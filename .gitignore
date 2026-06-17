@@ -1,0 +1,34 @@
+.DS_Store
+Thumbs.db
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dependency and build outputs
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+
+# Editor / local tooling
+.idea/
+.vscode/
+*.swp
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
