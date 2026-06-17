@@ -1,12 +1,16 @@
-# DESIGN.md v0.5 レビュー報告
+# ARCHITECTURE.md（旧 DESIGN.md） v0.5 レビュー報告
 
 ## Context
 
-`DESIGN.md`（v0.5「GUI-first Personal Agent Workspace / Policy-Bounded Agent Loop」）のレビュー依頼。
+`ARCHITECTURE.md`（レビュー当時の `DESIGN.md`、v0.5「GUI-first Personal Agent Workspace / Policy-Bounded Agent Loop」）のレビュー依頼。
 初回作成時のユーザー指示は「レビューして報告だけ完了したら終了」だったため、
 本ファイルは当初レビュー報告として作成された。
-今回の追記では、レビュー結果をどう `DESIGN.md` v0.6 に反映するかの改訂プランまで含める。
-ただし、このファイル更新時点では `DESIGN.md` 本体の改訂はまだ行わない。
+今回の追記では、レビュー結果をどう `ARCHITECTURE.md` v0.6 に反映するかの改訂プランまで含める。
+ただし、このファイル更新時点では `ARCHITECTURE.md` 本体の改訂はまだ行わない。
+
+2026-06-17追記:
+`DESIGN.md` は `ARCHITECTURE.md` に改名された。
+本ファイル内の過去文脈としての `DESIGN.md` は、現在の `ARCHITECTURE.md` を指す。
 
 前提として、同じ `plans/dazzling-wondering-flask.md` は **v0.4 へのレビュー + v0.5改訂プラン**。
 今回の v0.5 は、その改訂プラン（Policy Specification / Instruction Provenance / Rollback具体化 /
@@ -15,7 +19,7 @@ Core Schemas / Home可観測性 / 縦切りMVP / secret masking / skill trust / 
 
 本レビューは、その上で **v0.5 時点でまだ残っている穴** を対象にする。
 
-2026-06-17追記:
+同日追加確認:
 ユーザーとの追加確認を踏まえ、本ファイルはレビュー報告に加えて、
 **v0.6へ反映するための改訂プラン**も含める。
 
@@ -159,7 +163,7 @@ local-first で filesystem と SQLite index の整合（9.7 で言及）を守�
 
 ## v0.6 改訂プラン
 
-対象ファイル: `DESIGN.md`
+対象ファイル: `ARCHITECTURE.md`（レビュー当時の `DESIGN.md`）
 
 v0.6は大きな方向転換ではなく、v0.5を **実装者が迷わない仕様書** に寄せる改訂にする。
 
@@ -244,4 +248,4 @@ v0.5 は v0.4 レビューを誠実に取り込んだ良い改訂。**「思想 
 (c) external由来Memoryの命令化防止、(d) 承認時の Loop 挙動**という、実装直前に効く「締め」。
 特に (b)(c) は中核思想（安全に自動実行を広げる）の正否を分けるので、v1 コード着手前に潰すのが望ましい。
 
-※ 本ファイルはレビュー報告 + v0.6改訂プラン。`DESIGN.md` 本体の改訂・実装はまだ行わない。
+※ 本ファイルはレビュー報告 + v0.6改訂プラン。`ARCHITECTURE.md`（レビュー当時の `DESIGN.md`）本体の改訂・実装はまだ行わない。

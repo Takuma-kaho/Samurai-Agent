@@ -11,9 +11,19 @@
 
 - このリポジトリは、Samurai Agent の設計・検討・実装準備を置く場所。
 - 中核テーマは `GUI-first Personal Agent Workspace`。
-- `DESIGN.md` を最重要の source of truth として扱う。
+- `PRINCIPLES.md` を設計思想・判断基準の最重要 source of truth として扱う。
+- `ARCHITECTURE.md` を実装前アーキテクチャ仕様の source of truth として扱う。
+- `PUBLIC_NAMING.md` を公開面の命名ルールとして扱う。
 - `plans/` はレビュー、改訂方針、作業計画の置き場として扱う。
 - `Hermes_Agent_解説.md` は Hermes Agent 理解の補助資料として扱う。
+
+### Source of truth の優先順位
+
+1. `PRINCIPLES.md`: 設計思想・判断基準・前提
+2. `ARCHITECTURE.md`: 実装前アーキテクチャ仕様
+3. `PUBLIC_NAMING.md`: 公開面の命名ルール
+4. `plans/`: レビュー・改訂方針・作業計画
+5. `Hermes_Agent_解説.md`: Hermes Agent 理解の補助資料
 
 ## 設計方針
 
@@ -22,6 +32,13 @@
 - 人間は毎回承認する人ではなく、Agent が動ける境界を決める人として扱う。
 - Agent は境界内で自律的に動き、境界を越える時だけ人間を呼ぶ設計を優先する。
 - 実装を考える時は、GUI / Runtime / Gateway / Memory / Policy / Audit の責務を混ぜない。
+
+## 公開命名ルール
+
+- 参照元固有名は、`ARCHITECTURE.md` / `plans/` / 調査メモでは残してよい。
+- README、UI文言、API名、route名、package名、DB名、env/config key には参照元固有名を出さない。
+- 公開面に出る名前を決める時は、先に `PUBLIC_NAMING.md` を確認する。
+- `Memory` / `Skill` / `Runtime` / `Gateway` などの一般的な技術語は、無理に日本語化しない。
 
 ## 作業ルール
 

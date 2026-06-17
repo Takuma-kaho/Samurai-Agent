@@ -1,4 +1,4 @@
-# 設計書 v0.5
+# Samurai Agent Architecture v0.6
 
 ## GUI-first Personal Agent Workspace
 
@@ -6,7 +6,20 @@
 
 ---
 
-## 0. この設計書の位置づけ
+## 0. この文書の位置づけ
+
+この文書は、Samurai Agent の **実装前アーキテクチャ仕様書** である。
+
+文書の役割は以下のように分ける。
+
+- `PRINCIPLES.md`: プロジェクト全体の設計思想、判断基準、前提
+- `ARCHITECTURE.md`: 具体的な責務分解、仕様、境界、実装前の設計
+- `PUBLIC_NAMING.md`: 公開面の命名ルール
+- `plans/`: レビュー、改訂方針、作業計画
+
+旧 `DESIGN.md` は、履歴上の呼称としてのみ扱う。
+
+現在の実装前アーキテクチャの source of truth は、この `ARCHITECTURE.md` である。
 
 このプロダクトは、単に **MulmoClaude / Hermes Agent / OpenClaw を合体するもの** ではない。
 
@@ -23,13 +36,15 @@
 
 である。
 
-ただし、v0.5では重要な修正を入れる。
+ただし、v0.6では重要な修正を入れる。
 
 v0.3は安全側に倒しすぎて、承認UIがAgent Loopを止める危険があった。
 
 v0.4では、承認中心から境界中心へ戻した。
 
-v0.5では、それをさらに実装可能な仕様へ落とす。
+v0.5では、それをさらに実装可能な仕様へ落とした。
+
+v0.6では、コード実装で迷う型、権限、承認、記録、MVP範囲を固定する。
 
 この設計書は、3つのOSSをそのまま結合する計画ではない。
 
@@ -42,7 +57,7 @@ OpenClawのGateway/Session/Safety/External boundaryの勝ち筋
 を参照したgreenfield再構築
 ```
 
-v0.5では、以下を中核思想にする。
+v0.6でも、以下を中核思想にする。
 
 > **Policy-Bounded Agent Loop**
 
@@ -353,7 +368,7 @@ continue
 
 毎回人間承認を挟むと、このLoopは止まる。
 
-そのため、v0.5では以下を基本にする。
+そのため、v0.6では以下を基本にする。
 
 ```text
 自然言語
@@ -517,14 +532,17 @@ Web / Future Telegram / Slack / LINE / Email / Webhook / Cron / Bridges
 | --- | --- |
 | Home | 今日の予定、未完了、AIからの提案、自動実行の結果 |
 | Chat | AIへの依頼 |
-| Workspace | ファイル・成果物・データの入口 |
 | Artifacts | 文書、表、グラフ、画像、PDF |
-| Collections | 顧客、案件、タスク、メモなど |
 | Memory | AIが覚えていること、provisional/active/sensitiveの管理 |
-| Skills | AIが使う作業手順、active/stale/archivedの管理 |
-| Policy | Agentが今どの範囲で動けるか |
-| Approvals | 境界越えの承認待ち |
 | Audit | 何を読んで何を実行したか |
+
+v1必須画面は `Home / Chat / Artifact / Memory / Audit` に絞る。
+
+`Approval / Notification Inbox` は必須導線にする。
+ただし、v1では専用画面でなく、HomeまたはChat内のパネルでよい。
+
+`Skill / Collection` はv1でも必要だが、専用画面は必須にしない。
+最初は最小バックエンドと、Artifact / Chat / Auditから辿れる表示でよい。
 
 Human On The Loopを成立させるため、Homeは単なるダッシュボードではない。
 
@@ -538,10 +556,14 @@ Homeには、自律実行の可観測性を置く。
 | Recent Rollback Points | 直近の復元可能な変更をまとめて確認する |
 | Batch Undo | Workspace内部の可逆変更をまとめて戻す |
 | Boundary Changes | toolset、scope、schedule、secret policyの変更履歴 |
+| Notification Inbox | 承認待ち、異常、失敗、rollback期限をまとめて見せる |
 
 毎回承認しない代わりに、後から気づける画面を必ず作る。
 
 Audit logは証跡であり、Homeは人間が気づくためのUIである。
+
+Notification Inboxは保存モデルを新設しない。
+v1では `ApprovalRequest` と `OperationRecord` から生成するread modelとして扱う。
 
 ---
 
@@ -750,18 +772,45 @@ PolicyEvaluationInput。
 PolicyEvaluationInput
   capability_id
   operation
-  static_risk
-  static_scope
-  declared_effects
-  reversibility
-  instruction_source
-  trust_level
   actor_identity
+  instruction_source
+  instruction_authority
   channel
-  schedule_context
+  target_resource_refs
+  proposed_effects
   prior_grants
   recent_history
+  input_hash
 ```
+
+正準のPolicy Engine仕様。
+
+```text
+evaluatePolicy(input): PolicyDecisionRecord
+```
+
+評価順序。
+
+1. `capability_id + operation` から `CapabilityManifest.operations[]` を解決する。
+2. operationごとの `risk / scope / reversibility / external_impact / secret_requirement` を読む。
+3. `instruction_source` と `instruction_authority` を評価し、外部由来の命令昇格を落とす。
+4. `prior_grants` を `capability_id + operation + actor_identity + channel + resource_scope` で照合する。
+5. `proposed_effects` と `target_resource_refs` がgrantやpolicy範囲を越えないか確認する。
+6. 複数条件が当たる場合は、原則として最も制限的なDecisionを採用する。
+7. 結果を `PolicyDecisionRecord` として保存し、`OperationRecord` に紐づける。
+
+制限の強さ。
+
+```text
+deny
+> requires_strong_approval
+> requires_approval
+> requires_first_time_confirm
+> allow_with_audit
+> allow_auto
+```
+
+正準ポリシー行列と各ドメイン別表が矛盾した場合は、正準ポリシー行列と `5.14 Canonical Core Schemas` が勝つ。
 
 正準ポリシー行列。
 
@@ -784,13 +833,23 @@ PolicyEvaluationInput
 状態変更 = Selective DSL + validator + static capability policy + audit + rollback
 ```
 
+承認待ち中のAgent Loop。
+
+対話セッションで `requires_approval` または `requires_strong_approval` が出ても、Agent Loop全体は止めない。
+
+- 承認対象の `OperationRecord` だけを `pending_approval` にする。
+- そのoperationに依存する後続toolは `deferred` にする。
+- 読み取り、下書き、説明、代替案作成、プレビュー作成は継続できる。
+- UIでは「承認待ち」「継続中」「停止中」を分けて表示する。
+- 承認後は、保存済み `input_hash / input_ref / target_resource_refs / proposed_effects` を使って再評価してから実行する。
+
 ---
 
 ## 5.5 Instruction Provenance & Injection Defense
 
 外部由来コンテンツを、命令として扱わない。
 
-これはv0.5の不変条件である。
+これはv0.6の不変条件である。
 
 外部メール、Webhook、RSS、CSV、Webページ、API応答、paired相手の発言、tool出力には、悪意ある指示が混ざる可能性がある。
 
@@ -866,7 +925,7 @@ owner instruction:
 
 Memoryは個人化の土台。
 
-v0.5でも、Memoryをすべて承認候補にしない。
+v0.6でも、Memoryをすべて承認候補にしない。
 
 Memoryは状態を分ける。
 
@@ -922,6 +981,7 @@ Memory write policy。
 | memory archive | allow_with_audit |
 
 Memory frontmatter。
+正準定義は `5.14 Canonical Core Schemas` を参照する。
 
 ```text
 MemoryFrontmatter
@@ -929,6 +989,9 @@ MemoryFrontmatter
   state
   topic
   source
+  source_kind
+  instruction_authority
+  quoted_from
   confidence
   created_by
   created_at
@@ -946,6 +1009,7 @@ Memoryを自律的に育てる条件。
 | non-sensitive topic memory | allow_with_auditでactive化可 |
 | 既存active memoryと矛盾する | conflictとして保存し、自動上書きしない |
 | source不明 | provisional止まり |
+| external_content由来 | 事実・参照データとして保存可。命令権限は持たせない |
 | sensitive/identity/長期方針 | 承認または強承認 |
 
 Memory conflict / dedup。
@@ -981,6 +1045,7 @@ Active Memoryは読み取り専用ではない。
 - identity方針の無断変更
 - user approvalなしの削除
 - sourceなしのactive確定
+- external_content由来Memoryからtool intent / external send / public publish / payment / deleteを直接発火すること
 
 Memory Wiki / journal / dreaming / flush も採用する。
 
@@ -1036,6 +1101,7 @@ Skill write policy。
 | archive | allow_with_audit |
 
 Skill frontmatter。
+正準定義は `5.14 Canonical Core Schemas` を参照する。
 
 ```text
 SkillFrontmatter
@@ -1043,6 +1109,7 @@ SkillFrontmatter
   state
   title
   description
+  tags
   provenance
   trust_level
   allowed_scopes
@@ -1077,6 +1144,9 @@ skill index
 ```
 
 毎回すべてのSkillを読むのではなく、必要なSkillだけ読む。
+
+`SkillIndexEntry` は保存モデルではない。
+v1では `SkillFrontmatter` から生成するread modelとして扱う。
 
 Curatorは早期中核機能に入れる。
 
@@ -1250,23 +1320,38 @@ proposal capability
 ```
 
 Capability manifestはPolicy Engineのsource of truthである。
+正準定義は `5.14 Canonical Core Schemas` を参照する。
 
 ```text
 CapabilityManifest
   id
+  version
   operations
   input_schema
   output_schema
   ui_surfaces
   agent_tools
-  static_risk_by_operation
-  static_scope_by_operation
-  reversibility_by_operation
-  allowed_instruction_sources
   permission_policy
   secret_policy
   audit_policy
   rollback_policy
+```
+
+`operations[]` はoperationごとの静的属性を持つ。
+
+```text
+CapabilityOperation
+  operation
+  description
+  input_schema_ref
+  output_schema_ref
+  risk
+  scope
+  reversibility
+  external_impact
+  secret_requirement
+  allowed_instruction_sources
+  default_decision
 ```
 
 LLMはCapability manifestを書き換えられない。
@@ -1583,11 +1668,25 @@ scheduled contextはowner instructionそのものではない。
 
 ---
 
-## 5.14 Core Schemas
+## 5.14 Canonical Core Schemas
 
-v0.5では、思想だけでなく中核契約を固定する。
+v0.6では、思想だけでなく中核契約を固定する。
 
 実装言語ではTypeScript/Zod相当を想定するが、この設計書では概念スキーマとして示す。
+
+この節は、Core Schemasの唯一の正準である。
+5.xの各節にある説明・表・擬似スキーマと矛盾した場合は、この節が勝つ。
+
+ResourceRef。
+
+```text
+ResourceRef
+  kind
+  id
+  uri
+  version
+  label
+```
 
 MessageEnvelope。
 
@@ -1603,42 +1702,121 @@ MessageEnvelope
   received_at
 ```
 
+PolicyEvaluationInput。
+
+```text
+PolicyEvaluationInput
+  capability_id
+  operation
+  actor_identity
+  instruction_source
+  instruction_authority
+  channel
+  target_resource_refs
+  proposed_effects
+  prior_grants
+  recent_history
+  input_hash
+```
+
 CapabilityManifest。
 
 ```text
 CapabilityManifest
   id
   version
+  title
+  description
   operations
   input_schema
   output_schema
   ui_surfaces
   agent_tools
-  static_risk_by_operation
-  static_scope_by_operation
-  reversibility_by_operation
-  allowed_instruction_sources
   permission_policy
   secret_policy
   audit_policy
   rollback_policy
 ```
 
-PolicyDecisionRecord。
+CapabilityOperation。
 
 ```text
-PolicyDecisionRecord
-  id
-  operation_id
-  capability_id
-  decision
-  reason
-  policy_inputs
-  required_approval_level
-  created_at
+CapabilityOperation
+  operation
+  description
+  input_schema_ref
+  output_schema_ref
+  risk
+  scope
+  reversibility
+  external_impact
+  secret_requirement
+  allowed_instruction_sources
+  default_decision
 ```
 
-Collection schema.json。
+MemoryFrontmatter。
+
+```text
+MemoryFrontmatter
+  id
+  state
+  topic
+  source
+  source_kind
+  instruction_authority
+  quoted_from
+  confidence
+  created_by
+  created_at
+  updated_at
+  last_used_at
+  related_memories
+  conflicts_with
+  sensitive_level
+```
+
+SkillFrontmatter。
+
+```text
+SkillFrontmatter
+  id
+  state
+  title
+  description
+  tags
+  provenance
+  trust_level
+  allowed_scopes
+  required_capabilities
+  schedule_policy
+  secret_policy
+  last_reviewed_at
+  owner_pinned
+```
+
+`SkillIndexEntry` は保存しない。
+`SkillFrontmatter` から生成するread modelである。
+
+ArtifactRecord。
+
+```text
+ArtifactRecord
+  id
+  title
+  kind
+  file_ref
+  metadata
+  source_operation_id
+  created_by
+  created_at
+  updated_at
+```
+
+`ArtifactRecord` はfilesystem上の成果物を参照するDB/索引用レコードである。
+成果物本文そのものをDBへ閉じ込めない。
+
+CollectionSchema。
 
 ```text
 CollectionSchema
@@ -1653,36 +1831,121 @@ CollectionSchema
   permissions
 ```
 
-Memory frontmatter。
+CollectionRecord。
 
 ```text
-MemoryFrontmatter
+CollectionRecord
   id
-  state
-  topic
-  source
-  confidence
-  conflicts_with
-  sensitive_level
+  collection_id
+  data
+  resource_refs
   created_at
   updated_at
 ```
 
-Skill frontmatter。
+CollectionPatch。
 
 ```text
-SkillFrontmatter
+CollectionPatch
   id
-  state
-  provenance
-  trust_level
-  allowed_scopes
-  required_capabilities
-  schedule_policy
-  secret_policy
+  record_id
+  changes
+  source_operation_id
+  created_at
 ```
 
-Audit record。
+rollback差分は `CollectionPatch` に持たせない。
+復元用のsnapshotは `RollbackPoint` 側に持たせる。
+
+GrantRecord。
+
+```text
+GrantRecord
+  id
+  capability_id
+  operation
+  actor_identity
+  channel
+  resource_scope
+  manifest_version
+  risk_snapshot
+  scope_snapshot
+  external_impact_snapshot
+  secret_requirement_snapshot
+  granted_by
+  reason
+  created_at
+  expires_at
+  revoked_at
+```
+
+v1のgrant粒度は `capability_id + operation + actor_identity + channel + resource_scope` とする。
+Capability manifestのversion、risk、scope、external impact、secret requirementが変わった場合は再確認に戻す。
+
+OperationRecord。
+
+```text
+OperationRecord
+  id
+  session_id
+  capability_id
+  operation
+  actor_identity
+  instruction_source
+  instruction_authority
+  channel
+  input_hash
+  input_ref
+  target_resource_refs
+  proposed_effects
+  status
+  policy_decision_id
+  approval_request_id
+  result_ref
+  error
+  created_at
+  updated_at
+```
+
+`OperationRecord` は、承認後の再評価とAuditの起点である。
+承認待ちでは該当operationだけを止め、Agent Loop全体は止めない。
+
+ApprovalRequest。
+
+```text
+ApprovalRequest
+  id
+  operation_id
+  requested_level
+  status
+  reason
+  requested_by
+  decided_by
+  created_at
+  expires_at
+  decided_at
+```
+
+`status` は `pending / approved / denied / expired / cancelled` を扱う。
+
+PolicyDecisionRecord。
+
+```text
+PolicyDecisionRecord
+  id
+  operation_id
+  capability_id
+  operation
+  decision
+  reason
+  policy_inputs
+  matched_rules
+  required_approval_level
+  grant_id
+  created_at
+```
+
+AuditRecord。
 
 ```text
 AuditRecord
@@ -1693,13 +1956,13 @@ AuditRecord
   instruction_source
   inputs_summary
   outputs_summary
-  policy_decision
+  policy_decision_id
   affected_resources
   rollback_point_id
   created_at
 ```
 
-Rollback point。
+RollbackPoint。
 
 ```text
 RollbackPoint
@@ -1714,9 +1977,17 @@ RollbackPoint
   expires_at
 ```
 
-これらは実装時のsource of truthに近い。
+Notification Inbox。
 
-特に、CapabilityManifestとPolicyDecisionRecordがないと、Agent Loopの自動実行範囲が人によってズレる。
+```text
+NotificationInboxItem
+  = read model from ApprovalRequest + OperationRecord
+```
+
+Notification Inboxは保存モデルを新設しない。
+承認待ち、異常、失敗、rollback期限を `ApprovalRequest` と `OperationRecord` から表示する。
+
+特に、CapabilityManifest、OperationRecord、ApprovalRequest、PolicyDecisionRecordがないと、Agent Loopの自動実行範囲が人によってズレる。
 
 ---
 
@@ -2028,9 +2299,9 @@ AIはscheduled promptとして登録する。
 
 ---
 
-## 8.2 v1 Vertical Slice
+## 8.2 v1 MVP Cut Line
 
-v0.5では、最初の実装を機能網羅にしない。
+v0.6では、最初の実装を機能網羅にしない。
 
 最初に通すのは、Agent Loopが端から端まで動く1本の縦切りである。
 
@@ -2053,25 +2324,29 @@ small Memory / Collection update
 ↓
 PolicyDecision
 ↓
+ApprovalRequest if needed
+↓
 Audit + RollbackPoint
 ↓
-HomeのAutonomous Activityに表示
+HomeのAutonomous Activity / Notification Inboxに表示
 ```
 
 v1に入れるもの。
 
 | 領域 | v1に入れる |
 | --- | --- |
-| GUI | Home / Chat / Artifact / Memory / Skill / Collection / Audit |
+| GUI | Home / Chat / Artifact / Memory / Audit |
+| Approval / Notification Inbox | HomeまたはChat内パネルとして必須 |
 | Runtime | ProviderAdapter / Tool loop / Event stream / Session store |
-| Policy | Capability manifest + PolicyDecision + static risk/scope |
+| Policy | Capability manifest + OperationRecord + ApprovalRequest + PolicyDecisionRecord |
 | DSL | Collection更新、Memory/Skill状態変更、Artifact保存だけ |
 | Memory | session / provisional / topic / Active Memory |
-| Skill | candidate / project / active / skill index |
+| Skill | candidate / project保存 / skill index生成。専用画面なし |
+| Collection | schema定義 / record作成 / 小さなpatch適用。専用画面なし |
 | Capability | proposal capabilityを最初の代表例にする |
 | Safety | SecretRef / output masking / audit / rollback point |
 | Gateway | web source + cron sourceまで |
-| Automation | memory review / skill curator / collection checkの小さなcron |
+| Automation | memory reviewの小さなcron |
 
 v1に入れないもの。
 
@@ -2083,16 +2358,19 @@ v1に入れないもの。
 | 自由HTML全面解禁 | sandboxed custom view検証まで |
 | 支払い自動化 | 設計だけ残して実行しない |
 | shared skill ecosystem | trust matrix設計まで |
+| Skill専用管理画面 | backendとread modelを先に作る |
+| Collection専用管理画面 | backendとArtifact/Chat経由の表示を先に作る |
+| skill curator / collection check cron | memory review安定後 |
 
 速度見立て。
 
 Codexを前提にすると実装速度は上がる。
 
-ただし、v0.5では「速く全部作る」より「境界を間違えずに縦切りを通す」ことを優先する。
+ただし、v0.6では「速く全部作る」より「境界を間違えずに縦切りを通す」ことを優先する。
 
 | 段階 | 期間感 |
 | --- | --- |
-| v0.5設計書と境界仕様確定 | 1週間 |
+| v0.6設計書と境界仕様確定 | 1週間 |
 | v1 vertical sliceの初期版 | 3〜6週間 |
 | Claude Code非依存の実用alpha | 2〜3か月 |
 | Memory / Skill / Artifact / Collection / Policy Loopが安定するalpha | 3〜5か月 |
@@ -2280,7 +2558,7 @@ Codexを前提にすると実装速度は上がる。
 
 ## 10.1 OpenClaw由来
 
-| 参照元 | 大分類 | 項目 | 判断 | v0.5での扱い | 理由 |
+| 参照元 | 大分類 | 項目 | 判断 | v0.6での扱い | 理由 |
 | --- | --- | --- | --- | --- | --- |
 | OpenClaw | 全体思想 | Local-first Gateway | 採用 | Thin Gateway Control Plane | GUI、外部チャネル、ローカル作業を安全に束ねる背骨だから |
 | OpenClaw | 導入/運用 | onboard / daemon / status / doctor | 補強 | 後期運用だが概念は残す | 常駐Agentには診断と状態確認が必要だから |
@@ -2318,7 +2596,7 @@ Codexを前提にすると実装速度は上がる。
 
 ## 10.2 Hermes Agent由来
 
-| 参照元 | 大分類 | 項目 | 判断 | v0.5での扱い | 理由 |
+| 参照元 | 大分類 | 項目 | 判断 | v0.6での扱い | 理由 |
 | --- | --- | --- | --- | --- | --- |
 | Hermes | 全体思想 | Self-improving agent | 採用 | Learning Loop | 個人秘書の価値そのものだから |
 | Hermes | UI | CLI/TUI first | 除外 | UXとしては不採用 | GUI-firstがプロダクトの主語だから |
@@ -2354,7 +2632,7 @@ Codexを前提にすると実装速度は上がる。
 
 ## 10.3 MulmoClaude由来
 
-| 参照元 | 大分類 | 項目 | 判断 | v0.5での扱い | 理由 |
+| 参照元 | 大分類 | 項目 | 判断 | v0.6での扱い | 理由 |
 | --- | --- | --- | --- | --- | --- |
 | MulmoClaude | 全体思想 | Universal controller | 採用 | 全体コンセプト | AIがアプリ、データ、画面をまとめて操作する思想が中核だから |
 | MulmoClaude | UI | Chat summons GUIs | 採用 | GUI-first | 会話だけで終わらない秘書を作るため |
