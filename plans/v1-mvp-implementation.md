@@ -89,7 +89,7 @@ v1に入れるもの。
 | Memory | session / provisional / topic / Active Memory minimal |
 | Artifact | draft作成、保存、参照 |
 | Skill | candidate生成、project保存、skill index生成 |
-| Collection | schema定義、record作成、小さなpatch適用 |
+| Collection | schema定義、record作成、小さなpatch適用、任意のnotes読み取り |
 | Audit | AuditRecord、RollbackPoint、Home activity |
 | Gateway | web source、cron sourceの入口だけ |
 | Automation | memory reviewの小さなcron |
@@ -205,6 +205,13 @@ locale関連の必須フィールド。
 - `MemoryFrontmatter`: `source_locale` / `content_locale`
 - `ArtifactRecord`: `locale` / `source_locales`
 - `CollectionSchema`: `labels` / `descriptions` をlocale mapとして扱う
+
+Collectionの補助文脈。
+
+- v1のCollection minimal backendは `schema.json`、`records/*.json`、`SKILL.md` を主対象にする。
+- 任意の `notes/*.md` は保存・読み取り対象に含める。
+- `notes/*.md` は、AIが読む補助文脈であり、v1ではpatch/API/validator対象にしない。
+- `notes/*.md` だけを根拠に、高リスク操作の自動実行や承認判断を行わない。
 
 ---
 

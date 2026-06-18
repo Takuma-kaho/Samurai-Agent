@@ -1302,9 +1302,32 @@ collections/
     schema.json
     records/
       client_a.json
+    notes/
+      context.md
     views/
     SKILL.md
 ```
+
+Collectionは、単なるJSON databaseではない。
+
+```text
+schema.json + records + SKILL.md + notes/ = small data app
+```
+
+責務。
+
+| 要素 | 役割 |
+| --- | --- |
+| `schema.json` | 検証可能な項目定義、UI、refs、embeds、derived fields、actions |
+| `records/` | schemaに沿う実データ |
+| `SKILL.md` | そのCollectionを扱う作業手順、確認条件、AIへの運用指示 |
+| `notes/` | 任意のMarkdown補助文脈。背景、例外、慣習、過去判断、schema化しきれない情報 |
+
+`notes/` は複数Markdownを置ける任意ディレクトリである。
+`notes/context.md` は例であり、単一ファイル固定ではない。
+
+AIは `notes/` を読んで文脈補完してよい。
+ただし、`notes/` はvalidatorの代替ではない。
 
 設計対象に含めるもの。
 
@@ -1312,6 +1335,7 @@ collections/
 | --- | --- | --- |
 | schema | 項目定義 | データの形を固定し、AIの暴走を防ぐため |
 | records | 実データ | 人間もAIも同じデータを見るため |
+| notes | 自由記述の補助文脈 | schema化しきれない背景、判断理由、運用メモを人間とAIが読めるようにするため |
 | refs | 他recordへの参照 | 顧客、案件、請求などをつなぐため |
 | embeds | 小さな入れ子データ | 住所、連絡先、メモなどを自然に持つため |
 | derived fields | 自動計算項目 | 合計、進捗、状態を手作業で更新しないため |
@@ -1334,6 +1358,16 @@ Collection update policy。
 | record削除 | requires_approval |
 | 外部送信を伴うaction | requires_strong_approval |
 | 金銭処理 | requires_strong_approval |
+
+schemaと自由記述の使い分け。
+
+- `schema valid` は自動実行の必要条件であり、十分条件ではない。
+- 必須情報がschema、records、明確な補助文脈から取れない場合、AIは推測せず確認する。
+- `notes/` は判断補助であり、validatorの代替ではない。
+- `notes/` 由来の情報は `instruction_source` または `ResourceRef` として追跡対象にできる。
+- ただし、`notes/` は `PolicyDecision` の直接根拠にしない。
+- 金銭処理、外部送信、削除、大量更新、権限変更では、`notes/` だけを根拠に実行しない。
+- 高リスク操作は、schema、records、policy、audit、approvalを通す。
 
 custom HTML viewは全面解禁しない。
 
@@ -1948,6 +1982,10 @@ CollectionSchema
   actions
   permissions
 ```
+
+`notes/` は `CollectionSchema` のフィールドではない。
+filesystem上の補助文脈であり、v1ではvalidator対象外とする。
+必要になった場合は、`ResourceRef` やindex側で参照する。
 
 CollectionRecord。
 
