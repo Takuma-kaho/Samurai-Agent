@@ -202,6 +202,8 @@ MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象では
 
 それぞれの勝ち筋を参照し、Samurai Agent として greenfield に再構成する。
 
+正式な参照元は、`ARCHITECTURE.md` の `Reference Sources` を正本とする。
+
 ここでの参照元固有名は、内部設計上の索引である。
 
 - 実装中は、どの判断がどの参照元に由来するか追えるように残す。

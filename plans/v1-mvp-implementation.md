@@ -24,6 +24,8 @@ v1 MVPは、機能を全部そろえることではない。
 ```text
 Chat
 ↓
+Surface Protocol
+↓
 OperationRecord
 ↓
 PolicyEvaluationInput
@@ -43,6 +45,12 @@ RollbackPoint
 Home activity / Notification Inbox read model
 ```
 
+この縦切りは、機能一覧を広げるためではなく、MulmoClaude由来のGUI / Workspace操作をClaude Code非依存の自前Runtimeへ接続できるかを確認するためのものでもある。
+
+v1では、画面だけを先に作る状態にしない。
+
+GUIから出た操作が、Surface Protocol、Agent Runtime、Policy、Auditまで通ることを完成条件に含める。
+
 ユーザーから見た完成条件。
 
 - Chatから依頼できる。
@@ -61,6 +69,7 @@ v1に入れるもの。
 | 領域 | 対象 |
 | --- | --- |
 | GUI | Home / Chat / Artifact / Memory / Audit |
+| Surface Protocol | GUI operation / artifact update / approval request の最小表現 |
 | Approval / Notification Inbox | HomeまたはChat内パネル |
 | Runtime | ProviderAdapter / Tool loop / Event stream / Session store |
 | Policy | Capability manifest / OperationRecord / ApprovalRequest / PolicyDecisionRecord |
@@ -133,15 +142,17 @@ packages/
 
 1. Core Schemas
 2. Capability registry / manifest seed
-3. Workspace store
-4. Policy Engine
-5. Audit / OperationRecord / ApprovalRequest
-6. Chat session
-7. Memory minimal
-8. Artifact draft
-9. Home activity
-10. Notification Inbox read model
-11. Skill / Collection minimal backend
+3. Surface Protocol minimal
+4. Workspace store
+5. Policy Engine
+6. Audit / OperationRecord / ApprovalRequest
+7. Chat session
+8. GUI to Runtime connection spike
+9. Memory minimal
+10. Artifact draft
+11. Home activity
+12. Notification Inbox read model
+13. Skill / Collection minimal backend
 
 ---
 

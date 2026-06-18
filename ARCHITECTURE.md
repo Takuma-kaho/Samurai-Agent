@@ -21,6 +21,23 @@
 
 現在の実装前アーキテクチャの source of truth は、この `ARCHITECTURE.md` である。
 
+### Reference Sources
+
+この設計で参照する3つのOSSと補助資料の正式な参照元は以下である。
+
+これらは設計上のsource materialであり、コードをそのままforkまたは統合する対象ではない。
+Samurai Agentは、各参照元の勝ち筋を理解した上で、greenfieldに再構成する。
+
+| 参照対象 | 正式参照元 | この設計での扱い |
+| --- | --- | --- |
+| OpenClaw | `https://github.com/openclaw/openclaw.git` | Gateway / Session / Pairing / Sandbox / External boundary の参照元 |
+| Hermes Agent | `https://github.com/NousResearch/hermes-agent.git` | Runtime / Memory / Skill / Self-improvement / Provider abstraction の参照元 |
+| MulmoClaude | `https://github.com/receptron/mulmoclaude.git` | GUI / Workspace / Artifact / Collection DSL / Plugin UI の参照元 |
+| Hermes Agent 解説 | `Hermes_Agent_解説.md` | Hermes Agent理解のローカル補助資料 |
+| MulmoClaude記事 | `https://singularitysociety.org/articles/blog/2026-04-10-mulmoclaude/` | MulmoClaude理解の補助資料 |
+| OpenClaw記事 | `https://unicornee.ai/articles/openclaw-ai-agent/` | OpenClaw理解の補助資料 |
+| OpenClaw architecture guide | `https://eastondev.com/blog/ja/posts/ai/20260205-openclaw-architecture-guide/` | OpenClaw architecture理解の補助資料 |
+
 このプロダクトは、単に **MulmoClaude / Hermes Agent / OpenClaw を合体するもの** ではない。
 
 目指すものは以下。
@@ -56,6 +73,28 @@ Hermes AgentのRuntime/Memory/Skill/Self-improvementの勝ち筋
 OpenClawのGateway/Session/Safety/External boundaryの勝ち筋
 を参照したgreenfield再構築
 ```
+
+### レビュー反映: 実装リスクと方針
+
+3 OSS確認後のレビューで、設計思想そのものは維持する。
+
+変更するのは、実装時に迷いやすい前提の明文化である。
+
+| 論点 | 方針 |
+| --- | --- |
+| 3 OSSの扱い | コードを足し合わせるのではなく、勝ち筋と設計パターンを借りる |
+| Hermes領域 | Python実装の直接流用ではなく、TypeScriptで再実装する前提にする |
+| MulmoClaude領域 | GUI / Workspace / Collection / Plugin UIの考え方を借りる |
+| MulmoClaudeとRuntimeの接合 | Claude Code依存を外すため、Samurai Agent独自の接合部を作る |
+| OpenClaw領域 | Gateway / Session / External boundaryの設計パターンを借りる |
+| MIT license | 実際にコードをコピーする場合だけ、ファイル単位でlicense / noticeを管理する |
+
+最大の実装リスクは、以下の2つである。
+
+- Hermes由来のRuntime / Memory / Skill / Curator / AutomationをTypeScriptで再実装すること。
+- MulmoClaude由来のGUI / Workspace操作を、Claude Code非依存の自前Agent Runtimeへ接続すること。
+
+v1の縦切りでは、機能網羅よりもこの接合部を最初に通すことを優先する。
 
 v0.6でも、以下を中核思想にする。
 
@@ -348,6 +387,27 @@ sqlite:
 
 整合性・検索・履歴・queueが必要なものはSQLiteへ置く。
 
+正本ルール。
+
+| 対象 | 正本 | 補助側 | 理由 |
+| --- | --- | --- | --- |
+| Artifact本文 | filesystem | SQLite metadata | 人間が直接開いて読める成果物だから |
+| Artifactの検索状態 | SQLite | filesystem path | 一覧、検索、参照関係に使うから |
+| Memory本文 | filesystem | SQLite index / status | 人間が編集できる個人記憶だから |
+| Memoryの検索index | SQLite | filesystem source | Active Memory retrievalで高速に探すため |
+| Skill本文 | filesystem | SQLite index / status | 手順書として人間もAIも読める必要があるから |
+| Skill index | SQLite | filesystem source | 必要なSkillだけ選ぶため |
+| Collection schema | filesystem | SQLite schema metadata | データ構造を人間が確認できるようにするため |
+| Collection record index | SQLite | filesystem export | 一覧、検索、patch適用、rollbackに使うため |
+| Session transcript | SQLite | export file | 履歴、検索、再開、監査で一貫性が必要だから |
+| Audit / PolicyDecision / OperationRecord | SQLite | export file | 後から改ざんされにくく追跡できる必要があるから |
+| RollbackPoint | SQLite | snapshot file | 復元対象と期限を正確に管理するため |
+| Queue / scheduled task | SQLite | なし | 実行状態の整合性が最優先だから |
+
+同じ情報をfilesystemとSQLiteの両方に置く場合、片方は必ずread modelまたはindexとして扱う。
+
+正本がどちらか不明なデータは追加しない。
+
 ---
 
 ## 3.3 Policy-Bounded Agent Loop
@@ -519,6 +579,19 @@ Toolsets / Sandbox / SecretRef / Pairing / Allowlist / Strong Approval
 [Gateway Control Plane]
 Web / Future Telegram / Slack / LINE / Email / Webhook / Cron / Bridges
 ```
+
+この図で特に混ぜてはいけない境界。
+
+| 境界 | 役割 | 混ぜないもの |
+| --- | --- | --- |
+| Surface Protocol | GUIからRuntimeへ渡す操作、表示、承認、artifact更新を表現する入口 | LLMの自由な思考やrisk判定 |
+| Agent Runtime | Claude Codeに依存しない、LLM呼び出し、tool loop、event stream、session管理の実行部 | GUI表示責務、公開命名、policy定義 |
+| Capability Manifest | operationごとのrisk / scope / reversibility / secret requirementの正本 | LLMの自己申告、UI上の説明文 |
+| Workspace Store | filesystemとSQLiteの責務分離、index、履歴、rollbackを扱う場所 | Agentの判断ロジック、承認UI |
+
+MulmoClaude由来のGUI操作は、Surface Protocolを通ってAgent Runtimeへ渡す。
+
+Agent RuntimeはCapability Manifestを解決し、PolicyDecisionを経由しない操作を実行しない。
 
 ---
 
@@ -2048,7 +2121,8 @@ Frontend:
 
 Backend:
   Express
-  WebSocket
+  Socket.io
+  WebSocket only if Socket.io is too heavy
 
 Schema:
   Zod
@@ -2056,6 +2130,12 @@ Schema:
 Data:
   local filesystem
   SQLite
+
+Charts:
+  ECharts
+
+Test:
+  Vitest
 
 LLM:
   Anthropic Claude API
@@ -2079,6 +2159,20 @@ Future worker:
   Python 3.11+
 ```
 
+補足。
+
+| 領域 | 初期判断 | 理由 |
+| --- | --- | --- |
+| Chart | EChartsを推奨 | MulmoClaudeの方向性と合い、業務グラフ、dashboard、artifact previewに使いやすい |
+| Realtime / event stream | Socket.ioを推奨 | 再接続、room、fallbackを自前実装しすぎずに済む |
+| Unit / policy eval | Vitestを推奨 | TypeScript中心のmonorepoでpolicy fixtureを回しやすい |
+| Backend framework | Expressを初期候補として維持 | 枯れていて導入しやすい。Hono / Fastifyは性能やEdge適性が必要になった時の比較候補 |
+| Tool protocol | MCP-inspiredから始める | ただし外部tool資産を取り込む余地を残すため、将来MCP互換寄せを検討する |
+
+Express / Hono / Fastifyの選択は、v1実装を止める未確定事項にしない。
+
+まずはAPI、event stream、Gateway control planeを壊さず差し替えられる境界を保つ。
+
 ---
 
 ## 6.3 Monorepo案
@@ -2090,7 +2184,7 @@ apps/
 
   server/
     API
-    WebSocket
+    Socket.io
     Event stream
     Gateway control plane
 
@@ -2308,6 +2402,8 @@ v0.6では、最初の実装を機能網羅にしない。
 ```text
 Chat
 ↓
+Surface Protocol
+↓
 MessageEnvelope
 ↓
 Session routing
@@ -2331,11 +2427,18 @@ Audit + RollbackPoint
 HomeのAutonomous Activity / Notification Inboxに表示
 ```
 
+この縦切りは、MulmoClaude由来のGUI / Workspace操作を、Claude Code非依存の自前Agent Runtimeへ接続する最初の検証でもある。
+
+画面だけ、Runtimeだけ、Policyだけを個別に作って終わらせない。
+
+GUIから出た操作がSurface Protocolを通り、Agent Runtime、PolicyDecision、Auditまで到達することをv1の必須条件にする。
+
 v1に入れるもの。
 
 | 領域 | v1に入れる |
 | --- | --- |
 | GUI | Home / Chat / Artifact / Memory / Audit |
+| Surface Protocol | GUI operation / artifact update / approval request の最小表現 |
 | Approval / Notification Inbox | HomeまたはChat内パネルとして必須 |
 | Runtime | ProviderAdapter / Tool loop / Event stream / Session store |
 | Policy | Capability manifest + OperationRecord + ApprovalRequest + PolicyDecisionRecord |
@@ -2551,6 +2654,40 @@ Codexを前提にすると実装速度は上がる。
 - Hermes = Runtime / Memory / Skill / Curator / Automation
 - OpenClaw = Gateway / Session / External / Safety
 - 実装はこのプロダクト用に再構成する
+
+---
+
+## 9.11 Hermes領域のTypeScript再実装が重い
+
+リスク。
+
+- HermesのMemory / Skill / Curator / Automationは中核価値だが、実装はPython中心である
+- TypeScript中心のSamurai Agentにそのまま移植できる前提で見積もると破綻する
+- Curatorやself-improvement loopを後回しにしすぎると、育つAI秘書の価値が弱くなる
+
+対策。
+
+- Hermesから借りるのはコードではなく設計パターンと振る舞いにする
+- v1ではMemory / Skill / Active Memory / 小さなreview cronまでをTypeScriptで通す
+- Curatorはv1後続だが、skill indexとarchive可能な状態遷移は先に設計する
+- Pythonは初期中核ではなく、heavy tool workerや補助実行環境として残す
+
+---
+
+## 9.12 MulmoClaude GUIと自前Runtimeの接合が詰まる
+
+リスク。
+
+- MulmoClaudeのGUI / Workspace体験は強いが、実行側はClaude Code依存が強い
+- Claude Code依存を外すと、GUI操作からtool loopへ渡す接合部を自前で作る必要がある
+- ここを後回しにすると、画面はあるがAgent Loopが通らない状態になる
+
+対策。
+
+- v1最初の縦切りで、Chat / GUI operation / Surface Protocol / Agent Runtime / Policy / Auditを一本で通す
+- GUI操作はSurface Protocolで構造化し、Runtimeへ直接結合しない
+- RuntimeはCapability Manifestを必ず解決してからPolicyDecisionへ渡す
+- Claude Code互換を目指すのではなく、Samurai AgentのCapability境界として再構成する
 
 ---
 
