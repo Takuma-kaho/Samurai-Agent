@@ -26,6 +26,16 @@ Chat
 ↓
 Surface Protocol
 ↓
+MessageEnvelope
+↓
+Session routing
+↓
+Active Memory retrieval
+↓
+Skill selection
+↓
+Proposal Capability
+↓
 OperationRecord
 ↓
 PolicyEvaluationInput
@@ -59,6 +69,7 @@ GUIから出た操作が、Surface Protocol、Agent Runtime、Policy、Auditま�
 - 承認が必要なoperationだけ止まり、下書きや説明は続く。
 - Memoryに保存された内容を確認・無効化できる。
 - Homeで自律実行、承認待ち、失敗、rollback候補に気づける。
+- UI、Agent出力、Memory、Artifactがlocale前提で壊れない。
 
 ---
 
@@ -73,6 +84,7 @@ v1に入れるもの。
 | Approval / Notification Inbox | HomeまたはChat内パネル |
 | Runtime | ProviderAdapter / Tool loop / Event stream / Session store |
 | Policy | Capability manifest / OperationRecord / ApprovalRequest / PolicyDecisionRecord |
+| Localization / i18n | 8 locale seed、locale file、output_locale付きPromptBuilder、locale-aware schema |
 | Workspace store | filesystem + SQLite |
 | Memory | session / provisional / topic / Active Memory minimal |
 | Artifact | draft作成、保存、参照 |
@@ -114,6 +126,7 @@ packages/
   core-schemas/
   capability-registry/
   workspace-store/
+  localization/
   policy-engine/
   runtime/
   audit/
@@ -141,18 +154,19 @@ packages/
 この順で進める。
 
 1. Core Schemas
-2. Capability registry / manifest seed
-3. Surface Protocol minimal
-4. Workspace store
-5. Policy Engine
-6. Audit / OperationRecord / ApprovalRequest
-7. Chat session
-8. GUI to Runtime connection spike
-9. Memory minimal
-10. Artifact draft
-11. Home activity
-12. Notification Inbox read model
-13. Skill / Collection minimal backend
+2. Localization / i18n scaffold
+3. Capability registry / manifest seed
+4. Surface Protocol minimal
+5. Workspace store
+6. Policy Engine
+7. Audit / OperationRecord / ApprovalRequest
+8. Chat session
+9. GUI to Runtime connection spike
+10. Memory minimal
+11. Artifact draft
+12. Home activity
+13. Notification Inbox read model
+14. Skill / Collection minimal backend
 
 ---
 
@@ -163,6 +177,10 @@ packages/
 必須。
 
 - `ResourceRef`
+- `SupportedLocale`
+- `TranslationStatus`
+- `LocalizedText`
+- `MessageEnvelope`
 - `PolicyEvaluationInput`
 - `CapabilityManifest`
 - `CapabilityOperation`
@@ -181,9 +199,68 @@ packages/
 
 `NotificationInboxItem` と `SkillIndexEntry` は保存モデルではなくread model。
 
+locale関連の必須フィールド。
+
+- `MessageEnvelope`: `input_locale` / `output_locale`
+- `MemoryFrontmatter`: `source_locale` / `content_locale`
+- `ArtifactRecord`: `locale` / `source_locales`
+- `CollectionSchema`: `labels` / `descriptions` をlocale mapとして扱う
+
 ---
 
-## 7. Policy Engine
+## 7. Localization / i18n 初期実装
+
+多言語対応は、v1後続のpolishではなく初期scaffoldに含める。
+
+初期seed locale。
+
+```text
+en
+ja
+zh
+ko
+es
+pt-BR
+fr
+de
+```
+
+追加するもの。
+
+- `locales/en.json`
+- `locales/ja.json`
+- `locales/zh.json`
+- `locales/ko.json`
+- `locales/es.json`
+- `locales/pt-BR.json`
+- `locales/fr.json`
+- `locales/de.json`
+
+基本ルール。
+
+- `ja` を設計・文案のcanonicalにする。
+- `en` をfirst-class localeにする。
+- `zh`、`ko`、`es`、`pt-BR`、`fr`、`de` は初期 `draft` 翻訳でもよい。
+- key欠落は許可しない。
+- UI文言はlocale fileから取得する。
+- 原文は必ず保持し、翻訳は派生データとして扱う。
+- Policy / Audit / Capability の内部値は翻訳しない。
+- Agent RuntimeのPromptBuilderは必ず `output_locale` を受け取る。
+
+実装時に混ぜないlocale。
+
+| Locale | 役割 |
+| --- | --- |
+| `ui_locale` | UI表示言語 |
+| `output_locale` | Agent返答とArtifact出力言語 |
+| `input_locale` | ユーザー入力または外部入力の言語 |
+| `source_locale` | 取り込み元の原文言語 |
+| `content_locale` | 保存データの主言語 |
+| `fallback_locale` | 欠落時のfallback言語 |
+
+---
+
+## 8. Policy Engine
 
 正準API。
 
@@ -201,7 +278,7 @@ evaluatePolicy(input): PolicyDecisionRecord
 
 ---
 
-## 8. GUI最小要件
+## 9. GUI最小要件
 
 v1必須画面。
 
@@ -219,7 +296,7 @@ v1必須画面。
 
 ---
 
-## 9. Test Plan
+## 10. Test Plan
 
 最低限通すもの。
 
@@ -227,6 +304,7 @@ v1必須画面。
 - `git diff -- ARCHITECTURE.md plans/v1-mvp-implementation.md AGENTS.md PRINCIPLES.md PUBLIC_NAMING.md`
 - `rg -n "DESIGN.md" .`
 - `rg -n "PUBLIC_NAMING.md" AGENTS.md PRINCIPLES.md PUBLIC_NAMING.md`
+- `rg -n "locale|i18n|多言語|Localization" PRINCIPLES.md ARCHITECTURE.md plans/v1-mvp-implementation.md`
 
 参照元固有名の検索。
 
@@ -262,10 +340,19 @@ Policy fixture観点。
 - external content 由来の高リスク intent。
 - approval pending 中に安全な作業だけ継続するケース。
 - Artifact / Memory / Collection / Skill / Operation が `ResourceRef` で追えるケース。
+- 英語以外の外部コンテンツに危険命令が含まれても、owner instructionへ昇格しないケース。
+- 8 localeすべてでUI key欠落がないケース。
+
+i18n check観点。
+
+- `locales/{en,ja,zh,ko,es,pt-BR,fr,de}.json` のkeyが一致する。
+- `missing` translation statusが残っていない。
+- `verified / draft / missing` 以外のtranslation statusを拒否する。
+- Runtime promptに `output_locale` が渡っていない場合はテストで落とす。
 
 ---
 
-## 10. 未確定事項の扱い
+## 11. 未確定事項の扱い
 
 実装を止める未確定事項は残さない。
 

@@ -126,6 +126,7 @@ Agentは境界内で自律的に観察・判断・実行・記録する
 - Capability / Policy / Provenance / Rollbackの基本契約
 - MemoryとSkillを自律的に育てる条件
 - Gatewayと外部入口の権限境界
+- 多言語対応を後付けにしないLocalization境界
 - 最初に通す縦切り実装の範囲
 
 ### この設計書で決めないこと
@@ -1062,6 +1063,8 @@ MemoryFrontmatter
   state
   topic
   source
+  source_locale
+  content_locale
   source_kind
   instruction_authority
   quoted_from
@@ -1589,6 +1592,8 @@ MessageEnvelope。
   "session_key": "main",
   "user_intent": "A社向けに提案書を作って",
   "attachments": [],
+  "input_locale": "ja",
+  "output_locale": "ja",
   "metadata": {
     "page": "clients/client_a"
   }
@@ -1750,6 +1755,38 @@ v0.6では、思想だけでなく中核契約を固定する。
 この節は、Core Schemasの唯一の正準である。
 5.xの各節にある説明・表・擬似スキーマと矛盾した場合は、この節が勝つ。
 
+SupportedLocale。
+
+```text
+SupportedLocale
+  en
+  ja
+  zh
+  ko
+  es
+  pt-BR
+  fr
+  de
+```
+
+TranslationStatus。
+
+```text
+TranslationStatus
+  verified
+  draft
+  missing
+```
+
+LocalizedText。
+
+```text
+LocalizedText
+  canonical_locale
+  values
+  status_by_locale
+```
+
 ResourceRef。
 
 ```text
@@ -1771,6 +1808,8 @@ MessageEnvelope
   session_key
   user_intent
   attachments
+  input_locale
+  output_locale
   metadata
   received_at
 ```
@@ -1836,6 +1875,8 @@ MemoryFrontmatter
   state
   topic
   source
+  source_locale
+  content_locale
   source_kind
   instruction_authority
   quoted_from
@@ -1878,6 +1919,8 @@ ArtifactRecord
   id
   title
   kind
+  locale
+  source_locales
   file_ref
   metadata
   source_operation_id
@@ -1895,6 +1938,8 @@ CollectionSchema。
 CollectionSchema
   id
   version
+  labels
+  descriptions
   fields
   refs
   embeds
@@ -2061,6 +2106,103 @@ Notification Inboxは保存モデルを新設しない。
 承認待ち、異常、失敗、rollback期限を `ApprovalRequest` と `OperationRecord` から表示する。
 
 特に、CapabilityManifest、OperationRecord、ApprovalRequest、PolicyDecisionRecordがないと、Agent Loopの自動実行範囲が人によってズレる。
+
+---
+
+## 5.15 Localization & Language Policy
+
+多言語対応は、公開前polishではない。
+
+v1から、UI、Agent出力、外部入力、保存データを多言語前提で扱う。
+
+初期seed locale。
+
+```text
+en
+ja
+zh
+ko
+es
+pt-BR
+fr
+de
+```
+
+`ja` は設計・文案のcanonical、`en` はfirst-class localeとして扱う。
+
+ただし、実行時の内部値はlocaleに依存させない。
+
+分離するlocale。
+
+| Locale | 役割 |
+| --- | --- |
+| `ui_locale` | 画面表示、ボタン、ラベル、通知文言の言語 |
+| `output_locale` | Agent返答、Artifact本文、ユーザー向け説明の出力言語 |
+| `input_locale` | ユーザー入力または外部入力の推定・指定言語 |
+| `source_locale` | 外部資料、添付、tool output、取り込み元の原文言語 |
+| `content_locale` | 保存されたMemory、Artifact、Collection recordの主言語 |
+| `fallback_locale` | 表示文言が不足した時に戻す言語 |
+
+`locale` という1つの値にまとめない。
+
+理由。
+
+- UIは日本語でも、英語資料を読み、英語Artifactを作ることがある。
+- 外部入力の言語と、Agentが返す言語は一致しないことがある。
+- MemoryやArtifactは、原文言語と翻訳後の言語を分けないと検索と監査が壊れる。
+- Policy判断は言語ではなく、Capability manifestとinstruction provenanceで決める。
+
+原文と翻訳。
+
+```text
+original content
+  = sourceから得た原文。必ず保持する。
+
+translated content
+  = 表示、検索補助、Artifact生成のための派生データ。
+```
+
+翻訳は原文の置き換えではない。
+
+翻訳状態。
+
+| Status | 意味 |
+| --- | --- |
+| `verified` | 人間確認済み、または正式文案として扱える |
+| `draft` | AI翻訳または仮訳。表示可能だが品質保証は弱い |
+| `missing` | keyまたは翻訳が存在しない。CIで失敗させる |
+
+v1では、`ja` と `en` は `verified` を目指す。
+`zh`、`ko`、`es`、`pt-BR`、`fr`、`de` は初期 `draft` でもよい。
+
+ただし、locale keyの欠落は許可しない。
+
+内部値と表示文言。
+
+- Policy decision、Capability operation、ExecutionScope、RiskLevel、Audit statusは英語enumを正準にする。
+- UI表示時だけlocale fileで翻訳する。
+- DB table、API route、package名、env/config keyにlocale別の値を混ぜない。
+- `LocalizedText` は、Collection label、Artifact title候補、ユーザー向け短文など表示文言に使う。
+
+Agent Runtime。
+
+- PromptBuilderは必ず `output_locale` を受け取る。
+- Agentは `output_locale` でユーザー向け出力を作る。
+- Active Memoryは `content_locale` と `source_locale` を見て、必要なら要約・翻訳してContextに入れる。
+- Tool outputや外部資料は、原文を保持したまま、必要に応じて派生翻訳を作る。
+
+Instruction Provenanceとの関係。
+
+外部コンテンツ由来の命令防止は、どの言語でも同じPolicyで扱う。
+
+```text
+external_content in any language
+  -> data
+  -> not owner_instruction
+  -> cannot directly trigger external send / public / delete / payment
+```
+
+言語が違うことを理由に、外部由来の命令をowner instructionへ昇格させない。
 
 ---
 
@@ -2387,6 +2529,7 @@ AIはscheduled promptとして登録する。
 | Memory | session/provisional/topicは自動、sensitive/identityは承認 |
 | Skill | candidate/project/activeはpolicyで自動、delete/overwrite/external actionは承認 |
 | Collection | DSL + validator + policy + rollbackで低リスク更新は自動 |
+| Localization | 後付けpolishではなく、UI / Agent出力 / 入力元 / 保存データの初期境界として扱う |
 | Gateway | 将来案ではなく薄いcontrol planeを早めに作る |
 | Data | filesystem + SQLite |
 | Python | 最初は主役にしない。heavy tool workerとして後から足せるようにする |
@@ -2447,6 +2590,7 @@ v1に入れるもの。
 | Skill | candidate / project保存 / skill index生成。専用画面なし |
 | Collection | schema定義 / record作成 / 小さなpatch適用。専用画面なし |
 | Capability | proposal capabilityを最初の代表例にする |
+| Localization | 8 locale seed、locale file、output_locale付きPromptBuilder、locale-aware schema |
 | Safety | SecretRef / output masking / audit / rollback point |
 | Gateway | web source + cron sourceまで |
 | Automation | memory reviewの小さなcron |

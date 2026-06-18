@@ -196,7 +196,31 @@ rollback の限界。
 
 ---
 
-## 8. OSS参照元の扱い
+## 8. Multilingual by Default
+
+Samurai Agent は、多言語対応を後から足す翻訳作業として扱わない。
+
+多言語対応は、Workspace、Memory、Artifact、Agent出力の初期設計の一部である。
+
+理由。
+
+- ユーザーは日本語UIで、英語資料を読み、英語Artifactを作ることがある。
+- 外部コンテンツ、Memory、Artifact、Auditは、それぞれ別の言語を持つことがある。
+- 後から多言語化すると、保存データ、検索、Agent出力、Policy判断の境界が混ざりやすい。
+- 言語が違っても、安全境界と監査可能性は同じように守る必要がある。
+
+実装判断。
+
+- `ui_locale`、`output_locale`、`source_locale`、`content_locale` を混ぜない。
+- 原文は必ず保持し、翻訳は派生データとして扱う。
+- 内部enum、Policy decision、Capability、Auditの正準値は翻訳しない。
+- 表示文言、Agent出力、Artifact本文は、必要なlocaleに合わせる。
+- v1から `en`、`ja`、`zh`、`ko`、`es`、`pt-BR`、`fr`、`de` をseed localeとして扱う。
+- 設計・文案のcanonicalは `ja`、first-class localeは `en` とする。
+
+---
+
+## 9. OSS参照元の扱い
 
 MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象ではない。
 
@@ -226,7 +250,7 @@ MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象では
 
 ---
 
-## 9. 責務分離
+## 10. 責務分離
 
 GUI / Runtime / Gateway / Memory / Policy / Audit の責務を混ぜない。
 
@@ -248,7 +272,7 @@ GUI / Runtime / Gateway / Memory / Policy / Audit の責務を混ぜない。
 
 ---
 
-## 10. 判断に迷った時の優先順位
+## 11. 判断に迷った時の優先順位
 
 迷ったら、以下の順に優先する。
 
