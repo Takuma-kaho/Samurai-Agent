@@ -36,16 +36,19 @@ Samurai Agent の Web UI は、以下を基本にする。
 
 最初に見える画面は、複雑なダッシュボードではなく、静かなチャット作業面にする。
 
-ただし、Chat-first は「初期表示と普段の作業導線」の話である。
+Chat-first は、初期表示だけではなくUI全体の主軸である。
+承認待ち、失敗、rollback候補、自律実行の見える化も、別のダッシュボードに逃がさず、Chat Shellに付随する補助表示として扱う。
 
-以下の画面や導線を消す意味ではない。
+ただし、以下の面や導線を消す意味ではない。
 
-- Home
-- Memory
-- Audit
-- Artifact
+- Memory View
+- Audit View
+- Artifact Card
 - Settings
-- Workspace
+- Workspace Peek
+
+Activity Inbox は、独立したUI surfaceではない。
+`ActivityInboxItem` read model を Chat Shell 内の badge、inline banner、Context Drawer、Audit View への導線として使う。
 
 Memory や Audit は、必要な時に確認できる専用面を持つ。
 Context Drawer はそれらの代替ではなく、作業中に軽く見る補助面である。
@@ -111,6 +114,8 @@ Context Drawer は、作業中に必要な補助情報を置く場所である�
 - Memory candidate
 - Approval
 - Tool log
+- ActivityInboxItem
+- agent要確認イベント
 - Policy / Audit の軽い要約
 
 置きすぎないもの。
@@ -378,4 +383,3 @@ UI内の文字は増やしすぎない。
 - `lit-surface` / prompt pill / Artifact / Workspace / Drawer のrecipeが保たれているか
 - responsive rule が `980px` / `640px` で破綻しないか
 - UI文言が増えすぎていないか
-

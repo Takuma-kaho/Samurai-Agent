@@ -14,6 +14,10 @@ Policy-Bounded Agent Loop(= Human On The Loop)を中核に据えた個人用Agen
 `DESIGN.md` は `ARCHITECTURE.md` に改名された。
 本ファイル内の過去文脈としての `DESIGN.md` は、現在の `ARCHITECTURE.md` を指す。
 
+2026-06-18追記:
+現行方針では旧Home表現はChat Shell内のActivity Inbox / Context Drawer / badge / Audit Viewへ読み替える。
+本ファイルのレビュー本文は履歴として残すが、今後の実装判断ではダッシュボード型の初期画面やActivity Inbox専用画面を作らない。
+
 ---
 
 ## 総評
@@ -142,9 +146,9 @@ Hermesのtraceベース評価(GEPA)は後回しで良いが、**安全境界のe
    - rollback pointの定義(粒度/保持/保存先: fs=git or snapshot, sqlite=before/after)。
    - 「明示的にrollback不可な操作集合」を列挙し、それらは強承認のみで担保と明記。
 4. **新セクション「Core Schemas」を追加**: ~8コアスキーマをZod相当の擬似定義で固定。
-5. **5.1/Home を拡張し「Observability for Human-On-The-Loop」**: 自律アクションのサーフェシング/日次ダイジェスト/一括undo/異常フラグ。
+5. **5.1/Chat Shell に「Observability for Human-On-The-Loop」を組み込む**: Activity Inbox / Context Drawer / badge / Audit Viewで自律アクション、rollback候補、異常フラグを見せる。
 6. **8.2を「縦切り1本のMVP定義」へ組み替え**: v1 cut line を明示。例の最薄スライス
-   = Chat → 1 Capability(proposal生成) → Artifact保存 → 低risk Memory自動更新 → Audit → Home表示、を端から端まで。
+   = Chat Shell → 1 Capability(proposal生成) → Artifact保存 → 低risk Memory自動更新 → Audit View → ActivityInboxItem表示、を端から端まで。
 7. **Safety Layer(5.10)に追記**: 出力側secret masking / skill provenance+trust matrix / 安全境界eval。
 8. **5.11に追記**: paired外部identity → 許可scope の権限マッピング。
 9. **0章 or 9章に正直さの注記**: greenfield再構築である旨 / ライセンス / caching前提のprovider依存。

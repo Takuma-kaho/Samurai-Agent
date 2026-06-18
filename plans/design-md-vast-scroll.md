@@ -12,6 +12,10 @@
 `DESIGN.md` は `ARCHITECTURE.md` に改名された。
 本ファイル内の過去文脈としての `DESIGN.md` は、現在の `ARCHITECTURE.md` を指す。
 
+2026-06-18追記:
+現行方針では旧Home表現はChat Shell内のActivity Inbox / Context Drawer / badge / Audit Viewへ読み替える。
+本ファイルのレビュー本文は履歴として残すが、今後の実装判断ではダッシュボード型の初期画面やActivity Inbox専用画面を作らない。
+
 前提として、同じ `plans/dazzling-wondering-flask.md` は **v0.4 へのレビュー + v0.5改訂プラン**。
 今回の v0.5 は、その改訂プラン（Policy Specification / Instruction Provenance / Rollback具体化 /
 Core Schemas / Home可観測性 / 縦切りMVP / secret masking / skill trust / safety eval / paired scope /
@@ -205,12 +209,13 @@ v0.6は大きな方向転換ではなく、v0.5を **実装者が迷わない仕
 ### 6. Human On The Loopの通知面を最小実装に落とす
 
 - v1は外部push通知なしでよい。
-- 代わりに、Home以外にも `Notification Inbox` / badge / banner を置く。
+- 代わりに、Chat Shell内の `Activity Inbox` / badge / inline banner / Context Drawer に置く。
 - 強承認待ち、異常検知、自律実行失敗、rollback期限切れ前だけを最初の通知対象にする。
 
 ### 7. v1 cut lineをもう一段絞る
 
-- v1の画面は `Home / Chat / Artifact / Memory / Audit` を必須にする。
+- v1のUI surfaceは `Chat Shell / Artifact Card / Workspace Peek / Context Drawer / Memory View / Audit View` を必須にする。
+- `Activity Inbox` は専用画面ではなく、`ActivityInboxItem` read modelとChat Shell内の補助表示にする。
 - `Skill / Collection` は裏側の最小機能から始め、専用画面はbeta後でもよい。
 - Capabilityは `proposal capability` 1本を代表例にして、policy / audit / rollback / memory更新まで縦に通す。
 - cronは `memory review` だけを最初の非対話Loopにして、skill curator / collection check は後続に回す。
@@ -218,7 +223,7 @@ v0.6は大きな方向転換ではなく、v0.5を **実装者が迷わない仕
 ### 8. UX観点の追記を入れる
 
 - 安全仕様を増やしても、ユーザーから見ると「止まらず、何をしたか見えて、必要な時だけ呼ぶ」体験にする。
-- Homeは監査台帳ではなく、秘書の活動が自然に見える場所にする。
+- Chat Shellは監査台帳ではなく、秘書の活動が自然に見える作業面にする。
 - Approval UIは恐怖訴求ではなく、差分・理由・取り消し可否を短く見せる。
 
 ---

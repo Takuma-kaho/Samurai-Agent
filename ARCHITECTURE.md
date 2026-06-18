@@ -600,44 +600,48 @@ Agent RuntimeはCapability Manifestを解決し、PolicyDecisionを経由しな�
 
 ## 5.1 GUI Shell
 
-人間が操作する中心画面。
+人間が操作する中心UI surface。
 
-| 画面 | 役割 |
+初期画面は `Chat Shell` に固定する。
+ダッシュボード型の初期画面や活動履歴カード一覧を、別の初期画面として作らない。
+
+| UI surface | 役割 |
 | --- | --- |
-| Home | 今日の予定、未完了、AIからの提案、自動実行の結果 |
-| Chat | AIへの依頼 |
-| Artifacts | 文書、表、グラフ、画像、PDF |
-| Memory | AIが覚えていること、provisional/active/sensitiveの管理 |
-| Audit | 何を読んで何を実行したか |
+| Chat Shell | AIへの依頼、自律実行の補助表示、承認待ちや失敗の入口 |
+| Artifact Card | 文書、表、グラフ、画像、PDFなどの成果物を会話内で見る |
+| Workspace Peek | 成果物や小さな業務データを必要時だけ軽く開く |
+| Context Drawer | 作業中の補助情報、Tool log、Memory candidate、要確認イベントを見る |
+| Memory View | AIが覚えていること、provisional/active/sensitiveの管理 |
+| Audit View | 何を読んで何を実行したか、Decisionとrollback候補の確認 |
 
-v1必須画面は `Home / Chat / Artifact / Memory / Audit` に絞る。
+v1必須UIは `Chat Shell / Artifact Card / Workspace Peek / Context Drawer / Memory View / Audit View` に絞る。
 
-`Approval / Notification Inbox` は必須導線にする。
-ただし、v1では専用画面でなく、HomeまたはChat内のパネルでよい。
+`Approval` と `Activity Inbox` は必須導線にする。
+ただし、v1では独立したUI surfaceにしない。
+`Chat Shell` に付随するread model / 補助表示として扱う。
 
 `Skill / Collection` はv1でも必要だが、専用画面は必須にしない。
 最初は最小バックエンドと、Artifact / Chat / Auditから辿れる表示でよい。
 
-Human On The Loopを成立させるため、Homeは単なるダッシュボードではない。
+Human On The Loopを成立させるため、Chat Shellは単なる会話欄ではない。
 
-Homeには、自律実行の可観測性を置く。
+旧ダッシュボード方針に置かれていた自律実行の可観測性は、Chat Shell内の補助表示へ分解する。
 
 | 表示 | 役割 |
 | --- | --- |
-| Autonomous Activity | Agentが勝手に実行したことの一覧 |
-| Daily Digest | 今日の自動実行、変更、失敗、保留を短くまとめる |
-| Anomaly Flags | 普段より多い更新、初めての外部tool、失敗連発などを目立たせる |
-| Recent Rollback Points | 直近の復元可能な変更をまとめて確認する |
-| Batch Undo | Workspace内部の可逆変更をまとめて戻す |
-| Boundary Changes | toolset、scope、schedule、secret policyの変更履歴 |
-| Notification Inbox | 承認待ち、異常、失敗、rollback期限をまとめて見せる |
+| Activity Inbox | 承認待ち、異常、失敗、rollback期限、境界変更をまとめるread model |
+| badge | 強承認待ち、異常、失敗などをChat Shell内で見落としにくくする |
+| inline banner | 作業を止めるべき要確認イベントを会話の流れに差し込む |
+| Context Drawer | Tool log、Memory candidate、agent要確認イベントを作業中に参照する |
+| Audit View | Decision、変更理由、参照元、rollback候補を正本として確認する |
 
 毎回承認しない代わりに、後から気づける画面を必ず作る。
 
-Audit logは証跡であり、Homeは人間が気づくためのUIである。
+Audit logは証跡であり、Chat Shellの補助表示は人間が気づくためのUIである。
 
-Notification Inboxは保存モデルを新設しない。
-v1では `ApprovalRequest` と `OperationRecord` から生成するread modelとして扱う。
+Activity Inboxは保存モデルを新設しない。
+v1では `ActivityInboxItem` を `ApprovalRequest`、`OperationRecord`、`PolicyDecisionRecord`、`AuditRecord`、`RollbackPoint` から生成するread modelとして扱う。
+`ActivityInboxItem` は、独立したUI surfaceを作る根拠にしない。
 
 ---
 
@@ -793,7 +797,7 @@ PolicyDecision
 | Decision | 意味 | 例 |
 | --- | --- | --- |
 | allow_auto | そのまま自動実行 | 検索、要約、Artifact下書き、session memory |
-| allow_with_audit | 自動実行するがHomeとAuditで強く見せる | 小さなCollection更新、Skill候補保存、topic memory追加 |
+| allow_with_audit | 自動実行するがActivity Inbox / Context Drawer / Audit Viewで強く見せる | 小さなCollection更新、Skill候補保存、topic memory追加 |
 | requires_first_time_confirm | 初回だけ確認し、以後はscope内で自動化 | 初めてのscheduled skill、新しい外部toolの限定利用 |
 | requires_approval | 通常承認 | schema変更、大量更新、外部送信前の確定 |
 | requires_strong_approval | 強承認 | 支払い、公開、不可逆削除、secret利用、identity変更 |
@@ -805,8 +809,8 @@ PolicyDecision
 
 `allow_with_audit` は、以下を追加するDecisionである。
 
-- HomeのAutonomous Activityに表示する
-- Daily Digestに載せる
+- Activity Inboxに `ActivityInboxItem` として表示する
+- Chat Shell内のbadge / inline banner / Context Drawerで必要に応じて目立たせる
 - rollback pointを作る
 - 変更理由と参照元を残す
 - 異常検知の対象にする
@@ -2133,15 +2137,20 @@ RollbackPoint
   expires_at
 ```
 
-Notification Inbox。
+Activity Inbox。
 
 ```text
-NotificationInboxItem
-  = read model from ApprovalRequest + OperationRecord
+ActivityInboxItem
+  = read model from ApprovalRequest
+    + OperationRecord
+    + PolicyDecisionRecord
+    + AuditRecord
+    + RollbackPoint
 ```
 
-Notification Inboxは保存モデルを新設しない。
-承認待ち、異常、失敗、rollback期限を `ApprovalRequest` と `OperationRecord` から表示する。
+Activity Inboxは保存モデルを新設しない。
+承認待ち、異常、失敗、rollback期限、境界変更、自律実行を `ActivityInboxItem` として表示する。
+ただし、Activity Inboxは独立したUI surfaceを作る根拠にしない。
 
 特に、CapabilityManifest、OperationRecord、ApprovalRequest、PolicyDecisionRecordがないと、Agent Loopの自動実行範囲が人によってズレる。
 
@@ -2605,7 +2614,7 @@ ApprovalRequest if needed
 ↓
 Audit + RollbackPoint
 ↓
-HomeのAutonomous Activity / Notification Inboxに表示
+ActivityInboxItem read model + Chat Shell surfacing + Audit View
 ```
 
 この縦切りは、MulmoClaude由来のGUI / Workspace操作を、Claude Code非依存の自前Agent Runtimeへ接続する最初の検証でもある。
@@ -2618,9 +2627,9 @@ v1に入れるもの。
 
 | 領域 | v1に入れる |
 | --- | --- |
-| GUI | Home / Chat / Artifact / Memory / Audit |
+| GUI | Chat Shell / Artifact Card / Workspace Peek / Context Drawer / Memory View / Audit View |
 | Surface Protocol | GUI operation / artifact update / approval request の最小表現 |
-| Approval / Notification Inbox | HomeまたはChat内パネルとして必須 |
+| Approval / Activity Inbox | Chat Shellに付随するread model / 補助表示として必須。独立surfaceにしない |
 | Runtime | ProviderAdapter / Tool loop / Event stream / Session store |
 | Policy | Capability manifest + OperationRecord + ApprovalRequest + PolicyDecisionRecord |
 | DSL | Collection更新、Memory/Skill状態変更、Artifact保存だけ |

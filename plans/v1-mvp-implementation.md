@@ -52,7 +52,7 @@ AuditRecord
 ↓
 RollbackPoint
 ↓
-Home activity / Notification Inbox read model
+ActivityInboxItem read model + Chat Shell surfacing + Audit View
 ```
 
 この縦切りは、機能一覧を広げるためではなく、MulmoClaude由来のGUI / Workspace操作をClaude Code非依存の自前Runtimeへ接続できるかを確認するためのものでもある。
@@ -68,7 +68,7 @@ GUIから出た操作が、Surface Protocol、Agent Runtime、Policy、Auditま�
 - Agentが何を読んで、何を変えたかAuditで追える。
 - 承認が必要なoperationだけ止まり、下書きや説明は続く。
 - Memoryに保存された内容を確認・無効化できる。
-- Homeで自律実行、承認待ち、失敗、rollback候補に気づける。
+- Chat Shell内の補助表示で、自律実行、承認待ち、失敗、rollback候補に気づける。
 - UI、Agent出力、Memory、Artifactがlocale前提で壊れない。
 
 ---
@@ -79,9 +79,9 @@ v1に入れるもの。
 
 | 領域 | 対象 |
 | --- | --- |
-| GUI | Home / Chat / Artifact / Memory / Audit |
+| GUI | Chat Shell / Artifact Card / Workspace Peek / Context Drawer / Memory View / Audit View |
 | Surface Protocol | GUI operation / artifact update / approval request の最小表現 |
-| Approval / Notification Inbox | HomeまたはChat内パネル |
+| Approval / Activity Inbox | Chat Shellに付随するread model / 補助表示。独立surfaceにしない |
 | Runtime | ProviderAdapter / Tool loop / Event stream / Session store |
 | Policy | Capability manifest / OperationRecord / ApprovalRequest / PolicyDecisionRecord |
 | Localization / i18n | 8 locale seed、locale file、output_locale付きPromptBuilder、locale-aware schema |
@@ -90,7 +90,7 @@ v1に入れるもの。
 | Artifact | draft作成、保存、参照 |
 | Skill | candidate生成、project保存、skill index生成 |
 | Collection | schema定義、record作成、小さなpatch適用、任意のnotes読み取り |
-| Audit | AuditRecord、RollbackPoint、Home activity |
+| Audit | AuditRecord、RollbackPoint、ActivityInboxItem read model |
 | Gateway | web source、cron sourceの入口だけ |
 | Automation | memory reviewの小さなcron |
 
@@ -164,8 +164,8 @@ packages/
 9. GUI to Runtime connection spike
 10. Memory minimal
 11. Artifact draft
-12. Home activity
-13. Notification Inbox read model
+12. ActivityInboxItem read model
+13. Chat Shell surfacing
 14. Skill / Collection minimal backend
 
 ---
@@ -197,7 +197,11 @@ packages/
 - `AuditRecord`
 - `RollbackPoint`
 
-`NotificationInboxItem` と `SkillIndexEntry` は保存モデルではなくread model。
+`ActivityInboxItem` と `SkillIndexEntry` は保存モデルではなくread model。
+
+`ActivityInboxItem` は、`ApprovalRequest`、`OperationRecord`、`PolicyDecisionRecord`、`AuditRecord`、`RollbackPoint` から生成する。
+activity_type は `auto_run`、`approval_required`、`anomaly`、`rollback_expiring`、`boundary_change`、`failure` などを扱う。
+独立したUI surfaceを作る根拠にしない。
 
 locale関連の必須フィールド。
 
@@ -289,7 +293,7 @@ evaluatePolicy(input): PolicyDecisionRecord
 
 v1必須画面。
 
-- Home: activity、承認待ち、失敗、rollback候補。
+- Chat Shell surfacing: ActivityInboxItem、badge、inline banner、Context Drawerへの導線。
 - Chat: 依頼、実行状況、承認パネル。
 - Artifact: draft表示、保存状態、参照元。
 - Memory: provisional / topic の確認、無効化。
@@ -299,7 +303,7 @@ v1必須画面。
 
 - Skill: index生成とproject保存まで。
 - Collection: schema、record、patch適用まで。
-- Approval / Notification Inbox: Home/Chat内パネルでよい。
+- Approval / Activity Inbox: Chat Shellに付随するread model / 補助表示にする。独立surfaceにしない。
 
 ---
 
