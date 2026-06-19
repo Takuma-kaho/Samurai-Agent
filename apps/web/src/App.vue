@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
+  Archive,
   Brain,
   CheckCircle2,
   Clock3,
+  Eye,
   FileText,
   Monitor,
   Moon,
@@ -33,7 +35,7 @@ import type {
 import { supportedLocales } from "@samurai-agent/core-schemas";
 import { type LocaleKey, t } from "@samurai-agent/localization";
 import { io } from "socket.io-client";
-import { api, ApiError, type ApprovalLifecyclePayload, type SearchResult } from "./lib/api";
+import { api, ApiError, type ApprovalLifecyclePayload, type ArchiveMemoryPayload, type ArtifactDetail, type MemoryDetail, type SearchResult, type SessionDetail } from "./lib/api";
 
 type ViewMode = "chat" | "search" | "settings" | "audit" | "memory";
 
@@ -60,7 +62,10 @@ const searchQuery = ref("");
 const viewMode = ref<ViewMode>("chat");
 const drawerOpen = ref(false);
 const loading = ref(false);
-const activeArtifact = ref<{ artifact: ArtifactRecord; content: string } | null>(null);
+const activeArtifact = ref<ArtifactDetail | null>(null);
+const activeMemory = ref<MemoryDetail | null>(null);
+const memoryContent = ref<Record<string, string>>({});
+let systemThemeMedia: MediaQueryList | undefined;
 
 const label = (key: LocaleKey) => t(settings.value.ui_locale, key);
 const currentMessages = computed(() => messages.value);
@@ -81,9 +86,15 @@ const firstMemory = computed(() => memory.value[0]);
 
 onMounted(async () => {
   settings.value = await api.getSettings();
+  systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+  systemThemeMedia.addEventListener("change", handleSystemThemeChange);
   applyTheme(settings.value.theme);
   await loadSessions();
   connectSocket();
+});
+
+onUnmounted(() => {
+  systemThemeMedia?.removeEventListener("change", handleSystemThemeChange);
 });
 
 watch(
@@ -97,9 +108,13 @@ async function loadSessions() {
     await createSession();
     return;
   }
-  const firstSession = sessions.value[0];
-  if (firstSession) {
-    await openSession(firstSession.id);
+  const currentSession = activeSession.value ? sessions.value.find((session) => session.id === activeSession.value?.id) : undefined;
+  if (currentSession) {
+    await openSession(currentSession.id);
+    return;
+  }
+  if (sessions.value[0]) {
+    await openSession(sessions.value[0].id);
   }
 }
 
@@ -115,13 +130,7 @@ async function createSession() {
 
 async function openSession(sessionId: string) {
   const detail = await api.getSession(sessionId);
-  activeSession.value = detail.session;
-  messages.value = detail.messages;
-  operations.value = detail.operations;
-  artifacts.value = detail.artifacts;
-  auditRecords.value = detail.auditRecords;
-  memory.value = detail.memory;
-  activity.value = detail.activity;
+  await applySessionDetail(detail);
   await refreshAuditContext();
 }
 
@@ -141,8 +150,10 @@ async function sendMessage() {
     policyDecisions.value = [...result.policyDecisions, ...policyDecisions.value];
     approvalRequests.value = [...result.approvalRequests, ...approvalRequests.value];
     rollbackPoints.value = [...result.rollbackPoints, ...rollbackPoints.value];
-    memory.value = await api.getMemory();
     activity.value = result.activity;
+    if (activeSession.value) {
+      await reloadActiveSession();
+    }
     if (result.artifacts[0]) {
       activeArtifact.value = await api.getArtifact(result.artifacts[0].id);
     }
@@ -160,14 +171,26 @@ async function chooseResult(result: SearchResult) {
   if (result.kind === "session") {
     await openSession(result.id);
     viewMode.value = "chat";
+    return;
   }
   if (result.kind === "message" && result.session_id) {
     await openSession(result.session_id);
     viewMode.value = "chat";
+    return;
   }
   if (result.kind === "artifact") {
+    if (result.session_id) {
+      await openSession(result.session_id);
+    }
     activeArtifact.value = await api.getArtifact(result.id);
     viewMode.value = "chat";
+    return;
+  }
+  if (result.kind === "audit") {
+    if (result.session_id) {
+      await openSession(result.session_id);
+    }
+    await loadAudit();
   }
 }
 
@@ -182,7 +205,12 @@ async function loadAudit() {
 }
 
 async function loadMemory() {
-  memory.value = await api.getMemory();
+  if (activeSession.value) {
+    await reloadActiveSession();
+  } else {
+    memory.value = await api.listMemory();
+    await hydrateMemoryContent(memory.value);
+  }
   viewMode.value = "memory";
 }
 
@@ -192,6 +220,23 @@ async function patchSettings(patch: Partial<Pick<SettingsRecord, "theme" | "ui_l
 
 async function openArtifact(id: string) {
   activeArtifact.value = await api.getArtifact(id);
+}
+
+async function openMemory(id: string) {
+  activeMemory.value = await api.getMemory(id);
+  memoryContent.value = {
+    ...memoryContent.value,
+    [id]: activeMemory.value.content
+  };
+}
+
+async function archiveMemoryItem(id: string) {
+  if (!activeSession.value) {
+    return;
+  }
+  const payload = await api.archiveMemory(id, activeSession.value.id);
+  applyArchiveMemory(payload);
+  await reloadActiveSession();
 }
 
 async function approveActivity(item: ActivityInboxItem) {
@@ -234,6 +279,55 @@ function applyApprovalLifecycle(payload: ApprovalLifecyclePayload) {
   operations.value = [payload.operation, ...operations.value.filter((item) => item.id !== payload.operation.id)];
   auditRecords.value = [payload.auditRecord, ...auditRecords.value.filter((item) => item.id !== payload.auditRecord.id)];
   activity.value = payload.activity;
+}
+
+function applyArchiveMemory(payload: ArchiveMemoryPayload) {
+  operations.value = [payload.operation, ...operations.value.filter((item) => item.id !== payload.operation.id)];
+  auditRecords.value = [payload.auditRecord, ...auditRecords.value.filter((item) => item.id !== payload.auditRecord.id)];
+  if (payload.rollbackPoint) {
+    rollbackPoints.value = [payload.rollbackPoint, ...rollbackPoints.value.filter((item) => item.id !== payload.rollbackPoint?.id)];
+  }
+  activity.value = payload.activity;
+  memory.value = memory.value.filter((item) => item.id !== payload.memory.id);
+  if (activeMemory.value?.memory.id === payload.memory.id) {
+    activeMemory.value = null;
+  }
+}
+
+async function applySessionDetail(detail: SessionDetail) {
+  activeSession.value = detail.session;
+  messages.value = detail.messages;
+  operations.value = detail.operations;
+  artifacts.value = detail.artifacts;
+  auditRecords.value = detail.auditRecords;
+  memory.value = detail.memory;
+  activity.value = detail.activity;
+  if (activeArtifact.value && !detail.artifacts.some((artifact) => artifact.id === activeArtifact.value?.artifact.id)) {
+    activeArtifact.value = null;
+  }
+  if (activeMemory.value && !detail.memory.some((item) => item.id === activeMemory.value?.memory.id)) {
+    activeMemory.value = null;
+  }
+  await hydrateMemoryContent(detail.memory);
+}
+
+async function reloadActiveSession() {
+  if (!activeSession.value) {
+    return;
+  }
+  await applySessionDetail(await api.getSession(activeSession.value.id));
+}
+
+async function hydrateMemoryContent(items: Array<MemoryFrontmatter & { file_path: string }>) {
+  const missing = items.filter((item) => memoryContent.value[item.id] === undefined);
+  if (missing.length === 0) {
+    return;
+  }
+  const details = await Promise.all(missing.map((item) => api.getMemory(item.id).catch(() => undefined)));
+  memoryContent.value = {
+    ...memoryContent.value,
+    ...Object.fromEntries(details.filter((item): item is MemoryDetail => Boolean(item)).map((item) => [item.memory.id, item.content]))
+  };
 }
 
 function activityLabel(item: ActivityInboxItem): string {
@@ -283,6 +377,47 @@ function auditStatusByOperation(operation: OperationRecord): string {
   return label("approval.status.recorded");
 }
 
+function artifactOperation(artifact: ArtifactRecord): OperationRecord | undefined {
+  return operationsById.value.get(artifact.source_operation_id);
+}
+
+function artifactAuditRecords(artifact: ArtifactRecord): AuditRecord[] {
+  return auditRecords.value.filter((audit) => audit.operation_id === artifact.source_operation_id);
+}
+
+function memoryExcerpt(id: string): string {
+  return (memoryContent.value[id] ?? "").replace(/\s+/g, " ").slice(0, 150);
+}
+
+function memoryStateLabel(state: MemoryFrontmatter["state"]): string {
+  return label(`memory.state.${state}` as LocaleKey);
+}
+
+function searchKindLabel(kind: SearchResult["kind"]): string {
+  return label(`search.kind.${kind}` as LocaleKey);
+}
+
+function sessionDisplayTitle(session: SessionRecord): string {
+  return displayTitle(session.title);
+}
+
+function resultDisplayTitle(result: SearchResult): string {
+  return displayTitle(result.title);
+}
+
+function localeDisplayName(locale: SupportedLocale): string {
+  return label(`locale.${locale}` as LocaleKey);
+}
+
+function displayTitle(title: string): string {
+  return isInitialTitle(title) ? label("session.fallback_title") : title;
+}
+
+function isInitialTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  return normalized === "" || normalized === "new chat" || normalized === "untitled chat";
+}
+
 function connectSocket() {
   const socket = io();
   socket.on("session.created", (session: SessionRecord) => {
@@ -303,11 +438,23 @@ function connectSocket() {
   socket.on("settings.updated", (next: SettingsRecord) => {
     settings.value = next;
   });
+  socket.on("artifact.created", () => {
+    void reloadActiveSession();
+  });
+  socket.on("memory.candidate.created", () => {
+    void reloadActiveSession();
+  });
 }
 
 function applyTheme(theme: SettingsRecord["theme"]) {
-  const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const systemDark = systemThemeMedia?.matches ?? window.matchMedia("(prefers-color-scheme: dark)").matches;
   document.body.dataset.theme = theme === "system" ? (systemDark ? "dark" : "light") : theme;
+}
+
+function handleSystemThemeChange() {
+  if (settings.value.theme === "system") {
+    applyTheme("system");
+  }
 }
 
 function mergeById<T extends { id: string }>(primary: T[], fallback: T[]): T[] {
@@ -355,7 +502,7 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
           type="button"
           @click="openSession(session.id)"
         >
-          <span>{{ session.title }}</span>
+          <span>{{ sessionDisplayTitle(session) }}</span>
           <span v-if="activeSession?.id === session.id" class="session-dot" />
         </button>
       </section>
@@ -372,7 +519,7 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
       <header class="stage-header">
         <div>
           <div class="stage-title">
-            <span v-if="viewMode === 'chat'">Chat</span>
+            <span v-if="viewMode === 'chat'">{{ label("chat.title") }}</span>
             <span v-else-if="viewMode === 'search'">{{ label("search.title") }}</span>
             <span v-else-if="viewMode === 'settings'">{{ label("settings.title") }}</span>
             <span v-else-if="viewMode === 'audit'">{{ label("audit.title") }}</span>
@@ -380,13 +527,13 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
           </div>
         </div>
         <div class="stage-actions">
-          <button class="icon-button" type="button" title="Memory" @click="loadMemory">
+          <button class="icon-button" type="button" :title="label('memory.title')" :aria-label="label('memory.title')" @click="loadMemory">
             <Brain :size="17" />
           </button>
-          <button class="icon-button" type="button" title="Audit" @click="loadAudit">
+          <button class="icon-button" type="button" :title="label('audit.title')" :aria-label="label('audit.title')" @click="loadAudit">
             <ShieldCheck :size="17" />
           </button>
-          <button class="icon-button" :class="{ 'has-badge': hasActivity }" type="button" title="Context" @click="drawerOpen = !drawerOpen">
+          <button class="icon-button" :class="{ 'has-badge': hasActivity }" type="button" :title="label('context.title')" :aria-label="label('context.title')" @click="drawerOpen = !drawerOpen">
             <PanelRightOpen :size="17" />
           </button>
         </div>
@@ -416,11 +563,28 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
               <span class="status-pill"><CheckCircle2 :size="13" />{{ label("status.draft") }}</span>
             </div>
             <div class="artifact-preview">
-              <p>{{ artifact.metadata.status ?? label("status.saved") }}</p>
+              <p>{{ label("artifact.operation") }}: {{ artifactOperation(artifact) ? auditStatusByOperation(artifactOperation(artifact)!) : label("approval.status.recorded") }}</p>
+              <p>{{ label("artifact.audit") }}: {{ artifactAuditRecords(artifact).length > 0 ? label("audit.recorded") : label("audit.empty") }}</p>
             </div>
             <div class="artifact-actions">
               <button type="button" @click="openArtifact(artifact.id)">{{ label("artifact.open") }}</button>
               <span>{{ label("artifact.saved") }}</span>
+            </div>
+          </article>
+
+          <article v-for="item in memory.slice(0, 3)" :key="item.id" class="memory-item lit-surface">
+            <span class="status-pill">{{ memoryStateLabel(item.state) }}</span>
+            <strong>{{ item.topic }}</strong>
+            <p>{{ memoryExcerpt(item.id) || item.source }}</p>
+            <div class="memory-actions">
+              <button type="button" @click="openMemory(item.id)">
+                <Eye :size="14" />
+                {{ label("memory.open") }}
+              </button>
+              <button v-if="activeSession" type="button" @click="archiveMemoryItem(item.id)">
+                <Archive :size="14" />
+                {{ label("memory.archive") }}
+              </button>
             </div>
           </article>
         </div>
@@ -433,7 +597,19 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
             </div>
             <FileText :size="18" />
           </header>
+          <div class="workspace-meta">
+            <span>{{ label("artifact.operation") }}: {{ activeArtifact.operation ? auditStatusByOperation(activeArtifact.operation) : label("approval.status.recorded") }}</span>
+            <span>{{ label("artifact.audit") }}: {{ activeArtifact.auditRecords.length }}</span>
+          </div>
           <pre class="document-surface">{{ activeArtifact.content }}</pre>
+        </article>
+
+        <article v-if="activeMemory" class="memory-detail lit-surface">
+          <div class="drawer-card-head">
+            <span>{{ activeMemory.memory.topic }}</span>
+            <span class="status-pill">{{ memoryStateLabel(activeMemory.memory.state) }}</span>
+          </div>
+          <pre class="document-surface">{{ activeMemory.content }}</pre>
         </article>
 
         <form class="prompt-card lit-surface" @submit.prevent="sendMessage">
@@ -450,9 +626,10 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
           <input v-model="searchQuery" :placeholder="label('search.placeholder')" />
         </form>
         <div class="result-list">
+          <div v-if="searchResults.length === 0" class="empty-note">{{ label("search.empty") }}</div>
           <button v-for="result in searchResults" :key="`${result.kind}-${result.id}`" class="result-item lit-surface" type="button" @click="chooseResult(result)">
-            <span class="result-kind">{{ result.kind }}</span>
-            <strong>{{ result.title }}</strong>
+            <span class="result-kind">{{ searchKindLabel(result.kind) }}</span>
+            <strong>{{ resultDisplayTitle(result) }}</strong>
             <span>{{ result.summary }}</span>
           </button>
         </div>
@@ -464,15 +641,15 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
           <div class="segmented">
             <button :class="{ active: settings.theme === 'light' }" type="button" @click="patchSettings({ theme: 'light' })">
               <Sun :size="16" />
-              Light
+              {{ label("theme.light") }}
             </button>
             <button :class="{ active: settings.theme === 'dark' }" type="button" @click="patchSettings({ theme: 'dark' })">
               <Moon :size="16" />
-              Dark
+              {{ label("theme.dark") }}
             </button>
             <button :class="{ active: settings.theme === 'system' }" type="button" @click="patchSettings({ theme: 'system' })">
               <Monitor :size="16" />
-              System
+              {{ label("theme.system") }}
             </button>
           </div>
         </div>
@@ -482,13 +659,13 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
           <label>
             <span>{{ label("settings.ui_locale") }}</span>
             <select :value="settings.ui_locale" @change="patchSettings({ ui_locale: ($event.target as HTMLSelectElement).value as SupportedLocale })">
-              <option v-for="locale in supportedLocales" :key="locale" :value="locale">{{ locale }}</option>
+              <option v-for="locale in supportedLocales" :key="locale" :value="locale">{{ localeDisplayName(locale) }}</option>
             </select>
           </label>
           <label>
             <span>{{ label("settings.output_locale") }}</span>
             <select :value="settings.output_locale" @change="patchSettings({ output_locale: ($event.target as HTMLSelectElement).value as SupportedLocale })">
-              <option v-for="locale in supportedLocales" :key="locale" :value="locale">{{ locale }}</option>
+              <option v-for="locale in supportedLocales" :key="locale" :value="locale">{{ localeDisplayName(locale) }}</option>
             </select>
           </label>
         </div>
@@ -509,9 +686,26 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
       <section v-else class="panel-stage">
         <div v-if="memory.length === 0" class="empty-note">{{ label("memory.empty") }}</div>
         <article v-for="item in memory" :key="item.id" class="memory-item lit-surface">
-          <span class="status-pill">{{ item.state }}</span>
+          <span class="status-pill">{{ memoryStateLabel(item.state) }}</span>
           <strong>{{ item.topic }}</strong>
-          <p>{{ item.source }}</p>
+          <p>{{ memoryExcerpt(item.id) || item.source }}</p>
+          <div class="memory-actions">
+            <button type="button" @click="openMemory(item.id)">
+              <Eye :size="14" />
+              {{ label("memory.open") }}
+            </button>
+            <button v-if="activeSession" type="button" @click="archiveMemoryItem(item.id)">
+              <Archive :size="14" />
+              {{ label("memory.archive") }}
+            </button>
+          </div>
+        </article>
+        <article v-if="activeMemory" class="memory-detail lit-surface">
+          <div class="drawer-card-head">
+            <span>{{ activeMemory.memory.topic }}</span>
+            <span class="status-pill">{{ memoryStateLabel(activeMemory.memory.state) }}</span>
+          </div>
+          <pre class="document-surface">{{ activeMemory.content }}</pre>
         </article>
       </section>
     </section>
@@ -519,7 +713,7 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
     <aside v-if="drawerOpen" class="context-drawer">
       <header class="drawer-header">
         <div class="drawer-title">{{ label("context.title") }}</div>
-        <button class="icon-button" type="button" title="Close" @click="drawerOpen = false">
+        <button class="icon-button" type="button" :title="label('action.close')" :aria-label="label('action.close')" @click="drawerOpen = false">
           <X :size="16" />
         </button>
       </header>
@@ -549,7 +743,11 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
           <span class="status-pill">{{ memory.length }}</span>
         </div>
         <p v-if="!firstMemory">{{ label("memory.empty") }}</p>
-        <p v-else>{{ firstMemory.topic }} / {{ firstMemory.state }}</p>
+        <div v-else class="drawer-memory">
+          <strong>{{ firstMemory.topic }}</strong>
+          <p>{{ memoryExcerpt(firstMemory.id) || memoryStateLabel(firstMemory.state) }}</p>
+          <button type="button" @click="openMemory(firstMemory.id)">{{ label("memory.open") }}</button>
+        </div>
       </section>
     </aside>
   </main>

@@ -79,9 +79,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       const [messages, operations, artifacts, auditRecords, memory, activity] = await Promise.all([
         store.listMessages(session.id),
         store.listOperations(session.id),
-        store.listArtifacts(),
+        store.listArtifactsForSession(session.id),
         store.listAuditRecords(),
-        store.listMemory(),
+        store.listMemoryForSession(session.id),
         store.readActivityInputs().then((inputs) => import("@samurai-agent/audit").then(({ buildActivityInboxItems }) => buildActivityInboxItems(inputs)))
       ]);
       res.json({ session, messages, operations, artifacts, auditRecords, memory, activity });
@@ -126,8 +126,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         res.status(404).json({ error: "artifact_not_found" });
         return;
       }
-      const content = await store.readArtifactContent(req.params.id);
-      res.json({ artifact, content });
+      const [content, operation, auditRecords] = await Promise.all([
+        store.readArtifactContent(req.params.id),
+        store.getOperation(artifact.source_operation_id),
+        store.listAuditRecordsForOperation(artifact.source_operation_id)
+      ]);
+      res.json({ artifact, content, operation, auditRecords });
     } catch (error) {
       next(error);
     }
@@ -160,6 +164,39 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   app.get("/api/memory", async (_req, res, next) => {
     try {
       res.json(await store.listMemory());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/memory/:id", async (req, res, next) => {
+    try {
+      const memory = await store.getMemory(req.params.id);
+      if (!memory) {
+        res.status(404).json({ error: "memory_not_found" });
+        return;
+      }
+      const content = await store.readMemoryContent(req.params.id);
+      res.json({ memory, content });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/memory/:id/archive", async (req, res, next) => {
+    try {
+      const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id : "";
+      if (!sessionId) {
+        res.status(400).json({ error: "session_id_required" });
+        return;
+      }
+      const result = await runtime.archiveMemory({
+        memoryId: req.params.id,
+        sessionId,
+        actorIdentity: "owner",
+        decidedBy: typeof req.body?.decided_by === "string" ? req.body.decided_by : "owner"
+      });
+      res.json(archiveMemoryPayload(result));
     } catch (error) {
       next(error);
     }
@@ -219,10 +256,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (error instanceof RuntimeRequestError) {
-      res.status(error.code === "not_found" ? 404 : 409).json({
+      const status = error.code === "not_found" ? 404 : error.code === "forbidden" ? 403 : 409;
+      res.status(status).json({
         error: error.code,
         message: error.message,
-        ...(error.payload ? approvalLifecyclePayload(error.payload) : {})
+        ...(error.payload ? runtimeErrorPayload(error.payload) : {})
       });
       return;
     }
@@ -261,6 +299,26 @@ function approvalLifecyclePayload(result: Awaited<ReturnType<AgentRuntime["appro
     auditRecord: result.auditRecord,
     activity: result.activity
   };
+}
+
+function archiveMemoryPayload(result: Awaited<ReturnType<AgentRuntime["archiveMemory"]>>) {
+  return {
+    memory: result.memory,
+    content: result.content,
+    operation: result.operation,
+    auditRecord: result.auditRecord,
+    ...(result.rollbackPoint ? { rollbackPoint: result.rollbackPoint } : {}),
+    activity: result.activity,
+    changed: result.changed,
+    ...(result.warning ? { warning: result.warning } : {})
+  };
+}
+
+function runtimeErrorPayload(payload: NonNullable<RuntimeRequestError["payload"]>) {
+  if ("approvalRequest" in payload) {
+    return approvalLifecyclePayload(payload);
+  }
+  return archiveMemoryPayload(payload);
 }
 
 const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";

@@ -6,6 +6,7 @@ import {
   type ApprovalRequest,
   type ArtifactRecord,
   type AuditRecord,
+  type JsonValue,
   type MemoryFrontmatter,
   type MessageEnvelope,
   type MessageRecord,
@@ -23,7 +24,7 @@ import { isSupportedLocale } from "@samurai-agent/localization";
 import { createSessionMemory, createTopicMemory, retrieveActiveMemory } from "@samurai-agent/memory";
 import { evaluatePolicy } from "@samurai-agent/policy-engine";
 import type { RuntimeEventSink } from "@samurai-agent/ui-protocol";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+import type { ArchiveMemoryResult, WorkspaceStore } from "@samurai-agent/workspace-store";
 
 interface MockProviderInput {
   envelope: MessageEnvelope;
@@ -71,11 +72,29 @@ export interface ApprovalLifecycleResult {
   status: ApprovalLifecycleStatus;
 }
 
+export interface ArchiveMemoryInput {
+  memoryId: string;
+  sessionId: string;
+  actorIdentity?: OperationRecord["actor_identity"];
+  decidedBy?: string;
+}
+
+export interface ArchiveMemoryRuntimeResult {
+  memory: ArchiveMemoryResult["after"]["frontmatter"] & { file_path: string };
+  content: string;
+  operation: OperationRecord;
+  auditRecord: AuditRecord;
+  rollbackPoint?: RollbackPoint;
+  activity: ActivityInboxItem[];
+  changed: boolean;
+  warning?: string;
+}
+
 export class RuntimeRequestError extends Error {
   constructor(
-    readonly code: "not_found" | "conflict",
+    readonly code: "not_found" | "conflict" | "forbidden",
     message: string,
-    readonly payload?: ApprovalLifecycleResult
+    readonly payload?: ApprovalLifecycleResult | ArchiveMemoryRuntimeResult
   ) {
     super(message);
     this.name = "RuntimeRequestError";
@@ -390,6 +409,107 @@ export class AgentRuntime {
     };
   }
 
+  async archiveMemory(input: ArchiveMemoryInput): Promise<ArchiveMemoryRuntimeResult> {
+    const session = await this.store.getSession(input.sessionId);
+    if (!session) {
+      throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
+    }
+
+    const memory = await this.store.getMemory(input.memoryId);
+    if (!memory) {
+      throw new RuntimeRequestError("not_found", `Memory not found: ${input.memoryId}`);
+    }
+
+    const sessionMemory = await this.store.listMemoryForSession(session.id, { includeArchived: true });
+    if (!sessionMemory.some((item) => item.id === input.memoryId)) {
+      throw new RuntimeRequestError("conflict", "memory_not_in_session");
+    }
+
+    const operation = await this.createMemoryArchiveOperation(session, memory, input.actorIdentity ?? "owner", input.decidedBy ?? "owner");
+    const manifest = getCapabilityManifest(operation.capability_id);
+    const decision = await this.savePolicyDecision(evaluatePolicy({
+      input: this.createPolicyInput(operation),
+      manifest,
+      grants: await this.store.listGrants(),
+      operationId: operation.id
+    }));
+    operation.policy_decision_id = decision.id;
+
+    if (decision.decision === "deny") {
+      operation.status = "denied";
+      operation.updated_at = nowIso();
+      await this.store.updateOperation(operation);
+      const audit = await this.auditOperation(operation, decision, "Memory archive denied by policy.", [memoryRef(memory)], undefined);
+      const activity = await this.rebuildActivity();
+      throw new RuntimeRequestError("forbidden", "policy_denied", {
+        memory,
+        content: (await this.store.readMemoryContent(input.memoryId)) ?? "",
+        operation,
+        auditRecord: audit,
+        activity,
+        changed: false
+      });
+    }
+
+    if (decision.decision !== "allow_auto" && decision.decision !== "allow_with_audit") {
+      operation.status = "denied";
+      operation.updated_at = nowIso();
+      await this.store.updateOperation(operation);
+      const audit = await this.auditOperation(operation, decision, "Memory archive requires approval and was not executed in this endpoint.", [memoryRef(memory)], undefined);
+      const activity = await this.rebuildActivity();
+      throw new RuntimeRequestError("forbidden", "policy_denied", {
+        memory,
+        content: (await this.store.readMemoryContent(input.memoryId)) ?? "",
+        operation,
+        auditRecord: audit,
+        activity,
+        changed: false
+      });
+    }
+
+    const archive = await this.store.archiveMemory(input.memoryId);
+    if (!archive) {
+      throw new RuntimeRequestError("not_found", `Memory not found: ${input.memoryId}`);
+    }
+
+    const archivedMemory = {
+      ...archive.after.frontmatter,
+      file_path: archive.after.file_path
+    };
+    const ref = memoryRef(archivedMemory);
+    let rollbackPoint: RollbackPoint | undefined;
+    if (archive.changed) {
+      rollbackPoint = await this.createRollbackPoint(
+        operation,
+        [ref],
+        { memory: archive.before as unknown as JsonValue },
+        { memory: archive.after as unknown as JsonValue }
+      );
+    }
+
+    operation.status = "completed";
+    operation.result_ref = ref;
+    operation.updated_at = nowIso();
+    await this.store.updateOperation(operation);
+
+    const summary = archive.changed
+      ? `Archived memory ${archive.after.frontmatter.topic}.${archive.warning ? ` Warning: ${archive.warning}` : ""}`
+      : `Memory ${archive.after.frontmatter.topic} was already archived.`;
+    const audit = await this.auditOperation(operation, decision, summary, [ref], rollbackPoint?.id);
+    const activity = await this.rebuildActivity();
+
+    return {
+      memory: archivedMemory,
+      content: archive.content,
+      operation,
+      auditRecord: audit,
+      rollbackPoint,
+      activity,
+      changed: archive.changed,
+      warning: archive.warning
+    };
+  }
+
   private async saveMessage(message: MessageRecord): Promise<MessageRecord> {
     const saved = await this.store.saveMessage(message);
     await this.emit("message.created", saved);
@@ -449,6 +569,40 @@ export class AgentRuntime {
       recent_history: [],
       input_hash: operation.input_hash
     };
+  }
+
+  private async createMemoryArchiveOperation(
+    session: SessionRecord,
+    memory: MemoryFrontmatter & { file_path: string },
+    actorIdentity: OperationRecord["actor_identity"],
+    decidedBy: string
+  ): Promise<OperationRecord> {
+    const now = nowIso();
+    const ref = memoryRef(memory);
+    const operation: OperationRecord = {
+      id: createId("operation"),
+      session_id: session.id,
+      capability_id: proposalCapabilityManifest.id,
+      operation: "memory.archive",
+      actor_identity: actorIdentity,
+      instruction_source: "owner_instruction",
+      instruction_authority: decidedBy,
+      channel: "web",
+      input_hash: stableHash({
+        memory_id: memory.id,
+        session_id: session.id,
+        operationName: "memory.archive"
+      }),
+      input_ref: ref,
+      target_resource_refs: [ref],
+      proposed_effects: ["Archive a session-linked memory so it no longer appears in normal memory views."],
+      status: "created",
+      created_at: now,
+      updated_at: now
+    };
+    await this.store.saveOperation(operation);
+    await this.emit("operation.created", operation);
+    return operation;
   }
 
   private async savePolicyDecision(decision: PolicyDecisionRecord): Promise<PolicyDecisionRecord> {
@@ -711,4 +865,13 @@ function buildArtifactContent(intent: string, outputLocale: SupportedLocale, act
     "",
     `Active memory considered: ${activeMemoryCount}`
   ].join("\n");
+}
+
+function memoryRef(memory: MemoryFrontmatter & { file_path?: string }) {
+  return {
+    kind: "memory",
+    id: memory.id,
+    uri: memory.file_path ?? `memory/${memory.state}/${memory.id}.md`,
+    label: memory.topic
+  };
 }

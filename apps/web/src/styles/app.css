@@ -402,16 +402,23 @@ button {
   margin: 0;
 }
 
-.artifact-actions {
+.artifact-actions,
+.memory-actions {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
-.artifact-actions button {
+.artifact-actions button,
+.memory-actions button,
+.drawer-memory button {
+  align-items: center;
   background: var(--panel-subtle);
   border: 1px solid var(--line);
   border-radius: var(--radius-ui);
+  display: inline-flex;
+  gap: 6px;
   min-height: 32px;
   padding: 0 12px;
 }
@@ -426,6 +433,14 @@ button {
   gap: 12px;
   margin: 12px 0 16px;
   padding: 14px;
+}
+
+.workspace-meta {
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px 14px;
 }
 
 .document-surface {
@@ -544,6 +559,21 @@ button {
 
 .memory-item {
   grid-template-columns: auto minmax(0, 1fr);
+}
+
+.memory-actions {
+  grid-column: 1 / -1;
+}
+
+.memory-detail {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.drawer-memory {
+  display: grid;
+  gap: 8px;
 }
 
 .empty-note {

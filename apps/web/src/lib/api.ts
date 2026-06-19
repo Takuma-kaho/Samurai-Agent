@@ -23,6 +23,18 @@ export interface SessionDetail {
   activity: ActivityInboxItem[];
 }
 
+export interface ArtifactDetail {
+  artifact: ArtifactRecord;
+  content: string;
+  operation?: OperationRecord;
+  auditRecords: AuditRecord[];
+}
+
+export interface MemoryDetail {
+  memory: MemoryFrontmatter & { file_path: string };
+  content: string;
+}
+
 export interface ChatTurnResult {
   session: SessionRecord;
   messages: MessageRecord[];
@@ -42,6 +54,7 @@ export interface SearchResult {
   title: string;
   summary: string;
   session_id?: string;
+  operation_id?: string;
 }
 
 export interface AuditPayload {
@@ -57,6 +70,17 @@ export interface ApprovalLifecyclePayload {
   operation: OperationRecord;
   auditRecord: AuditRecord;
   activity: ActivityInboxItem[];
+}
+
+export interface ArchiveMemoryPayload {
+  memory: MemoryFrontmatter & { file_path: string };
+  content: string;
+  operation: OperationRecord;
+  auditRecord: AuditRecord;
+  rollbackPoint?: RollbackPoint;
+  activity: ActivityInboxItem[];
+  changed: boolean;
+  warning?: string;
 }
 
 export class ApiError extends Error {
@@ -113,7 +137,7 @@ export const api = {
     return request<SearchResult[]>(`/api/search?q=${encodeURIComponent(query)}`);
   },
   getArtifact(id: string) {
-    return request<{ artifact: ArtifactRecord; content: string }>(`/api/artifacts/${id}`);
+    return request<ArtifactDetail>(`/api/artifacts/${id}`);
   },
   getAudit() {
     return request<AuditPayload>("/api/audit");
@@ -121,8 +145,17 @@ export const api = {
   getActivity() {
     return request<ActivityInboxItem[]>("/api/activity");
   },
-  getMemory() {
+  listMemory() {
     return request<Array<MemoryFrontmatter & { file_path: string }>>("/api/memory");
+  },
+  getMemory(id: string) {
+    return request<MemoryDetail>(`/api/memory/${id}`);
+  },
+  archiveMemory(id: string, sessionId: string) {
+    return request<ArchiveMemoryPayload>(`/api/memory/${id}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId })
+    });
   },
   getSettings() {
     return request<SettingsRecord>("/api/settings");

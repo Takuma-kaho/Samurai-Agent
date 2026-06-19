@@ -129,4 +129,68 @@ describe("agent runtime", () => {
     });
     await store.close();
   });
+
+  it("archives session memory with audit activity and rollback", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "提案書を作って、今後この文体を覚えて",
+      output_locale: "ja"
+    });
+    const memory = result.memories.find((item) => item.state === "topic")!;
+
+    const archived = await runtime.archiveMemory({
+      sessionId: session.id,
+      memoryId: memory.id
+    });
+    const sessionMemory = await store.listMemoryForSession(session.id);
+    await store.close();
+
+    expect(archived.changed).toBe(true);
+    expect(archived.memory.state).toBe("archived");
+    expect(archived.operation.operation).toBe("memory.archive");
+    expect(archived.auditRecord.outputs_summary).toContain("Archived memory");
+    expect(archived.rollbackPoint).toBeDefined();
+    expect(archived.activity.length).toBeGreaterThan(0);
+    expect(sessionMemory.some((item) => item.id === memory.id)).toBe(false);
+  });
+
+  it("does not archive memory from another session", async () => {
+    const { store, runtime } = await createRuntime();
+    const sessionA = await runtime.createSession();
+    const sessionB = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: sessionA.id,
+      content: "今後この文体を覚えて",
+      output_locale: "ja"
+    });
+    const memory = result.memories.find((item) => item.state === "topic")!;
+
+    await expect(runtime.archiveMemory({ sessionId: sessionB.id, memoryId: memory.id })).rejects.toMatchObject({
+      code: "conflict",
+      message: "memory_not_in_session"
+    });
+    expect((await store.getMemory(memory.id))?.state).toBe("topic");
+    await store.close();
+  });
+
+  it("archives already archived memory as audit-only no-op", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "今後この文体を覚えて",
+      output_locale: "ja"
+    });
+    const memory = result.memories.find((item) => item.state === "topic")!;
+    await runtime.archiveMemory({ sessionId: session.id, memoryId: memory.id });
+
+    const archivedAgain = await runtime.archiveMemory({ sessionId: session.id, memoryId: memory.id });
+    await store.close();
+
+    expect(archivedAgain.changed).toBe(false);
+    expect(archivedAgain.rollbackPoint).toBeUndefined();
+    expect(archivedAgain.auditRecord.outputs_summary).toContain("already archived");
+  });
 });

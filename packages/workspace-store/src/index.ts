@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   type ActivityInboxItem,
@@ -197,6 +197,24 @@ export interface SearchResult {
   title: string;
   summary: string;
   session_id?: string;
+  operation_id?: string;
+}
+
+export type MemoryWithFilePath = MemoryFrontmatter & { file_path: string };
+
+export interface MemoryArchiveSnapshot {
+  frontmatter: MemoryFrontmatter;
+  file_path: string;
+  state: MemoryFrontmatter["state"];
+  updated_at: string;
+}
+
+export interface ArchiveMemoryResult {
+  before: MemoryArchiveSnapshot;
+  after: MemoryArchiveSnapshot;
+  content: string;
+  changed: boolean;
+  warning?: string;
 }
 
 export class WorkspaceStore {
@@ -433,7 +451,9 @@ export class WorkspaceStore {
         created_at: message.created_at
       })
       .execute();
-    await this.touchSession(message.session_id, message.role === "user" ? titleFromContent(message.content) : undefined);
+    const session = await this.getSession(message.session_id);
+    const nextTitle = message.role === "user" && session && isInitialSessionTitle(session.title) ? titleFromContent(message.content) : undefined;
+    await this.touchSession(message.session_id, nextTitle);
     return message;
   }
 
@@ -574,6 +594,11 @@ export class WorkspaceStore {
     return rows.map(auditRecordFromRow);
   }
 
+  async listAuditRecordsForOperation(operationId: string): Promise<AuditRecord[]> {
+    const rows = await this.db.selectFrom("audit_records").selectAll().where("operation_id", "=", operationId).orderBy("created_at", "desc").execute();
+    return rows.map(auditRecordFromRow);
+  }
+
   async saveRollbackPoint(point: RollbackPoint): Promise<RollbackPoint> {
     const filePath = path.join(this.rootDir, "rollback", `${point.id}.json`);
     await writeFile(filePath, JSON.stringify(point, null, 2));
@@ -629,6 +654,17 @@ export class WorkspaceStore {
     return rows.map(artifactFromRow);
   }
 
+  async listArtifactsForSession(sessionId: string): Promise<ArtifactRecord[]> {
+    const rows = await this.db
+      .selectFrom("artifacts")
+      .innerJoin("operations", "operations.id", "artifacts.source_operation_id")
+      .selectAll("artifacts")
+      .where("operations.session_id", "=", sessionId)
+      .orderBy("artifacts.updated_at", "desc")
+      .execute();
+    return rows.map(artifactFromRow);
+  }
+
   async readArtifactContent(id: string): Promise<string | undefined> {
     const artifact = await this.getArtifact(id);
     if (!artifact) {
@@ -669,21 +705,124 @@ export class WorkspaceStore {
     return frontmatter;
   }
 
-  async listMemory(): Promise<Array<MemoryFrontmatter & { file_path: string }>> {
-    const rows = await this.db.selectFrom("memory_index").selectAll().orderBy("updated_at", "desc").execute();
+  async listMemory(options: { includeArchived?: boolean } = {}): Promise<MemoryWithFilePath[]> {
+    let query = this.db.selectFrom("memory_index").selectAll();
+    if (!options.includeArchived) {
+      query = query.where("state", "!=", "archived");
+    }
+    const rows = await query.orderBy("updated_at", "desc").execute();
     return rows.map((row) => ({ ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path }));
   }
 
-  async searchMemory(query: string, limit = 5): Promise<Array<MemoryFrontmatter & { file_path: string }>> {
+  async listMemoryForSession(sessionId: string, options: { includeArchived?: boolean } = {}): Promise<MemoryWithFilePath[]> {
+    const messages = await this.listMessages(sessionId);
+    const envelopeIds = new Set<string>();
+    for (const message of messages) {
+      if (message.envelope?.id) {
+        envelopeIds.add(message.envelope.id);
+      }
+    }
+    if (envelopeIds.size === 0) {
+      return [];
+    }
+
+    let query = this.db.selectFrom("memory_index").selectAll();
+    if (!options.includeArchived) {
+      query = query.where("state", "!=", "archived");
+    }
+    const rows = await query.orderBy("updated_at", "desc").execute();
+    return rows
+      .filter((row) => envelopeIds.has(row.source))
+      .map((row) => ({ ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path }));
+  }
+
+  async searchMemory(query: string, limit = 5, options: { includeArchived?: boolean } = {}): Promise<MemoryWithFilePath[]> {
     const needle = `%${query}%`;
-    const rows = await this.db
-      .selectFrom("memory_index")
-      .selectAll()
-      .where((eb) => eb.or([eb("topic", "like", needle), eb("source", "like", needle)]))
-      .orderBy("updated_at", "desc")
-      .limit(limit)
-      .execute();
+    let dbQuery = this.db.selectFrom("memory_index").selectAll().where((eb) => eb.or([eb("topic", "like", needle), eb("source", "like", needle)]));
+    if (!options.includeArchived) {
+      dbQuery = dbQuery.where("state", "!=", "archived");
+    }
+    const rows = await dbQuery.orderBy("updated_at", "desc").limit(limit).execute();
     return rows.map((row) => ({ ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path }));
+  }
+
+  async getMemory(id: string): Promise<MemoryWithFilePath | undefined> {
+    const row = await this.db.selectFrom("memory_index").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? { ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path } : undefined;
+  }
+
+  async readMemoryContent(id: string): Promise<string | undefined> {
+    const memory = await this.getMemory(id);
+    if (!memory) {
+      return undefined;
+    }
+    const raw = await readFile(path.join(this.rootDir, memory.file_path), "utf8");
+    return stripFrontmatter(raw).trim();
+  }
+
+  async archiveMemory(id: string): Promise<ArchiveMemoryResult | undefined> {
+    const row = await this.db.selectFrom("memory_index").selectAll().where("id", "=", id).executeTakeFirst();
+    if (!row) {
+      return undefined;
+    }
+
+    const frontmatter = parse<MemoryFrontmatter>(row.frontmatter_json);
+    const content = await this.readMemoryContent(id);
+    if (content === undefined) {
+      return undefined;
+    }
+    const before = memorySnapshot(frontmatter, row.file_path);
+
+    if (frontmatter.state === "archived") {
+      return {
+        before,
+        after: before,
+        content,
+        changed: false
+      };
+    }
+
+    const nextFrontmatter: MemoryFrontmatter = {
+      ...frontmatter,
+      state: "archived",
+      updated_at: nowIso()
+    };
+    const archivedPath = path.join("memory", "archived", `${id}.md`);
+    const previousAbsolutePath = path.join(this.rootDir, row.file_path);
+    const archivedAbsolutePath = path.join(this.rootDir, archivedPath);
+    await mkdir(path.dirname(archivedAbsolutePath), { recursive: true });
+    await writeFile(archivedAbsolutePath, `${renderFrontmatter(nextFrontmatter)}\n${content.trim()}\n`);
+
+    try {
+      await this.db
+        .updateTable("memory_index")
+        .set({
+          state: nextFrontmatter.state,
+          file_path: archivedPath,
+          frontmatter_json: stringify(nextFrontmatter),
+          updated_at: nextFrontmatter.updated_at
+        })
+        .where("id", "=", id)
+        .execute();
+    } catch (error) {
+      await unlink(archivedAbsolutePath).catch(() => undefined);
+      throw error;
+    }
+
+    let warning: string | undefined;
+    try {
+      await unlink(previousAbsolutePath);
+    } catch (error) {
+      warning = error instanceof Error ? `old_file_delete_failed:${error.message}` : "old_file_delete_failed";
+    }
+
+    return {
+      before,
+      after: memorySnapshot(nextFrontmatter, archivedPath),
+      content,
+      changed: true,
+      warning
+    };
   }
 
   async getSettings(): Promise<SettingsRecord> {
@@ -731,10 +870,17 @@ export class WorkspaceStore {
     const [sessions, messages, artifacts, audits] = await Promise.all([
       this.db.selectFrom("sessions").selectAll().where("title", "like", needle).limit(10).execute(),
       this.db.selectFrom("messages").selectAll().where("content", "like", needle).limit(10).execute(),
-      this.db.selectFrom("artifacts").selectAll().where("title", "like", needle).limit(10).execute(),
+      this.db
+        .selectFrom("artifacts")
+        .leftJoin("operations", "operations.id", "artifacts.source_operation_id")
+        .selectAll("artifacts")
+        .select(["operations.session_id as session_id"])
+        .execute(),
       this.db
         .selectFrom("audit_records")
-        .selectAll()
+        .leftJoin("operations", "operations.id", "audit_records.operation_id")
+        .selectAll("audit_records")
+        .select(["operations.session_id as session_id"])
         .where((eb) => eb.or([eb("inputs_summary", "like", needle), eb("outputs_summary", "like", needle)]))
         .limit(10)
         .execute()
@@ -748,8 +894,13 @@ export class WorkspaceStore {
           kind: "artifact",
           id: artifact.id,
           title: artifact.title,
-          summary: content.slice(0, 120)
+          summary: content.slice(0, 120),
+          session_id: artifact.session_id ?? undefined,
+          operation_id: artifact.source_operation_id
         });
+      }
+      if (artifactResults.length >= 10) {
+        break;
       }
     }
 
@@ -767,7 +918,9 @@ export class WorkspaceStore {
         kind: "audit" as const,
         id: row.id,
         title: row.operation_id,
-        summary: `${row.inputs_summary} -> ${row.outputs_summary}`.slice(0, 140)
+        summary: `${row.inputs_summary} -> ${row.outputs_summary}`.slice(0, 140),
+        session_id: row.session_id ?? undefined,
+        operation_id: row.operation_id
       }))
     ];
   }
@@ -823,12 +976,38 @@ function titleFromContent(content: string): string {
   return content.trim().replace(/\s+/g, " ").slice(0, 48) || "Untitled chat";
 }
 
+function isInitialSessionTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  return normalized === "" || normalized === "new chat" || normalized === "untitled chat";
+}
+
 function stringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
 function parse<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+function stripFrontmatter(raw: string): string {
+  if (!raw.startsWith("---\n")) {
+    return raw;
+  }
+  const end = raw.indexOf("\n---", 4);
+  if (end === -1) {
+    return raw;
+  }
+  const contentStart = raw.indexOf("\n", end + 4);
+  return contentStart === -1 ? "" : raw.slice(contentStart + 1);
+}
+
+function memorySnapshot(frontmatter: MemoryFrontmatter, filePath: string): MemoryArchiveSnapshot {
+  return {
+    frontmatter,
+    file_path: filePath,
+    state: frontmatter.state,
+    updated_at: frontmatter.updated_at
+  };
 }
 
 function sessionFromRow(row: SessionsTable): SessionRecord {
@@ -844,6 +1023,7 @@ function sessionFromRow(row: SessionsTable): SessionRecord {
 }
 
 function messageFromRow(row: MessagesTable): MessageRecord {
+  const envelope = row.envelope_json ? safeParse(row.envelope_json) : undefined;
   return {
     id: row.id,
     session_id: row.session_id,
@@ -851,9 +1031,17 @@ function messageFromRow(row: MessagesTable): MessageRecord {
     content: row.content,
     input_locale: row.input_locale as MessageRecord["input_locale"],
     output_locale: row.output_locale as MessageRecord["output_locale"],
-    envelope: row.envelope_json ? parse(row.envelope_json) : undefined,
+    envelope: envelope as MessageRecord["envelope"],
     created_at: row.created_at
   };
+}
+
+function safeParse(value: string): unknown | undefined {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function operationToRow(operation: OperationRecord): OperationsTable {

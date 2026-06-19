@@ -46,6 +46,19 @@ export const proposalCapabilityManifest: CapabilityManifest = {
       default_decision: "allow_with_audit"
     },
     {
+      operation: "memory.archive",
+      description: "Archive a memory item so it leaves normal memory views without deleting the record.",
+      input_schema_ref: "memory.archive.input",
+      output_schema_ref: "memory.archive.output",
+      risk: "medium",
+      scope: "memory",
+      reversibility: true,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "owner_approved_policy"],
+      default_decision: "allow_with_audit"
+    },
+    {
       operation: "external.send",
       description: "Prepare an outbound send operation.",
       input_schema_ref: "external.send.input",
@@ -75,7 +88,7 @@ export const proposalCapabilityManifest: CapabilityManifest = {
   input_schema: {},
   output_schema: {},
   ui_surfaces: ["chat", "artifact", "context_drawer", "audit"],
-  agent_tools: ["artifact.create", "memory.session.create", "memory.topic.create", "external.send"],
+  agent_tools: ["artifact.create", "memory.session.create", "memory.topic.create", "memory.archive", "external.send"],
   permission_policy: {
     grant_key: "capability_id+operation+actor_identity+channel+resource_scope"
   },
