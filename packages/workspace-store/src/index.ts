@@ -1,0 +1,1005 @@
+import Database from "better-sqlite3";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import {
+  type ActivityInboxItem,
+  type ApprovalRequest,
+  type ArtifactRecord,
+  type AuditRecord,
+  type GrantRecord,
+  type MemoryFrontmatter,
+  type MessageRecord,
+  type OperationRecord,
+  type PolicyDecisionRecord,
+  type RollbackPoint,
+  type SessionRecord,
+  type SettingsRecord,
+  defaultSettings,
+  nowIso
+} from "@samurai-agent/core-schemas";
+import { Kysely, SqliteDialect, sql } from "kysely";
+
+type JsonColumn = string;
+
+interface SessionsTable {
+  id: string;
+  session_key: string;
+  title: string;
+  ui_locale: string;
+  output_locale: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MessagesTable {
+  id: string;
+  session_id: string;
+  role: "user" | "agent" | "system";
+  content: string;
+  input_locale: string;
+  output_locale: string;
+  envelope_json: JsonColumn | null;
+  created_at: string;
+}
+
+interface OperationsTable {
+  id: string;
+  session_id: string;
+  capability_id: string;
+  operation: string;
+  actor_identity: string;
+  instruction_source: string;
+  instruction_authority: string;
+  channel: string;
+  input_hash: string;
+  input_ref_json: JsonColumn | null;
+  target_resource_refs_json: JsonColumn;
+  proposed_effects_json: JsonColumn;
+  status: string;
+  policy_decision_id: string | null;
+  approval_request_id: string | null;
+  result_ref_json: JsonColumn | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PolicyDecisionsTable {
+  id: string;
+  operation_id: string;
+  capability_id: string;
+  operation: string;
+  decision: string;
+  reason: string;
+  policy_inputs_json: JsonColumn;
+  matched_rules_json: JsonColumn;
+  required_approval_level: string;
+  grant_id: string | null;
+  created_at: string;
+}
+
+interface ApprovalRequestsTable {
+  id: string;
+  operation_id: string;
+  requested_level: string;
+  status: string;
+  reason: string;
+  requested_by: string;
+  decided_by: string | null;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+}
+
+interface AuditRecordsTable {
+  id: string;
+  actor_identity: string;
+  operation_id: string;
+  capability_id: string;
+  instruction_source: string;
+  inputs_summary: string;
+  outputs_summary: string;
+  policy_decision_id: string;
+  affected_resources_json: JsonColumn;
+  rollback_point_id: string | null;
+  created_at: string;
+}
+
+interface RollbackPointsTable {
+  id: string;
+  operation_id: string;
+  affected_resources_json: JsonColumn;
+  before_snapshot_json: JsonColumn;
+  after_snapshot_json: JsonColumn;
+  reversible: number;
+  irreversible_effects_json: JsonColumn;
+  created_at: string;
+  expires_at: string;
+}
+
+interface ArtifactsTable {
+  id: string;
+  title: string;
+  kind: string;
+  locale: string;
+  source_locales_json: JsonColumn;
+  file_ref_json: JsonColumn;
+  metadata_json: JsonColumn;
+  source_operation_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MemoryIndexTable {
+  id: string;
+  state: string;
+  topic: string;
+  source: string;
+  source_locale: string;
+  content_locale: string;
+  source_kind: string;
+  instruction_authority: string;
+  file_path: string;
+  frontmatter_json: JsonColumn;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SettingsTable {
+  id: "default";
+  theme: "light" | "dark" | "system";
+  ui_locale: string;
+  output_locale: string;
+  updated_at: string;
+}
+
+interface GrantsTable {
+  id: string;
+  capability_id: string;
+  operation: string;
+  actor_identity: string;
+  channel: string;
+  resource_scope: string;
+  manifest_version: string;
+  risk_snapshot: string;
+  scope_snapshot: string;
+  external_impact_snapshot: number;
+  secret_requirement_snapshot: string;
+  granted_by: string;
+  reason: string;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+}
+
+interface WorkspaceDb {
+  sessions: SessionsTable;
+  messages: MessagesTable;
+  operations: OperationsTable;
+  policy_decisions: PolicyDecisionsTable;
+  approval_requests: ApprovalRequestsTable;
+  audit_records: AuditRecordsTable;
+  rollback_points: RollbackPointsTable;
+  artifacts: ArtifactsTable;
+  memory_index: MemoryIndexTable;
+  settings: SettingsTable;
+  grants: GrantsTable;
+}
+
+export interface WorkspaceStoreOptions {
+  rootDir: string;
+}
+
+export interface SearchResult {
+  kind: "session" | "message" | "artifact" | "audit";
+  id: string;
+  title: string;
+  summary: string;
+  session_id?: string;
+}
+
+export class WorkspaceStore {
+  readonly rootDir: string;
+  readonly dbPath: string;
+  readonly db: Kysely<WorkspaceDb>;
+
+  constructor(options: WorkspaceStoreOptions) {
+    this.rootDir = options.rootDir;
+    this.dbPath = path.join(this.rootDir, "workspace.sqlite");
+    this.db = new Kysely<WorkspaceDb>({
+      dialect: new SqliteDialect({
+        database: new Database(this.dbPath)
+      })
+    });
+  }
+
+  static async create(options: WorkspaceStoreOptions): Promise<WorkspaceStore> {
+    await ensureWorkspaceLayout(options.rootDir);
+    const store = new WorkspaceStore(options);
+    await store.migrate();
+    await store.ensureDefaultSettings();
+    return store;
+  }
+
+  async migrate(): Promise<void> {
+    const statements = [
+      `CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        session_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        ui_locale TEXT NOT NULL,
+        output_locale TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        input_locale TEXT NOT NULL,
+        output_locale TEXT NOT NULL,
+        envelope_json TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS operations (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        capability_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        actor_identity TEXT NOT NULL,
+        instruction_source TEXT NOT NULL,
+        instruction_authority TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        input_ref_json TEXT,
+        target_resource_refs_json TEXT NOT NULL,
+        proposed_effects_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        policy_decision_id TEXT,
+        approval_request_id TEXT,
+        result_ref_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS policy_decisions (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL,
+        capability_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        policy_inputs_json TEXT NOT NULL,
+        matched_rules_json TEXT NOT NULL,
+        required_approval_level TEXT NOT NULL,
+        grant_id TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS approval_requests (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL,
+        requested_level TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        decided_by TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        decided_at TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS audit_records (
+        id TEXT PRIMARY KEY,
+        actor_identity TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        capability_id TEXT NOT NULL,
+        instruction_source TEXT NOT NULL,
+        inputs_summary TEXT NOT NULL,
+        outputs_summary TEXT NOT NULL,
+        policy_decision_id TEXT NOT NULL,
+        affected_resources_json TEXT NOT NULL,
+        rollback_point_id TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS rollback_points (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL,
+        affected_resources_json TEXT NOT NULL,
+        before_snapshot_json TEXT NOT NULL,
+        after_snapshot_json TEXT NOT NULL,
+        reversible INTEGER NOT NULL,
+        irreversible_effects_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS artifacts (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        locale TEXT NOT NULL,
+        source_locales_json TEXT NOT NULL,
+        file_ref_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        source_operation_id TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS memory_index (
+        id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_locale TEXT NOT NULL,
+        content_locale TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        instruction_authority TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        frontmatter_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS settings (
+        id TEXT PRIMARY KEY,
+        theme TEXT NOT NULL,
+        ui_locale TEXT NOT NULL,
+        output_locale TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS grants (
+        id TEXT PRIMARY KEY,
+        capability_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        actor_identity TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        resource_scope TEXT NOT NULL,
+        manifest_version TEXT NOT NULL,
+        risk_snapshot TEXT NOT NULL,
+        scope_snapshot TEXT NOT NULL,
+        external_impact_snapshot INTEGER NOT NULL,
+        secret_requirement_snapshot TEXT NOT NULL,
+        granted_by TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT,
+        revoked_at TEXT
+      )`
+    ];
+
+    for (const statement of statements) {
+      await sql.raw(statement).execute(this.db);
+    }
+  }
+
+  async ensureDefaultSettings(): Promise<void> {
+    const existing = await this.db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirst();
+    if (existing) {
+      return;
+    }
+
+    const settings = defaultSettings();
+    await this.db
+      .insertInto("settings")
+      .values({
+        id: "default",
+        theme: settings.theme,
+        ui_locale: settings.ui_locale,
+        output_locale: settings.output_locale,
+        updated_at: settings.updated_at
+      })
+      .execute();
+  }
+
+  async createSession(session: SessionRecord): Promise<SessionRecord> {
+    await this.db.insertInto("sessions").values(session).execute();
+    return session;
+  }
+
+  async listSessions(): Promise<SessionRecord[]> {
+    const rows = await this.db.selectFrom("sessions").selectAll().orderBy("updated_at", "desc").execute();
+    return rows.map(sessionFromRow);
+  }
+
+  async getSession(sessionId: string): Promise<SessionRecord | undefined> {
+    const row = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
+    return row ? sessionFromRow(row) : undefined;
+  }
+
+  async touchSession(sessionId: string, title?: string): Promise<void> {
+    await this.db
+      .updateTable("sessions")
+      .set({
+        ...(title ? { title } : {}),
+        updated_at: nowIso()
+      })
+      .where("id", "=", sessionId)
+      .execute();
+  }
+
+  async saveMessage(message: MessageRecord): Promise<MessageRecord> {
+    await this.db
+      .insertInto("messages")
+      .values({
+        id: message.id,
+        session_id: message.session_id,
+        role: message.role,
+        content: message.content,
+        input_locale: message.input_locale,
+        output_locale: message.output_locale,
+        envelope_json: message.envelope ? stringify(message.envelope) : null,
+        created_at: message.created_at
+      })
+      .execute();
+    await this.touchSession(message.session_id, message.role === "user" ? titleFromContent(message.content) : undefined);
+    return message;
+  }
+
+  async listMessages(sessionId: string): Promise<MessageRecord[]> {
+    const rows = await this.db.selectFrom("messages").selectAll().where("session_id", "=", sessionId).orderBy("created_at").execute();
+    return rows.map(messageFromRow);
+  }
+
+  async saveOperation(operation: OperationRecord): Promise<OperationRecord> {
+    await this.db
+      .insertInto("operations")
+      .values(operationToRow(operation))
+      .execute();
+    return operation;
+  }
+
+  async updateOperation(operation: OperationRecord): Promise<OperationRecord> {
+    await this.db
+      .updateTable("operations")
+      .set(operationToRow(operation))
+      .where("id", "=", operation.id)
+      .execute();
+    return operation;
+  }
+
+  async getOperation(operationId: string): Promise<OperationRecord | undefined> {
+    const row = await this.db.selectFrom("operations").selectAll().where("id", "=", operationId).executeTakeFirst();
+    return row ? operationFromRow(row) : undefined;
+  }
+
+  async listOperations(sessionId?: string): Promise<OperationRecord[]> {
+    let query = this.db.selectFrom("operations").selectAll();
+    if (sessionId) {
+      query = query.where("session_id", "=", sessionId);
+    }
+    const rows = await query.orderBy("created_at", "desc").execute();
+    return rows.map(operationFromRow);
+  }
+
+  async savePolicyDecision(decision: PolicyDecisionRecord): Promise<PolicyDecisionRecord> {
+    await this.db
+      .insertInto("policy_decisions")
+      .values({
+        id: decision.id,
+        operation_id: decision.operation_id,
+        capability_id: decision.capability_id,
+        operation: decision.operation,
+        decision: decision.decision,
+        reason: decision.reason,
+        policy_inputs_json: stringify(decision.policy_inputs),
+        matched_rules_json: stringify(decision.matched_rules),
+        required_approval_level: decision.required_approval_level,
+        grant_id: decision.grant_id ?? null,
+        created_at: decision.created_at
+      })
+      .execute();
+    return decision;
+  }
+
+  async listPolicyDecisions(): Promise<PolicyDecisionRecord[]> {
+    const rows = await this.db.selectFrom("policy_decisions").selectAll().orderBy("created_at", "desc").execute();
+    return rows.map(policyDecisionFromRow);
+  }
+
+  async getPolicyDecision(id: string): Promise<PolicyDecisionRecord | undefined> {
+    const row = await this.db.selectFrom("policy_decisions").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? policyDecisionFromRow(row) : undefined;
+  }
+
+  async saveApprovalRequest(request: ApprovalRequest): Promise<ApprovalRequest> {
+    await this.db
+      .insertInto("approval_requests")
+      .values({
+        id: request.id,
+        operation_id: request.operation_id,
+        requested_level: request.requested_level,
+        status: request.status,
+        reason: request.reason,
+        requested_by: request.requested_by,
+        decided_by: request.decided_by ?? null,
+        created_at: request.created_at,
+        expires_at: request.expires_at,
+        decided_at: request.decided_at ?? null
+      })
+      .execute();
+    return request;
+  }
+
+  async updateApprovalRequest(request: ApprovalRequest): Promise<ApprovalRequest> {
+    await this.db
+      .updateTable("approval_requests")
+      .set({
+        requested_level: request.requested_level,
+        status: request.status,
+        reason: request.reason,
+        requested_by: request.requested_by,
+        decided_by: request.decided_by ?? null,
+        expires_at: request.expires_at,
+        decided_at: request.decided_at ?? null
+      })
+      .where("id", "=", request.id)
+      .execute();
+    return request;
+  }
+
+  async getApprovalRequest(id: string): Promise<ApprovalRequest | undefined> {
+    const row = await this.db.selectFrom("approval_requests").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? approvalRequestFromRow(row) : undefined;
+  }
+
+  async listApprovalRequests(): Promise<ApprovalRequest[]> {
+    const rows = await this.db.selectFrom("approval_requests").selectAll().orderBy("created_at", "desc").execute();
+    return rows.map(approvalRequestFromRow);
+  }
+
+  async saveAuditRecord(record: AuditRecord): Promise<AuditRecord> {
+    await this.db
+      .insertInto("audit_records")
+      .values({
+        id: record.id,
+        actor_identity: record.actor_identity,
+        operation_id: record.operation_id,
+        capability_id: record.capability_id,
+        instruction_source: record.instruction_source,
+        inputs_summary: record.inputs_summary,
+        outputs_summary: record.outputs_summary,
+        policy_decision_id: record.policy_decision_id,
+        affected_resources_json: stringify(record.affected_resources),
+        rollback_point_id: record.rollback_point_id ?? null,
+        created_at: record.created_at
+      })
+      .execute();
+    return record;
+  }
+
+  async listAuditRecords(): Promise<AuditRecord[]> {
+    const rows = await this.db.selectFrom("audit_records").selectAll().orderBy("created_at", "desc").execute();
+    return rows.map(auditRecordFromRow);
+  }
+
+  async saveRollbackPoint(point: RollbackPoint): Promise<RollbackPoint> {
+    const filePath = path.join(this.rootDir, "rollback", `${point.id}.json`);
+    await writeFile(filePath, JSON.stringify(point, null, 2));
+    await this.db
+      .insertInto("rollback_points")
+      .values({
+        id: point.id,
+        operation_id: point.operation_id,
+        affected_resources_json: stringify(point.affected_resources),
+        before_snapshot_json: stringify(point.before_snapshot),
+        after_snapshot_json: stringify(point.after_snapshot),
+        reversible: point.reversible ? 1 : 0,
+        irreversible_effects_json: stringify(point.irreversible_effects),
+        created_at: point.created_at,
+        expires_at: point.expires_at
+      })
+      .execute();
+    return point;
+  }
+
+  async listRollbackPoints(): Promise<RollbackPoint[]> {
+    const rows = await this.db.selectFrom("rollback_points").selectAll().orderBy("created_at", "desc").execute();
+    return rows.map(rollbackPointFromRow);
+  }
+
+  async saveArtifactMetadata(record: ArtifactRecord): Promise<ArtifactRecord> {
+    await this.db
+      .insertInto("artifacts")
+      .values({
+        id: record.id,
+        title: record.title,
+        kind: record.kind,
+        locale: record.locale,
+        source_locales_json: stringify(record.source_locales),
+        file_ref_json: stringify(record.file_ref),
+        metadata_json: stringify(record.metadata),
+        source_operation_id: record.source_operation_id,
+        created_by: record.created_by,
+        created_at: record.created_at,
+        updated_at: record.updated_at
+      })
+      .execute();
+    return record;
+  }
+
+  async getArtifact(id: string): Promise<ArtifactRecord | undefined> {
+    const row = await this.db.selectFrom("artifacts").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? artifactFromRow(row) : undefined;
+  }
+
+  async listArtifacts(): Promise<ArtifactRecord[]> {
+    const rows = await this.db.selectFrom("artifacts").selectAll().orderBy("updated_at", "desc").execute();
+    return rows.map(artifactFromRow);
+  }
+
+  async readArtifactContent(id: string): Promise<string | undefined> {
+    const artifact = await this.getArtifact(id);
+    if (!artifact) {
+      return undefined;
+    }
+    return readFile(path.join(this.rootDir, artifact.file_ref.uri), "utf8");
+  }
+
+  async writeArtifactContent(id: string, content: string): Promise<string> {
+    const relativePath = path.join("artifacts", `${id}.md`);
+    const absolutePath = path.join(this.rootDir, relativePath);
+    await writeFile(absolutePath, content);
+    return relativePath;
+  }
+
+  async saveMemory(frontmatter: MemoryFrontmatter, content: string): Promise<MemoryFrontmatter> {
+    const relativePath = path.join("memory", frontmatter.state, `${frontmatter.id}.md`);
+    const absolutePath = path.join(this.rootDir, relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, `${renderFrontmatter(frontmatter)}\n${content.trim()}\n`);
+    await this.db
+      .insertInto("memory_index")
+      .values({
+        id: frontmatter.id,
+        state: frontmatter.state,
+        topic: frontmatter.topic,
+        source: frontmatter.source,
+        source_locale: frontmatter.source_locale,
+        content_locale: frontmatter.content_locale,
+        source_kind: frontmatter.source_kind,
+        instruction_authority: frontmatter.instruction_authority,
+        file_path: relativePath,
+        frontmatter_json: stringify(frontmatter),
+        created_at: frontmatter.created_at,
+        updated_at: frontmatter.updated_at
+      })
+      .execute();
+    return frontmatter;
+  }
+
+  async listMemory(): Promise<Array<MemoryFrontmatter & { file_path: string }>> {
+    const rows = await this.db.selectFrom("memory_index").selectAll().orderBy("updated_at", "desc").execute();
+    return rows.map((row) => ({ ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path }));
+  }
+
+  async searchMemory(query: string, limit = 5): Promise<Array<MemoryFrontmatter & { file_path: string }>> {
+    const needle = `%${query}%`;
+    const rows = await this.db
+      .selectFrom("memory_index")
+      .selectAll()
+      .where((eb) => eb.or([eb("topic", "like", needle), eb("source", "like", needle)]))
+      .orderBy("updated_at", "desc")
+      .limit(limit)
+      .execute();
+    return rows.map((row) => ({ ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path }));
+  }
+
+  async getSettings(): Promise<SettingsRecord> {
+    const row = await this.db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
+    return {
+      theme: row.theme,
+      ui_locale: row.ui_locale as SettingsRecord["ui_locale"],
+      output_locale: row.output_locale as SettingsRecord["output_locale"],
+      updated_at: row.updated_at
+    };
+  }
+
+  async patchSettings(patch: Partial<Pick<SettingsRecord, "theme" | "ui_locale" | "output_locale">>): Promise<SettingsRecord> {
+    const current = await this.getSettings();
+    const next: SettingsRecord = {
+      ...current,
+      ...patch,
+      updated_at: nowIso()
+    };
+    await this.db
+      .updateTable("settings")
+      .set({
+        theme: next.theme,
+        ui_locale: next.ui_locale,
+        output_locale: next.output_locale,
+        updated_at: next.updated_at
+      })
+      .where("id", "=", "default")
+      .execute();
+    return next;
+  }
+
+  async listGrants(): Promise<GrantRecord[]> {
+    const rows = await this.db.selectFrom("grants").selectAll().execute();
+    return rows.map(grantFromRow);
+  }
+
+  async search(query: string): Promise<SearchResult[]> {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      return [];
+    }
+
+    const needle = `%${trimmed}%`;
+    const [sessions, messages, artifacts, audits] = await Promise.all([
+      this.db.selectFrom("sessions").selectAll().where("title", "like", needle).limit(10).execute(),
+      this.db.selectFrom("messages").selectAll().where("content", "like", needle).limit(10).execute(),
+      this.db.selectFrom("artifacts").selectAll().where("title", "like", needle).limit(10).execute(),
+      this.db
+        .selectFrom("audit_records")
+        .selectAll()
+        .where((eb) => eb.or([eb("inputs_summary", "like", needle), eb("outputs_summary", "like", needle)]))
+        .limit(10)
+        .execute()
+    ]);
+
+    const artifactResults: SearchResult[] = [];
+    for (const artifact of artifacts) {
+      const content = (await this.readArtifactContent(artifact.id).catch(() => "")) ?? "";
+      if (artifact.title.includes(trimmed) || content.includes(trimmed)) {
+        artifactResults.push({
+          kind: "artifact",
+          id: artifact.id,
+          title: artifact.title,
+          summary: content.slice(0, 120)
+        });
+      }
+    }
+
+    return [
+      ...sessions.map((row) => ({ kind: "session" as const, id: row.id, title: row.title, summary: row.session_key })),
+      ...messages.map((row) => ({
+        kind: "message" as const,
+        id: row.id,
+        title: row.role,
+        summary: row.content.slice(0, 120),
+        session_id: row.session_id
+      })),
+      ...artifactResults,
+      ...audits.map((row) => ({
+        kind: "audit" as const,
+        id: row.id,
+        title: row.operation_id,
+        summary: `${row.inputs_summary} -> ${row.outputs_summary}`.slice(0, 140)
+      }))
+    ];
+  }
+
+  async readActivityInputs(): Promise<{
+    approvals: ApprovalRequest[];
+    operations: OperationRecord[];
+    decisions: PolicyDecisionRecord[];
+    audits: AuditRecord[];
+    rollbacks: RollbackPoint[];
+  }> {
+    const [approvals, operations, decisions, audits, rollbacks] = await Promise.all([
+      this.listApprovalRequests(),
+      this.listOperations(),
+      this.listPolicyDecisions(),
+      this.listAuditRecords(),
+      this.listRollbackPoints()
+    ]);
+    return { approvals, operations, decisions, audits, rollbacks };
+  }
+
+  async close(): Promise<void> {
+    await this.db.destroy();
+  }
+}
+
+export async function ensureWorkspaceLayout(rootDir: string): Promise<void> {
+  const dirs = [
+    rootDir,
+    path.join(rootDir, "artifacts"),
+    path.join(rootDir, "memory", "session"),
+    path.join(rootDir, "memory", "provisional"),
+    path.join(rootDir, "memory", "topic"),
+    path.join(rootDir, "memory", "active"),
+    path.join(rootDir, "memory", "sensitive"),
+    path.join(rootDir, "memory", "archived"),
+    path.join(rootDir, "rollback"),
+    path.join(rootDir, "collections")
+  ];
+
+  await Promise.all(dirs.map((dir) => mkdir(dir, { recursive: true })));
+}
+
+export function renderFrontmatter(frontmatter: MemoryFrontmatter): string {
+  return [
+    "---",
+    ...Object.entries(frontmatter).map(([key, value]) => `${key}: ${JSON.stringify(value)}`),
+    "---"
+  ].join("\n");
+}
+
+function titleFromContent(content: string): string {
+  return content.trim().replace(/\s+/g, " ").slice(0, 48) || "Untitled chat";
+}
+
+function stringify(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function parse<T>(value: string): T {
+  return JSON.parse(value) as T;
+}
+
+function sessionFromRow(row: SessionsTable): SessionRecord {
+  return {
+    id: row.id,
+    session_key: row.session_key,
+    title: row.title,
+    ui_locale: row.ui_locale as SessionRecord["ui_locale"],
+    output_locale: row.output_locale as SessionRecord["output_locale"],
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+function messageFromRow(row: MessagesTable): MessageRecord {
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    role: row.role,
+    content: row.content,
+    input_locale: row.input_locale as MessageRecord["input_locale"],
+    output_locale: row.output_locale as MessageRecord["output_locale"],
+    envelope: row.envelope_json ? parse(row.envelope_json) : undefined,
+    created_at: row.created_at
+  };
+}
+
+function operationToRow(operation: OperationRecord): OperationsTable {
+  return {
+    id: operation.id,
+    session_id: operation.session_id,
+    capability_id: operation.capability_id,
+    operation: operation.operation,
+    actor_identity: operation.actor_identity,
+    instruction_source: operation.instruction_source,
+    instruction_authority: operation.instruction_authority,
+    channel: operation.channel,
+    input_hash: operation.input_hash,
+    input_ref_json: operation.input_ref ? stringify(operation.input_ref) : null,
+    target_resource_refs_json: stringify(operation.target_resource_refs),
+    proposed_effects_json: stringify(operation.proposed_effects),
+    status: operation.status,
+    policy_decision_id: operation.policy_decision_id ?? null,
+    approval_request_id: operation.approval_request_id ?? null,
+    result_ref_json: operation.result_ref ? stringify(operation.result_ref) : null,
+    error: operation.error ?? null,
+    created_at: operation.created_at,
+    updated_at: operation.updated_at
+  };
+}
+
+function operationFromRow(row: OperationsTable): OperationRecord {
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    capability_id: row.capability_id,
+    operation: row.operation,
+    actor_identity: row.actor_identity as OperationRecord["actor_identity"],
+    instruction_source: row.instruction_source as OperationRecord["instruction_source"],
+    instruction_authority: row.instruction_authority,
+    channel: row.channel,
+    input_hash: row.input_hash,
+    input_ref: row.input_ref_json ? parse(row.input_ref_json) : undefined,
+    target_resource_refs: parse(row.target_resource_refs_json),
+    proposed_effects: parse(row.proposed_effects_json),
+    status: row.status as OperationRecord["status"],
+    policy_decision_id: row.policy_decision_id ?? undefined,
+    approval_request_id: row.approval_request_id ?? undefined,
+    result_ref: row.result_ref_json ? parse(row.result_ref_json) : undefined,
+    error: row.error ?? undefined,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+function policyDecisionFromRow(row: PolicyDecisionsTable): PolicyDecisionRecord {
+  return {
+    id: row.id,
+    operation_id: row.operation_id,
+    capability_id: row.capability_id,
+    operation: row.operation,
+    decision: row.decision as PolicyDecisionRecord["decision"],
+    reason: row.reason,
+    policy_inputs: parse(row.policy_inputs_json),
+    matched_rules: parse(row.matched_rules_json),
+    required_approval_level: row.required_approval_level as PolicyDecisionRecord["required_approval_level"],
+    grant_id: row.grant_id ?? undefined,
+    created_at: row.created_at
+  };
+}
+
+function approvalRequestFromRow(row: ApprovalRequestsTable): ApprovalRequest {
+  return {
+    id: row.id,
+    operation_id: row.operation_id,
+    requested_level: row.requested_level as ApprovalRequest["requested_level"],
+    status: row.status as ApprovalRequest["status"],
+    reason: row.reason,
+    requested_by: row.requested_by,
+    decided_by: row.decided_by ?? undefined,
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+    decided_at: row.decided_at ?? undefined
+  };
+}
+
+function auditRecordFromRow(row: AuditRecordsTable): AuditRecord {
+  return {
+    id: row.id,
+    actor_identity: row.actor_identity as AuditRecord["actor_identity"],
+    operation_id: row.operation_id,
+    capability_id: row.capability_id,
+    instruction_source: row.instruction_source as AuditRecord["instruction_source"],
+    inputs_summary: row.inputs_summary,
+    outputs_summary: row.outputs_summary,
+    policy_decision_id: row.policy_decision_id,
+    affected_resources: parse(row.affected_resources_json),
+    rollback_point_id: row.rollback_point_id ?? undefined,
+    created_at: row.created_at
+  };
+}
+
+function rollbackPointFromRow(row: RollbackPointsTable): RollbackPoint {
+  return {
+    id: row.id,
+    operation_id: row.operation_id,
+    affected_resources: parse(row.affected_resources_json),
+    before_snapshot: parse(row.before_snapshot_json),
+    after_snapshot: parse(row.after_snapshot_json),
+    reversible: row.reversible === 1,
+    irreversible_effects: parse(row.irreversible_effects_json),
+    created_at: row.created_at,
+    expires_at: row.expires_at
+  };
+}
+
+function artifactFromRow(row: ArtifactsTable): ArtifactRecord {
+  return {
+    id: row.id,
+    title: row.title,
+    kind: row.kind as ArtifactRecord["kind"],
+    locale: row.locale as ArtifactRecord["locale"],
+    source_locales: parse(row.source_locales_json),
+    file_ref: parse(row.file_ref_json),
+    metadata: parse(row.metadata_json),
+    source_operation_id: row.source_operation_id,
+    created_by: row.created_by,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+function grantFromRow(row: GrantsTable): GrantRecord {
+  return {
+    id: row.id,
+    capability_id: row.capability_id,
+    operation: row.operation,
+    actor_identity: row.actor_identity as GrantRecord["actor_identity"],
+    channel: row.channel,
+    resource_scope: row.resource_scope,
+    manifest_version: row.manifest_version,
+    risk_snapshot: row.risk_snapshot as GrantRecord["risk_snapshot"],
+    scope_snapshot: row.scope_snapshot as GrantRecord["scope_snapshot"],
+    external_impact_snapshot: row.external_impact_snapshot === 1,
+    secret_requirement_snapshot: row.secret_requirement_snapshot,
+    granted_by: row.granted_by,
+    reason: row.reason,
+    created_at: row.created_at,
+    expires_at: row.expires_at ?? undefined,
+    revoked_at: row.revoked_at ?? undefined
+  };
+}
+
+export type { ActivityInboxItem };

@@ -1,0 +1,97 @@
+import type { CapabilityManifest } from "@samurai-agent/core-schemas";
+
+export const proposalCapabilityManifest: CapabilityManifest = {
+  id: "proposal_workspace",
+  version: "1.0.0",
+  title: "Workspace proposal capability",
+  description: "Creates local drafts, provisional memory, and approval-gated outbound actions.",
+  operations: [
+    {
+      operation: "artifact.create",
+      description: "Create a local markdown artifact draft.",
+      input_schema_ref: "artifact.create.input",
+      output_schema_ref: "artifact.create.output",
+      risk: "low",
+      scope: "artifact",
+      reversibility: true,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "owner_approved_policy", "agent_reasoning", "scheduled_context"],
+      default_decision: "allow_auto"
+    },
+    {
+      operation: "memory.session.create",
+      description: "Keep a session-scoped memory note.",
+      input_schema_ref: "memory.session.create.input",
+      output_schema_ref: "memory.session.create.output",
+      risk: "low",
+      scope: "memory",
+      reversibility: true,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "agent_reasoning", "scheduled_context"],
+      default_decision: "allow_auto"
+    },
+    {
+      operation: "memory.topic.create",
+      description: "Create a non-sensitive topic memory candidate.",
+      input_schema_ref: "memory.topic.create.input",
+      output_schema_ref: "memory.topic.create.output",
+      risk: "medium",
+      scope: "memory",
+      reversibility: true,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "owner_approved_policy", "agent_reasoning"],
+      default_decision: "allow_with_audit"
+    },
+    {
+      operation: "external.send",
+      description: "Prepare an outbound send operation.",
+      input_schema_ref: "external.send.input",
+      output_schema_ref: "external.send.output",
+      risk: "high",
+      scope: "external_channel",
+      reversibility: false,
+      external_impact: true,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "owner_approved_policy"],
+      default_decision: "requires_approval"
+    },
+    {
+      operation: "workspace.delete",
+      description: "Delete a workspace resource.",
+      input_schema_ref: "workspace.delete.input",
+      output_schema_ref: "workspace.delete.output",
+      risk: "irreversible",
+      scope: "workspace",
+      reversibility: false,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction"],
+      default_decision: "requires_strong_approval"
+    }
+  ],
+  input_schema: {},
+  output_schema: {},
+  ui_surfaces: ["chat", "artifact", "context_drawer", "audit"],
+  agent_tools: ["artifact.create", "memory.session.create", "memory.topic.create", "external.send"],
+  permission_policy: {
+    grant_key: "capability_id+operation+actor_identity+channel+resource_scope"
+  },
+  secret_policy: {
+    direct_secret_values: false
+  },
+  audit_policy: {
+    state_changes: "always"
+  },
+  rollback_policy: {
+    workspace_changes: "snapshot"
+  }
+};
+
+export const capabilityManifests = [proposalCapabilityManifest] as const;
+
+export function getCapabilityManifest(capabilityId: string): CapabilityManifest | undefined {
+  return capabilityManifests.find((manifest) => manifest.id === capabilityId);
+}

@@ -16,10 +16,12 @@ pnpm-debug.log*
 # Dependency and build outputs
 node_modules/
 dist/
+dist-ts/
 build/
 .next/
 out/
 coverage/
+workspace-data/
 
 # Editor / local tooling
 .idea/
