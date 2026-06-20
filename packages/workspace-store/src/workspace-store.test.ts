@@ -1,8 +1,20 @@
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { createId, nowIso, type ArtifactRecord, type AuditRecord, type MemoryFrontmatter, type MessageEnvelope, type OperationRecord, type PolicyDecisionRecord, type SessionRecord } from "@samurai-agent/core-schemas";
+import {
+  createId,
+  nowIso,
+  type ArtifactRecord,
+  type AuditRecord,
+  type CollectionSchema,
+  type MemoryFrontmatter,
+  type MessageEnvelope,
+  type OperationRecord,
+  type PolicyDecisionRecord,
+  type SessionRecord,
+  type SkillFrontmatter
+} from "@samurai-agent/core-schemas";
 import { WorkspaceStore } from "./index";
 
 const roots: string[] = [];
@@ -186,6 +198,101 @@ describe("workspace store", () => {
     expect(firstTitle).toBe("最初の依頼です");
     expect(secondTitle).toBe(firstTitle);
   });
+
+  it("stores skill markdown in filesystem and SQLite index", async () => {
+    const store = await createTempStore();
+    const markdown = skillMarkdown({ id: "skill_store", state: "candidate", title: "Store skill" });
+
+    const saved = await store.saveSkillMarkdown({ state: "candidate", skillId: "skill_store", markdown });
+    const listed = await store.listSkills();
+    const raw = await store.readSkillMarkdown("skill_store");
+    await store.close();
+
+    expect(saved.file_path).toBe(path.join("skills", "candidate", "skill_store.md"));
+    expect(listed.map((skill) => skill.id)).toContain("skill_store");
+    expect(raw).toContain("Store skill");
+  });
+
+  it("rejects skill id/file conflicts and removes invalid new files", async () => {
+    const store = await createTempStore();
+    await store.saveSkillMarkdown({ state: "candidate", skillId: "skill_conflict", markdown: skillMarkdown({ id: "skill_conflict", state: "candidate" }) });
+
+    await expect(
+      store.saveSkillMarkdown({ state: "candidate", skillId: "skill_conflict", markdown: skillMarkdown({ id: "skill_conflict", state: "candidate" }) })
+    ).rejects.toThrow();
+    await expect(store.saveSkillMarkdown({ state: "candidate", skillId: "skill_invalid", markdown: "---\n{broken\n---\nbody" })).rejects.toThrow();
+    await expect(access(path.join(store.rootDir, "skills", "candidate", "skill_invalid.md"))).rejects.toThrow();
+    await store.close();
+  });
+
+  it("stores collection schemas, records, notes, and automation runs", async () => {
+    const store = await createTempStore();
+    const schema = collectionSchema("contacts");
+    const now = nowIso();
+
+    const savedSchema = await store.saveCollectionSchema(schema);
+    const savedRecord = await store.saveCollectionRecord({
+      id: "record_1",
+      collection_id: "contacts",
+      data: { name: "Takuma" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await mkdir(path.join(store.rootDir, "collections", "contacts", "notes"), { recursive: true });
+    await writeFile(path.join(store.rootDir, "collections", "contacts", "notes", "README.md"), "補助メモ");
+    const notes = await store.listCollectionNotes("contacts");
+    const run = await store.createAutomationRun({
+      id: "automation_run_1",
+      kind: "memory_review",
+      source: "cron",
+      status: "started",
+      started_at: now
+    });
+    const updatedRun = await store.updateAutomationRun({ ...run, session_id: "session_1", status: "completed", completed_at: now });
+    await store.close();
+
+    expect(savedSchema.file_path).toBe(path.join("collections", "contacts", "schema.json"));
+    expect(savedRecord.file_path).toBe(path.join("collections", "contacts", "records", "record_1.json"));
+    expect(notes[0]?.content).toBe("補助メモ");
+    expect(run.session_id).toBeUndefined();
+    expect(updatedRun.session_id).toBe("session_1");
+  });
+
+  it("rejects collection unknown fields and record conflicts", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    await store.saveCollectionSchema(collectionSchema("contacts"));
+    await expect(
+      store.saveCollectionRecord({
+        id: "record_unknown",
+        collection_id: "contacts",
+        data: { unknown: true },
+        resource_refs: [],
+        created_at: now,
+        updated_at: now
+      })
+    ).rejects.toThrow("collection_unknown_field");
+    await store.saveCollectionRecord({
+      id: "record_conflict",
+      collection_id: "contacts",
+      data: { name: "A" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await expect(
+      store.saveCollectionRecord({
+        id: "record_conflict",
+        collection_id: "contacts",
+        data: { name: "B" },
+        resource_refs: [],
+        created_at: now,
+        updated_at: now
+      })
+    ).rejects.toThrow();
+    await store.close();
+  });
 });
 
 async function createSessionRecord(store: WorkspaceStore, title: string): Promise<SessionRecord> {
@@ -277,6 +384,42 @@ async function saveArtifactRecord(store: WorkspaceStore, operation: OperationRec
     created_at: now,
     updated_at: now
   });
+}
+
+function skillMarkdown(input: Partial<SkillFrontmatter> & { id: string; state: SkillFrontmatter["state"] }): string {
+  const frontmatter: SkillFrontmatter = {
+    id: input.id,
+    state: input.state,
+    title: input.title ?? "Skill",
+    description: input.description ?? "Description",
+    tags: input.tags ?? [],
+    provenance: input.provenance ?? "generated_local",
+    trust_level: input.trust_level ?? "generated_local",
+    allowed_scopes: input.allowed_scopes ?? ["skill"],
+    required_capabilities: input.required_capabilities ?? [],
+    schedule_policy: input.schedule_policy ?? {},
+    secret_policy: input.secret_policy ?? {},
+    last_reviewed_at: input.last_reviewed_at ?? nowIso(),
+    owner_pinned: input.owner_pinned ?? false
+  };
+  return ["---", JSON.stringify(frontmatter, null, 2), "---", "# Body", ""].join("\n");
+}
+
+function collectionSchema(id: string): CollectionSchema {
+  const labels = { ja: id, en: id, zh: id, ko: id, es: id, "pt-BR": id, fr: id, de: id };
+  return {
+    id,
+    version: "1",
+    labels,
+    descriptions: labels,
+    fields: [{ id: "name", type: "string" }],
+    refs: [],
+    embeds: [],
+    derived_fields: [],
+    triggers: [],
+    actions: [],
+    permissions: {}
+  };
 }
 
 async function saveAuditRecord(store: WorkspaceStore, operation: OperationRecord, inputsSummary: string, outputsSummary: string): Promise<AuditRecord> {

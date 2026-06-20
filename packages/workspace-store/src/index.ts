@@ -1,12 +1,18 @@
 import Database from "better-sqlite3";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   type ActivityInboxItem,
   type ApprovalRequest,
   type ArtifactRecord,
   type AuditRecord,
+  CollectionRecordSchema,
+  CollectionSchemaSchema,
+  type CollectionPatch,
+  type CollectionRecord,
+  type CollectionSchema,
   type GrantRecord,
+  type JsonValue,
   type MemoryFrontmatter,
   type MessageRecord,
   type OperationRecord,
@@ -14,6 +20,8 @@ import {
   type RollbackPoint,
   type SessionRecord,
   type SettingsRecord,
+  SkillFrontmatterSchema,
+  type SkillFrontmatter,
   defaultSettings,
   nowIso
 } from "@samurai-agent/core-schemas";
@@ -146,6 +154,48 @@ interface MemoryIndexTable {
   updated_at: string;
 }
 
+interface SkillIndexTable {
+  id: string;
+  state: string;
+  title: string;
+  description: string;
+  tags_json: JsonColumn;
+  required_capabilities_json: JsonColumn;
+  file_path: string;
+  frontmatter_json: JsonColumn;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CollectionSchemasTable {
+  id: string;
+  version: string;
+  file_path: string;
+  schema_json: JsonColumn;
+  updated_at: string;
+}
+
+interface CollectionRecordsTable {
+  id: string;
+  collection_id: string;
+  file_path: string;
+  record_json: JsonColumn;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AutomationRunsTable {
+  id: string;
+  kind: string;
+  source: string;
+  session_id: string | null;
+  status: string;
+  operation_id: string | null;
+  started_at: string;
+  completed_at: string | null;
+  error: string | null;
+}
+
 interface SettingsTable {
   id: "default";
   theme: "light" | "dark" | "system";
@@ -183,6 +233,10 @@ interface WorkspaceDb {
   rollback_points: RollbackPointsTable;
   artifacts: ArtifactsTable;
   memory_index: MemoryIndexTable;
+  skill_index: SkillIndexTable;
+  collection_schemas: CollectionSchemasTable;
+  collection_records: CollectionRecordsTable;
+  automation_runs: AutomationRunsTable;
   settings: SettingsTable;
   grants: GrantsTable;
 }
@@ -201,6 +255,31 @@ export interface SearchResult {
 }
 
 export type MemoryWithFilePath = MemoryFrontmatter & { file_path: string };
+export interface SkillIndexEntry {
+  id: string;
+  title: string;
+  description: string;
+  tags: string[];
+  state: SkillFrontmatter["state"];
+  required_capabilities: string[];
+  frontmatter: SkillFrontmatter;
+  file_path?: string;
+}
+export type SkillWithFilePath = SkillIndexEntry & { file_path: string };
+export type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string };
+export type CollectionRecordWithFilePath = CollectionRecord & { file_path: string };
+
+export interface AutomationRunRecord {
+  id: string;
+  kind: string;
+  source: string;
+  session_id?: string;
+  status: "started" | "completed" | "failed";
+  operation_id?: string;
+  started_at: string;
+  completed_at?: string;
+  error?: string;
+}
 
 export interface MemoryArchiveSnapshot {
   frontmatter: MemoryFrontmatter;
@@ -359,6 +438,45 @@ export class WorkspaceStore {
         frontmatter_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS skill_index (
+        id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        required_capabilities_json TEXT NOT NULL,
+        file_path TEXT NOT NULL UNIQUE,
+        frontmatter_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS collection_schemas (
+        id TEXT PRIMARY KEY,
+        version TEXT NOT NULL,
+        file_path TEXT NOT NULL UNIQUE,
+        schema_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS collection_records (
+        id TEXT NOT NULL,
+        collection_id TEXT NOT NULL,
+        file_path TEXT NOT NULL UNIQUE,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (collection_id, id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS automation_runs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        source TEXT NOT NULL,
+        session_id TEXT,
+        status TEXT NOT NULL,
+        operation_id TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        error TEXT
       )`,
       `CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY,
@@ -825,6 +943,199 @@ export class WorkspaceStore {
     };
   }
 
+  async saveSkillMarkdown(input: { state: "candidate" | "project"; skillId: string; markdown: string }): Promise<SkillWithFilePath> {
+    const relativePath = path.join("skills", input.state, `${input.skillId}.md`);
+    const absolutePath = path.join(this.rootDir, relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, input.markdown, { flag: "wx" });
+
+    try {
+      const { frontmatter } = parseSkillMarkdownLocal(await readFile(absolutePath, "utf8"));
+      if (frontmatter.id !== input.skillId || frontmatter.state !== input.state) {
+        throw new Error("skill_frontmatter_path_mismatch");
+      }
+      const now = nowIso();
+      await this.db
+        .insertInto("skill_index")
+        .values({
+          id: frontmatter.id,
+          state: frontmatter.state,
+          title: frontmatter.title,
+          description: frontmatter.description,
+          tags_json: stringify(frontmatter.tags),
+          required_capabilities_json: stringify(frontmatter.required_capabilities),
+          file_path: relativePath,
+          frontmatter_json: stringify(frontmatter),
+          created_at: now,
+          updated_at: now
+        })
+        .execute();
+      return { ...buildSkillIndexEntry(frontmatter), file_path: relativePath };
+    } catch (error) {
+      await unlink(absolutePath).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async listSkills(): Promise<SkillWithFilePath[]> {
+    const rows = await this.db.selectFrom("skill_index").selectAll().orderBy("updated_at", "desc").execute();
+    return rows.map(skillFromRow);
+  }
+
+  async getSkill(id: string): Promise<SkillWithFilePath | undefined> {
+    const row = await this.db.selectFrom("skill_index").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? skillFromRow(row) : undefined;
+  }
+
+  async readSkillMarkdown(id: string): Promise<string | undefined> {
+    const skill = await this.getSkill(id);
+    if (!skill) {
+      return undefined;
+    }
+    return readFile(path.join(this.rootDir, skill.file_path), "utf8");
+  }
+
+  async saveCollectionSchema(schemaInput: CollectionSchema): Promise<CollectionSchemaWithFilePath> {
+    const relativePath = path.join("collections", schemaInput.id, "schema.json");
+    const absolutePath = path.join(this.rootDir, relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, `${JSON.stringify(schemaInput, null, 2)}\n`, { flag: "wx" });
+
+    try {
+      const schema = parseCollectionSchemaLocal(JSON.parse(await readFile(absolutePath, "utf8")));
+      const now = nowIso();
+      await this.db
+        .insertInto("collection_schemas")
+        .values({
+          id: schema.id,
+          version: schema.version,
+          file_path: relativePath,
+          schema_json: stringify(schema),
+          updated_at: now
+        })
+        .execute();
+      return { ...schema, file_path: relativePath };
+    } catch (error) {
+      await unlink(absolutePath).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async getCollectionSchema(collectionId: string): Promise<CollectionSchemaWithFilePath | undefined> {
+    const row = await this.db.selectFrom("collection_schemas").selectAll().where("id", "=", collectionId).executeTakeFirst();
+    return row ? collectionSchemaFromRow(row) : undefined;
+  }
+
+  async saveCollectionRecord(recordInput: CollectionRecord): Promise<CollectionRecordWithFilePath> {
+    const schema = await this.getCollectionSchema(recordInput.collection_id);
+    if (!schema) {
+      throw new Error("collection_schema_not_found");
+    }
+    const relativePath = path.join("collections", recordInput.collection_id, "records", `${recordInput.id}.json`);
+    const absolutePath = path.join(this.rootDir, relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, `${JSON.stringify(recordInput, null, 2)}\n`, { flag: "wx" });
+
+    try {
+      const record = parseCollectionRecordLocal(JSON.parse(await readFile(absolutePath, "utf8")), schema);
+      await this.db
+        .insertInto("collection_records")
+        .values({
+          id: record.id,
+          collection_id: record.collection_id,
+          file_path: relativePath,
+          record_json: stringify(record),
+          created_at: record.created_at,
+          updated_at: record.updated_at
+        })
+        .execute();
+      return { ...record, file_path: relativePath };
+    } catch (error) {
+      await unlink(absolutePath).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async getCollectionRecord(collectionId: string, recordId: string): Promise<CollectionRecordWithFilePath | undefined> {
+    const row = await this.db
+      .selectFrom("collection_records")
+      .selectAll()
+      .where("collection_id", "=", collectionId)
+      .where("id", "=", recordId)
+      .executeTakeFirst();
+    return row ? collectionRecordFromRow(row) : undefined;
+  }
+
+  async applyCollectionRecordPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<{
+    before: CollectionRecordWithFilePath;
+    after: CollectionRecordWithFilePath;
+  }> {
+    const [schema, before] = await Promise.all([
+      this.getCollectionSchema(input.collectionId),
+      this.getCollectionRecord(input.collectionId, input.recordId)
+    ]);
+    if (!schema) {
+      throw new Error("collection_schema_not_found");
+    }
+    if (!before) {
+      throw new Error("collection_record_not_found");
+    }
+    const after = applyCollectionPatchLocal(before, input.patch, schema);
+    const absolutePath = path.join(this.rootDir, before.file_path);
+    await writeFile(absolutePath, `${JSON.stringify(after, null, 2)}\n`);
+    await this.db
+      .updateTable("collection_records")
+      .set({
+        record_json: stringify(after),
+        updated_at: after.updated_at
+      })
+      .where("collection_id", "=", input.collectionId)
+      .where("id", "=", input.recordId)
+      .execute();
+    return { before, after: { ...after, file_path: before.file_path } };
+  }
+
+  async listCollectionNotes(collectionId: string): Promise<Array<{ file_path: string; content: string }>> {
+    const notesDir = path.join(this.rootDir, "collections", collectionId, "notes");
+    let entries: string[];
+    try {
+      entries = await readdir(notesDir);
+    } catch {
+      return [];
+    }
+    const notes: Array<{ file_path: string; content: string }> = [];
+    for (const entry of entries.filter((item) => item.endsWith(".md")).sort()) {
+      const relativePath = path.join("collections", collectionId, "notes", entry);
+      notes.push({
+        file_path: relativePath,
+        content: await readFile(path.join(this.rootDir, relativePath), "utf8")
+      });
+    }
+    return notes;
+  }
+
+  async createAutomationRun(run: AutomationRunRecord): Promise<AutomationRunRecord> {
+    await this.db
+      .insertInto("automation_runs")
+      .values(automationRunToRow(run))
+      .execute();
+    return run;
+  }
+
+  async updateAutomationRun(run: AutomationRunRecord): Promise<AutomationRunRecord> {
+    await this.db
+      .updateTable("automation_runs")
+      .set(automationRunToRow(run))
+      .where("id", "=", run.id)
+      .execute();
+    return run;
+  }
+
+  async getAutomationRun(id: string): Promise<AutomationRunRecord | undefined> {
+    const row = await this.db.selectFrom("automation_runs").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? automationRunFromRow(row) : undefined;
+  }
+
   async getSettings(): Promise<SettingsRecord> {
     const row = await this.db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
     return {
@@ -957,6 +1268,8 @@ export async function ensureWorkspaceLayout(rootDir: string): Promise<void> {
     path.join(rootDir, "memory", "active"),
     path.join(rootDir, "memory", "sensitive"),
     path.join(rootDir, "memory", "archived"),
+    path.join(rootDir, "skills", "candidate"),
+    path.join(rootDir, "skills", "project"),
     path.join(rootDir, "rollback"),
     path.join(rootDir, "collections")
   ];
@@ -999,6 +1312,89 @@ function stripFrontmatter(raw: string): string {
   }
   const contentStart = raw.indexOf("\n", end + 4);
   return contentStart === -1 ? "" : raw.slice(contentStart + 1);
+}
+
+function parseSkillMarkdownLocal(markdown: string): { frontmatter: SkillFrontmatter; content: string } {
+  if (!markdown.startsWith("---\n")) {
+    throw new Error("skill_frontmatter_missing");
+  }
+  const end = markdown.indexOf("\n---", 4);
+  if (end === -1) {
+    throw new Error("skill_frontmatter_unclosed");
+  }
+  const rawFrontmatter = markdown.slice(4, end).trim();
+  const contentStart = markdown.indexOf("\n", end + 4);
+  const content = contentStart === -1 ? "" : markdown.slice(contentStart + 1).trim();
+  return {
+    frontmatter: SkillFrontmatterSchema.parse(JSON.parse(rawFrontmatter)),
+    content
+  };
+}
+
+function buildSkillIndexEntry(frontmatter: SkillFrontmatter): SkillIndexEntry {
+  return {
+    id: frontmatter.id,
+    title: frontmatter.title,
+    description: frontmatter.description,
+    tags: frontmatter.tags,
+    state: frontmatter.state,
+    required_capabilities: frontmatter.required_capabilities,
+    frontmatter
+  };
+}
+
+function parseCollectionSchemaLocal(value: unknown): CollectionSchema {
+  const schema = CollectionSchemaSchema.parse(value);
+  const seen = new Set<string>();
+  for (const field of schema.fields) {
+    const id = collectionFieldId(field);
+    if (!id) {
+      throw new Error("collection_field_id_required");
+    }
+    if (seen.has(id)) {
+      throw new Error(`collection_field_duplicate:${id}`);
+    }
+    seen.add(id);
+  }
+  return schema;
+}
+
+function parseCollectionRecordLocal(value: unknown, schema: CollectionSchema): CollectionRecord {
+  const record = CollectionRecordSchema.parse(value);
+  if (record.collection_id !== schema.id) {
+    throw new Error("collection_record_collection_id_mismatch");
+  }
+  rejectUnknownCollectionFields(record.data, schema);
+  return record;
+}
+
+function applyCollectionPatchLocal(record: CollectionRecord, patch: CollectionPatch, schema: CollectionSchema): CollectionRecord {
+  if (patch.record_id !== record.id) {
+    throw new Error("collection_patch_record_id_mismatch");
+  }
+  rejectUnknownCollectionFields(patch.changes, schema);
+  return {
+    ...record,
+    data: {
+      ...record.data,
+      ...patch.changes
+    },
+    updated_at: patch.created_at
+  };
+}
+
+function rejectUnknownCollectionFields(data: Record<string, JsonValue>, schema: CollectionSchema): void {
+  const allowed = new Set(schema.fields.map(collectionFieldId).filter((id): id is string => Boolean(id)));
+  for (const key of Object.keys(data)) {
+    if (!allowed.has(key)) {
+      throw new Error(`collection_unknown_field:${key}`);
+    }
+  }
+}
+
+function collectionFieldId(field: Record<string, JsonValue>): string | undefined {
+  const value = field.id ?? field.name;
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function memorySnapshot(frontmatter: MemoryFrontmatter, filePath: string): MemoryArchiveSnapshot {
@@ -1150,6 +1546,55 @@ function rollbackPointFromRow(row: RollbackPointsTable): RollbackPoint {
     irreversible_effects: parse(row.irreversible_effects_json),
     created_at: row.created_at,
     expires_at: row.expires_at
+  };
+}
+
+function skillFromRow(row: SkillIndexTable): SkillWithFilePath {
+  return {
+    ...buildSkillIndexEntry(parse(row.frontmatter_json)),
+    file_path: row.file_path
+  };
+}
+
+function collectionSchemaFromRow(row: CollectionSchemasTable): CollectionSchemaWithFilePath {
+  return {
+    ...parse(row.schema_json),
+    file_path: row.file_path
+  };
+}
+
+function collectionRecordFromRow(row: CollectionRecordsTable): CollectionRecordWithFilePath {
+  return {
+    ...parse(row.record_json),
+    file_path: row.file_path
+  };
+}
+
+function automationRunToRow(run: AutomationRunRecord): AutomationRunsTable {
+  return {
+    id: run.id,
+    kind: run.kind,
+    source: run.source,
+    session_id: run.session_id ?? null,
+    status: run.status,
+    operation_id: run.operation_id ?? null,
+    started_at: run.started_at,
+    completed_at: run.completed_at ?? null,
+    error: run.error ?? null
+  };
+}
+
+function automationRunFromRow(row: AutomationRunsTable): AutomationRunRecord {
+  return {
+    id: row.id,
+    kind: row.kind,
+    source: row.source,
+    session_id: row.session_id ?? undefined,
+    status: row.status as AutomationRunRecord["status"],
+    operation_id: row.operation_id ?? undefined,
+    started_at: row.started_at,
+    completed_at: row.completed_at ?? undefined,
+    error: row.error ?? undefined
   };
 }
 

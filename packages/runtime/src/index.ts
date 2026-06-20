@@ -6,6 +6,11 @@ import {
   type ApprovalRequest,
   type ArtifactRecord,
   type AuditRecord,
+  type CollectionPatch,
+  type CollectionRecord,
+  type CollectionSchema,
+  type ActorIdentity,
+  type InstructionSource,
   type JsonValue,
   type MemoryFrontmatter,
   type MessageEnvelope,
@@ -15,6 +20,8 @@ import {
   type PolicyEvaluationInput,
   type RollbackPoint,
   type SessionRecord,
+  SkillFrontmatterSchema,
+  type SkillFrontmatter,
   type SupportedLocale,
   createId,
   nowIso,
@@ -24,7 +31,14 @@ import { isSupportedLocale } from "@samurai-agent/localization";
 import { createSessionMemory, createTopicMemory, retrieveActiveMemory } from "@samurai-agent/memory";
 import { evaluatePolicy } from "@samurai-agent/policy-engine";
 import type { RuntimeEventSink } from "@samurai-agent/ui-protocol";
-import type { ArchiveMemoryResult, WorkspaceStore } from "@samurai-agent/workspace-store";
+import type {
+  ArchiveMemoryResult,
+  AutomationRunRecord,
+  CollectionRecordWithFilePath,
+  CollectionSchemaWithFilePath,
+  SkillWithFilePath,
+  WorkspaceStore
+} from "@samurai-agent/workspace-store";
 
 interface MockProviderInput {
   envelope: MessageEnvelope;
@@ -40,6 +54,30 @@ interface MockProviderOutput {
     proposedEffects: string[];
   }>;
 }
+
+interface GatewayContext {
+  source: "web" | "cron";
+  actor_identity: ActorIdentity;
+  instruction_source: InstructionSource;
+  channel: "web" | "cron";
+  session_key: string;
+}
+
+const webGatewayContext: GatewayContext = {
+  source: "web",
+  actor_identity: "owner",
+  instruction_source: "owner_instruction",
+  channel: "web",
+  session_key: "web:owner:main"
+};
+
+const cronMemoryReviewGatewayContext: GatewayContext = {
+  source: "cron",
+  actor_identity: "owner_scheduled",
+  instruction_source: "scheduled_context",
+  channel: "cron",
+  session_key: "cron:owner_scheduled:memory-review"
+};
 
 export interface RunChatTurnInput {
   sessionId: string;
@@ -88,6 +126,32 @@ export interface ArchiveMemoryRuntimeResult {
   activity: ActivityInboxItem[];
   changed: boolean;
   warning?: string;
+}
+
+export interface RuntimeWriteResult<TResource> {
+  resource: TResource;
+  operation: OperationRecord;
+  policyDecision: PolicyDecisionRecord;
+  auditRecord: AuditRecord;
+  rollbackPoint?: RollbackPoint;
+  activity: ActivityInboxItem[];
+}
+
+export type SkillRuntimeResult = RuntimeWriteResult<SkillWithFilePath>;
+export type CollectionSchemaRuntimeResult = RuntimeWriteResult<CollectionSchemaWithFilePath>;
+export type CollectionRecordRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
+
+export interface CollectionPatchRuntimeResult extends RuntimeWriteResult<CollectionRecordWithFilePath> {
+  before: CollectionRecordWithFilePath;
+}
+
+export interface AutomationRunRuntimeResult {
+  automationRun: AutomationRunRecord;
+  operation: OperationRecord;
+  policyDecision: PolicyDecisionRecord;
+  auditRecord: AuditRecord;
+  rollbackPoint?: RollbackPoint;
+  activity: ActivityInboxItem[];
 }
 
 export class RuntimeRequestError extends Error {
@@ -510,6 +574,216 @@ export class AgentRuntime {
     };
   }
 
+  async createSkillCandidate(input: {
+    title: string;
+    description: string;
+    content: string;
+    tags?: string[];
+    required_capabilities?: string[];
+  }): Promise<SkillRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Create skill candidate: ${input.title}`);
+    const skillId = createId("skill");
+    const now = nowIso();
+    const markdown = renderSkillMarkdown(
+      {
+        id: skillId,
+        state: "candidate",
+        title: input.title,
+        description: input.description,
+        tags: input.tags ?? [],
+        provenance: "generated_local",
+        trust_level: "generated_local",
+        allowed_scopes: ["skill"],
+        required_capabilities: input.required_capabilities ?? [],
+        schedule_policy: {},
+        secret_policy: {},
+        owner_pinned: false,
+        last_reviewed_at: now
+      },
+      input.content
+    );
+
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "skill.candidate.create",
+      proposedEffects: ["Create a local skill candidate markdown file."],
+      execute: async (operation) => {
+        const skill = await this.store.saveSkillMarkdown({ state: "candidate", skillId, markdown });
+        const ref = skillRef(skill);
+        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { skill_id: skill.id });
+        return { resource: skill, ref, rollbackPoint, summary: `Created skill candidate ${skill.title}.` };
+      }
+    });
+  }
+
+  async saveSkillProject(input: { candidateId: string }): Promise<SkillRuntimeResult> {
+    const candidateMarkdown = await this.store.readSkillMarkdown(input.candidateId);
+    if (!candidateMarkdown) {
+      throw new RuntimeRequestError("not_found", `Skill candidate not found: ${input.candidateId}`);
+    }
+    const parsedCandidate = parseSkillMarkdown(candidateMarkdown);
+    if (parsedCandidate.frontmatter.state !== "candidate") {
+      throw new RuntimeRequestError("conflict", "skill_is_not_candidate");
+    }
+
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Save project skill from candidate: ${input.candidateId}`);
+    const skillId = createId("skill");
+    const markdown = renderSkillMarkdown(
+      {
+        ...parsedCandidate.frontmatter,
+        id: skillId,
+        state: "project",
+        provenance: `candidate:${input.candidateId}`,
+        last_reviewed_at: nowIso()
+      },
+      parsedCandidate.content
+    );
+
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "skill.project.save",
+      proposedEffects: ["Create a project skill markdown file from an existing candidate."],
+      execute: async (operation) => {
+        const skill = await this.store.saveSkillMarkdown({ state: "project", skillId, markdown });
+        const ref = skillRef(skill);
+        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { skill_id: skill.id, candidate_id: input.candidateId });
+        return { resource: skill, ref, rollbackPoint, summary: `Saved project skill ${skill.title}.` };
+      }
+    });
+  }
+
+  async saveCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Save collection schema: ${schema.id}`);
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "collection.schema.save",
+      proposedEffects: ["Create a collection schema file and SQLite index row."],
+      execute: async (operation) => {
+        const saved = await this.store.saveCollectionSchema(schema);
+        const ref = collectionSchemaRef(saved);
+        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { collection_id: saved.id, version: saved.version });
+        return { resource: saved, ref, rollbackPoint, summary: `Saved collection schema ${saved.id}.` };
+      }
+    });
+  }
+
+  async createCollectionRecord(record: CollectionRecord): Promise<CollectionRecordRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Create collection record: ${record.collection_id}/${record.id}`);
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "collection.record.create",
+      proposedEffects: ["Create a collection record file and SQLite index row."],
+      execute: async (operation) => {
+        const saved = await this.store.saveCollectionRecord(record);
+        const ref = collectionRecordRef(saved);
+        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { collection_id: saved.collection_id, record_id: saved.id });
+        return { resource: saved, ref, rollbackPoint, summary: `Created collection record ${saved.collection_id}/${saved.id}.` };
+      }
+    });
+  }
+
+  async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Apply collection patch: ${input.collectionId}/${input.recordId}`);
+    const result = await this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "collection.patch.apply",
+      proposedEffects: ["Apply a collection patch to an existing local record."],
+      execute: async (operation) => {
+        const patch = { ...input.patch, source_operation_id: operation.id };
+        const patched = await this.store.applyCollectionRecordPatch({ ...input, patch });
+        const ref = collectionRecordRef(patched.after);
+        const rollbackPoint = await this.createRollbackPoint(
+          operation,
+          [ref],
+          { record: patched.before as unknown as JsonValue },
+          { record: patched.after as unknown as JsonValue }
+        );
+        return {
+          resource: patched.after,
+          before: patched.before,
+          ref,
+          rollbackPoint,
+          summary: `Applied collection patch ${patch.id}.`
+        };
+      }
+    });
+    return { ...result, before: (result as CollectionPatchRuntimeResult).before };
+  }
+
+  async runMemoryReviewAutomation(): Promise<AutomationRunRuntimeResult> {
+    const startedAt = nowIso();
+    let automationRun = await this.store.createAutomationRun({
+      id: createId("automation_run"),
+      kind: "memory_review",
+      source: "cron",
+      status: "started",
+      started_at: startedAt
+    });
+
+    const session = await this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled memory review");
+    automationRun = await this.store.updateAutomationRun({ ...automationRun, session_id: session.id });
+
+    const envelope = createCronMemoryReviewEnvelope();
+    try {
+      const result = await this.runAllowedWrite({
+        session,
+        envelope,
+        context: cronMemoryReviewGatewayContext,
+        operationName: "automation.memory_review.run",
+        inputRef: {
+          kind: "automation_run",
+          id: automationRun.id,
+          uri: `automation-runs/${automationRun.id}`,
+          label: "Automation run"
+        },
+        proposedEffects: ["Run minimal scheduled memory review without external effects."],
+        execute: async (operation) => {
+          const ref = {
+            kind: "automation_run",
+            id: automationRun.id,
+            uri: `automation-runs/${automationRun.id}`,
+            label: "Memory review automation"
+          };
+          return {
+            resource: automationRun,
+            ref,
+            summary: "Memory review automation recorded. No scheduler or LLM execution was performed."
+          };
+        }
+      });
+      automationRun = await this.store.updateAutomationRun({
+        ...automationRun,
+        status: "completed",
+        operation_id: result.operation.id,
+        completed_at: nowIso()
+      });
+      return { ...result, automationRun };
+    } catch (error) {
+      automationRun = await this.store.updateAutomationRun({
+        ...automationRun,
+        status: "failed",
+        completed_at: nowIso(),
+        error: error instanceof Error ? error.message : "Unknown error"
+      });
+      throw error;
+    }
+  }
+
   private async saveMessage(message: MessageRecord): Promise<MessageRecord> {
     const saved = await this.store.saveMessage(message);
     await this.emit("message.created", saved);
@@ -520,30 +794,36 @@ export class AgentRuntime {
     session: SessionRecord,
     envelope: MessageEnvelope,
     operationName: string,
-    proposedEffects: string[]
+    proposedEffects: string[],
+    options: {
+      context?: GatewayContext;
+      inputRef?: OperationRecord["input_ref"];
+      targetResourceRefs?: OperationRecord["target_resource_refs"];
+    } = {}
   ): Promise<OperationRecord> {
     const now = nowIso();
+    const context = options.context ?? webGatewayContext;
     const operation: OperationRecord = {
       id: createId("operation"),
       session_id: session.id,
       capability_id: proposalCapabilityManifest.id,
       operation: operationName,
-      actor_identity: envelope.actor_identity,
-      instruction_source: "owner_instruction",
-      instruction_authority: envelope.actor_identity,
-      channel: envelope.source,
+      actor_identity: context.actor_identity,
+      instruction_source: context.instruction_source,
+      instruction_authority: context.actor_identity,
+      channel: context.channel,
       input_hash: stableHash({
         envelope,
         operationName,
         proposedEffects
       }),
-      input_ref: {
+      input_ref: options.inputRef ?? {
         kind: "message",
         id: envelope.id,
         uri: `messages/${envelope.id}`,
-        label: "User message"
+        label: context.source === "cron" ? "Scheduled context" : "User message"
       },
-      target_resource_refs: [],
+      target_resource_refs: options.targetResourceRefs ?? [],
       proposed_effects: proposedEffects,
       status: "created",
       created_at: now,
@@ -553,6 +833,96 @@ export class AgentRuntime {
     await this.store.saveOperation(operation);
     await this.emit("operation.created", operation);
     return operation;
+  }
+
+  private async ensureSessionForContext(context: GatewayContext, title: string): Promise<SessionRecord> {
+    const existing = (await this.store.listSessions()).find((session) => session.session_key === context.session_key);
+    if (existing) {
+      return existing;
+    }
+    const settings = await this.store.getSettings();
+    const now = nowIso();
+    const session: SessionRecord = {
+      id: createId("session"),
+      session_key: context.session_key,
+      title,
+      ui_locale: settings.ui_locale,
+      output_locale: settings.output_locale,
+      created_at: now,
+      updated_at: now
+    };
+    await this.store.createSession(session);
+    await this.emit("session.created", session);
+    return session;
+  }
+
+  private async runAllowedWrite<TResource, TExtra extends Record<string, unknown> = Record<string, never>>(input: {
+    session: SessionRecord;
+    envelope: MessageEnvelope;
+    context: GatewayContext;
+    operationName: string;
+    proposedEffects: string[];
+    inputRef?: OperationRecord["input_ref"];
+    execute: (operation: OperationRecord) => Promise<{
+      resource: TResource;
+      ref: NonNullable<OperationRecord["result_ref"]>;
+      rollbackPoint?: RollbackPoint;
+      summary: string;
+    } & TExtra>;
+  }): Promise<RuntimeWriteResult<TResource> & TExtra> {
+    const operation = await this.createOperation(input.session, input.envelope, input.operationName, input.proposedEffects, {
+      context: input.context,
+      inputRef: input.inputRef
+    });
+    const manifest = getCapabilityManifest(operation.capability_id);
+    const decision = await this.savePolicyDecision(evaluatePolicy({
+      input: this.createPolicyInput(operation),
+      manifest,
+      grants: await this.store.listGrants(),
+      operationId: operation.id
+    }));
+    operation.policy_decision_id = decision.id;
+
+    if (decision.decision !== "allow_auto" && decision.decision !== "allow_with_audit") {
+      operation.status = decision.decision === "deny" ? "denied" : "pending_approval";
+      operation.updated_at = nowIso();
+      await this.store.updateOperation(operation);
+      const audit = await this.auditOperation(operation, decision, "Write operation was not executed by policy.", [], undefined);
+      throw new RuntimeRequestError(decision.decision === "deny" ? "forbidden" : "conflict", "policy_blocked", {
+        approvalRequest: await this.createApprovalRequest(operation, decision),
+        operation,
+        auditRecord: audit,
+        activity: await this.rebuildActivity(),
+        status: decision.decision === "deny" ? "denied" : "approved"
+      });
+    }
+
+    try {
+      const execution = await input.execute(operation);
+      operation.status = "completed";
+      operation.result_ref = execution.ref;
+      operation.updated_at = nowIso();
+      await this.store.updateOperation(operation);
+      const audit = await this.auditOperation(operation, decision, execution.summary, [execution.ref], execution.rollbackPoint?.id);
+      const activity = await this.rebuildActivity();
+      const { resource, ref: _ref, rollbackPoint, summary: _summary, ...extra } = execution;
+      return {
+        resource,
+        operation,
+        policyDecision: decision,
+        auditRecord: audit,
+        ...(rollbackPoint ? { rollbackPoint } : {}),
+        activity,
+        ...((extra as unknown) as TExtra)
+      };
+    } catch (error) {
+      operation.status = "failed";
+      operation.error = error instanceof Error ? error.message : "Unknown error";
+      operation.updated_at = nowIso();
+      await this.store.updateOperation(operation);
+      await this.auditOperation(operation, decision, "Write operation failed before completion.", [], undefined);
+      throw new RuntimeRequestError("conflict", operation.error);
+    }
   }
 
   private createPolicyInput(operation: OperationRecord): PolicyEvaluationInput {
@@ -833,6 +1203,52 @@ function createEnvelope(
   };
 }
 
+function createGatewayEnvelope(
+  context: GatewayContext,
+  userIntent: string,
+  inputLocale: SupportedLocale = "ja",
+  outputLocale: SupportedLocale = "ja",
+  metadata: Record<string, unknown> = {}
+): MessageEnvelope {
+  return {
+    id: createId("envelope"),
+    source: context.source,
+    actor_identity: context.actor_identity,
+    session_key: context.session_key,
+    user_intent: userIntent,
+    attachments: [],
+    input_locale: inputLocale,
+    output_locale: outputLocale,
+    metadata: metadata as MessageEnvelope["metadata"],
+    received_at: nowIso()
+  };
+}
+
+function createCronMemoryReviewEnvelope(): MessageEnvelope {
+  return createGatewayEnvelope(cronMemoryReviewGatewayContext, "Run scheduled memory review.");
+}
+
+function renderSkillMarkdown(frontmatter: SkillFrontmatter, content: string): string {
+  const parsed = SkillFrontmatterSchema.parse(frontmatter);
+  return ["---", JSON.stringify(parsed, null, 2), "---", content.trim(), ""].join("\n");
+}
+
+function parseSkillMarkdown(markdown: string): { frontmatter: SkillFrontmatter; content: string } {
+  if (!markdown.startsWith("---\n")) {
+    throw new Error("skill_frontmatter_missing");
+  }
+  const end = markdown.indexOf("\n---", 4);
+  if (end === -1) {
+    throw new Error("skill_frontmatter_unclosed");
+  }
+  const rawFrontmatter = markdown.slice(4, end).trim();
+  const contentStart = markdown.indexOf("\n", end + 4);
+  return {
+    frontmatter: SkillFrontmatterSchema.parse(JSON.parse(rawFrontmatter)),
+    content: contentStart === -1 ? "" : markdown.slice(contentStart + 1).trim()
+  };
+}
+
 function buildArtifactContent(intent: string, outputLocale: SupportedLocale, activeMemoryCount: number): string {
   if (outputLocale === "ja") {
     return [
@@ -873,5 +1289,33 @@ function memoryRef(memory: MemoryFrontmatter & { file_path?: string }) {
     id: memory.id,
     uri: memory.file_path ?? `memory/${memory.state}/${memory.id}.md`,
     label: memory.topic
+  };
+}
+
+function skillRef(skill: SkillWithFilePath) {
+  return {
+    kind: "skill",
+    id: skill.id,
+    uri: skill.file_path,
+    label: skill.title
+  };
+}
+
+function collectionSchemaRef(schema: CollectionSchemaWithFilePath) {
+  return {
+    kind: "collection_schema",
+    id: schema.id,
+    uri: schema.file_path,
+    version: schema.version,
+    label: schema.id
+  };
+}
+
+function collectionRecordRef(record: CollectionRecordWithFilePath) {
+  return {
+    kind: "collection_record",
+    id: record.id,
+    uri: record.file_path,
+    label: `${record.collection_id}/${record.id}`
   };
 }

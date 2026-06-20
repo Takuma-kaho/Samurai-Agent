@@ -3,6 +3,8 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   AuditRecord,
+  CollectionRecord,
+  CollectionSchema,
   MemoryFrontmatter,
   MessageRecord,
   OperationRecord,
@@ -83,6 +85,44 @@ export interface ArchiveMemoryPayload {
   warning?: string;
 }
 
+export interface SkillIndexEntry {
+  id: string;
+  title: string;
+  description: string;
+  tags: string[];
+  state: "candidate" | "project" | "active" | "stale" | "archived" | "pinned";
+  required_capabilities: string[];
+  file_path: string;
+}
+
+export interface RuntimeWritePayload<TResource> {
+  resource: TResource;
+  operation: OperationRecord;
+  policyDecision: PolicyDecisionRecord;
+  auditRecord: AuditRecord;
+  rollbackPoint?: RollbackPoint;
+  activity: ActivityInboxItem[];
+}
+
+export interface AutomationRunPayload {
+  automationRun: {
+    id: string;
+    kind: string;
+    source: string;
+    session_id?: string;
+    status: "started" | "completed" | "failed";
+    operation_id?: string;
+    started_at: string;
+    completed_at?: string;
+    error?: string;
+  };
+  operation: OperationRecord;
+  policyDecision: PolicyDecisionRecord;
+  auditRecord: AuditRecord;
+  rollbackPoint?: RollbackPoint;
+  activity: ActivityInboxItem[];
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -155,6 +195,57 @@ export const api = {
     return request<ArchiveMemoryPayload>(`/api/memory/${id}/archive`, {
       method: "POST",
       body: JSON.stringify({ session_id: sessionId })
+    });
+  },
+  listSkills() {
+    return request<SkillIndexEntry[]>("/api/skills");
+  },
+  getSkill(id: string) {
+    return request<{ skill: SkillIndexEntry; markdown: string }>(`/api/skills/${id}`);
+  },
+  createSkillCandidate(input: { title: string; description: string; content?: string; tags?: string[]; required_capabilities?: string[] }) {
+    return request<RuntimeWritePayload<SkillIndexEntry>>("/api/skills/candidates", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+  saveSkillProject(candidateId: string) {
+    return request<RuntimeWritePayload<SkillIndexEntry>>("/api/skills/projects", {
+      method: "POST",
+      body: JSON.stringify({ candidate_id: candidateId })
+    });
+  },
+  saveCollectionSchema(schema: CollectionSchema) {
+    return request<RuntimeWritePayload<CollectionSchema & { file_path: string }>>("/api/collections/schemas", {
+      method: "POST",
+      body: JSON.stringify(schema)
+    });
+  },
+  getCollectionSchema(collectionId: string) {
+    return request<CollectionSchema & { file_path: string }>(`/api/collections/${collectionId}/schema`);
+  },
+  createCollectionRecord(collectionId: string, input: Partial<CollectionRecord> & { data: CollectionRecord["data"] }) {
+    return request<RuntimeWritePayload<CollectionRecord & { file_path: string }>>(`/api/collections/${collectionId}/records`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+  applyCollectionPatch(collectionId: string, recordId: string, input: { id?: string; changes: Record<string, unknown>; created_at?: string }) {
+    return request<RuntimeWritePayload<CollectionRecord & { file_path: string }>>(
+      `/api/collections/${collectionId}/records/${recordId}/patches`,
+      {
+        method: "POST",
+        body: JSON.stringify(input)
+      }
+    );
+  },
+  listCollectionNotes(collectionId: string) {
+    return request<Array<{ file_path: string; content: string }>>(`/api/collections/${collectionId}/notes`);
+  },
+  runMemoryReviewAutomation() {
+    return request<AutomationRunPayload>("/api/automation/memory-review/run", {
+      method: "POST",
+      body: JSON.stringify({})
     });
   },
   getSettings() {

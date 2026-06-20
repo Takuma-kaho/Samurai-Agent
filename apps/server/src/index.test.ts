@@ -169,6 +169,77 @@ describe("approval request API", () => {
     expect(persisted).toMatchObject({ theme: "dark", ui_locale: "en", output_locale: "fr" });
     expect(invalidPatch).toMatchObject({ theme: "dark", ui_locale: "en", output_locale: "fr" });
   });
+
+  it("serves minimal skill collection and automation backend routes", async () => {
+    const { baseUrl } = await startTestServer();
+    const candidate = await postJson<{ resource: { id: string }; operation: { operation: string }; auditRecord: unknown; rollbackPoint?: unknown }>(
+      `${baseUrl}/api/skills/candidates`,
+      {
+        title: "調査メモ",
+        description: "調査メモを整える",
+        content: "# Skill"
+      },
+      201
+    );
+    const project = await postJson<{ resource: { id: string }; operation: { operation: string } }>(
+      `${baseUrl}/api/skills/projects`,
+      { candidate_id: candidate.resource.id },
+      201
+    );
+    const skills = await getJson<Array<{ id: string }>>(`${baseUrl}/api/skills`);
+    const skillDetail = await getJson<{ markdown: string }>(`${baseUrl}/api/skills/${project.resource.id}`);
+
+    const schema = await postJson<{ resource: { id: string }; operation: { operation: string } }>(
+      `${baseUrl}/api/collections/schemas`,
+      collectionSchema("contacts"),
+      201
+    );
+    const record = await postJson<{ resource: { id: string; data: { name: string } }; operation: { operation: string } }>(
+      `${baseUrl}/api/collections/contacts/records`,
+      { id: "record_1", data: { name: "Takuma" } },
+      201
+    );
+    const patched = await postJson<{ resource: { data: { name: string } }; operation: { operation: string } }>(
+      `${baseUrl}/api/collections/contacts/records/record_1/patches`,
+      { changes: { name: "Samurai" } }
+    );
+    const savedSchema = await getJson<{ id: string }>(`${baseUrl}/api/collections/contacts/schema`);
+    const notes = await getJson<unknown[]>(`${baseUrl}/api/collections/contacts/notes`);
+    const automation = await postJson<{ automationRun: { status: string }; operation: { actor_identity: string; channel: string; input_ref: { kind: string } }; auditRecord: unknown }>(
+      `${baseUrl}/api/automation/memory-review/run`,
+      {},
+      201
+    );
+
+    expect(candidate.operation.operation).toBe("skill.candidate.create");
+    expect(project.operation.operation).toBe("skill.project.save");
+    expect(skills.map((skill) => skill.id)).toContain(candidate.resource.id);
+    expect(skillDetail.markdown).toContain("調査メモ");
+    expect(schema.operation.operation).toBe("collection.schema.save");
+    expect(record.operation.operation).toBe("collection.record.create");
+    expect(patched.operation.operation).toBe("collection.patch.apply");
+    expect(patched.resource.data.name).toBe("Samurai");
+    expect(savedSchema.id).toBe("contacts");
+    expect(notes).toEqual([]);
+    expect(automation.automationRun.status).toBe("completed");
+    expect(automation.operation).toMatchObject({ actor_identity: "owner_scheduled", channel: "cron" });
+    expect(automation.operation.input_ref.kind).toBe("automation_run");
+  });
+
+  it("rejects invalid skill and collection writes through API", async () => {
+    const { baseUrl } = await startTestServer();
+
+    const badSkill = await postJson<Record<string, unknown>>(`${baseUrl}/api/skills/candidates`, { title: "", description: "" }, 400);
+    await postJson(`${baseUrl}/api/collections/schemas`, collectionSchema("contacts"), 201);
+    const badRecord = await postJson<Record<string, unknown>>(
+      `${baseUrl}/api/collections/contacts/records`,
+      { id: "record_bad", data: { unknown: true } },
+      409
+    );
+
+    expect(badSkill.error).toBe("title_and_description_required");
+    expect(badRecord.error).toBe("conflict");
+  });
 });
 
 async function startTestServer(): Promise<{ baseUrl: string; server: ApiServer }> {
@@ -217,4 +288,21 @@ async function patchJson<T>(url: string, body: unknown, expectedStatus = 200): P
   const payload = (await response.json()) as T;
   expect(response.status).toBe(expectedStatus);
   return payload;
+}
+
+function collectionSchema(id: string) {
+  const labels = { ja: id, en: id, zh: id, ko: id, es: id, "pt-BR": id, fr: id, de: id };
+  return {
+    id,
+    version: "1",
+    labels,
+    descriptions: labels,
+    fields: [{ id: "name", type: "string" }],
+    refs: [],
+    embeds: [],
+    derived_fields: [],
+    triggers: [],
+    actions: [],
+    permissions: {}
+  };
 }

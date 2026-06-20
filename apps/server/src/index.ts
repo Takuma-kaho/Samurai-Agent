@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import type { Server as HttpServer } from "node:http";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Server as SocketServer } from "socket.io";
-import { supportedLocales, type SettingsRecord, type SupportedLocale } from "@samurai-agent/core-schemas";
+import { createId, nowIso, supportedLocales, type SettingsRecord, type SupportedLocale } from "@samurai-agent/core-schemas";
 import { AgentRuntime, RuntimeRequestError } from "@samurai-agent/runtime";
 import type { RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
@@ -183,6 +183,147 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     }
   });
 
+  app.get("/api/skills", async (_req, res, next) => {
+    try {
+      res.json(await store.listSkills());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/skills/:id", async (req, res, next) => {
+    try {
+      const skill = await store.getSkill(req.params.id);
+      if (!skill) {
+        res.status(404).json({ error: "skill_not_found" });
+        return;
+      }
+      const markdown = await store.readSkillMarkdown(req.params.id);
+      res.json({ skill, markdown });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/skills/candidates", async (req, res, next) => {
+    try {
+      const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
+      const description = typeof req.body?.description === "string" ? req.body.description.trim() : "";
+      if (!title || !description) {
+        res.status(400).json({ error: "title_and_description_required" });
+        return;
+      }
+      const result = await runtime.createSkillCandidate({
+        title,
+        description,
+        content: typeof req.body?.content === "string" ? req.body.content : "",
+        tags: stringArray(req.body?.tags),
+        required_capabilities: stringArray(req.body?.required_capabilities)
+      });
+      res.status(201).json(runtimeWritePayload(result));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/skills/projects", async (req, res, next) => {
+    try {
+      const candidateId = typeof req.body?.candidate_id === "string" ? req.body.candidate_id : "";
+      if (!candidateId) {
+        res.status(400).json({ error: "candidate_id_required" });
+        return;
+      }
+      const result = await runtime.saveSkillProject({ candidateId });
+      res.status(201).json(runtimeWritePayload(result));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/collections/schemas", async (req, res, next) => {
+    try {
+      const result = await runtime.saveCollectionSchema(req.body);
+      res.status(201).json(runtimeWritePayload(result));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/collections/:collectionId/schema", async (req, res, next) => {
+    try {
+      const schema = await store.getCollectionSchema(req.params.collectionId);
+      if (!schema) {
+        res.status(404).json({ error: "collection_schema_not_found" });
+        return;
+      }
+      res.json(schema);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/collections/:collectionId/records", async (req, res, next) => {
+    try {
+      const now = nowIso();
+      const record = {
+        id: typeof req.body?.id === "string" ? req.body.id : createId("record"),
+        collection_id: req.params.collectionId,
+        data: isRecord(req.body?.data) ? req.body.data : {},
+        resource_refs: Array.isArray(req.body?.resource_refs) ? req.body.resource_refs : [],
+        created_at: typeof req.body?.created_at === "string" ? req.body.created_at : now,
+        updated_at: typeof req.body?.updated_at === "string" ? req.body.updated_at : now
+      };
+      const result = await runtime.createCollectionRecord(record);
+      res.status(201).json(runtimeWritePayload(result));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/collections/:collectionId/records/:recordId/patches", async (req, res, next) => {
+    try {
+      const patch = {
+        id: typeof req.body?.id === "string" ? req.body.id : createId("patch"),
+        record_id: req.params.recordId,
+        changes: isRecord(req.body?.changes) ? req.body.changes : {},
+        source_operation_id: typeof req.body?.source_operation_id === "string" ? req.body.source_operation_id : "pending_runtime_operation",
+        created_at: typeof req.body?.created_at === "string" ? req.body.created_at : nowIso()
+      };
+      const result = await runtime.applyCollectionPatch({
+        collectionId: req.params.collectionId,
+        recordId: req.params.recordId,
+        patch
+      });
+      res.json(runtimeWritePayload(result));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/collections/:collectionId/notes", async (req, res, next) => {
+    try {
+      res.json(await store.listCollectionNotes(req.params.collectionId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/automation/memory-review/run", async (_req, res, next) => {
+    try {
+      const result = await runtime.runMemoryReviewAutomation();
+      res.status(201).json({
+        automationRun: result.automationRun,
+        operation: result.operation,
+        policyDecision: result.policyDecision,
+        auditRecord: result.auditRecord,
+        ...(result.rollbackPoint ? { rollbackPoint: result.rollbackPoint } : {}),
+        activity: result.activity
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/api/memory/:id/archive", async (req, res, next) => {
     try {
       const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id : "";
@@ -290,6 +431,28 @@ function asSupportedLocale(value: unknown): SupportedLocale | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function runtimeWritePayload(result: {
+  resource: unknown;
+  operation: unknown;
+  policyDecision: unknown;
+  auditRecord: unknown;
+  rollbackPoint?: unknown;
+  activity: unknown;
+}) {
+  return {
+    resource: result.resource,
+    operation: result.operation,
+    policyDecision: result.policyDecision,
+    auditRecord: result.auditRecord,
+    ...(result.rollbackPoint ? { rollbackPoint: result.rollbackPoint } : {}),
+    activity: result.activity
+  };
 }
 
 function approvalLifecyclePayload(result: Awaited<ReturnType<AgentRuntime["approveRequest"]>>) {
