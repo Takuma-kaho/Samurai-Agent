@@ -173,6 +173,16 @@ export const api = {
       })
     });
   },
+  startChat(content: string, uiLocale: SupportedLocale, outputLocale: SupportedLocale) {
+    return request<ChatTurnResult>("/api/chat/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        content,
+        ui_locale: uiLocale,
+        output_locale: outputLocale
+      })
+    });
+  },
   search(query: string) {
     return request<SearchResult[]>(`/api/search?q=${encodeURIComponent(query)}`);
   },

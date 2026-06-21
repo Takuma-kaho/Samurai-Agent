@@ -82,6 +82,12 @@ Context Drawer はそれらの代替ではなく、作業中に軽く見る補�
 - 中央: メインのチャット作業面
 - 右: 必要時だけ開く Context Drawer
 
+App Shell は viewport 全体を使う。
+外側を中央寄せのカードとして見せない。
+fullscreen shell では内部の scroll owner を明示し、prompt bar と sidebar footer を画面外へ押し出さない。
+ただし chat rail 自体は横いっぱいに広げない。
+会話本文と prompt bar は中央寄せの max-width を持たせ、ChatGPT / Codex に近い読みやすい幅にする。
+
 左サイドバーは、機能一覧にしすぎない。
 
 常時置くものは以下程度に抑える。
@@ -95,13 +101,41 @@ Context Drawer はそれらの代替ではなく、作業中に軽く見る補�
 
 Memory、Skills、Audit、Policy などを左サイドバーに常時羅列しない。
 これらは専用画面、検索、コマンド、Context Drawer から到達できるようにする。
+Session list のタイトルは1行固定にする。
+長い session title は `...` で省略し、sidebar 自体を横に広げない。
+左ナビの選択状態に緑 dot は使わない。
+New Chat、Search、Session item、Settings は、すべて同じグレー系の hover / active highlight に統一する。
+hover / active highlight は角丸長方形のグレー背景で表現し、選択中はその背景を保持する。
+hover / active で文字の太さ、letter spacing、padding を変えない。選択中も太字化しない。
+左ナビ内の icon は hover で白く変化させず、グレーの円形/角丸背景面で反応を見せる。
+左サイドバーは desktop で icon rail へ collapse できる。
+collapse 時も New Chat、Search、Settings の主要導線はアイコンとして残す。
 
 ### 3.2 Main Stage
 
 中央面は、常に最も静かに保つ。
 
 - 初期画面は短い一文と prompt bar を中心にする
+- New Chat は未保存の draft state として扱い、空の session は作成・保存・一覧表示しない
+- session は初回送信や実アクションが発生した時だけ作成し、Session list に入れる
+- Session list は閲覧クリックだけで並び替えない。送信成功時だけ対象 session をトップへ移動する
+- 未保存の新規チャットでは prompt bar を画面中央寄りに置き、送信後は通常の下部 prompt layout に戻す
 - 会話中も入力欄が主役から外れすぎないようにする
+- fullscreen shell の中でも chat rail は約860px前後を上限にする
+- Workspace Canvas 表示時は、chat rail + canvas を中央カード幅に閉じ込めず、desktop では画面を `1fr 1fr` で左右半分に分割する
+- Workspace Canvas 表示時は、desktop の中央 divider をドラッグして chat / workspace の比率を調整できる
+- workspace split 比率は UI preference として `localStorage` に保存し、server 設定や DB schema には入れない
+- Workspace Canvas と Context Drawer は closed / open で grid の列数を変えず、0幅 track から開くことで transition を保つ
+- chat shell は固定shell + 左chat scroll + 右workspace independent scroll で構成する
+- chat feed は左chat列だけを scroll surface にし、prompt bar は scroll surface の外側で下部に残す
+- prompt bar は prompt dock で包み、上部gradientでfeed内容が背面に透けないようにする
+- scroll state に応じて上下の薄い fade を出す
+- internal scroll surface は native scrollbar を見せず、scroll affordance は fade で補う
+- main header は約52pxの薄いtoolbarとして扱い、半透明blurのみで軽く分離する
+- chat view の main header には `Chat` / `チャット` title を出さず、補助画面では title を残す
+- icon-only button は枠線で囲まず、円形グレー hover surface で反応を出す
+- 左サイドバーの collapsed icon-only nav は、丸い button + 丸い hover / active surface に統一する
+- Settings は専用画面として扱うが、直前の画面へ戻る導線を header に置く
 - Artifact や Workspace は、会話の流れから自然に出す
 - 説明文を増やして機能を説明しない
 
@@ -154,6 +188,7 @@ Dark mode は、黒背景と hairline border を中心にする。
 - 上辺中央だけに控えめな light rim を置く
 - 発光は広げすぎない
 - グローはカード内部に広げない
+- chat feed 内の小さい Artifact / Memory preview card だけは、濃いグレー面と 1px border で分けてよい
 - 情報密度が高い部分でも、border と typography で整理する
 
 ### 4.3 Frame Lighting
@@ -251,23 +286,42 @@ Dark mode は、白い rim を使うが、幅と明るさを絞る。
 
 - border-radius は pill
 - 影は使わない、または最小
-- min-height は約56pxから60px
+- min-height は約48pxから52px
 - attach / voice / send はアイコンボタン
+- attach は左側の plus icon を使い、初期実装では画像選択と選択中previewまでを扱う
 - voice はghost、send はink塗り
+- send は紙飛行機ではなく上矢印 icon を使う
 - placeholder はsoft color
 - 文字ボタンで `Voice` / `Send` を見せない
+- icon button は約36pxを基準にして、prompt 全体を重くしない
 
-### 5.4 Message Bubble
+### 5.3.1 Header Bar
 
-会話の吹き出しは、情報量を抑える。
+メインヘッダーは、ページの主役ではなく軽いtoolbarとして扱う。
+
+ルール。
+
+- height は約52px
+- background は半透明
+- backdrop-filter blur を使う
+- main header は下線を使わず、shadow も使わない
+- Context Drawer の header までは巻き込まない
+
+### 5.4 Message
+
+会話表示は、user message と agent message の役割を分ける。
 
 ルール。
 
 - user message は右寄せ、ink塗り
-- agent message は左寄せ、panel surface
+- agent message は左寄せ、吹き出しなしの通常文章として表示する
 - max-width は desktop で約74%
 - mobile では約92%
-- 角丸は大きくしすぎず、card radius を使う
+- agent message に frame lighting や panel border を付けない
+- user message の角丸は大きくしすぎず、card radius を使う
+- message padding は 8px / 12px 程度を基準にし、縦にボテっと見せない
+- body text は 14px / 1.5 前後を基本にする
+- feed がスクロール可能な時だけ、上下に薄いfadeを出して続きがあることを示す
 
 ### 5.5 Artifact Card
 
@@ -276,10 +330,12 @@ Artifact は、会話の成果物として自然に出す。
 ルール。
 
 - chat 内に置けるカードにする
-- header / preview / action に分ける
-- status は pill + small dot
-- 説明文は最大2行程度に抑える
-- action button は控えめにする
+- chat feed 内の compact preview card だけ、Dark mode で濃いグレー背景にしてよい
+- app 背景、stage、sidebar、prompt、workspace canvas まではグレー化しない
+- chat feed では「何が作られたか」だけを出す
+- `Artifact`、保存状態、Audit、operation、Draft などの内部メタ情報は chat feed に出さない
+- 表示は作成通知 + title + 最大2行previewに留める
+- action button は置かず、card全体クリックでWorkspaceを開く
 
 ### 5.6 Workspace Peek
 
@@ -287,9 +343,21 @@ Workspace Peek は、常時2グリッドではなく、必要時に開く作業�
 
 ルール。
 
-- desktop では chat と workspace を横に並べる
+- desktop では Artifact card や Memory view / Context Drawer の項目をクリックした時だけ chat と workspace canvas を横に並べる
+- desktop の workspace open 状態では、Claude の document pane のように右半分全体を workspace として扱う
+- desktop の workspace open 状態では、中央の細い divider + handle をドラッグして `32%〜68%` の範囲で chat 幅を調整できる
+- divider handle は視覚的には `6px x 22px` 程度の小さい grip にし、透明な hit area だけ最小限残す
+- divider handle は keyboard でも調整可能にし、mobile / narrow width では表示しない
 - chat 側を完全に消さない
 - workspace 側は document surface を中心にする
+- workspace canvas 外枠はカード化せず、右ペインとして左境界線だけで分離する
+- workspace canvas は chat feed の scroll owner に含めない
+- workspace canvas 内の document surface は独立してスクロールする
+- feed 内には Artifact の compact preview だけを置き、Session Memory は chat feed に直接出さない
+- Artifact の operation / Audit metadata は workspace canvas で常時表示せず、Audit View / Context Drawer 側に残す
+- workspace canvas は DOM から出し入れせず、常設trackを class で開閉する
+- 開閉は grid column width、opacity、translate を約180msから220msで transition する
+- `prefers-reduced-motion: reduce` では transition を無効化する
 - Focus 操作は用意するが、初期状態では主張しすぎない
 - mobile / narrow width では1カラムに落とす
 

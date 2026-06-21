@@ -63,7 +63,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
   app.get("/api/chat/sessions", async (_req, res, next) => {
     try {
-      res.json(await store.listSessions());
+      const sessions = await store.listSessions();
+      const activeSessions = await Promise.all(
+        sessions.map(async (session) => ({
+          session,
+          messageCount: (await store.listMessages(session.id)).length,
+          operationCount: (await store.listOperations(session.id)).length
+        }))
+      );
+      res.json(activeSessions.filter((item) => item.messageCount > 0 || item.operationCount > 0).map((item) => item.session));
     } catch (error) {
       next(error);
     }
@@ -99,6 +107,31 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
       const result = await runtime.runChatTurn({
         sessionId: req.params.sessionId,
+        content,
+        input_locale: asSupportedLocale(req.body?.input_locale),
+        output_locale: asSupportedLocale(req.body?.output_locale),
+        metadata: isRecord(req.body?.metadata) ? req.body.metadata : {}
+      });
+      res.status(201).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/chat/messages", async (req, res, next) => {
+    try {
+      const content = typeof req.body?.content === "string" ? req.body.content.trim() : "";
+      if (!content) {
+        res.status(400).json({ error: "content_required" });
+        return;
+      }
+      const settings = await store.getSettings();
+      const session = await runtime.createSession({
+        ui_locale: asSupportedLocale(req.body?.ui_locale) ?? settings.ui_locale,
+        output_locale: asSupportedLocale(req.body?.output_locale) ?? settings.output_locale
+      });
+      const result = await runtime.runChatTurn({
+        sessionId: session.id,
         content,
         input_locale: asSupportedLocale(req.body?.input_locale),
         output_locale: asSupportedLocale(req.body?.output_locale),

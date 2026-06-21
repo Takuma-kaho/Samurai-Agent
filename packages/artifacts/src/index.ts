@@ -35,6 +35,7 @@ export async function createArtifactDraft(input: CreateArtifactDraftInput): Prom
       label: input.title
     },
     metadata: {
+      preview: createArtifactPreview(input.content),
       word_count: input.content.trim().split(/\s+/).filter(Boolean).length,
       status: "draft"
     },
@@ -45,4 +46,14 @@ export async function createArtifactDraft(input: CreateArtifactDraftInput): Prom
   };
 
   return input.store.saveArtifactMetadata(record);
+}
+
+function createArtifactPreview(content: string): string {
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .slice(0, 140);
 }

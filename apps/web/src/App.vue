@@ -1,18 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   Archive,
+  ArrowLeft,
+  ArrowUp,
   Brain,
-  CheckCircle2,
   Clock3,
   Eye,
-  FileText,
   Monitor,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRightOpen,
   Plus,
   Search,
-  Send,
   Settings,
   ShieldCheck,
   Sun,
@@ -38,6 +39,18 @@ import { io } from "socket.io-client";
 import { api, ApiError, type ApprovalLifecyclePayload, type ArchiveMemoryPayload, type ArtifactDetail, type MemoryDetail, type SearchResult, type SessionDetail } from "./lib/api";
 
 type ViewMode = "chat" | "search" | "settings" | "audit" | "memory";
+type PromptAttachment = {
+  id: string;
+  name: string;
+  previewUrl: string;
+  size: number;
+  type: string;
+};
+type ChatScrollState = {
+  canScroll: boolean;
+  atTop: boolean;
+  atBottom: boolean;
+};
 
 const settings = ref<SettingsRecord>({
   theme: "system",
@@ -58,18 +71,39 @@ const rollbackPoints = ref<RollbackPoint[]>([]);
 const memory = ref<Array<MemoryFrontmatter & { file_path: string }>>([]);
 const searchResults = ref<SearchResult[]>([]);
 const prompt = ref("");
+const attachmentInput = ref<HTMLInputElement | null>(null);
+const promptInput = ref<HTMLInputElement | null>(null);
+const selectedAttachments = ref<PromptAttachment[]>([]);
+const chatScrollRef = ref<HTMLDivElement | null>(null);
+const chatLayoutRef = ref<HTMLDivElement | null>(null);
+const chatScrollState = ref<ChatScrollState>({
+  canScroll: false,
+  atTop: true,
+  atBottom: true
+});
 const searchQuery = ref("");
 const viewMode = ref<ViewMode>("chat");
 const drawerOpen = ref(false);
+const sidebarCollapsed = ref(false);
+const settingsReturnMode = ref<ViewMode>("chat");
 const loading = ref(false);
 const activeArtifact = ref<ArtifactDetail | null>(null);
 const activeMemory = ref<MemoryDetail | null>(null);
 const memoryContent = ref<Record<string, string>>({});
+const workspaceSplitMin = 32;
+const workspaceSplitMax = 68;
+const workspaceSplitDefault = 50;
+const workspaceSplitStorageKey = "samurai-agent.workspace-split-percent";
+const workspaceSplitPercent = ref(readWorkspaceSplitPercent());
+const isResizingWorkspace = ref(false);
 let systemThemeMedia: MediaQueryList | undefined;
+let chatScrollResizeObserver: ResizeObserver | undefined;
+let observedChatScrollElement: HTMLDivElement | null = null;
+let previousBodyCursor = "";
+let previousBodyUserSelect = "";
 
 const label = (key: LocaleKey) => t(settings.value.ui_locale, key);
 const currentMessages = computed(() => messages.value);
-const latestArtifact = computed(() => activeArtifact.value?.artifact ?? artifacts.value[0]);
 const operationsById = computed(() => new Map(operations.value.map((operation) => [operation.id, operation])));
 const approvalsById = computed(() => new Map(approvalRequests.value.map((request) => [request.id, request])));
 const policyDecisionMap = computed(() => new Map(policyDecisions.value.map((decision) => [decision.id, decision])));
@@ -83,6 +117,16 @@ const activeActivity = computed(() =>
 );
 const hasActivity = computed(() => activeActivity.value.length > 0);
 const firstMemory = computed(() => memory.value[0]);
+const hasWorkspaceCanvas = computed(() => Boolean(activeArtifact.value || activeMemory.value));
+const isDraftChat = computed(() => !activeSession.value && currentMessages.value.length === 0 && viewMode.value === "chat");
+const chatScrollFrameClass = computed(() => ({
+  "has-top-fade": chatScrollState.value.canScroll && !chatScrollState.value.atTop,
+  "has-bottom-fade": chatScrollState.value.canScroll && !chatScrollState.value.atBottom
+}));
+const workspaceSplitStyle = computed<Record<string, string>>(() => ({
+  "--workspace-chat-percent": `${workspaceSplitPercent.value}%`,
+  "--workspace-canvas-percent": `${100 - workspaceSplitPercent.value}%`
+}));
 
 onMounted(async () => {
   settings.value = await api.getSettings();
@@ -95,6 +139,9 @@ onMounted(async () => {
 
 onUnmounted(() => {
   systemThemeMedia?.removeEventListener("change", handleSystemThemeChange);
+  chatScrollResizeObserver?.disconnect();
+  finishWorkspaceResize();
+  clearAttachments();
 });
 
 watch(
@@ -102,10 +149,15 @@ watch(
   (theme) => applyTheme(theme)
 );
 
+watch(
+  [() => currentMessages.value.length, () => artifacts.value.length, () => memory.value.length, () => selectedAttachments.value.length, hasWorkspaceCanvas, viewMode],
+  () => scheduleChatScrollCheck()
+);
+
 async function loadSessions() {
   sessions.value = await api.listSessions();
   if (sessions.value.length === 0) {
-    await createSession();
+    startDraftChat();
     return;
   }
   const currentSession = activeSession.value ? sessions.value.find((session) => session.id === activeSession.value?.id) : undefined;
@@ -118,31 +170,45 @@ async function loadSessions() {
   }
 }
 
-async function createSession() {
-  const session = await api.createSession({
-    ui_locale: settings.value.ui_locale,
-    output_locale: settings.value.output_locale
-  });
-  sessions.value = [session, ...sessions.value.filter((item) => item.id !== session.id)];
-  await openSession(session.id);
+function startDraftChat() {
+  activeSession.value = null;
+  messages.value = [];
+  artifacts.value = [];
+  operations.value = [];
+  auditRecords.value = [];
+  policyDecisions.value = [];
+  approvalRequests.value = [];
+  rollbackPoints.value = [];
+  memory.value = [];
+  activity.value = [];
+  activeArtifact.value = null;
+  activeMemory.value = null;
+  prompt.value = "";
+  clearAttachments();
   viewMode.value = "chat";
+  schedulePromptFocus();
 }
 
 async function openSession(sessionId: string) {
   const detail = await api.getSession(sessionId);
   await applySessionDetail(detail);
   await refreshAuditContext();
+  viewMode.value = "chat";
 }
 
 async function sendMessage() {
-  if (!activeSession.value || prompt.value.trim().length === 0 || loading.value) {
+  if (prompt.value.trim().length === 0 || loading.value) {
     return;
   }
   const content = prompt.value.trim();
   prompt.value = "";
   loading.value = true;
   try {
-    const result = await api.sendMessage(activeSession.value.id, content, settings.value.output_locale);
+    const result = activeSession.value
+      ? await api.sendMessage(activeSession.value.id, content, settings.value.output_locale)
+      : await api.startChat(content, settings.value.ui_locale, settings.value.output_locale);
+    activeSession.value = result.session;
+    promoteSessionToTop(result.session);
     messages.value.push(...result.messages);
     artifacts.value = [...result.artifacts, ...artifacts.value];
     auditRecords.value = [...result.auditRecords, ...auditRecords.value];
@@ -151,14 +217,211 @@ async function sendMessage() {
     approvalRequests.value = [...result.approvalRequests, ...approvalRequests.value];
     rollbackPoints.value = [...result.rollbackPoints, ...rollbackPoints.value];
     activity.value = result.activity;
-    if (activeSession.value) {
-      await reloadActiveSession();
-    }
-    if (result.artifacts[0]) {
-      activeArtifact.value = await api.getArtifact(result.artifacts[0].id);
-    }
+    await reloadActiveSession();
+    clearAttachments();
   } finally {
     loading.value = false;
+  }
+}
+
+function schedulePromptFocus() {
+  void nextTick(() => {
+    promptInput.value?.focus();
+    updateChatScrollState();
+  });
+}
+
+function openAttachmentPicker() {
+  attachmentInput.value?.click();
+}
+
+function handleAttachmentSelection(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  clearAttachments();
+  selectedAttachments.value = files.map((file) => ({
+    id: `${file.name}-${file.size}-${file.lastModified}`,
+    name: file.name,
+    previewUrl: URL.createObjectURL(file),
+    size: file.size,
+    type: file.type
+  }));
+  input.value = "";
+}
+
+function removeAttachment(id: string) {
+  const attachment = selectedAttachments.value.find((item) => item.id === id);
+  if (attachment) {
+    URL.revokeObjectURL(attachment.previewUrl);
+  }
+  selectedAttachments.value = selectedAttachments.value.filter((item) => item.id !== id);
+}
+
+function clearAttachments() {
+  selectedAttachments.value.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+  selectedAttachments.value = [];
+}
+
+function formatFileSize(size: number): string {
+  if (size < 1024 * 1024) {
+    return `${Math.max(1, Math.round(size / 1024))} KB`;
+  }
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function scheduleChatScrollCheck() {
+  void nextTick(() => {
+    bindChatScrollObserver();
+    updateChatScrollState();
+  });
+}
+
+function bindChatScrollObserver() {
+  const element = chatScrollRef.value;
+  if (observedChatScrollElement === element) {
+    return;
+  }
+  chatScrollResizeObserver?.disconnect();
+  observedChatScrollElement = element;
+  if (!element) {
+    return;
+  }
+  chatScrollResizeObserver = new ResizeObserver(() => updateChatScrollState());
+  chatScrollResizeObserver.observe(element);
+}
+
+function updateChatScrollState() {
+  const element = chatScrollRef.value;
+  if (!element) {
+    chatScrollState.value = {
+      canScroll: false,
+      atTop: true,
+      atBottom: true
+    };
+    return;
+  }
+  const threshold = 2;
+  const canScroll = element.scrollHeight > element.clientHeight + threshold;
+  const atTop = element.scrollTop <= threshold;
+  const atBottom = element.scrollTop + element.clientHeight >= element.scrollHeight - threshold;
+  chatScrollState.value = {
+    canScroll,
+    atTop,
+    atBottom
+  };
+}
+
+function readWorkspaceSplitPercent(): number {
+  if (typeof window === "undefined") {
+    return workspaceSplitDefault;
+  }
+  try {
+    const stored = window.localStorage.getItem(workspaceSplitStorageKey);
+    if (!stored) {
+      return workspaceSplitDefault;
+    }
+    return normalizeWorkspaceSplitPercent(Number(stored));
+  } catch {
+    return workspaceSplitDefault;
+  }
+}
+
+function normalizeWorkspaceSplitPercent(value: number): number {
+  const normalized = Number.isFinite(value) ? value : workspaceSplitDefault;
+  return Math.min(workspaceSplitMax, Math.max(workspaceSplitMin, Math.round(normalized * 10) / 10));
+}
+
+function persistWorkspaceSplitPercent() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(workspaceSplitStorageKey, String(workspaceSplitPercent.value));
+  } catch {
+    // localStorage can be unavailable in private/restricted contexts.
+  }
+}
+
+function setWorkspaceSplitPercent(value: number, persist = false) {
+  workspaceSplitPercent.value = normalizeWorkspaceSplitPercent(value);
+  if (persist) {
+    persistWorkspaceSplitPercent();
+  }
+}
+
+function beginWorkspaceResize(event: PointerEvent) {
+  if (!hasWorkspaceCanvas.value || !chatLayoutRef.value) {
+    return;
+  }
+  event.preventDefault();
+  isResizingWorkspace.value = true;
+  previousBodyCursor = document.body.style.cursor;
+  previousBodyUserSelect = document.body.style.userSelect;
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  updateWorkspaceSplitFromPointer(event);
+  window.addEventListener("pointermove", handleWorkspaceResizeMove);
+  window.addEventListener("pointerup", finishWorkspaceResize);
+  window.addEventListener("pointercancel", finishWorkspaceResize);
+}
+
+function handleWorkspaceResizeMove(event: PointerEvent) {
+  if (!isResizingWorkspace.value) {
+    return;
+  }
+  event.preventDefault();
+  updateWorkspaceSplitFromPointer(event);
+}
+
+function updateWorkspaceSplitFromPointer(event: PointerEvent) {
+  const rect = chatLayoutRef.value?.getBoundingClientRect();
+  if (!rect || rect.width <= 0) {
+    return;
+  }
+  const percent = ((event.clientX - rect.left) / rect.width) * 100;
+  setWorkspaceSplitPercent(percent);
+}
+
+function finishWorkspaceResize() {
+  if (!isResizingWorkspace.value) {
+    return;
+  }
+  isResizingWorkspace.value = false;
+  document.body.style.cursor = previousBodyCursor;
+  document.body.style.userSelect = previousBodyUserSelect;
+  window.removeEventListener("pointermove", handleWorkspaceResizeMove);
+  window.removeEventListener("pointerup", finishWorkspaceResize);
+  window.removeEventListener("pointercancel", finishWorkspaceResize);
+  persistWorkspaceSplitPercent();
+}
+
+function handleWorkspaceResizerKeydown(event: KeyboardEvent) {
+  if (!hasWorkspaceCanvas.value) {
+    return;
+  }
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitPercent.value - 4, true);
+    return;
+  }
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitPercent.value + 4, true);
+    return;
+  }
+  if (event.key === "Home") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitMin, true);
+    return;
+  }
+  if (event.key === "End") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitMax, true);
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitDefault, true);
   }
 }
 
@@ -182,7 +445,7 @@ async function chooseResult(result: SearchResult) {
     if (result.session_id) {
       await openSession(result.session_id);
     }
-    activeArtifact.value = await api.getArtifact(result.id);
+    await openArtifact(result.id);
     viewMode.value = "chat";
     return;
   }
@@ -214,20 +477,38 @@ async function loadMemory() {
   viewMode.value = "memory";
 }
 
+function openSettings() {
+  if (viewMode.value !== "settings") {
+    settingsReturnMode.value = viewMode.value;
+  }
+  viewMode.value = "settings";
+}
+
+function returnFromSettings() {
+  viewMode.value = settingsReturnMode.value === "settings" ? "chat" : settingsReturnMode.value;
+}
+
 async function patchSettings(patch: Partial<Pick<SettingsRecord, "theme" | "ui_locale" | "output_locale">>) {
   settings.value = await api.patchSettings(patch);
 }
 
 async function openArtifact(id: string) {
   activeArtifact.value = await api.getArtifact(id);
+  activeMemory.value = null;
 }
 
 async function openMemory(id: string) {
   activeMemory.value = await api.getMemory(id);
+  activeArtifact.value = null;
   memoryContent.value = {
     ...memoryContent.value,
     [id]: activeMemory.value.content
   };
+}
+
+function closeWorkspaceCanvas() {
+  activeArtifact.value = null;
+  activeMemory.value = null;
 }
 
 async function archiveMemoryItem(id: string) {
@@ -296,6 +577,7 @@ function applyArchiveMemory(payload: ArchiveMemoryPayload) {
 
 async function applySessionDetail(detail: SessionDetail) {
   activeSession.value = detail.session;
+  updateSessionInPlace(detail.session);
   messages.value = detail.messages;
   operations.value = detail.operations;
   artifacts.value = detail.artifacts;
@@ -361,32 +643,13 @@ function auditStatus(audit: AuditRecord): string {
   return label("approval.status.recorded");
 }
 
-function auditStatusByOperation(operation: OperationRecord): string {
-  if (operation.status === "pending_approval") {
-    return label("approval.status.pending");
-  }
-  if (operation.status === "deferred") {
-    return label("approval.status.deferred");
-  }
-  if (operation.status === "denied") {
-    return label("approval.status.denied");
-  }
-  if (operation.status === "completed") {
-    return label("approval.status.completed");
-  }
-  return label("approval.status.recorded");
-}
-
-function artifactOperation(artifact: ArtifactRecord): OperationRecord | undefined {
-  return operationsById.value.get(artifact.source_operation_id);
-}
-
-function artifactAuditRecords(artifact: ArtifactRecord): AuditRecord[] {
-  return auditRecords.value.filter((audit) => audit.operation_id === artifact.source_operation_id);
-}
-
 function memoryExcerpt(id: string): string {
   return (memoryContent.value[id] ?? "").replace(/\s+/g, " ").slice(0, 150);
+}
+
+function artifactPreview(artifact: ArtifactRecord): string {
+  const preview = artifact.metadata.preview;
+  return typeof preview === "string" ? preview.replace(/\s+/g, " ").trim().slice(0, 140) : "";
 }
 
 function memoryStateLabel(state: MemoryFrontmatter["state"]): string {
@@ -418,10 +681,26 @@ function isInitialTitle(title: string): boolean {
   return normalized === "" || normalized === "new chat" || normalized === "untitled chat";
 }
 
+function updateSessionInPlace(session: SessionRecord) {
+  const index = sessions.value.findIndex((item) => item.id === session.id);
+  if (index === -1) {
+    sessions.value = [...sessions.value, session];
+    return;
+  }
+  sessions.value = sessions.value.map((item) => (item.id === session.id ? session : item));
+}
+
+function promoteSessionToTop(session: SessionRecord) {
+  sessions.value = [session, ...sessions.value.filter((item) => item.id !== session.id)];
+}
+
 function connectSocket() {
   const socket = io();
   socket.on("session.created", (session: SessionRecord) => {
-    sessions.value = [session, ...sessions.value.filter((item) => item.id !== session.id)];
+    if (isInitialTitle(session.title)) {
+      return;
+    }
+    updateSessionInPlace(session);
   });
   socket.on("activity.updated", (items: ActivityInboxItem[]) => {
     activity.value = items;
@@ -474,19 +753,43 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
 </script>
 
 <template>
-  <main class="app-shell" :class="{ 'has-drawer': drawerOpen }">
+  <main class="app-shell" :class="{ 'has-drawer': drawerOpen, 'sidebar-collapsed': sidebarCollapsed }">
     <aside class="sidebar">
       <div class="brand-row">
         <div class="brand-symbol">S</div>
         <div class="brand-name">{{ label("app.name") }}</div>
+        <button
+          class="sidebar-toggle icon-button"
+          type="button"
+          :title="sidebarCollapsed ? label('nav.expand_sidebar') : label('nav.collapse_sidebar')"
+          :aria-label="sidebarCollapsed ? label('nav.expand_sidebar') : label('nav.collapse_sidebar')"
+          @click="sidebarCollapsed = !sidebarCollapsed"
+        >
+          <PanelLeftOpen v-if="sidebarCollapsed" :size="16" />
+          <PanelLeftClose v-else :size="16" />
+        </button>
       </div>
 
       <nav class="nav-block">
-        <button class="nav-item is-primary" type="button" @click="createSession">
+        <button
+          class="nav-item"
+          :class="{ 'is-active': isDraftChat }"
+          type="button"
+          :title="label('nav.new_chat')"
+          :aria-label="label('nav.new_chat')"
+          @click="startDraftChat"
+        >
           <Plus :size="16" />
           <span>{{ label("nav.new_chat") }}</span>
         </button>
-        <button class="nav-item" type="button" @click="viewMode = 'search'">
+        <button
+          class="nav-item"
+          :class="{ 'is-active': viewMode === 'search' }"
+          type="button"
+          :title="label('nav.search')"
+          :aria-label="label('nav.search')"
+          @click="viewMode = 'search'"
+        >
           <Search :size="16" />
           <span>{{ label("nav.search") }}</span>
         </button>
@@ -498,17 +801,24 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
           v-for="session in sessions"
           :key="session.id"
           class="session-item"
-          :class="{ 'is-current': activeSession?.id === session.id }"
+          :class="{ 'is-current': viewMode === 'chat' && activeSession?.id === session.id }"
           type="button"
+          :title="sessionDisplayTitle(session)"
           @click="openSession(session.id)"
         >
           <span>{{ sessionDisplayTitle(session) }}</span>
-          <span v-if="activeSession?.id === session.id" class="session-dot" />
         </button>
       </section>
 
       <div class="sidebar-footer">
-        <button class="nav-item footer-button" type="button" @click="viewMode = 'settings'">
+        <button
+          class="nav-item footer-button"
+          :class="{ 'is-active': viewMode === 'settings' }"
+          type="button"
+          :title="label('nav.settings')"
+          :aria-label="label('nav.settings')"
+          @click="openSettings"
+        >
           <Settings :size="16" />
           <span>{{ label("nav.settings") }}</span>
         </button>
@@ -517,10 +827,12 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
 
     <section class="main-stage">
       <header class="stage-header">
-        <div>
-          <div class="stage-title">
-            <span v-if="viewMode === 'chat'">{{ label("chat.title") }}</span>
-            <span v-else-if="viewMode === 'search'">{{ label("search.title") }}</span>
+        <div class="stage-heading" :class="{ 'is-chat': viewMode === 'chat' }">
+          <button v-if="viewMode === 'settings'" class="icon-button stage-back-button" type="button" :title="label('action.back')" :aria-label="label('action.back')" @click="returnFromSettings">
+            <ArrowLeft :size="16" />
+          </button>
+          <div v-if="viewMode !== 'chat'" class="stage-title">
+            <span v-if="viewMode === 'search'">{{ label("search.title") }}</span>
             <span v-else-if="viewMode === 'settings'">{{ label("settings.title") }}</span>
             <span v-else-if="viewMode === 'audit'">{{ label("audit.title") }}</span>
             <span v-else>{{ label("memory.title") }}</span>
@@ -539,85 +851,111 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
         </div>
       </header>
 
-      <section v-if="viewMode === 'chat'" class="chat-stage">
-        <div v-if="currentMessages.length === 0" class="empty-composition">
-          <h1>{{ label("chat.empty_title") }}</h1>
-        </div>
+      <section v-if="viewMode === 'chat'" class="chat-stage" :class="{ 'has-workspace': hasWorkspaceCanvas }">
+        <div
+          ref="chatLayoutRef"
+          class="chat-layout"
+          :class="{ 'has-workspace': hasWorkspaceCanvas, 'is-resizing-workspace': isResizingWorkspace }"
+          :style="workspaceSplitStyle"
+        >
+          <div class="chat-column" :class="{ 'is-empty': isDraftChat }">
+            <div class="chat-scroll-frame" :class="chatScrollFrameClass">
+              <div ref="chatScrollRef" class="chat-scroll" @scroll="updateChatScrollState">
+                <div v-if="currentMessages.length === 0" class="empty-composition">
+                  <h1>{{ label("chat.empty_title") }}</h1>
+                </div>
 
-        <div v-else class="conversation">
-          <article
-            v-for="message in currentMessages"
-            :key="message.id"
-            class="message"
-            :class="message.role === 'user' ? 'message-user' : 'message-agent lit-surface'"
-          >
-            <p>{{ message.content }}</p>
-          </article>
+                <div v-else class="conversation-frame">
+                  <div class="conversation">
+                    <article
+                      v-for="message in currentMessages"
+                      :key="message.id"
+                      class="message"
+                      :class="message.role === 'user' ? 'message-user' : 'message-agent'"
+                    >
+                      <p>{{ message.content }}</p>
+                    </article>
 
-          <article v-for="artifact in artifacts.slice(0, 3)" :key="artifact.id" class="artifact-card lit-surface">
-            <div class="artifact-head">
-              <div>
-                <div class="artifact-type">{{ label("artifact.title") }}</div>
-                <h2>{{ artifact.title }}</h2>
+                    <article v-for="artifact in artifacts.slice(0, 3)" :key="artifact.id" class="artifact-card artifact-notice feed-card lit-surface">
+                      <button class="feed-card-main" type="button" @click="openArtifact(artifact.id)">
+                        <span class="artifact-created">{{ label("artifact.created") }}</span>
+                        <strong class="feed-card-title">{{ artifact.title }}</strong>
+                        <span v-if="artifactPreview(artifact)" class="feed-card-summary">{{ artifactPreview(artifact) }}</span>
+                      </button>
+                    </article>
+                  </div>
+                </div>
               </div>
-              <span class="status-pill"><CheckCircle2 :size="13" />{{ label("status.draft") }}</span>
             </div>
-            <div class="artifact-preview">
-              <p>{{ label("artifact.operation") }}: {{ artifactOperation(artifact) ? auditStatusByOperation(artifactOperation(artifact)!) : label("approval.status.recorded") }}</p>
-              <p>{{ label("artifact.audit") }}: {{ artifactAuditRecords(artifact).length > 0 ? label("audit.recorded") : label("audit.empty") }}</p>
+            <div class="prompt-dock">
+              <form class="prompt-card lit-surface" @submit.prevent="sendMessage">
+                <div v-if="selectedAttachments.length > 0" class="attachment-strip">
+                  <div v-for="attachment in selectedAttachments" :key="attachment.id" class="attachment-chip">
+                    <img v-if="attachment.type.startsWith('image/')" :src="attachment.previewUrl" :alt="label('chat.attachment_image')" />
+                    <div class="attachment-meta">
+                      <span>{{ attachment.name }}</span>
+                      <small>{{ formatFileSize(attachment.size) }}</small>
+                    </div>
+                    <button type="button" :aria-label="label('chat.remove_attachment')" @click="removeAttachment(attachment.id)">
+                      <X :size="13" />
+                    </button>
+                  </div>
+                </div>
+                <button class="prompt-action attach-button" type="button" :aria-label="label('chat.attach')" @click="openAttachmentPicker">
+                  <Plus :size="16" />
+                </button>
+                <input ref="attachmentInput" class="file-input" type="file" accept="image/*" multiple @change="handleAttachmentSelection" />
+                <input ref="promptInput" v-model="prompt" :placeholder="label('chat.placeholder')" :aria-label="label('chat.placeholder')" />
+                <button class="prompt-action send-button" type="submit" :aria-label="label('chat.send')" :disabled="loading">
+                  <ArrowUp :size="16" />
+                </button>
+              </form>
             </div>
-            <div class="artifact-actions">
-              <button type="button" @click="openArtifact(artifact.id)">{{ label("artifact.open") }}</button>
-              <span>{{ label("artifact.saved") }}</span>
-            </div>
-          </article>
+          </div>
 
-          <article v-for="item in memory.slice(0, 3)" :key="item.id" class="memory-item lit-surface">
-            <span class="status-pill">{{ memoryStateLabel(item.state) }}</span>
-            <strong>{{ item.topic }}</strong>
-            <p>{{ memoryExcerpt(item.id) || item.source }}</p>
-            <div class="memory-actions">
-              <button type="button" @click="openMemory(item.id)">
-                <Eye :size="14" />
-                {{ label("memory.open") }}
-              </button>
-              <button v-if="activeSession" type="button" @click="archiveMemoryItem(item.id)">
-                <Archive :size="14" />
-                {{ label("memory.archive") }}
-              </button>
+          <button
+            class="workspace-resizer"
+            :class="{ open: hasWorkspaceCanvas }"
+            type="button"
+            role="separator"
+            aria-orientation="vertical"
+            :aria-label="label('workspace.resize')"
+            :aria-valuemin="workspaceSplitMin"
+            :aria-valuemax="workspaceSplitMax"
+            :aria-valuenow="Math.round(workspaceSplitPercent)"
+            :aria-hidden="!hasWorkspaceCanvas"
+            :disabled="!hasWorkspaceCanvas"
+            :tabindex="hasWorkspaceCanvas ? 0 : -1"
+            @pointerdown="beginWorkspaceResize"
+            @keydown="handleWorkspaceResizerKeydown"
+          />
+
+          <aside class="workspace-canvas" :class="{ open: hasWorkspaceCanvas }" :aria-hidden="!hasWorkspaceCanvas">
+            <div v-if="hasWorkspaceCanvas" class="workspace-canvas-inner">
+              <header class="workspace-head">
+                <div>
+                  <span v-if="activeMemory" class="artifact-type">{{ label("memory.title") }}</span>
+                  <h2>{{ activeArtifact ? activeArtifact.artifact.title : activeMemory?.memory.topic }}</h2>
+                </div>
+                <button class="icon-button" type="button" :title="label('action.close')" :aria-label="label('action.close')" @click="closeWorkspaceCanvas">
+                  <X :size="16" />
+                </button>
+              </header>
+
+              <template v-if="activeArtifact">
+                <pre class="document-surface">{{ activeArtifact.content }}</pre>
+              </template>
+
+              <template v-else-if="activeMemory">
+                <div class="workspace-meta">
+                  <span>{{ memoryStateLabel(activeMemory.memory.state) }}</span>
+                  <span>{{ label("memory.source") }}: {{ activeMemory.memory.source }}</span>
+                </div>
+                <pre class="document-surface">{{ activeMemory.content }}</pre>
+              </template>
             </div>
-          </article>
+          </aside>
         </div>
-
-        <article v-if="latestArtifact && activeArtifact" class="workspace-peek lit-surface">
-          <header class="workspace-head">
-            <div>
-              <span class="artifact-type">{{ label("artifact.title") }}</span>
-              <h2>{{ activeArtifact.artifact.title }}</h2>
-            </div>
-            <FileText :size="18" />
-          </header>
-          <div class="workspace-meta">
-            <span>{{ label("artifact.operation") }}: {{ activeArtifact.operation ? auditStatusByOperation(activeArtifact.operation) : label("approval.status.recorded") }}</span>
-            <span>{{ label("artifact.audit") }}: {{ activeArtifact.auditRecords.length }}</span>
-          </div>
-          <pre class="document-surface">{{ activeArtifact.content }}</pre>
-        </article>
-
-        <article v-if="activeMemory" class="memory-detail lit-surface">
-          <div class="drawer-card-head">
-            <span>{{ activeMemory.memory.topic }}</span>
-            <span class="status-pill">{{ memoryStateLabel(activeMemory.memory.state) }}</span>
-          </div>
-          <pre class="document-surface">{{ activeMemory.content }}</pre>
-        </article>
-
-        <form class="prompt-card lit-surface" @submit.prevent="sendMessage">
-          <input v-model="prompt" :placeholder="label('chat.placeholder')" :aria-label="label('chat.placeholder')" />
-          <button class="send-button" type="submit" :aria-label="label('chat.send')" :disabled="loading">
-            <Send :size="18" />
-          </button>
-        </form>
       </section>
 
       <section v-else-if="viewMode === 'search'" class="panel-stage">
@@ -710,7 +1048,7 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
       </section>
     </section>
 
-    <aside v-if="drawerOpen" class="context-drawer">
+    <aside class="context-drawer" :class="{ open: drawerOpen }" :aria-hidden="!drawerOpen">
       <header class="drawer-header">
         <div class="drawer-title">{{ label("context.title") }}</div>
         <button class="icon-button" type="button" :title="label('action.close')" :aria-label="label('action.close')" @click="drawerOpen = false">
