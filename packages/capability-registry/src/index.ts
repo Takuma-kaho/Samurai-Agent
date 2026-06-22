@@ -177,7 +177,8 @@ export const proposalCapabilityManifest: CapabilityManifest = {
     "collection.record.create",
     "collection.patch.apply",
     "automation.memory_review.run",
-    "external.send"
+    "external.send",
+    "workspace.delete"
   ],
   permission_policy: {
     grant_key: "capability_id+operation+actor_identity+channel+resource_scope"

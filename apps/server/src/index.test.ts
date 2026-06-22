@@ -1,25 +1,76 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
-import { createApiServer, type ApiServer } from "./index";
+import { FakeProviderAdapter, ProviderRequestError, type ProviderAdapter, type ProviderOutput } from "@samurai-agent/runtime";
+import { createApiServer, loadServerEnv, type ApiServer } from "./index";
 
 const roots: string[] = [];
 const servers: ApiServer[] = [];
+const managedEnv = new Map<string, string | undefined>();
 
 afterEach(async () => {
-  await Promise.all(
-    servers.splice(0).map(
-      (server) =>
-        new Promise<void>((resolve) => {
-          server.io.close();
-          server.httpServer.close(() => resolve());
-          void server.store.close();
-        })
-    )
-  );
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  try {
+    await Promise.all(
+      servers.splice(0).map(
+        (server) =>
+          new Promise<void>((resolve) => {
+            server.io.close();
+            server.httpServer.close(() => resolve());
+            void server.store.close();
+          })
+      )
+    );
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  } finally {
+    restoreManagedEnv();
+  }
+});
+
+describe("server env loading", () => {
+  it("does nothing when the env file is missing", () => {
+    expect(() => loadServerEnv(path.join(tmpdir(), `missing-samurai-${Date.now()}`, ".env"))).not.toThrow();
+  });
+
+  it("loads env file values through process.loadEnvFile", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-env-"));
+    roots.push(root);
+    const envPath = path.join(root, ".env");
+    deleteManagedEnv("SAMURAI_ENV_LOAD_TEST");
+    deleteManagedEnv("PORT");
+
+    await writeFile(envPath, "SAMURAI_ENV_LOAD_TEST=loaded\nPORT=49321\n", "utf8");
+    loadServerEnv(envPath);
+
+    expect(process.env.SAMURAI_ENV_LOAD_TEST).toBe("loaded");
+    expect(process.env.PORT).toBe("49321");
+  });
+
+  it("fails clearly when an env file exists but process.loadEnvFile is unavailable", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-env-"));
+    roots.push(root);
+    const envPath = path.join(root, ".env");
+    await writeFile(envPath, "SAMURAI_ENV_LOAD_TEST=loaded\n", "utf8");
+    const originalLoadEnvFile = process.loadEnvFile;
+
+    Object.defineProperty(process, "loadEnvFile", { configurable: true, value: undefined });
+    try {
+      expect(() => loadServerEnv(envPath)).toThrow("process.loadEnvFile()");
+    } finally {
+      Object.defineProperty(process, "loadEnvFile", { configurable: true, value: originalLoadEnvFile });
+    }
+  });
+
+  it("keeps injected fake providers even when provider env is set", async () => {
+    setManagedEnv("SAMURAI_LLM_MODEL", "openai/test-model");
+    setManagedEnv("OPENAI_API_KEY", "test-key");
+    const { baseUrl } = await startTestServer();
+
+    const health = await getJson<{ llm: { primary: { provider: string; model: string } } }>(`${baseUrl}/api/health`);
+
+    expect(health.llm.primary).toMatchObject({ provider: "fake", model: "fake/test" });
+  });
 });
 
 describe("approval request API", () => {
@@ -148,6 +199,27 @@ describe("approval request API", () => {
     expect(emptyResults).toEqual([]);
   });
 
+  it("returns sanitized provider diagnostics without raw provider messages", async () => {
+    const { baseUrl } = await startTestServer(new FailingProviderAdapter());
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+
+    const response = await postJson<Record<string, unknown>>(`${baseUrl}/api/chat/sessions/${session.id}/messages`, {
+      content: "こんにちは",
+      output_locale: "ja"
+    }, 502);
+
+    expect(response).toMatchObject({
+      error: "provider_failed",
+      reason: "auth_failed",
+      provider: "fake",
+      model: "fake/failing",
+      status: 401,
+      retryable: false
+    });
+    expect(JSON.stringify(response)).not.toContain("secret-token");
+    expect(response).not.toHaveProperty("message");
+  });
+
   it("persists settings through get and patch", async () => {
     const { baseUrl } = await startTestServer();
 
@@ -242,10 +314,10 @@ describe("approval request API", () => {
   });
 });
 
-async function startTestServer(): Promise<{ baseUrl: string; server: ApiServer }> {
+async function startTestServer(provider: ProviderAdapter = new FakeProviderAdapter("fake/test", fakeProviderOutput)): Promise<{ baseUrl: string; server: ApiServer }> {
   const root = await mkdtemp(path.join(tmpdir(), "samurai-api-"));
   roots.push(root);
-  const server = await createApiServer({ workspaceDataDir: root });
+  const server = await createApiServer({ workspaceDataDir: root, provider });
   servers.push(server);
   await new Promise<void>((resolve) => {
     server.httpServer.listen(0, "127.0.0.1", resolve);
@@ -255,6 +327,76 @@ async function startTestServer(): Promise<{ baseUrl: string; server: ApiServer }
     baseUrl: `http://127.0.0.1:${address.port}`,
     server
   };
+}
+
+function fakeProviderOutput(input: Parameters<FakeProviderAdapter["generate"]>[0]): ProviderOutput {
+  const intent = input.envelope.user_intent;
+  const isJapanese = input.envelope.output_locale === "ja";
+  const wantsArtifact = /作って|下書き|提案書|draft|memo|note/i.test(intent);
+  const toolCalls: ProviderOutput["toolCalls"] = [];
+  if (wantsArtifact) {
+    toolCalls.push({
+      name: "create_artifact",
+      arguments: {
+        title: isJapanese ? "作業メモ" : "Workspace note",
+        content: isJapanese ? `# 作業メモ\n\n${intent}` : `# Workspace note\n\n${intent}`
+      }
+    });
+  }
+  if (/覚えて|今後|preference|remember/i.test(intent)) {
+    toolCalls.push({ name: "remember_topic", arguments: {} });
+  }
+  if (/送信|メール|外部|公開|send|mail|publish|post/i.test(intent)) {
+    toolCalls.push({ name: "request_external_send", arguments: {} });
+  }
+  if (/削除|消して|delete|remove/i.test(intent)) {
+    toolCalls.push({ name: "request_delete", arguments: {} });
+  }
+  return {
+    content: isJapanese ? "対応しました。" : "Done.",
+    toolCalls
+  };
+}
+
+class FailingProviderAdapter implements ProviderAdapter {
+  readonly id = "fake" as const;
+  readonly model = "fake/failing";
+
+  async generate(): Promise<ProviderOutput> {
+    throw new ProviderRequestError("provider_failed", "Bearer secret-token raw body", {
+      reason: "auth_failed",
+      status: 401,
+      retryable: false,
+      message: "Bearer [redacted]"
+    });
+  }
+}
+
+function setManagedEnv(key: string, value: string): void {
+  rememberEnv(key);
+  process.env[key] = value;
+}
+
+function deleteManagedEnv(key: string): void {
+  rememberEnv(key);
+  delete process.env[key];
+}
+
+function rememberEnv(key: string): void {
+  if (!managedEnv.has(key)) {
+    managedEnv.set(key, process.env[key]);
+  }
+}
+
+function restoreManagedEnv(): void {
+  for (const [key, value] of managedEnv) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+  managedEnv.clear();
 }
 
 async function postJson<T>(url: string, body: unknown, expectedStatus = 200): Promise<T> {

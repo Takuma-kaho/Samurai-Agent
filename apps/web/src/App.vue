@@ -51,6 +51,30 @@ type ChatScrollState = {
   atTop: boolean;
   atBottom: boolean;
 };
+type ChatDisplayMessage = {
+  id: string;
+  role: MessageRecord["role"];
+  content: string;
+  state?: "pending" | "loading";
+};
+type ProviderErrorReason =
+  | "not_configured"
+  | "auth_failed"
+  | "rate_limited"
+  | "temporary_unavailable"
+  | "model_not_found"
+  | "invalid_model"
+  | "invalid_response"
+  | "network"
+  | "unknown";
+type ProviderNotice = {
+  error: "provider_not_configured" | "provider_failed";
+  reason: ProviderErrorReason;
+  provider?: string;
+  model?: string;
+  status?: number;
+  retryable: boolean;
+};
 
 const settings = ref<SettingsRecord>({
   theme: "system",
@@ -87,6 +111,26 @@ const drawerOpen = ref(false);
 const sidebarCollapsed = ref(false);
 const settingsReturnMode = ref<ViewMode>("chat");
 const loading = ref(false);
+const initializing = ref(true);
+const sessionLoadError = ref(false);
+const pendingUserMessage = ref<ChatDisplayMessage | null>(null);
+const agentResponsePending = ref(false);
+const providerNotice = ref<ProviderNotice | null>(null);
+const providerNoticeDetailsOpen = ref(false);
+const providerNoticeTitle = computed(() => (providerNotice.value ? label(`provider_error.${providerNotice.value.reason}.title` as LocaleKey) : ""));
+const providerNoticeBody = computed(() => (providerNotice.value ? label(`provider_error.${providerNotice.value.reason}.body` as LocaleKey) : ""));
+const providerNoticeDetails = computed(() => {
+  if (!providerNotice.value) {
+    return "";
+  }
+  const detail = [
+    providerNotice.value.provider ? `provider=${providerNotice.value.provider}` : "",
+    providerNotice.value.model ? `model=${providerNotice.value.model}` : "",
+    providerNotice.value.status ? `status=${providerNotice.value.status}` : "",
+    `retryable=${providerNotice.value.retryable ? "true" : "false"}`
+  ].filter(Boolean);
+  return detail.join(" / ");
+});
 const activeArtifact = ref<ArtifactDetail | null>(null);
 const activeMemory = ref<MemoryDetail | null>(null);
 const memoryContent = ref<Record<string, string>>({});
@@ -103,7 +147,27 @@ let previousBodyCursor = "";
 let previousBodyUserSelect = "";
 
 const label = (key: LocaleKey) => t(settings.value.ui_locale, key);
-const currentMessages = computed(() => messages.value);
+const currentMessages = computed<ChatDisplayMessage[]>(() => {
+  const displayMessages = messages.value.map(
+    (message): ChatDisplayMessage => ({
+      id: message.id,
+      role: message.role,
+      content: message.content
+    })
+  );
+  if (pendingUserMessage.value) {
+    displayMessages.push(pendingUserMessage.value);
+  }
+  if (agentResponsePending.value) {
+    displayMessages.push({
+      id: "pending-agent-response",
+      role: "agent",
+      content: "",
+      state: "loading"
+    });
+  }
+  return displayMessages;
+});
 const operationsById = computed(() => new Map(operations.value.map((operation) => [operation.id, operation])));
 const approvalsById = computed(() => new Map(approvalRequests.value.map((request) => [request.id, request])));
 const policyDecisionMap = computed(() => new Map(policyDecisions.value.map((decision) => [decision.id, decision])));
@@ -133,8 +197,8 @@ onMounted(async () => {
   systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
   systemThemeMedia.addEventListener("change", handleSystemThemeChange);
   applyTheme(settings.value.theme);
-  await loadSessions();
   connectSocket();
+  await loadSessionsWithRetry();
 });
 
 onUnmounted(() => {
@@ -170,9 +234,36 @@ async function loadSessions() {
   }
 }
 
+async function loadSessionsWithRetry() {
+  const retryDelays = [250, 600, 1000];
+  initializing.value = true;
+  sessionLoadError.value = false;
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      await loadSessions();
+      sessionLoadError.value = false;
+      initializing.value = false;
+      return;
+    } catch {
+      if (attempt === retryDelays.length) {
+        sessionLoadError.value = true;
+        initializing.value = false;
+        return;
+      }
+      await wait(retryDelays[attempt] ?? 0);
+    }
+  }
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function startDraftChat() {
   activeSession.value = null;
   messages.value = [];
+  pendingUserMessage.value = null;
+  agentResponsePending.value = false;
   artifacts.value = [];
   operations.value = [];
   auditRecords.value = [];
@@ -203,10 +294,21 @@ async function sendMessage() {
   const content = prompt.value.trim();
   prompt.value = "";
   loading.value = true;
+  pendingUserMessage.value = {
+    id: `pending-user-${Date.now()}`,
+    role: "user",
+    content,
+    state: "pending"
+  };
+  agentResponsePending.value = true;
   try {
+    providerNotice.value = null;
+    providerNoticeDetailsOpen.value = false;
     const result = activeSession.value
       ? await api.sendMessage(activeSession.value.id, content, settings.value.output_locale)
       : await api.startChat(content, settings.value.ui_locale, settings.value.output_locale);
+    pendingUserMessage.value = null;
+    agentResponsePending.value = false;
     activeSession.value = result.session;
     promoteSessionToTop(result.session);
     messages.value.push(...result.messages);
@@ -219,6 +321,17 @@ async function sendMessage() {
     activity.value = result.activity;
     await reloadActiveSession();
     clearAttachments();
+  } catch (error) {
+    pendingUserMessage.value = null;
+    agentResponsePending.value = false;
+    prompt.value = content;
+    if (error instanceof ApiError && isRecord(error.body)) {
+      if (error.body.error === "provider_not_configured" || error.body.error === "provider_failed") {
+        providerNotice.value = normalizeProviderNotice(error.body);
+        return;
+      }
+    }
+    throw error;
   } finally {
     loading.value = false;
   }
@@ -488,6 +601,10 @@ function returnFromSettings() {
   viewMode.value = settingsReturnMode.value === "settings" ? "chat" : settingsReturnMode.value;
 }
 
+function retryProviderRequest() {
+  void sendMessage();
+}
+
 async function patchSettings(patch: Partial<Pick<SettingsRecord, "theme" | "ui_locale" | "output_locale">>) {
   settings.value = await api.patchSettings(patch);
 }
@@ -750,6 +867,37 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
     "activity" in value
   );
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeProviderNotice(value: Record<string, unknown>): ProviderNotice {
+  const error = value.error === "provider_not_configured" ? "provider_not_configured" : "provider_failed";
+  const reason = isProviderErrorReason(value.reason) ? value.reason : error === "provider_not_configured" ? "not_configured" : "unknown";
+  return {
+    error,
+    reason,
+    provider: typeof value.provider === "string" ? value.provider : undefined,
+    model: typeof value.model === "string" ? value.model : undefined,
+    status: typeof value.status === "number" ? value.status : undefined,
+    retryable: value.retryable === true
+  };
+}
+
+function isProviderErrorReason(value: unknown): value is ProviderErrorReason {
+  return (
+    value === "not_configured" ||
+    value === "auth_failed" ||
+    value === "rate_limited" ||
+    value === "temporary_unavailable" ||
+    value === "model_not_found" ||
+    value === "invalid_model" ||
+    value === "invalid_response" ||
+    value === "network" ||
+    value === "unknown"
+  );
+}
 </script>
 
 <template>
@@ -797,6 +945,14 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
 
       <section class="session-list" :aria-label="label('nav.sessions')">
         <div class="section-label">{{ label("nav.sessions") }}</div>
+        <div v-if="initializing" class="session-state">
+          <span class="state-pulse" aria-hidden="true"></span>
+          <span>{{ label("session.loading") }}</span>
+        </div>
+        <div v-else-if="sessionLoadError" class="session-state is-error">
+          <span>{{ label("session.load_failed") }}</span>
+          <button type="button" @click="loadSessionsWithRetry">{{ label("session.reload") }}</button>
+        </div>
         <button
           v-for="session in sessions"
           :key="session.id"
@@ -871,9 +1027,14 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
                       v-for="message in currentMessages"
                       :key="message.id"
                       class="message"
-                      :class="message.role === 'user' ? 'message-user' : 'message-agent'"
+                      :class="[message.role === 'user' ? 'message-user' : 'message-agent', { 'message-pending': message.state === 'pending', 'message-loading': message.state === 'loading' }]"
                     >
-                      <p>{{ message.content }}</p>
+                      <p v-if="message.state !== 'loading'">{{ message.content }}</p>
+                      <div v-else class="typing-dots" :aria-label="label('chat.waiting')">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                      </div>
                     </article>
 
                     <article v-for="artifact in artifacts.slice(0, 3)" :key="artifact.id" class="artifact-card artifact-notice feed-card lit-surface">
@@ -884,6 +1045,19 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
                       </button>
                     </article>
                   </div>
+                </div>
+                <div v-if="providerNotice" class="provider-notice lit-surface">
+                  <div class="provider-notice-main">
+                    <strong>{{ providerNoticeTitle }}</strong>
+                    <span>{{ providerNoticeBody }}</span>
+                  </div>
+                  <div class="provider-notice-actions">
+                    <button type="button" @click="retryProviderRequest">{{ label("provider_error.retry") }}</button>
+                    <button v-if="providerNoticeDetails" type="button" @click="providerNoticeDetailsOpen = !providerNoticeDetailsOpen">
+                      {{ providerNoticeDetailsOpen ? label("provider_error.hide_details") : label("provider_error.show_details") }}
+                    </button>
+                  </div>
+                  <code v-if="providerNoticeDetailsOpen && providerNoticeDetails" class="provider-notice-details">{{ providerNoticeDetails }}</code>
                 </div>
               </div>
             </div>

@@ -39,21 +39,18 @@ import type {
   SkillWithFilePath,
   WorkspaceStore
 } from "@samurai-agent/workspace-store";
-
-interface MockProviderInput {
-  envelope: MessageEnvelope;
-  activeMemoryCount: number;
-}
-
-interface MockProviderOutput {
-  agentMessage: string;
-  artifactTitle: string;
-  artifactContent: string;
-  operations: Array<{
-    operation: string;
-    proposedEffects: string[];
-  }>;
-}
+export {
+  FakeProviderAdapter,
+  ProviderRegistry,
+  ProviderRequestError,
+  createProviderRegistryFromEnv,
+  type ProviderAdapter,
+  type ProviderDiagnostics,
+  type ProviderInput,
+  type ProviderOutput,
+  type ProviderToolCall
+} from "./provider";
+import { ProviderRequestError, type ProviderAdapter, type ProviderDiagnostics, type ProviderInput, type ProviderOutput, type ProviderToolCall } from "./provider";
 
 interface GatewayContext {
   source: "web" | "cron";
@@ -156,73 +153,32 @@ export interface AutomationRunRuntimeResult {
 
 export class RuntimeRequestError extends Error {
   constructor(
-    readonly code: "not_found" | "conflict" | "forbidden",
+    readonly code: "not_found" | "conflict" | "forbidden" | "provider_not_configured" | "provider_failed",
     message: string,
-    readonly payload?: ApprovalLifecycleResult | ArchiveMemoryRuntimeResult
+    readonly payload?: ApprovalLifecycleResult | ArchiveMemoryRuntimeResult,
+    readonly diagnostics?: ProviderDiagnostics
   ) {
     super(message);
     this.name = "RuntimeRequestError";
   }
 }
 
-export class MockProviderAdapter {
-  generate(input: MockProviderInput): MockProviderOutput {
-    const intent = input.envelope.user_intent;
-    const outputLocale = input.envelope.output_locale;
-    const isJapanese = outputLocale === "ja";
-    const needsOutboundApproval = /送信|メール|外部|公開|send|mail|publish|post/i.test(intent);
-    const needsDeleteApproval = /削除|消して|delete|remove/i.test(intent);
-    const wantsMemory = /覚えて|今後|好み|preference|remember|from now on/i.test(intent);
-
-    const operations: MockProviderOutput["operations"] = [
-      {
-        operation: "artifact.create",
-        proposedEffects: ["Create a local markdown draft artifact."]
-      },
-      {
-        operation: "memory.session.create",
-        proposedEffects: ["Keep the current user intent in session memory."]
-      }
-    ];
-
-    if (wantsMemory) {
-      operations.push({
-        operation: "memory.topic.create",
-        proposedEffects: ["Create a visible topic memory candidate."]
-      });
-    }
-
-    if (needsOutboundApproval) {
-      operations.push({
-        operation: "external.send",
-        proposedEffects: ["Prepare an outbound action. No external effect is executed in v1."]
-      });
-    }
-
-    if (needsDeleteApproval) {
-      operations.push({
-        operation: "workspace.delete",
-        proposedEffects: ["Prepare a delete operation. No deletion is executed in v1."]
-      });
-    }
-
-    return {
-      agentMessage: isJapanese
-        ? `下書きを作りました。参照Memoryは${input.activeMemoryCount}件です。承認が必要な操作だけ保留します。`
-        : `Draft created. ${input.activeMemoryCount} memory item(s) were considered. Only approval-gated work is held.`,
-      artifactTitle: isJapanese ? "作業メモ" : "Workspace note",
-      artifactContent: buildArtifactContent(intent, outputLocale, input.activeMemoryCount),
-      operations
-    };
-  }
+interface OperationPlan {
+  operation: string;
+  proposedEffects: string[];
+  toolCall?: ProviderToolCall;
+  artifact?: {
+    title: string;
+    content: string;
+    preview?: string;
+  };
 }
 
 export class AgentRuntime {
-  private readonly provider = new MockProviderAdapter();
-
   constructor(
     private readonly store: WorkspaceStore,
-    private readonly emit: RuntimeEventSink = () => undefined
+    private readonly emit: RuntimeEventSink = () => undefined,
+    private readonly provider?: ProviderAdapter
   ) {}
 
   async createSession(input: {
@@ -257,6 +213,14 @@ export class AgentRuntime {
     const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
     const outputLocale = input.output_locale ?? session.output_locale ?? settings.output_locale;
     const envelope = createEnvelope(input.content, inputLocale, outputLocale, input.metadata);
+    const activeMemory = await retrieveActiveMemory(this.store, input.content);
+    const recentMessages = (await this.store.listMessages(session.id)).slice(-10);
+    const providerOutput = await this.generateProviderOutput({
+      envelope,
+      activeMemory,
+      recentMessages
+    });
+
     const userMessage = await this.saveMessage({
       id: createId("message"),
       session_id: session.id,
@@ -268,12 +232,6 @@ export class AgentRuntime {
       created_at: envelope.received_at
     });
 
-    const activeMemory = await retrieveActiveMemory(this.store, input.content);
-    const providerOutput = this.provider.generate({
-      envelope,
-      activeMemoryCount: activeMemory.length
-    });
-
     const operations: OperationRecord[] = [];
     const policyDecisions: PolicyDecisionRecord[] = [];
     const artifacts: ArtifactRecord[] = [];
@@ -282,7 +240,7 @@ export class AgentRuntime {
     const auditRecords: AuditRecord[] = [];
     const rollbackPoints: RollbackPoint[] = [];
 
-    for (const operationPlan of providerOutput.operations) {
+    for (const operationPlan of this.createOperationPlans(providerOutput)) {
       const operation = await this.createOperation(session, envelope, operationPlan.operation, operationPlan.proposedEffects);
       operations.push(operation);
 
@@ -299,7 +257,7 @@ export class AgentRuntime {
       operation.policy_decision_id = decision.id;
 
       if (decision.decision === "allow_auto" || decision.decision === "allow_with_audit") {
-        const execution = await this.executeAllowedOperation(operation, decision, envelope, providerOutput);
+        const execution = await this.executeAllowedOperation(operation, decision, envelope, operationPlan);
         operation.status = "completed";
         operation.result_ref = execution.resultRef;
         operation.updated_at = nowIso();
@@ -342,7 +300,7 @@ export class AgentRuntime {
       id: createId("message"),
       session_id: session.id,
       role: "agent",
-      content: providerOutput.agentMessage,
+      content: providerOutput.content,
       input_locale: envelope.input_locale,
       output_locale: envelope.output_locale,
       created_at: nowIso()
@@ -1043,7 +1001,7 @@ export class AgentRuntime {
     operation: OperationRecord,
     decision: PolicyDecisionRecord,
     envelope: MessageEnvelope,
-    providerOutput: MockProviderOutput
+    operationPlan: OperationPlan
   ): Promise<{
     resultRef?: OperationRecord["result_ref"];
     artifact?: ArtifactRecord;
@@ -1053,11 +1011,14 @@ export class AgentRuntime {
     summary: string;
   }> {
     if (operation.operation === "artifact.create") {
+      if (!operationPlan.artifact) {
+        throw new RuntimeRequestError("conflict", "artifact_missing");
+      }
       const artifact = await createArtifactDraft({
         store: this.store,
         operation,
-        title: providerOutput.artifactTitle,
-        content: providerOutput.artifactContent,
+        title: operationPlan.artifact.title,
+        content: operationPlan.artifact.content,
         locale: envelope.output_locale,
         sourceLocales: [envelope.input_locale],
         createdBy: "runtime"
@@ -1176,6 +1137,94 @@ export class AgentRuntime {
     return audit;
   }
 
+  private async generateProviderOutput(input: ProviderInput): Promise<ProviderOutput> {
+    if (!this.provider) {
+      throw new RuntimeRequestError("provider_not_configured", "No LLM provider is configured.");
+    }
+
+    try {
+      return await this.provider.generate(input);
+    } catch (error) {
+      if (error instanceof ProviderRequestError) {
+        throw new RuntimeRequestError(error.code, error.message, undefined, {
+          ...error.diagnostics,
+          provider: error.diagnostics.provider ?? this.provider.id,
+          model: error.diagnostics.model ?? this.provider.model
+        });
+      }
+      throw new RuntimeRequestError("provider_failed", error instanceof Error ? error.message : "Provider failed.");
+    }
+  }
+
+  private createOperationPlans(providerOutput: ProviderOutput): OperationPlan[] {
+    const operations: OperationPlan[] = [
+      {
+        operation: "memory.session.create",
+        proposedEffects: ["Keep the current user intent in session memory."]
+      }
+    ];
+
+    for (const toolCall of providerOutput.toolCalls) {
+      const plan = this.operationPlanFromToolCall(toolCall);
+      if (!plan) {
+        continue;
+      }
+      if (plan.operation === "artifact.create") {
+        operations.unshift(plan);
+      } else {
+        operations.push(plan);
+      }
+    }
+
+    return operations;
+  }
+
+  private operationPlanFromToolCall(toolCall: ProviderToolCall): OperationPlan | undefined {
+    if (toolCall.name === "create_artifact") {
+      const title = stringArg(toolCall.arguments.title).trim();
+      const content = stringArg(toolCall.arguments.content).trim();
+      if (!title || !content) {
+        return undefined;
+      }
+      return {
+        operation: "artifact.create",
+        proposedEffects: ["Create a local markdown draft artifact."],
+        toolCall,
+        artifact: {
+          title,
+          content,
+          ...(stringArg(toolCall.arguments.preview).trim() ? { preview: stringArg(toolCall.arguments.preview).trim() } : {})
+        }
+      };
+    }
+
+    if (toolCall.name === "remember_topic") {
+      return {
+        operation: "memory.topic.create",
+        proposedEffects: ["Create a visible topic memory candidate."],
+        toolCall
+      };
+    }
+
+    if (toolCall.name === "request_external_send") {
+      return {
+        operation: "external.send",
+        proposedEffects: ["Prepare an outbound action. No external effect is executed in v1."],
+        toolCall
+      };
+    }
+
+    if (toolCall.name === "request_delete") {
+      return {
+        operation: "workspace.delete",
+        proposedEffects: ["Prepare a delete operation. No deletion is executed in v1."],
+        toolCall
+      };
+    }
+
+    return undefined;
+  }
+
   private async rebuildActivity(): Promise<ActivityInboxItem[]> {
     const activity = buildActivityInboxItems(await this.store.readActivityInputs());
     await this.emit("activity.updated", activity);
@@ -1201,6 +1250,10 @@ function createEnvelope(
     metadata: metadata as MessageEnvelope["metadata"],
     received_at: nowIso()
   };
+}
+
+function stringArg(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function createGatewayEnvelope(
@@ -1247,40 +1300,6 @@ function parseSkillMarkdown(markdown: string): { frontmatter: SkillFrontmatter; 
     frontmatter: SkillFrontmatterSchema.parse(JSON.parse(rawFrontmatter)),
     content: contentStart === -1 ? "" : markdown.slice(contentStart + 1).trim()
   };
-}
-
-function buildArtifactContent(intent: string, outputLocale: SupportedLocale, activeMemoryCount: number): string {
-  if (outputLocale === "ja") {
-    return [
-      "# 作業メモ",
-      "",
-      `依頼: ${intent}`,
-      "",
-      "## Draft",
-      "",
-      "この下書きはローカルWorkspaceに保存されました。",
-      "外部送信、公開、削除はこの初期版では実行しません。",
-      "",
-      "## Context",
-      "",
-      `参照したActive Memory: ${activeMemoryCount}件`
-    ].join("\n");
-  }
-
-  return [
-    "# Workspace note",
-    "",
-    `Request: ${intent}`,
-    "",
-    "## Draft",
-    "",
-    "This draft was saved in the local workspace.",
-    "Outbound send, publishing, and deletion are not executed in this initial build.",
-    "",
-    "## Context",
-    "",
-    `Active memory considered: ${activeMemoryCount}`
-  ].join("\n");
 }
 
 function memoryRef(memory: MemoryFrontmatter & { file_path?: string }) {

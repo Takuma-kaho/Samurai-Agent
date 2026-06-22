@@ -1,19 +1,30 @@
 import cors from "cors";
 import express from "express";
 import type { Express } from "express";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import type { Server as HttpServer } from "node:http";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Server as SocketServer } from "socket.io";
 import { createId, nowIso, supportedLocales, type SettingsRecord, type SupportedLocale } from "@samurai-agent/core-schemas";
-import { AgentRuntime, RuntimeRequestError } from "@samurai-agent/runtime";
+import {
+  AgentRuntime,
+  RuntimeRequestError,
+  createProviderRegistryFromEnv,
+  type ProviderAdapter,
+  type ProviderDiagnostics,
+  type ProviderRegistry
+} from "@samurai-agent/runtime";
 import type { RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 
 const defaultPort = 4317;
+const defaultEnvPath = fileURLToPath(new URL("../../../.env", import.meta.url));
+const loadedEnvPaths = new Set<string>();
 
 export interface CreateApiServerOptions {
   workspaceDataDir?: string;
+  provider?: ProviderAdapter;
 }
 
 export interface ApiServer {
@@ -24,7 +35,19 @@ export interface ApiServer {
   runtime: AgentRuntime;
 }
 
+export function loadServerEnv(envPath = defaultEnvPath): void {
+  if (!existsSync(envPath) || loadedEnvPaths.has(envPath)) {
+    return;
+  }
+  if (typeof process.loadEnvFile !== "function") {
+    throw new Error(`Node.js process.loadEnvFile() is required to load ${envPath}. Upgrade Node.js or provide env vars through the shell.`);
+  }
+  process.loadEnvFile(envPath);
+  loadedEnvPaths.add(envPath);
+}
+
 export async function createApiServer(options: CreateApiServerOptions = {}): Promise<ApiServer> {
+  loadServerEnv();
   const workspaceDataDir = options.workspaceDataDir ?? process.env.WORKSPACE_DATA_DIR ?? fileURLToPath(new URL("../../../workspace-data", import.meta.url));
   const store = await WorkspaceStore.create({ rootDir: workspaceDataDir });
   const app = express();
@@ -38,13 +61,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   const emit: RuntimeEventSink = async (name, payload) => {
     io.emit(name, payload);
   };
-  const runtime = new AgentRuntime(store, emit);
+  const provider = options.provider ?? createProviderRegistryFromEnv();
+  const runtime = new AgentRuntime(store, emit, provider);
 
   app.use(cors());
   app.use(express.json({ limit: "2mb" }));
 
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true });
+    res.json({ ok: true, llm: providerStatus(provider) });
   });
 
   app.post("/api/chat/sessions", async (req, res, next) => {
@@ -430,7 +454,18 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (error instanceof RuntimeRequestError) {
-      const status = error.code === "not_found" ? 404 : error.code === "forbidden" ? 403 : 409;
+      const status =
+        error.code === "not_found"
+          ? 404
+          : error.code === "forbidden"
+            ? 403
+            : error.code === "provider_failed"
+              ? 502
+              : 409;
+      if (error.code === "provider_not_configured" || error.code === "provider_failed") {
+        res.status(status).json(providerErrorPayload(error));
+        return;
+      }
       res.status(status).json({
         error: error.code,
         message: error.message,
@@ -449,12 +484,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   return { app, httpServer, io, store, runtime };
 }
 
-export async function startServer(port = Number(process.env.PORT ?? defaultPort)): Promise<ApiServer> {
+export async function startServer(port?: number): Promise<ApiServer> {
+  loadServerEnv();
+  const resolvedPort = port ?? Number(process.env.PORT ?? defaultPort);
   const server = await createApiServer();
   await new Promise<void>((resolve) => {
-    server.httpServer.listen(port, "127.0.0.1", resolve);
+    server.httpServer.listen(resolvedPort, "127.0.0.1", resolve);
   });
-  console.log(`Samurai Agent API listening on http://127.0.0.1:${port}`);
+  console.log(`Samurai Agent API listening on http://127.0.0.1:${resolvedPort}`);
   return server;
 }
 
@@ -515,6 +552,54 @@ function runtimeErrorPayload(payload: NonNullable<RuntimeRequestError["payload"]
     return approvalLifecyclePayload(payload);
   }
   return archiveMemoryPayload(payload);
+}
+
+function providerErrorPayload(error: RuntimeRequestError) {
+  const code = error.code === "provider_not_configured" ? "provider_not_configured" : "provider_failed";
+  const diagnostic = safeProviderDiagnostics(error.diagnostics, code);
+  return {
+    error: error.code,
+    reason: diagnostic.reason,
+    provider: diagnostic.provider,
+    model: diagnostic.model,
+    status: diagnostic.status,
+    retryable: diagnostic.retryable
+  };
+}
+
+function safeProviderDiagnostics(
+  diagnostics: ProviderDiagnostics | undefined,
+  code: "provider_not_configured" | "provider_failed"
+): ProviderDiagnostics {
+  return {
+    provider: safeShortString(diagnostics?.provider),
+    model: safeShortString(diagnostics?.model),
+    status: diagnostics?.status,
+    reason: diagnostics?.reason ?? (code === "provider_not_configured" ? "not_configured" : "unknown"),
+    retryable: diagnostics?.retryable ?? false
+  };
+}
+
+function safeShortString(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return value.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]").slice(0, 80);
+}
+
+function providerStatus(provider: ProviderAdapter) {
+  if ("getStatus" in provider && typeof provider.getStatus === "function") {
+    return (provider as ProviderRegistry).getStatus();
+  }
+  return {
+    configured: true,
+    primary: {
+      provider: provider.id,
+      model: provider.model,
+      configured: true
+    },
+    fallbacks: []
+  };
 }
 
 const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";

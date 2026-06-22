@@ -3,7 +3,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
-import { AgentRuntime, RuntimeRequestError } from "./index";
+import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, type ProviderOutput } from "./index";
 
 const roots: string[] = [];
 
@@ -13,7 +13,42 @@ async function createRuntime() {
   const store = await WorkspaceStore.create({ rootDir: root });
   return {
     store,
-    runtime: new AgentRuntime(store)
+    runtime: new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", fakeProviderOutput))
+  };
+}
+
+function fakeProviderOutput(input: Parameters<FakeProviderAdapter["generate"]>[0]): ProviderOutput {
+  const intent = input.envelope.user_intent;
+  const isJapanese = input.envelope.output_locale === "ja";
+  const wantsMalformedArtifact = /malformed artifact/i.test(intent);
+  const wantsArtifact = /作って|下書き|提案書|draft|memo|note/i.test(intent);
+  const toolCalls: ProviderOutput["toolCalls"] = [];
+  if (wantsMalformedArtifact) {
+    toolCalls.push({
+      name: "create_artifact",
+      arguments: {}
+    });
+  } else if (wantsArtifact) {
+    toolCalls.push({
+      name: "create_artifact",
+      arguments: {
+        title: isJapanese ? "作業メモ" : "Workspace note",
+        content: isJapanese ? `# 作業メモ\n\n${intent}` : `# Workspace note\n\n${intent}`
+      }
+    });
+  }
+  if (/覚えて|今後|preference|remember/i.test(intent)) {
+    toolCalls.push({ name: "remember_topic", arguments: {} });
+  }
+  if (/送信|メール|外部|公開|send|mail|publish|post/i.test(intent)) {
+    toolCalls.push({ name: "request_external_send", arguments: {} });
+  }
+  if (/削除|消して|delete|remove/i.test(intent)) {
+    toolCalls.push({ name: "request_delete", arguments: {} });
+  }
+  return {
+    content: isJapanese ? "対応しました。" : "Done.",
+    toolCalls
   };
 }
 
@@ -22,6 +57,21 @@ afterEach(async () => {
 });
 
 describe("agent runtime", () => {
+  it("keeps plain chat as content without creating artifacts", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "こんにちは",
+      output_locale: "ja"
+    });
+    await store.close();
+
+    expect(result.messages.find((message) => message.role === "agent")?.content).toBe("対応しました。");
+    expect(result.artifacts).toEqual([]);
+    expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(false);
+  });
+
   it("runs chat through operation policy audit artifact", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
@@ -33,9 +83,25 @@ describe("agent runtime", () => {
     await store.close();
 
     expect(result.artifacts.length).toBeGreaterThan(0);
+    expect(result.messages.find((message) => message.role === "agent")?.content).toBeTruthy();
     expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(true);
     expect(result.policyDecisions.some((decision) => decision.decision === "allow_auto")).toBe(true);
     expect(result.auditRecords.length).toBeGreaterThan(0);
+  });
+
+  it("ignores malformed artifact tool calls without failing the chat turn", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "malformed artifact",
+      output_locale: "en"
+    });
+    await store.close();
+
+    expect(result.messages.find((message) => message.role === "agent")?.content).toBe("Done.");
+    expect(result.artifacts).toEqual([]);
+    expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(false);
   });
 
   it("keeps safe drafting while outbound work waits for approval", async () => {
@@ -278,6 +344,33 @@ describe("agent runtime", () => {
       uri: `automation-runs/${result.automationRun.id}`
     });
     expect(result.auditRecord.actor_identity).toBe("owner_scheduled");
+  });
+
+  it("ignores unknown and invalid tool calls without external effects", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", {
+      content: "確認しました。",
+      toolCalls: [
+        { name: "unknown_tool", arguments: {} },
+        { name: "create_artifact", arguments: { title: "壊れたArtifact" } },
+        { name: "request_delete", arguments: { risk: "low", approval: "none" } }
+      ]
+    }));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "削除して",
+      output_locale: "ja"
+    });
+    await store.close();
+
+    expect(result.artifacts).toEqual([]);
+    expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(false);
+    expect(result.operations.some((operation) => operation.operation === "unknown_tool")).toBe(false);
+    expect(result.operations.find((operation) => operation.operation === "workspace.delete")?.status).toBe("pending_approval");
   });
 });
 
