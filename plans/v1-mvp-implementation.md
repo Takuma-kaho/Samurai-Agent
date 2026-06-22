@@ -11,64 +11,61 @@ source of truthの優先順位は以下。
 3. `PUBLIC_NAMING.md`: 公開面の命名ルール
 4. `plans/`: 作業計画、レビュー、改訂方針
 
-この計画は `ARCHITECTURE.md v0.6` を前提にする。
+この計画は `ARCHITECTURE.md v0.7` を前提にする。
 
 ---
 
 ## 1. v1 MVPの完成条件
 
-v1 MVPは、機能を全部そろえることではない。
-
 完成条件は、以下の縦切りが実際に動くこと。
 
 ```text
-Chat
+Chat Shell
 ↓
 Surface Protocol
 ↓
-MessageEnvelope
+Host Orchestrator
 ↓
-Session routing
+MessageEnvelope / Session context
 ↓
 Active Memory retrieval
 ↓
 Skill selection
 ↓
-Proposal Capability
+AgentBackendRegistry
 ↓
-OperationRecord
+mockable Backend cassette
 ↓
-PolicyEvaluationInput
+BackendEventBridge
 ↓
-evaluatePolicy(input): PolicyDecisionRecord
+normalized AgentEvent
 ↓
-Artifact draft
+Artifact draft / Workspace change
 ↓
-Memory / Collection minimal update
+Workspace Store
 ↓
-ApprovalRequest if needed
+Memory suggestion / Skill candidate
 ↓
-AuditRecord
+Reflection job
 ↓
-RollbackPoint
-↓
-ActivityInboxItem read model + Chat Shell surfacing + Audit View
+Chat Shell + Context Drawer
 ```
 
-この縦切りは、機能一覧を広げるためではなく、MulmoClaude由来のGUI / Workspace操作をAgent Backend cassetteへ流し、結果をWorkspace / Memory / Skillへ戻せるかを確認するためのものでもある。
+この縦切りは、MulmoClaude由来のGUI / Workspace操作をAgent Backend cassetteへ流し、結果をWorkspace / Memory / Skillへ戻せるかを確認するためのものである。
 
 v1では、画面だけを先に作る状態にしない。
 
-GUIから出た操作が、Surface Protocol、Agent Backend cassette、Policy、Audit、Workspace更新まで通ることを完成条件に含める。
+GUIから出た操作が、Host、Backend cassette、Backend event、Workspace更新まで通ることを完成条件に含める。
 
 ユーザーから見た完成条件。
 
 - Chatから依頼できる。
+- 選ばれたBackendが見える。
+- Backendの進行状況がContext Drawerに出る。
 - 生成されたArtifactを画面で見られる。
-- Agentが何を読んで、何を変えたかAuditで追える。
-- 承認が必要なoperationだけ止まり、下書きや説明は続く。
-- Memoryに保存された内容を確認・無効化できる。
-- Chat Shell内の補助表示で、自律実行、承認待ち、失敗、rollback候補に気づける。
+- Workspaceに何が変わったか確認できる。
+- Memory suggestionを確認できる。
+- Skill candidateを確認できる。
 - UI、Agent出力、Memory、Artifactがlocale前提で壊れない。
 
 ---
@@ -79,20 +76,20 @@ v1に入れるもの。
 
 | 領域 | 対象 |
 | --- | --- |
-| GUI | Chat Shell / Artifact Card / Workspace Peek / Context Drawer / Memory View / Audit View |
-| Surface Protocol | GUI operation / artifact update / approval request の最小表現 |
-| Approval / Activity Inbox | Chat Shellに付随するread model / 補助表示。独立surfaceにしない |
+| GUI | Chat Shell / Artifact Card / Workspace Peek / Context Drawer / Memory View / Run History |
+| Surface Protocol | GUI operation / artifact update / backend event の最小表現 |
 | Agent Backend | AgentBackend interface / Backend registry / Event stream / Session store |
-| Policy | Capability manifest / OperationRecord / ApprovalRequest / PolicyDecisionRecord |
+| Backend Event | normalized AgentEvent / BackendRunRecord / BackendEventRecord |
+| Workspace History | WorkspaceChangeRecord / ChangeHistoryEntry read model |
 | Localization / i18n | 8 locale seed、locale file、output_locale付きPromptBuilder、locale-aware schema |
 | Workspace store | filesystem + SQLite |
 | Memory | session / provisional / topic / Active Memory minimal |
 | Artifact | draft作成、保存、参照 |
 | Skill | candidate生成、project保存、skill index生成 |
 | Collection | schema定義、record作成、小さなpatch適用、任意のnotes読み取り |
-| Audit | AuditRecord、RollbackPoint、ActivityInboxItem read model |
+| ActionCatalog | Hostが呼べる操作の名前、schema、実装先 |
 | Gateway | web source、cron sourceの入口だけ |
-| Automation | memory reviewの小さなcron |
+| Automation | memory review / skill candidate review の小さなcron |
 
 ---
 
@@ -108,8 +105,12 @@ v1ではやらないもの。
 - 自由HTML全面解禁。
 - MoA / GEPA。
 - shared skill ecosystem。
-- skill curator / collection check cron。
 - OS通知、メール通知、外部push通知。
+- ClaudeCodeBackend完成版。
+- CodexBackend完成版。
+- SamuraiNativeBackend完成版。
+- Generated UI全面解禁。
+- Workspace復元機能。
 
 これらは、v1後続、UI詳細、公開前polishに分類する。
 
@@ -124,12 +125,10 @@ apps/
 
 packages/
   core-schemas/
-  capability-registry/
+  agent-backends/
+  runtime/
   workspace-store/
   localization/
-  policy-engine/
-  agent-backends/
-  audit/
   memory/
   artifacts/
   skills/
@@ -140,13 +139,14 @@ packages/
 
 責務を混ぜない。
 
-- GUIは、人間が見る、直す、承認する場所。
+- GUIは、人間が見る、直す、理解する場所。
+- Hostは、Workspace文脈を集め、Backend cassetteに作業を渡し、結果を戻す場所。
 - Agent Backendは、Hostから渡された作業を実行する差し替え可能な実行部。
 - `ProviderAdapter` は、Agent Backend全体ではなく `SamuraiNativeBackend` 内部のモデル差し替え口。
 - Gatewayは、入口とsession routingを扱う場所。
 - Memoryは、長期的に残す事実、好み、手順、文脈。
-- Policyは、何を自動でできるか、何を承認すべきかを決める場所。
-- Auditは、何が起きたか、なぜ起きたか、戻せるかを残す場所。
+- Skillは、繰り返し使える作業手順。
+- Run Historyは、表示、デバッグ、セッション再開のための履歴。
 
 ---
 
@@ -156,24 +156,39 @@ packages/
 
 1. Core Schemas
 2. Localization / i18n scaffold
-3. Capability registry / manifest seed
-4. Surface Protocol minimal
-5. Workspace store
-6. Policy Engine
-7. Audit / OperationRecord / ApprovalRequest
-8. Chat session
-9. GUI to Agent Backend cassette connection spike
-10. Memory minimal
+3. Surface Protocol minimal
+4. Workspace store
+5. AgentBackend interface
+6. Backend registry
+7. BackendEventBridge
+8. Mock Backend cassette
+9. Chat session
+10. GUI to Backend cassette connection spike
 11. Artifact draft
-12. ActivityInboxItem read model
-13. Chat Shell surfacing
-14. Skill / Collection minimal backend
+12. Run History / Backend event surfacing
+13. Memory minimal
+14. Memory suggestion
+15. Skill candidate
+16. Reflection job
+17. Skill / Collection minimal backend
+
+最初の成功条件は、Claude Code本体を完全に動かすことではない。
+
+まずは、mockable Backend cassetteで以下を通す。
+
+- cassette選択。
+- run作成。
+- event stream。
+- Artifact draft保存。
+- Workspace change保存。
+- Memory suggestion表示。
+- Skill candidate表示。
 
 ---
 
 ## 6. Core Schemas
 
-最初に `ARCHITECTURE.md v0.6` の `5.14 Canonical Core Schemas` を型として固定する。
+最初に `ARCHITECTURE.md v0.7` の `Canonical Core Schemas` を型として固定する。
 
 必須。
 
@@ -182,9 +197,11 @@ packages/
 - `TranslationStatus`
 - `LocalizedText`
 - `MessageEnvelope`
-- `PolicyEvaluationInput`
-- `CapabilityManifest`
-- `CapabilityOperation`
+- `AgentBackendConfig`
+- `BackendRunRecord`
+- `BackendEventRecord`
+- `WorkspaceChangeRecord`
+- `ActionCatalogEntry`
 - `MemoryFrontmatter`
 - `SkillFrontmatter`
 - `ArtifactRecord`
@@ -192,17 +209,11 @@ packages/
 - `CollectionRecord`
 - `CollectionPatch`
 - `GrantRecord`
-- `OperationRecord`
-- `ApprovalRequest`
-- `PolicyDecisionRecord`
-- `AuditRecord`
-- `RollbackPoint`
 
-`ActivityInboxItem` と `SkillIndexEntry` は保存モデルではなくread model。
+`SkillIndexEntry` と `ChangeHistoryEntry` は保存モデルではなくread model。
 
-`ActivityInboxItem` は、`ApprovalRequest`、`OperationRecord`、`PolicyDecisionRecord`、`AuditRecord`、`RollbackPoint` から生成する。
-activity_type は `auto_run`、`approval_required`、`anomaly`、`rollback_expiring`、`boundary_change`、`failure` などを扱う。
-独立したUI surfaceを作る根拠にしない。
+`ChangeHistoryEntry` は、WorkspaceやArtifactで「何が変わったか」を見るための表示用read model。
+復元期限や自動復元機能はv1中核に入れない。
 
 locale関連の必須フィールド。
 
@@ -216,11 +227,53 @@ Collectionの補助文脈。
 - v1のCollection minimal backendは `schema.json`、`records/*.json`、`SKILL.md` を主対象にする。
 - 任意の `notes/*.md` は保存・読み取り対象に含める。
 - `notes/*.md` は、AIが読む補助文脈であり、v1ではpatch/API/validator対象にしない。
-- `notes/*.md` だけを根拠に、高リスク操作の自動実行や承認判断を行わない。
 
 ---
 
-## 7. Localization / i18n 初期実装
+## 7. Agent Backend MVP
+
+v1の中核は、Agent Backend cassetteを差し替えられること。
+
+最初に作るもの。
+
+- `AgentBackend` interface。
+- `AgentBackendRegistry`。
+- `BackendRunRecord`。
+- `BackendEventRecord`。
+- `BackendEventBridge`。
+- `MockBackend`。
+
+Backend eventの代表例。
+
+```text
+run_started
+text_delta
+tool_call_started
+tool_call_output
+artifact_created
+workspace_change_suggested
+memory_suggested
+skill_candidate_created
+backend_waiting_for_native_input
+run_completed
+run_failed
+```
+
+`backend_waiting_for_native_input` は、外部Backendが自前で入力待ちになったことを表示するためのevent。
+Hostは可否判定せず、状態表示または中継だけを行う。
+
+Backend候補。
+
+| Backend | v1での扱い |
+| --- | --- |
+| MockBackend | 最初に通す |
+| ClaudeCodeBackend | MulmoClaude寄せの第一候補。後続で実装 |
+| CodexBackend | 互換候補。後続で実装 |
+| SamuraiNativeBackend | 自前Runtime候補。ProviderAdapterを内部に持つ |
+
+---
+
+## 8. Localization / i18n 初期実装
 
 多言語対応は、v1後続のpolishではなく初期scaffoldに含める。
 
@@ -256,7 +309,6 @@ de
 - key欠落は許可しない。
 - UI文言はlocale fileから取得する。
 - 原文は必ず保持し、翻訳は派生データとして扱う。
-- Policy / Audit / Capability の内部値は翻訳しない。
 - `SamuraiNativeBackend` のPromptBuilderは必ず `output_locale` を受け取る。
 
 実装時に混ぜないlocale。
@@ -272,51 +324,88 @@ de
 
 ---
 
-## 8. Policy Engine
-
-正準API。
-
-```text
-evaluatePolicy(input): PolicyDecisionRecord
-```
-
-評価の基本。
-
-- risk / scope / reversibility / external impact / secret requirement はLLMに決めさせない。
-- それらは `CapabilityManifest.operations[]` から読む。
-- grant粒度は `capability_id + operation + actor_identity + channel + resource_scope`。
-- manifest versionやrisk snapshotが変わったら再確認する。
-- 複数条件が当たる場合は、最も制限的なDecisionを採用する。
-
----
-
 ## 9. GUI最小要件
 
 v1必須画面。
 
-- Chat Shell surfacing: ActivityInboxItem、badge、inline banner、Context Drawerへの導線。
-- Chat: 依頼、実行状況、承認パネル。
+- Chat: 依頼、Backend進行状況、結果表示。
+- Context Drawer: Backend event、Tool log、Memory suggestion、Skill candidate。
 - Artifact: draft表示、保存状態、参照元。
 - Memory: provisional / topic の確認、無効化。
-- Audit: operation、policy decision、affected resources、rollback point。
+- Run History: Backend run、event、エラー、再開に必要な履歴。
 
 専用画面なしでよいもの。
 
 - Skill: index生成とproject保存まで。
 - Collection: schema、record、patch適用まで。
-- Approval / Activity Inbox: Chat Shellに付随するread model / 補助表示にする。独立surfaceにしない。
+- Change History: Artifact / Workspace 詳細から辿る補助履歴にする。
+
+Run Historyに持たせるもの。
+
+- Backend run。
+- Backend event。
+- tool output要約。
+- error。
+- Artifact / Memory / Skillへの導線。
+
+Run Historyに持たせないもの。
+
+- judgement。
+- host-side approval。
+- policy decision。
+- accountability。
+- audit。
+- rollback eligibility。
 
 ---
 
-## 10. Test Plan
+## 10. 後続コード置換の棚卸し
+
+今回のMarkdown更新では、実装コードは削除しない。
+
+ただし、後続で置換が必要な実装面は明示する。
+
+棚卸し対象。
+
+- `packages/core-schemas`
+- `packages/runtime`
+- `packages/policy-engine`
+- `packages/audit`
+- `packages/capability-registry`
+- `packages/workspace-store`
+- `packages/ui-protocol`
+- `apps/server`
+- `apps/web`
+
+後続実装の完了条件。
+
+- 旧安全ループ用パッケージを削除または履歴系パッケージへ改名する。
+- 旧manifest系schemaを `ActionCatalogEntry` 系へ置換する。
+- `/api/audit`、`/api/activity` を `/api/runs`、`/api/run-events` などへ置換する。
+- socket eventを `backend.run.*`、`backend.event.*`、`workspace.change.*`、`memory.suggestion.*`、`skill.candidate.*` へ寄せる。
+- UI locale keyから旧中核語彙を削除または履歴語彙へ置換する。
+- `runtime.runChatTurn()` 直結を、後続で `AgentBackendRegistry` 経由に置換する。
+
+---
+
+## 11. Test Plan
 
 最低限通すもの。
 
 - `git diff --check`
-- `git diff -- ARCHITECTURE.md plans/v1-mvp-implementation.md AGENTS.md PRINCIPLES.md PUBLIC_NAMING.md`
-- `rg -n "DESIGN.md" .`
-- `rg -n "PUBLIC_NAMING.md" AGENTS.md PRINCIPLES.md PUBLIC_NAMING.md`
-- `rg -n "locale|i18n|多言語|Localization" PRINCIPLES.md ARCHITECTURE.md plans/v1-mvp-implementation.md`
+- `git diff -- PRINCIPLES.md ARCHITECTURE.md plans/v1-mvp-implementation.md AGENTS.md WEB_UI_DESIGN.md PUBLIC_NAMING.md`
+
+旧中核語彙検索は、対象6ファイルでゼロを目標にする。
+検索語は、v0.6以前の安全中核、decision系schema、manifest系schema、activity系read model、強制確認系enumを対象にする。
+
+単体語としての `Policy`、`Audit`、`Rollback`、`Approval` は、公開命名や過去コード棚卸しの文脈で残る可能性がある。
+ただし、中核概念としては残さない。
+
+新方針語彙の検索。
+
+```sh
+rg -n "Agent Backend cassette|ClaudeCodeBackend|CodexBackend|SamuraiNativeBackend|BackendEventRecord|BackendRunRecord|Memory suggestion|Skill candidate|Reflection|Curator|Workspace|Artifact|Collection" PRINCIPLES.md ARCHITECTURE.md plans/v1-mvp-implementation.md AGENTS.md WEB_UI_DESIGN.md PUBLIC_NAMING.md
+```
 
 参照元固有名の検索。
 
@@ -345,26 +434,9 @@ rg -n "MulmoClaude|Hermes Agent|OpenClaw|MulmoScript|gui-chat-protocol|Claude Co
 - public docs
 - example code
 
-Policy fixture観点。
-
-- 全 decision 分岐。
-- grant 有効 / 期限切れ / 失効 / version不一致。
-- external content 由来の高リスク intent。
-- approval pending 中に安全な作業だけ継続するケース。
-- Artifact / Memory / Collection / Skill / Operation が `ResourceRef` で追えるケース。
-- 英語以外の外部コンテンツに危険命令が含まれても、owner instructionへ昇格しないケース。
-- 8 localeすべてでUI key欠落がないケース。
-
-i18n check観点。
-
-- `locales/{en,ja,zh,ko,es,pt-BR,fr,de}.json` のkeyが一致する。
-- `missing` translation statusが残っていない。
-- `verified / draft / missing` 以外のtranslation statusを拒否する。
-- `SamuraiNativeBackend` のpromptに `output_locale` が渡っていない場合はテストで落とす。
-
 ---
 
-## 11. 未確定事項の扱い
+## 12. 未確定事項の扱い
 
 実装を止める未確定事項は残さない。
 
@@ -374,4 +446,4 @@ i18n check観点。
 - UI詳細。
 - 公開前polish。
 
-v1実装中に迷った場合は、`ARCHITECTURE.md v0.6` の `5.14 Canonical Core Schemas` と `8.2 v1 MVP Cut Line` を優先する。
+v1実装中に迷った場合は、`ARCHITECTURE.md v0.7` の `10. v1 MVP Cut Line` を優先する。

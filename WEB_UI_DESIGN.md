@@ -9,7 +9,7 @@
 この文書は以下を上書きしない。
 
 - `PRINCIPLES.md`: 設計思想、判断基準、前提
-- `ARCHITECTURE.md`: Runtime、Gateway、Memory、Policy、Audit などの責務分解
+- `ARCHITECTURE.md`: Host、Agent Backend、Gateway、Memory、Skill、Workspace などの責務分解
 - `PUBLIC_NAMING.md`: 公開面の命名ルール
 
 この文書で決めるのは、画面の構成、見た目のトーン、CSSとして再利用すべき部品の考え方である。
@@ -18,7 +18,7 @@
 
 - Agent Runtime の仕様
 - Surface Protocol の型
-- DB / API / queue / policy evaluation の仕様
+- DB / API / queue / backend event の仕様
 - React / shadcn/ui への実装方法
 - 本番コンポーネントのファイル構成
 
@@ -37,20 +37,20 @@ Samurai Agent の Web UI は、以下を基本にする。
 最初に見える画面は、複雑なダッシュボードではなく、静かなチャット作業面にする。
 
 Chat-first は、初期表示だけではなくUI全体の主軸である。
-承認待ち、失敗、rollback候補、自律実行の見える化も、別のダッシュボードに逃がさず、Chat Shellに付随する補助表示として扱う。
+Backend進行状況、失敗、Memory/Skill候補、自律実行の見える化も、別のダッシュボードに逃がさず、Chat Shellに付随する補助表示として扱う。
 
 ただし、以下の面や導線を消す意味ではない。
 
 - Memory View
-- Audit View
+- Run History
 - Artifact Card
 - Settings
 - Workspace Peek
 
-Activity Inbox は、独立したUI surfaceではない。
-`ActivityInboxItem` read model を Chat Shell 内の badge、inline banner、Context Drawer、Audit View への導線として使う。
+Backend event は、独立したUI surfaceではない。
+Chat Shell 内の inline status、Context Drawer、Run History への導線として使う。
 
-Memory や Audit は、必要な時に確認できる専用面を持つ。
+Memory や Run History は、必要な時に確認できる専用面を持つ。
 Context Drawer はそれらの代替ではなく、作業中に軽く見る補助面である。
 
 ---
@@ -64,7 +64,7 @@ Context Drawer はそれらの代替ではなく、作業中に軽く見る補�
 | `Chat Empty` | 初期チャット画面。短い見出しと入力欄だけを中心にする |
 | `With Artifact` | 会話の中に成果物カードが出る状態 |
 | `Workspace Peek` | 成果物を軽い作業空間として開く状態 |
-| `Context Drawer` | Memory candidate、Approval、Tool log などの補助情報を見る状態 |
+| `Context Drawer` | Backend event、Memory suggestion、Skill candidate、Tool log などの補助情報を見る状態 |
 
 本番実装でも、いきなり固定2グリッドを主役にしない。
 
@@ -99,7 +99,7 @@ fullscreen shell では内部の scroll owner を明示し、prompt bar と side
 - Session list
 - Settings
 
-Memory、Skills、Audit、Policy などを左サイドバーに常時羅列しない。
+Memory、Skills、Run History、Backend settings などを左サイドバーに常時羅列しない。
 これらは専用画面、検索、コマンド、Context Drawer から到達できるようにする。
 Session list のタイトルは1行固定にする。
 長い session title は `...` で省略し、sidebar 自体を横に広げない。
@@ -145,12 +145,11 @@ Context Drawer は、作業中に必要な補助情報を置く場所である�
 
 置いてよいもの。
 
-- Memory candidate
-- Approval
+- Memory suggestion
+- Skill candidate
+- Backend event
 - Tool log
-- ActivityInboxItem
 - agent要確認イベント
-- Policy / Audit の軽い要約
 
 置きすぎないもの。
 
@@ -333,7 +332,7 @@ Artifact は、会話の成果物として自然に出す。
 - chat feed 内の compact preview card だけ、Dark mode で濃いグレー背景にしてよい
 - app 背景、stage、sidebar、prompt、workspace canvas まではグレー化しない
 - chat feed では「何が作られたか」だけを出す
-- `Artifact`、保存状態、Audit、operation、Draft などの内部メタ情報は chat feed に出さない
+- `Artifact`、保存状態、Backend run、Draft などの内部メタ情報は chat feed に出しすぎない
 - 表示は作成通知 + title + 最大2行previewに留める
 - action button は置かず、card全体クリックでWorkspaceを開く
 
@@ -354,7 +353,7 @@ Workspace Peek は、常時2グリッドではなく、必要時に開く作業�
 - workspace canvas は chat feed の scroll owner に含めない
 - workspace canvas 内の document surface は独立してスクロールする
 - feed 内には Artifact の compact preview だけを置き、Session Memory は chat feed に直接出さない
-- Artifact の operation / Audit metadata は workspace canvas で常時表示せず、Audit View / Context Drawer 側に残す
+- Artifact の backend run / change metadata は workspace canvas で常時表示せず、Run History / Context Drawer 側に残す
 - workspace canvas は DOM から出し入れせず、常設trackを class で開閉する
 - 開閉は grid column width、opacity、translate を約180msから220msで transition する
 - `prefers-reduced-motion: reduce` では transition を無効化する
@@ -368,7 +367,7 @@ Context Drawer は、補助情報を軽く見る場所である。
 ルール。
 
 - 右側に出す
-- Memory / Approval / Tool log のような短いブロックを置く
+- Memory suggestion / Skill candidate / Tool log のような短いブロックを置く
 - close button は枠線なしのghost
 - 専門家向けログに寄せすぎない
 - mobile / narrow width では下に落とす
@@ -426,7 +425,7 @@ UI内の文字は増やしすぎない。
 - Workspace は常時主役にしない
 - Context Drawer は補助情報であり、主画面を奪わない
 - Artifact は会話の成果物として自然に出す
-- Memory / Audit 専用画面の必要性は維持する
+- Memory / Run History 専用画面の必要性は維持する
 - Runtime / DB / API の仕様を UI 文書に混ぜない
 - 公開面に参照元固有名を出さない
 - `design-lab/web-ui-demo/styles.css` の見た目を丸ごとコピーせず、recipe単位で再構成する

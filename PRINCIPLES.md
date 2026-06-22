@@ -17,11 +17,7 @@
 ---
 
 ## 1. Samurai Agent が作るもの
-
-Samurai Agent は、チャットAIでもCLI Agentでもない。
-
-作るものは以下。
-
+Samurai Agentは、
 > 人間とAIが同じ作業机を触る、GUI-first な Personal Agent Workspace。
 
 その上に「自分専用に育つAI秘書」という体験を載せる。
@@ -29,10 +25,9 @@ Samurai Agent は、チャットAIでもCLI Agentでもない。
 重視すること。
 
 - 個人の記憶、好み、作業手順、成果物を長期的に扱う。
-- 人間が成果物、記憶、スキル、履歴、実行範囲を画面で確認できる。
-- Agent は境界内で自律的に観察、判断、実行、記録する。
-- 境界を越える時だけ人間を呼ぶ。
-- 実行結果は後から追える形で残す。
+- Agent の実行部は固定せず、外部Agentや自前Agentを差し替えられる。
+- 実行結果は Workspace、Artifact、Memory、Skill に戻ってくる。
+- 使うほど、Memory と Skill が育つ。
 
 ---
 
@@ -41,36 +36,33 @@ Samurai Agent は、チャットAIでもCLI Agentでもない。
 Samurai Agent は、以下を目指さない。
 
 - 単なるチャットボット。
-- CLI Agent のGUIラッパー。
-- MulmoClaude / Hermes Agent / OpenClaw の単純な合体。
-- 毎回ユーザー承認を求める承認UI中心のAgent。
+- CLI Agent の薄いGUIラッパー。
+- 独自の安全制御を主役にしたAgent基盤。
 - すべての会話、文章生成、思考をDSL化する仕組み。
 - 最初から多チャネルGateway、音声秘書、plugin marketplaceを全部載せた大きなシステム。
 
 特に重要な前提。
 
-- 承認を増やすことは、安全性そのものではない。
-- 承認が多すぎると、Agent Loop の価値が消える。
-- 安全は、承認ではなく、境界、権限、監査、復元可能性で作る。
+- 独自性は、安全制御ではなく、できることの拡張で出す。
+- 外部Agentが持つ確認や制限は尊重するが、Samurai Agent 側で独自の承認中核を作らない。
+- 記憶、スキル、成果物、Workspace体験を育てることを優先する。
 
 ---
 
 ## 3. GUI-first
-
-チャットは入口だが、本体ではない。
 
 本体は Workspace である。
 
 GUI-first である理由。
 
 - 成果物、表、グラフ、顧客情報、記憶、スキルは画面で見えた方が強い。
-- 人間が「何が起きたか」「何が保存されたか」「何を承認すべきか」を確認できる必要がある。
-- Agent の行動は、見えない裏側ではなく、画面上の活動として理解できるべき。
+- 人間が「何が起きたか」「何が保存されたか」「何が候補になったか」を確認できる必要がある。
+- Agent の行動は、見えない裏側ではなく、画面上の作業として理解できるべき。
 
 実装判断。
 
 - 迷ったら、チャット欄だけで完結させない。
-- Artifact、Memory、Skill、Policy、Audit が見える導線を優先する。
+- Artifact、Memory、Skill、Collection、Run History、Backend event が見える導線を優先する。
 - 画面で扱うべきものを、ログやプロンプト内だけに閉じ込めない。
 
 ---
@@ -90,7 +82,9 @@ Workspaceに置くもの。
 - collections
 - artifacts
 - sessions
-- audit
+- backend runs
+- backend events
+- workspace changes
 - files
 - indexes
 - system
@@ -103,47 +97,80 @@ Workspaceに置くもの。
 
 ---
 
-## 5. Policy-Bounded Agent Loop
+## 5. Agent Backend Cassette
 
-中核思想は **Policy-Bounded Agent Loop**。
-
-つまり以下。
+Samurai Agent の中核は、実行部を固定しない Host 構造である。
 
 ```text
-Human sets boundaries
-Agent loops inside boundaries
-Human intervenes on boundary crossing
+Samurai Agent Host
+  GUI / Workspace / Memory / Skill / Gateway
+  AgentBackend cassette
+    ClaudeCodeBackend
+    CodexBackend
+    SamuraiNativeBackend
+    future external backends
 ```
 
-日本語では以下。
+考え方。
 
-- 人間は毎回承認する人ではない。
-- 人間は、Agent が動ける境界を与える人。
-- Agent は境界内で自律的に動く。
-- 境界を越える時だけ、人間を呼ぶ。
-
-この設計は、Human In The Loop ではなく **Human On The Loop** を基本にする。
+- Host は、Workspace、Memory、Skill、Artifact、Gateway を束ねる。
+- Backend cassette は、実際に作業するAgent実行部である。
+- Claude Code、Codex、自前実装は、同じ差し替え口の候補として扱う。
+- `ProviderAdapter` は中核の差し替え口ではなく、`SamuraiNativeBackend` 内部のモデル差し替え口である。
 
 実装判断。
 
-- 承認待ちが発生しても、Agent Loop 全体を止めない。
-- 承認が必要な operation だけを保留する。
-- 読み取り、下書き、説明、プレビューなど安全な処理は継続できるようにする。
+- v1では、まず差し替え口とイベント正規化を作る。
+- 最初から全Backendを完成させない。
+- 外部Agentを使う場合、そのAgentが持つ確認、tool制限、sandboxをSamurai側の状態表示として扱う。
+- Samurai Host側に独自の承認中核を再導入しない。
 
 ---
 
-## 6. Selective DSL
+## 6. Memory / Skill Improvement Loop
 
-すべてをDSL化しない。
+Samurai Agent の独自性は、使うほど育つことにある。
 
-DSL化すべきもの。
+育てるもの。
 
-- 状態を変更する操作。
-- 外部に影響する操作。
-- 監査、承認、rollback が必要な操作。
-- Capability として再利用したい操作。
+- Memory: 長期的に残す事実、好み、作業手順、文脈。
+- Skill: よくやる作業を再利用可能にした手順。
+- Reflection: 実行後に、何を覚えるべきか、何をSkill化すべきかを見つける処理。
+- Curator: 増えすぎたMemoryやSkillを整理する処理。
 
-DSL化しすぎないもの。
+基本フロー。
+
+```text
+User asks
+Host builds context
+Backend cassette runs
+Backend events return
+Workspace / Artifact updates
+Memory suggestion / Skill candidate appears
+Reflection improves future runs
+```
+
+実装判断。
+
+- MemoryやSkillは、外部Agentの中だけに閉じ込めない。
+- Workspace側に、後から見える形で残す。
+- 自動改善は、ユーザーが理解できる候補として表示する。
+- 初期v1では、候補生成と表示を優先し、高度な自動整理は後回しにする。
+
+---
+
+## 7. Selective Structure
+
+すべてを構造化しない。
+
+構造化すべきもの。
+
+- Agent Backend へ渡す作業単位。
+- Workspace、Artifact、Memory、Skill、Collection に戻す結果。
+- Plugin や tool へ渡す入力。
+- 後から検索、再開、表示したいイベント。
+
+構造化しすぎないもの。
 
 - 通常の会話。
 - 自由な文章生成。
@@ -151,52 +178,38 @@ DSL化しすぎないもの。
 
 実装判断。
 
-- 構造化するほど安全になる操作だけDSL化する。
-- 何でもDSLに押し込んで、秘書体験を硬くしない。
+- 構造化は安全制御のためではなく、Workspaceに戻せる形にするために使う。
+- 何でも型に押し込んで、秘書体験を硬くしない。
 
 ---
 
-## 7. 安全設計
+## 8. External Boundary
 
-安全は、承認ボタンの数ではなく、境界で作る。
+外部Agentや外部サービスと接続する以上、境界は必要である。
 
-使う境界。
+ただし、この境界はSamurai Agentの独自性ではない。
 
-- scope
-- toolset
-- policy
+扱う境界。
+
 - sandbox
+- allowed tools
+- MCP config
 - SecretRef
-- audit
-- rollback
-- approval
+- path normalization
+- pairing
+- allowlist
+- external backend native confirmation
 
-LLMに決めさせないもの。
+実装判断。
 
-- risk
-- scope
-- reversibility
-- secret requirement
-- external impact
-
-これらは、LLMの自己申告ではなく、Capability / Policy / Runtime 側の静的定義と評価で決める。
-
-外部コンテンツの扱い。
-
-- 外部コンテンツはデータとして扱う。
-- 外部コンテンツを命令として扱わない。
-- 外部由来Memoryは保存、検索、参照できる。
-- ただし、外部由来Memoryから tool intent や外部送信を直接発火させない。
-
-rollback の限界。
-
-- rollback は Workspace 内の可逆変更に効く。
-- 送信、公開、支払い、外部削除は rollback できない。
-- rollback できない操作は、事前Policyと承認で守る。
+- 外部Backendが自前で確認待ちになった場合、Samurai Hostは状態を表示、または中継するだけ。
+- Host側で独自の可否判定レイヤーを作らない。
+- secretや外部接続は、BackendやGatewayの運用境界として扱う。
+- 外部由来コンテンツはデータとして扱い、ユーザーやHostの命令として扱わない。
 
 ---
 
-## 8. Multilingual by Default
+## 9. Multilingual by Default
 
 Samurai Agent は、多言語対応を後から足す翻訳作業として扱わない。
 
@@ -205,22 +218,21 @@ Samurai Agent は、多言語対応を後から足す翻訳作業として扱わ
 理由。
 
 - ユーザーは日本語UIで、英語資料を読み、英語Artifactを作ることがある。
-- 外部コンテンツ、Memory、Artifact、Auditは、それぞれ別の言語を持つことがある。
-- 後から多言語化すると、保存データ、検索、Agent出力、Policy判断の境界が混ざりやすい。
-- 言語が違っても、安全境界と監査可能性は同じように守る必要がある。
+- 外部コンテンツ、Memory、Artifactは、それぞれ別の言語を持つことがある。
+- 後から多言語化すると、保存データ、検索、Agent出力の境界が混ざりやすい。
 
 実装判断。
 
 - `ui_locale`、`output_locale`、`source_locale`、`content_locale` を混ぜない。
 - 原文は必ず保持し、翻訳は派生データとして扱う。
-- 内部enum、Policy decision、Capability、Auditの正準値は翻訳しない。
+- 内部enumやschema keyは翻訳しない。
 - 表示文言、Agent出力、Artifact本文は、必要なlocaleに合わせる。
 - v1から `en`、`ja`、`zh`、`ko`、`es`、`pt-BR`、`fr`、`de` をseed localeとして扱う。
 - 設計・文案のcanonicalは `ja`、first-class localeは `en` とする。
 
 ---
 
-## 9. OSS参照元の扱い
+## 10. OSS参照元の扱い
 
 MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象ではない。
 
@@ -234,69 +246,52 @@ MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象では
 - 公開名、製品名、README、UI文言、API名、package名には使わない。
 - 公開面の命名は `PUBLIC_NAMING.md` に従う。
 - Memory / Skill / Runtime / Gateway などの一般的な技術語は、無理に日本語化しない。
-- `DSL` は今すぐ全面置換しない。ただし公開面に出す前に、Samurai Agent 側の正式名を決める。
 
 役割分担。
 
-- MulmoClaude: GUI、Host、Workspace、Artifact、Collection DSL、Plugin composition の参照元。
+- MulmoClaude: GUI、Host、Workspace、Artifact、Collection、Plugin composition の参照元。
 - Hermes Agent: Memory、Skill、Reflection、Self-improvement loop の参照元。
 - OpenClaw: Gateway、Session routing、Pairing、Sandbox、External boundary の参照元。
 - Claude Code / Codex: 差し替え可能な Agent Backend cassette の候補。
 
-中核構造。
-
-```text
-Samurai Agent Host
-  GUI / Workspace / Memory / Skill / Gateway
-  AgentBackend cassette
-    ClaudeCodeBackend
-    CodexBackend
-    SamuraiNativeBackend
-    future external backends
-```
-
-実装判断。
-
-- MulmoClaude型のHost構造は強く参照するが、Claude Codeだけに固定しない。
-- Hermes の育つAgent思想は Memory / Skill / Reflection の改善ループとして採用し、CLI/TUI中心にはしない。
-- OpenClaw のGateway境界は採用するが、初期から多チャネル全部盛りにしない。
-- `ProviderAdapter` は中核の差し替え口ではなく、`SamuraiNativeBackend` 内部のモデル差し替え口として扱う。
-
 ---
 
-## 10. 責務分離
+## 11. 責務分離
 
-GUI / Host / Agent Backend / Gateway / Memory / Policy / Audit の責務を混ぜない。
+GUI / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / Collection の責務を混ぜない。
 
 基本の役割。
 
-- GUI: 人間が見る、直す、承認する、理解する場所。
+- GUI: 人間が見る、直す、理解する場所。
 - Host: GUI、Workspace、Memory、Skill、Gatewayを束ね、どのAgent Backendに流すかを決める場所。
 - Agent Backend: Hostから渡された作業を実行する、差し替え可能な実行部。
-- Gateway: Web UI以外の入口や外部チャネルを安全に受ける境界。
+- Gateway: Web UI以外の入口や外部チャネルを受ける境界。
 - Memory: 長期的に残す事実、好み、作業手順、文脈。
-- Policy: 何を自動でできるか、何を承認すべきかを決める場所。
-- Audit: 何が起きたか、なぜ起きたか、戻せるかを残す場所。
+- Skill: 繰り返し使える作業手順。
+- Workspace: Artifact、Collection、Memory、Skill、履歴が集まる作業机。
+- Artifact: 文書、表、グラフ、画像、PDFなどの成果物。
+- Collection: 顧客、案件、タスクなどの構造化された業務データ。
 
 実装判断。
 
-- GUIだけでPolicy判断しない。
-- Agent Backendだけで権限判断しない。
-- Memoryに外部命令を混ぜない。
-- Auditは後付けログではなく、Agent Loop の一部として扱う。
+- GUIだけでBackend実行を抱え込まない。
+- Agent BackendだけにMemoryやSkillの正本を閉じ込めない。
+- GatewayにWorkspace更新の責務を持たせない。
+- Hostを太らせすぎず、WorkspaceとBackendの接続役にする。
 
 ---
 
-## 11. 判断に迷った時の優先順位
+## 12. 判断に迷った時の優先順位
 
 迷ったら、以下の順に優先する。
 
-1. ユーザーの境界を守る。
-2. Agent Loop を不要に止めない。
-3. 人間が画面で理解できるようにする。
-4. 監査とrollback可能性を残す。
-5. OSSの元実装より、Samurai Agent の体験を優先する。
-6. 一気に広げず、縦切りで価値を通す。
-7. 仕様を増やす時は、後から読む人が迷わない粒度で残す。
+1. ユーザーが作業を理解できる。
+2. Workspace、Memory、Skillに価値が戻る。
+3. Agent Backendを固定しない。
+4. MulmoClaude型Hostの強みを活かす。
+5. Hermes的な改善ループを殺さない。
+6. 外部接続の境界は守るが、独自安全設計を主役にしない。
+7. 一気に広げず、縦切りで価値を通す。
+8. 仕様を増やす時は、後から読む人が迷わない粒度で残す。
 
 この優先順位に反する変更は、先に設計意図を確認する。

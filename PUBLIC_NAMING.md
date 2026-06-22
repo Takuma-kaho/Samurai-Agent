@@ -89,6 +89,10 @@
 | `Workspace is the agent` | 公開面ではそのまま使わず、Samurai Agent の説明文に言い換える |
 | `Chat summons GUIs` | 公開面ではそのまま使わず、画面が会話から開く体験として説明する |
 | `Universal controller` | 公開面では使わない |
+| `Policy` | 中核語彙として使わない。外部文脈で必要な場合だけ補足付きで使う |
+| `Audit` | 中核語彙として使わない。履歴表示は `Run History` や `Change History` に言い換える |
+| `Rollback` | 中核語彙として使わない。復元機能は後続UXとして別途命名する |
+| `Approval` | 中核語彙として使わない。外部Backend固有の確認待ちはBackend eventとして説明する |
 
 ---
 
@@ -101,9 +105,6 @@
 - Runtime
 - Gateway
 - Artifact
-- Policy
-- Audit
-- Rollback
 - Session
 - Workspace
 - Provider

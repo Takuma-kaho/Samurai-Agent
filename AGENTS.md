@@ -27,11 +27,10 @@
 
 ## 設計方針
 
-- MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象ではなく、参照元として扱う。
-- 基本方針は `Policy-Bounded Agent Loop`。
-- 人間は毎回承認する人ではなく、Agent が動ける境界を決める人として扱う。
-- Agent は境界内で自律的に動き、境界を越える時だけ人間を呼ぶ設計を優先する。
-- 実装を考える時は、GUI / Runtime / Gateway / Memory / Policy / Audit の責務を混ぜない。
+- 基本方針は `MulmoClaude型Host + Agent Backend cassette + Hermes的Memory/Skill改善ループ`。
+- Claude Code / Codex / SamuraiNativeBackend などの実行部は、Hostから差し替えられるBackend cassetteとして扱う。
+- 独自性は安全制御ではなく、Memory、Skill、Artifact、Collection、Workspace UX、外部連携の拡張で出す。
+- 実装を考える時は、GUI / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / Collection の責務を混ぜない。
 
 ## 公開命名ルール
 
