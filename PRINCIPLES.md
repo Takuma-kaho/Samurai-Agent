@@ -238,26 +238,41 @@ MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象では
 
 役割分担。
 
-- MulmoClaude: GUI、Workspace、Artifact、Collection DSL、Plugin UI の参照元。
-- Hermes Agent: Runtime、Memory、Skill、Self-improvement、Provider abstraction の参照元。
+- MulmoClaude: GUI、Host、Workspace、Artifact、Collection DSL、Plugin composition の参照元。
+- Hermes Agent: Memory、Skill、Reflection、Self-improvement loop の参照元。
 - OpenClaw: Gateway、Session routing、Pairing、Sandbox、External boundary の参照元。
+- Claude Code / Codex: 差し替え可能な Agent Backend cassette の候補。
+
+中核構造。
+
+```text
+Samurai Agent Host
+  GUI / Workspace / Memory / Skill / Gateway
+  AgentBackend cassette
+    ClaudeCodeBackend
+    CodexBackend
+    SamuraiNativeBackend
+    future external backends
+```
 
 実装判断。
 
-- MulmoClaude のGUI思想は採用するが、Claude Code SDK 依存を中核にしない。
-- Hermes の育つAgent思想は採用するが、CLI/TUI中心にはしない。
+- MulmoClaude型のHost構造は強く参照するが、Claude Codeだけに固定しない。
+- Hermes の育つAgent思想は Memory / Skill / Reflection の改善ループとして採用し、CLI/TUI中心にはしない。
 - OpenClaw のGateway境界は採用するが、初期から多チャネル全部盛りにしない。
+- `ProviderAdapter` は中核の差し替え口ではなく、`SamuraiNativeBackend` 内部のモデル差し替え口として扱う。
 
 ---
 
 ## 10. 責務分離
 
-GUI / Runtime / Gateway / Memory / Policy / Audit の責務を混ぜない。
+GUI / Host / Agent Backend / Gateway / Memory / Policy / Audit の責務を混ぜない。
 
 基本の役割。
 
 - GUI: 人間が見る、直す、承認する、理解する場所。
-- Runtime: Agent が考え、toolを使い、結果を見て続ける場所。
+- Host: GUI、Workspace、Memory、Skill、Gatewayを束ね、どのAgent Backendに流すかを決める場所。
+- Agent Backend: Hostから渡された作業を実行する、差し替え可能な実行部。
 - Gateway: Web UI以外の入口や外部チャネルを安全に受ける境界。
 - Memory: 長期的に残す事実、好み、作業手順、文脈。
 - Policy: 何を自動でできるか、何を承認すべきかを決める場所。
@@ -266,7 +281,7 @@ GUI / Runtime / Gateway / Memory / Policy / Audit の責務を混ぜない。
 実装判断。
 
 - GUIだけでPolicy判断しない。
-- Runtimeだけで権限判断しない。
+- Agent Backendだけで権限判断しない。
 - Memoryに外部命令を混ぜない。
 - Auditは後付けログではなく、Agent Loop の一部として扱う。
 

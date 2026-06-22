@@ -55,11 +55,11 @@ RollbackPoint
 ActivityInboxItem read model + Chat Shell surfacing + Audit View
 ```
 
-この縦切りは、機能一覧を広げるためではなく、MulmoClaude由来のGUI / Workspace操作をClaude Code非依存の自前Runtimeへ接続できるかを確認するためのものでもある。
+この縦切りは、機能一覧を広げるためではなく、MulmoClaude由来のGUI / Workspace操作をAgent Backend cassetteへ流し、結果をWorkspace / Memory / Skillへ戻せるかを確認するためのものでもある。
 
 v1では、画面だけを先に作る状態にしない。
 
-GUIから出た操作が、Surface Protocol、Agent Runtime、Policy、Auditまで通ることを完成条件に含める。
+GUIから出た操作が、Surface Protocol、Agent Backend cassette、Policy、Audit、Workspace更新まで通ることを完成条件に含める。
 
 ユーザーから見た完成条件。
 
@@ -82,7 +82,7 @@ v1に入れるもの。
 | GUI | Chat Shell / Artifact Card / Workspace Peek / Context Drawer / Memory View / Audit View |
 | Surface Protocol | GUI operation / artifact update / approval request の最小表現 |
 | Approval / Activity Inbox | Chat Shellに付随するread model / 補助表示。独立surfaceにしない |
-| Runtime | ProviderAdapter / Tool loop / Event stream / Session store |
+| Agent Backend | AgentBackend interface / Backend registry / Event stream / Session store |
 | Policy | Capability manifest / OperationRecord / ApprovalRequest / PolicyDecisionRecord |
 | Localization / i18n | 8 locale seed、locale file、output_locale付きPromptBuilder、locale-aware schema |
 | Workspace store | filesystem + SQLite |
@@ -128,7 +128,7 @@ packages/
   workspace-store/
   localization/
   policy-engine/
-  runtime/
+  agent-backends/
   audit/
   memory/
   artifacts/
@@ -141,7 +141,8 @@ packages/
 責務を混ぜない。
 
 - GUIは、人間が見る、直す、承認する場所。
-- Runtimeは、Agentが考え、toolを使い、結果を見て続ける場所。
+- Agent Backendは、Hostから渡された作業を実行する差し替え可能な実行部。
+- `ProviderAdapter` は、Agent Backend全体ではなく `SamuraiNativeBackend` 内部のモデル差し替え口。
 - Gatewayは、入口とsession routingを扱う場所。
 - Memoryは、長期的に残す事実、好み、手順、文脈。
 - Policyは、何を自動でできるか、何を承認すべきかを決める場所。
@@ -161,7 +162,7 @@ packages/
 6. Policy Engine
 7. Audit / OperationRecord / ApprovalRequest
 8. Chat session
-9. GUI to Runtime connection spike
+9. GUI to Agent Backend cassette connection spike
 10. Memory minimal
 11. Artifact draft
 12. ActivityInboxItem read model
@@ -256,7 +257,7 @@ de
 - UI文言はlocale fileから取得する。
 - 原文は必ず保持し、翻訳は派生データとして扱う。
 - Policy / Audit / Capability の内部値は翻訳しない。
-- Agent RuntimeのPromptBuilderは必ず `output_locale` を受け取る。
+- `SamuraiNativeBackend` のPromptBuilderは必ず `output_locale` を受け取る。
 
 実装時に混ぜないlocale。
 
@@ -359,7 +360,7 @@ i18n check観点。
 - `locales/{en,ja,zh,ko,es,pt-BR,fr,de}.json` のkeyが一致する。
 - `missing` translation statusが残っていない。
 - `verified / draft / missing` 以外のtranslation statusを拒否する。
-- Runtime promptに `output_locale` が渡っていない場合はテストで落とす。
+- `SamuraiNativeBackend` のpromptに `output_locale` が渡っていない場合はテストで落とす。
 
 ---
 

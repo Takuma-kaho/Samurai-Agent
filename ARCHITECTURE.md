@@ -2,7 +2,7 @@
 
 ## GUI-first Personal Agent Workspace
 
-### MulmoClaude中心のGUI/Workspace、Hermes Agent中心のRuntime、OpenClaw中心のGatewayを参照して再構成する
+### MulmoClaude型Host、Agent Backend cassette、Hermes的Memory/Skill改善ループ、OpenClaw中心のGatewayを参照して再構成する
 
 ---
 
@@ -31,8 +31,8 @@ Samurai Agentは、各参照元の勝ち筋を理解した上で、greenfieldに
 | 参照対象 | 正式参照元 | この設計での扱い |
 | --- | --- | --- |
 | OpenClaw | `https://github.com/openclaw/openclaw.git` | Gateway / Session / Pairing / Sandbox / External boundary の参照元 |
-| Hermes Agent | `https://github.com/NousResearch/hermes-agent.git` | Runtime / Memory / Skill / Self-improvement / Provider abstraction の参照元 |
-| MulmoClaude | `https://github.com/receptron/mulmoclaude.git` | GUI / Workspace / Artifact / Collection DSL / Plugin UI の参照元 |
+| Hermes Agent | `https://github.com/NousResearch/hermes-agent.git` | Memory / Skill / Reflection / Self-improvement loop の参照元 |
+| MulmoClaude | `https://github.com/receptron/mulmoclaude.git` | GUI / Host / Workspace / Artifact / Collection DSL / Plugin composition の参照元 |
 | Hermes Agent 解説 | `Hermes_Agent_解説.md` | Hermes Agent理解のローカル補助資料 |
 | MulmoClaude記事 | `https://singularitysociety.org/articles/blog/2026-04-10-mulmoclaude/` | MulmoClaude理解の補助資料 |
 | OpenClaw記事 | `https://unicornee.ai/articles/openclaw-ai-agent/` | OpenClaw理解の補助資料 |
@@ -68,9 +68,10 @@ v0.6では、コード実装で迷う型、権限、承認、記録、MVP範囲�
 正確には、以下である。
 
 ```text
-MulmoClaudeのGUI/Workspace/Collection DSLの勝ち筋
-Hermes AgentのRuntime/Memory/Skill/Self-improvementの勝ち筋
+MulmoClaudeのGUI/Host/Workspace/Collection DSLの勝ち筋
+Hermes AgentのMemory/Skill/Reflection/Self-improvement loopの勝ち筋
 OpenClawのGateway/Session/Safety/External boundaryの勝ち筋
+Claude Code / Codexを含むAgent Backend cassetteの差し替え構造
 を参照したgreenfield再構築
 ```
 
@@ -83,16 +84,16 @@ OpenClawのGateway/Session/Safety/External boundaryの勝ち筋
 | 論点 | 方針 |
 | --- | --- |
 | 3 OSSの扱い | コードを足し合わせるのではなく、勝ち筋と設計パターンを借りる |
-| Hermes領域 | Python実装の直接流用ではなく、TypeScriptで再実装する前提にする |
-| MulmoClaude領域 | GUI / Workspace / Collection / Plugin UIの考え方を借りる |
-| MulmoClaudeとRuntimeの接合 | Claude Code依存を外すため、Samurai Agent独自の接合部を作る |
+| Hermes領域 | Agent Runtime全体ではなく、Memory / Skill / Reflection / Improvement loopの設計パターンを借りる |
+| MulmoClaude領域 | GUI / Host / Workspace / Collection / Plugin compositionの考え方を借りる |
+| MulmoClaudeとAgent Backendの接合 | Claude Code固定依存を避けるため、Agent Backend cassetteとして差し替える |
 | OpenClaw領域 | Gateway / Session / External boundaryの設計パターンを借りる |
 | MIT license | 実際にコードをコピーする場合だけ、ファイル単位でlicense / noticeを管理する |
 
 最大の実装リスクは、以下の2つである。
 
-- Hermes由来のRuntime / Memory / Skill / Curator / AutomationをTypeScriptで再実装すること。
-- MulmoClaude由来のGUI / Workspace操作を、Claude Code非依存の自前Agent Runtimeへ接続すること。
+- Agent Backend cassetteを、Host / Workspace / Memory / Skillと壊れずに接続すること。
+- Hermes由来のMemory / Skill / Reflection / Curator / Automationを、Backend固定にせずWorkspace側で育てること。
 
 v1の縦切りでは、機能網羅よりもこの接合部を最初に通すことを優先する。
 
@@ -135,7 +136,7 @@ Agentは境界内で自律的に観察・判断・実行・記録する
 - すべての会話、思考、文章生成をDSL化すること
 - すべての外部チャネルを初期実装すること
 - MoA / GEPA / plugin marketplaceを初期中核にすること
-- Claude Code SDKを中核Runtimeにすること
+- Claude Code SDK / CLIに固定したAgent Backendを中核前提にすること
 
 ---
 
@@ -147,9 +148,10 @@ Agentは境界内で自律的に観察・判断・実行・記録する
 
 | 参照元 | 役割 | このプロダクトでの位置づけ |
 | --- | --- | --- |
-| MulmoClaude | GUI / Workspace / Artifact / Collection DSL / Plugin UI | 体験とWorkspace構造の中心 |
-| Hermes Agent | Agent Runtime / Memory / Skills / Self-improvement / Provider abstraction | Agentの頭脳と学習ループの中心 |
+| MulmoClaude | GUI / Host / Workspace / Artifact / Collection DSL / Plugin composition | 体験とWorkspace構造の中心 |
+| Hermes Agent | Memory / Skills / Reflection / Self-improvement loop | 育つAgent体験の中心 |
 | OpenClaw | Gateway / Session routing / Pairing / Sandbox / External entry | 外部連携と運用境界の中心 |
+| Claude Code / Codex | Agent Backend cassette | 実行部を固定しないための差し替え候補 |
 
 この分担を守る。
 
@@ -180,7 +182,7 @@ MulmoClaudeは、このプロダクトの一番大きなUX参照元。
 
 | 項目 | 判断 | 理由 |
 | --- | --- | --- |
-| Claude Code SDK / CLIを中核Agent Runtimeにする構成 | 除外 | GUI-firstの自前Runtimeを作るため。CLI Agent依存にするとプロダクトの主語がずれる |
+| Claude Code SDK / CLIに固定したAgent Backend構成 | 除外 | HostはMulmoClaude型に寄せるが、実行部はClaudeCodeBackend / CodexBackend / SamuraiNativeBackendとして差し替えるため |
 | MulmoScriptを初期中核にすること | 除外 | 映像やスライド生成寄りで、個人秘書の初期価値とは少し離れる |
 | 自由HTML全面解禁 | 一部採用 | 危険なので全面解禁しない。ただし sandboxed custom view は早めに設計対象に入れる |
 
@@ -188,13 +190,12 @@ MulmoClaudeは、このプロダクトの一番大きなUX参照元。
 
 ## 1.3 Hermes Agentから採用するもの
 
-Hermes Agentからは、Agentの「頭脳」と「育つ仕組み」を参考にする。
+Hermes Agentからは、Agentの「記憶、手順、振り返りが育つ仕組み」を参考にする。
 
 採用するもの。
 
 | 項目 | 採用理由 |
 | --- | --- |
-| Agent Runtime | LLMが考え、toolを使い、結果を見て続ける実行ループが必要だから |
 | `SOUL.md` | Agentの人格、口調、禁止事項を人間が読める形で持てるから |
 | 3層Prompt | 固定指示、状況、現在値を分けると振る舞いが安定するから |
 | Memory | 個人秘書の価値は長期記憶にあるから |
@@ -204,7 +205,8 @@ Hermes Agentからは、Agentの「頭脳」と「育つ仕組み」を参考に
 | Curator | Skillが増えても自律整理できるようにするため |
 | Cron / scheduled automation | 人間が見ていない時もAgent Loopを回すため |
 | Toolsets / whitelist / deny | 毎回承認ではなく、使える道具を制限して自律実行させるため |
-| Provider abstraction | OpenAI / Anthropic / Gemini / OpenRouterなどを差し替えるため |
+| Reflection / Improvement loop | 実行結果からMemoryやSkillを改善するため |
+| Provider abstraction | `SamuraiNativeBackend` 内で OpenAI / Anthropic / Gemini / OpenRouter などを差し替えるため |
 
 採用しない、または初期では扱わないもの。
 
@@ -226,7 +228,7 @@ OpenClawからは、常駐する個人AI assistantとしての運用境界を参
 | 項目 | 採用理由 |
 | --- | --- |
 | Gateway boundary | Web UI以外の入口を後から足せる構造にするため |
-| Thin control plane | 初期からWeb UIとAgent Runtimeを密結合させないため |
+| Thin control plane | 初期からWeb UIとAgent Backendを密結合させないため |
 | Session routing | Web / cron / webhook / 将来の外部チャネルを正しいsessionに紐づけるため |
 | Session tools | セッション横断の検索、送信、yield、spawnをpolicy付きで扱うため |
 | Pairing / Allowlist | 外部入口の安全設計に必要だから |
@@ -547,8 +549,18 @@ API / UI / Agent Tool / Schema / Permission / Secret Policy / Audit Policy
 
         ↓
 
-[Agent Runtime]
-Provider Adapter / Prompt Builder / Context Builder / Tool Loop / Event Stream / Session Store
+[Agent Backend Orchestrator]
+AgentBackend interface / Backend registry / Event bridge / Backend session store
+
+        ↓
+
+[AgentBackend Cassette]
+ClaudeCodeBackend / CodexBackend / SamuraiNativeBackend / future external backends
+
+        ↓
+
+[Samurai Native Backend internals]
+ProviderAdapter / PromptBuilder / ContextBuilder / ToolLoop / ToolExecutor
 
         ↓
 
@@ -585,14 +597,16 @@ Web / Future Telegram / Slack / LINE / Email / Webhook / Cron / Bridges
 
 | 境界 | 役割 | 混ぜないもの |
 | --- | --- | --- |
-| Surface Protocol | GUIからRuntimeへ渡す操作、表示、承認、artifact更新を表現する入口 | LLMの自由な思考やrisk判定 |
-| Agent Runtime | Claude Codeに依存しない、LLM呼び出し、tool loop、event stream、session管理の実行部 | GUI表示責務、公開命名、policy定義 |
+| Surface Protocol | GUIからHost / Agent Backendへ渡す操作、表示、承認、artifact更新を表現する入口 | LLMの自由な思考やrisk判定 |
+| Agent Backend Orchestrator | AgentBackend cassetteを選び、event streamとsessionをHostへ接続する境界 | 個別モデル呼び出し、GUI表示責務、policy定義 |
+| AgentBackend Cassette | ClaudeCodeBackend / CodexBackend / SamuraiNativeBackendなどの差し替え実行部 | Workspace正本、Memory/Skill正本、公開命名 |
+| Samurai Native Backend internals | Native実装だけが持つProviderAdapter、PromptBuilder、ToolLoop | Agent Backend全体の差し替え責務 |
 | Capability Manifest | operationごとのrisk / scope / reversibility / secret requirementの正本 | LLMの自己申告、UI上の説明文 |
 | Workspace Store | filesystemとSQLiteの責務分離、index、履歴、rollbackを扱う場所 | Agentの判断ロジック、承認UI |
 
-MulmoClaude由来のGUI操作は、Surface Protocolを通ってAgent Runtimeへ渡す。
+MulmoClaude由来のGUI操作は、Surface Protocolを通ってAgent Backend Orchestratorへ渡す。
 
-Agent RuntimeはCapability Manifestを解決し、PolicyDecisionを経由しない操作を実行しない。
+Backend cassetteから返るtool intentや変更提案は、Capability ManifestとPolicyDecisionを経由してからWorkspaceへ反映する。
 
 ---
 
@@ -680,28 +694,62 @@ prompt snapshot
 
 ---
 
-## 5.3 Agent Runtime
+## 5.3 Agent Backend Orchestrator / Backend Cassette
 
-Claude Code CLIには依存しない。
+Claude Code CLIには固定依存しない。
 
-自前のAgent Runtimeを作る。
+ただし、「Claude Codeを外すために、Native実装だけを必ず中核にする」という意味ではない。
+
+Samurai Agent Hostが `AgentBackend` interfaceを持ち、実行部をcassetteとして差し替える。
 
 ```text
-AgentRuntime
+Samurai Agent Host
+  GUI / Workspace / Memory / Skill / Gateway
+  AgentBackend cassette
+    ClaudeCodeBackend
+    CodexBackend
+    SamuraiNativeBackend
+    future external backends
+```
+
+共通の差し替え口。
+
+```text
+AgentBackend
+  startSession
+  runTurn
+  streamEvents
+  cancel
+  getSessionState
+
+AgentBackendRegistry
+  resolveBackend
+  checkCapabilities
+  routeSession
+
+BackendEventBridge
+  normalizeEvents
+  mapToolIntent
+  mapArtifactDelta
+  mapMemorySkillSuggestion
+```
+
+`ProviderAdapter` はここでは中核差し替え口にしない。
+
+`ProviderAdapter` は、`SamuraiNativeBackend` の内部でだけ使うモデル差し替え口である。
+
+```text
+SamuraiNativeBackend
   ProviderAdapter
   PromptBuilder
   ContextBuilder
   ToolRegistry
   ToolExecutor
-  PolicyEngine
   MemoryRetriever
   ActiveMemoryRunner
   SkillInjector
   CuratorRunner
   SurfacePlanner
-  EventStreamer
-  SessionStore
-  AuditWriter
 ```
 
 基本ループ。
@@ -713,15 +761,17 @@ MessageEnvelopeを作る
 ↓
 Sessionを決める
 ↓
-Contextを組み立てる
+AgentBackendRegistryでBackend cassetteを選ぶ
 ↓
-Active Memoryで必要な記憶を探す
+HostがWorkspace context / Active Memory / Skill候補を組み立てる
 ↓
-必要なSkillを注入する
+Backend cassetteへ渡す
 ↓
-LLMを呼ぶ
+Backend cassetteが思考 / tool use / 生成を進める
 ↓
-tool intent / DSL patch を作る
+BackendEventBridgeがevent streamを正規化する
+↓
+tool intent / DSL patch / artifact delta / memory-skill suggestion を取り出す
 ↓
 validatorで検証する
 ↓
@@ -931,7 +981,7 @@ deny
 
 外部メール、Webhook、RSS、CSV、Webページ、API応答、paired相手の発言、tool出力には、悪意ある指示が混ざる可能性がある。
 
-そのため、Agent Runtimeはすべての入力に出所を付ける。
+そのため、Host / Agent Backend境界ではすべての入力に出所を付ける。
 
 ```text
 InstructionSource
@@ -1617,7 +1667,7 @@ Safety boundary eval。
 
 理由。
 
-- Web UIとAgent Runtimeを密結合させない
+- Web UIとAgent Backendを密結合させない
 - cron / webhook / future bridgeを同じ入口に乗せられる
 - session routingを最初から統一できる
 - 外部連携を後で足しても壊れにくい
@@ -2231,7 +2281,7 @@ v1では、`ja` と `en` は `verified` を目指す。
 - DB table、API route、package名、env/config keyにlocale別の値を混ぜない。
 - `LocalizedText` は、Collection label、Artifact title候補、ユーザー向け短文など表示文言に使う。
 
-Agent Runtime。
+SamuraiNativeBackend。
 
 - PromptBuilderは必ず `output_locale` を受け取る。
 - Agentは `output_locale` でユーザー向け出力を作る。
@@ -2264,7 +2314,7 @@ external_content in any language
 - MulmoClaudeとOpenClawがNode / TypeScript中心
 - GUI / server / gateway / plugin protocolを同じ言語で扱いやすい
 - OSS contributorにとっても入りやすい
-- Claude Code依存を外したAgent Runtimeを自前化しやすい
+- Agent Backend OrchestratorとSamuraiNativeBackendをTypeScriptで揃えやすい
 
 ただし、Node.jsだけですべてを抱えない。
 
@@ -2275,7 +2325,8 @@ TypeScript / Node.js:
   本体
   UI
   API server
-  Agent Runtime
+  Agent Backend Orchestrator
+  SamuraiNativeBackend
   Gateway control plane
   Plugin protocol
   Collection DSL engine
@@ -2563,11 +2614,12 @@ AIはscheduled promptとして登録する。
 
 | 論点 | 方針 |
 | --- | --- |
-| MulmoClaudeとの関係 | UX思想、Workspace、Collection DSL、Plugin UIを採用。GUI/Workspaceの中心 |
-| Hermesとの関係 | Agent Runtime、Memory、Skill、Curator、Automation、Learning loopを採用。Runtimeの中心 |
+| MulmoClaudeとの関係 | UX思想、Host、Workspace、Collection DSL、Plugin compositionを採用。GUI/Workspaceの中心 |
+| Hermesとの関係 | Memory、Skill、Reflection、Curator、Automation、Learning loopを採用。育つAgent体験の中心 |
 | OpenClawとの関係 | Gateway、session routing、pairing、sandbox、SecretRefを採用。外部連携の中心 |
-| Claude Code依存 | 撤廃する |
-| Agent Runtime | TypeScriptで自前実装 |
+| Claude Code依存 | 固定依存を避け、ClaudeCodeBackend cassetteとして扱える余地は残す |
+| Agent Backend | AgentBackend interface / Backend registry / Event stream / Session storeで差し替える |
+| ProviderAdapter | Agent Backend全体ではなく、SamuraiNativeBackend内部のモデル差し替え口 |
 | Safety | 承認中心ではなくPolicy-Bounded Agent Loop |
 | DSL | すべてをDSL化しない。副作用のある操作だけSelective DSL |
 | Policy | LLM自己申告ではなくCapability manifestの静的risk/scopeで判定 |
@@ -2596,6 +2648,8 @@ Surface Protocol
 ↓
 MessageEnvelope
 ↓
+AgentBackend cassette selection
+↓
 Session routing
 ↓
 Active Memory retrieval
@@ -2617,11 +2671,11 @@ Audit + RollbackPoint
 ActivityInboxItem read model + Chat Shell surfacing + Audit View
 ```
 
-この縦切りは、MulmoClaude由来のGUI / Workspace操作を、Claude Code非依存の自前Agent Runtimeへ接続する最初の検証でもある。
+この縦切りは、MulmoClaude由来のGUI / Workspace操作をAgent Backend cassetteへ流し、結果をWorkspace / Memory / Skillへ戻せるかを確認する最初の検証でもある。
 
-画面だけ、Runtimeだけ、Policyだけを個別に作って終わらせない。
+画面だけ、Agent Backendだけ、Policyだけを個別に作って終わらせない。
 
-GUIから出た操作がSurface Protocolを通り、Agent Runtime、PolicyDecision、Auditまで到達することをv1の必須条件にする。
+GUIから出た操作がSurface Protocolを通り、Agent Backend cassette、PolicyDecision、Audit、Workspace更新まで到達することをv1の必須条件にする。
 
 v1に入れるもの。
 
@@ -2630,7 +2684,7 @@ v1に入れるもの。
 | GUI | Chat Shell / Artifact Card / Workspace Peek / Context Drawer / Memory View / Audit View |
 | Surface Protocol | GUI operation / artifact update / approval request の最小表現 |
 | Approval / Activity Inbox | Chat Shellに付随するread model / 補助表示として必須。独立surfaceにしない |
-| Runtime | ProviderAdapter / Tool loop / Event stream / Session store |
+| Agent Backend | AgentBackend interface / Backend registry / Event stream / Session store |
 | Policy | Capability manifest + OperationRecord + ApprovalRequest + PolicyDecisionRecord |
 | DSL | Collection更新、Memory/Skill状態変更、Artifact保存だけ |
 | Memory | session / provisional / topic / Active Memory |
@@ -2666,7 +2720,7 @@ Codexを前提にすると実装速度は上がる。
 | --- | --- |
 | v0.6設計書と境界仕様確定 | 1週間 |
 | v1 vertical sliceの初期版 | 3〜6週間 |
-| Claude Code非依存の実用alpha | 2〜3か月 |
+| Agent Backend cassette対応の実用alpha | 2〜3か月 |
 | Memory / Skill / Artifact / Collection / Policy Loopが安定するalpha | 3〜5か月 |
 | OSSとして見せられるbeta | 5〜7か月 |
 
@@ -2754,14 +2808,16 @@ Codexを前提にすると実装速度は上がる。
 
 リスク。
 
-- Claude Code依存を外すと、Agent Runtimeは結局作り直しになる
+- MulmoClaude型Hostの強みを借りる時に、Claude Code固定依存まで一緒に抱え込む
+- Backend差し替え口を切らないと、将来CodexやNative backendへ移れない
 - fork改造に寄りすぎると、独自設計が歪む
 
 対策。
 
-- MulmoClaudeはUX思想とWorkspace構造の参照元にする
-- RuntimeはHermes/OpenClawを参考に自前境界にする
-- Claude Code SDK中核依存は除外する
+- MulmoClaudeはUX思想、Host構造、Workspace構造の参照元にする
+- 実行部はAgent Backend cassetteとして切り出す
+- Claude Code SDK / CLIへの固定依存は除外する
+- ClaudeCodeBackendは、使う場合でも差し替え可能なBackend候補として扱う
 
 ---
 
@@ -2841,9 +2897,10 @@ Codexを前提にすると実装速度は上がる。
 対策。
 
 - 借りるのはコード量ではなく、勝ち筋
-- MulmoClaude = GUI / Workspace / Collection DSL
-- Hermes = Runtime / Memory / Skill / Curator / Automation
+- MulmoClaude = GUI / Host / Workspace / Collection DSL
+- Hermes = Memory / Skill / Reflection / Curator / Automation
 - OpenClaw = Gateway / Session / External / Safety
+- Claude Code / Codex = Agent Backend cassette候補
 - 実装はこのプロダクト用に再構成する
 
 ---
@@ -2865,20 +2922,20 @@ Codexを前提にすると実装速度は上がる。
 
 ---
 
-## 9.12 MulmoClaude GUIと自前Runtimeの接合が詰まる
+## 9.12 MulmoClaude型HostとAgent Backend cassetteの接合が詰まる
 
 リスク。
 
-- MulmoClaudeのGUI / Workspace体験は強いが、実行側はClaude Code依存が強い
-- Claude Code依存を外すと、GUI操作からtool loopへ渡す接合部を自前で作る必要がある
+- MulmoClaudeのGUI / Workspace / Host体験は強いが、実行側をClaude Codeだけに固定すると拡張しにくい
+- Agent Backend cassette境界が曖昧だと、GUI操作からtool loopや外部Backendへ渡す接合部が毎回個別実装になる
 - ここを後回しにすると、画面はあるがAgent Loopが通らない状態になる
 
 対策。
 
-- v1最初の縦切りで、Chat / GUI operation / Surface Protocol / Agent Runtime / Policy / Auditを一本で通す
-- GUI操作はSurface Protocolで構造化し、Runtimeへ直接結合しない
-- RuntimeはCapability Manifestを必ず解決してからPolicyDecisionへ渡す
-- Claude Code互換を目指すのではなく、Samurai AgentのCapability境界として再構成する
+- v1最初の縦切りで、Chat / GUI operation / Surface Protocol / Agent Backend cassette / Policy / Auditを一本で通す
+- GUI操作はSurface Protocolで構造化し、Backend cassetteへ直接結合しない
+- Backend cassetteの出力はCapability Manifestを必ず解決してからPolicyDecisionへ渡す
+- Claude Code互換を目指すのではなく、Samurai AgentのHost / Capability境界として再構成する
 
 ---
 
@@ -2890,15 +2947,15 @@ Codexを前提にすると実装速度は上がる。
 | --- | --- | --- | --- | --- | --- |
 | OpenClaw | 全体思想 | Local-first Gateway | 採用 | Thin Gateway Control Plane | GUI、外部チャネル、ローカル作業を安全に束ねる背骨だから |
 | OpenClaw | 導入/運用 | onboard / daemon / status / doctor | 補強 | 後期運用だが概念は残す | 常駐Agentには診断と状態確認が必要だから |
-| OpenClaw | 通信 | WebSocket制御プロトコル | 補強 | MessageEnvelope + Event Stream | 将来BridgeのためにWeb UIとRuntimeを密結合させない |
+| OpenClaw | 通信 | WebSocket制御プロトコル | 補強 | MessageEnvelope + Event Stream | 将来BridgeのためにWeb UIとAgent Backendを密結合させない |
 | OpenClaw | 安全 | device identity / pairing / allowlist | 採用 | Gateway Safety | 外部入口のなりすましを防ぐため |
 | OpenClaw | 遠隔接続 | Tailscale / VPN / SSH / TLS pinning | 後回し | 将来案 | セキュリティ難度が高く、初期には重いから |
 | OpenClaw | チャネル | multi-channel inbox | 補強 | Gateway設計には入れる | Web以外の入口を後から足せるようにするため |
 | OpenClaw | セッション | session routing / transcripts | 採用 | Gateway & Session | どの話の続きかを間違えないことが基本だから |
 | OpenClaw | セッション | session tools | 採用 | policy付きでsend/spawn/yieldも許可 | 読み取りだけではOpenClawの強みを殺すため |
 | OpenClaw | Agent構成 | multi-agent routing | 初期限定 | 軽量subtask/workerのみ | 複雑な多Agent管理は避けつつ、並列性は残す |
-| OpenClaw | Runtime | embedded agent runner | 補強 | 自前Runtimeへ統合 | 外部CLI依存を避けるため |
-| OpenClaw | Runtime安全 | concurrency / lock / timeout | 採用 | Agent Runtime | 長時間作業や同時実行で壊れないため |
+| OpenClaw | Runtime | embedded agent runner | 補強 | Agent Backend運用境界に概念採用 | 外部実行部を安全に常駐させる考え方が必要だから |
+| OpenClaw | Runtime安全 | concurrency / lock / timeout | 採用 | Agent Backend Orchestrator | 長時間作業や同時実行で壊れないため |
 | OpenClaw | Prompt | bootstrap files | 採用 | `SOUL.md` / `MEMORY.md` / `SKILL.md` | 可搬性と説明可能性が高いから |
 | OpenClaw | Prompt | prompt snapshots | 採用 | Prompt snapshot | AIの挙動が変わった理由を追うため |
 | OpenClaw | Memory | memory search/get | 採用 | Active Memory / Session Search | 長期記憶を実用化する最低条件だから |
@@ -2928,7 +2985,7 @@ Codexを前提にすると実装速度は上がる。
 | --- | --- | --- | --- | --- | --- |
 | Hermes | 全体思想 | Self-improving agent | 採用 | Learning Loop | 個人秘書の価値そのものだから |
 | Hermes | UI | CLI/TUI first | 除外 | UXとしては不採用 | GUI-firstがプロダクトの主語だから |
-| Hermes | Model | provider abstraction | 採用 | ProviderAdapter | 特定モデル依存を避けるため |
+| Hermes | Model | provider abstraction | 採用 | SamuraiNativeBackend内のProviderAdapter | Native backend内で特定モデル依存を避けるため |
 | Hermes | Tool | terminal backends | 補強 | 裏側executorとして概念採用 | GUIでも実作業executorは必要だから |
 | Hermes | Identity | `SOUL.md` | 採用 | Identity & Prompt | 一貫した人格、口調、禁止事項に必要だから |
 | Hermes | Prompt | stable/context/volatile prompt | 採用 | 3層Prompt | 記憶や作業状態が混ざると不安定になるから |
@@ -2944,7 +3001,7 @@ Codexを前提にすると実装速度は上がる。
 | Hermes | Skills | skill preprocessing | 補強 | 変数置換から採用 | Skillの実用性を上げるため |
 | Hermes | Skills | skill provenance / trust matrix | 採用 | Skill frontmatter | Skillはprompt注入になり得るため出所と信頼度が必要だから |
 | Hermes | Skills | Curator | 採用 | 早期中核 | Skill整理能力を殺さないため |
-| Hermes | Context | context engine / compressor | 採用 | Agent Runtime | 長期会話には必要だから |
+| Hermes | Context | context engine / compressor | 採用 | SamuraiNativeBackend / Context Builder | 長期会話には必要だから |
 | Hermes | Subagent | delegate tool | 初期限定 | sandbox + toolset制限 | 並列実行力を残すため |
 | Hermes | Subagent | Mixture of Agents | 後回し | 初期対象外 | コストと遅延が増えるため |
 | Hermes | Automation | cron scheduler | 採用 | toolset制限付き自律実行 | Hermesの自動運用力を活かすため |
@@ -2984,7 +3041,7 @@ Codexを前提にすると実装速度は上がる。
 | MulmoClaude | Collections | recurring obligations | 採用 | triggers | 期限や状態から次タスクを作る秘書機能に必要だから |
 | MulmoClaude | Collections | custom HTML view | 補強 | sandboxed custom view | 単なる表で終わらせないため |
 | MulmoClaude | Collections | feeds / ingest | 補強 | 小さく採用 | 自動で育つWorkspaceに必要だから |
-| MulmoClaude | Boundary | Host vs Claude responsibility | 採用 | Safety / DSL | AIに任せる部分と検証する部分を分けるため |
+| MulmoClaude | Boundary | Host vs Claude responsibility | 採用 | Host / Agent Backend cassette境界 | AIに任せる部分と検証する部分を分けるため |
 | MulmoClaude | Extension | 7 extension mechanisms | 補強 | Plugin分類 | 拡張方法が混ざらないようにするため |
 | MulmoClaude | Plugin | runtime plugin factory | 後回し | 境界だけ設計 | 初期には重いが拡張口は必要だから |
 | MulmoClaude | Plugin | OAuth callback | 後回し | 将来案 | 外部サービス連携が増えてからでよいから |
@@ -2995,7 +3052,7 @@ Codexを前提にすると実装速度は上がる。
 | MulmoClaude | Bridge | session mapping | 補強 | Session設計に概念採用 | Bridgeを入れるなら必須だから |
 | MulmoClaude | Automation | scheduler / task manager | 採用 | toolset制限付き自律実行 | reminderだけではMulmoClaudeの強みが出ないから |
 | MulmoClaude | Security | Docker / MCP sandbox | 採用 | Safety Layer | 外部toolを使うなら必須だから |
-| MulmoClaude | Dependency | Claude Code SDK core | 除外 | 明確に不採用 | Claude Code依存を避ける方針だから |
+| MulmoClaude | Dependency | Claude Code SDK core | 置換 | ClaudeCodeBackend cassette候補 | 固定依存は避けるが、Backend候補として差し替え可能に扱えるため |
 | MulmoClaude | Self-improve | recognize / crystallize / tune / retire | 採用 | Learning Loop | 作業を見つけ、Skill化し、改善する流れが重要だから |
 | MulmoClaude | Audit | git-backed audit/revert | 補強 | audit + rollback | Git前提にしすぎず、監査と復元思想を採用する |
 
@@ -3009,6 +3066,7 @@ Codexを前提にすると実装速度は上がる。
 MulmoClaude的に画面で使える
 Hermes的に自律的に育つ
 OpenClaw的に外部入口と運用境界を持てる
+Agent Backendをcassetteとして差し替えられる
 Policy-Bounded Agent Loopを備えた
 GUI-first Personal Agent Workspace
 ```
@@ -3017,23 +3075,25 @@ GUI-first Personal Agent Workspace
 
 より正確には、
 
-> **MulmoClaudeのGUI-firstな作業体験を中心にしつつ、Claude Code依存は撤廃する。**
-> **HermesのAgent Runtime / Memory / Skill / Curator / Automationを、GUI上で見える形に変換して採用する。**
+> **MulmoClaude型のHost / Workspace体験を中心にしつつ、Claude Codeだけに固定しない。**
+> **Agent BackendはClaudeCodeBackend / CodexBackend / SamuraiNativeBackendとして差し替え可能にする。**
+> **HermesのMemory / Skill / Reflection / Curator / Automationを、GUI上で見える形に変換して採用する。**
 > **OpenClawのGateway / Session / Pairing / Sandbox / SecretRef思想は、外部入口と安全運用の境界として取り込む。**
 
 これは、3 OSSのコードを単純に合体する計画ではない。
 
 借りるのは、実装そのものよりも以下の勝ち筋である。
 
-- MulmoClaude: WorkspaceをAgentの中心にすること
-- Hermes: Memory / Skill / CuratorでAgentが育つこと
+- MulmoClaude: HostとWorkspaceをAgent体験の中心にすること
+- Hermes: Memory / Skill / Reflection / CuratorでAgentが育つこと
 - OpenClaw: GatewayとSessionで外部入口を安全に束ねること
+- Claude Code / Codex: Agent Backendとして差し替え可能に扱うこと
 
 OSSとして進める場合は、各参照元のlicense/provenanceを明示する。
 
 また、Hermes的なprompt cacheやprovider optimizationは、provider固有の性質を持つ。
 
-そのため、Provider abstractionは採用するが、すべてのproviderで同じコスト効率になるとは書かない。
+そのため、`SamuraiNativeBackend` 内ではProvider abstractionを採用するが、すべてのAgent Backendやproviderで同じコスト効率になるとは書かない。
 
 最初に作るべきものは「毎回人間が承認する安全な補助ツール」ではない。
 
