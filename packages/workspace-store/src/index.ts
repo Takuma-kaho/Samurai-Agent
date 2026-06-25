@@ -1690,9 +1690,26 @@ function parseWikiMarkdownLocal(markdown: string): { frontmatter: WikiFrontmatte
   const contentStart = markdown.indexOf("\n", end + 4);
   const content = contentStart === -1 ? "" : markdown.slice(contentStart + 1).trim();
   return {
-    frontmatter: WikiFrontmatterSchema.parse(JSON.parse(rawFrontmatter)),
+    frontmatter: WikiFrontmatterSchema.parse(parseRenderedFrontmatter(rawFrontmatter)),
     content
   };
+}
+
+function parseRenderedFrontmatter(rawFrontmatter: string): Record<string, unknown> {
+  const entries = rawFrontmatter
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf(":");
+      if (separator <= 0) {
+        throw new Error("wiki_frontmatter_invalid_line");
+      }
+      const key = line.slice(0, separator).trim();
+      const value = line.slice(separator + 1).trim();
+      return [key, JSON.parse(value)] as const;
+    });
+  return Object.fromEntries(entries);
 }
 
 function buildSkillIndexEntry(frontmatter: SkillFrontmatter): SkillIndexEntry {
