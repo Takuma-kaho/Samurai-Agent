@@ -18,8 +18,7 @@ afterEach(async () => {
           new Promise<void>((resolve) => {
             server.io.close();
             server.httpServer.close(() => resolve());
-            void server.store.close();
-          })
+          }).finally(() => server.store.close())
       )
     );
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -420,7 +419,7 @@ describe("backend run API", () => {
 async function startTestServer(provider: ProviderAdapter = new FakeProviderAdapter("fake/test", fakeProviderOutput)): Promise<{ baseUrl: string; server: ApiServer }> {
   const root = await mkdtemp(path.join(tmpdir(), "samurai-api-"));
   roots.push(root);
-  const server = await createApiServer({ workspaceDataDir: root, provider });
+  const server = await createApiServer({ workspaceDataDir: root, provider, automationScheduler: false });
   servers.push(server);
   await new Promise<void>((resolve) => {
     server.httpServer.listen(0, "127.0.0.1", resolve);

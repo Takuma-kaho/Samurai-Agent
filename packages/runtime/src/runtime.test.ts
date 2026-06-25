@@ -3,6 +3,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentBackendRegistry, MockBackend } from "@samurai-agent/agent-backends";
+import type { SkillFrontmatter } from "@samurai-agent/core-schemas";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, type ProviderOutput } from "./index";
 
@@ -127,6 +128,9 @@ describe("agent runtime", () => {
     expect(result.backendRun.status).toBe("completed");
     expect(result.backendEvents.some((event) => event.event_type === "artifact_created")).toBe(true);
     expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
+    expect(result.toolRuns.some((toolRun) => toolRun.action_id === "artifact.create" && toolRun.status === "completed")).toBe(true);
+    expect(result.reflectionRuns[0]?.status).toBe("completed");
+    expect(result.reflectionSuggestions.some((suggestion) => suggestion.suggestion_type === "knowledge_wiki")).toBe(true);
     expect(result.policyDecisions).toEqual([]);
     expect(result.auditRecords).toEqual([]);
   });
@@ -338,6 +342,161 @@ describe("agent runtime", () => {
     expect(result.operations.some((operation) => operation.operation === "unknown_tool")).toBe(false);
     expect(result.approvalRequests).toEqual([]);
     expect(result.backendEvents.some((event) => event.event_type === "tool_call_output" && event.payload.status === "ignored")).toBe(true);
+    expect(result.toolRuns.filter((toolRun) => toolRun.status === "ignored").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("builds reusable context from memory wiki skills and session search", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "今後この文体を覚えて。設計メモを書く時は短く。",
+      output_locale: "ja"
+    });
+    const memory = (await store.listMemory()).find((item) => item.state === "topic")!;
+    const now = new Date().toISOString();
+    const wiki = await runtime.createWikiProposal({
+      title: "設計方針",
+      content: "# 設計方針\n\nWorkspaceを正本にする。",
+      content_locale: "ja"
+    });
+    await runtime.acceptWikiPage(wiki.resource.id);
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_context_test",
+      markdown: skillMarkdown({
+        id: "skill_context_test",
+        state: "project",
+        title: "設計メモ手順",
+        description: "設計メモを短く整える",
+        createdAt: now
+      })
+    });
+
+    const context = await runtime.previewContext({
+      sessionId: session.id,
+      query: "設計メモ"
+    });
+    await store.close();
+
+    expect(context.active_memory.some((item) => item.id === memory.id && item.content.includes("設計メモ"))).toBe(true);
+    expect(context.knowledge_wiki.some((item) => item.title === "設計方針" && item.content.includes("Workspace"))).toBe(true);
+    expect(context.selected_skills.some((item) => item.id === "skill_context_test")).toBe(true);
+    expect(context.available_tools).toContain("wiki.proposal.create");
+  });
+
+  it("runs file actions through policy audit and rollback", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const written = await runtime.runFileAction({
+      operation: "file.write",
+      path: "notes/test.md",
+      content: "hello"
+    });
+    const read = await runtime.runFileAction({
+      operation: "file.read",
+      path: "notes/test.md"
+    });
+    const patched = await runtime.runFileAction({
+      operation: "file.patch",
+      path: "notes/test.md",
+      search: "hello",
+      replace: "hello samurai"
+    });
+    await store.close();
+
+    expect(written.operation.operation).toBe("file.write");
+    expect(read.resource.content).toBe("hello");
+    expect(patched.resource.content).toBe("hello samurai");
+    expect(patched.rollbackPoint).toBeDefined();
+  });
+
+  it("prepares external sends and gates dispatch behind approval", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const prepared = await runtime.prepareExternalSend({
+      channel: "webhook",
+      target: { url: "https://example.invalid/webhook" },
+      title: "確認",
+      body: "送信本文"
+    });
+    await expect(runtime.dispatchExternalSend({ sendId: prepared.resource.id })).rejects.toMatchObject({
+      code: "conflict",
+      message: "policy_blocked"
+    });
+    const sends = await store.listExternalSends();
+    await store.close();
+
+    expect(prepared.operation.operation).toBe("external.send.prepare");
+    expect(sends[0]?.status).toBe("draft");
+  });
+
+  it("saves and runs due automation jobs", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const saved = await runtime.saveAutomationJob({
+      title: "Wiki reindex",
+      kind: "wiki_reindex",
+      schedule: "daily",
+      target_instruction: "Reindex wiki",
+      next_run_at: new Date(0).toISOString()
+    });
+    const runs = await runtime.runDueAutomationJobs();
+    const refreshedJob = await store.getAutomationJob(saved.resource.id);
+    await store.close();
+
+    expect(saved.operation.operation).toBe("automation.job.save");
+    expect(runs[0]?.operation.operation).toBe("automation.job.run");
+    expect(refreshedJob?.last_run_at).toBeTruthy();
+  });
+
+  it("runs curator and evaluation jobs as reflection loops", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "今後、失敗したtoolは手順に反映して",
+      output_locale: "ja"
+    });
+
+    const curator = await runtime.runCuratorJob();
+    const evaluation = await runtime.runEvaluationJob();
+    await store.close();
+
+    expect(curator.reflectionRun.kind).toBe("curator");
+    expect(evaluation.reflectionRun.kind).toBe("evaluation");
+  });
+
+  it("downloads browser content into the workspace fallback adapter", async () => {
+    const { store, runtime } = await createRuntime();
+    const result = await runtime.runBrowserAction({
+      operation: "browser.download_to_workspace",
+      url: "data:text/html,<title>Test</title><main>Hello browser</main>",
+      output_path: "browser/test.txt"
+    });
+    await store.close();
+
+    expect(result.operation.operation).toBe("browser.download_to_workspace");
+    expect(result.resource.file_path).toBe("browser/test.txt");
+    expect(result.resource.text).toContain("Hello browser");
+  });
+
+  it("applies reflection suggestions into reusable workspace resources", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "今後、議事録は短くまとめる手順を覚えて",
+      output_locale: "ja"
+    });
+    const suggestion = (await store.listReflectionSuggestions()).find((item) => item.suggestion_type === "memory")!;
+
+    const applied = await runtime.applyReflectionSuggestion({ suggestionId: suggestion.id });
+    const updated = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion.id);
+    await store.close();
+
+    expect(applied.operation.operation).toBe("reflection.suggestion.apply");
+    expect(updated?.status).toBe("applied");
   });
 });
 
@@ -356,4 +515,22 @@ function collectionSchema(id: string) {
     actions: [],
     permissions: {}
   };
+}
+
+function skillMarkdown(input: Partial<SkillFrontmatter> & { id: string; state: SkillFrontmatter["state"]; createdAt?: string }): string {
+  const frontmatter: SkillFrontmatter = {
+    id: input.id,
+    state: input.state,
+    title: input.title ?? "Context Skill",
+    description: input.description ?? "Reusable context skill",
+    tags: input.tags ?? ["context"],
+    provenance: input.provenance ?? "test",
+    trust_level: input.trust_level ?? "user_authored",
+    allowed_scopes: input.allowed_scopes ?? ["workspace"],
+    required_capabilities: input.required_capabilities ?? [],
+    schedule_policy: input.schedule_policy ?? {},
+    secret_policy: input.secret_policy ?? {},
+    owner_pinned: input.owner_pinned ?? false
+  };
+  return ["---", JSON.stringify(frontmatter, null, 2), "---", "# Steps", "", "- Keep the note short.", ""].join("\n");
 }

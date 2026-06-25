@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 
 const apiPort = Number(process.env.PORT ?? 4317);
@@ -13,12 +14,28 @@ const viteBin = fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import
 const children = new Map();
 let shuttingDown = false;
 
-const server = start("API", process.execPath, ["--import", "tsx", apiEntry], {
-  env: {
-    ...process.env,
-    PORT: String(apiPort)
-  }
-});
+const preflight = await probeApi(healthUrl);
+const server = preflight.kind === "unavailable"
+  ? start("API", process.execPath, ["--import", "tsx", apiEntry], {
+      env: {
+        ...process.env,
+        PORT: String(apiPort)
+      }
+    })
+  : undefined;
+
+if (preflight.kind === "ready") {
+  console.log(`[dev] Reusing existing API: ${healthUrl}`);
+} else if (preflight.kind === "starting") {
+  console.log(`[dev] API port is already in use; waiting for existing Samurai Agent API: ${healthUrl}`);
+  void monitorHealth(healthUrl);
+} else if (preflight.kind === "occupied") {
+  console.error(`[dev] Port ${apiPort} is already in use, but ${healthUrl} is not a Samurai Agent API.`);
+  console.error(`[dev] Stop the process using ${apiPort}, or run with PORT=<free-port>.`);
+  process.exit(1);
+} else {
+  void monitorHealth(healthUrl);
+}
 
 const web = start("Web", process.execPath, [viteBin, "--host", "127.0.0.1", "--port", "5173"], {
   cwd: webRoot,
@@ -28,12 +45,10 @@ const web = start("Web", process.execPath, [viteBin, "--host", "127.0.0.1", "--p
   }
 });
 
-void monitorHealth(healthUrl);
-
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
-server.on("exit", (code, signal) => handleChildExit("API", code, signal));
+server?.on("exit", (code, signal) => handleChildExit("API", code, signal));
 web.on("exit", (code, signal) => handleChildExit("Web", code, signal));
 
 function start(name, command, args, options) {
@@ -96,6 +111,45 @@ async function monitorHealth(url) {
     }
     await sleep(pollMs);
   }
+}
+
+async function probeApi(url) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+    const text = await response.text();
+    let health;
+    try {
+      health = JSON.parse(text);
+    } catch {
+      return { kind: "occupied" };
+    }
+
+    if (!health || typeof health !== "object" || !("ok" in health) || !("db" in health)) {
+      return { kind: "occupied" };
+    }
+    if (response.ok && health.ok === true && health.db?.ok !== false) {
+      return { kind: "ready" };
+    }
+    return { kind: "starting" };
+  } catch {
+    return (await isPortOpen(apiPort)) ? { kind: "occupied" } : { kind: "unavailable" };
+  }
+}
+
+async function isPortOpen(port) {
+  return await new Promise((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const done = (open) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(open);
+    };
+
+    socket.setTimeout(1_000);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(true));
+    socket.once("error", () => done(false));
+  });
 }
 
 function sleep(ms) {

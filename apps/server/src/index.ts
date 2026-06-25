@@ -35,6 +35,7 @@ const loadedEnvPaths = new Set<string>();
 export interface CreateApiServerOptions {
   workspaceDataDir?: string;
   provider?: ProviderAdapter;
+  automationScheduler?: boolean;
 }
 
 export interface ApiServer {
@@ -43,6 +44,7 @@ export interface ApiServer {
   io: SocketServer;
   store: WorkspaceStore;
   runtime: AgentRuntime;
+  scheduler?: NodeJS.Timeout;
 }
 
 export function loadServerEnv(envPath = defaultEnvPath): void {
@@ -73,6 +75,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   };
   const provider = options.provider ?? createProviderRegistryFromEnv();
   const runtime = new AgentRuntime(store, emit, provider);
+  const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
 
   app.use(cors());
   app.use(express.json({ limit: "2mb" }));
@@ -127,7 +130,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "session_not_found" });
           return;
         }
-        const [messages, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges] = await Promise.all([
+        const [messages, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
           store.listMessages(session.id),
           store.listOperations(session.id),
           store.listArtifactsForSession(session.id),
@@ -136,9 +139,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           store.readActivityInputs().then((inputs) => import("@samurai-agent/audit").then(({ buildActivityInboxItems }) => buildActivityInboxItems(inputs))),
           store.listBackendRuns(session.id),
           store.listBackendEvents({ sessionId: session.id }),
-          store.listWorkspaceChanges(session.id)
+          store.listWorkspaceChanges(session.id),
+          store.listToolRuns({ sessionId: session.id }),
+          store.listReflectionRuns(session.id)
         ]);
-        res.json({ session, messages, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges });
+        res.json({ session, messages, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns });
       } catch (error) {
         next(error);
       }
@@ -195,6 +200,203 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const query = typeof req.query.q === "string" ? req.query.q : "";
         res.json(await store.search(query));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/context/preview", async (req, res, next) => {
+      try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runtime.previewContext({
+          sessionId,
+          query: typeof req.query.q === "string" ? req.query.q : ""
+        }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/reflection/run", async (req, res, next) => {
+      try {
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.status(201).json(await runtime.runReflection({
+          sessionId,
+          sourceRunId: typeof req.body?.source_run_id === "string" ? req.body.source_run_id : undefined
+        }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/curator/run", async (_req, res, next) => {
+      try {
+        res.status(201).json(await runtime.runCuratorJob());
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/evaluation/run", async (_req, res, next) => {
+      try {
+        res.status(201).json(await runtime.runEvaluationJob());
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/reflection-runs/:id", async (req, res, next) => {
+      try {
+        const reflectionRun = await store.getReflectionRun(req.params.id);
+        if (!reflectionRun) {
+          res.status(404).json({ error: "reflection_run_not_found" });
+          return;
+        }
+        res.json({
+          reflectionRun,
+          suggestions: await store.listReflectionSuggestions(reflectionRun.id)
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/reflection-suggestions/:id/apply", async (req, res, next) => {
+      try {
+        res.json(runtimeWritePayload(await runtime.applyReflectionSuggestion({ suggestionId: req.params.id })));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/tools/file", async (req, res, next) => {
+      try {
+        const operation = typeof req.body?.operation === "string" ? req.body.operation : "";
+        if (!["file.read", "file.list", "file.write", "file.patch"].includes(operation)) {
+          res.status(400).json({ error: "invalid_file_operation" });
+          return;
+        }
+        const filePath = typeof req.body?.path === "string" ? req.body.path : "";
+        if (!filePath) {
+          res.status(400).json({ error: "path_required" });
+          return;
+        }
+        res.json(runtimeWritePayload(await runtime.runFileAction({
+          operation: operation as "file.read" | "file.list" | "file.write" | "file.patch",
+          path: filePath,
+          content: typeof req.body?.content === "string" ? req.body.content : undefined,
+          search: typeof req.body?.search === "string" ? req.body.search : undefined,
+          replace: typeof req.body?.replace === "string" ? req.body.replace : undefined
+        })));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/tools/browser", async (req, res, next) => {
+      try {
+        const operation = typeof req.body?.operation === "string" ? req.body.operation : "";
+        if (!["browser.navigate", "browser.extract", "browser.screenshot", "browser.download_to_workspace"].includes(operation)) {
+          res.status(400).json({ error: "invalid_browser_operation" });
+          return;
+        }
+        const url = typeof req.body?.url === "string" ? req.body.url : "";
+        if (!url) {
+          res.status(400).json({ error: "url_required" });
+          return;
+        }
+        res.json(runtimeWritePayload(await runtime.runBrowserAction({
+          operation: operation as "browser.navigate" | "browser.extract" | "browser.screenshot" | "browser.download_to_workspace",
+          url,
+          output_path: typeof req.body?.output_path === "string" ? req.body.output_path : undefined
+        })));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/external-sends", async (_req, res, next) => {
+      try {
+        res.json(await store.listExternalSends());
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/external-sends", async (req, res, next) => {
+      try {
+        const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
+        const body = typeof req.body?.body === "string" ? req.body.body : "";
+        const channel = typeof req.body?.channel === "string" ? req.body.channel : "webhook";
+        if (!title || !body || !["webhook", "email", "slack"].includes(channel)) {
+          res.status(400).json({ error: "invalid_external_send" });
+          return;
+        }
+        res.status(201).json(runtimeWritePayload(await runtime.prepareExternalSend({
+          channel: channel as "webhook" | "email" | "slack",
+          target: isRecord(req.body?.target) ? req.body.target : {},
+          title,
+          body
+        })));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/external-sends/:id/dispatch", async (req, res, next) => {
+      try {
+        res.json(runtimeWritePayload(await runtime.dispatchExternalSend({
+          sendId: req.params.id,
+          dryRun: req.body?.dry_run !== false
+        })));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/automation/jobs", async (_req, res, next) => {
+      try {
+        res.json(await store.listAutomationJobs());
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/automation/jobs", async (req, res, next) => {
+      try {
+        const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
+        const kind = typeof req.body?.kind === "string" ? req.body.kind : "custom_instruction";
+        const schedule = typeof req.body?.schedule === "string" ? req.body.schedule : "daily";
+        const targetInstruction = typeof req.body?.target_instruction === "string" ? req.body.target_instruction : title;
+        if (!title || !["memory_review", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction"].includes(kind)) {
+          res.status(400).json({ error: "invalid_automation_job" });
+          return;
+        }
+        res.status(201).json(runtimeWritePayload(await runtime.saveAutomationJob({
+          title,
+          kind: kind as "memory_review" | "skill_curator" | "wiki_reindex" | "daily_digest" | "custom_instruction",
+          schedule,
+          target_instruction: targetInstruction,
+          delivery_target: isRecord(req.body?.delivery_target) ? req.body.delivery_target : undefined,
+          enabled: req.body?.enabled !== false,
+          next_run_at: typeof req.body?.next_run_at === "string" ? req.body.next_run_at : undefined
+        })));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/automation/jobs/run-due", async (_req, res, next) => {
+      try {
+        res.status(201).json(await runtime.runDueAutomationJobs());
       } catch (error) {
         next(error);
       }
@@ -653,7 +855,13 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       });
     });
 
-  return { app, httpServer, io, store, runtime };
+  httpServer.once("close", () => {
+    if (scheduler) {
+      clearInterval(scheduler);
+    }
+  });
+
+  return { app, httpServer, io, store, runtime, ...(scheduler ? { scheduler } : {}) };
 }
 
 export async function startServer(port?: number): Promise<ApiServer> {
@@ -679,6 +887,26 @@ export async function startServer(port?: number): Promise<ApiServer> {
 
 function asSupportedLocale(value: unknown): SupportedLocale | undefined {
   return typeof value === "string" && supportedLocales.includes(value as SupportedLocale) ? (value as SupportedLocale) : undefined;
+}
+
+function startAutomationScheduler(runtime: AgentRuntime): NodeJS.Timeout | undefined {
+  if (process.env.SAMURAI_AUTOMATION_SCHEDULER === "false") {
+    return undefined;
+  }
+  const intervalMs = Number(process.env.SAMURAI_AUTOMATION_TICK_MS ?? 60_000);
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    return undefined;
+  }
+  const tick = async () => {
+    try {
+      await runtime.runDueAutomationJobs();
+    } catch (error) {
+      console.warn("automation_scheduler_failed", error instanceof Error ? error.message : String(error));
+    }
+  };
+  const timer = setInterval(tick, intervalMs);
+  timer.unref?.();
+  return timer;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

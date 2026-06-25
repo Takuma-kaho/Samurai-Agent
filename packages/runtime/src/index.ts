@@ -1,6 +1,8 @@
 import { createArtifactDraft } from "@samurai-agent/artifacts";
 import { buildActivityInboxItems, createAuditRecord } from "@samurai-agent/audit";
 import { getCapabilityManifest, proposalCapabilityManifest } from "@samurai-agent/capability-registry";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 import {
   AgentBackendRegistry,
   ClaudeCodeBackend,
@@ -13,6 +15,7 @@ import {
   type ApprovalRequest,
   type ArtifactRecord,
   type AuditRecord,
+  type AutomationJobRecord,
   type BackendEventRecord,
   type BackendRunRecord,
   type CollectionPatch,
@@ -25,12 +28,17 @@ import {
   type MessageEnvelope,
   type MessageRecord,
   type OperationRecord,
+  type ExternalSendRecord,
   type PolicyDecisionRecord,
   type PolicyEvaluationInput,
+  type ContextPreview,
+  type ReflectionRunRecord,
+  type ReflectionSuggestionRecord,
   type RollbackPoint,
   type SessionRecord,
   type WikiFrontmatter,
   type WorkspaceChangeRecord,
+  type ToolRunRecord,
   SkillFrontmatterSchema,
   type SkillFrontmatter,
   type SupportedLocale,
@@ -113,6 +121,9 @@ export interface RunChatTurnResult {
   auditRecords: AuditRecord[];
   rollbackPoints: RollbackPoint[];
   activity: ActivityInboxItem[];
+  reflectionRuns: ReflectionRunRecord[];
+  reflectionSuggestions: ReflectionSuggestionRecord[];
+  toolRuns: ToolRunRecord[];
 }
 
 export type ApprovalLifecycleStatus = "approved" | "denied" | "expired";
@@ -156,6 +167,25 @@ export type SkillRuntimeResult = RuntimeWriteResult<SkillWithFilePath>;
 export type WikiRuntimeResult = RuntimeWriteResult<WikiWithFilePath>;
 export type CollectionSchemaRuntimeResult = RuntimeWriteResult<CollectionSchemaWithFilePath>;
 export type CollectionRecordRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
+export type AutomationJobRuntimeResult = RuntimeWriteResult<AutomationJobRecord>;
+export type ExternalSendRuntimeResult = RuntimeWriteResult<ExternalSendRecord>;
+
+export interface FileActionRuntimeResult extends RuntimeWriteResult<{
+  path: string;
+  content?: string;
+  entries?: Array<{ path: string; kind: "file" | "directory"; size?: number }>;
+}> {}
+
+export interface BrowserActionRuntimeResult extends RuntimeWriteResult<{
+  url: string;
+  title?: string;
+  text?: string;
+  screenshot_ref?: string;
+  file_path?: string;
+}> {}
+
+type FileActionResource = FileActionRuntimeResult["resource"];
+type BrowserActionResource = BrowserActionRuntimeResult["resource"];
 
 export interface CollectionPatchRuntimeResult extends RuntimeWriteResult<CollectionRecordWithFilePath> {
   before: CollectionRecordWithFilePath;
@@ -168,6 +198,11 @@ export interface AutomationRunRuntimeResult {
   auditRecord: AuditRecord;
   rollbackPoint?: RollbackPoint;
   activity: ActivityInboxItem[];
+}
+
+export interface ReflectionRuntimeResult {
+  reflectionRun: ReflectionRunRecord;
+  suggestions: ReflectionSuggestionRecord[];
 }
 
 export interface BackendRunErrorPayload {
@@ -252,6 +287,150 @@ export class AgentRuntime {
     return this.backendRegistry.statuses();
   }
 
+  async previewContext(input: { sessionId: string; query?: string }): Promise<ContextPreview> {
+    const session = await this.store.getSession(input.sessionId);
+    if (!session) {
+      throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
+    }
+    return this.buildContextPreview(session.id, input.query ?? "");
+  }
+
+  async runReflection(input: { sessionId: string; sourceRunId?: string }): Promise<ReflectionRuntimeResult> {
+    const session = await this.store.getSession(input.sessionId);
+    if (!session) {
+      throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
+    }
+    const messages = await this.store.listMessages(session.id);
+    const userMessage = [...messages].reverse().find((message) => message.role === "user");
+    const agentMessage = [...messages].reverse().find((message) => message.role === "agent");
+    return this.runReflectionForCompletedTurn({
+      kind: "manual",
+      session,
+      sourceRunId: input.sourceRunId,
+      userMessage,
+      agentMessage,
+      workspaceChanges: await this.store.listWorkspaceChanges(session.id),
+      toolRuns: await this.store.listToolRuns({ sessionId: session.id })
+    });
+  }
+
+  async runCuratorJob(): Promise<ReflectionRuntimeResult> {
+    const session = await this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled curator");
+    const [memories, skills] = await Promise.all([
+      this.store.listMemory(),
+      this.store.listSkills()
+    ]);
+    const now = nowIso();
+    let reflectionRun: ReflectionRunRecord = {
+      id: createId("reflection"),
+      kind: "curator",
+      session_id: session.id,
+      status: "started",
+      input_summary: `Curate ${memories.length} memory item(s) and ${skills.length} skill item(s).`,
+      started_at: now
+    };
+    reflectionRun = await this.store.createReflectionRun(reflectionRun);
+    const suggestions: ReflectionSuggestionRecord[] = [];
+    for (const memory of memories.filter((item) => item.state !== "archived").slice(0, 20)) {
+      if (memory.confidence < 0.5 || memory.state === "topic") {
+        suggestions.push({
+          id: createId("suggestion"),
+          reflection_run_id: reflectionRun.id,
+          suggestion_type: "memory_patch",
+          status: "proposed",
+          title: `Review memory: ${memory.topic}`,
+          content: `Review whether this memory should be promoted, merged, or archived.\n\n${(await this.store.readMemoryContent(memory.id)) ?? ""}`,
+          target_ref: memoryRef(memory),
+          source_refs: [memoryRef(memory)],
+          confidence: 0.62,
+          created_at: now,
+          updated_at: now
+        });
+      }
+    }
+    for (const skill of skills.filter((item) => item.state === "candidate" || item.state === "project").slice(0, 20)) {
+      suggestions.push({
+        id: createId("suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: "skill_patch",
+        status: "proposed",
+        title: `Review skill: ${skill.title}`,
+        content: `Review this Skill for promotion, stale marking, or rewrite.\n\n${(await this.store.readSkillMarkdown(skill.id)) ?? ""}`,
+        target_ref: skillRef(skill),
+        source_refs: [skillRef(skill)],
+        confidence: 0.66,
+        created_at: now,
+        updated_at: now
+      });
+    }
+    for (const suggestion of suggestions) {
+      await this.store.saveReflectionSuggestion(suggestion);
+    }
+    reflectionRun = await this.store.updateReflectionRun({
+      ...reflectionRun,
+      status: "completed",
+      output_summary: `Curator created ${suggestions.length} suggestion(s).`,
+      completed_at: nowIso()
+    });
+    return { reflectionRun, suggestions };
+  }
+
+  async runEvaluationJob(): Promise<ReflectionRuntimeResult> {
+    const session = await this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled evaluation");
+    const [skills, toolRuns, auditRecords] = await Promise.all([
+      this.store.listSkills(),
+      this.store.listToolRuns(),
+      this.store.listAuditRecords()
+    ]);
+    const now = nowIso();
+    let reflectionRun: ReflectionRunRecord = {
+      id: createId("reflection"),
+      kind: "evaluation",
+      session_id: session.id,
+      status: "started",
+      input_summary: `Evaluate ${skills.length} skill item(s), ${toolRuns.length} tool run(s), and ${auditRecords.length} audit record(s).`,
+      started_at: now
+    };
+    reflectionRun = await this.store.createReflectionRun(reflectionRun);
+    const failedTools = toolRuns.filter((run) => run.status !== "completed").slice(0, 20);
+    const suggestions: ReflectionSuggestionRecord[] = failedTools.map((run) => ({
+      id: createId("suggestion"),
+      reflection_run_id: reflectionRun.id,
+      suggestion_type: "skill_patch",
+      status: "proposed",
+      title: `Improve tool workflow: ${run.provider_tool_name}`,
+      content: `Tool run did not complete.\n\nTool: ${run.provider_tool_name}\nStatus: ${run.status}\nOutput: ${run.output_summary}\n\nUpdate related Skills or prompts so future runs choose a valid action.`,
+      source_refs: run.resource_refs,
+      confidence: 0.7,
+      created_at: now,
+      updated_at: now
+    }));
+    if (!suggestions.length && skills.length) {
+      suggestions.push({
+        id: createId("suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: "skill_patch",
+        status: "proposed",
+        title: "Skill evaluation checkpoint",
+        content: `No failed tool runs were found. Review ${skills.length} skill item(s) for freshness and coverage.`,
+        source_refs: [],
+        confidence: 0.52,
+        created_at: now,
+        updated_at: now
+      });
+    }
+    for (const suggestion of suggestions) {
+      await this.store.saveReflectionSuggestion(suggestion);
+    }
+    reflectionRun = await this.store.updateReflectionRun({
+      ...reflectionRun,
+      status: "completed",
+      output_summary: `Evaluation created ${suggestions.length} suggestion(s).`,
+      completed_at: nowIso()
+    });
+    return { reflectionRun, suggestions };
+  }
+
   async createSession(input: {
     title?: string;
     ui_locale?: SupportedLocale;
@@ -314,7 +493,8 @@ export class AgentRuntime {
     backendRun = await this.store.saveBackendRun(backendRun);
     await this.emit("backend.run.created", backendRun);
 
-    const activeMemory = await retrieveActiveMemory(this.store, input.content);
+    const contextPreview = await this.buildContextPreview(session.id, input.content);
+    const activeMemory = contextPreview.active_memory;
     const recentMessages = (await this.store.listMessages(session.id)).slice(-10);
     const runInput: BackendRunInput = {
       run_id: backendRun.id,
@@ -324,10 +504,14 @@ export class AgentRuntime {
       input_locale: inputLocale,
       output_locale: outputLocale,
       active_memory: activeMemory.map((memory) => ({
-        id: memory.frontmatter.id,
-        topic: memory.frontmatter.topic,
+        id: memory.id,
+        topic: memory.topic,
         content: memory.content
       })),
+      knowledge_wiki: contextPreview.knowledge_wiki,
+      selected_skills: contextPreview.selected_skills,
+      session_search: contextPreview.session_search,
+      available_tools: contextPreview.available_tools,
       recent_messages: recentMessages,
       metadata: jsonRecord(input.metadata ?? {})
     };
@@ -337,6 +521,7 @@ export class AgentRuntime {
     const memories: MemoryFrontmatter[] = [];
     const backendEvents: BackendEventRecord[] = [];
     const workspaceChanges: WorkspaceChangeRecord[] = [];
+    const toolRuns: ToolRunRecord[] = [];
     const textParts: string[] = [];
     let nextSequence = 1;
     let failedEvent: BackendEventRecord | undefined;
@@ -390,17 +575,47 @@ export class AgentRuntime {
         }
       }
       if (event.event_type === "tool_call_started") {
-        const feedback = await handleBackendToolCall({ store: this.store, run: backendRun, runInput, event });
-        operations.push(...feedback.operations);
-        artifacts.push(...feedback.artifacts);
-        memories.push(...feedback.memories);
-        for (const change of feedback.workspaceChanges) {
-          await this.store.saveWorkspaceChange(change);
-          workspaceChanges.push(change);
-          await this.emit("workspace.change.created", change);
-        }
-        for (const feedbackEvent of feedback.events) {
-          await saveFeedbackEvent(feedbackEvent);
+        const runtimeTool = await this.handleRuntimeToolCall(backendRun, event).catch(async (error) => {
+          await recordEvent({
+            event_type: "tool_call_output",
+            payload: {
+              status: "failed",
+              provider_tool_name: stringPayload(event.payload.provider_tool_name),
+              reason: error instanceof Error ? error.message : "runtime_tool_failed"
+            },
+            tool_call_id: event.tool_call_id
+          });
+          return undefined;
+        });
+        if (runtimeTool) {
+          operations.push(runtimeTool.operation);
+          if ("toolRun" in runtimeTool) {
+            toolRuns.push(runtimeTool.toolRun);
+          }
+          await saveFeedbackEvent({
+            event_type: "tool_call_output",
+            payload: {
+              status: "completed",
+              action_id: runtimeTool.operation.operation,
+              resource_id: runtimeTool.operation.result_ref?.id ?? runtimeTool.operation.id
+            },
+            resource_refs: runtimeTool.operation.result_ref ? [runtimeTool.operation.result_ref] : [],
+            tool_call_id: event.tool_call_id
+          });
+        } else {
+          const feedback = await handleBackendToolCall({ store: this.store, run: backendRun, runInput, event });
+          operations.push(...feedback.operations);
+          artifacts.push(...feedback.artifacts);
+          memories.push(...feedback.memories);
+          toolRuns.push(...feedback.toolRuns);
+          for (const change of feedback.workspaceChanges) {
+            await this.store.saveWorkspaceChange(change);
+            workspaceChanges.push(change);
+            await this.emit("workspace.change.created", change);
+          }
+          for (const feedbackEvent of feedback.events) {
+            await saveFeedbackEvent(feedbackEvent);
+          }
         }
       }
       if (event.event_type === "backend_waiting_for_native_input") {
@@ -466,6 +681,15 @@ export class AgentRuntime {
     };
     await this.store.updateBackendRun(backendRun);
     await this.emit("backend.run.updated", backendRun);
+    const reflection = await this.runReflectionForCompletedTurn({
+      kind: "chat_turn",
+      session,
+      backendRun,
+      userMessage,
+      agentMessage,
+      workspaceChanges,
+      toolRuns
+    });
 
     return {
       session,
@@ -480,7 +704,10 @@ export class AgentRuntime {
       approvalRequests: [],
       auditRecords: [],
       rollbackPoints: [],
-      activity: []
+      activity: [],
+      reflectionRuns: [reflection.reflectionRun],
+      reflectionSuggestions: reflection.suggestions,
+      toolRuns
     };
   }
 
@@ -517,6 +744,10 @@ export class AgentRuntime {
       decided_at: nowIso()
     };
     await this.store.updateApprovalRequest(approved);
+
+    if (decision.decision !== "deny" && operation.operation === "external.send.dispatch") {
+      return this.executeApprovedExternalDispatch(approved, operation, decision);
+    }
 
     operation.policy_decision_id = decision.id;
     operation.status = decision.decision === "deny" ? "denied" : "deferred";
@@ -693,6 +924,309 @@ export class AgentRuntime {
       changed: archive.changed,
       warning: archive.warning
     };
+  }
+
+  async runFileAction(input: {
+    operation: "file.read" | "file.list" | "file.write" | "file.patch";
+    path: string;
+    content?: string;
+    search?: string;
+    replace?: string;
+  }): Promise<FileActionRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const workspacePath = this.resolveWorkspacePath(input.path);
+    const envelope = createGatewayEnvelope(webGatewayContext, `${input.operation}: ${workspacePath.relativePath}`);
+    return this.runAllowedWrite<FileActionResource, Record<string, unknown>>({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: input.operation,
+      proposedEffects: [`${input.operation} ${workspacePath.relativePath} inside the workspace.`],
+      targetResourceRefs: [fileRef(workspacePath.relativePath)],
+      execute: async (operation) => {
+        const ref = fileRef(workspacePath.relativePath);
+        if (input.operation === "file.read") {
+          const content = await readFile(workspacePath.absolutePath, "utf8");
+          return {
+            resource: { path: workspacePath.relativePath, content },
+            ref,
+            summary: `Read workspace file ${workspacePath.relativePath}.`
+          };
+        }
+        if (input.operation === "file.list") {
+          const entries = await listWorkspaceDirectory(workspacePath.absolutePath, workspacePath.relativePath);
+          return {
+            resource: { path: workspacePath.relativePath, entries },
+            ref,
+            summary: `Listed workspace directory ${workspacePath.relativePath}.`
+          };
+        }
+        const before = await readFile(workspacePath.absolutePath, "utf8").catch(() => undefined);
+        let nextContent = input.content ?? "";
+        if (input.operation === "file.patch") {
+          if (before === undefined) {
+            throw new RuntimeRequestError("not_found", `File not found: ${workspacePath.relativePath}`);
+          }
+          const search = input.search ?? "";
+          if (!search || !before.includes(search)) {
+            throw new RuntimeRequestError("conflict", "file_patch_search_not_found");
+          }
+          nextContent = before.replace(search, input.replace ?? "");
+        }
+        await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
+        await writeFile(workspacePath.absolutePath, nextContent);
+        const rollbackPoint = await this.createRollbackPoint(
+          operation,
+          [ref],
+          { path: workspacePath.relativePath, content: before ?? null },
+          { path: workspacePath.relativePath, content: nextContent }
+        );
+        return {
+          resource: { path: workspacePath.relativePath, content: nextContent },
+          ref,
+          rollbackPoint,
+          summary: `${input.operation === "file.write" ? "Wrote" : "Patched"} workspace file ${workspacePath.relativePath}.`
+        };
+      }
+    });
+  }
+
+  async runBrowserAction(input: {
+    operation: "browser.navigate" | "browser.extract" | "browser.screenshot" | "browser.download_to_workspace";
+    url: string;
+    output_path?: string;
+  }): Promise<BrowserActionRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `${input.operation}: ${input.url}`);
+    return this.runAllowedWrite<BrowserActionResource, Record<string, unknown>>({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: input.operation,
+      proposedEffects: [`${input.operation} ${input.url} without mutating external state.`],
+      execute: async (operation) => {
+        const page = await readBrowserPage(input.url);
+        const ref = {
+          kind: "browser_page",
+          id: stableHash(input.url),
+          uri: input.url,
+          label: page.title || input.url
+        };
+        if (input.operation === "browser.download_to_workspace" || input.operation === "browser.screenshot") {
+          const outputPath = input.output_path || path.posix.join("browser", `${stableHash(input.url)}.${input.operation === "browser.screenshot" ? "html" : "txt"}`);
+          const workspacePath = this.resolveWorkspacePath(outputPath);
+          await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
+          const content = input.operation === "browser.screenshot"
+            ? renderBrowserSnapshotHtml(page)
+            : page.text;
+          const before = await readFile(workspacePath.absolutePath, "utf8").catch(() => undefined);
+          await writeFile(workspacePath.absolutePath, content);
+          const fileResourceRef = fileRef(workspacePath.relativePath);
+          const rollbackPoint = await this.createRollbackPoint(
+            operation,
+            [fileResourceRef],
+            { path: workspacePath.relativePath, content: before ?? null },
+            { path: workspacePath.relativePath, content }
+          );
+          return {
+            resource: {
+              url: input.url,
+              title: page.title,
+              text: page.text,
+              file_path: workspacePath.relativePath,
+              ...(input.operation === "browser.screenshot" ? { screenshot_ref: workspacePath.relativePath } : {})
+            },
+            ref: fileResourceRef,
+            rollbackPoint,
+            summary: input.operation === "browser.screenshot"
+              ? `Saved browser snapshot fallback for ${input.url}.`
+              : `Downloaded browser content from ${input.url} into workspace.`
+          };
+        }
+        return {
+          resource: { url: input.url, title: page.title, text: page.text },
+          ref,
+          summary: `Read browser page ${input.url}.`
+        };
+      }
+    });
+  }
+
+  async prepareExternalSend(input: {
+    channel: ExternalSendRecord["channel"];
+    target: Record<string, JsonValue>;
+    title: string;
+    body: string;
+  }): Promise<ExternalSendRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Prepare external send: ${input.title}`);
+    const now = nowIso();
+    const draft: ExternalSendRecord = {
+      id: createId("send"),
+      channel: input.channel,
+      status: "draft",
+      target: input.target,
+      title: input.title,
+      body: input.body,
+      created_at: now,
+      updated_at: now
+    };
+    return this.runAllowedWrite<ExternalSendRecord, Record<string, unknown>>({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "external.send.prepare",
+      proposedEffects: ["Create an outbound send draft without dispatching."],
+      execute: async (operation) => {
+        const send = await this.store.saveExternalSend({ ...draft, operation_id: operation.id });
+        const ref = externalSendRef(send);
+        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { external_send: send as unknown as JsonValue });
+        return { resource: send, ref, rollbackPoint, summary: `Prepared external send draft ${send.title}.` };
+      }
+    });
+  }
+
+  async dispatchExternalSend(input: { sendId: string; dryRun?: boolean } ): Promise<ExternalSendRuntimeResult> {
+    const existing = await this.store.getExternalSend(input.sendId);
+    if (!existing) {
+      throw new RuntimeRequestError("not_found", `External send not found: ${input.sendId}`);
+    }
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Dispatch external send: ${existing.title}`);
+    return this.runAllowedWrite<ExternalSendRecord, Record<string, unknown>>({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "external.send.dispatch",
+      proposedEffects: ["Dispatch a prepared outbound send to an external channel."],
+      inputRef: externalSendRef(existing),
+      targetResourceRefs: [externalSendRef(existing)],
+      execute: async (operation) => {
+        const result = await dispatchExternalSendAdapter(existing, input.dryRun ?? process.env.SAMURAI_EXTERNAL_SEND_DISPATCH !== "true");
+        const now = nowIso();
+        const next: ExternalSendRecord = {
+          ...existing,
+          status: result.dispatched ? "dispatched" : "approved",
+          operation_id: operation.id,
+          dispatch_result: result as Record<string, JsonValue>,
+          updated_at: now,
+          dispatched_at: result.dispatched ? now : undefined
+        };
+        const saved = await this.store.saveExternalSend(next);
+        const ref = externalSendRef(saved);
+        return { resource: saved, ref, summary: result.dispatched ? `Dispatched external send ${saved.title}.` : `Prepared external send ${saved.title}; dispatch dry-run recorded.` };
+      }
+    });
+  }
+
+  async saveAutomationJob(input: {
+    title: string;
+    kind: AutomationJobRecord["kind"];
+    schedule: string;
+    target_instruction: string;
+    delivery_target?: Record<string, JsonValue>;
+    enabled?: boolean;
+    next_run_at?: string;
+  }): Promise<AutomationJobRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Save automation job: ${input.title}`);
+    const now = nowIso();
+    const job: AutomationJobRecord = {
+      id: createId("automation"),
+      title: input.title,
+      kind: input.kind,
+      status: input.enabled === false ? "disabled" : "enabled",
+      schedule: input.schedule,
+      target_instruction: input.target_instruction,
+      delivery_target: input.delivery_target ?? { channel: "activity" },
+      next_run_at: input.next_run_at ?? now,
+      created_at: now,
+      updated_at: now
+    };
+    return this.runAllowedWrite<AutomationJobRecord, Record<string, unknown>>({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "automation.job.save",
+      proposedEffects: ["Save an automation job definition."],
+      execute: async (operation) => {
+        const saved = await this.store.saveAutomationJob(job);
+        const ref = automationJobRef(saved);
+        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { automation_job: saved as unknown as JsonValue });
+        return { resource: saved, ref, rollbackPoint, summary: `Saved automation job ${saved.title}.` };
+      }
+    });
+  }
+
+  async runDueAutomationJobs(now = nowIso()): Promise<AutomationRunRuntimeResult[]> {
+    const jobs = await this.store.listAutomationJobs({ dueAt: now, enabledOnly: true });
+    const results: AutomationRunRuntimeResult[] = [];
+    for (const job of jobs) {
+      results.push(await this.runAutomationJob(job));
+    }
+    return results;
+  }
+
+  async applyReflectionSuggestion(input: { suggestionId: string }): Promise<RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>> {
+    const suggestions = await this.store.listReflectionSuggestions();
+    const suggestion = suggestions.find((item) => item.id === input.suggestionId);
+    if (!suggestion) {
+      throw new RuntimeRequestError("not_found", `Reflection suggestion not found: ${input.suggestionId}`);
+    }
+    if (suggestion.status !== "proposed") {
+      throw new RuntimeRequestError("conflict", "reflection_suggestion_already_settled");
+    }
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Apply reflection suggestion: ${suggestion.title}`);
+    return this.runAllowedWrite<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath, Record<string, unknown>>({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "reflection.suggestion.apply",
+      proposedEffects: [`Apply ${suggestion.suggestion_type} reflection suggestion.`],
+      targetResourceRefs: suggestion.source_refs,
+      execute: async (operation) => {
+        const now = nowIso();
+        if (suggestion.suggestion_type === "memory") {
+          const memory = await createTopicMemory(this.store, envelope, suggestion.title || "reflection", suggestion.content);
+          const ref = memoryRef(memory);
+          const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { memory: memory as unknown as JsonValue });
+          await this.store.updateReflectionSuggestion({ ...suggestion, status: "applied", updated_at: now });
+          return { resource: memory, ref, rollbackPoint, summary: `Applied reflection suggestion as Memory ${memory.topic}.` };
+        }
+        if (suggestion.suggestion_type === "knowledge_wiki") {
+          const wiki = await this.createWikiProposal({
+            title: suggestion.title,
+            content: suggestion.content,
+            source_refs: suggestion.source_refs,
+            provenance: { kind: "generated_local", summary: "Applied from reflection suggestion.", verified: false }
+          });
+          await this.store.updateReflectionSuggestion({ ...suggestion, status: "applied", target_ref: wiki.operation.result_ref, updated_at: now });
+          return {
+            resource: wiki.resource,
+            ref: wiki.operation.result_ref!,
+            rollbackPoint: wiki.rollbackPoint,
+            summary: `Applied reflection suggestion as Knowledge Wiki proposal ${wiki.resource.title}.`
+          };
+        }
+        if (suggestion.suggestion_type === "skill") {
+          const skill = await this.createSkillCandidate({
+            title: suggestion.title,
+            description: summarize(suggestion.content),
+            content: suggestion.content,
+            tags: ["reflection"]
+          });
+          await this.store.updateReflectionSuggestion({ ...suggestion, status: "applied", target_ref: skill.operation.result_ref, updated_at: now });
+          return {
+            resource: skill.resource,
+            ref: skill.operation.result_ref!,
+            rollbackPoint: skill.rollbackPoint,
+            summary: `Applied reflection suggestion as Skill candidate ${skill.resource.title}.`
+          };
+        }
+        throw new RuntimeRequestError("conflict", "reflection_suggestion_type_not_applyable");
+      }
+    });
   }
 
   async createSkillCandidate(input: {
@@ -1022,10 +1556,340 @@ export class AgentRuntime {
     }
   }
 
+  private async runAutomationJob(job: AutomationJobRecord): Promise<AutomationRunRuntimeResult> {
+    let automationRun = await this.store.createAutomationRun({
+      id: createId("automationrun"),
+      kind: job.kind,
+      source: "automation_job",
+      status: "started",
+      started_at: nowIso()
+    });
+    const context: GatewayContext = {
+      source: "cron",
+      actor_identity: "owner_scheduled",
+      instruction_source: "scheduled_context",
+      channel: "cron",
+      session_key: `cron:automation:${job.id}`
+    };
+    const session = await this.ensureSessionForContext(context, job.title);
+    automationRun = await this.store.updateAutomationRun({ ...automationRun, session_id: session.id });
+    const envelope = createGatewayEnvelope(context, job.target_instruction);
+    try {
+      const result = await this.runAllowedWrite({
+        session,
+        envelope,
+        context,
+        operationName: "automation.job.run",
+        inputRef: automationJobRef(job),
+        proposedEffects: [`Run automation job ${job.title}.`],
+        execute: async (operation) => {
+          let resource: AutomationRunRecord = automationRun;
+          let summary = `Ran automation job ${job.title}.`;
+          if (job.kind === "wiki_reindex") {
+            const reindex = await this.store.reindexWiki();
+            summary = `Reindexed Knowledge Wiki pages: ${reindex.active}/${reindex.total} active.`;
+          } else if (job.kind === "skill_curator") {
+            const curator = await this.runCuratorJob();
+            summary = `Skill curator created ${curator.suggestions.length} review suggestion(s).`;
+          } else if (job.kind === "memory_review") {
+            const curator = await this.runCuratorJob();
+            summary = `Memory review created ${curator.suggestions.length} curator suggestion(s).`;
+          } else if (job.kind === "daily_digest" || job.kind === "custom_instruction") {
+            const evaluation = await this.runEvaluationJob();
+            summary = `Automation evaluation completed with ${evaluation.suggestions.length} suggestion(s).`;
+          }
+          const ref = {
+            kind: "automation_run",
+            id: automationRun.id,
+            uri: `automation-runs/${automationRun.id}`,
+            label: job.title
+          };
+          resource = await this.store.updateAutomationRun({
+            ...automationRun,
+            status: "completed",
+            operation_id: operation.id,
+            completed_at: nowIso()
+          });
+          await this.store.saveAutomationJob({
+            ...job,
+            last_run_at: nowIso(),
+            next_run_at: nextRunFromSchedule(job.schedule),
+            updated_at: nowIso()
+          });
+          return { resource, ref, summary };
+        }
+      });
+      return { ...result, automationRun: result.resource };
+    } catch (error) {
+      automationRun = await this.store.updateAutomationRun({
+        ...automationRun,
+        status: "failed",
+        completed_at: nowIso(),
+        error: error instanceof Error ? error.message : "Unknown error"
+      });
+      throw error;
+    }
+  }
+
   private async saveMessage(message: MessageRecord): Promise<MessageRecord> {
     const saved = await this.store.saveMessage(message);
     await this.emit("message.created", saved);
     return saved;
+  }
+
+  private async handleRuntimeToolCall(run: BackendRunRecord, event: BackendOutputEvent): Promise<{ operation: OperationRecord; toolRun: ToolRunRecord } | undefined> {
+    const toolName = stringPayload(event.payload.provider_tool_name);
+    const args = recordPayload(event.payload.arguments);
+    const toolCallId = stringPayload(event.payload.tool_call_id) || event.tool_call_id;
+    let result:
+      | FileActionRuntimeResult
+      | BrowserActionRuntimeResult
+      | ExternalSendRuntimeResult
+      | AutomationJobRuntimeResult
+      | RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>
+      | undefined;
+
+    if (toolName === "file.read" || toolName === "file.list" || toolName === "file.write" || toolName === "file.patch") {
+      result = await this.runFileAction({
+        operation: toolName,
+        path: stringPayload(args.path),
+        content: typeof args.content === "string" ? args.content : undefined,
+        search: typeof args.search === "string" ? args.search : undefined,
+        replace: typeof args.replace === "string" ? args.replace : undefined
+      });
+    } else if (toolName === "browser.navigate" || toolName === "browser.extract" || toolName === "browser.screenshot" || toolName === "browser.download_to_workspace") {
+      result = await this.runBrowserAction({
+        operation: toolName,
+        url: stringPayload(args.url),
+        output_path: typeof args.output_path === "string" ? args.output_path : undefined
+      });
+    } else if (toolName === "external.send.prepare") {
+      result = await this.prepareExternalSend({
+        channel: ["webhook", "email", "slack"].includes(stringPayload(args.channel)) ? stringPayload(args.channel) as ExternalSendRecord["channel"] : "webhook",
+        target: recordPayload(args.target),
+        title: stringPayload(args.title),
+        body: stringPayload(args.body)
+      });
+    } else if (toolName === "external.send.dispatch") {
+      result = await this.dispatchExternalSend({
+        sendId: stringPayload(args.send_id),
+        dryRun: args.dry_run !== false
+      });
+    } else if (toolName === "reflection.suggestion.apply") {
+      result = await this.applyReflectionSuggestion({ suggestionId: stringPayload(args.suggestion_id) });
+    }
+
+    if (!result) {
+      return undefined;
+    }
+    const toolRun = await this.store.saveToolRun({
+      id: createId("toolrun"),
+      run_id: run.id,
+      session_id: run.session_id,
+      tool_call_id: toolCallId,
+      provider_tool_name: toolName,
+      action_id: result.operation.operation,
+      status: "completed",
+      input_summary: summarize(JSON.stringify(args), 220),
+      output_summary: result.auditRecord.outputs_summary,
+      resource_refs: result.operation.result_ref ? [result.operation.result_ref] : [],
+      created_at: nowIso()
+    });
+    return { operation: result.operation, toolRun };
+  }
+
+  private resolveWorkspacePath(inputPath: string): { absolutePath: string; relativePath: string } {
+    const normalized = inputPath.replaceAll("\\", "/").replace(/^\/+/, "");
+    const absolutePath = path.resolve(this.store.rootDir, normalized);
+    const root = path.resolve(this.store.rootDir);
+    if (absolutePath !== root && !absolutePath.startsWith(`${root}${path.sep}`)) {
+      throw new RuntimeRequestError("forbidden", "path_outside_workspace");
+    }
+    return {
+      absolutePath,
+      relativePath: path.relative(root, absolutePath) || "."
+    };
+  }
+
+  private async buildContextPreview(sessionId: string, query: string): Promise<ContextPreview> {
+    const [activeMemory, activeWiki, skills, messages, searchResults] = await Promise.all([
+      retrieveActiveMemory(this.store, query),
+      this.store.listWiki({ activeOnly: true }),
+      this.store.listSkills(),
+      this.store.listMessages(sessionId),
+      query.trim() ? this.store.search(query) : Promise.resolve([])
+    ]);
+    const selectedSkills = skills
+      .filter((skill) => skill.state === "active" || skill.state === "pinned" || skill.state === "project")
+      .slice(0, 5);
+    const selectedSkillEntries = await Promise.all(
+      selectedSkills.map(async (skill) => ({
+        id: skill.id,
+        title: skill.title,
+        description: skill.description,
+        tags: skill.tags,
+        required_capabilities: skill.required_capabilities,
+        ...(skill.state === "active" || skill.state === "pinned" ? { content: stripSkillFrontmatter((await this.store.readSkillMarkdown(skill.id)) ?? "") } : {})
+      }))
+    );
+    const wikiEntries = await Promise.all(
+      activeWiki.slice(0, 5).map(async (wiki) => ({
+        id: wiki.id,
+        slug: wiki.slug,
+        title: wiki.title,
+        content: (await this.store.readWikiContent(wiki.id)) ?? ""
+      }))
+    );
+
+    return {
+      session_id: sessionId,
+      query,
+      active_memory: activeMemory.map((memory) => ({
+        id: memory.frontmatter.id,
+        topic: memory.frontmatter.topic,
+        content: memory.content
+      })),
+      knowledge_wiki: wikiEntries.filter((wiki) => wiki.content.trim().length > 0),
+      selected_skills: selectedSkillEntries,
+      session_search: searchResults.slice(0, 8).map((result) => ({
+        kind: result.kind,
+        id: result.id,
+        title: result.title,
+        summary: result.summary
+      })),
+      recent_messages: messages.slice(-10).map((message) => ({
+        id: message.id,
+        role: message.role,
+        content: message.content
+      })),
+      available_tools: proposalCapabilityManifest.agent_tools
+    };
+  }
+
+  private async runReflectionForCompletedTurn(input: {
+    kind: ReflectionRunRecord["kind"];
+    session: SessionRecord;
+    sourceRunId?: string;
+    backendRun?: BackendRunRecord;
+    userMessage?: MessageRecord;
+    agentMessage?: MessageRecord;
+    workspaceChanges: WorkspaceChangeRecord[];
+    toolRuns: ToolRunRecord[];
+  }): Promise<ReflectionRuntimeResult> {
+    const startedAt = nowIso();
+    let reflectionRun: ReflectionRunRecord = {
+      id: createId("reflection"),
+      kind: input.kind,
+      source_run_id: input.sourceRunId ?? input.backendRun?.id,
+      session_id: input.session.id,
+      status: "started",
+      input_summary: summarize(input.userMessage?.content ?? input.session.title),
+      started_at: startedAt
+    };
+    reflectionRun = await this.store.createReflectionRun(reflectionRun);
+    const suggestions = this.createReflectionSuggestions(reflectionRun, input);
+    for (const suggestion of suggestions) {
+      await this.store.saveReflectionSuggestion(suggestion);
+    }
+    reflectionRun = {
+      ...reflectionRun,
+      status: "completed",
+      output_summary: suggestions.length ? `Created ${suggestions.length} reflection suggestion(s).` : "No reflection suggestions.",
+      completed_at: nowIso()
+    };
+    reflectionRun = await this.store.updateReflectionRun(reflectionRun);
+    return { reflectionRun, suggestions };
+  }
+
+  private createReflectionSuggestions(
+    reflectionRun: ReflectionRunRecord,
+    input: {
+      userMessage?: MessageRecord;
+      agentMessage?: MessageRecord;
+      backendRun?: BackendRunRecord;
+      workspaceChanges: WorkspaceChangeRecord[];
+      toolRuns: ToolRunRecord[];
+    }
+  ): ReflectionSuggestionRecord[] {
+    const now = nowIso();
+    const sourceRefs: ReflectionSuggestionRecord["source_refs"] = [
+      ...(input.backendRun
+        ? [{
+            kind: "backend_run",
+            id: input.backendRun.id,
+            uri: `backend-runs/${input.backendRun.id}`,
+            label: input.backendRun.input_summary
+          }]
+        : []),
+      ...(input.userMessage
+        ? [{
+            kind: "message",
+            id: input.userMessage.id,
+            uri: `messages/${input.userMessage.id}`,
+            label: "User message"
+          }]
+        : [])
+    ];
+    const suggestions: ReflectionSuggestionRecord[] = [];
+    const userContent = input.userMessage?.content ?? "";
+    const agentContent = input.agentMessage?.content ?? "";
+    if (/覚えて|今後|preference|remember|好み|文体/i.test(userContent)) {
+      suggestions.push({
+        id: createId("suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: "memory",
+        status: "proposed",
+        title: "Memory candidate",
+        content: userContent,
+        source_refs: sourceRefs,
+        confidence: 0.72,
+        created_at: now,
+        updated_at: now
+      });
+    }
+    if (input.workspaceChanges.some((change) => change.change_type === "artifact_created") || /設計|調査|仕様|wiki|knowledge/i.test(userContent)) {
+      suggestions.push({
+        id: createId("suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: "knowledge_wiki",
+        status: "proposed",
+        title: "Knowledge Wiki proposal",
+        content: summarize(`${userContent}\n${agentContent}`, 800),
+        source_refs: sourceRefs,
+        confidence: 0.6,
+        created_at: now,
+        updated_at: now
+      });
+    }
+    if (/手順|毎回|次回|skill|workflow|やり方/i.test(userContent)) {
+      suggestions.push({
+        id: createId("suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: "skill",
+        status: "proposed",
+        title: "Skill candidate",
+        content: summarize(userContent, 800),
+        source_refs: sourceRefs,
+        confidence: 0.64,
+        created_at: now,
+        updated_at: now
+      });
+    }
+    if (input.toolRuns.some((toolRun) => toolRun.status === "ignored" || toolRun.status === "failed")) {
+      suggestions.push({
+        id: createId("suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: "conflict",
+        status: "proposed",
+        title: "Tool boundary review",
+        content: input.toolRuns.filter((toolRun) => toolRun.status !== "completed").map((toolRun) => `${toolRun.provider_tool_name}: ${toolRun.output_summary}`).join("\n"),
+        source_refs: sourceRefs,
+        confidence: 0.58,
+        created_at: now,
+        updated_at: now
+      });
+    }
+    return suggestions;
   }
 
   private async createOperation(
@@ -1071,6 +1935,53 @@ export class AgentRuntime {
     await this.store.saveOperation(operation);
     await this.emit("operation.created", operation);
     return operation;
+  }
+
+  private async executeApprovedExternalDispatch(
+    approval: ApprovalRequest,
+    operation: OperationRecord,
+    decision: PolicyDecisionRecord
+  ): Promise<ApprovalLifecycleResult> {
+    const sendId = operation.input_ref?.kind === "external_send" ? operation.input_ref.id : operation.target_resource_refs.find((ref) => ref.kind === "external_send")?.id;
+    if (!sendId) {
+      throw new RuntimeRequestError("conflict", "external_send_ref_missing");
+    }
+    const send = await this.store.getExternalSend(sendId);
+    if (!send) {
+      throw new RuntimeRequestError("not_found", `External send not found: ${sendId}`);
+    }
+    const result = await dispatchExternalSendAdapter(send, process.env.SAMURAI_EXTERNAL_SEND_DISPATCH !== "true");
+    const now = nowIso();
+    const saved = await this.store.saveExternalSend({
+      ...send,
+      status: result.dispatched ? "dispatched" : "approved",
+      operation_id: operation.id,
+      approval_request_id: approval.id,
+      dispatch_result: result as Record<string, JsonValue>,
+      updated_at: now,
+      dispatched_at: result.dispatched ? now : undefined
+    });
+    const ref = externalSendRef(saved);
+    operation.policy_decision_id = decision.id;
+    operation.approval_request_id = approval.id;
+    operation.status = "completed";
+    operation.result_ref = ref;
+    operation.updated_at = now;
+    await this.store.updateOperation(operation);
+    const audit = await this.auditOperation(
+      operation,
+      decision,
+      result.dispatched ? `Dispatched external send ${saved.title}.` : `Approved external send ${saved.title}; dry-run dispatch recorded.`,
+      [ref],
+      undefined
+    );
+    return {
+      approvalRequest: approval,
+      operation,
+      auditRecord: audit,
+      activity: await this.rebuildActivity(),
+      status: "approved"
+    };
   }
 
   private async ensureSessionForContext(context: GatewayContext, title: string): Promise<SessionRecord> {
@@ -1128,8 +2039,12 @@ export class AgentRuntime {
       operation.updated_at = nowIso();
       await this.store.updateOperation(operation);
       const audit = await this.auditOperation(operation, decision, "Write operation was not executed by policy.", [], undefined);
+      const approvalRequest = await this.createApprovalRequest(operation, decision);
+      operation.approval_request_id = approvalRequest.id;
+      operation.updated_at = nowIso();
+      await this.store.updateOperation(operation);
       throw new RuntimeRequestError(decision.decision === "deny" ? "forbidden" : "conflict", "policy_blocked", {
-        approvalRequest: await this.createApprovalRequest(operation, decision),
+        approvalRequest,
         operation,
         auditRecord: audit,
         activity: await this.rebuildActivity(),
@@ -1571,8 +2486,16 @@ function createEnvelope(
   };
 }
 
-function summarize(value: string): string {
-  return value.trim().replace(/\s+/g, " ").slice(0, 160);
+function summarize(value: string, maxLength = 160): string {
+  return value.trim().replace(/\s+/g, " ").slice(0, maxLength);
+}
+
+function stringPayload(value: JsonValue | undefined): string {
+  return typeof value === "string" ? value : "";
+}
+
+function recordPayload(value: JsonValue | undefined): Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
 }
 
 function jsonRecord(value: Record<string, unknown>): Record<string, JsonValue> {
@@ -1656,6 +2579,10 @@ function parseSkillMarkdown(markdown: string): { frontmatter: SkillFrontmatter; 
   };
 }
 
+function stripSkillFrontmatter(markdown: string): string {
+  return parseSkillMarkdown(markdown).content.trim();
+}
+
 function memoryRef(memory: MemoryFrontmatter & { file_path?: string }) {
   return {
     kind: "memory",
@@ -1709,5 +2636,181 @@ function collectionRecordRef(record: CollectionRecordWithFilePath) {
     id: record.id,
     uri: record.file_path,
     label: `${record.collection_id}/${record.id}`
+  };
+}
+
+function fileRef(relativePath: string) {
+  return {
+    kind: "file",
+    id: stableHash(relativePath),
+    uri: relativePath,
+    label: relativePath
+  };
+}
+
+function externalSendRef(send: ExternalSendRecord) {
+  return {
+    kind: "external_send",
+    id: send.id,
+    uri: `external-sends/${send.id}`,
+    label: send.title
+  };
+}
+
+function automationJobRef(job: AutomationJobRecord) {
+  return {
+    kind: "automation_job",
+    id: job.id,
+    uri: `automation-jobs/${job.id}`,
+    label: job.title
+  };
+}
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function readBrowserPage(url: string): Promise<{ url: string; title?: string; html: string; text: string; adapter: "playwright" | "fetch" }> {
+  const playwrightPage = await readBrowserPageWithPlaywright(url).catch(() => undefined);
+  if (playwrightPage) {
+    return playwrightPage;
+  }
+  const response = await fetch(url);
+  const html = await response.text();
+  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim();
+  return {
+    url,
+    title,
+    html,
+    text: htmlToText(html).slice(0, 20_000),
+    adapter: "fetch"
+  };
+}
+
+async function readBrowserPageWithPlaywright(url: string): Promise<{ url: string; title?: string; html: string; text: string; adapter: "playwright" } | undefined> {
+  if (process.env.SAMURAI_BROWSER_ADAPTER !== "playwright") {
+    return undefined;
+  }
+  const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<unknown>;
+  const imported = await dynamicImport("playwright").catch(() => undefined) as { chromium?: { launch: (options: { headless: boolean }) => Promise<{
+    newPage: () => Promise<{
+      goto: (targetUrl: string, options: { waitUntil: "networkidle"; timeout: number }) => Promise<unknown>;
+      title: () => Promise<string>;
+      content: () => Promise<string>;
+      locator: (selector: string) => { innerText: (options: { timeout: number }) => Promise<string> };
+    }>;
+    close: () => Promise<void>;
+  }> } } | undefined;
+  if (!imported?.chromium) {
+    return undefined;
+  }
+  const browser = await imported.chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
+    const [title, html, text] = await Promise.all([
+      page.title(),
+      page.content(),
+      page.locator("body").innerText({ timeout: 5_000 }).catch(() => "")
+    ]);
+    return {
+      url,
+      title,
+      html,
+      text: text.slice(0, 20_000),
+      adapter: "playwright"
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
+function renderBrowserSnapshotHtml(page: { url: string; title?: string; html: string; text: string; adapter: string }): string {
+  return [
+    "<!doctype html>",
+    "<meta charset=\"utf-8\">",
+    `<title>${escapeHtml(page.title || page.url)}</title>`,
+    `<meta name=\"samurai-source-url\" content=\"${escapeHtml(page.url)}\">`,
+    `<meta name=\"samurai-browser-adapter\" content=\"${escapeHtml(page.adapter)}\">`,
+    page.html || `<pre>${escapeHtml(page.text)}</pre>`,
+    ""
+  ].join("\n");
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;");
+}
+
+async function listWorkspaceDirectory(absolutePath: string, relativePath: string) {
+  const entries = await readdir(absolutePath, { withFileTypes: true });
+  return Promise.all(
+    entries.map(async (entry) => {
+      const childRelativePath = path.posix.join(relativePath.replaceAll(path.sep, "/"), entry.name).replace(/^\/+/, "");
+      const childAbsolutePath = path.join(absolutePath, entry.name);
+      const info = await stat(childAbsolutePath);
+      return {
+        path: childRelativePath,
+        kind: entry.isDirectory() ? "directory" as const : "file" as const,
+        ...(entry.isFile() ? { size: info.size } : {})
+      };
+    })
+  );
+}
+
+function nextRunFromSchedule(schedule: string): string {
+  const now = Date.now();
+  const normalized = schedule.trim().toLowerCase();
+  if (normalized.includes("weekly")) {
+    return new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString();
+  }
+  if (normalized.includes("hourly")) {
+    return new Date(now + 60 * 60 * 1000).toISOString();
+  }
+  return new Date(now + 24 * 60 * 60 * 1000).toISOString();
+}
+
+async function dispatchExternalSendAdapter(send: ExternalSendRecord, dryRun: boolean): Promise<{ dispatched: boolean; adapter: string; status?: number; dry_run: boolean; message: string }> {
+  if (send.channel === "email") {
+    return {
+      dispatched: false,
+      adapter: "email",
+      dry_run: true,
+      message: "Email dispatch is prepared but no email transport is configured in this backend slice."
+    };
+  }
+  const url = typeof send.target.url === "string" ? send.target.url : "";
+  if (!url) {
+    throw new RuntimeRequestError("conflict", `${send.channel}_url_required`);
+  }
+  if (dryRun) {
+    return {
+      dispatched: false,
+      adapter: send.channel,
+      dry_run: true,
+      message: "Dry run recorded. Set SAMURAI_EXTERNAL_SEND_DISPATCH=true to enable dispatch."
+    };
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(send.channel === "slack" ? { text: `*${send.title}*\n${send.body}` } : { title: send.title, body: send.body })
+  });
+  return {
+    dispatched: response.ok,
+    adapter: send.channel,
+    status: response.status,
+    dry_run: false,
+    message: response.ok ? `${send.channel} dispatched.` : `${send.channel} dispatch failed.`
   };
 }

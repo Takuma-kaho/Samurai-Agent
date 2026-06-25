@@ -89,6 +89,13 @@ export const backendEventTypes = [
   "run_failed"
 ] as const;
 export const workspaceChangeTypes = ["artifact_created", "memory_suggested", "skill_candidate_created", "collection_changed", "settings_changed", "other"] as const;
+export const reflectionRunKinds = ["chat_turn", "manual", "scheduled", "curator", "evaluation"] as const;
+export const reflectionRunStatuses = ["started", "completed", "failed"] as const;
+export const reflectionSuggestionTypes = ["memory", "knowledge_wiki", "skill", "memory_patch", "skill_patch", "conflict"] as const;
+export const reflectionSuggestionStatuses = ["proposed", "applied", "rejected", "archived"] as const;
+export const toolRunStatuses = ["completed", "ignored", "failed"] as const;
+export const automationJobStatuses = ["enabled", "disabled", "archived"] as const;
+export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed"] as const;
 
 export const SupportedLocaleSchema = z.enum(supportedLocales);
 export const TranslationStatusSchema = z.enum(translationStatuses);
@@ -110,6 +117,13 @@ export const AgentBackendKindSchema = z.enum(agentBackendKinds);
 export const BackendRunStatusSchema = z.enum(backendRunStatuses);
 export const BackendEventTypeSchema = z.enum(backendEventTypes);
 export const WorkspaceChangeTypeSchema = z.enum(workspaceChangeTypes);
+export const ReflectionRunKindSchema = z.enum(reflectionRunKinds);
+export const ReflectionRunStatusSchema = z.enum(reflectionRunStatuses);
+export const ReflectionSuggestionTypeSchema = z.enum(reflectionSuggestionTypes);
+export const ReflectionSuggestionStatusSchema = z.enum(reflectionSuggestionStatuses);
+export const ToolRunStatusSchema = z.enum(toolRunStatuses);
+export const AutomationJobStatusSchema = z.enum(automationJobStatuses);
+export const ExternalSendStatusSchema = z.enum(externalSendStatuses);
 
 export type SupportedLocale = z.infer<typeof SupportedLocaleSchema>;
 export type TranslationStatus = z.infer<typeof TranslationStatusSchema>;
@@ -131,6 +145,13 @@ export type AgentBackendKind = z.infer<typeof AgentBackendKindSchema>;
 export type BackendRunStatus = z.infer<typeof BackendRunStatusSchema>;
 export type BackendEventType = z.infer<typeof BackendEventTypeSchema>;
 export type WorkspaceChangeType = z.infer<typeof WorkspaceChangeTypeSchema>;
+export type ReflectionRunKind = z.infer<typeof ReflectionRunKindSchema>;
+export type ReflectionRunStatus = z.infer<typeof ReflectionRunStatusSchema>;
+export type ReflectionSuggestionType = z.infer<typeof ReflectionSuggestionTypeSchema>;
+export type ReflectionSuggestionStatus = z.infer<typeof ReflectionSuggestionStatusSchema>;
+export type ToolRunStatus = z.infer<typeof ToolRunStatusSchema>;
+export type AutomationJobStatus = z.infer<typeof AutomationJobStatusSchema>;
+export type ExternalSendStatus = z.infer<typeof ExternalSendStatusSchema>;
 
 export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValueSchema), z.record(jsonValueSchema)])
@@ -227,6 +248,118 @@ export const WorkspaceChangeRecordSchema = z.object({
   created_at: z.string().datetime()
 });
 export type WorkspaceChangeRecord = z.infer<typeof WorkspaceChangeRecordSchema>;
+
+export const ContextPreviewSchema = z.object({
+  session_id: z.string().min(1),
+  query: z.string(),
+  active_memory: z.array(z.object({
+    id: z.string().min(1),
+    topic: z.string().min(1),
+    content: z.string()
+  })),
+  knowledge_wiki: z.array(z.object({
+    id: z.string().min(1),
+    slug: z.string().min(1),
+    title: z.string().min(1),
+    content: z.string()
+  })),
+  selected_skills: z.array(z.object({
+    id: z.string().min(1),
+    title: z.string(),
+    description: z.string(),
+    tags: z.array(z.string()),
+    required_capabilities: z.array(z.string()),
+    content: z.string().optional()
+  })),
+  session_search: z.array(z.object({
+    kind: z.string().min(1),
+    id: z.string().min(1),
+    title: z.string(),
+    summary: z.string()
+  })),
+  recent_messages: z.array(z.object({
+    id: z.string().min(1),
+    role: z.enum(["user", "agent", "system"]),
+    content: z.string()
+  })),
+  available_tools: z.array(z.string())
+});
+export type ContextPreview = z.infer<typeof ContextPreviewSchema>;
+
+export const ReflectionRunRecordSchema = z.object({
+  id: z.string().min(1),
+  kind: ReflectionRunKindSchema,
+  source_run_id: z.string().optional(),
+  session_id: z.string().optional(),
+  status: ReflectionRunStatusSchema,
+  input_summary: z.string(),
+  output_summary: z.string().optional(),
+  started_at: z.string().datetime(),
+  completed_at: z.string().datetime().optional(),
+  error: z.string().optional()
+});
+export type ReflectionRunRecord = z.infer<typeof ReflectionRunRecordSchema>;
+
+export const ReflectionSuggestionRecordSchema = z.object({
+  id: z.string().min(1),
+  reflection_run_id: z.string().min(1),
+  suggestion_type: ReflectionSuggestionTypeSchema,
+  status: ReflectionSuggestionStatusSchema,
+  title: z.string(),
+  content: z.string(),
+  target_ref: ResourceRefSchema.optional(),
+  source_refs: z.array(ResourceRefSchema),
+  confidence: z.number().min(0).max(1),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type ReflectionSuggestionRecord = z.infer<typeof ReflectionSuggestionRecordSchema>;
+
+export const ToolRunRecordSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  session_id: z.string().min(1),
+  tool_call_id: z.string().optional(),
+  provider_tool_name: z.string().min(1),
+  action_id: z.string().optional(),
+  status: ToolRunStatusSchema,
+  input_summary: z.string(),
+  output_summary: z.string(),
+  resource_refs: z.array(ResourceRefSchema),
+  created_at: z.string().datetime()
+});
+export type ToolRunRecord = z.infer<typeof ToolRunRecordSchema>;
+
+export const AutomationJobRecordSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  kind: z.enum(["memory_review", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction"]),
+  status: AutomationJobStatusSchema,
+  schedule: z.string().min(1),
+  target_instruction: z.string().min(1),
+  delivery_target: z.record(jsonValueSchema),
+  next_run_at: z.string().datetime().optional(),
+  last_run_at: z.string().datetime().optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type AutomationJobRecord = z.infer<typeof AutomationJobRecordSchema>;
+
+export const ExternalSendRecordSchema = z.object({
+  id: z.string().min(1),
+  channel: z.enum(["webhook", "email", "slack"]),
+  status: ExternalSendStatusSchema,
+  target: z.record(jsonValueSchema),
+  title: z.string(),
+  body: z.string(),
+  operation_id: z.string().optional(),
+  approval_request_id: z.string().optional(),
+  dispatch_result: z.record(jsonValueSchema).optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  dispatched_at: z.string().datetime().optional()
+});
+export type ExternalSendRecord = z.infer<typeof ExternalSendRecordSchema>;
 
 export const ActionCatalogEntrySchema = z.object({
   id: z.string().min(1),

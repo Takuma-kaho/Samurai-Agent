@@ -22,6 +22,27 @@ export interface BackendRunInput {
   input_locale: SupportedLocale;
   output_locale: SupportedLocale;
   active_memory: MemoryCandidateLike[];
+  knowledge_wiki?: Array<{
+    id: string;
+    slug: string;
+    title: string;
+    content: string;
+  }>;
+  selected_skills?: Array<{
+    id: string;
+    title: string;
+    description: string;
+    tags: string[];
+    required_capabilities: string[];
+    content?: string;
+  }>;
+  session_search?: Array<{
+    kind: string;
+    id: string;
+    title: string;
+    summary: string;
+  }>;
+  available_tools?: string[];
   recent_messages: MessageRecord[];
   metadata: Record<string, JsonValue>;
 }

@@ -14,10 +14,13 @@ export interface MemoryCandidate {
 
 export async function retrieveActiveMemory(store: WorkspaceStore, query: string): Promise<MemoryCandidate[]> {
   const rows = await store.searchMemory(query, 5);
-  return rows.map((frontmatter) => ({
-    frontmatter,
-    content: frontmatter.source
-  }));
+  const candidates = await Promise.all(
+    rows.map(async (frontmatter) => ({
+      frontmatter,
+      content: (await store.readMemoryContent(frontmatter.id)) ?? ""
+    }))
+  );
+  return candidates.filter((candidate) => candidate.content.trim().length > 0);
 }
 
 export async function createSessionMemory(

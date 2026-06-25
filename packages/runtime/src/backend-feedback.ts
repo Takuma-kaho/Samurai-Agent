@@ -7,6 +7,7 @@ import {
   type MemoryFrontmatter,
   type OperationRecord,
   type ResourceRef,
+  type ToolRunRecord,
   type WorkspaceChangeRecord,
   createId,
   nowIso
@@ -21,6 +22,7 @@ export interface FeedbackResult {
   artifacts: ArtifactRecord[];
   memories: MemoryFrontmatter[];
   operations: OperationRecord[];
+  toolRuns: ToolRunRecord[];
 }
 
 export async function handleBackendToolCall(input: {
@@ -34,22 +36,22 @@ export async function handleBackendToolCall(input: {
   const args = objectValue(input.event.payload.arguments);
 
   if (providerToolName === "create_artifact") {
-    return createArtifactFromTool({ ...input, toolCallId, args });
+    return createArtifactFromTool({ ...input, toolCallId, args, providerToolName });
   }
 
   if (providerToolName === "remember_topic") {
     const settings = await input.store.getSettings();
     if (settings.memory_capture_mode !== "suggest") {
-      return ignoredToolOutput(input.run, toolCallId, "remember_topic", `memory_capture_${settings.memory_capture_mode}`);
+      return ignoredToolOutput(input.run, toolCallId, "remember_topic", `memory_capture_${settings.memory_capture_mode}`, input.store);
     }
-    return createMemoryFromTool({ ...input, toolCallId, args });
+    return createMemoryFromTool({ ...input, toolCallId, args, providerToolName });
   }
 
   if (providerToolName === "request_external_send" || providerToolName === "request_delete") {
-    return ignoredToolOutput(input.run, toolCallId, providerToolName, "backend_native_boundary");
+    return ignoredToolOutput(input.run, toolCallId, providerToolName, "backend_native_boundary", input.store);
   }
 
-  return ignoredToolOutput(input.run, toolCallId, providerToolName || "unknown_tool", "unsupported_tool");
+  return ignoredToolOutput(input.run, toolCallId, providerToolName || "unknown_tool", "unsupported_tool", input.store);
 }
 
 async function createArtifactFromTool(input: {
@@ -57,12 +59,13 @@ async function createArtifactFromTool(input: {
   run: BackendRunRecord;
   runInput: BackendRunInput;
   toolCallId?: string;
+  providerToolName: string;
   args: Record<string, JsonValue>;
 }): Promise<FeedbackResult> {
   const title = stringValue(input.args.title).trim();
   const content = stringValue(input.args.content).trim();
   if (!title || !content) {
-    return ignoredToolOutput(input.run, input.toolCallId, "create_artifact", "artifact_title_or_content_missing");
+    return ignoredToolOutput(input.run, input.toolCallId, "create_artifact", "artifact_title_or_content_missing", input.store);
   }
 
   const operation = createArtifactCompatOperation({ run: input.run, toolCallId: input.toolCallId, title });
@@ -106,7 +109,19 @@ async function createArtifactFromTool(input: {
     workspaceChanges: [change],
     artifacts: [artifact],
     memories: [],
-    operations: [operation]
+    operations: [operation],
+    toolRuns: [
+      await saveToolRun(input.store, {
+        run: input.run,
+        toolCallId: input.toolCallId,
+        providerToolName: input.providerToolName,
+        actionId: "artifact.create",
+        status: "completed",
+        inputSummary: title,
+        outputSummary: `Created artifact ${artifact.title}.`,
+        resourceRefs: [artifact.file_ref]
+      })
+    ]
   };
 }
 
@@ -115,6 +130,7 @@ async function createMemoryFromTool(input: {
   run: BackendRunRecord;
   runInput: BackendRunInput;
   toolCallId?: string;
+  providerToolName: string;
   args: Record<string, JsonValue>;
 }): Promise<FeedbackResult> {
   const topic = stringValue(input.args.topic).trim() || "preference";
@@ -167,11 +183,36 @@ async function createMemoryFromTool(input: {
     workspaceChanges: [change],
     artifacts: [],
     memories: [memory],
-    operations: []
+    operations: [],
+    toolRuns: [
+      await saveToolRun(input.store, {
+        run: input.run,
+        toolCallId: input.toolCallId,
+        providerToolName: input.providerToolName,
+        actionId: "memory.suggest",
+        status: "completed",
+        inputSummary: topic,
+        outputSummary: `Suggested memory ${memory.topic}.`,
+        resourceRefs: [ref]
+      })
+    ]
   };
 }
 
-function ignoredToolOutput(run: BackendRunRecord, toolCallId: string | undefined, toolName: string, reason: string): FeedbackResult {
+async function ignoredToolOutput(run: BackendRunRecord, toolCallId: string | undefined, toolName: string, reason: string, store?: WorkspaceStore): Promise<FeedbackResult> {
+  const toolRuns = store
+    ? [
+        await saveToolRun(store, {
+          run,
+          toolCallId,
+          providerToolName: toolName,
+          status: "ignored",
+          inputSummary: toolName,
+          outputSummary: reason,
+          resourceRefs: []
+        })
+      ]
+    : [];
   return {
     events: [
       {
@@ -183,8 +224,37 @@ function ignoredToolOutput(run: BackendRunRecord, toolCallId: string | undefined
     workspaceChanges: [],
     artifacts: [],
     memories: [],
-    operations: []
+    operations: [],
+    toolRuns
   };
+}
+
+async function saveToolRun(
+  store: WorkspaceStore,
+  input: {
+    run: BackendRunRecord;
+    toolCallId?: string;
+    providerToolName: string;
+    actionId?: string;
+    status: ToolRunRecord["status"];
+    inputSummary: string;
+    outputSummary: string;
+    resourceRefs: ResourceRef[];
+  }
+): Promise<ToolRunRecord> {
+  return store.saveToolRun({
+    id: createId("toolrun"),
+    run_id: input.run.id,
+    session_id: input.run.session_id,
+    tool_call_id: input.toolCallId,
+    provider_tool_name: input.providerToolName || "unknown_tool",
+    action_id: input.actionId,
+    status: input.status,
+    input_summary: summarize(input.inputSummary),
+    output_summary: summarize(input.outputSummary),
+    resource_refs: input.resourceRefs,
+    created_at: nowIso()
+  });
 }
 
 function workspaceChange(input: {
@@ -212,4 +282,8 @@ function stringValue(value: JsonValue | undefined): string {
 
 function objectValue(value: JsonValue | undefined): Record<string, JsonValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+}
+
+function summarize(value: string): string {
+  return value.trim().replace(/\s+/g, " ").slice(0, 220);
 }

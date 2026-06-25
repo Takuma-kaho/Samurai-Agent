@@ -6,6 +6,7 @@ import {
   type ApprovalRequest,
   type ArtifactRecord,
   type AuditRecord,
+  type AutomationJobRecord,
   type BackendEventRecord,
   type BackendRunRecord,
   CollectionRecordSchema,
@@ -18,12 +19,16 @@ import {
   type MemoryFrontmatter,
   type MessageRecord,
   type OperationRecord,
+  type ExternalSendRecord,
   type PolicyDecisionRecord,
+  type ReflectionRunRecord,
+  type ReflectionSuggestionRecord,
   type RollbackPoint,
   type SessionRecord,
   type SettingsRecord,
   SkillFrontmatterSchema,
   type SkillFrontmatter,
+  type ToolRunRecord,
   WikiFrontmatterSchema,
   type WikiFrontmatter,
   type WorkspaceChangeRecord,
@@ -216,6 +221,76 @@ interface AutomationRunsTable {
   error: string | null;
 }
 
+interface AutomationJobsTable {
+  id: string;
+  title: string;
+  kind: string;
+  status: string;
+  schedule: string;
+  target_instruction: string;
+  delivery_target_json: JsonColumn;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ExternalSendsTable {
+  id: string;
+  channel: string;
+  status: string;
+  target_json: JsonColumn;
+  title: string;
+  body: string;
+  operation_id: string | null;
+  approval_request_id: string | null;
+  dispatch_result_json: JsonColumn | null;
+  created_at: string;
+  updated_at: string;
+  dispatched_at: string | null;
+}
+
+interface ReflectionRunsTable {
+  id: string;
+  kind: string;
+  source_run_id: string | null;
+  session_id: string | null;
+  status: string;
+  input_summary: string;
+  output_summary: string | null;
+  started_at: string;
+  completed_at: string | null;
+  error: string | null;
+}
+
+interface ReflectionSuggestionsTable {
+  id: string;
+  reflection_run_id: string;
+  suggestion_type: string;
+  status: string;
+  title: string;
+  content: string;
+  target_ref_json: JsonColumn | null;
+  source_refs_json: JsonColumn;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ToolRunsTable {
+  id: string;
+  run_id: string;
+  session_id: string;
+  tool_call_id: string | null;
+  provider_tool_name: string;
+  action_id: string | null;
+  status: string;
+  input_summary: string;
+  output_summary: string;
+  resource_refs_json: JsonColumn;
+  created_at: string;
+}
+
 interface SettingsTable {
   id: "default";
   ui_locale: string;
@@ -299,7 +374,12 @@ interface WorkspaceDb {
   wiki_index: WikiIndexTable;
   collection_schemas: CollectionSchemasTable;
   collection_records: CollectionRecordsTable;
+  automation_jobs: AutomationJobsTable;
   automation_runs: AutomationRunsTable;
+  external_sends: ExternalSendsTable;
+  reflection_runs: ReflectionRunsTable;
+  reflection_suggestions: ReflectionSuggestionsTable;
+  tool_runs: ToolRunsTable;
   settings: SettingsTable;
   grants: GrantsTable;
   backend_runs: BackendRunsTable;
@@ -558,6 +638,74 @@ export class WorkspaceStore {
         started_at TEXT NOT NULL,
         completed_at TEXT,
         error TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS automation_jobs (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        schedule TEXT NOT NULL,
+        target_instruction TEXT NOT NULL,
+        delivery_target_json TEXT NOT NULL,
+        next_run_at TEXT,
+        last_run_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS external_sends (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,
+        status TEXT NOT NULL,
+        target_json TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        operation_id TEXT,
+        approval_request_id TEXT,
+        dispatch_result_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        dispatched_at TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS reflection_runs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        source_run_id TEXT,
+        session_id TEXT,
+        status TEXT NOT NULL,
+        input_summary TEXT NOT NULL,
+        output_summary TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        error TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS reflection_suggestions (
+        id TEXT PRIMARY KEY,
+        reflection_run_id TEXT NOT NULL,
+        suggestion_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        target_ref_json TEXT,
+        source_refs_json TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (reflection_run_id) REFERENCES reflection_runs(id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS tool_runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        tool_call_id TEXT,
+        provider_tool_name TEXT NOT NULL,
+        action_id TEXT,
+        status TEXT NOT NULL,
+        input_summary TEXT NOT NULL,
+        output_summary TEXT NOT NULL,
+        resource_refs_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
       )`,
       `CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY,
@@ -1454,6 +1602,55 @@ export class WorkspaceStore {
     return notes;
   }
 
+  async saveAutomationJob(job: AutomationJobRecord): Promise<AutomationJobRecord> {
+    await this.db
+      .insertInto("automation_jobs")
+      .values(automationJobToRow(job))
+      .onConflict((oc) => oc.column("id").doUpdateSet(automationJobToRow(job)))
+      .execute();
+    return job;
+  }
+
+  async getAutomationJob(id: string): Promise<AutomationJobRecord | undefined> {
+    const row = await this.db.selectFrom("automation_jobs").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? automationJobFromRow(row) : undefined;
+  }
+
+  async listAutomationJobs(input: { dueAt?: string; enabledOnly?: boolean } = {}): Promise<AutomationJobRecord[]> {
+    let query = this.db.selectFrom("automation_jobs").selectAll();
+    if (input.enabledOnly) {
+      query = query.where("status", "=", "enabled");
+    }
+    const dueAt = input.dueAt;
+    if (dueAt) {
+      query = query.where((eb) => eb.or([
+        eb("next_run_at", "is", null),
+        eb("next_run_at", "<=", dueAt)
+      ]));
+    }
+    const rows = await query.orderBy("updated_at", "desc").execute();
+    return rows.map(automationJobFromRow);
+  }
+
+  async saveExternalSend(send: ExternalSendRecord): Promise<ExternalSendRecord> {
+    await this.db
+      .insertInto("external_sends")
+      .values(externalSendToRow(send))
+      .onConflict((oc) => oc.column("id").doUpdateSet(externalSendToRow(send)))
+      .execute();
+    return send;
+  }
+
+  async getExternalSend(id: string): Promise<ExternalSendRecord | undefined> {
+    const row = await this.db.selectFrom("external_sends").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? externalSendFromRow(row) : undefined;
+  }
+
+  async listExternalSends(): Promise<ExternalSendRecord[]> {
+    const rows = await this.db.selectFrom("external_sends").selectAll().orderBy("created_at", "desc").execute();
+    return rows.map(externalSendFromRow);
+  }
+
   async createAutomationRun(run: AutomationRunRecord): Promise<AutomationRunRecord> {
     await this.db
       .insertInto("automation_runs")
@@ -1474,6 +1671,70 @@ export class WorkspaceStore {
   async getAutomationRun(id: string): Promise<AutomationRunRecord | undefined> {
     const row = await this.db.selectFrom("automation_runs").selectAll().where("id", "=", id).executeTakeFirst();
     return row ? automationRunFromRow(row) : undefined;
+  }
+
+  async createReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord> {
+    await this.db.insertInto("reflection_runs").values(reflectionRunToRow(run)).execute();
+    return run;
+  }
+
+  async updateReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord> {
+    await this.db.updateTable("reflection_runs").set(reflectionRunToRow(run)).where("id", "=", run.id).execute();
+    return run;
+  }
+
+  async getReflectionRun(id: string): Promise<ReflectionRunRecord | undefined> {
+    const row = await this.db.selectFrom("reflection_runs").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? reflectionRunFromRow(row) : undefined;
+  }
+
+  async listReflectionRuns(sessionId?: string): Promise<ReflectionRunRecord[]> {
+    let query = this.db.selectFrom("reflection_runs").selectAll();
+    if (sessionId) {
+      query = query.where("session_id", "=", sessionId);
+    }
+    const rows = await query.orderBy("started_at", "desc").execute();
+    return rows.map(reflectionRunFromRow);
+  }
+
+  async saveReflectionSuggestion(suggestion: ReflectionSuggestionRecord): Promise<ReflectionSuggestionRecord> {
+    await this.db.insertInto("reflection_suggestions").values(reflectionSuggestionToRow(suggestion)).execute();
+    return suggestion;
+  }
+
+  async updateReflectionSuggestion(suggestion: ReflectionSuggestionRecord): Promise<ReflectionSuggestionRecord> {
+    await this.db
+      .updateTable("reflection_suggestions")
+      .set(reflectionSuggestionToRow(suggestion))
+      .where("id", "=", suggestion.id)
+      .execute();
+    return suggestion;
+  }
+
+  async listReflectionSuggestions(reflectionRunId?: string): Promise<ReflectionSuggestionRecord[]> {
+    let query = this.db.selectFrom("reflection_suggestions").selectAll();
+    if (reflectionRunId) {
+      query = query.where("reflection_run_id", "=", reflectionRunId);
+    }
+    const rows = await query.orderBy("created_at", "desc").execute();
+    return rows.map(reflectionSuggestionFromRow);
+  }
+
+  async saveToolRun(run: ToolRunRecord): Promise<ToolRunRecord> {
+    await this.db.insertInto("tool_runs").values(toolRunToRow(run)).execute();
+    return run;
+  }
+
+  async listToolRuns(input: { runId?: string; sessionId?: string } = {}): Promise<ToolRunRecord[]> {
+    let query = this.db.selectFrom("tool_runs").selectAll();
+    if (input.runId) {
+      query = query.where("run_id", "=", input.runId);
+    }
+    if (input.sessionId) {
+      query = query.where("session_id", "=", input.sessionId);
+    }
+    const rows = await query.orderBy("created_at", "desc").execute();
+    return rows.map(toolRunFromRow);
   }
 
   async getSettings(): Promise<SettingsRecord> {
@@ -2063,6 +2324,72 @@ function collectionRecordFromRow(row: CollectionRecordsTable): CollectionRecordW
   };
 }
 
+function automationJobToRow(job: AutomationJobRecord): AutomationJobsTable {
+  return {
+    id: job.id,
+    title: job.title,
+    kind: job.kind,
+    status: job.status,
+    schedule: job.schedule,
+    target_instruction: job.target_instruction,
+    delivery_target_json: stringify(job.delivery_target),
+    next_run_at: job.next_run_at ?? null,
+    last_run_at: job.last_run_at ?? null,
+    created_at: job.created_at,
+    updated_at: job.updated_at
+  };
+}
+
+function automationJobFromRow(row: AutomationJobsTable): AutomationJobRecord {
+  return {
+    id: row.id,
+    title: row.title,
+    kind: row.kind as AutomationJobRecord["kind"],
+    status: row.status as AutomationJobRecord["status"],
+    schedule: row.schedule,
+    target_instruction: row.target_instruction,
+    delivery_target: parse(row.delivery_target_json),
+    next_run_at: row.next_run_at ?? undefined,
+    last_run_at: row.last_run_at ?? undefined,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+function externalSendToRow(send: ExternalSendRecord): ExternalSendsTable {
+  return {
+    id: send.id,
+    channel: send.channel,
+    status: send.status,
+    target_json: stringify(send.target),
+    title: send.title,
+    body: send.body,
+    operation_id: send.operation_id ?? null,
+    approval_request_id: send.approval_request_id ?? null,
+    dispatch_result_json: send.dispatch_result ? stringify(send.dispatch_result) : null,
+    created_at: send.created_at,
+    updated_at: send.updated_at,
+    dispatched_at: send.dispatched_at ?? null
+  };
+}
+
+function externalSendFromRow(row: ExternalSendsTable): ExternalSendRecord {
+  return {
+    id: row.id,
+    channel: row.channel as ExternalSendRecord["channel"],
+    status: row.status as ExternalSendRecord["status"],
+    target: parse(row.target_json),
+    title: row.title,
+    body: row.body,
+    operation_id: row.operation_id ?? undefined,
+    approval_request_id: row.approval_request_id ?? undefined,
+    dispatch_result: row.dispatch_result_json ? parse(row.dispatch_result_json) : undefined,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    dispatched_at: row.dispatched_at ?? undefined
+  };
+}
+
 function automationRunToRow(run: AutomationRunRecord): AutomationRunsTable {
   return {
     id: run.id,
@@ -2088,6 +2415,100 @@ function automationRunFromRow(row: AutomationRunsTable): AutomationRunRecord {
     started_at: row.started_at,
     completed_at: row.completed_at ?? undefined,
     error: row.error ?? undefined
+  };
+}
+
+function reflectionRunToRow(run: ReflectionRunRecord): ReflectionRunsTable {
+  return {
+    id: run.id,
+    kind: run.kind,
+    source_run_id: run.source_run_id ?? null,
+    session_id: run.session_id ?? null,
+    status: run.status,
+    input_summary: run.input_summary,
+    output_summary: run.output_summary ?? null,
+    started_at: run.started_at,
+    completed_at: run.completed_at ?? null,
+    error: run.error ?? null
+  };
+}
+
+function reflectionRunFromRow(row: ReflectionRunsTable): ReflectionRunRecord {
+  return {
+    id: row.id,
+    kind: row.kind as ReflectionRunRecord["kind"],
+    source_run_id: row.source_run_id ?? undefined,
+    session_id: row.session_id ?? undefined,
+    status: row.status as ReflectionRunRecord["status"],
+    input_summary: row.input_summary,
+    output_summary: row.output_summary ?? undefined,
+    started_at: row.started_at,
+    completed_at: row.completed_at ?? undefined,
+    error: row.error ?? undefined
+  };
+}
+
+function reflectionSuggestionToRow(suggestion: ReflectionSuggestionRecord): ReflectionSuggestionsTable {
+  return {
+    id: suggestion.id,
+    reflection_run_id: suggestion.reflection_run_id,
+    suggestion_type: suggestion.suggestion_type,
+    status: suggestion.status,
+    title: suggestion.title,
+    content: suggestion.content,
+    target_ref_json: suggestion.target_ref ? stringify(suggestion.target_ref) : null,
+    source_refs_json: stringify(suggestion.source_refs),
+    confidence: suggestion.confidence,
+    created_at: suggestion.created_at,
+    updated_at: suggestion.updated_at
+  };
+}
+
+function reflectionSuggestionFromRow(row: ReflectionSuggestionsTable): ReflectionSuggestionRecord {
+  return {
+    id: row.id,
+    reflection_run_id: row.reflection_run_id,
+    suggestion_type: row.suggestion_type as ReflectionSuggestionRecord["suggestion_type"],
+    status: row.status as ReflectionSuggestionRecord["status"],
+    title: row.title,
+    content: row.content,
+    target_ref: row.target_ref_json ? parse(row.target_ref_json) : undefined,
+    source_refs: parse(row.source_refs_json),
+    confidence: row.confidence,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+function toolRunToRow(run: ToolRunRecord): ToolRunsTable {
+  return {
+    id: run.id,
+    run_id: run.run_id,
+    session_id: run.session_id,
+    tool_call_id: run.tool_call_id ?? null,
+    provider_tool_name: run.provider_tool_name,
+    action_id: run.action_id ?? null,
+    status: run.status,
+    input_summary: run.input_summary,
+    output_summary: run.output_summary,
+    resource_refs_json: stringify(run.resource_refs),
+    created_at: run.created_at
+  };
+}
+
+function toolRunFromRow(row: ToolRunsTable): ToolRunRecord {
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    session_id: row.session_id,
+    tool_call_id: row.tool_call_id ?? undefined,
+    provider_tool_name: row.provider_tool_name,
+    action_id: row.action_id ?? undefined,
+    status: row.status as ToolRunRecord["status"],
+    input_summary: row.input_summary,
+    output_summary: row.output_summary,
+    resource_refs: parse(row.resource_refs_json),
+    created_at: row.created_at
   };
 }
 
