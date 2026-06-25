@@ -133,8 +133,11 @@ Samurai Agent の独自性は、使うほど育つことにある。
 
 育てるもの。
 
-- Memory: 長期的に残す事実、好み、作業手順、文脈。
-- Skill: よくやる作業を再利用可能にした手順。
+- Memory: 毎回効かせる短い個人理解。好み、作業スタイル、重要ルール、短い教訓。
+- Knowledge Wiki: 濃い知識。記事、調査、設計、プロジェクト知識、技術、意思決定。
+- Skill: 記憶ではなく、よくやる作業を再利用可能にした手順。
+- Session Search: SQLiteで過去会話を探すための検索面。長期Memoryの正本ではない。
+- External Provider: 検索、関連付け、抽出の補助。正本ではない。
 - Reflection: 実行後に、何を覚えるべきか、何をSkill化すべきかを見つける処理。
 - Curator: 増えすぎたMemoryやSkillを整理する処理。
 
@@ -154,6 +157,10 @@ Reflection improves future runs
 
 - MemoryやSkillは、外部Agentの中だけに閉じ込めない。
 - Workspace側に、後から見える形で残す。
+- Memory、Knowledge Wiki、Skillの正本はWorkspace内のMarkdownに置く。
+- SQLiteは検索、履歴、index、状態管理に限定する。
+- External Provider由来の内容は、参照元付きの提案として扱い、acceptedされるまで正本にしない。
+- 参照元不明のProvider情報は保存せず、診断上の未検証ヒントに留める。
 - 自動改善は、ユーザーが理解できる候補として表示する。
 - 初期v1では、候補生成と表示を優先し、高度な自動整理は後回しにする。
 

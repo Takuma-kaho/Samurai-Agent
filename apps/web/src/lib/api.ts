@@ -3,6 +3,8 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   AuditRecord,
+  BackendEventRecord,
+  BackendRunRecord,
   CollectionRecord,
   CollectionSchema,
   MemoryFrontmatter,
@@ -12,7 +14,9 @@ import type {
   RollbackPoint,
   SessionRecord,
   SettingsRecord,
-  SupportedLocale
+  SupportedLocale,
+  WikiFrontmatter,
+  WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
 
 export interface SessionDetail {
@@ -21,6 +25,9 @@ export interface SessionDetail {
   operations: OperationRecord[];
   artifacts: ArtifactRecord[];
   auditRecords: AuditRecord[];
+  backendRuns: BackendRunRecord[];
+  backendEvents: BackendEventRecord[];
+  workspaceChanges: WorkspaceChangeRecord[];
   memory: Array<MemoryFrontmatter & { file_path: string }>;
   activity: ActivityInboxItem[];
 }
@@ -37,9 +44,17 @@ export interface MemoryDetail {
   content: string;
 }
 
+export interface WikiDetail {
+  wiki: WikiFrontmatter & { file_path: string };
+  content: string;
+}
+
 export interface ChatTurnResult {
   session: SessionRecord;
   messages: MessageRecord[];
+  backendRun: BackendRunRecord;
+  backendEvents: BackendEventRecord[];
+  workspaceChanges: WorkspaceChangeRecord[];
   operations: OperationRecord[];
   policyDecisions: PolicyDecisionRecord[];
   artifacts: ArtifactRecord[];
@@ -48,6 +63,41 @@ export interface ChatTurnResult {
   auditRecords: AuditRecord[];
   rollbackPoints: RollbackPoint[];
   activity: ActivityInboxItem[];
+}
+
+export interface AgentBackendStatus {
+  id: string;
+  kind: "mock" | "samurai_native" | "claude_code" | "codex" | "external";
+  label: string;
+  configured: boolean;
+  reason?: string;
+}
+
+export interface HealthPayload {
+  ok: boolean;
+  db?: {
+    ok: boolean;
+    path: string;
+    sizeBytes?: number;
+    reason?: string;
+  };
+  llm?: unknown;
+  backends?: AgentBackendStatus[];
+  workspaceDataDir?: string;
+}
+
+export interface ProviderErrorPayload {
+  error: "provider_not_configured" | "provider_failed";
+  reason?: string;
+  provider?: string;
+  model?: string;
+  status?: number;
+  retryable?: boolean;
+  session?: SessionRecord;
+  messages?: MessageRecord[];
+  backendRun?: BackendRunRecord;
+  backendEvents?: BackendEventRecord[];
+  workspaceChanges?: WorkspaceChangeRecord[];
 }
 
 export interface SearchResult {
@@ -152,6 +202,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getHealth() {
+    return request<HealthPayload>("/api/health");
+  },
   createSession(input: Partial<Pick<SessionRecord, "title" | "ui_locale" | "output_locale">> = {}) {
     return request<SessionRecord>("/api/chat/sessions", {
       method: "POST",
@@ -164,22 +217,27 @@ export const api = {
   getSession(sessionId: string) {
     return request<SessionDetail>(`/api/chat/sessions/${sessionId}`);
   },
-  sendMessage(sessionId: string, content: string, outputLocale: SupportedLocale) {
+  listAgentBackends() {
+    return request<AgentBackendStatus[]>("/api/agent-backends");
+  },
+  sendMessage(sessionId: string, content: string, outputLocale: SupportedLocale, backendId?: string) {
     return request<ChatTurnResult>(`/api/chat/sessions/${sessionId}/messages`, {
       method: "POST",
       body: JSON.stringify({
         content,
-        output_locale: outputLocale
+        output_locale: outputLocale,
+        ...(backendId ? { backend_id: backendId } : {})
       })
     });
   },
-  startChat(content: string, uiLocale: SupportedLocale, outputLocale: SupportedLocale) {
+  startChat(content: string, uiLocale: SupportedLocale, outputLocale: SupportedLocale, backendId?: string) {
     return request<ChatTurnResult>("/api/chat/messages", {
       method: "POST",
       body: JSON.stringify({
         content,
         ui_locale: uiLocale,
-        output_locale: outputLocale
+        output_locale: outputLocale,
+        ...(backendId ? { backend_id: backendId } : {})
       })
     });
   },
@@ -194,6 +252,15 @@ export const api = {
   },
   getActivity() {
     return request<ActivityInboxItem[]>("/api/activity");
+  },
+  listBackendRuns(sessionId?: string) {
+    return request<BackendRunRecord[]>(sessionId ? `/api/backend-runs?session_id=${encodeURIComponent(sessionId)}` : "/api/backend-runs");
+  },
+  listBackendEvents(runId: string) {
+    return request<BackendEventRecord[]>(`/api/backend-runs/${runId}/events`);
+  },
+  listWorkspaceChanges(sessionId?: string) {
+    return request<WorkspaceChangeRecord[]>(sessionId ? `/api/workspace-changes?session_id=${encodeURIComponent(sessionId)}` : "/api/workspace-changes");
   },
   listMemory() {
     return request<Array<MemoryFrontmatter & { file_path: string }>>("/api/memory");
@@ -212,6 +279,48 @@ export const api = {
   },
   getSkill(id: string) {
     return request<{ skill: SkillIndexEntry; markdown: string }>(`/api/skills/${id}`);
+  },
+  listWiki() {
+    return request<Array<WikiFrontmatter & { file_path: string }>>("/api/wiki");
+  },
+  getWiki(id: string) {
+    return request<WikiDetail>(`/api/wiki/${id}`);
+  },
+  createWikiProposal(input: { title: string; content: string; slug?: string; tags?: string[]; content_locale?: SupportedLocale }) {
+    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>("/api/wiki/proposals", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+  acceptWiki(id: string) {
+    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>(`/api/wiki/${id}/accept`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  },
+  rejectWiki(id: string) {
+    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>(`/api/wiki/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  },
+  patchWiki(id: string, input: Partial<Pick<WikiFrontmatter, "title" | "tags" | "content_locale">> & { content?: string }) {
+    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>(`/api/wiki/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  },
+  archiveWiki(id: string) {
+    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>(`/api/wiki/${id}/archive`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  },
+  reindexWiki() {
+    return request<RuntimeWritePayload<{ active: number; total: number }>>("/api/wiki/reindex", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
   },
   createSkillCandidate(input: { title: string; description: string; content?: string; tags?: string[]; required_capabilities?: string[] }) {
     return request<RuntimeWritePayload<SkillIndexEntry>>("/api/skills/candidates", {
@@ -261,7 +370,7 @@ export const api = {
   getSettings() {
     return request<SettingsRecord>("/api/settings");
   },
-  patchSettings(patch: Partial<Pick<SettingsRecord, "theme" | "ui_locale" | "output_locale">>) {
+  patchSettings(patch: Partial<Omit<SettingsRecord, "updated_at">>) {
     return request<SettingsRecord>("/api/settings", {
       method: "PATCH",
       body: JSON.stringify(patch)

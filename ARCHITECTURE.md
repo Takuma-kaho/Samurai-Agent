@@ -517,6 +517,8 @@ sqlite:
 | Artifactの検索状態 | SQLite | filesystem path | 一覧、検索、参照関係に使うから |
 | Memory本文 | filesystem | SQLite index / status | 人間が編集できる個人記憶だから |
 | Memoryの検索index | SQLite | filesystem source | Active Memory retrievalで高速に探すため |
+| Knowledge Wiki本文 | filesystem | SQLite index / status / graph | 濃い知識を人間がMarkdownで読める必要があるから |
+| Knowledge Wiki active index | SQLite | filesystem source | AI根拠、検索注入、reindex対象をactiveに限定するため |
 | Skill本文 | filesystem | SQLite index / status | 手順書として人間もAIも読める必要があるから |
 | Skill index | SQLite | filesystem source | 必要なSkillだけ選ぶため |
 | Collection schema | filesystem | SQLite schema metadata | データ構造を人間が確認できるようにするため |
@@ -546,6 +548,7 @@ BackendEventRecord
 WorkspaceChangeRecord
 ActionCatalogEntry
 MemoryFrontmatter
+WikiFrontmatter
 SkillFrontmatter
 ArtifactRecord
 CollectionSchema
@@ -570,6 +573,19 @@ read modelは、表示や検索のための派生データであり、source of 
 
 Memory / Skill / Reflection / Curator は、Hermes Agentから強く参照する領域である。
 
+この領域は、次の5つを混ぜない。
+
+| 領域 | 役割 | 正本 |
+| --- | --- | --- |
+| Memory | 毎回効かせる短い個人理解。好み、作業スタイル、重要ルール、短い教訓 | `workspace/memory/**/*.md` |
+| Knowledge Wiki | 記事、調査、設計、プロジェクト知識、技術、意思決定などの濃い知識 | `workspace/wiki/pages/<slug>.md` |
+| Skill | 記憶ではなく、再利用できる作業手順 | `workspace/skills/**/*.md` |
+| Session Search | SQLite FTS系の過去会話検索 | SQLite read model |
+| External Provider | 検索、関連付け、抽出の補助 | 正本なし |
+
+External Provider由来の内容は、acceptedされるまでMemory、Knowledge Wiki、Skillの正本にしない。
+参照元不明のProvider情報は保存せず、`unverified external hint` として診断表示に留める。
+
 ### 8.1 Memory
 
 Memoryは、AI秘書の長期的な理解を支える。
@@ -582,7 +598,40 @@ Memoryは、AI秘書の長期的な理解を支える。
 | provisional memory | 保存候補だが、まだ確定していない記憶 |
 | topic memory | ユーザーの好み、事実、作業手順などの長期記憶 |
 | sensitive memory | 個人情報、secret、強い自己理解に関わる記憶 |
-| memory wiki | `[[links]]` 的な知識ネットワーク |
+
+Knowledge WikiはMemoryの一種ではなく、独立したWorkspaceリソースとして扱う。
+
+`WikiFrontmatter`。
+
+```text
+id
+slug
+title
+state: proposed | active | archived | rejected
+content_locale
+tags
+source_refs
+provenance
+created_at
+updated_at
+```
+
+`state=active` のページだけをAIの根拠、検索注入、外部Provider補助index、Wiki graph/reindexの有効対象にする。
+`proposed / rejected / archived` は管理UIと履歴には出せるが、返答根拠としては使わない。
+archive/rejectは物理削除せず、state更新にする。
+
+Wiki APIはStore直書きではなくRuntime operation経由にする。
+
+```text
+GET /api/wiki
+GET /api/wiki/:id
+POST /api/wiki/proposals
+POST /api/wiki/:id/accept
+POST /api/wiki/:id/reject
+PATCH /api/wiki/:id
+POST /api/wiki/:id/archive
+POST /api/wiki/reindex
+```
 
 Memory flow。
 

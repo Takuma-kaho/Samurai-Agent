@@ -1,41 +1,4 @@
 :root {
-  color-scheme: light;
-  --bg: #ffffff;
-  --stage: #ffffff;
-  --stage-soft: #f7f7f8;
-  --rail: #f7f7f8;
-  --panel: #ffffff;
-  --panel-subtle: #f8f8f9;
-  --ink: #101110;
-  --muted: #62646a;
-  --soft: #9a9ca3;
-  --line: #e5e7eb;
-  --line-strong: #d1d5db;
-  --focus: #2563eb;
-  --warn: #b7791f;
-  --ok: #2f8a68;
-  --edge-light: rgba(82, 90, 108, 0.26);
-  --edge-shade: rgba(98, 104, 116, 0.13);
-  --edge-glow: rgba(15, 23, 42, 0.04);
-  --canvas-glow: rgba(15, 23, 42, 0.03);
-  --surface-lift: #ffffff;
-  --surface-inset: rgba(255, 255, 255, 0.82);
-  --feed-card: var(--panel-subtle);
-  --feed-card-hover: #f0f1f3;
-  --feed-card-line: var(--line);
-  --nav-hover: rgba(16, 17, 16, 0.065);
-  --nav-active: rgba(16, 17, 16, 0.085);
-  --icon-hover: rgba(16, 17, 16, 0.075);
-  --header-glass: rgba(255, 255, 255, 0.72);
-  --header-line: rgba(229, 231, 235, 0.72);
-  --shadow: 0 24px 70px rgba(15, 23, 42, 0.04);
-  --radius-ui: 8px;
-  --radius-card: 8px;
-  --radius-pill: 999px;
-  font-family: "Open Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-body[data-theme="dark"] {
   color-scheme: dark;
   --bg: #000000;
   --stage: #050505;
@@ -66,6 +29,10 @@ body[data-theme="dark"] {
   --header-glass: rgba(5, 5, 5, 0.72);
   --header-line: rgba(41, 45, 48, 0.78);
   --shadow: none;
+  --radius-ui: 8px;
+  --radius-card: 8px;
+  --radius-pill: 999px;
+  font-family: "Open Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 * {
@@ -93,6 +60,16 @@ input,
 select {
   color: inherit;
   font: inherit;
+}
+
+select {
+  background: var(--panel);
+  color: var(--ink);
+}
+
+option {
+  background: var(--panel);
+  color: var(--ink);
 }
 
 button {
@@ -416,6 +393,101 @@ button {
 
 .stage-heading.is-chat {
   min-width: 0;
+}
+
+.backend-picker {
+  align-items: center;
+  display: inline-flex;
+  min-width: 0;
+  position: relative;
+}
+
+.backend-picker::after {
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--muted);
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-35%);
+}
+
+.stage-backend-trigger {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  color: var(--ink);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 700;
+  height: 32px;
+  justify-content: center;
+  max-width: min(46vw, 220px);
+  min-width: 128px;
+  outline: none;
+  overflow: hidden;
+  padding: 0 28px 0 14px;
+}
+
+.stage-backend-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-backend-trigger:hover {
+  background: var(--icon-hover);
+  border-color: var(--line);
+}
+
+.stage-backend-trigger:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.backend-menu {
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ui);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.42);
+  display: grid;
+  gap: 2px;
+  left: 0;
+  min-width: 180px;
+  padding: 5px;
+  position: absolute;
+  top: calc(100% + 6px);
+  transform: translateX(8px);
+  z-index: 20;
+}
+
+.backend-menu-item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ink);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 32px;
+  padding: 6px 9px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.backend-menu-item:hover,
+.backend-menu-item.active {
+  background: var(--icon-hover);
+}
+
+.backend-menu-item small {
+  color: var(--soft);
+  font-size: 11px;
 }
 
 .stage-back-button {
@@ -1281,31 +1353,6 @@ button {
   font-weight: 700;
 }
 
-.segmented {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-ui);
-  display: flex;
-  gap: 3px;
-  padding: 3px;
-  width: fit-content;
-}
-
-.segmented button {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  display: flex;
-  gap: 7px;
-  min-height: 34px;
-  padding: 0 10px;
-}
-
-.segmented button.active {
-  background: var(--ink);
-  color: var(--stage);
-}
-
 .settings-group label {
   align-items: center;
   display: grid;
@@ -1314,10 +1361,62 @@ button {
 }
 
 .settings-group select {
+  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius-ui);
+  color: var(--ink);
   min-height: 36px;
   padding: 0 10px;
+}
+
+.policy-setting {
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-top: 12px;
+}
+
+.policy-setting:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.policy-setting span {
+  font-weight: 650;
+}
+
+.policy-setting p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 4px 0 0;
+}
+
+.segmented-control {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ui);
+  display: inline-grid;
+  grid-auto-flow: column;
+  min-height: 34px;
+  overflow: hidden;
+}
+
+.segmented-control button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  min-width: 78px;
+  padding: 0 12px;
+}
+
+.segmented-control button.is-active {
+  background: var(--ink);
+  color: var(--bg);
 }
 
 .audit-item,
@@ -1326,6 +1425,90 @@ button {
   gap: 10px;
   grid-template-columns: 20px minmax(0, 1fr);
   padding: 13px;
+}
+
+.history-item {
+  background: color-mix(in srgb, var(--panel-subtle) 74%, var(--stage));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.history-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 16px 16px minmax(0, 1fr);
+  min-height: 48px;
+  padding: 9px 11px;
+  text-align: left;
+  width: 100%;
+}
+
+.drawer-history-item .history-toggle {
+  grid-template-columns: 16px 36px minmax(0, 1fr);
+  min-height: 42px;
+  padding: 8px 10px;
+}
+
+.history-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.history-chevron {
+  color: var(--soft);
+  transition: transform 140ms ease;
+}
+
+.history-chevron.open {
+  transform: rotate(90deg);
+}
+
+.history-leading,
+.history-index {
+  color: var(--soft);
+}
+
+.history-index {
+  font-size: 12px;
+}
+
+.history-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.history-main strong,
+.history-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-main strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.history-main small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-detail {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  padding: 9px 12px 10px 40px;
+}
+
+.history-detail p {
+  margin: 0;
 }
 
 .memory-item {
@@ -1345,6 +1528,8 @@ button {
 .drawer-memory {
   display: grid;
   gap: 8px;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .empty-note {
@@ -1362,6 +1547,7 @@ button {
   min-width: 0;
   opacity: 0;
   overflow: hidden;
+  overflow-x: hidden;
   padding: 0 12px 12px;
   pointer-events: none;
   transform: translateX(18px);
@@ -1385,6 +1571,8 @@ button {
 .drawer-card {
   display: grid;
   gap: 10px;
+  min-width: 0;
+  overflow-x: hidden;
   padding: 12px;
 }
 
@@ -1393,17 +1581,35 @@ button {
   gap: 9px;
   list-style: none;
   margin: 0;
+  min-width: 0;
   padding: 0;
 }
 
 .activity-list li {
-  display: grid;
-  gap: 2px;
+  min-width: 0;
 }
 
 .activity-list span {
   color: var(--soft);
   font-size: 12px;
+}
+
+.event-payload {
+  background: var(--stage);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0 10px 10px 30px;
+  max-height: 130px;
+  min-width: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .approval-actions {
@@ -1565,6 +1771,7 @@ button {
 
   .prompt-card {
     bottom: auto;
+    grid-template-columns: 36px minmax(0, 1fr) 36px;
     min-height: 48px;
   }
 

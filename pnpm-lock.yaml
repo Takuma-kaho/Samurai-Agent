@@ -125,6 +125,18 @@ importers:
         specifier: ^2.2.12
         version: 2.2.12(typescript@5.9.3)
 
+  packages/action-catalog:
+    dependencies:
+      '@samurai-agent/core-schemas':
+        specifier: workspace:*
+        version: link:../core-schemas
+
+  packages/agent-backends:
+    dependencies:
+      '@samurai-agent/core-schemas':
+        specifier: workspace:*
+        version: link:../core-schemas
+
   packages/artifacts:
     dependencies:
       '@samurai-agent/core-schemas':
@@ -187,6 +199,12 @@ importers:
 
   packages/runtime:
     dependencies:
+      '@samurai-agent/action-catalog':
+        specifier: workspace:*
+        version: link:../action-catalog
+      '@samurai-agent/agent-backends':
+        specifier: workspace:*
+        version: link:../agent-backends
       '@samurai-agent/artifacts':
         specifier: workspace:*
         version: link:../artifacts

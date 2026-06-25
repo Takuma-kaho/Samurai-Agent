@@ -3,12 +3,15 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   AuditRecord,
+  BackendEventRecord,
+  BackendRunRecord,
   MemoryFrontmatter,
   MessageRecord,
   OperationRecord,
   PolicyDecisionRecord,
   SessionRecord,
-  SettingsRecord
+  SettingsRecord,
+  WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
 
 export const socketEvents = [
@@ -21,6 +24,10 @@ export const socketEvents = [
   "approval.requested",
   "audit.recorded",
   "activity.updated",
+  "backend.run.created",
+  "backend.run.updated",
+  "backend.event.created",
+  "workspace.change.created",
   "settings.updated"
 ] as const;
 
@@ -36,6 +43,10 @@ export interface SocketEventPayloads {
   "approval.requested": ApprovalRequest;
   "audit.recorded": AuditRecord;
   "activity.updated": ActivityInboxItem[];
+  "backend.run.created": BackendRunRecord;
+  "backend.run.updated": BackendRunRecord;
+  "backend.event.created": BackendEventRecord;
+  "workspace.change.created": WorkspaceChangeRecord;
   "settings.updated": SettingsRecord;
 }
 

@@ -5,18 +5,15 @@ import {
   ArrowLeft,
   ArrowUp,
   Brain,
+  ChevronRight,
   Clock3,
   Eye,
-  Monitor,
-  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
   Plus,
   Search,
   Settings,
-  ShieldCheck,
-  Sun,
   X
 } from "lucide-vue-next";
 import type {
@@ -24,6 +21,8 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   AuditRecord,
+  BackendEventRecord,
+  BackendRunRecord,
   MemoryFrontmatter,
   MessageRecord,
   OperationRecord,
@@ -31,32 +30,26 @@ import type {
   RollbackPoint,
   SessionRecord,
   SettingsRecord,
-  SupportedLocale
+  SupportedLocale,
+  WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
 import { supportedLocales } from "@samurai-agent/core-schemas";
 import { type LocaleKey, t } from "@samurai-agent/localization";
 import { io } from "socket.io-client";
-import { api, ApiError, type ApprovalLifecyclePayload, type ArchiveMemoryPayload, type ArtifactDetail, type MemoryDetail, type SearchResult, type SessionDetail } from "./lib/api";
+import {
+  api,
+  ApiError,
+  type AgentBackendStatus,
+  type ApprovalLifecyclePayload,
+  type ArchiveMemoryPayload,
+  type ArtifactDetail,
+  type MemoryDetail,
+  type ProviderErrorPayload,
+  type SearchResult,
+  type SessionDetail
+} from "./lib/api";
 
-type ViewMode = "chat" | "search" | "settings" | "audit" | "memory";
-type PromptAttachment = {
-  id: string;
-  name: string;
-  previewUrl: string;
-  size: number;
-  type: string;
-};
-type ChatScrollState = {
-  canScroll: boolean;
-  atTop: boolean;
-  atBottom: boolean;
-};
-type ChatDisplayMessage = {
-  id: string;
-  role: MessageRecord["role"];
-  content: string;
-  state?: "pending" | "loading";
-};
+type ViewMode = "chat" | "search" | "settings" | "runs" | "memory";
 type ProviderErrorReason =
   | "not_configured"
   | "auth_failed"
@@ -75,11 +68,31 @@ type ProviderNotice = {
   status?: number;
   retryable: boolean;
 };
-
+type PromptAttachment = {
+  id: string;
+  name: string;
+  previewUrl: string;
+  size: number;
+  type: string;
+};
+type ChatScrollState = {
+  canScroll: boolean;
+  atTop: boolean;
+  atBottom: boolean;
+};
+type ChatDisplayMessage = {
+  id: string;
+  role: MessageRecord["role"];
+  content: string;
+  state?: "pending" | "loading";
+};
 const settings = ref<SettingsRecord>({
-  theme: "system",
   ui_locale: "ja",
   output_locale: "ja",
+  memory_capture_mode: "suggest",
+  knowledge_wiki_capture_mode: "suggest",
+  skill_capture_mode: "suggest",
+  external_provider_role: "assistive",
   updated_at: new Date().toISOString()
 });
 const sessions = ref<SessionRecord[]>([]);
@@ -88,6 +101,10 @@ const messages = ref<MessageRecord[]>([]);
 const artifacts = ref<ArtifactRecord[]>([]);
 const activity = ref<ActivityInboxItem[]>([]);
 const auditRecords = ref<AuditRecord[]>([]);
+const backendRuns = ref<BackendRunRecord[]>([]);
+const backendEvents = ref<BackendEventRecord[]>([]);
+const workspaceChanges = ref<WorkspaceChangeRecord[]>([]);
+const agentBackends = ref<AgentBackendStatus[]>([]);
 const operations = ref<OperationRecord[]>([]);
 const policyDecisions = ref<PolicyDecisionRecord[]>([]);
 const approvalRequests = ref<ApprovalRequest[]>([]);
@@ -109,44 +126,47 @@ const searchQuery = ref("");
 const viewMode = ref<ViewMode>("chat");
 const drawerOpen = ref(false);
 const sidebarCollapsed = ref(false);
+const openBackendEventIds = ref<Set<string>>(new Set());
+const openBackendRunIds = ref<Set<string>>(new Set());
 const settingsReturnMode = ref<ViewMode>("chat");
 const loading = ref(false);
 const initializing = ref(true);
 const sessionLoadError = ref(false);
 const pendingUserMessage = ref<ChatDisplayMessage | null>(null);
+const pendingUserMessageStartIndex = ref(0);
 const agentResponsePending = ref(false);
 const providerNotice = ref<ProviderNotice | null>(null);
 const providerNoticeDetailsOpen = ref(false);
 const providerNoticeTitle = computed(() => (providerNotice.value ? label(`provider_error.${providerNotice.value.reason}.title` as LocaleKey) : ""));
 const providerNoticeBody = computed(() => (providerNotice.value ? label(`provider_error.${providerNotice.value.reason}.body` as LocaleKey) : ""));
-const providerNoticeDetails = computed(() => {
-  if (!providerNotice.value) {
-    return "";
-  }
-  const detail = [
-    providerNotice.value.provider ? `provider=${providerNotice.value.provider}` : "",
-    providerNotice.value.model ? `model=${providerNotice.value.model}` : "",
-    providerNotice.value.status ? `status=${providerNotice.value.status}` : "",
-    `retryable=${providerNotice.value.retryable ? "true" : "false"}`
-  ].filter(Boolean);
-  return detail.join(" / ");
-});
+const providerNoticeDetails = computed(() => formatProviderNoticeDetails(providerNotice.value));
 const activeArtifact = ref<ArtifactDetail | null>(null);
 const activeMemory = ref<MemoryDetail | null>(null);
 const memoryContent = ref<Record<string, string>>({});
+const settingsStorageKey = "samurai-agent.settings";
+const backendStorageKey = "samurai-agent.selected-backend-id";
+const workspaceSplitStorageKey = "samurai-agent.workspace-split-percent";
 const workspaceSplitMin = 32;
 const workspaceSplitMax = 68;
 const workspaceSplitDefault = 50;
-const workspaceSplitStorageKey = "samurai-agent.workspace-split-percent";
-const workspaceSplitPercent = ref(readWorkspaceSplitPercent());
-const isResizingWorkspace = ref(false);
-let systemThemeMedia: MediaQueryList | undefined;
 let chatScrollResizeObserver: ResizeObserver | undefined;
 let observedChatScrollElement: HTMLDivElement | null = null;
-let previousBodyCursor = "";
-let previousBodyUserSelect = "";
+const selectedBackendId = ref("samurai-native");
+const backendPickerOpen = ref(false);
+const fallbackBackends: AgentBackendStatus[] = [
+  {
+    id: "samurai-native",
+    kind: "samurai_native",
+    label: "Samurai Native",
+    configured: true
+  }
+];
 
 const label = (key: LocaleKey) => t(settings.value.ui_locale, key);
+const captureModes: SettingsRecord["memory_capture_mode"][] = ["manual", "suggest", "off"];
+const externalProviderRoles: SettingsRecord["external_provider_role"][] = ["assistive", "disabled"];
+const backendOptions = computed(() => (agentBackends.value.length > 0 ? agentBackends.value : fallbackBackends));
+const selectedBackendLabel = computed(() => backendOptions.value.find((backend) => backend.id === selectedBackendId.value)?.label ?? selectedBackendId.value);
 const currentMessages = computed<ChatDisplayMessage[]>(() => {
   const displayMessages = messages.value.map(
     (message): ChatDisplayMessage => ({
@@ -155,7 +175,7 @@ const currentMessages = computed<ChatDisplayMessage[]>(() => {
       content: message.content
     })
   );
-  if (pendingUserMessage.value) {
+  if (pendingUserMessage.value && !hasPersistedPendingUserMessage()) {
     displayMessages.push(pendingUserMessage.value);
   }
   if (agentResponsePending.value) {
@@ -179,39 +199,44 @@ const activeActivity = computed(() =>
     return operationsById.value.get(item.operation_id)?.session_id === activeSession.value.id;
   })
 );
-const hasActivity = computed(() => activeActivity.value.length > 0);
+const latestBackendEvents = computed(() => {
+  if (!activeSession.value) {
+    return backendEvents.value.slice(0, 8);
+  }
+  return backendEvents.value.filter((event) => event.session_id === activeSession.value?.id).slice(-8).reverse();
+});
+const hasActivity = computed(() => latestBackendEvents.value.length > 0);
+const pendingLegacyApprovals = computed(() => approvalRequests.value.filter((request) => request.status === "pending"));
 const firstMemory = computed(() => memory.value[0]);
 const hasWorkspaceCanvas = computed(() => Boolean(activeArtifact.value || activeMemory.value));
+const workspaceSplitPercent = ref(readWorkspaceSplitPercent());
+const isResizingWorkspace = ref(false);
+const workspaceSplitStyle = computed<Record<string, string>>(() => ({
+  "--workspace-chat-percent": `${workspaceSplitPercent.value}%`,
+  "--workspace-canvas-percent": `${100 - workspaceSplitPercent.value}%`
+}));
 const isDraftChat = computed(() => !activeSession.value && currentMessages.value.length === 0 && viewMode.value === "chat");
 const chatScrollFrameClass = computed(() => ({
   "has-top-fade": chatScrollState.value.canScroll && !chatScrollState.value.atTop,
   "has-bottom-fade": chatScrollState.value.canScroll && !chatScrollState.value.atBottom
 }));
-const workspaceSplitStyle = computed<Record<string, string>>(() => ({
-  "--workspace-chat-percent": `${workspaceSplitPercent.value}%`,
-  "--workspace-canvas-percent": `${100 - workspaceSplitPercent.value}%`
-}));
+let previousBodyCursor = "";
+let previousBodyUserSelect = "";
 
 onMounted(async () => {
-  settings.value = await api.getSettings();
-  systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
-  systemThemeMedia.addEventListener("change", handleSystemThemeChange);
-  applyTheme(settings.value.theme);
+  const storedSettings = readStoredSettings();
+  if (storedSettings) {
+    settings.value = storedSettings;
+  }
   connectSocket();
-  await loadSessionsWithRetry();
+  await Promise.all([loadSettings(), loadAgentBackends(), loadSessionsWithRetry()]);
 });
 
 onUnmounted(() => {
-  systemThemeMedia?.removeEventListener("change", handleSystemThemeChange);
   chatScrollResizeObserver?.disconnect();
   finishWorkspaceResize();
   clearAttachments();
 });
-
-watch(
-  () => settings.value.theme,
-  (theme) => applyTheme(theme)
-);
 
 watch(
   [() => currentMessages.value.length, () => artifacts.value.length, () => memory.value.length, () => selectedAttachments.value.length, hasWorkspaceCanvas, viewMode],
@@ -259,6 +284,15 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+async function loadSettings() {
+  try {
+    settings.value = await api.getSettings();
+    persistSettings(settings.value);
+  } catch {
+    persistSettings(settings.value);
+  }
+}
+
 function startDraftChat() {
   activeSession.value = null;
   messages.value = [];
@@ -267,6 +301,9 @@ function startDraftChat() {
   artifacts.value = [];
   operations.value = [];
   auditRecords.value = [];
+  backendRuns.value = [];
+  backendEvents.value = [];
+  workspaceChanges.value = [];
   policyDecisions.value = [];
   approvalRequests.value = [];
   rollbackPoints.value = [];
@@ -294,6 +331,7 @@ async function sendMessage() {
   const content = prompt.value.trim();
   prompt.value = "";
   loading.value = true;
+  pendingUserMessageStartIndex.value = messages.value.length;
   pendingUserMessage.value = {
     id: `pending-user-${Date.now()}`,
     role: "user",
@@ -305,14 +343,17 @@ async function sendMessage() {
     providerNotice.value = null;
     providerNoticeDetailsOpen.value = false;
     const result = activeSession.value
-      ? await api.sendMessage(activeSession.value.id, content, settings.value.output_locale)
-      : await api.startChat(content, settings.value.ui_locale, settings.value.output_locale);
+      ? await api.sendMessage(activeSession.value.id, content, settings.value.output_locale, selectedBackendId.value)
+      : await api.startChat(content, settings.value.ui_locale, settings.value.output_locale, selectedBackendId.value);
     pendingUserMessage.value = null;
     agentResponsePending.value = false;
     activeSession.value = result.session;
     promoteSessionToTop(result.session);
-    messages.value.push(...result.messages);
+    messages.value = appendById(messages.value, result.messages);
     artifacts.value = [...result.artifacts, ...artifacts.value];
+    backendRuns.value = [result.backendRun, ...backendRuns.value.filter((item) => item.id !== result.backendRun.id)];
+    backendEvents.value = mergeById(result.backendEvents, backendEvents.value);
+    workspaceChanges.value = mergeById(result.workspaceChanges, workspaceChanges.value);
     auditRecords.value = [...result.auditRecords, ...auditRecords.value];
     operations.value = [...result.operations, ...operations.value];
     policyDecisions.value = [...result.policyDecisions, ...policyDecisions.value];
@@ -328,6 +369,7 @@ async function sendMessage() {
     if (error instanceof ApiError && isRecord(error.body)) {
       if (error.body.error === "provider_not_configured" || error.body.error === "provider_failed") {
         providerNotice.value = normalizeProviderNotice(error.body);
+        applyProviderErrorState(error.body as ProviderErrorPayload);
         return;
       }
     }
@@ -342,6 +384,97 @@ function schedulePromptFocus() {
     promptInput.value?.focus();
     updateChatScrollState();
   });
+}
+
+async function loadAgentBackends() {
+  try {
+    agentBackends.value = await api.listAgentBackends();
+  } catch {
+    agentBackends.value = [];
+  }
+  chooseInitialBackend();
+}
+
+function chooseInitialBackend() {
+  const stored = readStoredBackendId();
+  const nextBackend = backendOptions.value.find((backend) => backend.id === stored) ?? backendOptions.value.find((backend) => backend.configured) ?? backendOptions.value[0];
+  if (nextBackend) {
+    selectedBackendId.value = nextBackend.id;
+  }
+}
+
+function setSelectedBackend(id: string) {
+  selectedBackendId.value = id;
+  backendPickerOpen.value = false;
+  try {
+    window.localStorage.setItem(backendStorageKey, id);
+  } catch {
+    // localStorage can be unavailable in private/restricted contexts.
+  }
+}
+
+function backendLabel(id: string, fallback?: string): string {
+  return agentBackends.value.find((backend) => backend.id === id)?.label ?? fallback ?? id;
+}
+
+function toggleBackendPicker() {
+  backendPickerOpen.value = !backendPickerOpen.value;
+}
+
+function readStoredBackendId(): string | undefined {
+  try {
+    return window.localStorage.getItem(backendStorageKey) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isBackendEventOpen(id: string): boolean {
+  return openBackendEventIds.value.has(id);
+}
+
+function toggleBackendEvent(id: string) {
+  const next = new Set(openBackendEventIds.value);
+  if (next.has(id)) {
+    next.delete(id);
+  } else {
+    next.add(id);
+  }
+  openBackendEventIds.value = next;
+}
+
+function isBackendRunOpen(id: string): boolean {
+  return openBackendRunIds.value.has(id);
+}
+
+function toggleBackendRun(id: string) {
+  const next = new Set(openBackendRunIds.value);
+  if (next.has(id)) {
+    next.delete(id);
+  } else {
+    next.add(id);
+  }
+  openBackendRunIds.value = next;
+}
+
+function backendEventSummary(event: BackendEventRecord): string {
+  const payload = event.payload;
+  if (isRecord(payload)) {
+    const candidates = [payload.text, payload.message, payload.output_summary, payload.error_code, payload.status, payload.reason];
+    const summary = candidates.find((value) => typeof value === "string" && value.trim().length > 0);
+    if (typeof summary === "string") {
+      return summary.slice(0, 120);
+    }
+  }
+  return event.event_type;
+}
+
+function backendEventPayload(event: BackendEventRecord): string {
+  return JSON.stringify(event.payload, null, 2);
+}
+
+function backendRunNote(run: BackendRunRecord): string {
+  return run.output_summary || run.error_code || "";
 }
 
 function openAttachmentPicker() {
@@ -424,120 +557,6 @@ function updateChatScrollState() {
   };
 }
 
-function readWorkspaceSplitPercent(): number {
-  if (typeof window === "undefined") {
-    return workspaceSplitDefault;
-  }
-  try {
-    const stored = window.localStorage.getItem(workspaceSplitStorageKey);
-    if (!stored) {
-      return workspaceSplitDefault;
-    }
-    return normalizeWorkspaceSplitPercent(Number(stored));
-  } catch {
-    return workspaceSplitDefault;
-  }
-}
-
-function normalizeWorkspaceSplitPercent(value: number): number {
-  const normalized = Number.isFinite(value) ? value : workspaceSplitDefault;
-  return Math.min(workspaceSplitMax, Math.max(workspaceSplitMin, Math.round(normalized * 10) / 10));
-}
-
-function persistWorkspaceSplitPercent() {
-  if (typeof window === "undefined") {
-    return;
-  }
-  try {
-    window.localStorage.setItem(workspaceSplitStorageKey, String(workspaceSplitPercent.value));
-  } catch {
-    // localStorage can be unavailable in private/restricted contexts.
-  }
-}
-
-function setWorkspaceSplitPercent(value: number, persist = false) {
-  workspaceSplitPercent.value = normalizeWorkspaceSplitPercent(value);
-  if (persist) {
-    persistWorkspaceSplitPercent();
-  }
-}
-
-function beginWorkspaceResize(event: PointerEvent) {
-  if (!hasWorkspaceCanvas.value || !chatLayoutRef.value) {
-    return;
-  }
-  event.preventDefault();
-  isResizingWorkspace.value = true;
-  previousBodyCursor = document.body.style.cursor;
-  previousBodyUserSelect = document.body.style.userSelect;
-  document.body.style.cursor = "col-resize";
-  document.body.style.userSelect = "none";
-  updateWorkspaceSplitFromPointer(event);
-  window.addEventListener("pointermove", handleWorkspaceResizeMove);
-  window.addEventListener("pointerup", finishWorkspaceResize);
-  window.addEventListener("pointercancel", finishWorkspaceResize);
-}
-
-function handleWorkspaceResizeMove(event: PointerEvent) {
-  if (!isResizingWorkspace.value) {
-    return;
-  }
-  event.preventDefault();
-  updateWorkspaceSplitFromPointer(event);
-}
-
-function updateWorkspaceSplitFromPointer(event: PointerEvent) {
-  const rect = chatLayoutRef.value?.getBoundingClientRect();
-  if (!rect || rect.width <= 0) {
-    return;
-  }
-  const percent = ((event.clientX - rect.left) / rect.width) * 100;
-  setWorkspaceSplitPercent(percent);
-}
-
-function finishWorkspaceResize() {
-  if (!isResizingWorkspace.value) {
-    return;
-  }
-  isResizingWorkspace.value = false;
-  document.body.style.cursor = previousBodyCursor;
-  document.body.style.userSelect = previousBodyUserSelect;
-  window.removeEventListener("pointermove", handleWorkspaceResizeMove);
-  window.removeEventListener("pointerup", finishWorkspaceResize);
-  window.removeEventListener("pointercancel", finishWorkspaceResize);
-  persistWorkspaceSplitPercent();
-}
-
-function handleWorkspaceResizerKeydown(event: KeyboardEvent) {
-  if (!hasWorkspaceCanvas.value) {
-    return;
-  }
-  if (event.key === "ArrowLeft") {
-    event.preventDefault();
-    setWorkspaceSplitPercent(workspaceSplitPercent.value - 4, true);
-    return;
-  }
-  if (event.key === "ArrowRight") {
-    event.preventDefault();
-    setWorkspaceSplitPercent(workspaceSplitPercent.value + 4, true);
-    return;
-  }
-  if (event.key === "Home") {
-    event.preventDefault();
-    setWorkspaceSplitPercent(workspaceSplitMin, true);
-    return;
-  }
-  if (event.key === "End") {
-    event.preventDefault();
-    setWorkspaceSplitPercent(workspaceSplitMax, true);
-    return;
-  }
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    setWorkspaceSplitPercent(workspaceSplitDefault, true);
-  }
-}
-
 async function runSearch() {
   viewMode.value = "search";
   searchResults.value = await api.search(searchQuery.value);
@@ -566,18 +585,23 @@ async function chooseResult(result: SearchResult) {
     if (result.session_id) {
       await openSession(result.session_id);
     }
-    await loadAudit();
+    await loadRuns();
   }
 }
 
-async function loadAudit() {
+async function loadRuns() {
+  if (activeSession.value) {
+    backendRuns.value = await api.listBackendRuns(activeSession.value.id);
+    backendEvents.value = await Promise.all(backendRuns.value.map((run) => api.listBackendEvents(run.id))).then((groups) => groups.flat());
+    workspaceChanges.value = await api.listWorkspaceChanges(activeSession.value.id);
+  }
   const payload = await api.getAudit();
   auditRecords.value = payload.auditRecords;
   operations.value = payload.operations;
   policyDecisions.value = payload.policyDecisions;
   approvalRequests.value = payload.approvalRequests;
   rollbackPoints.value = payload.rollbackPoints;
-  viewMode.value = "audit";
+  viewMode.value = "runs";
 }
 
 async function loadMemory() {
@@ -605,8 +629,9 @@ function retryProviderRequest() {
   void sendMessage();
 }
 
-async function patchSettings(patch: Partial<Pick<SettingsRecord, "theme" | "ui_locale" | "output_locale">>) {
+async function patchSettings(patch: Partial<Omit<SettingsRecord, "updated_at">>) {
   settings.value = await api.patchSettings(patch);
+  persistSettings(settings.value);
 }
 
 async function openArtifact(id: string) {
@@ -699,6 +724,9 @@ async function applySessionDetail(detail: SessionDetail) {
   operations.value = detail.operations;
   artifacts.value = detail.artifacts;
   auditRecords.value = detail.auditRecords;
+  backendRuns.value = detail.backendRuns;
+  backendEvents.value = detail.backendEvents;
+  workspaceChanges.value = detail.workspaceChanges;
   memory.value = detail.memory;
   activity.value = detail.activity;
   if (activeArtifact.value && !detail.artifacts.some((artifact) => artifact.id === activeArtifact.value?.artifact.id)) {
@@ -789,6 +817,14 @@ function localeDisplayName(locale: SupportedLocale): string {
   return label(`locale.${locale}` as LocaleKey);
 }
 
+function captureModeLabel(mode: SettingsRecord["memory_capture_mode"]): string {
+  return label(`settings.capture.${mode}` as LocaleKey);
+}
+
+function externalProviderRoleLabel(role: SettingsRecord["external_provider_role"]): string {
+  return label(`settings.external_provider.${role}` as LocaleKey);
+}
+
 function displayTitle(title: string): string {
   return isInitialTitle(title) ? label("session.fallback_title") : title;
 }
@@ -831,8 +867,21 @@ function connectSocket() {
   socket.on("policy.decided", (decision: PolicyDecisionRecord) => {
     policyDecisions.value = [decision, ...policyDecisions.value.filter((item) => item.id !== decision.id)];
   });
+  socket.on("backend.run.created", (run: BackendRunRecord) => {
+    backendRuns.value = [run, ...backendRuns.value.filter((item) => item.id !== run.id)];
+  });
+  socket.on("backend.run.updated", (run: BackendRunRecord) => {
+    backendRuns.value = [run, ...backendRuns.value.filter((item) => item.id !== run.id)];
+  });
+  socket.on("backend.event.created", (event: BackendEventRecord) => {
+    backendEvents.value = mergeById([...backendEvents.value, event], []).sort((a, b) => a.sequence - b.sequence);
+  });
+  socket.on("workspace.change.created", (change: WorkspaceChangeRecord) => {
+    workspaceChanges.value = [change, ...workspaceChanges.value.filter((item) => item.id !== change.id)];
+  });
   socket.on("settings.updated", (next: SettingsRecord) => {
     settings.value = next;
+    persistSettings(next);
   });
   socket.on("artifact.created", () => {
     void reloadActiveSession();
@@ -842,19 +891,63 @@ function connectSocket() {
   });
 }
 
-function applyTheme(theme: SettingsRecord["theme"]) {
-  const systemDark = systemThemeMedia?.matches ?? window.matchMedia("(prefers-color-scheme: dark)").matches;
-  document.body.dataset.theme = theme === "system" ? (systemDark ? "dark" : "light") : theme;
+function readStoredSettings(): SettingsRecord | undefined {
+  try {
+    const raw = window.localStorage.getItem(settingsStorageKey);
+    if (!raw) {
+      return undefined;
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isSettingsRecord(parsed)) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
 }
 
-function handleSystemThemeChange() {
-  if (settings.value.theme === "system") {
-    applyTheme("system");
+function persistSettings(next: SettingsRecord) {
+  try {
+    window.localStorage.setItem(settingsStorageKey, JSON.stringify(next));
+  } catch {
+    // localStorage can be unavailable in private/restricted contexts.
   }
+}
+
+function isSettingsRecord(value: unknown): value is SettingsRecord {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.ui_locale === "string" &&
+    supportedLocales.includes(value.ui_locale as SupportedLocale) &&
+    typeof value.output_locale === "string" &&
+    supportedLocales.includes(value.output_locale as SupportedLocale) &&
+    (value.memory_capture_mode === "manual" || value.memory_capture_mode === "suggest" || value.memory_capture_mode === "off") &&
+    (value.knowledge_wiki_capture_mode === "manual" || value.knowledge_wiki_capture_mode === "suggest" || value.knowledge_wiki_capture_mode === "off") &&
+    (value.skill_capture_mode === "manual" || value.skill_capture_mode === "suggest" || value.skill_capture_mode === "off") &&
+    (value.external_provider_role === "assistive" || value.external_provider_role === "disabled") &&
+    typeof value.updated_at === "string"
+  );
 }
 
 function mergeById<T extends { id: string }>(primary: T[], fallback: T[]): T[] {
   return [...new Map([...primary, ...fallback].map((item) => [item.id, item])).values()];
+}
+
+function appendById<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
+  const seen = new Set(existing.map((item) => item.id));
+  return [...existing, ...incoming.filter((item) => !seen.has(item.id))];
+}
+
+function hasPersistedPendingUserMessage(): boolean {
+  if (!pendingUserMessage.value) {
+    return false;
+  }
+  return messages.value
+    .slice(pendingUserMessageStartIndex.value)
+    .some((message) => message.role === "user" && message.content === pendingUserMessage.value?.content);
 }
 
 function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecyclePayload {
@@ -885,6 +978,19 @@ function normalizeProviderNotice(value: Record<string, unknown>): ProviderNotice
   };
 }
 
+function formatProviderNoticeDetails(notice: ProviderNotice | null): string {
+  if (!notice) {
+    return "";
+  }
+  const detail = [
+    notice.provider ? `provider=${notice.provider}` : "",
+    notice.model ? `model=${notice.model}` : "",
+    notice.status ? `status=${notice.status}` : "",
+    `retryable=${notice.retryable ? "true" : "false"}`
+  ].filter(Boolean);
+  return detail.join(" / ");
+}
+
 function isProviderErrorReason(value: unknown): value is ProviderErrorReason {
   return (
     value === "not_configured" ||
@@ -898,6 +1004,140 @@ function isProviderErrorReason(value: unknown): value is ProviderErrorReason {
     value === "unknown"
   );
 }
+
+function applyProviderErrorState(payload: ProviderErrorPayload) {
+  if (payload.session) {
+    activeSession.value = payload.session;
+    promoteSessionToTop(payload.session);
+  }
+  if (payload.messages?.length) {
+    messages.value = mergeById(messages.value, payload.messages);
+  }
+  if (payload.backendRun) {
+    backendRuns.value = [payload.backendRun, ...backendRuns.value.filter((item) => item.id !== payload.backendRun?.id)];
+  }
+  if (payload.backendEvents?.length) {
+    backendEvents.value = mergeById(payload.backendEvents, backendEvents.value);
+  }
+  if (payload.workspaceChanges?.length) {
+    workspaceChanges.value = mergeById(payload.workspaceChanges, workspaceChanges.value);
+  }
+}
+
+function beginWorkspaceResize(event: PointerEvent) {
+  if (!hasWorkspaceCanvas.value || !chatLayoutRef.value) {
+    return;
+  }
+  event.preventDefault();
+  isResizingWorkspace.value = true;
+  previousBodyCursor = document.body.style.cursor;
+  previousBodyUserSelect = document.body.style.userSelect;
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  updateWorkspaceSplitFromPointer(event);
+  window.addEventListener("pointermove", handleWorkspaceResizeMove);
+  window.addEventListener("pointerup", finishWorkspaceResize);
+  window.addEventListener("pointercancel", finishWorkspaceResize);
+}
+
+function handleWorkspaceResizeMove(event: PointerEvent) {
+  if (!isResizingWorkspace.value) {
+    return;
+  }
+  event.preventDefault();
+  updateWorkspaceSplitFromPointer(event);
+}
+
+function updateWorkspaceSplitFromPointer(event: PointerEvent) {
+  const rect = chatLayoutRef.value?.getBoundingClientRect();
+  if (!rect || rect.width <= 0) {
+    return;
+  }
+  const percent = ((event.clientX - rect.left) / rect.width) * 100;
+  setWorkspaceSplitPercent(percent);
+}
+
+function finishWorkspaceResize() {
+  if (!isResizingWorkspace.value) {
+    return;
+  }
+  isResizingWorkspace.value = false;
+  document.body.style.cursor = previousBodyCursor;
+  document.body.style.userSelect = previousBodyUserSelect;
+  window.removeEventListener("pointermove", handleWorkspaceResizeMove);
+  window.removeEventListener("pointerup", finishWorkspaceResize);
+  window.removeEventListener("pointercancel", finishWorkspaceResize);
+  persistWorkspaceSplitPercent(workspaceSplitPercent.value);
+}
+
+function handleWorkspaceResizerKeydown(event: KeyboardEvent) {
+  if (!hasWorkspaceCanvas.value) {
+    return;
+  }
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitPercent.value - 4, true);
+    return;
+  }
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitPercent.value + 4, true);
+    return;
+  }
+  if (event.key === "Home") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitMin, true);
+    return;
+  }
+  if (event.key === "End") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitMax, true);
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    setWorkspaceSplitPercent(workspaceSplitDefault, true);
+  }
+}
+
+function setWorkspaceSplitPercent(value: number, persist = false) {
+  workspaceSplitPercent.value = normalizeWorkspaceSplitPercent(value);
+  if (persist) {
+    persistWorkspaceSplitPercent(workspaceSplitPercent.value);
+  }
+}
+
+function readWorkspaceSplitPercent(): number {
+  if (typeof window === "undefined") {
+    return workspaceSplitDefault;
+  }
+  try {
+    const stored = window.localStorage.getItem(workspaceSplitStorageKey);
+    if (!stored) {
+      return workspaceSplitDefault;
+    }
+    return normalizeWorkspaceSplitPercent(Number(stored));
+  } catch {
+    return workspaceSplitDefault;
+  }
+}
+
+function normalizeWorkspaceSplitPercent(value: number): number {
+  const normalized = Number.isFinite(value) ? value : workspaceSplitDefault;
+  return Math.min(workspaceSplitMax, Math.max(workspaceSplitMin, Math.round(normalized * 10) / 10));
+}
+
+function persistWorkspaceSplitPercent(value: number) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(workspaceSplitStorageKey, String(value));
+  } catch {
+    // localStorage can be unavailable in private/restricted contexts.
+  }
+}
+
 </script>
 
 <template>
@@ -990,16 +1230,43 @@ function isProviderErrorReason(value: unknown): value is ProviderErrorReason {
           <div v-if="viewMode !== 'chat'" class="stage-title">
             <span v-if="viewMode === 'search'">{{ label("search.title") }}</span>
             <span v-else-if="viewMode === 'settings'">{{ label("settings.title") }}</span>
-            <span v-else-if="viewMode === 'audit'">{{ label("audit.title") }}</span>
+            <span v-else-if="viewMode === 'runs'">{{ label("run_history.title") }}</span>
             <span v-else>{{ label("memory.title") }}</span>
+          </div>
+          <div v-else class="backend-picker">
+            <button
+              class="stage-backend-trigger"
+              type="button"
+              :aria-label="label('backend.select')"
+              :aria-expanded="backendPickerOpen"
+              :title="label('backend.select')"
+              @click="toggleBackendPicker"
+            >
+              <span>{{ selectedBackendLabel }}</span>
+            </button>
+            <div v-if="backendPickerOpen" class="backend-menu" role="listbox" :aria-label="label('backend.select')">
+              <button
+                v-for="backend in backendOptions"
+                :key="backend.id"
+                class="backend-menu-item"
+                :class="{ active: backend.id === selectedBackendId }"
+                type="button"
+                role="option"
+                :aria-selected="backend.id === selectedBackendId"
+                @click="setSelectedBackend(backend.id)"
+              >
+                <span>{{ backend.label }}</span>
+                <small v-if="!backend.configured">off</small>
+              </button>
+            </div>
           </div>
         </div>
         <div class="stage-actions">
           <button class="icon-button" type="button" :title="label('memory.title')" :aria-label="label('memory.title')" @click="loadMemory">
             <Brain :size="17" />
           </button>
-          <button class="icon-button" type="button" :title="label('audit.title')" :aria-label="label('audit.title')" @click="loadAudit">
-            <ShieldCheck :size="17" />
+          <button class="icon-button" type="button" :title="label('run_history.title')" :aria-label="label('run_history.title')" @click="loadRuns">
+            <Clock3 :size="17" />
           </button>
           <button class="icon-button" :class="{ 'has-badge': hasActivity }" type="button" :title="label('context.title')" :aria-label="label('context.title')" @click="drawerOpen = !drawerOpen">
             <PanelRightOpen :size="17" />
@@ -1149,24 +1416,6 @@ function isProviderErrorReason(value: unknown): value is ProviderErrorReason {
 
       <section v-else-if="viewMode === 'settings'" class="panel-stage settings-stage">
         <div class="settings-group lit-surface">
-          <div class="settings-head">{{ label("settings.theme") }}</div>
-          <div class="segmented">
-            <button :class="{ active: settings.theme === 'light' }" type="button" @click="patchSettings({ theme: 'light' })">
-              <Sun :size="16" />
-              {{ label("theme.light") }}
-            </button>
-            <button :class="{ active: settings.theme === 'dark' }" type="button" @click="patchSettings({ theme: 'dark' })">
-              <Moon :size="16" />
-              {{ label("theme.dark") }}
-            </button>
-            <button :class="{ active: settings.theme === 'system' }" type="button" @click="patchSettings({ theme: 'system' })">
-              <Monitor :size="16" />
-              {{ label("theme.system") }}
-            </button>
-          </div>
-        </div>
-
-        <div class="settings-group lit-surface">
           <div class="settings-head">{{ label("settings.language") }}</div>
           <label>
             <span>{{ label("settings.ui_locale") }}</span>
@@ -1181,16 +1430,99 @@ function isProviderErrorReason(value: unknown): value is ProviderErrorReason {
             </select>
           </label>
         </div>
+        <div class="settings-group lit-surface">
+          <div class="settings-head">{{ label("settings.learning_memory") }}</div>
+          <div class="policy-setting">
+            <div>
+              <span>{{ label("settings.memory_policy") }}</span>
+              <p>{{ label("settings.memory_policy_desc") }}</p>
+            </div>
+            <div class="segmented-control" role="group" :aria-label="label('settings.memory_policy')">
+              <button
+                v-for="mode in captureModes"
+                :key="mode"
+                type="button"
+                :class="{ 'is-active': settings.memory_capture_mode === mode }"
+                @click="patchSettings({ memory_capture_mode: mode })"
+              >
+                {{ captureModeLabel(mode) }}
+              </button>
+            </div>
+          </div>
+          <div class="policy-setting">
+            <div>
+              <span>{{ label("settings.wiki_policy") }}</span>
+              <p>{{ label("settings.wiki_policy_desc") }}</p>
+            </div>
+            <div class="segmented-control" role="group" :aria-label="label('settings.wiki_policy')">
+              <button
+                v-for="mode in captureModes"
+                :key="mode"
+                type="button"
+                :class="{ 'is-active': settings.knowledge_wiki_capture_mode === mode }"
+                @click="patchSettings({ knowledge_wiki_capture_mode: mode })"
+              >
+                {{ captureModeLabel(mode) }}
+              </button>
+            </div>
+          </div>
+          <div class="policy-setting">
+            <div>
+              <span>{{ label("settings.skill_policy") }}</span>
+              <p>{{ label("settings.skill_policy_desc") }}</p>
+            </div>
+            <div class="segmented-control" role="group" :aria-label="label('settings.skill_policy')">
+              <button
+                v-for="mode in captureModes"
+                :key="mode"
+                type="button"
+                :class="{ 'is-active': settings.skill_capture_mode === mode }"
+                @click="patchSettings({ skill_capture_mode: mode })"
+              >
+                {{ captureModeLabel(mode) }}
+              </button>
+            </div>
+          </div>
+          <div class="policy-setting">
+            <div>
+              <span>{{ label("settings.external_provider_policy") }}</span>
+              <p>{{ label("settings.external_provider_policy_desc") }}</p>
+            </div>
+            <div class="segmented-control" role="group" :aria-label="label('settings.external_provider_policy')">
+              <button
+                v-for="role in externalProviderRoles"
+                :key="role"
+                type="button"
+                :class="{ 'is-active': settings.external_provider_role === role }"
+                @click="patchSettings({ external_provider_role: role })"
+              >
+                {{ externalProviderRoleLabel(role) }}
+              </button>
+            </div>
+          </div>
+        </div>
       </section>
 
-      <section v-else-if="viewMode === 'audit'" class="panel-stage">
-        <div v-if="auditRecords.length === 0" class="empty-note">{{ label("audit.empty") }}</div>
-        <article v-for="audit in auditRecords" :key="audit.id" class="audit-item lit-surface">
+      <section v-else-if="viewMode === 'runs'" class="panel-stage">
+        <div v-if="backendRuns.length === 0" class="empty-note">{{ label("run_history.empty") }}</div>
+        <article v-for="run in backendRuns" :key="run.id" class="history-item">
+          <button class="history-toggle" type="button" :aria-expanded="isBackendRunOpen(run.id)" @click="toggleBackendRun(run.id)">
+            <ChevronRight class="history-chevron" :class="{ open: isBackendRunOpen(run.id) }" :size="15" />
+            <Clock3 class="history-leading" :size="15" />
+            <span class="history-main">
+              <strong>{{ backendLabel(run.backend_id, run.backend_kind) }} / {{ run.status }}</strong>
+              <small>{{ run.input_summary }}</small>
+            </span>
+          </button>
+          <div v-if="isBackendRunOpen(run.id)" class="history-detail">
+            <p>{{ backendRunNote(run) || run.status }}</p>
+          </div>
+        </article>
+        <article v-if="pendingLegacyApprovals.length > 0" class="audit-item lit-surface">
           <Clock3 :size="16" />
           <div>
-            <strong>{{ auditStatus(audit) }}</strong>
-            <p>{{ audit.inputs_summary }}</p>
-            <span>{{ audit.outputs_summary }}</span>
+            <strong>{{ label("legacy_request.title") }}</strong>
+            <p>{{ pendingLegacyApprovals.length }}</p>
           </div>
         </article>
       </section>
@@ -1232,19 +1564,21 @@ function isProviderErrorReason(value: unknown): value is ProviderErrorReason {
 
       <section class="drawer-card lit-surface">
         <div class="drawer-card-head">
-          <span>{{ label("activity.title") }}</span>
-          <span class="status-pill">{{ activeActivity.length }}</span>
+          <span>{{ label("backend_event.title") }}</span>
+          <span class="status-pill">{{ latestBackendEvents.length }}</span>
         </div>
-        <p v-if="activeActivity.length === 0">{{ label("activity.empty") }}</p>
+        <p v-if="latestBackendEvents.length === 0">{{ label("backend_event.empty") }}</p>
         <ol v-else class="activity-list">
-          <li v-for="item in activeActivity.slice(0, 6)" :key="item.id">
-            <span>{{ activityLabel(item) }}</span>
-            <strong>{{ activityLabel(item) }}</strong>
-            <p>{{ item.summary }}</p>
-            <div v-if="item.activity_type === 'approval_required'" class="approval-actions">
-              <button type="button" @click="approveActivity(item)">{{ label("approval.approve") }}</button>
-              <button type="button" @click="denyActivity(item)">{{ label("approval.deny") }}</button>
-            </div>
+          <li v-for="item in latestBackendEvents" :key="item.id" class="history-item drawer-history-item">
+            <button class="history-toggle" type="button" :aria-expanded="isBackendEventOpen(item.id)" @click="toggleBackendEvent(item.id)">
+              <ChevronRight class="history-chevron" :class="{ open: isBackendEventOpen(item.id) }" :size="15" />
+              <span class="history-index">#{{ item.sequence }}</span>
+              <span class="history-main">
+                <strong>{{ item.event_type }}</strong>
+                <small>{{ backendEventSummary(item) }}</small>
+              </span>
+            </button>
+            <pre v-if="isBackendEventOpen(item.id)" class="event-payload">{{ backendEventPayload(item) }}</pre>
           </li>
         </ol>
       </section>

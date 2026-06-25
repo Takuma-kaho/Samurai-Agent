@@ -6,6 +6,8 @@ import {
   type ApprovalRequest,
   type ArtifactRecord,
   type AuditRecord,
+  type BackendEventRecord,
+  type BackendRunRecord,
   CollectionRecordSchema,
   CollectionSchemaSchema,
   type CollectionPatch,
@@ -22,6 +24,9 @@ import {
   type SettingsRecord,
   SkillFrontmatterSchema,
   type SkillFrontmatter,
+  WikiFrontmatterSchema,
+  type WikiFrontmatter,
+  type WorkspaceChangeRecord,
   defaultSettings,
   nowIso
 } from "@samurai-agent/core-schemas";
@@ -167,6 +172,21 @@ interface SkillIndexTable {
   updated_at: string;
 }
 
+interface WikiIndexTable {
+  id: string;
+  slug: string;
+  title: string;
+  state: string;
+  content_locale: string;
+  tags_json: JsonColumn;
+  source_refs_json: JsonColumn;
+  provenance_json: JsonColumn;
+  file_path: string;
+  frontmatter_json: JsonColumn;
+  created_at: string;
+  updated_at: string;
+}
+
 interface CollectionSchemasTable {
   id: string;
   version: string;
@@ -198,9 +218,13 @@ interface AutomationRunsTable {
 
 interface SettingsTable {
   id: "default";
-  theme: "light" | "dark" | "system";
   ui_locale: string;
   output_locale: string;
+  memory_capture_mode: string;
+  knowledge_wiki_capture_mode: string;
+  llm_wiki_capture_mode?: string;
+  skill_capture_mode: string;
+  external_provider_role: string;
   updated_at: string;
 }
 
@@ -223,6 +247,44 @@ interface GrantsTable {
   revoked_at: string | null;
 }
 
+interface BackendRunsTable {
+  id: string;
+  session_id: string;
+  input_message_id: string;
+  output_message_id: string | null;
+  backend_id: string;
+  backend_kind: string;
+  status: string;
+  started_at: string;
+  completed_at: string | null;
+  input_summary: string;
+  output_summary: string | null;
+  error_code: string | null;
+  metadata_json: JsonColumn;
+}
+
+interface BackendEventsTable {
+  id: string;
+  run_id: string;
+  session_id: string;
+  event_type: string;
+  sequence: number;
+  payload_json: JsonColumn;
+  resource_refs_json: JsonColumn;
+  created_at: string;
+}
+
+interface WorkspaceChangesTable {
+  id: string;
+  run_id: string;
+  session_id: string;
+  resource_ref_json: JsonColumn;
+  change_type: string;
+  summary: string;
+  legacy_operation_id: string | null;
+  created_at: string;
+}
+
 interface WorkspaceDb {
   sessions: SessionsTable;
   messages: MessagesTable;
@@ -234,11 +296,15 @@ interface WorkspaceDb {
   artifacts: ArtifactsTable;
   memory_index: MemoryIndexTable;
   skill_index: SkillIndexTable;
+  wiki_index: WikiIndexTable;
   collection_schemas: CollectionSchemasTable;
   collection_records: CollectionRecordsTable;
   automation_runs: AutomationRunsTable;
   settings: SettingsTable;
   grants: GrantsTable;
+  backend_runs: BackendRunsTable;
+  backend_events: BackendEventsTable;
+  workspace_changes: WorkspaceChangesTable;
 }
 
 export interface WorkspaceStoreOptions {
@@ -266,6 +332,7 @@ export interface SkillIndexEntry {
   file_path?: string;
 }
 export type SkillWithFilePath = SkillIndexEntry & { file_path: string };
+export type WikiWithFilePath = WikiFrontmatter & { file_path: string };
 export type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string };
 export type CollectionRecordWithFilePath = CollectionRecord & { file_path: string };
 
@@ -451,6 +518,20 @@ export class WorkspaceStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )`,
+      `CREATE TABLE IF NOT EXISTS wiki_index (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        state TEXT NOT NULL,
+        content_locale TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        source_refs_json TEXT NOT NULL,
+        provenance_json TEXT NOT NULL,
+        file_path TEXT NOT NULL UNIQUE,
+        frontmatter_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
       `CREATE TABLE IF NOT EXISTS collection_schemas (
         id TEXT PRIMARY KEY,
         version TEXT NOT NULL,
@@ -480,9 +561,12 @@ export class WorkspaceStore {
       )`,
       `CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY,
-        theme TEXT NOT NULL,
         ui_locale TEXT NOT NULL,
         output_locale TEXT NOT NULL,
+        memory_capture_mode TEXT NOT NULL DEFAULT 'suggest',
+        knowledge_wiki_capture_mode TEXT NOT NULL DEFAULT 'suggest',
+        skill_capture_mode TEXT NOT NULL DEFAULT 'suggest',
+        external_provider_role TEXT NOT NULL DEFAULT 'assistive',
         updated_at TEXT NOT NULL
       )`,
       `CREATE TABLE IF NOT EXISTS grants (
@@ -502,12 +586,87 @@ export class WorkspaceStore {
         created_at TEXT NOT NULL,
         expires_at TEXT,
         revoked_at TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS backend_runs (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        input_message_id TEXT NOT NULL,
+        output_message_id TEXT,
+        backend_id TEXT NOT NULL,
+        backend_kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        input_summary TEXT NOT NULL,
+        output_summary TEXT,
+        error_code TEXT,
+        metadata_json TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS backend_events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        resource_refs_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (run_id, sequence),
+        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_changes (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        resource_ref_json TEXT NOT NULL,
+        change_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        legacy_operation_id TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
       )`
     ];
 
     for (const statement of statements) {
       await sql.raw(statement).execute(this.db);
     }
+
+    await this.ensureSettingsColumns();
+  }
+
+  private async ensureSettingsColumns(): Promise<void> {
+    const hadKnowledgeWikiCaptureMode = await this.hasSettingsColumn("knowledge_wiki_capture_mode");
+    const hadLegacyLlmWikiCaptureMode = await this.hasSettingsColumn("llm_wiki_capture_mode");
+    const columns = [
+      ["memory_capture_mode", "TEXT NOT NULL DEFAULT 'suggest'"],
+      ["knowledge_wiki_capture_mode", "TEXT NOT NULL DEFAULT 'suggest'"],
+      ["skill_capture_mode", "TEXT NOT NULL DEFAULT 'suggest'"],
+      ["external_provider_role", "TEXT NOT NULL DEFAULT 'assistive'"]
+    ] as const;
+
+    for (const [name, definition] of columns) {
+      try {
+        await sql.raw(`ALTER TABLE settings ADD COLUMN ${name} ${definition}`).execute(this.db);
+      } catch (error) {
+        if (!isDuplicateColumnError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    if (!hadKnowledgeWikiCaptureMode && hadLegacyLlmWikiCaptureMode) {
+      await sql.raw(
+        "UPDATE settings SET knowledge_wiki_capture_mode = llm_wiki_capture_mode WHERE knowledge_wiki_capture_mode = 'suggest' AND llm_wiki_capture_mode IS NOT NULL"
+      ).execute(this.db);
+    }
+  }
+
+  private async hasSettingsColumn(name: string): Promise<boolean> {
+    const result = await sql<{ name: string }>`PRAGMA table_info(settings)`.execute(this.db);
+    return result.rows.some((row) => row.name === name);
   }
 
   async ensureDefaultSettings(): Promise<void> {
@@ -521,9 +680,12 @@ export class WorkspaceStore {
       .insertInto("settings")
       .values({
         id: "default",
-        theme: settings.theme,
         ui_locale: settings.ui_locale,
         output_locale: settings.output_locale,
+        memory_capture_mode: settings.memory_capture_mode,
+        knowledge_wiki_capture_mode: settings.knowledge_wiki_capture_mode,
+        skill_capture_mode: settings.skill_capture_mode,
+        external_provider_role: settings.external_provider_role,
         updated_at: settings.updated_at
       })
       .execute();
@@ -609,6 +771,61 @@ export class WorkspaceStore {
     }
     const rows = await query.orderBy("created_at", "desc").execute();
     return rows.map(operationFromRow);
+  }
+
+  async saveBackendRun(run: BackendRunRecord): Promise<BackendRunRecord> {
+    await this.db.insertInto("backend_runs").values(backendRunToRow(run)).execute();
+    return run;
+  }
+
+  async updateBackendRun(run: BackendRunRecord): Promise<BackendRunRecord> {
+    await this.db.updateTable("backend_runs").set(backendRunToRow(run)).where("id", "=", run.id).execute();
+    return run;
+  }
+
+  async getBackendRun(runId: string): Promise<BackendRunRecord | undefined> {
+    const row = await this.db.selectFrom("backend_runs").selectAll().where("id", "=", runId).executeTakeFirst();
+    return row ? backendRunFromRow(row) : undefined;
+  }
+
+  async listBackendRuns(sessionId?: string): Promise<BackendRunRecord[]> {
+    let query = this.db.selectFrom("backend_runs").selectAll();
+    if (sessionId) {
+      query = query.where("session_id", "=", sessionId);
+    }
+    const rows = await query.orderBy("started_at", "desc").execute();
+    return rows.map(backendRunFromRow);
+  }
+
+  async saveBackendEvent(event: BackendEventRecord): Promise<BackendEventRecord> {
+    await this.db.insertInto("backend_events").values(backendEventToRow(event)).execute();
+    return event;
+  }
+
+  async listBackendEvents(input: { runId?: string; sessionId?: string } = {}): Promise<BackendEventRecord[]> {
+    let query = this.db.selectFrom("backend_events").selectAll();
+    if (input.runId) {
+      query = query.where("run_id", "=", input.runId);
+    }
+    if (input.sessionId) {
+      query = query.where("session_id", "=", input.sessionId);
+    }
+    const rows = await query.orderBy("run_id").orderBy("sequence").execute();
+    return rows.map(backendEventFromRow);
+  }
+
+  async saveWorkspaceChange(change: WorkspaceChangeRecord): Promise<WorkspaceChangeRecord> {
+    await this.db.insertInto("workspace_changes").values(workspaceChangeToRow(change)).execute();
+    return change;
+  }
+
+  async listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]> {
+    let query = this.db.selectFrom("workspace_changes").selectAll();
+    if (sessionId) {
+      query = query.where("session_id", "=", sessionId);
+    }
+    const rows = await query.orderBy("created_at", "desc").execute();
+    return rows.map(workspaceChangeFromRow);
   }
 
   async savePolicyDecision(decision: PolicyDecisionRecord): Promise<PolicyDecisionRecord> {
@@ -836,6 +1053,7 @@ export class WorkspaceStore {
     const messages = await this.listMessages(sessionId);
     const envelopeIds = new Set<string>();
     for (const message of messages) {
+      envelopeIds.add(message.id);
       if (message.envelope?.id) {
         envelopeIds.add(message.envelope.id);
       }
@@ -995,6 +1213,128 @@ export class WorkspaceStore {
     return readFile(path.join(this.rootDir, skill.file_path), "utf8");
   }
 
+  async saveWikiPage(frontmatter: WikiFrontmatter, content: string): Promise<WikiWithFilePath> {
+    const relativePath = path.join("wiki", "pages", `${frontmatter.slug}.md`);
+    const absolutePath = path.join(this.rootDir, relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, `${renderFrontmatter(frontmatter)}\n${content.trim()}\n`, { flag: "wx" });
+
+    try {
+      const parsed = parseWikiMarkdownLocal(await readFile(absolutePath, "utf8"));
+      if (parsed.frontmatter.id !== frontmatter.id || parsed.frontmatter.slug !== frontmatter.slug) {
+        throw new Error("wiki_frontmatter_path_mismatch");
+      }
+      await this.db
+        .insertInto("wiki_index")
+        .values(wikiToRow(parsed.frontmatter, relativePath))
+        .execute();
+      return { ...parsed.frontmatter, file_path: relativePath };
+    } catch (error) {
+      await unlink(absolutePath).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async listWiki(options: { activeOnly?: boolean } = {}): Promise<WikiWithFilePath[]> {
+    let query = this.db.selectFrom("wiki_index").selectAll();
+    if (options.activeOnly) {
+      query = query.where("state", "=", "active");
+    }
+    const rows = await query.orderBy("updated_at", "desc").execute();
+    return rows.map(wikiFromRow);
+  }
+
+  async getWiki(id: string): Promise<WikiWithFilePath | undefined> {
+    const row = await this.db.selectFrom("wiki_index").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? wikiFromRow(row) : undefined;
+  }
+
+  async readWikiContent(id: string): Promise<string | undefined> {
+    const wiki = await this.getWiki(id);
+    if (!wiki) {
+      return undefined;
+    }
+    const raw = await readFile(path.join(this.rootDir, wiki.file_path), "utf8");
+    return stripFrontmatter(raw).trim();
+  }
+
+  async updateWikiPage(input: {
+    id: string;
+    title?: string;
+    content?: string;
+    tags?: string[];
+    content_locale?: WikiFrontmatter["content_locale"];
+    source_refs?: WikiFrontmatter["source_refs"];
+    provenance?: WikiFrontmatter["provenance"];
+  }): Promise<WikiWithFilePath | undefined> {
+    const current = await this.getWiki(input.id);
+    if (!current) {
+      return undefined;
+    }
+    const content = input.content ?? (await this.readWikiContent(input.id));
+    if (content === undefined) {
+      return undefined;
+    }
+    const { file_path: filePath, ...currentFrontmatter } = current;
+    const next: WikiFrontmatter = {
+      ...currentFrontmatter,
+      title: input.title ?? current.title,
+      tags: input.tags ?? current.tags,
+      content_locale: input.content_locale ?? current.content_locale,
+      source_refs: input.source_refs ?? current.source_refs,
+      provenance: input.provenance ?? current.provenance,
+      updated_at: nowIso()
+    };
+    await this.writeWikiPage(next, filePath, content);
+    return { ...next, file_path: filePath };
+  }
+
+  async setWikiState(id: string, state: WikiFrontmatter["state"]): Promise<WikiWithFilePath | undefined> {
+    const current = await this.getWiki(id);
+    if (!current) {
+      return undefined;
+    }
+    const content = await this.readWikiContent(id);
+    if (content === undefined) {
+      return undefined;
+    }
+    const { file_path: filePath, ...currentFrontmatter } = current;
+    const next: WikiFrontmatter = {
+      ...currentFrontmatter,
+      state,
+      updated_at: nowIso()
+    };
+    await this.writeWikiPage(next, filePath, content);
+    return { ...next, file_path: filePath };
+  }
+
+  async reindexWiki(): Promise<{ active: number; total: number }> {
+    const pages = await this.listWiki();
+    for (const page of pages) {
+      const raw = await readFile(path.join(this.rootDir, page.file_path), "utf8");
+      const parsed = parseWikiMarkdownLocal(raw);
+      await this.db
+        .updateTable("wiki_index")
+        .set(wikiToRow(parsed.frontmatter, page.file_path))
+        .where("id", "=", page.id)
+        .execute();
+    }
+    return {
+      active: pages.filter((page) => page.state === "active").length,
+      total: pages.length
+    };
+  }
+
+  private async writeWikiPage(frontmatter: WikiFrontmatter, filePath: string, content: string): Promise<void> {
+    const absolutePath = path.join(this.rootDir, filePath);
+    await writeFile(absolutePath, `${renderFrontmatter(frontmatter)}\n${content.trim()}\n`);
+    await this.db
+      .updateTable("wiki_index")
+      .set(wikiToRow(frontmatter, filePath))
+      .where("id", "=", frontmatter.id)
+      .execute();
+  }
+
   async saveCollectionSchema(schemaInput: CollectionSchema): Promise<CollectionSchemaWithFilePath> {
     const relativePath = path.join("collections", schemaInput.id, "schema.json");
     const absolutePath = path.join(this.rootDir, relativePath);
@@ -1139,14 +1479,17 @@ export class WorkspaceStore {
   async getSettings(): Promise<SettingsRecord> {
     const row = await this.db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
     return {
-      theme: row.theme,
       ui_locale: row.ui_locale as SettingsRecord["ui_locale"],
       output_locale: row.output_locale as SettingsRecord["output_locale"],
+      memory_capture_mode: row.memory_capture_mode as SettingsRecord["memory_capture_mode"],
+      knowledge_wiki_capture_mode: row.knowledge_wiki_capture_mode as SettingsRecord["knowledge_wiki_capture_mode"],
+      skill_capture_mode: row.skill_capture_mode as SettingsRecord["skill_capture_mode"],
+      external_provider_role: row.external_provider_role as SettingsRecord["external_provider_role"],
       updated_at: row.updated_at
     };
   }
 
-  async patchSettings(patch: Partial<Pick<SettingsRecord, "theme" | "ui_locale" | "output_locale">>): Promise<SettingsRecord> {
+  async patchSettings(patch: Partial<Omit<SettingsRecord, "updated_at">>): Promise<SettingsRecord> {
     const current = await this.getSettings();
     const next: SettingsRecord = {
       ...current,
@@ -1156,9 +1499,12 @@ export class WorkspaceStore {
     await this.db
       .updateTable("settings")
       .set({
-        theme: next.theme,
         ui_locale: next.ui_locale,
         output_locale: next.output_locale,
+        memory_capture_mode: next.memory_capture_mode,
+        knowledge_wiki_capture_mode: next.knowledge_wiki_capture_mode,
+        skill_capture_mode: next.skill_capture_mode,
+        external_provider_role: next.external_provider_role,
         updated_at: next.updated_at
       })
       .where("id", "=", "default")
@@ -1270,6 +1616,7 @@ export async function ensureWorkspaceLayout(rootDir: string): Promise<void> {
     path.join(rootDir, "memory", "archived"),
     path.join(rootDir, "skills", "candidate"),
     path.join(rootDir, "skills", "project"),
+    path.join(rootDir, "wiki", "pages"),
     path.join(rootDir, "rollback"),
     path.join(rootDir, "collections")
   ];
@@ -1277,7 +1624,7 @@ export async function ensureWorkspaceLayout(rootDir: string): Promise<void> {
   await Promise.all(dirs.map((dir) => mkdir(dir, { recursive: true })));
 }
 
-export function renderFrontmatter(frontmatter: MemoryFrontmatter): string {
+export function renderFrontmatter(frontmatter: object): string {
   return [
     "---",
     ...Object.entries(frontmatter).map(([key, value]) => `${key}: ${JSON.stringify(value)}`),
@@ -1327,6 +1674,23 @@ function parseSkillMarkdownLocal(markdown: string): { frontmatter: SkillFrontmat
   const content = contentStart === -1 ? "" : markdown.slice(contentStart + 1).trim();
   return {
     frontmatter: SkillFrontmatterSchema.parse(JSON.parse(rawFrontmatter)),
+    content
+  };
+}
+
+function parseWikiMarkdownLocal(markdown: string): { frontmatter: WikiFrontmatter; content: string } {
+  if (!markdown.startsWith("---\n")) {
+    throw new Error("wiki_frontmatter_missing");
+  }
+  const end = markdown.indexOf("\n---", 4);
+  if (end === -1) {
+    throw new Error("wiki_frontmatter_unclosed");
+  }
+  const rawFrontmatter = markdown.slice(4, end).trim();
+  const contentStart = markdown.indexOf("\n", end + 4);
+  const content = contentStart === -1 ? "" : markdown.slice(contentStart + 1).trim();
+  return {
+    frontmatter: WikiFrontmatterSchema.parse(JSON.parse(rawFrontmatter)),
     content
   };
 }
@@ -1488,6 +1852,94 @@ function operationFromRow(row: OperationsTable): OperationRecord {
   };
 }
 
+function backendRunToRow(run: BackendRunRecord): BackendRunsTable {
+  return {
+    id: run.id,
+    session_id: run.session_id,
+    input_message_id: run.input_message_id,
+    output_message_id: run.output_message_id ?? null,
+    backend_id: run.backend_id,
+    backend_kind: run.backend_kind,
+    status: run.status,
+    started_at: run.started_at,
+    completed_at: run.completed_at ?? null,
+    input_summary: run.input_summary,
+    output_summary: run.output_summary ?? null,
+    error_code: run.error_code ?? null,
+    metadata_json: stringify(run.metadata)
+  };
+}
+
+function backendRunFromRow(row: BackendRunsTable): BackendRunRecord {
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    input_message_id: row.input_message_id,
+    output_message_id: row.output_message_id ?? undefined,
+    backend_id: row.backend_id,
+    backend_kind: row.backend_kind as BackendRunRecord["backend_kind"],
+    status: row.status as BackendRunRecord["status"],
+    started_at: row.started_at,
+    completed_at: row.completed_at ?? undefined,
+    input_summary: row.input_summary,
+    output_summary: row.output_summary ?? undefined,
+    error_code: row.error_code ?? undefined,
+    metadata: parse(row.metadata_json)
+  };
+}
+
+function backendEventToRow(event: BackendEventRecord): BackendEventsTable {
+  return {
+    id: event.id,
+    run_id: event.run_id,
+    session_id: event.session_id,
+    event_type: event.event_type,
+    sequence: event.sequence,
+    payload_json: stringify(event.payload),
+    resource_refs_json: stringify(event.resource_refs),
+    created_at: event.created_at
+  };
+}
+
+function backendEventFromRow(row: BackendEventsTable): BackendEventRecord {
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    session_id: row.session_id,
+    event_type: row.event_type as BackendEventRecord["event_type"],
+    sequence: row.sequence,
+    payload: parse(row.payload_json),
+    resource_refs: parse(row.resource_refs_json),
+    created_at: row.created_at
+  };
+}
+
+function workspaceChangeToRow(change: WorkspaceChangeRecord): WorkspaceChangesTable {
+  return {
+    id: change.id,
+    run_id: change.run_id,
+    session_id: change.session_id,
+    resource_ref_json: stringify(change.resource_ref),
+    change_type: change.change_type,
+    summary: change.summary,
+    legacy_operation_id: change.legacy_operation_id ?? null,
+    created_at: change.created_at
+  };
+}
+
+function workspaceChangeFromRow(row: WorkspaceChangesTable): WorkspaceChangeRecord {
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    session_id: row.session_id,
+    resource_ref: parse(row.resource_ref_json),
+    change_type: row.change_type as WorkspaceChangeRecord["change_type"],
+    summary: row.summary,
+    legacy_operation_id: row.legacy_operation_id ?? undefined,
+    created_at: row.created_at
+  };
+}
+
 function policyDecisionFromRow(row: PolicyDecisionsTable): PolicyDecisionRecord {
   return {
     id: row.id,
@@ -1556,6 +2008,30 @@ function skillFromRow(row: SkillIndexTable): SkillWithFilePath {
   };
 }
 
+function wikiToRow(frontmatter: WikiFrontmatter, filePath: string): WikiIndexTable {
+  return {
+    id: frontmatter.id,
+    slug: frontmatter.slug,
+    title: frontmatter.title,
+    state: frontmatter.state,
+    content_locale: frontmatter.content_locale,
+    tags_json: stringify(frontmatter.tags),
+    source_refs_json: stringify(frontmatter.source_refs),
+    provenance_json: stringify(frontmatter.provenance),
+    file_path: filePath,
+    frontmatter_json: stringify(frontmatter),
+    created_at: frontmatter.created_at,
+    updated_at: frontmatter.updated_at
+  };
+}
+
+function wikiFromRow(row: WikiIndexTable): WikiWithFilePath {
+  return {
+    ...parse<WikiFrontmatter>(row.frontmatter_json),
+    file_path: row.file_path
+  };
+}
+
 function collectionSchemaFromRow(row: CollectionSchemasTable): CollectionSchemaWithFilePath {
   return {
     ...parse(row.schema_json),
@@ -1596,6 +2072,10 @@ function automationRunFromRow(row: AutomationRunsTable): AutomationRunRecord {
     completed_at: row.completed_at ?? undefined,
     error: row.error ?? undefined
   };
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  return error instanceof Error && /duplicate column name/i.test(error.message);
 }
 
 function artifactFromRow(row: ArtifactsTable): ArtifactRecord {

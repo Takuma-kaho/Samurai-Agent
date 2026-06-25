@@ -25,6 +25,17 @@
 4. `plans/`: レビュー・改訂方針・作業計画
 5. `Hermes_Agent_解説.md`: Hermes Agent 理解の補助資料
 
+### 作業開始時に必ず読むファイル
+
+Samurai Agentで設計、実装、UI、命名に関わる作業を始める前に、必ず以下を読む。
+
+1. `ARCHITECTURE.md`
+2. `PRINCIPLES.md`
+3. `PUBLIC_NAMING.md`
+4. `WEB_UI_DESIGN.md`
+
+変更内容が小さくても、命名や責務に触れる場合は `PUBLIC_NAMING.md` を必ず確認する。
+
 ## 設計方針
 
 - 基本方針は `MulmoClaude型Host + Agent Backend cassette + Hermes的Memory/Skill改善ループ`。
@@ -43,6 +54,7 @@
 
 - 既存の設計意図を壊さない。
 - 大きな変更をする前に、関連する設計箇所を読む。
+- 設計、実装、UI、命名に関わる作業では、作業前に `ARCHITECTURE.md`、`PRINCIPLES.md`、`PUBLIC_NAMING.md`、`WEB_UI_DESIGN.md` を読む。
 - 複数ファイルにまたがる変更や仕様判断がある場合は、先に短く方針を説明する。
 - ユーザーが作った変更は勝手に戻さない。
 - 不要なリファクタや、目的外の整理はしない。

@@ -2,10 +2,19 @@ import { createArtifactDraft } from "@samurai-agent/artifacts";
 import { buildActivityInboxItems, createAuditRecord } from "@samurai-agent/audit";
 import { getCapabilityManifest, proposalCapabilityManifest } from "@samurai-agent/capability-registry";
 import {
+  AgentBackendRegistry,
+  ClaudeCodeBackend,
+  CodexBackend,
+  type BackendOutputEvent,
+  type BackendRunInput
+} from "@samurai-agent/agent-backends";
+import {
   type ActivityInboxItem,
   type ApprovalRequest,
   type ArtifactRecord,
   type AuditRecord,
+  type BackendEventRecord,
+  type BackendRunRecord,
   type CollectionPatch,
   type CollectionRecord,
   type CollectionSchema,
@@ -20,6 +29,8 @@ import {
   type PolicyEvaluationInput,
   type RollbackPoint,
   type SessionRecord,
+  type WikiFrontmatter,
+  type WorkspaceChangeRecord,
   SkillFrontmatterSchema,
   type SkillFrontmatter,
   type SupportedLocale,
@@ -37,8 +48,11 @@ import type {
   CollectionRecordWithFilePath,
   CollectionSchemaWithFilePath,
   SkillWithFilePath,
+  WikiWithFilePath,
   WorkspaceStore
 } from "@samurai-agent/workspace-store";
+import { handleBackendToolCall } from "./backend-feedback";
+import { SamuraiNativeBackend } from "./native-backend";
 export {
   FakeProviderAdapter,
   ProviderRegistry,
@@ -79,6 +93,7 @@ const cronMemoryReviewGatewayContext: GatewayContext = {
 export interface RunChatTurnInput {
   sessionId: string;
   content: string;
+  backend_id?: string;
   input_locale?: SupportedLocale;
   output_locale?: SupportedLocale;
   metadata?: Record<string, unknown>;
@@ -87,6 +102,9 @@ export interface RunChatTurnInput {
 export interface RunChatTurnResult {
   session: SessionRecord;
   messages: MessageRecord[];
+  backendRun: BackendRunRecord;
+  backendEvents: BackendEventRecord[];
+  workspaceChanges: WorkspaceChangeRecord[];
   operations: OperationRecord[];
   policyDecisions: PolicyDecisionRecord[];
   artifacts: ArtifactRecord[];
@@ -135,6 +153,7 @@ export interface RuntimeWriteResult<TResource> {
 }
 
 export type SkillRuntimeResult = RuntimeWriteResult<SkillWithFilePath>;
+export type WikiRuntimeResult = RuntimeWriteResult<WikiWithFilePath>;
 export type CollectionSchemaRuntimeResult = RuntimeWriteResult<CollectionSchemaWithFilePath>;
 export type CollectionRecordRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
 
@@ -151,11 +170,19 @@ export interface AutomationRunRuntimeResult {
   activity: ActivityInboxItem[];
 }
 
+export interface BackendRunErrorPayload {
+  session: SessionRecord;
+  messages: MessageRecord[];
+  backendRun: BackendRunRecord;
+  backendEvents: BackendEventRecord[];
+  workspaceChanges: WorkspaceChangeRecord[];
+}
+
 export class RuntimeRequestError extends Error {
   constructor(
     readonly code: "not_found" | "conflict" | "forbidden" | "provider_not_configured" | "provider_failed",
     message: string,
-    readonly payload?: ApprovalLifecycleResult | ArchiveMemoryRuntimeResult,
+    readonly payload?: ApprovalLifecycleResult | ArchiveMemoryRuntimeResult | BackendRunErrorPayload,
     readonly diagnostics?: ProviderDiagnostics
   ) {
     super(message);
@@ -174,12 +201,56 @@ interface OperationPlan {
   };
 }
 
+export function createDefaultAgentBackendRegistry(
+  provider?: ProviderAdapter,
+  env: NodeJS.ProcessEnv = process.env
+): AgentBackendRegistry {
+  return new AgentBackendRegistry([
+    new SamuraiNativeBackend(provider),
+    new ClaudeCodeBackend({
+      command: env.SAMURAI_CLAUDE_CODE_COMMAND,
+      args: splitArgs(env.SAMURAI_CLAUDE_CODE_ARGS),
+      timeoutMs: parseTimeout(env.SAMURAI_CLAUDE_CODE_TIMEOUT_MS)
+    }),
+    new CodexBackend({
+      command: env.SAMURAI_CODEX_COMMAND,
+      args: splitArgs(env.SAMURAI_CODEX_ARGS),
+      timeoutMs: parseTimeout(env.SAMURAI_CODEX_TIMEOUT_MS)
+    })
+  ]);
+}
+
+function defaultBackendId(env: NodeJS.ProcessEnv = process.env): string {
+  return env.SAMURAI_BACKEND_DEFAULT?.trim() || "samurai-native";
+}
+
+function splitArgs(value: string | undefined): string[] {
+  return value?.split(" ").map((item) => item.trim()).filter(Boolean) ?? [];
+}
+
+function parseTimeout(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 export class AgentRuntime {
+  private readonly backendRegistry: AgentBackendRegistry;
+
   constructor(
     private readonly store: WorkspaceStore,
     private readonly emit: RuntimeEventSink = () => undefined,
-    private readonly provider?: ProviderAdapter
-  ) {}
+    private readonly provider?: ProviderAdapter,
+    backendRegistry?: AgentBackendRegistry
+  ) {
+    this.backendRegistry = backendRegistry ?? createDefaultAgentBackendRegistry(provider);
+  }
+
+  listAgentBackends() {
+    return this.backendRegistry.statuses();
+  }
 
   async createSession(input: {
     title?: string;
@@ -213,14 +284,6 @@ export class AgentRuntime {
     const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
     const outputLocale = input.output_locale ?? session.output_locale ?? settings.output_locale;
     const envelope = createEnvelope(input.content, inputLocale, outputLocale, input.metadata);
-    const activeMemory = await retrieveActiveMemory(this.store, input.content);
-    const recentMessages = (await this.store.listMessages(session.id)).slice(-10);
-    const providerOutput = await this.generateProviderOutput({
-      envelope,
-      activeMemory,
-      recentMessages
-    });
-
     const userMessage = await this.saveMessage({
       id: createId("message"),
       session_id: session.id,
@@ -232,92 +295,192 @@ export class AgentRuntime {
       created_at: envelope.received_at
     });
 
+    const backendId = input.backend_id?.trim() || defaultBackendId();
+    const backend = this.backendRegistry.get(backendId);
+    if (!backend) {
+      throw new RuntimeRequestError("conflict", `backend_not_registered:${backendId}`);
+    }
+    let backendRun: BackendRunRecord = {
+      id: createId("run"),
+      session_id: session.id,
+      input_message_id: userMessage.id,
+      backend_id: backend.id,
+      backend_kind: backend.kind,
+      status: "running",
+      started_at: nowIso(),
+      input_summary: summarize(input.content),
+      metadata: jsonRecord(input.metadata ?? {})
+    };
+    backendRun = await this.store.saveBackendRun(backendRun);
+    await this.emit("backend.run.created", backendRun);
+
+    const activeMemory = await retrieveActiveMemory(this.store, input.content);
+    const recentMessages = (await this.store.listMessages(session.id)).slice(-10);
+    const runInput: BackendRunInput = {
+      run_id: backendRun.id,
+      session_id: session.id,
+      input_message_id: userMessage.id,
+      user_input: input.content,
+      input_locale: inputLocale,
+      output_locale: outputLocale,
+      active_memory: activeMemory.map((memory) => ({
+        id: memory.frontmatter.id,
+        topic: memory.frontmatter.topic,
+        content: memory.content
+      })),
+      recent_messages: recentMessages,
+      metadata: jsonRecord(input.metadata ?? {})
+    };
+
     const operations: OperationRecord[] = [];
-    const policyDecisions: PolicyDecisionRecord[] = [];
     const artifacts: ArtifactRecord[] = [];
     const memories: MemoryFrontmatter[] = [];
-    const approvalRequests: ApprovalRequest[] = [];
-    const auditRecords: AuditRecord[] = [];
-    const rollbackPoints: RollbackPoint[] = [];
+    const backendEvents: BackendEventRecord[] = [];
+    const workspaceChanges: WorkspaceChangeRecord[] = [];
+    const textParts: string[] = [];
+    let nextSequence = 1;
+    let failedEvent: BackendEventRecord | undefined;
+    let waitingForBackendInput = false;
 
-    for (const operationPlan of this.createOperationPlans(providerOutput)) {
-      const operation = await this.createOperation(session, envelope, operationPlan.operation, operationPlan.proposedEffects);
-      operations.push(operation);
+    const sessionMemory = await createSessionMemory(this.store, envelope, input.content);
+    memories.push(sessionMemory);
+    const sessionMemoryRef = memoryRef(sessionMemory);
+    const sessionMemoryChange: WorkspaceChangeRecord = {
+      id: createId("change"),
+      run_id: backendRun.id,
+      session_id: session.id,
+      resource_ref: sessionMemoryRef,
+      change_type: "memory_suggested",
+      summary: `Captured session memory ${sessionMemory.topic}.`,
+      created_at: nowIso()
+    };
+    await this.store.saveWorkspaceChange(sessionMemoryChange);
+    workspaceChanges.push(sessionMemoryChange);
+    await this.emit("workspace.change.created", sessionMemoryChange);
+    await this.emit("memory.candidate.created", sessionMemory);
 
-      const manifest = getCapabilityManifest(operation.capability_id);
-      const policyInput = this.createPolicyInput(operation);
-      const decision = await this.savePolicyDecision(evaluatePolicy({
-        input: policyInput,
-        manifest,
-        grants: await this.store.listGrants(),
-        operationId: operation.id
-      }));
-      policyDecisions.push(decision);
+    const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
+      const record: BackendEventRecord = {
+        id: createId("event"),
+        run_id: backendRun.id,
+        session_id: session.id,
+        event_type: event.event_type,
+        sequence: nextSequence,
+        payload: jsonRecord(event.payload),
+        resource_refs: event.resource_refs ?? [],
+        created_at: nowIso()
+      };
+      nextSequence += 1;
+      await this.store.saveBackendEvent(record);
+      backendEvents.push(record);
+      await this.emit("backend.event.created", record);
+      return record;
+    };
 
-      operation.policy_decision_id = decision.id;
+    const saveFeedbackEvent = async (event: BackendOutputEvent) => {
+      await recordEvent(event);
+    };
 
-      if (decision.decision === "allow_auto" || decision.decision === "allow_with_audit") {
-        const execution = await this.executeAllowedOperation(operation, decision, envelope, operationPlan);
-        operation.status = "completed";
-        operation.result_ref = execution.resultRef;
-        operation.updated_at = nowIso();
-        await this.store.updateOperation(operation);
-
-        if (execution.artifact) {
-          artifacts.push(execution.artifact);
-          await this.emit("artifact.created", execution.artifact);
+    for await (const event of backend.runTurn(runInput)) {
+      const record = await recordEvent(event);
+      if (event.event_type === "text_delta") {
+        const text = typeof event.payload.text === "string" ? event.payload.text : "";
+        if (text) {
+          textParts.push(text);
         }
-        if (execution.memory) {
-          memories.push(execution.memory);
-          await this.emit("memory.candidate.created", execution.memory);
+      }
+      if (event.event_type === "tool_call_started") {
+        const feedback = await handleBackendToolCall({ store: this.store, run: backendRun, runInput, event });
+        operations.push(...feedback.operations);
+        artifacts.push(...feedback.artifacts);
+        memories.push(...feedback.memories);
+        for (const change of feedback.workspaceChanges) {
+          await this.store.saveWorkspaceChange(change);
+          workspaceChanges.push(change);
+          await this.emit("workspace.change.created", change);
         }
-        if (execution.rollbackPoint) {
-          rollbackPoints.push(execution.rollbackPoint);
+        for (const feedbackEvent of feedback.events) {
+          await saveFeedbackEvent(feedbackEvent);
         }
-
-        const audit = await this.auditOperation(operation, decision, execution.summary, execution.affectedResources, execution.rollbackPoint?.id);
-        auditRecords.push(audit);
-      } else if (decision.decision === "requires_approval" || decision.decision === "requires_strong_approval") {
-        const request = await this.createApprovalRequest(operation, decision);
-        approvalRequests.push(request);
-        operation.status = "pending_approval";
-        operation.approval_request_id = request.id;
-        operation.updated_at = nowIso();
-        await this.store.updateOperation(operation);
-        await this.emit("approval.requested", request);
-        const audit = await this.auditOperation(operation, decision, "Operation held for approval. No external effect executed.", [], undefined);
-        auditRecords.push(audit);
-      } else {
-        operation.status = "denied";
-        operation.updated_at = nowIso();
-        await this.store.updateOperation(operation);
-        const audit = await this.auditOperation(operation, decision, "Operation denied by policy.", [], undefined);
-        auditRecords.push(audit);
+      }
+      if (event.event_type === "backend_waiting_for_native_input") {
+        waitingForBackendInput = true;
+        backendRun = {
+          ...backendRun,
+          status: "waiting_for_backend_input"
+        };
+        await this.store.updateBackendRun(backendRun);
+        await this.emit("backend.run.updated", backendRun);
+        break;
+      }
+      if (event.event_type === "run_failed") {
+        failedEvent = record;
+      }
+      if (event.event_type === "run_completed") {
+        backendRun = {
+          ...backendRun,
+          status: "completed",
+          output_summary: typeof event.payload.output_summary === "string" ? event.payload.output_summary : summarize(textParts.join(" ")),
+          completed_at: nowIso()
+        };
       }
     }
 
+    if (failedEvent) {
+      backendRun = {
+        ...backendRun,
+        status: "failed",
+        error_code: typeof failedEvent.payload.error_code === "string" ? failedEvent.payload.error_code : "provider_failed",
+        completed_at: nowIso()
+      };
+      await this.store.updateBackendRun(backendRun);
+      await this.emit("backend.run.updated", backendRun);
+      const payload = { session, messages: [userMessage], backendRun, backendEvents, workspaceChanges };
+      const code = backendRun.error_code === "provider_not_configured" ? "provider_not_configured" : "provider_failed";
+      throw new RuntimeRequestError(code, typeof failedEvent.payload.message === "string" ? failedEvent.payload.message : "Provider failed.", payload, {
+        reason: isProviderDiagnosticReason(failedEvent.payload.reason) ? failedEvent.payload.reason : code === "provider_not_configured" ? "not_configured" : "unknown",
+        retryable: failedEvent.payload.retryable === true,
+        provider: typeof failedEvent.payload.provider === "string" ? failedEvent.payload.provider : undefined,
+        model: typeof failedEvent.payload.model === "string" ? failedEvent.payload.model : undefined,
+        status: typeof failedEvent.payload.status === "number" ? failedEvent.payload.status : undefined
+      });
+    }
+
+    const agentContent = textParts.join("\n").trim();
     const agentMessage = await this.saveMessage({
       id: createId("message"),
       session_id: session.id,
       role: "agent",
-      content: providerOutput.content,
+      content: agentContent,
       input_locale: envelope.input_locale,
       output_locale: envelope.output_locale,
       created_at: nowIso()
     });
 
-    const activity = await this.rebuildActivity();
+    backendRun = {
+      ...backendRun,
+      output_message_id: agentMessage.id,
+      status: waitingForBackendInput ? "waiting_for_backend_input" : backendRun.status === "running" ? "completed" : backendRun.status,
+      output_summary: backendRun.output_summary ?? summarize(agentContent),
+      completed_at: waitingForBackendInput ? undefined : (backendRun.completed_at ?? nowIso())
+    };
+    await this.store.updateBackendRun(backendRun);
+    await this.emit("backend.run.updated", backendRun);
+
     return {
       session,
       messages: [userMessage, agentMessage],
+      backendRun,
+      backendEvents,
+      workspaceChanges,
       operations,
-      policyDecisions,
+      policyDecisions: [],
       artifacts,
       memories,
-      approvalRequests,
-      auditRecords,
-      rollbackPoints,
-      activity
+      approvalRequests: [],
+      auditRecords: [],
+      rollbackPoints: [],
+      activity: []
     };
   }
 
@@ -616,6 +779,123 @@ export class AgentRuntime {
     });
   }
 
+  async createWikiProposal(input: {
+    title: string;
+    content: string;
+    slug?: string;
+    tags?: string[];
+    content_locale?: SupportedLocale;
+    source_refs?: WikiFrontmatter["source_refs"];
+    provenance?: WikiFrontmatter["provenance"];
+  }): Promise<WikiRuntimeResult> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Create wiki proposal: ${input.title}`);
+    const now = nowIso();
+    const wiki: WikiFrontmatter = {
+      id: createId("wiki"),
+      slug: slugify(input.slug ?? input.title),
+      title: input.title,
+      state: "proposed",
+      content_locale: input.content_locale ?? session.output_locale,
+      tags: input.tags ?? [],
+      source_refs: input.source_refs ?? [],
+      provenance: input.provenance ?? {
+        kind: "user_authored",
+        summary: "Created from an explicit local request.",
+        verified: true
+      },
+      created_at: now,
+      updated_at: now
+    };
+
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "wiki.proposal.create",
+      proposedEffects: ["Create a proposed wiki markdown page."],
+      execute: async (operation) => {
+        const saved = await this.store.saveWikiPage(wiki, input.content);
+        const ref = wikiRef(saved);
+        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { wiki_id: saved.id });
+        return { resource: saved, ref, rollbackPoint, summary: `Created wiki proposal ${saved.title}.` };
+      }
+    });
+  }
+
+  async acceptWikiPage(id: string): Promise<WikiRuntimeResult> {
+    return this.updateWikiState(id, "active", "wiki.accept", "Accept a wiki proposal for active retrieval.", "Accepted wiki page");
+  }
+
+  async rejectWikiPage(id: string): Promise<WikiRuntimeResult> {
+    return this.updateWikiState(id, "rejected", "wiki.reject", "Reject a wiki proposal without deleting its markdown.", "Rejected wiki page");
+  }
+
+  async archiveWikiPage(id: string): Promise<WikiRuntimeResult> {
+    return this.updateWikiState(id, "archived", "wiki.archive", "Archive a wiki page without deleting its markdown.", "Archived wiki page");
+  }
+
+  async patchWikiPage(input: {
+    id: string;
+    title?: string;
+    content?: string;
+    tags?: string[];
+    content_locale?: SupportedLocale;
+    source_refs?: WikiFrontmatter["source_refs"];
+    provenance?: WikiFrontmatter["provenance"];
+  }): Promise<WikiRuntimeResult> {
+    const current = await this.store.getWiki(input.id);
+    if (!current) {
+      throw new RuntimeRequestError("not_found", `Wiki page not found: ${input.id}`);
+    }
+    const beforeContent = await this.store.readWikiContent(input.id);
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Patch wiki page: ${current.title}`);
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "wiki.patch",
+      proposedEffects: ["Edit wiki page frontmatter or markdown content."],
+      execute: async (operation) => {
+        const saved = await this.store.updateWikiPage(input);
+        if (!saved) {
+          throw new RuntimeRequestError("not_found", `Wiki page not found: ${input.id}`);
+        }
+        const ref = wikiRef(saved);
+        const rollbackPoint = await this.createRollbackPoint(
+          operation,
+          [ref],
+          { wiki: current as unknown as JsonValue, content: beforeContent ?? "" },
+          { wiki: saved as unknown as JsonValue, content: input.content ?? beforeContent ?? "" }
+        );
+        return { resource: saved, ref, rollbackPoint, summary: `Updated wiki page ${saved.title}.` };
+      }
+    });
+  }
+
+  async reindexWiki(): Promise<RuntimeWriteResult<{ active: number; total: number }>> {
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, "Reindex wiki pages");
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "wiki.reindex",
+      proposedEffects: ["Refresh the SQLite wiki index from markdown files."],
+      execute: async () => {
+        const result = await this.store.reindexWiki();
+        const ref = {
+          kind: "wiki_index",
+          id: "active",
+          uri: "wiki/pages",
+          label: "Wiki index"
+        };
+        return { resource: result, ref, summary: `Reindexed ${result.active} active wiki pages.` };
+      }
+    });
+  }
+
   async saveCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaRuntimeResult> {
     const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
     const envelope = createGatewayEnvelope(webGatewayContext, `Save collection schema: ${schema.id}`);
@@ -821,6 +1101,7 @@ export class AgentRuntime {
     operationName: string;
     proposedEffects: string[];
     inputRef?: OperationRecord["input_ref"];
+    targetResourceRefs?: OperationRecord["target_resource_refs"];
     execute: (operation: OperationRecord) => Promise<{
       resource: TResource;
       ref: NonNullable<OperationRecord["result_ref"]>;
@@ -830,7 +1111,8 @@ export class AgentRuntime {
   }): Promise<RuntimeWriteResult<TResource> & TExtra> {
     const operation = await this.createOperation(input.session, input.envelope, input.operationName, input.proposedEffects, {
       context: input.context,
-      inputRef: input.inputRef
+      inputRef: input.inputRef,
+      targetResourceRefs: input.targetResourceRefs
     });
     const manifest = getCapabilityManifest(operation.capability_id);
     const decision = await this.savePolicyDecision(evaluatePolicy({
@@ -881,6 +1163,43 @@ export class AgentRuntime {
       await this.auditOperation(operation, decision, "Write operation failed before completion.", [], undefined);
       throw new RuntimeRequestError("conflict", operation.error);
     }
+  }
+
+  private async updateWikiState(
+    id: string,
+    state: WikiFrontmatter["state"],
+    operationName: string,
+    effect: string,
+    summaryPrefix: string
+  ): Promise<WikiRuntimeResult> {
+    const current = await this.store.getWiki(id);
+    if (!current) {
+      throw new RuntimeRequestError("not_found", `Wiki page not found: ${id}`);
+    }
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `${summaryPrefix}: ${current.title}`);
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName,
+      proposedEffects: [effect],
+      targetResourceRefs: [wikiRef(current)],
+      execute: async (operation) => {
+        const saved = await this.store.setWikiState(id, state);
+        if (!saved) {
+          throw new RuntimeRequestError("not_found", `Wiki page not found: ${id}`);
+        }
+        const ref = wikiRef(saved);
+        const rollbackPoint = await this.createRollbackPoint(
+          operation,
+          [ref],
+          { wiki: current as unknown as JsonValue },
+          { wiki: saved as unknown as JsonValue }
+        );
+        return { resource: saved, ref, rollbackPoint, summary: `${summaryPrefix} ${saved.title}.` };
+      }
+    });
   }
 
   private createPolicyInput(operation: OperationRecord): PolicyEvaluationInput {
@@ -1247,13 +1566,48 @@ function createEnvelope(
     attachments: [],
     input_locale: isSupportedLocale(inputLocale) ? inputLocale : "ja",
     output_locale: isSupportedLocale(outputLocale) ? outputLocale : "ja",
-    metadata: metadata as MessageEnvelope["metadata"],
+    metadata: jsonRecord(metadata),
     received_at: nowIso()
   };
 }
 
+function summarize(value: string): string {
+  return value.trim().replace(/\s+/g, " ").slice(0, 160);
+}
+
+function jsonRecord(value: Record<string, unknown>): Record<string, JsonValue> {
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, jsonSafe(entry)]));
+}
+
+function jsonSafe(value: unknown): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(jsonSafe);
+  }
+  if (typeof value === "object" && value) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, jsonSafe(entry)]));
+  }
+  return null;
+}
+
 function stringArg(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function isProviderDiagnosticReason(value: unknown): value is ProviderDiagnostics["reason"] {
+  return (
+    value === "not_configured" ||
+    value === "auth_failed" ||
+    value === "rate_limited" ||
+    value === "temporary_unavailable" ||
+    value === "model_not_found" ||
+    value === "invalid_model" ||
+    value === "invalid_response" ||
+    value === "network" ||
+    value === "unknown"
+  );
 }
 
 function createGatewayEnvelope(
@@ -1272,7 +1626,7 @@ function createGatewayEnvelope(
     attachments: [],
     input_locale: inputLocale,
     output_locale: outputLocale,
-    metadata: metadata as MessageEnvelope["metadata"],
+    metadata: jsonRecord(metadata),
     received_at: nowIso()
   };
 }
@@ -1318,6 +1672,25 @@ function skillRef(skill: SkillWithFilePath) {
     uri: skill.file_path,
     label: skill.title
   };
+}
+
+function wikiRef(wiki: WikiWithFilePath) {
+  return {
+    kind: "wiki",
+    id: wiki.id,
+    uri: wiki.file_path,
+    label: wiki.title
+  };
+}
+
+function slugify(value: string): string {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72);
+  return slug || createId("wiki_slug");
 }
 
 function collectionSchemaRef(schema: CollectionSchemaWithFilePath) {

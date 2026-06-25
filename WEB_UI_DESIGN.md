@@ -28,7 +28,7 @@
 
 Samurai Agent の Web UI は、以下を基本にする。
 
-- Light-first
+- Dark-only
 - Chat-first
 - Workspace on demand
 - Low text
@@ -136,8 +136,23 @@ collapse 時も New Chat、Search、Settings の主要導線はアイコンと�
 - icon-only button は枠線で囲まず、円形グレー hover surface で反応を出す
 - 左サイドバーの collapsed icon-only nav は、丸い button + 丸い hover / active surface に統一する
 - Settings は専用画面として扱うが、直前の画面へ戻る導線を header に置く
+- Settings は保存方針の管理場所として扱う
 - Artifact や Workspace は、会話の流れから自然に出す
 - 説明文を増やして機能を説明しない
+
+Settings に置く保存方針。
+
+| ブロック | 役割 |
+| --- | --- |
+| Memory | 毎回効かせる短い個人理解の保存方針 |
+| Knowledge Wiki | 調査、設計、プロジェクト知識など濃い知識の保存方針 |
+| Skill | 再利用できる作業手順の候補化方針 |
+| External memory assist | 外部Providerを参照元付き提案の補助に使うか |
+
+各ブロックは短い説明と segmented control に留める。
+API key入力欄は作らない。
+Memoryの一覧・詳細はMemory Viewを使い、Settingsに管理一覧を増やさない。
+Wiki proposalのaccept / reject / edit / archive は、Context DrawerまたはWorkspace side panel側に置く。
 
 ### 3.3 Context Drawer
 
@@ -146,6 +161,7 @@ Context Drawer は、作業中に必要な補助情報を置く場所である�
 置いてよいもの。
 
 - Memory suggestion
+- Wiki proposal
 - Skill candidate
 - Backend event
 - Tool log
@@ -161,25 +177,11 @@ Context Drawer は、作業中に必要な補助情報を置く場所である�
 
 ## 4. Visual Language
 
-### 4.1 Light Mode
+### 4.1 Dark Mode
 
-Light mode は主役である。
-
-基本は以下。
-
-- white / black / neutral gray を中心にする
-- 背景を cream / beige / tan に寄せない
-- 影を強くしない
-- 面のgradientで高級感を出そうとしない
-- 境界線と余白で構造を見せる
-- 上辺中央に細い silver rim を置き、金属感を最小限だけ出す
-
-Light mode の rim は、白く発光させない。
-白い背景と同化して線が切れて見えるため、薄い銀グレーを中心にする。
-
-### 4.2 Dark Mode
-
-Dark mode は、黒背景と hairline border を中心にする。
+Samurai Agent は Dark mode 固定である。
+明るい表示モードと表示切替は持たない。
+OSS公開面でも、表示変更の管理導線を出さない。
 
 基本は以下。
 
@@ -190,15 +192,14 @@ Dark mode は、黒背景と hairline border を中心にする。
 - chat feed 内の小さい Artifact / Memory preview card だけは、濃いグレー面と 1px border で分けてよい
 - 情報密度が高い部分でも、border と typography で整理する
 
-### 4.3 Frame Lighting
+### 4.2 Frame Lighting
 
 Frame lighting は、面全体を光らせる表現ではない。
 
 正しい方向。
 
 - 上辺中央だけに細い rim を置く
-- Light mode は silver rim
-- Dark mode は white rim
+- rim は dark surface 上の white rim として扱う
 - glow は狭く、薄く、背景に溶かす
 
 避ける方向。
@@ -216,7 +217,7 @@ Frame lighting は、面全体を光らせる表現ではない。
 
 本番実装では、以下の意味単位として再利用する。
 
-### 5.1 Theme Tokens
+### 5.1 Visual Tokens
 
 最低限、以下の token を持つ。
 
@@ -228,23 +229,7 @@ Frame lighting は、面全体を光らせる表現ではない。
 - surface: subtle depth / shadow
 - edge: light / shade / glow / width / height / opacity / top
 
-Light mode の基準。
-
-```css
---bg: #ffffff;
---stage: #ffffff;
---stage-soft: #f7f7f8;
---rail: #f7f7f8;
---panel: #ffffff;
---panel-subtle: #f8f8f9;
---ink: #101110;
---muted: #62646a;
---soft: #9a9ca3;
---line: #e5e7eb;
---line-strong: #d1d5db;
-```
-
-Dark mode の基準。
+Dark-only の基準。
 
 ```css
 --bg: #000000;
@@ -268,14 +253,10 @@ Dark mode の基準。
 
 - background: panel
 - border: 1px solid line
-- optional depth: Light mode だけごく薄く使う
 - `::before`: 上辺中央の細い rim
 - `::after`: rim の周辺に置く薄い glow
 
-Light mode は、中央を白にしない。
-薄い銀グレーで、背景から少しだけ分離させる。
-
-Dark mode は、白い rim を使うが、幅と明るさを絞る。
+rim は白を使うが、幅と明るさを絞る。
 
 ### 5.3 Prompt Pill
 
@@ -446,7 +427,7 @@ UI内の文字は増やしすぎない。
 - `ARCHITECTURE.md` の責務分解を UI 側で混ぜていないか
 - `PUBLIC_NAMING.md` に反していないか
 - `Chat Empty` / `With Artifact` / `Workspace Peek` / `Context Drawer` の4状態を説明できるか
-- Light mode と Dark mode の役割が崩れていないか
+- Dark-only 方針と表示変更なしの前提が崩れていないか
 - `lit-surface` / prompt pill / Artifact / Workspace / Drawer のrecipeが保たれているか
 - responsive rule が `980px` / `640px` で破綻しないか
 - UI文言が増えすぎていないか

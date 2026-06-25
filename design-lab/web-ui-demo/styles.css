@@ -1,39 +1,7 @@
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   --font-ui: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Consolas, monospace;
-  --bg: #ffffff;
-  --stage: #ffffff;
-  --stage-soft: #f7f7f8;
-  --rail: #f7f7f8;
-  --panel: #ffffff;
-  --panel-subtle: #f8f8f9;
-  --ink: #101110;
-  --muted: #62646a;
-  --soft: #9a9ca3;
-  --line: #e5e7eb;
-  --line-strong: #d1d5db;
-  --focus: #4c8dff;
-  --violet: #8275e8;
-  --warn: #b7791f;
-  --ok: #2f8a68;
-  --edge-light: rgba(82, 90, 108, 0.17);
-  --edge-shade: rgba(98, 104, 116, 0.11);
-  --edge-glow: rgba(15, 23, 42, 0.028);
-  --edge-line-width: min(25%, 180px);
-  --edge-glow-width: min(36%, 240px);
-  --edge-glow-height: 12px;
-  --edge-glow-opacity: 0.42;
-  --edge-glow-top: -8px;
-  --surface-depth: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 1px 2px rgba(15, 23, 42, 0.025);
-  --shadow: 0 24px 70px rgba(15, 23, 42, 0.04);
-  --radius-ui: 10px;
-  --radius-card: 8px;
-  --radius-pill: 999px;
-}
-
-body[data-theme="dark"] {
-  color-scheme: dark;
   --bg: #000000;
   --stage: #050505;
   --stage-soft: #080909;
@@ -59,6 +27,9 @@ body[data-theme="dark"] {
   --edge-glow-top: -10px;
   --surface-depth: none;
   --shadow: 0 22px 60px rgba(0, 0, 0, 0.34);
+  --radius-ui: 10px;
+  --radius-card: 8px;
+  --radius-pill: 999px;
 }
 
 * {
@@ -112,15 +83,11 @@ button {
 }
 
 .demo-mark {
-  background: var(--ink);
+  background: #f0f0f0;
   border-radius: 6px;
   display: inline-block;
   height: 18px;
   width: 18px;
-}
-
-body[data-theme="dark"] .demo-mark {
-  background: #f0f0f0;
 }
 
 .lit-surface {
@@ -170,8 +137,7 @@ body[data-theme="dark"] .demo-mark {
   padding: 3px;
 }
 
-.demo-tab,
-.theme-toggle {
+.demo-tab {
   background: transparent;
   border: 0;
   border-radius: 8px;
@@ -190,13 +156,7 @@ body[data-theme="dark"] .demo-mark {
   color: var(--stage);
 }
 
-.theme-toggle {
-  border: 1px solid var(--line);
-  min-width: 70px;
-}
-
-body[data-theme="dark"] .demo-controls,
-body[data-theme="dark"] .theme-toggle {
+.demo-controls {
   background: var(--panel);
 }
 
@@ -467,7 +427,7 @@ h1 {
   padding: 8px;
 }
 
-body[data-theme="dark"] .prompt-card {
+.prompt-card {
   box-shadow: none;
 }
 

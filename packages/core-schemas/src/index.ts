@@ -61,6 +61,9 @@ export const operationStatuses = [
 export const approvalStatuses = ["pending", "approved", "denied", "expired", "cancelled"] as const;
 export const memoryStates = ["session", "provisional", "active", "sensitive", "archived", "topic"] as const;
 export const skillStates = ["candidate", "project", "active", "stale", "archived", "pinned"] as const;
+export const wikiStates = ["proposed", "active", "archived", "rejected"] as const;
+export const captureModes = ["manual", "suggest", "off"] as const;
+export const externalProviderRoles = ["assistive", "disabled"] as const;
 export const activityTypes = [
   "auto_run",
   "approval_required",
@@ -70,6 +73,22 @@ export const activityTypes = [
   "failure"
 ] as const;
 export const activitySeverities = ["info", "notice", "warning", "critical"] as const;
+export const agentBackendKinds = ["mock", "samurai_native", "claude_code", "codex", "external"] as const;
+export const backendRunStatuses = ["queued", "running", "waiting_for_backend_input", "completed", "failed", "cancelled"] as const;
+export const backendEventTypes = [
+  "run_started",
+  "text_delta",
+  "tool_call_started",
+  "tool_call_output",
+  "artifact_created",
+  "workspace_change_suggested",
+  "memory_suggested",
+  "skill_candidate_created",
+  "backend_waiting_for_native_input",
+  "run_completed",
+  "run_failed"
+] as const;
+export const workspaceChangeTypes = ["artifact_created", "memory_suggested", "skill_candidate_created", "collection_changed", "settings_changed", "other"] as const;
 
 export const SupportedLocaleSchema = z.enum(supportedLocales);
 export const TranslationStatusSchema = z.enum(translationStatuses);
@@ -82,8 +101,15 @@ export const OperationStatusSchema = z.enum(operationStatuses);
 export const ApprovalStatusSchema = z.enum(approvalStatuses);
 export const MemoryStateSchema = z.enum(memoryStates);
 export const SkillStateSchema = z.enum(skillStates);
+export const WikiStateSchema = z.enum(wikiStates);
+export const CaptureModeSchema = z.enum(captureModes);
+export const ExternalProviderRoleSchema = z.enum(externalProviderRoles);
 export const ActivityTypeSchema = z.enum(activityTypes);
 export const ActivitySeveritySchema = z.enum(activitySeverities);
+export const AgentBackendKindSchema = z.enum(agentBackendKinds);
+export const BackendRunStatusSchema = z.enum(backendRunStatuses);
+export const BackendEventTypeSchema = z.enum(backendEventTypes);
+export const WorkspaceChangeTypeSchema = z.enum(workspaceChangeTypes);
 
 export type SupportedLocale = z.infer<typeof SupportedLocaleSchema>;
 export type TranslationStatus = z.infer<typeof TranslationStatusSchema>;
@@ -96,8 +122,15 @@ export type OperationStatus = z.infer<typeof OperationStatusSchema>;
 export type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
 export type MemoryState = z.infer<typeof MemoryStateSchema>;
 export type SkillState = z.infer<typeof SkillStateSchema>;
+export type WikiState = z.infer<typeof WikiStateSchema>;
+export type CaptureMode = z.infer<typeof CaptureModeSchema>;
+export type ExternalProviderRole = z.infer<typeof ExternalProviderRoleSchema>;
 export type ActivityType = z.infer<typeof ActivityTypeSchema>;
 export type ActivitySeverity = z.infer<typeof ActivitySeveritySchema>;
+export type AgentBackendKind = z.infer<typeof AgentBackendKindSchema>;
+export type BackendRunStatus = z.infer<typeof BackendRunStatusSchema>;
+export type BackendEventType = z.infer<typeof BackendEventTypeSchema>;
+export type WorkspaceChangeType = z.infer<typeof WorkspaceChangeTypeSchema>;
 
 export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValueSchema), z.record(jsonValueSchema)])
@@ -113,6 +146,16 @@ export const ResourceRefSchema = z.object({
   label: z.string().optional()
 });
 export type ResourceRef = z.infer<typeof ResourceRefSchema>;
+
+export const ProvenanceSchema = z.object({
+  kind: z.enum(["user_authored", "generated_local", "external_provider", "imported", "system"]),
+  summary: z.string(),
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  verified: z.boolean()
+});
+export type Provenance = z.infer<typeof ProvenanceSchema>;
 
 export const LocalizedTextSchema = z.object({
   canonical_locale: SupportedLocaleSchema,
@@ -134,6 +177,67 @@ export const MessageEnvelopeSchema = z.object({
   received_at: z.string().datetime()
 });
 export type MessageEnvelope = z.infer<typeof MessageEnvelopeSchema>;
+
+export const AgentBackendConfigSchema = z.object({
+  id: z.string().min(1),
+  kind: AgentBackendKindSchema,
+  label: z.string().min(1),
+  enabled: z.boolean(),
+  metadata: z.record(jsonValueSchema)
+});
+export type AgentBackendConfig = z.infer<typeof AgentBackendConfigSchema>;
+
+export const BackendRunRecordSchema = z.object({
+  id: z.string().min(1),
+  session_id: z.string().min(1),
+  input_message_id: z.string().min(1),
+  output_message_id: z.string().optional(),
+  backend_id: z.string().min(1),
+  backend_kind: AgentBackendKindSchema,
+  status: BackendRunStatusSchema,
+  started_at: z.string().datetime(),
+  completed_at: z.string().datetime().optional(),
+  input_summary: z.string(),
+  output_summary: z.string().optional(),
+  error_code: z.string().optional(),
+  metadata: z.record(jsonValueSchema)
+});
+export type BackendRunRecord = z.infer<typeof BackendRunRecordSchema>;
+
+export const BackendEventRecordSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  session_id: z.string().min(1),
+  event_type: BackendEventTypeSchema,
+  sequence: z.number().int().positive(),
+  payload: z.record(jsonValueSchema),
+  resource_refs: z.array(ResourceRefSchema),
+  created_at: z.string().datetime()
+});
+export type BackendEventRecord = z.infer<typeof BackendEventRecordSchema>;
+
+export const WorkspaceChangeRecordSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  session_id: z.string().min(1),
+  resource_ref: ResourceRefSchema,
+  change_type: WorkspaceChangeTypeSchema,
+  summary: z.string(),
+  legacy_operation_id: z.string().optional(),
+  created_at: z.string().datetime()
+});
+export type WorkspaceChangeRecord = z.infer<typeof WorkspaceChangeRecordSchema>;
+
+export const ActionCatalogEntrySchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string(),
+  input_schema: z.record(jsonValueSchema),
+  output_schema: z.record(jsonValueSchema),
+  resource_kinds: z.array(z.string()),
+  handler_id: z.string().min(1)
+});
+export type ActionCatalogEntry = z.infer<typeof ActionCatalogEntrySchema>;
 
 export const PolicyEvaluationInputSchema = z.object({
   capability_id: z.string().min(1),
@@ -199,7 +303,9 @@ export const MemoryFrontmatterSchema = z.object({
   last_used_at: z.string().datetime().optional(),
   related_memories: z.array(z.string()),
   conflicts_with: z.array(z.string()),
-  sensitive_level: z.enum(["none", "low", "high"])
+  sensitive_level: z.enum(["none", "low", "high"]),
+  source_refs: z.array(ResourceRefSchema).optional(),
+  provenance: ProvenanceSchema.optional()
 });
 export type MemoryFrontmatter = z.infer<typeof MemoryFrontmatterSchema>;
 
@@ -216,9 +322,25 @@ export const SkillFrontmatterSchema = z.object({
   schedule_policy: z.record(jsonValueSchema),
   secret_policy: z.record(jsonValueSchema),
   last_reviewed_at: z.string().datetime().optional(),
-  owner_pinned: z.boolean()
+  owner_pinned: z.boolean(),
+  source_refs: z.array(ResourceRefSchema).optional(),
+  provenance_detail: ProvenanceSchema.optional()
 });
 export type SkillFrontmatter = z.infer<typeof SkillFrontmatterSchema>;
+
+export const WikiFrontmatterSchema = z.object({
+  id: z.string().min(1),
+  slug: z.string().min(1),
+  title: z.string().min(1),
+  state: WikiStateSchema,
+  content_locale: SupportedLocaleSchema,
+  tags: z.array(z.string()),
+  source_refs: z.array(ResourceRefSchema),
+  provenance: ProvenanceSchema,
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type WikiFrontmatter = z.infer<typeof WikiFrontmatterSchema>;
 
 export const ArtifactRecordSchema = z.object({
   id: z.string().min(1),
@@ -384,9 +506,12 @@ export const ActivityInboxItemSchema = z.object({
 export type ActivityInboxItem = z.infer<typeof ActivityInboxItemSchema>;
 
 export interface SettingsRecord {
-  theme: "light" | "dark" | "system";
   ui_locale: SupportedLocale;
   output_locale: SupportedLocale;
+  memory_capture_mode: CaptureMode;
+  knowledge_wiki_capture_mode: CaptureMode;
+  skill_capture_mode: CaptureMode;
+  external_provider_role: ExternalProviderRole;
   updated_at: string;
 }
 
@@ -446,8 +571,11 @@ function createRandomId(): string {
 }
 
 export const defaultSettings = (): SettingsRecord => ({
-  theme: "system",
   ui_locale: "ja",
   output_locale: "ja",
+  memory_capture_mode: "suggest",
+  knowledge_wiki_capture_mode: "suggest",
+  skill_capture_mode: "suggest",
+  external_provider_role: "assistive",
   updated_at: nowIso()
 });

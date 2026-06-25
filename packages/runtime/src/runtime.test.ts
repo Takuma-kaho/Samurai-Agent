@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
+import { AgentBackendRegistry, MockBackend } from "@samurai-agent/agent-backends";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, type ProviderOutput } from "./index";
 
@@ -72,7 +73,45 @@ describe("agent runtime", () => {
     expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(false);
   });
 
-  it("runs chat through operation policy audit artifact", async () => {
+  it("routes a chat turn through the selected agent backend", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([new MockBackend()]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "選択backendで実行して",
+      output_locale: "ja",
+      backend_id: "mock"
+    });
+    await store.close();
+
+    expect(result.backendRun.backend_id).toBe("mock");
+    expect(result.backendRun.backend_kind).toBe("mock");
+    expect(result.messages.find((message) => message.role === "agent")?.content).toContain("Mock response");
+  });
+
+  it("rejects unknown agent backend ids before creating a run", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+
+    await expect(
+      runtime.runChatTurn({
+        sessionId: session.id,
+        content: "存在しないbackend",
+        output_locale: "ja",
+        backend_id: "missing"
+      })
+    ).rejects.toMatchObject({
+      code: "conflict",
+      message: "backend_not_registered:missing"
+    });
+    await store.close();
+  });
+
+  it("runs chat through backend run events and artifact workspace change", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const result = await runtime.runChatTurn({
@@ -85,8 +124,11 @@ describe("agent runtime", () => {
     expect(result.artifacts.length).toBeGreaterThan(0);
     expect(result.messages.find((message) => message.role === "agent")?.content).toBeTruthy();
     expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(true);
-    expect(result.policyDecisions.some((decision) => decision.decision === "allow_auto")).toBe(true);
-    expect(result.auditRecords.length).toBeGreaterThan(0);
+    expect(result.backendRun.status).toBe("completed");
+    expect(result.backendEvents.some((event) => event.event_type === "artifact_created")).toBe(true);
+    expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
+    expect(result.policyDecisions).toEqual([]);
+    expect(result.auditRecords).toEqual([]);
   });
 
   it("ignores malformed artifact tool calls without failing the chat turn", async () => {
@@ -104,7 +146,7 @@ describe("agent runtime", () => {
     expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(false);
   });
 
-  it("keeps safe drafting while outbound work waits for approval", async () => {
+  it("keeps safe drafting while outbound work stays in backend events", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const result = await runtime.runChatTurn({
@@ -115,85 +157,9 @@ describe("agent runtime", () => {
     await store.close();
 
     expect(result.artifacts.length).toBeGreaterThan(0);
-    expect(result.approvalRequests.length).toBeGreaterThan(0);
-    expect(result.operations.some((operation) => operation.status === "pending_approval")).toBe(true);
-  });
-
-  it("approves approval-gated work as deferred without external execution", async () => {
-    const { store, runtime } = await createRuntime();
-    const session = await runtime.createSession();
-    const result = await runtime.runChatTurn({
-      sessionId: session.id,
-      content: "提案書を作って、あとでメール送信もして",
-      output_locale: "ja"
-    });
-    const request = result.approvalRequests[0];
-    expect(request).toBeDefined();
-
-    const approved = await runtime.approveRequest(request!.id);
-    await store.close();
-
-    expect(approved.approvalRequest.status).toBe("approved");
-    expect(approved.operation.status).toBe("deferred");
-    expect(approved.auditRecord.outputs_summary).toContain("deferred");
-  });
-
-  it("denies approval-gated work and records audit", async () => {
-    const { store, runtime } = await createRuntime();
-    const session = await runtime.createSession();
-    const result = await runtime.runChatTurn({
-      sessionId: session.id,
-      content: "提案書を作って、あとでメール送信もして",
-      output_locale: "ja"
-    });
-
-    const denied = await runtime.denyRequest(result.approvalRequests[0]!.id, "owner", "不要です");
-    await store.close();
-
-    expect(denied.approvalRequest.status).toBe("denied");
-    expect(denied.operation.status).toBe("denied");
-    expect(denied.auditRecord.outputs_summary).toContain("denied");
-  });
-
-  it("returns conflict for double approval decisions", async () => {
-    const { store, runtime } = await createRuntime();
-    const session = await runtime.createSession();
-    const result = await runtime.runChatTurn({
-      sessionId: session.id,
-      content: "提案書を作って、あとでメール送信もして",
-      output_locale: "ja"
-    });
-    const request = result.approvalRequests[0]!;
-    await runtime.approveRequest(request.id);
-
-    await expect(runtime.denyRequest(request.id)).rejects.toMatchObject({ code: "conflict" });
-    await store.close();
-  });
-
-  it("expires pending requests as deferred and returns conflict payload", async () => {
-    const { store, runtime } = await createRuntime();
-    const session = await runtime.createSession();
-    const result = await runtime.runChatTurn({
-      sessionId: session.id,
-      content: "提案書を作って、あとでメール送信もして",
-      output_locale: "ja"
-    });
-    const request = result.approvalRequests[0]!;
-    await store.updateApprovalRequest({
-      ...request,
-      expires_at: "2020-01-01T00:00:00.000Z"
-    });
-
-    await expect(runtime.approveRequest(request.id)).rejects.toSatisfy((error) => {
-      return (
-        error instanceof RuntimeRequestError &&
-        error.code === "conflict" &&
-        error.payload?.approvalRequest.status === "expired" &&
-        error.payload.operation.status === "deferred" &&
-        error.payload.auditRecord.outputs_summary.includes("expired")
-      );
-    });
-    await store.close();
+    expect(result.approvalRequests).toEqual([]);
+    expect(result.operations.some((operation) => operation.status === "pending_approval")).toBe(false);
+    expect(result.backendEvents.some((event) => event.event_type === "tool_call_output" && event.payload.status === "ignored")).toBe(true);
   });
 
   it("archives session memory with audit activity and rollback", async () => {
@@ -370,7 +336,8 @@ describe("agent runtime", () => {
     expect(result.artifacts).toEqual([]);
     expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(false);
     expect(result.operations.some((operation) => operation.operation === "unknown_tool")).toBe(false);
-    expect(result.operations.find((operation) => operation.operation === "workspace.delete")?.status).toBe("pending_approval");
+    expect(result.approvalRequests).toEqual([]);
+    expect(result.backendEvents.some((event) => event.event_type === "tool_call_output" && event.payload.status === "ignored")).toBe(true);
   });
 });
 

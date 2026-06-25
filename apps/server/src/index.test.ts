@@ -73,44 +73,74 @@ describe("server env loading", () => {
   });
 });
 
-describe("approval request API", () => {
-  it("returns approval lifecycle payloads and conflicts on double decisions", async () => {
+describe("backend run API", () => {
+  it("does not create approval requests for backend-native external work", async () => {
     const { baseUrl } = await startTestServer();
     const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
-    const turn = await postJson<{ approvalRequests: Array<{ id: string }> }>(`${baseUrl}/api/chat/sessions/${session.id}/messages`, {
+    const turn = await postJson<{ approvalRequests: Array<{ id: string }>; backendEvents: Array<{ event_type: string; payload: Record<string, unknown> }> }>(`${baseUrl}/api/chat/sessions/${session.id}/messages`, {
       content: "提案書を作って、あとでメール送信もして",
       output_locale: "ja"
     }, 201);
 
-    const approved = await postJson<Record<string, unknown>>(`${baseUrl}/api/approval-requests/${turn.approvalRequests[0]!.id}/approve`, {});
-    expect(approved).toHaveProperty("approvalRequest");
-    expect(approved).toHaveProperty("operation");
-    expect(approved).toHaveProperty("auditRecord");
-    expect(approved).toHaveProperty("activity");
-
-    const conflict = await postJson<Record<string, unknown>>(`${baseUrl}/api/approval-requests/${turn.approvalRequests[0]!.id}/deny`, {}, 409);
-    expect(conflict.error).toBe("conflict");
+    expect(turn.approvalRequests).toEqual([]);
+    expect(turn.backendEvents.some((event) => event.event_type === "tool_call_output" && event.payload.status === "ignored")).toBe(true);
   });
 
-  it("returns updated activity in 409 body when approval expired", async () => {
-    const { baseUrl, server } = await startTestServer();
+  it("returns backend run events and workspace changes", async () => {
+    const { baseUrl } = await startTestServer();
     const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
-    const turn = await postJson<{ approvalRequests: Array<{ id: string }> }>(`${baseUrl}/api/chat/sessions/${session.id}/messages`, {
-      content: "提案書を作って、あとでメール送信もして",
+    const turn = await postJson<{ backendRun: { id: string }; backendEvents: unknown[]; workspaceChanges: unknown[] }>(`${baseUrl}/api/chat/sessions/${session.id}/messages`, {
+      content: "提案書を作って",
       output_locale: "ja"
     }, 201);
-    const request = await server.store.getApprovalRequest(turn.approvalRequests[0]!.id);
-    await server.store.updateApprovalRequest({
-      ...request!,
-      expires_at: "2020-01-01T00:00:00.000Z"
-    });
 
-    const expired = await postJson<Record<string, unknown>>(`${baseUrl}/api/approval-requests/${turn.approvalRequests[0]!.id}/approve`, {}, 409);
-    expect(expired.error).toBe("conflict");
-    expect(expired).toHaveProperty("approvalRequest");
-    expect(expired).toHaveProperty("operation");
-    expect(expired).toHaveProperty("auditRecord");
-    expect(Array.isArray(expired.activity)).toBe(true);
+    const runs = await getJson<Array<{ id: string }>>(`${baseUrl}/api/backend-runs?session_id=${session.id}`);
+    const events = await getJson<unknown[]>(`${baseUrl}/api/backend-runs/${turn.backendRun.id}/events`);
+    const changes = await getJson<unknown[]>(`${baseUrl}/api/workspace-changes?session_id=${session.id}`);
+
+    expect(runs.some((run) => run.id === turn.backendRun.id)).toBe(true);
+    expect(events.length).toBe(turn.backendEvents.length);
+    expect(changes.length).toBe(turn.workspaceChanges.length);
+  });
+
+  it("lists selectable agent backends", async () => {
+    const { baseUrl } = await startTestServer();
+
+    const backends = await getJson<Array<{ id: string; configured: boolean }>>(`${baseUrl}/api/agent-backends`);
+
+    expect(backends.map((backend) => backend.id)).toEqual(expect.arrayContaining(["samurai-native", "claude-code", "codex"]));
+    expect(backends.find((backend) => backend.id === "samurai-native")?.configured).toBe(true);
+  });
+
+  it("records an unconfigured external backend as a failed run", async () => {
+    setManagedEnv("SAMURAI_CLAUDE_CODE_COMMAND", "");
+    setManagedEnv("SAMURAI_CLAUDE_CODE_ARGS", "");
+    const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+
+    const response = await postJson<{
+      error: string;
+      reason?: string;
+      backendRun?: { backend_id: string; status: string; error_code?: string };
+      backendEvents?: Array<{ event_type: string; payload: Record<string, unknown> }>;
+    }>(
+      `${baseUrl}/api/chat/sessions/${session.id}/messages`,
+      {
+        content: "Claude Codeで確認して",
+        output_locale: "ja",
+        backend_id: "claude-code"
+      },
+      502
+    );
+
+    expect(response.error).toBe("provider_failed");
+    expect(response.reason).toBe("not_configured");
+    expect(response.backendRun).toMatchObject({
+      backend_id: "claude-code",
+      status: "failed",
+      error_code: "backend_not_configured"
+    });
+    expect(response.backendEvents?.some((event) => event.event_type === "run_failed" && event.payload.error_code === "backend_not_configured")).toBe(true);
   });
 
   it("returns session scoped artifacts and memory details", async () => {
@@ -171,7 +201,7 @@ describe("approval request API", () => {
   it("returns enriched search results", async () => {
     const { baseUrl } = await startTestServer();
     const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
-    const turn = await postJson<{ artifacts: Array<{ id: string }>; auditRecords: Array<{ id: string }> }>(
+    const turn = await postJson<{ artifacts: Array<{ id: string }> }>(
       `${baseUrl}/api/chat/sessions/${session.id}/messages`,
       {
         content: "検索用の提案書を作って",
@@ -184,17 +214,11 @@ describe("approval request API", () => {
     const artifactResults = await getJson<Array<{ kind: string; id: string; session_id?: string; operation_id?: string }>>(
       `${baseUrl}/api/search?q=${encodeURIComponent("提案")}`
     );
-    const auditResults = await getJson<Array<{ kind: string; id: string; session_id?: string; operation_id?: string }>>(
-      `${baseUrl}/api/search?q=${encodeURIComponent("Create a local markdown draft artifact")}`
-    );
     const emptyResults = await getJson<unknown[]>(`${baseUrl}/api/search?q=${encodeURIComponent("   ")}`);
 
     expect(messageResults.some((result) => result.kind === "message" && result.session_id === session.id)).toBe(true);
     expect(
       artifactResults.some((result) => result.kind === "artifact" && result.id === turn.artifacts[0]!.id && result.session_id === session.id && result.operation_id)
-    ).toBe(true);
-    expect(
-      auditResults.some((result) => result.kind === "audit" && result.id === turn.auditRecords[0]!.id && result.session_id === session.id && result.operation_id)
     ).toBe(true);
     expect(emptyResults).toEqual([]);
   });
@@ -223,23 +247,65 @@ describe("approval request API", () => {
   it("persists settings through get and patch", async () => {
     const { baseUrl } = await startTestServer();
 
-    const initial = await getJson<{ theme: string; ui_locale: string; output_locale: string }>(`${baseUrl}/api/settings`);
-    const patched = await patchJson<{ theme: string; ui_locale: string; output_locale: string }>(`${baseUrl}/api/settings`, {
-      theme: "dark",
+    const initial = await getJson<{ ui_locale: string; output_locale: string; memory_capture_mode: string; knowledge_wiki_capture_mode: string }>(`${baseUrl}/api/settings`);
+    const patched = await patchJson<{
+      ui_locale: string;
+      output_locale: string;
+      memory_capture_mode: string;
+      knowledge_wiki_capture_mode: string;
+      external_provider_role: string;
+    }>(`${baseUrl}/api/settings`, {
       ui_locale: "en",
       output_locale: "fr",
+      memory_capture_mode: "manual",
+      knowledge_wiki_capture_mode: "manual",
+      external_provider_role: "disabled",
       ignored: "value"
     });
-    const persisted = await getJson<{ theme: string; ui_locale: string; output_locale: string }>(`${baseUrl}/api/settings`);
-    const invalidPatch = await patchJson<{ theme: string; ui_locale: string; output_locale: string }>(`${baseUrl}/api/settings`, {
-      theme: "neon",
+    const legacyPatched = await patchJson<{ knowledge_wiki_capture_mode: string }>(`${baseUrl}/api/settings`, {
+      llm_wiki_capture_mode: "off"
+    });
+    const priorityPatched = await patchJson<{ knowledge_wiki_capture_mode: string }>(`${baseUrl}/api/settings`, {
+      llm_wiki_capture_mode: "off",
+      knowledge_wiki_capture_mode: "suggest"
+    });
+    const persisted = await getJson<{
+      ui_locale: string;
+      output_locale: string;
+      memory_capture_mode: string;
+      knowledge_wiki_capture_mode: string;
+      external_provider_role: string;
+    }>(`${baseUrl}/api/settings`);
+    const invalidPatch = await patchJson<{ ui_locale: string; output_locale: string }>(`${baseUrl}/api/settings`, {
       ui_locale: "xx"
     });
+    const invalidCapture = await patchJson<{ error: string; field: string }>(
+      `${baseUrl}/api/settings`,
+      {
+        memory_capture_mode: "always"
+      },
+      400
+    );
 
-    expect(initial.theme).toBe("system");
-    expect(patched).toMatchObject({ theme: "dark", ui_locale: "en", output_locale: "fr" });
-    expect(persisted).toMatchObject({ theme: "dark", ui_locale: "en", output_locale: "fr" });
-    expect(invalidPatch).toMatchObject({ theme: "dark", ui_locale: "en", output_locale: "fr" });
+    expect(initial).toMatchObject({ ui_locale: "ja", output_locale: "ja", memory_capture_mode: "suggest", knowledge_wiki_capture_mode: "suggest" });
+    expect(patched).toMatchObject({
+      ui_locale: "en",
+      output_locale: "fr",
+      memory_capture_mode: "manual",
+      knowledge_wiki_capture_mode: "manual",
+      external_provider_role: "disabled"
+    });
+    expect(legacyPatched).toMatchObject({ knowledge_wiki_capture_mode: "off" });
+    expect(priorityPatched).toMatchObject({ knowledge_wiki_capture_mode: "suggest" });
+    expect(persisted).toMatchObject({
+      ui_locale: "en",
+      output_locale: "fr",
+      memory_capture_mode: "manual",
+      knowledge_wiki_capture_mode: "suggest",
+      external_provider_role: "disabled"
+    });
+    expect(invalidPatch).toMatchObject({ ui_locale: "en", output_locale: "fr" });
+    expect(invalidCapture).toEqual({ error: "invalid_capture_mode", field: "memory_capture_mode" });
   });
 
   it("serves minimal skill collection and automation backend routes", async () => {
@@ -296,6 +362,43 @@ describe("approval request API", () => {
     expect(automation.automationRun.status).toBe("completed");
     expect(automation.operation).toMatchObject({ actor_identity: "owner_scheduled", channel: "cron" });
     expect(automation.operation.input_ref.kind).toBe("automation_run");
+  });
+
+  it("serves wiki proposal lifecycle through runtime operations", async () => {
+    const { baseUrl } = await startTestServer();
+    const proposal = await postJson<{ resource: { id: string; state: string; file_path: string }; operation: { operation: string }; auditRecord: unknown }>(
+      `${baseUrl}/api/wiki/proposals`,
+      {
+        title: "Provider保存設計",
+        slug: "provider-storage-plan",
+        content: "# Provider保存設計",
+        tags: ["memory"]
+      },
+      201
+    );
+    const listed = await getJson<Array<{ id: string; state: string }>>(`${baseUrl}/api/wiki`);
+    const detail = await getJson<{ content: string }>(`${baseUrl}/api/wiki/${proposal.resource.id}`);
+    const accepted = await postJson<{ resource: { state: string }; operation: { operation: string } }>(
+      `${baseUrl}/api/wiki/${proposal.resource.id}/accept`,
+      {}
+    );
+    const patched = await patchJson<{ resource: { title: string }; operation: { operation: string } }>(`${baseUrl}/api/wiki/${proposal.resource.id}`, {
+      title: "保存設計"
+    });
+    const reindex = await postJson<{ resource: { active: number; total: number }; operation: { operation: string } }>(`${baseUrl}/api/wiki/reindex`, {});
+    const archived = await postJson<{ resource: { state: string }; operation: { operation: string } }>(
+      `${baseUrl}/api/wiki/${proposal.resource.id}/archive`,
+      {}
+    );
+
+    expect(proposal.operation.operation).toBe("wiki.proposal.create");
+    expect(proposal.resource).toMatchObject({ state: "proposed", file_path: "wiki/pages/provider-storage-plan.md" });
+    expect(listed.map((item) => item.id)).toContain(proposal.resource.id);
+    expect(detail.content).toBe("# Provider保存設計");
+    expect(accepted).toMatchObject({ resource: { state: "active" }, operation: { operation: "wiki.accept" } });
+    expect(patched).toMatchObject({ resource: { title: "保存設計" }, operation: { operation: "wiki.patch" } });
+    expect(reindex.resource).toEqual({ active: 1, total: 1 });
+    expect(archived).toMatchObject({ resource: { state: "archived" }, operation: { operation: "wiki.archive" } });
   });
 
   it("rejects invalid skill and collection writes through API", async () => {

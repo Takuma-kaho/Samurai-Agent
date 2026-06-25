@@ -101,6 +101,8 @@
 以下は一般的なAI・ソフトウェア用語として使ってよい。
 
 - Memory
+- Wiki
+- Knowledge Wiki
 - Skill
 - Runtime
 - Gateway
@@ -112,6 +114,19 @@
 - Capability
 
 ただし、公開面で使う場合は、Samurai Agent 内での意味が伝わるように説明を添える。
+
+`Knowledge Wiki` は、濃い知識を扱うWorkspaceリソースの正式名称として使う。
+External Providerは、UIでは `External memory assist` のように補助役であることが伝わる名前にする。
+API keyやsecretの保存導線はSettings UIに置かない。
+
+### 6.1 Knowledge Wiki
+
+MulmoClaudeでいう `LLM Wiki` は、Samurai Agentでは `Knowledge Wiki` と呼ぶ。
+
+- 公開面だけでなく、プロジェクト内の正式名称として `Knowledge Wiki` を使う。
+- `LLM Wiki` は参照元比較や履歴説明で必要な場合だけ使う。
+- 実装名、UI文言、API payload、database column、env/config key には `LLM Wiki` / `llm_wiki` を使わない。
+- 実装上の短いresource名として `wiki` は使ってよい。
 
 ---
 

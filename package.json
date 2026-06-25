@@ -6,7 +6,9 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "pnpm typecheck && pnpm --filter @samurai-agent/web run build",
-    "dev": "pnpm --parallel --filter @samurai-agent/server --filter @samurai-agent/web run dev",
+    "dev": "node scripts/dev.mjs",
+    "dev:parallel": "pnpm --parallel --filter @samurai-agent/server --filter @samurai-agent/web run dev",
+    "doctor": "node scripts/doctor.mjs",
     "i18n:check": "pnpm --filter @samurai-agent/localization run check",
     "test": "vitest run",
     "typecheck": "pnpm -r --workspace-concurrency=1 run typecheck"

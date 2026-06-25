@@ -13,6 +13,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@samurai-agent/action-catalog": "workspace:*",
+    "@samurai-agent/agent-backends": "workspace:*",
     "@samurai-agent/artifacts": "workspace:*",
     "@samurai-agent/audit": "workspace:*",
     "@samurai-agent/capability-registry": "workspace:*",

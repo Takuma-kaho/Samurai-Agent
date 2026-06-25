@@ -6,7 +6,7 @@
     <title>Samurai Agent Web UI Demo</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body data-theme="light" data-view="empty">
+  <body data-view="empty">
     <div class="demo-page">
       <header class="demo-toolbar" aria-label="Demo controls">
         <div class="demo-title">
@@ -27,9 +27,6 @@
             Context Drawer
           </button>
         </div>
-        <button class="theme-toggle" type="button" data-theme-toggle>
-          Dark
-        </button>
       </header>
 
       <main class="app-shell" aria-label="Samurai Agent static demo">
@@ -234,7 +231,7 @@
               <span>Memory</span>
               <span class="status-pill"><span class="pill-dot" aria-hidden="true"></span>Candidate</span>
             </div>
-            <p>Prefers light UI with restrained metallic detail.</p>
+            <p>Prefers a dark workspace with restrained metallic detail.</p>
           </section>
 
           <section class="drawer-card lit-surface">
@@ -267,7 +264,6 @@
     <script>
       const body = document.body;
       const tabs = Array.from(document.querySelectorAll("[data-view-target]"));
-      const themeToggle = document.querySelector("[data-theme-toggle]");
 
       tabs.forEach((tab) => {
         tab.addEventListener("click", () => {
@@ -277,12 +273,6 @@
             button.classList.toggle("is-active", button === tab);
           });
         });
-      });
-
-      themeToggle.addEventListener("click", () => {
-        const dark = body.getAttribute("data-theme") === "dark";
-        body.setAttribute("data-theme", dark ? "light" : "dark");
-        themeToggle.textContent = dark ? "Dark" : "Light";
       });
     </script>
   </body>

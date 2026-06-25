@@ -13,7 +13,8 @@ import {
   type OperationRecord,
   type PolicyDecisionRecord,
   type SessionRecord,
-  type SkillFrontmatter
+  type SkillFrontmatter,
+  type WikiFrontmatter
 } from "@samurai-agent/core-schemas";
 import { WorkspaceStore } from "./index";
 
@@ -48,6 +49,12 @@ describe("workspace store", () => {
     const sessions = await store.listSessions();
     await store.close();
 
+    expect(settings).toMatchObject({
+      memory_capture_mode: "suggest",
+      knowledge_wiki_capture_mode: "suggest",
+      skill_capture_mode: "suggest",
+      external_provider_role: "assistive"
+    });
     expect(sessions[0]?.title).toBe("Store test");
   });
 
@@ -211,6 +218,41 @@ describe("workspace store", () => {
     expect(saved.file_path).toBe(path.join("skills", "candidate", "skill_store.md"));
     expect(listed.map((skill) => skill.id)).toContain("skill_store");
     expect(raw).toContain("Store skill");
+  });
+
+  it("stores wiki markdown and indexes only active pages for active lookups", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const frontmatter: WikiFrontmatter = {
+      id: "wiki_test",
+      slug: "wiki-test",
+      title: "Wiki Test",
+      state: "proposed",
+      content_locale: "ja",
+      tags: ["design"],
+      source_refs: [],
+      provenance: {
+        kind: "user_authored",
+        summary: "test",
+        verified: true
+      },
+      created_at: now,
+      updated_at: now
+    };
+
+    const saved = await store.saveWikiPage(frontmatter, "# Wiki");
+    expect(saved.file_path).toBe(path.join("wiki", "pages", "wiki-test.md"));
+    expect(await store.readWikiContent("wiki_test")).toBe("# Wiki");
+    expect(await store.listWiki({ activeOnly: true })).toEqual([]);
+
+    const active = await store.setWikiState("wiki_test", "active");
+    const activePages = await store.listWiki({ activeOnly: true });
+    const reindex = await store.reindexWiki();
+    await store.close();
+
+    expect(active?.state).toBe("active");
+    expect(activePages.map((page) => page.id)).toEqual(["wiki_test"]);
+    expect(reindex).toEqual({ active: 1, total: 1 });
   });
 
   it("rejects skill id/file conflicts and removes invalid new files", async () => {
