@@ -7,6 +7,7 @@ import type {
   BackendRunRecord,
   CollectionRecord,
   CollectionSchema,
+  JsonValue,
   MemoryFrontmatter,
   MessageRecord,
   OperationRecord,
@@ -14,10 +15,17 @@ import type {
   RollbackPoint,
   SessionRecord,
   SettingsRecord,
+  SurfaceRendererRegistryEntry,
   SupportedLocale,
   WikiFrontmatter,
   WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
+import type {
+  SurfaceOperation,
+  SurfaceOperationResultEnvelope,
+  SurfaceRenderKind,
+  SurfaceRendererCapabilities
+} from "@samurai-agent/ui-protocol";
 
 export interface SessionDetail {
   session: SessionRecord;
@@ -72,6 +80,42 @@ export interface AgentBackendStatus {
   configured: boolean;
   reason?: string;
 }
+
+export type DomainCommandInputSource =
+  | "surface_operation"
+  | "provider_tool_call"
+  | "runtime_api"
+  | "gateway_inbound"
+  | "automation"
+  | "scheduled_context";
+
+export interface SurfaceCommandEntry {
+  id: string;
+  title: string;
+  description: string;
+  runtime_method: string;
+  handler_id: string;
+  implementation_target: string;
+  ui_display_category: string;
+  input_sources: DomainCommandInputSource[];
+  surface_operation_kinds?: string[];
+  provider_tool_names?: string[];
+  writes_workspace: boolean;
+  output_resource_kind: string;
+  output_render_kinds: SurfaceRenderKind[];
+  resource_kinds: string[];
+  proposed_effects: string[];
+}
+
+export interface SurfaceContractPayload {
+  protocol_version: string;
+  renderers: SurfaceRendererRegistryEntry[];
+  render_kinds: SurfaceRenderKind[];
+  commands: SurfaceCommandEntry[];
+  input_sources: DomainCommandInputSource[];
+}
+
+export type ChatSurfaceOperationResult = SurfaceOperationResultEnvelope<ChatTurnResult>;
 
 export interface HealthPayload {
   ok: boolean;
@@ -219,6 +263,39 @@ export const api = {
   },
   listAgentBackends() {
     return request<AgentBackendStatus[]>("/api/agent-backends");
+  },
+  getSurfaceContract(source?: DomainCommandInputSource) {
+    return request<SurfaceContractPayload>(source ? `/api/surface/contract?source=${encodeURIComponent(source)}` : "/api/surface/contract");
+  },
+  runSurfaceOperation<T>(operation: SurfaceOperation) {
+    return request<SurfaceOperationResultEnvelope<T>>("/api/surface/operations", {
+      method: "POST",
+      body: JSON.stringify(operation)
+    });
+  },
+  submitChatSurfaceOperation(input: {
+    sessionId: string;
+    content: string;
+    inputLocale?: SupportedLocale;
+    outputLocale: SupportedLocale;
+    backendId?: string;
+    rendererCapabilities?: SurfaceRendererCapabilities;
+    metadata?: Record<string, JsonValue>;
+  }) {
+    return request<ChatSurfaceOperationResult>("/api/surface/operations", {
+      method: "POST",
+      body: JSON.stringify({
+        id: `surface_message_${Date.now()}`,
+        kind: "message.submit",
+        session_id: input.sessionId,
+        content: input.content,
+        input_locale: input.inputLocale,
+        output_locale: input.outputLocale,
+        renderer_capabilities: input.rendererCapabilities,
+        metadata: input.metadata,
+        ...(input.backendId ? { backend_id: input.backendId } : {})
+      })
+    });
   },
   sendMessage(sessionId: string, content: string, outputLocale: SupportedLocale, backendId?: string) {
     return request<ChatTurnResult>(`/api/chat/sessions/${sessionId}/messages`, {

@@ -4,16 +4,20 @@ import {
   Archive,
   ArrowLeft,
   ArrowUp,
+  BarChart3,
   Brain,
   ChevronRight,
   Clock3,
   Eye,
+  FileInput,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
+  PanelsTopLeft,
   Plus,
   Search,
   Settings,
+  Table2,
   X
 } from "lucide-vue-next";
 import type {
@@ -35,6 +39,7 @@ import type {
 } from "@samurai-agent/core-schemas";
 import { supportedLocales } from "@samurai-agent/core-schemas";
 import { type LocaleKey, t } from "@samurai-agent/localization";
+import type { SurfaceOperation, SurfaceRenderKind, SurfaceRendererCapabilities, SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import { io } from "socket.io-client";
 import {
   api,
@@ -46,7 +51,8 @@ import {
   type MemoryDetail,
   type ProviderErrorPayload,
   type SearchResult,
-  type SessionDetail
+  type SessionDetail,
+  type SurfaceContractPayload
 } from "./lib/api";
 
 type ViewMode = "chat" | "search" | "settings" | "runs" | "memory";
@@ -110,6 +116,9 @@ const policyDecisions = ref<PolicyDecisionRecord[]>([]);
 const approvalRequests = ref<ApprovalRequest[]>([]);
 const rollbackPoints = ref<RollbackPoint[]>([]);
 const memory = ref<Array<MemoryFrontmatter & { file_path: string }>>([]);
+const surfaceContract = ref<SurfaceContractPayload | null>(null);
+const surfaceContractError = ref(false);
+const lastSurfaceRenderSpec = ref<SurfaceRenderSpec | null>(null);
 const searchResults = ref<SearchResult[]>([]);
 const prompt = ref("");
 const attachmentInput = ref<HTMLInputElement | null>(null);
@@ -142,6 +151,7 @@ const providerNoticeBody = computed(() => (providerNotice.value ? label(`provide
 const providerNoticeDetails = computed(() => formatProviderNoticeDetails(providerNotice.value));
 const activeArtifact = ref<ArtifactDetail | null>(null);
 const activeMemory = ref<MemoryDetail | null>(null);
+const activeSurfaceSpec = ref<SurfaceRenderSpec | null>(null);
 const memoryContent = ref<Record<string, string>>({});
 const settingsStorageKey = "samurai-agent.settings";
 const backendStorageKey = "samurai-agent.selected-backend-id";
@@ -149,6 +159,7 @@ const workspaceSplitStorageKey = "samurai-agent.workspace-split-percent";
 const workspaceSplitMin = 32;
 const workspaceSplitMax = 68;
 const workspaceSplitDefault = 50;
+const frontendSurfaceKinds = ["chat", "status_timeline", "form", "table", "chart", "artifact", "memory", "run_history", "custom_view"] as const satisfies readonly SurfaceRenderKind[];
 let chatScrollResizeObserver: ResizeObserver | undefined;
 let observedChatScrollElement: HTMLDivElement | null = null;
 const selectedBackendId = ref("samurai-native");
@@ -167,6 +178,31 @@ const captureModes: SettingsRecord["memory_capture_mode"][] = ["manual", "sugges
 const externalProviderRoles: SettingsRecord["external_provider_role"][] = ["assistive", "disabled"];
 const backendOptions = computed(() => (agentBackends.value.length > 0 ? agentBackends.value : fallbackBackends));
 const selectedBackendLabel = computed(() => backendOptions.value.find((backend) => backend.id === selectedBackendId.value)?.label ?? selectedBackendId.value);
+const surfaceRendererByKind = computed(() => new Map((surfaceContract.value?.renderers ?? []).map((renderer) => [renderer.kind, renderer])));
+const surfaceCommandById = computed(() => new Map((surfaceContract.value?.commands ?? []).map((command) => [command.id, command])));
+const frontendRendererCapabilities = computed<SurfaceRendererCapabilities>(() => {
+  const availableKinds = new Set<SurfaceRenderKind>(surfaceContract.value?.render_kinds ?? [...frontendSurfaceKinds]);
+  const supportedKinds = frontendSurfaceKinds.filter((kind) => availableKinds.has(kind));
+  return {
+    protocol_version: surfaceContract.value?.protocol_version ?? "1",
+    supported_kinds: supportedKinds.length > 0 ? [...supportedKinds] : [...frontendSurfaceKinds],
+    custom_view_renderers: [{ renderer: "generic", versions: ["1"] }]
+  };
+});
+const chatCommandSurfaceKinds = computed(() => supportedCommandSurfaceKinds("chat.turn.run", ["chat"]));
+const artifactCommandSurfaceKinds = computed(() => supportedCommandSurfaceKinds("artifact.create", ["artifact"]));
+const activeWorkspaceSurfaceKind = computed<SurfaceRenderKind | undefined>(() => {
+  if (activeSurfaceSpec.value) {
+    return activeSurfaceSpec.value.kind;
+  }
+  if (activeArtifact.value) {
+    return artifactCommandSurfaceKinds.value[0] ?? "artifact";
+  }
+  if (activeMemory.value) {
+    return "memory";
+  }
+  return undefined;
+});
 const currentMessages = computed<ChatDisplayMessage[]>(() => {
   const displayMessages = messages.value.map(
     (message): ChatDisplayMessage => ({
@@ -208,7 +244,7 @@ const latestBackendEvents = computed(() => {
 const hasActivity = computed(() => latestBackendEvents.value.length > 0);
 const pendingLegacyApprovals = computed(() => approvalRequests.value.filter((request) => request.status === "pending"));
 const firstMemory = computed(() => memory.value[0]);
-const hasWorkspaceCanvas = computed(() => Boolean(activeArtifact.value || activeMemory.value));
+const hasWorkspaceCanvas = computed(() => Boolean(activeArtifact.value || activeMemory.value || activeSurfaceSpec.value));
 const workspaceSplitPercent = ref(readWorkspaceSplitPercent());
 const isResizingWorkspace = ref(false);
 const workspaceSplitStyle = computed<Record<string, string>>(() => ({
@@ -229,7 +265,7 @@ onMounted(async () => {
     settings.value = storedSettings;
   }
   connectSocket();
-  await Promise.all([loadSettings(), loadAgentBackends(), loadSessionsWithRetry()]);
+  await Promise.all([loadSettings(), loadAgentBackends(), loadSurfaceContract(), loadSessionsWithRetry()]);
 });
 
 onUnmounted(() => {
@@ -311,6 +347,7 @@ function startDraftChat() {
   activity.value = [];
   activeArtifact.value = null;
   activeMemory.value = null;
+  activeSurfaceSpec.value = null;
   prompt.value = "";
   clearAttachments();
   viewMode.value = "chat";
@@ -342,9 +379,23 @@ async function sendMessage() {
   try {
     providerNotice.value = null;
     providerNoticeDetailsOpen.value = false;
-    const result = activeSession.value
-      ? await api.sendMessage(activeSession.value.id, content, settings.value.output_locale, selectedBackendId.value)
-      : await api.startChat(content, settings.value.ui_locale, settings.value.output_locale, selectedBackendId.value);
+    const session = activeSession.value ?? await api.createSession({
+      ui_locale: settings.value.ui_locale,
+      output_locale: settings.value.output_locale
+    });
+    const envelope = await api.submitChatSurfaceOperation({
+      sessionId: session.id,
+      content,
+      inputLocale: settings.value.ui_locale,
+      outputLocale: settings.value.output_locale,
+      backendId: selectedBackendId.value,
+      rendererCapabilities: frontendRendererCapabilities.value,
+      metadata: {
+        frontend_surface_contract_version: surfaceContract.value?.protocol_version ?? "1"
+      }
+    });
+    const result = envelope.result;
+    lastSurfaceRenderSpec.value = envelope.render_spec;
     pendingUserMessage.value = null;
     agentResponsePending.value = false;
     activeSession.value = result.session;
@@ -395,6 +446,16 @@ async function loadAgentBackends() {
   chooseInitialBackend();
 }
 
+async function loadSurfaceContract() {
+  try {
+    surfaceContract.value = await api.getSurfaceContract();
+    surfaceContractError.value = false;
+  } catch {
+    surfaceContract.value = null;
+    surfaceContractError.value = true;
+  }
+}
+
 function chooseInitialBackend() {
   const stored = readStoredBackendId();
   const nextBackend = backendOptions.value.find((backend) => backend.id === stored) ?? backendOptions.value.find((backend) => backend.configured) ?? backendOptions.value[0];
@@ -415,6 +476,20 @@ function setSelectedBackend(id: string) {
 
 function backendLabel(id: string, fallback?: string): string {
   return agentBackends.value.find((backend) => backend.id === id)?.label ?? fallback ?? id;
+}
+
+function supportedCommandSurfaceKinds(commandId: string, fallback: SurfaceRenderKind[]): SurfaceRenderKind[] {
+  const command = surfaceCommandById.value.get(commandId);
+  const supportedKinds = new Set(frontendRendererCapabilities.value.supported_kinds);
+  const kinds = (command?.output_render_kinds ?? fallback).filter((kind) => supportedKinds.has(kind));
+  return kinds.length > 0 ? kinds : fallback;
+}
+
+function surfaceRendererLabel(kind?: SurfaceRenderKind): string {
+  if (!kind) {
+    return "";
+  }
+  return surfaceRendererByKind.value.get(kind)?.title ?? kind.replace(/_/g, " ");
 }
 
 function toggleBackendPicker() {
@@ -637,11 +712,13 @@ async function patchSettings(patch: Partial<Omit<SettingsRecord, "updated_at">>)
 async function openArtifact(id: string) {
   activeArtifact.value = await api.getArtifact(id);
   activeMemory.value = null;
+  activeSurfaceSpec.value = null;
 }
 
 async function openMemory(id: string) {
   activeMemory.value = await api.getMemory(id);
   activeArtifact.value = null;
+  activeSurfaceSpec.value = null;
   memoryContent.value = {
     ...memoryContent.value,
     [id]: activeMemory.value.content
@@ -651,6 +728,83 @@ async function openMemory(id: string) {
 function closeWorkspaceCanvas() {
   activeArtifact.value = null;
   activeMemory.value = null;
+  activeSurfaceSpec.value = null;
+}
+
+async function runArtifactSurfaceOperation(kind: "form" | "table" | "chart" | "custom_view") {
+  if (!activeSession.value || !activeArtifact.value || loading.value) {
+    return;
+  }
+  loading.value = true;
+  try {
+    const artifact = activeArtifact.value.artifact;
+    const base = {
+      id: `surface_${kind}_${Date.now()}`,
+      session_id: activeSession.value.id,
+      input_locale: settings.value.ui_locale,
+      output_locale: settings.value.output_locale,
+      renderer_capabilities: frontendRendererCapabilities.value,
+      metadata: {
+        frontend_surface_contract_version: surfaceContract.value?.protocol_version ?? "1",
+        frontend_surface_action: kind,
+        source_artifact_id: artifact.id
+      }
+    };
+    const operation: SurfaceOperation = kind === "form"
+      ? {
+          ...base,
+          kind: "form.submit",
+          form_id: `artifact.${artifact.id}.review`,
+          values: {
+            artifact_id: artifact.id,
+            title: artifact.title,
+            kind: artifact.kind
+          },
+          submit_label: "Save"
+        }
+      : kind === "table"
+        ? {
+            ...base,
+            kind: "table.patch",
+            table_id: `artifact.${artifact.id}.table`,
+            row_id: artifact.id,
+            changes: {
+              title: artifact.title,
+              kind: artifact.kind,
+              file_path: artifact.file_ref.uri
+            }
+          }
+        : kind === "chart"
+          ? {
+              ...base,
+              kind: "chart.request",
+              chart_id: `artifact.${artifact.id}.chart`,
+              title: `${artifact.title} chart`,
+              query: `Summarize ${artifact.title} as chart-ready workspace data.`,
+              data_refs: [artifact.file_ref.uri]
+            }
+          : {
+              ...base,
+              kind: "custom_view.action",
+              view_id: `artifact.${artifact.id}.custom`,
+              action_id: "open",
+              payload: {
+                renderer: "generic",
+                artifact_id: artifact.id,
+                title: artifact.title,
+                file_path: artifact.file_ref.uri
+              }
+            };
+    const envelope = await api.runSurfaceOperation<{ resource?: unknown; workspaceChange?: WorkspaceChangeRecord }>(operation);
+    lastSurfaceRenderSpec.value = envelope.render_spec;
+    activeSurfaceSpec.value = envelope.render_spec;
+    await reloadActiveSession();
+    if (isArtifactRecordLike(envelope.result.resource)) {
+      activeArtifact.value = await api.getArtifact(envelope.result.resource.id);
+    }
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function archiveMemoryItem(id: string) {
@@ -731,6 +885,7 @@ async function applySessionDetail(detail: SessionDetail) {
   activity.value = detail.activity;
   if (activeArtifact.value && !detail.artifacts.some((artifact) => artifact.id === activeArtifact.value?.artifact.id)) {
     activeArtifact.value = null;
+    activeSurfaceSpec.value = null;
   }
   if (activeMemory.value && !detail.memory.some((item) => item.id === activeMemory.value?.memory.id)) {
     activeMemory.value = null;
@@ -803,6 +958,50 @@ function memoryStateLabel(state: MemoryFrontmatter["state"]): string {
 
 function searchKindLabel(kind: SearchResult["kind"]): string {
   return label(`search.kind.${kind}` as LocaleKey);
+}
+
+function surfaceFields(spec: SurfaceRenderSpec): Array<{ name: string; label: string; type: string; value: unknown }> {
+  const fields = Array.isArray(spec.props.fields) ? spec.props.fields : [];
+  return fields.filter(isRecord).map((field) => ({
+    name: typeof field.name === "string" ? field.name : "field",
+    label: typeof field.label === "string" ? field.label : typeof field.name === "string" ? field.name : "Field",
+    type: typeof field.type === "string" ? field.type : "text",
+    value: field.default_value
+  }));
+}
+
+function surfaceTableColumns(spec: SurfaceRenderSpec): Array<{ key: string; label: string }> {
+  const columns = Array.isArray(spec.props.columns) ? spec.props.columns : [];
+  return columns.filter(isRecord).map((column) => ({
+    key: typeof column.key === "string" ? column.key : "value",
+    label: typeof column.label === "string" ? column.label : typeof column.key === "string" ? column.key : "Value"
+  }));
+}
+
+function surfaceTableRows(spec: SurfaceRenderSpec): Record<string, unknown>[] {
+  const rows = Array.isArray(spec.props.rows) ? spec.props.rows : [];
+  return rows.filter(isRecord);
+}
+
+function surfaceChartRefs(spec: SurfaceRenderSpec): string[] {
+  return Array.isArray(spec.props.data_refs) ? spec.props.data_refs.filter((item): item is string => typeof item === "string") : [];
+}
+
+function surfaceCustomViewPayload(spec: SurfaceRenderSpec): string {
+  return JSON.stringify(spec.props.data ?? spec.props, null, 2);
+}
+
+function surfaceValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
 }
 
 function sessionDisplayTitle(session: SessionRecord): string {
@@ -963,6 +1162,10 @@ function isApprovalLifecyclePayload(value: unknown): value is ApprovalLifecycleP
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isArtifactRecordLike(value: unknown): value is ArtifactRecord {
+  return isRecord(value) && typeof value.id === "string" && typeof value.title === "string" && isRecord(value.file_ref);
 }
 
 function normalizeProviderNotice(value: Record<string, unknown>): ProviderNotice {
@@ -1244,6 +1447,13 @@ function persistWorkspaceSplitPercent(value: number) {
             >
               <span>{{ selectedBackendLabel }}</span>
             </button>
+            <span
+              class="surface-chip"
+              :class="{ 'is-warning': surfaceContractError }"
+              :title="chatCommandSurfaceKinds.map((kind) => surfaceRendererLabel(kind)).join(' / ')"
+            >
+              {{ surfaceRendererLabel(chatCommandSurfaceKinds[0]) }}
+            </span>
             <div v-if="backendPickerOpen" class="backend-menu" role="listbox" :aria-label="label('backend.select')">
               <button
                 v-for="backend in backendOptions"
@@ -1306,7 +1516,10 @@ function persistWorkspaceSplitPercent(value: number) {
 
                     <article v-for="artifact in artifacts.slice(0, 3)" :key="artifact.id" class="artifact-card artifact-notice feed-card lit-surface">
                       <button class="feed-card-main" type="button" @click="openArtifact(artifact.id)">
-                        <span class="artifact-created">{{ label("artifact.created") }}</span>
+                        <span class="feed-card-row">
+                          <span class="artifact-created">{{ label("artifact.created") }}</span>
+                          <span class="surface-chip is-compact">{{ surfaceRendererLabel(artifactCommandSurfaceKinds[0]) }}</span>
+                        </span>
                         <strong class="feed-card-title">{{ artifact.title }}</strong>
                         <span v-if="artifactPreview(artifact)" class="feed-card-summary">{{ artifactPreview(artifact) }}</span>
                       </button>
@@ -1375,15 +1588,70 @@ function persistWorkspaceSplitPercent(value: number) {
             <div v-if="hasWorkspaceCanvas" class="workspace-canvas-inner">
               <header class="workspace-head">
                 <div>
-                  <span v-if="activeMemory" class="artifact-type">{{ label("memory.title") }}</span>
-                  <h2>{{ activeArtifact ? activeArtifact.artifact.title : activeMemory?.memory.topic }}</h2>
+                  <span v-if="activeWorkspaceSurfaceKind" class="surface-chip is-compact">{{ surfaceRendererLabel(activeWorkspaceSurfaceKind) }}</span>
+                  <h2>{{ activeArtifact ? activeArtifact.artifact.title : activeMemory ? activeMemory.memory.topic : activeSurfaceSpec?.title ?? surfaceRendererLabel(activeSurfaceSpec?.kind) }}</h2>
                 </div>
-                <button class="icon-button" type="button" :title="label('action.close')" :aria-label="label('action.close')" @click="closeWorkspaceCanvas">
-                  <X :size="16" />
-                </button>
+                <div class="workspace-actions">
+                  <div v-if="activeArtifact" class="surface-action-group">
+                    <button class="icon-button" type="button" :title="surfaceRendererLabel('form')" :aria-label="surfaceRendererLabel('form')" :disabled="loading" @click="runArtifactSurfaceOperation('form')">
+                      <FileInput :size="15" />
+                    </button>
+                    <button class="icon-button" type="button" :title="surfaceRendererLabel('table')" :aria-label="surfaceRendererLabel('table')" :disabled="loading" @click="runArtifactSurfaceOperation('table')">
+                      <Table2 :size="15" />
+                    </button>
+                    <button class="icon-button" type="button" :title="surfaceRendererLabel('chart')" :aria-label="surfaceRendererLabel('chart')" :disabled="loading" @click="runArtifactSurfaceOperation('chart')">
+                      <BarChart3 :size="15" />
+                    </button>
+                    <button class="icon-button" type="button" :title="surfaceRendererLabel('custom_view')" :aria-label="surfaceRendererLabel('custom_view')" :disabled="loading" @click="runArtifactSurfaceOperation('custom_view')">
+                      <PanelsTopLeft :size="15" />
+                    </button>
+                  </div>
+                  <button class="icon-button" type="button" :title="label('action.close')" :aria-label="label('action.close')" @click="closeWorkspaceCanvas">
+                    <X :size="16" />
+                  </button>
+                </div>
               </header>
 
               <template v-if="activeArtifact">
+                <section v-if="activeSurfaceSpec" class="surface-render lit-surface">
+                  <div class="surface-render-head">
+                    <span class="surface-chip is-compact">{{ surfaceRendererLabel(activeSurfaceSpec.kind) }}</span>
+                    <strong>{{ activeSurfaceSpec.title || activeArtifact.artifact.title }}</strong>
+                  </div>
+
+                  <div v-if="activeSurfaceSpec.kind === 'form'" class="surface-form">
+                    <label v-for="field in surfaceFields(activeSurfaceSpec)" :key="field.name">
+                      <span>{{ field.label }}</span>
+                      <input :value="surfaceValue(field.value)" readonly />
+                    </label>
+                  </div>
+
+                  <div v-else-if="activeSurfaceSpec.kind === 'table'" class="surface-table-wrap">
+                    <table class="surface-table">
+                      <thead>
+                        <tr>
+                          <th v-for="column in surfaceTableColumns(activeSurfaceSpec)" :key="column.key">{{ column.label }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(row, rowIndex) in surfaceTableRows(activeSurfaceSpec)" :key="rowIndex">
+                          <td v-for="column in surfaceTableColumns(activeSurfaceSpec)" :key="column.key">{{ surfaceValue(row[column.key]) }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div v-else-if="activeSurfaceSpec.kind === 'chart'" class="surface-chart">
+                    <BarChart3 :size="18" />
+                    <div>
+                      <strong>{{ activeSurfaceSpec.title }}</strong>
+                      <span>{{ surfaceChartRefs(activeSurfaceSpec).join(" / ") }}</span>
+                    </div>
+                  </div>
+
+                  <pre v-else-if="activeSurfaceSpec.kind === 'custom_view'" class="surface-json">{{ surfaceCustomViewPayload(activeSurfaceSpec) }}</pre>
+                  <pre v-else class="surface-json">{{ surfaceCustomViewPayload(activeSurfaceSpec) }}</pre>
+                </section>
                 <pre class="document-surface">{{ activeArtifact.content }}</pre>
               </template>
 
@@ -1565,7 +1833,10 @@ function persistWorkspaceSplitPercent(value: number) {
       <section class="drawer-card lit-surface">
         <div class="drawer-card-head">
           <span>{{ label("backend_event.title") }}</span>
-          <span class="status-pill">{{ latestBackendEvents.length }}</span>
+          <span class="drawer-card-badges">
+            <span v-if="lastSurfaceRenderSpec" class="surface-chip is-compact">{{ surfaceRendererLabel(lastSurfaceRenderSpec.kind) }}</span>
+            <span class="status-pill">{{ latestBackendEvents.length }}</span>
+          </span>
         </div>
         <p v-if="latestBackendEvents.length === 0">{{ label("backend_event.empty") }}</p>
         <ol v-else class="activity-list">

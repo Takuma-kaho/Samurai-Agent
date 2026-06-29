@@ -1,11 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
-import { AgentBackendRegistry, MockBackend } from "@samurai-agent/agent-backends";
-import type { SkillFrontmatter } from "@samurai-agent/core-schemas";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { PluginRuntimeRegistry } from "@samurai-agent/action-catalog";
+import { AgentBackendRegistry, MockBackend, type AgentBackend } from "@samurai-agent/agent-backends";
+import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type MemoryFrontmatter, type SkillFrontmatter } from "@samurai-agent/core-schemas";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
-import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, type ProviderOutput } from "./index";
+import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, planSurfaceOperationDispatch, setExternalSendSmtpClientConnectionFactoryForTest, type ExternalAssistProvider, type ProviderInput, type ProviderOutput } from "./index";
 
 const roots: string[] = [];
 
@@ -17,6 +18,62 @@ async function createRuntime() {
     store,
     runtime: new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", fakeProviderOutput))
   };
+}
+
+async function requestAndApproveExternalSend(
+  runtime: AgentRuntime,
+  store: WorkspaceStore,
+  sendId: string
+): Promise<ExternalSendRecord> {
+  try {
+    await runtime.dispatchExternalSend({ sendId, dryRun: false });
+    throw new Error("expected external send dispatch to require approval");
+  } catch (error) {
+    if (!(error instanceof RuntimeRequestError)) {
+      throw error;
+    }
+    expect(error).toMatchObject({
+      code: "conflict",
+      message: "policy_blocked"
+    });
+    const approvalId = error.payload?.approvalRequest.id;
+    expect(approvalId).toBeTruthy();
+    await runtime.approveRequest(approvalId!);
+  }
+  const send = await store.getExternalSend(sendId);
+  expect(send).toBeDefined();
+  return send!;
+}
+
+class FakeSmtpConnection {
+  readonly commands: string[] = [];
+  readonly data: string[] = [];
+  closed = false;
+  private readonly responses: Array<{ code: number; lines: string[] }>;
+
+  constructor(responses: Array<{ code: number; lines: string[] }>) {
+    this.responses = [...responses];
+  }
+
+  async readResponse(): Promise<{ code: number; lines: string[] }> {
+    const response = this.responses.shift();
+    if (!response) {
+      throw new Error("smtp_response_missing");
+    }
+    return response;
+  }
+
+  async writeCommand(command: string): Promise<void> {
+    this.commands.push(command);
+  }
+
+  async writeData(data: string): Promise<void> {
+    this.data.push(data);
+  }
+
+  close(): void {
+    this.closed = true;
+  }
 }
 
 function fakeProviderOutput(input: Parameters<FakeProviderAdapter["generate"]>[0]): ProviderOutput {
@@ -55,10 +112,451 @@ function fakeProviderOutput(input: Parameters<FakeProviderAdapter["generate"]>[0
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  setExternalSendSmtpClientConnectionFactoryForTest();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe("agent runtime", () => {
+  it("plans surface operation dispatch before execution", () => {
+    const chatPlan = planSurfaceOperationDispatch({
+      id: "surface_chat_plan",
+      kind: "message.submit",
+      session_id: "session_1",
+      content: "hello"
+    });
+    const collectionPlan = planSurfaceOperationDispatch({
+      id: "surface_collection_plan",
+      kind: "collection.record.patch",
+      collection_id: "contacts",
+      record_id: "record_1",
+      patch_id: "patch_1",
+      changes: { name: "Samurai" }
+    });
+    const chartPlan = planSurfaceOperationDispatch({
+      id: "surface_chart_plan",
+      kind: "chart.request",
+      session_id: "session_1",
+      title: "Progress",
+      query: "show progress",
+      data_refs: ["collection/progress"]
+    });
+
+    expect(chatPlan).toMatchObject({
+      dispatch_target: "host_chat",
+      runtime_method: "runChatTurn",
+      result_kind: "chat_turn",
+      requires_session: true,
+      writes_workspace: false
+    });
+    expect(collectionPlan).toMatchObject({
+      dispatch_target: "collection_engine",
+      operation_name: "collection.patch.apply",
+      result_kind: "collection_patch",
+      render_kind: "collection_record",
+      writes_workspace: true
+    });
+    expect(chartPlan).toMatchObject({
+      dispatch_target: "artifact_pipeline",
+      operation_name: "artifact.create",
+      result_kind: "chart_request",
+      render_kind: "chart",
+      output_resource_kind: "chart"
+    });
+  });
+
+  it("runs runtime API calls through Domain Commands", async () => {
+    const { store, runtime } = await createRuntime();
+    const result = await runtime.runDomainCommand({
+      command_id: "chat.turn.run",
+      payload: {
+        content: "Domain Commandから実行して",
+        output_locale: "ja"
+      }
+    });
+    const artifact = await runtime.runDomainCommand({
+      command_id: "artifact.create",
+      payload: {
+        title: "Domain Command artifact",
+        content: "Domain Command APIから作ったArtifact",
+        output_locale: "ja"
+      }
+    });
+    await store.close();
+
+    const chat = result.result as Awaited<ReturnType<AgentRuntime["runChatTurn"]>>;
+    expect(result.command.id).toBe("chat.turn.run");
+    expect(result.input_source).toBe("runtime_api");
+    expect(result.render_spec).toMatchObject({
+      kind: "chat",
+      props: {
+        backend_status: "completed"
+      }
+    });
+    expect(result.render_specs.map((spec) => spec.kind)).toEqual(["chat"]);
+    expect(chat.backendRun.status).toBe("completed");
+    expect(chat.messages.some((message) => message.role === "agent")).toBe(true);
+    expect(artifact.command.id).toBe("artifact.create");
+    expect(artifact.render_spec).toMatchObject({
+      kind: "artifact",
+      props: {
+        title: "Domain Command artifact"
+      }
+    });
+  });
+
+  it("returns render specs for workspace resource Domain Commands", async () => {
+    const { store, runtime } = await createRuntime();
+    const wiki = await runtime.runDomainCommand({
+      command_id: "wiki.proposal.create",
+      payload: {
+        title: "Provider storage plan",
+        content: "Store provider hints as proposals until accepted.",
+        content_locale: "en"
+      }
+    });
+    const skill = await runtime.runDomainCommand({
+      command_id: "skill.candidate.create",
+      payload: {
+        title: "調査メモ整理",
+        description: "調査メモを再利用できる形に整える",
+        content: "# Skill\n\n- 調査結果を要約する"
+      }
+    });
+    const schema = await runtime.runDomainCommand({
+      command_id: "collection.schema.save",
+      payload: collectionSchema("contacts")
+    });
+    const record = await runtime.runDomainCommand({
+      command_id: "collection.record.create",
+      payload: {
+        collection_id: "contacts",
+        record_id: "record_1",
+        data: { name: "Takuma" }
+      }
+    });
+    await store.close();
+
+    expect(wiki.render_spec).toMatchObject({
+      kind: "knowledge_wiki",
+      props: {
+        active_only: false,
+        state: "proposed"
+      }
+    });
+    expect(skill.render_spec).toMatchObject({
+      kind: "skill",
+      props: {
+        disclosure_level: "catalog",
+        state: "candidate"
+      }
+    });
+    expect(schema.render_spec).toMatchObject({
+      kind: "collection",
+      props: {
+        collection_id: "contacts",
+        schema_id: "contacts"
+      }
+    });
+    expect(record.render_spec).toMatchObject({
+      kind: "collection_record",
+      props: {
+        collection_id: "contacts",
+        record_id: "record_1",
+        data: { name: "Takuma" }
+      }
+    });
+    expect([wiki, skill, schema, record].every((result) => result.render_specs.length === 1)).toBe(true);
+  });
+
+  it("runs Knowledge Wiki lifecycle Domain Commands through active retrieval and provenance", async () => {
+    const { store, runtime } = await createRuntime();
+    const proposal = await runtime.runDomainCommand({
+      command_id: "wiki.proposal.create",
+      payload: {
+        title: "Domain Wiki lifecycle",
+        slug: "domain-wiki-lifecycle",
+        content: "# Domain Wiki lifecycle\n\ndomain-wiki-lifecycle-needle starts as a proposal.",
+        content_locale: "ja",
+        source_refs: [{
+          kind: "backend_run",
+          id: "run_domain_wiki_lifecycle",
+          uri: "backend-runs/run_domain_wiki_lifecycle",
+          label: "Domain wiki lifecycle run"
+        }],
+        provenance: {
+          kind: "user_authored",
+          summary: "Created through Domain Command lifecycle fixture.",
+          verified: true
+        }
+      }
+    });
+    const proposalResult = proposal.result as Awaited<ReturnType<AgentRuntime["createWikiProposal"]>>;
+    const rejected = await runtime.runDomainCommand({
+      command_id: "wiki.proposal.create",
+      payload: {
+        title: "Rejected Domain Wiki lifecycle",
+        slug: "rejected-domain-wiki-lifecycle",
+        content: "# Rejected Domain Wiki lifecycle\n\ndomain-wiki-lifecycle-needle rejected.",
+        content_locale: "ja"
+      }
+    });
+    const rejectedResult = rejected.result as Awaited<ReturnType<AgentRuntime["createWikiProposal"]>>;
+    const accepted = await runtime.runDomainCommand({
+      command_id: "wiki.accept",
+      payload: { wiki_id: proposalResult.resource.id }
+    });
+    const patched = await runtime.runDomainCommand({
+      command_id: "wiki.patch",
+      payload: {
+        wiki_id: proposalResult.resource.id,
+        title: "Domain Wiki lifecycle patched",
+        content: "# Domain Wiki lifecycle patched\n\npatched-domain-wiki-lifecycle-needle is active.",
+        source_refs: [{
+          kind: "backend_run",
+          id: "run_domain_wiki_patch",
+          uri: "backend-runs/run_domain_wiki_patch",
+          label: "Domain wiki patch run"
+        }],
+        provenance: {
+          kind: "generated_local",
+          summary: "Patched through Domain Command lifecycle fixture.",
+          verified: false
+        }
+      }
+    });
+    const reject = await runtime.runDomainCommand({
+      command_id: "wiki.reject",
+      payload: { wiki_id: rejectedResult.resource.id }
+    });
+    const activePreview = await runtime.previewKnowledgeWiki({ query: "patched-domain-wiki-lifecycle-needle" });
+    const rejectedPreview = await runtime.previewKnowledgeWiki({ query: "domain-wiki-lifecycle-needle rejected" });
+    const reindex = await runtime.runDomainCommand({
+      command_id: "wiki.reindex",
+      payload: {}
+    });
+    const archived = await runtime.runDomainCommand({
+      command_id: "wiki.archive",
+      payload: { wiki_id: proposalResult.resource.id }
+    });
+    const afterArchivePreview = await runtime.previewKnowledgeWiki({ query: "patched-domain-wiki-lifecycle-needle" });
+    const operations = await store.listOperations();
+    await store.close();
+
+    expect(proposal.render_spec).toMatchObject({
+      kind: "knowledge_wiki",
+      props: { state: "proposed", active_only: false }
+    });
+    expect(accepted).toMatchObject({
+      command: { id: "wiki.accept" },
+      render_spec: { kind: "knowledge_wiki", props: { state: "active", active_only: true } }
+    });
+    expect(patched).toMatchObject({
+      command: { id: "wiki.patch" },
+      render_spec: { kind: "knowledge_wiki", props: { state: "active" } }
+    });
+    expect(reject).toMatchObject({
+      command: { id: "wiki.reject" },
+      render_spec: { kind: "knowledge_wiki", props: { state: "rejected", active_only: false } }
+    });
+    expect(activePreview.knowledge_wiki).toContainEqual(expect.objectContaining({
+      id: proposalResult.resource.id,
+      title: "Domain Wiki lifecycle patched",
+      source_refs: expect.arrayContaining([expect.objectContaining({ kind: "backend_run", id: "run_domain_wiki_patch" })]),
+      provenance: expect.objectContaining({ kind: "generated_local", verified: false })
+    }));
+    expect(activePreview.report.included_wiki_ids).toContain(proposalResult.resource.id);
+    expect(activePreview.graph.edges).toContainEqual(expect.objectContaining({
+      from_wiki_id: proposalResult.resource.id,
+      relation: "source_ref",
+      to_ref: expect.objectContaining({
+        kind: "backend_run",
+        id: "run_domain_wiki_patch"
+      })
+    }));
+    expect(rejectedPreview.knowledge_wiki.map((wiki) => wiki.id)).not.toContain(rejectedResult.resource.id);
+    expect(rejectedPreview.report.excluded).toContainEqual(expect.objectContaining({
+      id: rejectedResult.resource.id,
+      reason: "rejected"
+    }));
+    expect(reindex).toMatchObject({
+      command: { id: "wiki.reindex" },
+      render_spec: { kind: "knowledge_wiki" }
+    });
+    expect(archived).toMatchObject({
+      command: { id: "wiki.archive" },
+      render_spec: { kind: "knowledge_wiki", props: { state: "archived", active_only: false } }
+    });
+    expect(afterArchivePreview.knowledge_wiki.map((wiki) => wiki.id)).not.toContain(proposalResult.resource.id);
+    expect(afterArchivePreview.report.excluded).toContainEqual(expect.objectContaining({
+      id: proposalResult.resource.id,
+      reason: "archived"
+    }));
+    expect(operations.map((operation) => operation.operation)).toEqual(expect.arrayContaining([
+      "wiki.proposal.create",
+      "wiki.accept",
+      "wiki.patch",
+      "wiki.reject",
+      "wiki.reindex",
+      "wiki.archive"
+    ]));
+  });
+
+  it("runs Skill lifecycle Domain Commands through support files and selected usage", async () => {
+    const { store, runtime } = await createRuntime();
+    const candidate = await runtime.runDomainCommand({
+      command_id: "skill.candidate.create",
+      payload: {
+        title: "調査メモ整理",
+        description: "調査メモ references を短く整える",
+        content: "# Skill\n\n- Keep the note short.\n- Use the references support file."
+      }
+    });
+    const candidateResult = candidate.result as Awaited<ReturnType<AgentRuntime["createSkillCandidate"]>>;
+    const project = await runtime.runDomainCommand({
+      command_id: "skill.project.save",
+      payload: {
+        candidate_id: candidateResult.resource.id
+      }
+    });
+    const projectResult = project.result as Awaited<ReturnType<AgentRuntime["saveSkillProject"]>>;
+    const support = await runtime.runDomainCommand({
+      command_id: "skill.support_file.save",
+      payload: {
+        skill_id: projectResult.resource.id,
+        path: "references/style.md",
+        content: "補助資料: 調査メモは箇条書きで短くする。"
+      }
+    });
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "調査メモ references を使って",
+      output_locale: "ja"
+    });
+    const context = await runtime.previewContext({
+      sessionId: session.id,
+      query: "調査メモ references"
+    });
+    const usage = await store.listSkillUsage();
+    await store.close();
+
+    expect(candidate.render_spec).toMatchObject({ kind: "skill", props: { state: "candidate" } });
+    expect(project.render_spec).toMatchObject({ kind: "skill", props: { state: "project" } });
+    expect(support.render_spec).toMatchObject({
+      kind: "skill",
+      props: {
+        skill_ids: [projectResult.resource.id],
+        disclosure_level: "support",
+        support_file_path: "references/style.md"
+      }
+    });
+    expect(context.selected_skills).toContainEqual(expect.objectContaining({
+      id: projectResult.resource.id,
+      disclosure_level: "support",
+      support_files: [expect.objectContaining({
+        path: "references/style.md",
+        content: "補助資料: 調査メモは箇条書きで短くする。"
+      })]
+    }));
+    expect(context.selected_skills.find((item) => item.id === projectResult.resource.id)?.support_files?.[0]?.file_path)
+      .toContain(`skills/support/${projectResult.resource.id}/references/style.md`);
+    expect(usage.some((row) => row.skill_id === projectResult.resource.id && row.use_count > 0)).toBe(true);
+  });
+
+  it("turns reflection Skill suggestions into supported project Skills with usage", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const now = nowIso();
+    await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "user",
+      content: "次から差分確認 references を使って、保存前に短く確認して",
+      input_locale: "ja",
+      output_locale: "ja",
+      created_at: now
+    });
+    await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: "了解、次回から差分確認を先に入れます。",
+      input_locale: "ja",
+      output_locale: "ja",
+      created_at: now
+    });
+
+    const reflection = await runtime.runReflection({ sessionId: session.id });
+    const suggestion = reflection.suggestions.find((item) => item.suggestion_type === "skill");
+    expect(suggestion).toBeDefined();
+    const applied = await runtime.runDomainCommand({
+      command_id: "reflection.suggestion.apply",
+      payload: { suggestion_id: suggestion!.id }
+    });
+    const appliedResult = applied.result as Awaited<ReturnType<AgentRuntime["applyReflectionSuggestion"]>>;
+    const appliedSkill = appliedResult.resource as {
+      id: string;
+      state: string;
+      frontmatter?: Pick<SkillFrontmatter, "source_refs" | "provenance_detail">;
+    };
+    const project = await runtime.runDomainCommand({
+      command_id: "skill.project.save",
+      payload: { candidate_id: appliedSkill.id }
+    });
+    const projectResult = project.result as Awaited<ReturnType<AgentRuntime["saveSkillProject"]>>;
+    await runtime.runDomainCommand({
+      command_id: "skill.support_file.save",
+      payload: {
+        skill_id: projectResult.resource.id,
+        path: "references/diff-check.md",
+        content: "補助資料: 差分確認は保存前に3点だけ見る。"
+      }
+    });
+
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "差分確認 references を使って保存前チェックをして",
+      output_locale: "ja"
+    });
+    const context = await runtime.previewContext({
+      sessionId: session.id,
+      query: "差分確認 references"
+    });
+    const refreshedSuggestion = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion!.id);
+    const usage = await store.getSkillUsage(projectResult.resource.id);
+    await store.close();
+
+    expect(applied).toMatchObject({
+      command: { id: "reflection.suggestion.apply" },
+      render_spec: { kind: "skill" }
+    });
+    expect(appliedResult.operation.operation).toBe("reflection.suggestion.apply");
+    expect(appliedSkill.state).toBe("candidate");
+    expect(appliedSkill.frontmatter?.source_refs?.some((ref) => ref.kind === "message")).toBe(true);
+    expect(appliedSkill.frontmatter?.provenance_detail).toMatchObject({ kind: "generated_local", verified: false });
+    expect(refreshedSuggestion).toMatchObject({
+      status: "applied",
+      target_ref: expect.objectContaining({ kind: "skill", id: appliedSkill.id })
+    });
+    expect(project).toMatchObject({
+      command: { id: "skill.project.save" },
+      render_spec: { kind: "skill", props: { state: "project" } }
+    });
+    const selectedSkill = context.selected_skills.find((item) => item.id === projectResult.resource.id);
+    expect(selectedSkill).toMatchObject({
+      disclosure_level: "support",
+      support_files: [expect.objectContaining({
+        path: "references/diff-check.md",
+        content: "補助資料: 差分確認は保存前に3点だけ見る。"
+      })],
+      usage: expect.objectContaining({ use_count: 1 })
+    });
+    expect(selectedSkill?.selection_reason).toContain("Matched support files");
+    expect(usage).toMatchObject({ skill_id: projectResult.resource.id, use_count: 1 });
+  });
+
   it("keeps plain chat as content without creating artifacts", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
@@ -72,6 +570,46 @@ describe("agent runtime", () => {
     expect(result.messages.find((message) => message.role === "agent")?.content).toBe("対応しました。");
     expect(result.artifacts).toEqual([]);
     expect(result.operations.some((operation) => operation.operation === "artifact.create")).toBe(false);
+  });
+
+  it("runs message surface operations through backend events, workspace feedback, and reflection", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+
+    const envelope = await runtime.runSurfaceOperation({
+      id: "surface_message_vertical",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "提案書を作って",
+      output_locale: "ja"
+    });
+    const result = envelope.result as {
+      backendRun: { status: string; metadata: Record<string, unknown> };
+      backendEvents: Array<{ event_type: string }>;
+      workspaceChanges: Array<{ change_type: string }>;
+      reflectionRuns: Array<{ status: string }>;
+      reflectionSuggestions: Array<{ suggestion_type: string; source_refs: Array<{ kind: string }> }>;
+      artifacts: Array<{ title: string }>;
+    };
+    const reflectionRuns = await store.listReflectionRuns();
+    await store.close();
+
+    expect(envelope.result_kind).toBe("chat_turn");
+    expect(envelope.render_spec.kind).toBe("chat");
+    expect(result.backendRun.status).toBe("completed");
+    expect(result.backendRun.metadata).toMatchObject({
+      surface_operation_id: "surface_message_vertical",
+      surface_operation_kind: "message.submit"
+    });
+    expect(result.backendEvents.some((event) => event.event_type === "run_started")).toBe(true);
+    expect(result.backendEvents.some((event) => event.event_type === "artifact_created")).toBe(true);
+    expect(result.backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
+    expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
+    expect(result.artifacts[0]?.title).toBe("作業メモ");
+    expect(result.reflectionRuns.some((run) => run.status === "completed")).toBe(true);
+    expect(result.reflectionSuggestions.some((suggestion) => suggestion.suggestion_type === "knowledge_wiki")).toBe(true);
+    expect(result.reflectionSuggestions.some((suggestion) => suggestion.source_refs.some((ref) => ref.kind === "backend_event"))).toBe(true);
+    expect(reflectionRuns.some((run) => run.status === "completed")).toBe(true);
   });
 
   it("routes a chat turn through the selected agent backend", async () => {
@@ -91,7 +629,153 @@ describe("agent runtime", () => {
 
     expect(result.backendRun.backend_id).toBe("mock");
     expect(result.backendRun.backend_kind).toBe("mock");
+    expect(result.backendRun.metadata.freeze_snapshot_hash).toBeTruthy();
     expect(result.messages.find((message) => message.role === "agent")?.content).toContain("Mock response");
+  });
+
+  it("records backend-native session ids from backend events", async () => {
+    const sessionAwareBackend: AgentBackend = {
+      id: "session-aware",
+      kind: "external",
+      label: "Session Aware Fixture",
+      async *runTurn() {
+        yield {
+          event_type: "run_started",
+          payload: {
+            backend_session_id: "native-session-42",
+            input_summary: "started"
+          }
+        };
+        yield {
+          event_type: "text_delta",
+          payload: { text: "native session captured" }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: {
+            output_summary: "done"
+          }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([sessionAwareBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "native session を保存して",
+      output_locale: "ja",
+      backend_id: "session-aware"
+    });
+    const savedRun = await store.getBackendRun(result.backendRun.id);
+    await store.close();
+
+    expect(result.backendRun.metadata).toMatchObject({
+      backend_session_id: "native-session-42",
+      backend_session_source_event: "run_started"
+    });
+    expect(savedRun?.metadata.backend_session_id).toBe("native-session-42");
+  });
+
+  it("routes streaming provider tool aliases through Domain Commands", async () => {
+    const streamingToolBackend: AgentBackend = {
+      id: "streaming-tool",
+      kind: "external",
+      label: "Streaming Tool Fixture",
+      async *runTurn() {
+        yield {
+          event_type: "run_started",
+          payload: {
+            input_summary: "started"
+          }
+        };
+        yield {
+          event_type: "tool_call_started",
+          tool_call_id: "send_tool_1",
+          payload: {
+            tool_call_id: "send_tool_1",
+            provider_tool_name: "request_external_send",
+            arguments: {
+              channel: "email",
+              target: { to: "demo@example.com" },
+              title: "Domain command send draft",
+              body: "外部送信のdraftだけ作る"
+            }
+          }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: {
+            output_summary: "done"
+          }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([streamingToolBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "外部送信draftを作って",
+      output_locale: "ja",
+      backend_id: "streaming-tool"
+    });
+    await store.close();
+
+    expect(result.operations.some((operation) => operation.operation === "external.send.prepare")).toBe(true);
+    expect(result.backendEvents.some((event) =>
+      event.event_type === "tool_call_output"
+      && event.payload.status === "completed"
+      && event.payload.action_id === "external.send.prepare"
+    )).toBe(true);
+    expect(result.toolRuns).toContainEqual(expect.objectContaining({
+      provider_tool_name: "request_external_send",
+      action_id: "external.send.prepare",
+      status: "completed"
+    }));
+  });
+
+  it("adds recent backend run failures to backend status metadata", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([new MockBackend()]));
+    const session = await runtime.createSession();
+    const now = nowIso();
+    await store.saveBackendRun({
+      id: "run_failed_status",
+      session_id: session.id,
+      input_message_id: "message_failed_status",
+      backend_id: "mock",
+      backend_kind: "mock",
+      status: "failed",
+      started_at: now,
+      completed_at: now,
+      input_summary: "failed status",
+      output_summary: "Provider failed.",
+      error_code: "provider_failed",
+      metadata: {}
+    });
+
+    const statuses = await runtime.listAgentBackends();
+    await store.close();
+
+    expect(statuses.find((status) => status.id === "mock")).toMatchObject({
+      connection_state: "degraded",
+      reason: "provider_failed",
+      metadata: {
+        last_run_id: "run_failed_status",
+        last_run_status: "failed",
+        last_error_code: "provider_failed",
+        recent_failure_count: 1
+      }
+    });
   });
 
   it("rejects unknown agent backend ids before creating a run", async () => {
@@ -110,6 +794,1054 @@ describe("agent runtime", () => {
       message: "backend_not_registered:missing"
     });
     await store.close();
+  });
+
+  it("passes only sanitized gateway boundary snapshots to the native provider", async () => {
+    let capturedInput: ProviderInput | undefined;
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", (input) => {
+      capturedInput = input;
+      return { content: "Done.", toolCalls: [] };
+    }));
+    const session = await runtime.createSession();
+    const now = "2026-01-01T00:00:00.000Z";
+    const boundary: GatewayBoundaryPolicy = {
+      id: "gateway_boundary_secret_test",
+      source_channel: "webhook",
+      source_identity: "secret-source",
+      session_key: "webhook:secret-source:main",
+      allowed_tools: ["artifact.create"],
+      mcp_config_refs: [
+        {
+          id: "mcp_calendar",
+          server_name: "calendar",
+          allowed_tools: ["calendar.read"],
+          secret_refs: [
+            {
+              id: "secret_mcp_calendar",
+              source: "env",
+              provider: "default",
+              key: "MCP_CALENDAR_TOKEN"
+            }
+          ]
+        }
+      ],
+      secret_refs: [
+        {
+          id: "secret_direct",
+          source: "env",
+          provider: "default",
+          key: "DIRECT_WEBHOOK_TOKEN"
+        }
+      ],
+      sandbox: {
+        mode: "non_main",
+        scope: "session",
+        backend: "none",
+        workspace_access: "none",
+        network_access: "none",
+        allowed_paths: [],
+        denied_paths: [],
+        metadata: {}
+      },
+      path_normalization: {
+        canonical_root: "workspace",
+        reject_absolute_paths: true,
+        reject_parent_segments: true,
+        allowed_roots: ["workspace"],
+        denied_roots: []
+      },
+      allowlist: ["webhook:secret-source"],
+      concurrency_lock: {
+        scope: "session",
+        key: "webhook:secret-source:main",
+        ttl_ms: 60_000
+      },
+      metadata: {},
+      created_at: now,
+      updated_at: now
+    };
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "境界付きで実行",
+      gateway_boundary_policy: boundary,
+      metadata: {
+        api_key: "raw-api-key",
+        nested: {
+          authorization: "Bearer raw-token",
+          note: "key=raw-key"
+        }
+      }
+    });
+    await store.close();
+
+    const serializedBoundary = JSON.stringify(capturedInput?.gatewayBoundary);
+    expect(capturedInput?.gatewayBoundary).toMatchObject({
+      policy_id: boundary.id,
+      secret_ref_ids: ["secret_direct", "secret_mcp_calendar"],
+      mcp_config_refs: [
+        {
+          id: "mcp_calendar",
+          server_name: "calendar",
+          secret_ref_ids: ["secret_mcp_calendar"]
+        }
+      ]
+    });
+    expect(serializedBoundary).not.toContain("DIRECT_WEBHOOK_TOKEN");
+    expect(serializedBoundary).not.toContain("MCP_CALENDAR_TOKEN");
+    expect(capturedInput?.envelope.metadata).toMatchObject({
+      source: "web",
+      actor_identity: "owner",
+      instruction_source: "owner_instruction",
+      channel: "web",
+      session_key: "web:owner:main"
+    });
+    expect(result.backendRun.metadata.gateway_boundary_secret_ref_ids).toEqual(["secret_direct", "secret_mcp_calendar"]);
+    expect(JSON.stringify(result.backendRun.metadata)).not.toContain("DIRECT_WEBHOOK_TOKEN");
+    expect(JSON.stringify(result.backendRun.metadata)).not.toContain("MCP_CALENDAR_TOKEN");
+    expect(JSON.stringify(capturedInput?.envelope.metadata)).not.toContain("raw-api-key");
+    expect(JSON.stringify(capturedInput?.envelope.metadata)).not.toContain("raw-token");
+    expect(JSON.stringify(result.backendRun.metadata)).not.toContain("raw-api-key");
+    expect(JSON.stringify(result.backendRun.metadata)).not.toContain("raw-token");
+    expect(result.backendRun.metadata.api_key).toBe("[redacted]");
+  });
+
+  it("records gateway boundary allow decisions on completed tool runs", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const boundary = gatewayBoundaryPolicy(["artifact.create"]);
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "draft a note",
+      output_locale: "en",
+      gateway_boundary_policy: boundary
+    });
+    await store.close();
+
+    expect(result.artifacts.length).toBeGreaterThan(0);
+    expect(result.backendEvents).toContainEqual(expect.objectContaining({
+      event_type: "tool_call_started",
+      payload: expect.objectContaining({
+        provider_tool_name: "create_artifact",
+        action_id: "artifact.create",
+        execution_boundary: "host_runtime",
+        requires_host_execution: true
+      })
+    }));
+    expect(result.toolRuns).toContainEqual(expect.objectContaining({
+      action_id: "artifact.create",
+      status: "completed",
+      resource_refs: expect.arrayContaining([
+        expect.objectContaining({ kind: "gateway_boundary_policy", id: boundary.id })
+      ])
+    }));
+    expect(result.backendEvents).toContainEqual(expect.objectContaining({
+      event_type: "tool_call_output",
+      payload: expect.objectContaining({
+        status: "completed",
+        action_id: "artifact.create",
+        gateway_boundary: expect.objectContaining({
+          decision: "allowed",
+          action_id: "artifact.create",
+          reason: "explicit_allow",
+          policy_id: boundary.id,
+          allowed_tools: ["artifact.create"]
+        })
+      })
+    }));
+  });
+
+  it("executes allowed MCP calls through stored stdio config from runtime tool events", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-mcp-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const serverPath = path.join(root, "calendar-mcp.cjs");
+    await writeFile(serverPath, `
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+let id = 0;
+function send(result) {
+  process.stdout.write(JSON.stringify(result) + "\\n");
+}
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") {
+    send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2024-11-05", capabilities: {} } });
+    return;
+  }
+  if (request.method === "tools/call") {
+    send({
+      jsonrpc: "2.0",
+      id: request.id,
+      result: {
+        content: [{ type: "text", text: "calendar ok " + process.env.CALENDAR_TOKEN + " " + request.params.arguments.range }]
+      }
+    });
+    return;
+  }
+  if (request.id) {
+    send({ jsonrpc: "2.0", id: request.id, result: { ok: true, id: ++id } });
+  }
+});
+`);
+    const now = nowIso();
+    const secret = "runtime-calendar-secret";
+    process.env.CALENDAR_TOKEN = secret;
+    const config: GatewayMcpConfigRecord = {
+      id: "gateway_mcp_calendar_runtime",
+      server_name: "calendar",
+      transport: "stdio",
+      enabled: true,
+      allowed_tools: ["calendar.read"],
+      secret_refs: [{
+        id: "secret_calendar_runtime",
+        source: "env",
+        provider: "calendar",
+        key: "CALENDAR_TOKEN"
+      }],
+      stdio: {
+        command: process.execPath,
+        args: [serverPath],
+        env: {},
+        secret_env: { CALENDAR_TOKEN: "secret_calendar_runtime" },
+        secret_files: [],
+        framing: "json_lines",
+        initialize: true,
+        timeout_ms: 2000
+      },
+      metadata: {},
+      created_at: now,
+      updated_at: now
+    };
+    await store.saveGatewayMcpConfig(config);
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/mcp", () => ({
+        content: "MCPを実行しました。",
+        toolCalls: [{
+          name: "mcp.call",
+          arguments: {
+            server_name: "calendar",
+            tool_name: "calendar.read",
+            input: { range: "today" }
+          }
+        }]
+      }))
+    );
+    const session = await runtime.createSession();
+    const boundary: GatewayBoundaryPolicy = {
+      ...gatewayBoundaryPolicy(["mcp.call"]),
+      mcp_config_refs: [{
+        id: config.id,
+        server_name: config.server_name,
+        allowed_tools: ["calendar.read"],
+        secret_refs: config.secret_refs
+      }]
+    };
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "calendar read",
+      output_locale: "ja",
+      gateway_boundary_policy: boundary
+    });
+    delete process.env.CALENDAR_TOKEN;
+    await store.close();
+
+    const outputEvent = result.backendEvents.find((event) =>
+      event.event_type === "tool_call_output"
+      && event.payload.action_id === "mcp.call"
+    );
+    expect(result.operations).toContainEqual(expect.objectContaining({
+      operation: "mcp.call",
+      status: "completed",
+      result_ref: expect.objectContaining({ kind: "gateway_mcp_config", id: config.id })
+    }));
+    expect(result.toolRuns).toContainEqual(expect.objectContaining({
+      provider_tool_name: "mcp.call",
+      action_id: "calendar/calendar.read",
+      status: "completed",
+      resource_refs: expect.arrayContaining([
+        expect.objectContaining({ kind: "gateway_mcp_config", id: config.id }),
+        expect.objectContaining({ kind: "gateway_boundary_policy", id: boundary.id })
+      ])
+    }));
+    expect(outputEvent?.payload).toMatchObject({
+      status: "completed",
+      action_id: "mcp.call",
+      server_name: "calendar",
+      tool_name: "calendar.read",
+      secret_resolution: {
+        secret_ref_ids: ["secret_calendar_runtime"],
+        resolved_secret_ref_ids: ["secret_calendar_runtime"],
+        unresolved_secret_ref_ids: []
+      }
+    });
+    expect(JSON.stringify(outputEvent?.payload)).toContain("[redacted:secret_calendar_runtime]");
+    expect(JSON.stringify(outputEvent?.payload)).not.toContain(secret);
+    expect(JSON.stringify(outputEvent?.payload)).not.toContain("CALENDAR_TOKEN");
+  });
+
+  it("executes allowed sandbox commands from runtime tool events with redacted SecretRef output", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const secret = "runtime-sandbox-secret";
+    process.env.SANDBOX_RUNTIME_TOKEN = secret;
+    const sandboxRuntime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/sandbox", () => ({
+        content: "Sandboxを実行しました。",
+        toolCalls: [{
+          name: "sandbox.exec",
+          arguments: {
+            command: process.execPath,
+            args: ["-e", "console.log(process.env.SECRET_VALUE)"],
+            secret_env: { SECRET_VALUE: "secret_sandbox_runtime" }
+          }
+        }]
+      }))
+    );
+    const boundary: GatewayBoundaryPolicy = {
+      ...gatewayBoundaryPolicy(["sandbox.exec"]),
+      secret_refs: [{
+        id: "secret_sandbox_runtime",
+        source: "env",
+        provider: "test",
+        key: "SANDBOX_RUNTIME_TOKEN"
+      }],
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        backend: "none",
+        workspace_access: "none",
+        network_access: "none",
+        allowed_paths: [],
+        denied_paths: [],
+        timeout_ms: 2000,
+        metadata: {}
+      }
+    };
+
+    const result = await sandboxRuntime.runChatTurn({
+      sessionId: session.id,
+      content: "sandbox exec",
+      output_locale: "ja",
+      gateway_boundary_policy: boundary
+    });
+    delete process.env.SANDBOX_RUNTIME_TOKEN;
+    await store.close();
+
+    const outputEvent = result.backendEvents.find((event) =>
+      event.event_type === "tool_call_output"
+      && event.payload.action_id === "sandbox.exec"
+    );
+    expect(result.operations).toContainEqual(expect.objectContaining({
+      operation: "sandbox.exec",
+      status: "completed",
+      result_ref: expect.objectContaining({ kind: "gateway_sandbox_execution" })
+    }));
+    expect(result.toolRuns).toContainEqual(expect.objectContaining({
+      provider_tool_name: "sandbox.exec",
+      action_id: "sandbox.exec",
+      status: "completed",
+      resource_refs: expect.arrayContaining([
+        expect.objectContaining({ kind: "gateway_sandbox_execution" }),
+        expect.objectContaining({ kind: "gateway_boundary_policy", id: boundary.id })
+      ])
+    }));
+    expect(outputEvent?.payload).toMatchObject({
+      status: "completed",
+      action_id: "sandbox.exec",
+      stdout: "[redacted:secret_sandbox_runtime]\n",
+      secret_resolution: {
+        secret_ref_ids: ["secret_sandbox_runtime"],
+        resolved_secret_ref_ids: ["secret_sandbox_runtime"],
+        unresolved_secret_ref_ids: []
+      }
+    });
+    expect(JSON.stringify(outputEvent?.payload)).not.toContain(secret);
+    expect(JSON.stringify(outputEvent?.payload)).not.toContain("SANDBOX_RUNTIME_TOKEN");
+  });
+
+  it("records sandbox lifecycle instances for sandboxed runtime tool events", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const sandboxRuntime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/sandbox-lifecycle", () => ({
+        content: "Sandbox lifecycleを確認しました。",
+        toolCalls: [{
+          name: "sandbox.exec",
+          arguments: {
+            command: process.execPath,
+            args: ["-e", "console.log('not reached')"]
+          }
+        }]
+      }))
+    );
+    const boundary: GatewayBoundaryPolicy = {
+      ...gatewayBoundaryPolicy(["sandbox.exec"]),
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        backend: "docker",
+        workspace_access: "read_write",
+        network_access: "none",
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
+        denied_paths: [],
+        timeout_ms: 2000,
+        metadata: {}
+      }
+    };
+
+    const result = await sandboxRuntime.runChatTurn({
+      sessionId: session.id,
+      content: "sandbox lifecycle",
+      output_locale: "ja",
+      gateway_boundary_policy: boundary
+    });
+    const instances = await store.listGatewaySandboxInstances();
+    const recreated = await runtime.recreateGatewaySandboxInstance(instances[0]!.id);
+    const deleted = await runtime.deleteGatewaySandboxInstance(instances[0]!.id);
+    await store.close();
+
+    expect(instances).toHaveLength(1);
+    expect(instances[0]).toMatchObject({
+      instance_key: "docker:session:webhook:external-source:main",
+      scope: "session",
+      backend: "docker",
+      status: "ready",
+      session_key: "webhook:external-source:main"
+    });
+    expect(result.toolRuns).toContainEqual(expect.objectContaining({
+      provider_tool_name: "sandbox.exec",
+      resource_refs: expect.arrayContaining([
+        expect.objectContaining({ kind: "gateway_sandbox_instance", id: instances[0]!.id })
+      ])
+    }));
+    expect(result.backendEvents).toContainEqual(expect.objectContaining({
+      event_type: "tool_call_output",
+      payload: expect.objectContaining({
+        action_id: "sandbox.exec",
+        status: "failed",
+        reason: "adapter_failed",
+        sandbox_instance: expect.objectContaining({
+          id: instances[0]!.id,
+          backend: "docker",
+          status: "ready"
+        })
+      })
+    }));
+    expect(recreated.status).toBe("recreated");
+    expect(deleted.status).toBe("deleted");
+  });
+
+  it("records sandbox workspace sync previews and completed local apply results", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const remoteWorkspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-sync-"));
+    roots.push(remoteWorkspaceRoot);
+    await writeFile(path.join(store.rootDir, "sync-source.txt"), "workspace sync source");
+    const sandboxRuntime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/sandbox-sync", () => ({
+        content: "Sandbox sync対象を作りました。",
+        toolCalls: [{
+          name: "sandbox.exec",
+          arguments: {
+            command: process.execPath,
+            args: ["-e", "console.log('not reached')"]
+          }
+        }]
+      }))
+    );
+    const boundary: GatewayBoundaryPolicy = {
+      ...gatewayBoundaryPolicy(["sandbox.exec"]),
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        backend: "ssh",
+        workspace_access: "read_write",
+        network_access: "none",
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
+        denied_paths: [],
+        timeout_ms: 2000,
+        metadata: {
+          remote_workspace_root: remoteWorkspaceRoot,
+          workspace_sync_direction: "seed_to_sandbox",
+          workspace_sync_transport: "local"
+        }
+      }
+    };
+
+    await sandboxRuntime.runChatTurn({
+      sessionId: session.id,
+      content: "sandbox workspace sync",
+      output_locale: "ja",
+      gateway_boundary_policy: boundary
+    });
+    const instances = await store.listGatewaySandboxInstances();
+    const preview = await runtime.syncGatewaySandboxWorkspace(instances[0]!.id, { dryRun: true });
+    const afterPreview = await store.listGatewaySandboxWorkspaceSyncs();
+    const applied = await runtime.syncGatewaySandboxWorkspace(instances[0]!.instance_key, { dryRun: false });
+    const afterApply = await store.listGatewaySandboxWorkspaceSyncs({ instanceKey: instances[0]!.instance_key });
+    const copied = await readFile(path.join(remoteWorkspaceRoot, "sync-source.txt"), "utf8");
+    const deleted = await store.saveGatewaySandboxInstance({
+      ...instances[0]!,
+      status: "deleted",
+      deleted_at: nowIso(),
+      updated_at: nowIso()
+    });
+    await expect(runtime.syncGatewaySandboxWorkspace(deleted.id, { dryRun: false })).rejects.toThrow("gateway_sandbox_instance_deleted");
+    await store.close();
+
+    expect(preview).toMatchObject({
+      dry_run: true,
+      sync: {
+        instance_id: instances[0]!.id,
+        instance_key: instances[0]!.instance_key,
+        direction: "seed_to_sandbox",
+        status: "planned",
+        remote_workspace_root: remoteWorkspaceRoot
+      }
+    });
+    expect(afterPreview).toHaveLength(0);
+    expect(copied).toBe("workspace sync source");
+    expect(applied).toMatchObject({
+      dry_run: false,
+      sync: {
+        instance_id: instances[0]!.id,
+        status: "completed",
+        remote_workspace_root: remoteWorkspaceRoot
+      }
+    });
+    expect(afterApply).toHaveLength(1);
+    expect(afterApply[0]).toMatchObject({
+      id: applied.sync.id,
+      direction: "seed_to_sandbox",
+      status: "completed"
+    });
+  });
+
+  it("marks running backend runs as cancelled", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "キャンセル対象のrun",
+      output_locale: "ja"
+    });
+    await store.updateBackendRun({
+      ...result.backendRun,
+      status: "running",
+      completed_at: undefined,
+      error_code: undefined
+    });
+
+    const cancelled = await runtime.cancelBackendRun(result.backendRun.id);
+    const stored = await store.getBackendRun(result.backendRun.id);
+    await store.close();
+
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.error_code).toBe("backend_cancelled");
+    expect(stored?.status).toBe("cancelled");
+  });
+
+  it("releases gateway concurrency locks when cancelling backend runs", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "Gateway lock付きのcancel対象",
+      output_locale: "ja"
+    });
+    const lockKey = "webhook:cancel-source:main";
+    await store.acquireGatewayConcurrencyLock({
+      lockKey,
+      scope: "session",
+      policyId: "gateway-policy-cancel-test",
+      ownerRef: { kind: "gateway_inbound", id: "cancel-test", uri: "gateway-inbound/cancel-test" },
+      ttlMs: 60_000
+    });
+    await store.updateBackendRun({
+      ...result.backendRun,
+      status: "running",
+      completed_at: undefined,
+      error_code: undefined,
+      metadata: {
+        ...result.backendRun.metadata,
+        gateway_boundary_concurrency_lock_key: lockKey
+      }
+    });
+
+    const cancelled = await runtime.cancelBackendRun(result.backendRun.id);
+    const releasedLock = await store.getGatewayConcurrencyLock(lockKey);
+    const stored = await store.getBackendRun(result.backendRun.id);
+    await store.close();
+
+    expect(cancelled.status).toBe("cancelled");
+    expect(releasedLock).toMatchObject({
+      lock_key: lockKey,
+      status: "released"
+    });
+    expect(stored?.metadata.gateway_concurrency_lock_status).toBe("released");
+    expect(stored?.metadata.gateway_concurrency_lock_released_at).toBe(releasedLock?.released_at);
+  });
+
+  it("leaves settled backend runs unchanged when cancel is requested", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "完了済みrun",
+      output_locale: "ja"
+    });
+
+    const unchanged = await runtime.cancelBackendRun(result.backendRun.id);
+    await store.close();
+
+    expect(unchanged.status).toBe("completed");
+    expect(unchanged.error_code).toBeUndefined();
+  });
+
+  it("records resume attempts through backend lifecycle events", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "resume対象のrun",
+      output_locale: "ja"
+    });
+    await store.updateBackendRun({
+      ...result.backendRun,
+      backend_id: "codex",
+      backend_kind: "codex",
+      status: "waiting_for_backend_input",
+      completed_at: undefined,
+      error_code: undefined
+    });
+
+    const resumed = await runtime.resumeBackendRun(result.backendRun.id, { answer: "続けて" });
+    const events = await store.listBackendEvents({ runId: result.backendRun.id });
+    await store.close();
+
+    expect(resumed.status).toBe("failed");
+    expect(resumed.error_code).toBe("backend_resume_unsupported");
+    expect(events.some((event) =>
+      event.event_type === "backend_native_input_submitted" && event.payload.input
+    )).toBe(true);
+    expect(events.some((event) => event.event_type === "run_failed" && event.payload.error_code === "backend_resume_unsupported")).toBe(true);
+  });
+
+  it("records unsupported resume attempts for backends without resumeRun", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([new MockBackend()]));
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "mock resume対象",
+      output_locale: "ja",
+      backend_id: "mock"
+    });
+    await store.updateBackendRun({
+      ...result.backendRun,
+      status: "waiting_for_backend_input",
+      completed_at: undefined,
+      error_code: undefined
+    });
+
+    const resumed = await runtime.resumeBackendRun(result.backendRun.id, { answer: "続けて" });
+    const events = await store.listBackendEvents({ runId: result.backendRun.id });
+    await store.close();
+
+    expect(resumed.status).toBe("failed");
+    expect(resumed.error_code).toBe("backend_resume_unsupported");
+    expect(events.some((event) => event.event_type === "backend_native_input_submitted")).toBe(true);
+    expect(events.some((event) => event.event_type === "run_failed" && event.payload.backend_id === "mock")).toBe(true);
+  });
+
+  it("resumes backend runs through backend resumeRun when supported", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const resumableBackend: AgentBackend = {
+      id: "resumable",
+      kind: "mock",
+      label: "Resumable Backend",
+      async *runTurn() {
+        yield { event_type: "run_started", payload: { input_summary: "waiting" } };
+        yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
+      },
+      async *resumeRun(_runId, input) {
+        yield { event_type: "text_delta", payload: { text: `Resumed: ${String(input.answer ?? "")}` } };
+        yield { event_type: "run_completed", payload: { output_summary: "Resume completed." } };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([resumableBackend]));
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "resume success target",
+      output_locale: "ja",
+      backend_id: "resumable"
+    });
+
+    const resumed = await runtime.resumeBackendRun(result.backendRun.id, { answer: "続けて" });
+    const events = await store.listBackendEvents({ runId: result.backendRun.id });
+    await store.close();
+
+    expect(result.backendRun.status).toBe("waiting_for_backend_input");
+    expect(resumed).toMatchObject({
+      status: "completed",
+      output_summary: "Resume completed."
+    });
+    expect(resumed.metadata.resume_input).toEqual({ answer: "続けて" });
+    expect(events.some((event) => event.event_type === "backend_native_input_submitted")).toBe(true);
+    expect(events.some((event) => event.event_type === "text_delta" && event.payload.text === "Resumed: 続けて")).toBe(true);
+    expect(events.some((event) => event.event_type === "run_completed")).toBe(true);
+  });
+
+  it("applies gateway allowed-tools decisions to resumed backend tool calls", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const boundary = gatewayBoundaryPolicy([]);
+    const resumableBackend: AgentBackend = {
+      id: "resumable-denied-tool",
+      kind: "mock",
+      label: "Resumable Denied Tool Backend",
+      async *runTurn() {
+        yield { event_type: "run_started", payload: { input_summary: "waiting" } };
+        yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
+      },
+      async *resumeRun() {
+        yield {
+          event_type: "tool_call_started",
+          tool_call_id: "resume_tool_denied",
+          payload: {
+            provider_tool_name: "create_artifact",
+            action_id: "artifact.create",
+            arguments: {
+              title: "Blocked resume artifact",
+              content: "This should not be written."
+            }
+          }
+        };
+        yield { event_type: "run_completed", payload: { output_summary: "Resume completed." } };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([resumableBackend]));
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "resume denied tool target",
+      output_locale: "ja",
+      backend_id: "resumable-denied-tool",
+      gateway_boundary_policy: boundary
+    });
+
+    const resumed = await runtime.resumeBackendRun(result.backendRun.id, { answer: "続けて" });
+    const events = await store.listBackendEvents({ runId: result.backendRun.id });
+    const toolRuns = await store.listToolRuns({ runId: result.backendRun.id });
+    const workspaceChanges = await store.listWorkspaceChanges(session.id);
+    const artifacts = await store.listArtifactsForSession(session.id);
+    await store.close();
+
+    expect(result.backendRun.status).toBe("waiting_for_backend_input");
+    expect(resumed.status).toBe("completed");
+    expect(toolRuns).toContainEqual(expect.objectContaining({
+      tool_call_id: "resume_tool_denied",
+      provider_tool_name: "create_artifact",
+      action_id: "artifact.create",
+      status: "ignored",
+      resource_refs: expect.arrayContaining([
+        expect.objectContaining({ kind: "gateway_boundary_policy", id: boundary.id })
+      ])
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      event_type: "tool_call_output",
+      payload: expect.objectContaining({
+        tool_call_id: "resume_tool_denied",
+        status: "ignored",
+        action_id: "artifact.create",
+        reason: "gateway_boundary_tool_not_allowed",
+        gateway_boundary: expect.objectContaining({
+          decision: "denied",
+          policy_id: boundary.id,
+          allowed_tools: []
+        })
+      })
+    }));
+    expect(workspaceChanges).toContainEqual(expect.objectContaining({
+      change_type: "other",
+      resource_ref: expect.objectContaining({ kind: "gateway_boundary_policy", id: boundary.id })
+    }));
+    expect(artifacts).toHaveLength(0);
+  });
+
+  it("routes resumed provider tool events by action_id into runtime executors", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const boundary: GatewayBoundaryPolicy = {
+      ...gatewayBoundaryPolicy(["sandbox.exec"]),
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        backend: "none",
+        workspace_access: "none",
+        network_access: "none",
+        allowed_paths: [],
+        denied_paths: [],
+        timeout_ms: 2000,
+        metadata: {}
+      }
+    };
+    const resumableBackend: AgentBackend = {
+      id: "resumable-sandbox-tool",
+      kind: "mock",
+      label: "Resumable Sandbox Tool Backend",
+      async *runTurn() {
+        yield { event_type: "run_started", payload: { input_summary: "waiting" } };
+        yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
+      },
+      async *resumeRun() {
+        yield {
+          event_type: "tool_call_started",
+          tool_call_id: "resume_exec",
+          payload: {
+            provider_tool_name: "exec_command",
+            action_id: "sandbox.exec",
+            input: {
+              command: process.execPath,
+              args: ["-e", "process.stdout.write('resume sandbox ok')"]
+            }
+          }
+        };
+        yield { event_type: "run_completed", payload: { output_summary: "Resume sandbox completed." } };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([resumableBackend]));
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "resume sandbox tool target",
+      output_locale: "ja",
+      backend_id: "resumable-sandbox-tool",
+      gateway_boundary_policy: boundary
+    });
+
+    const resumed = await runtime.resumeBackendRun(result.backendRun.id, { answer: "続けて" });
+    const events = await store.listBackendEvents({ runId: result.backendRun.id });
+    const operations = await store.listOperations(session.id);
+    const toolRuns = await store.listToolRuns({ runId: result.backendRun.id });
+    await store.close();
+
+    expect(resumed).toMatchObject({
+      status: "completed",
+      output_summary: "Resume sandbox completed."
+    });
+    expect(operations).toContainEqual(expect.objectContaining({
+      operation: "sandbox.exec",
+      status: "completed",
+      result_ref: expect.objectContaining({ kind: "gateway_sandbox_execution" })
+    }));
+    expect(toolRuns).toContainEqual(expect.objectContaining({
+      tool_call_id: "resume_exec",
+      provider_tool_name: "sandbox.exec",
+      action_id: "sandbox.exec",
+      status: "completed",
+      resource_refs: expect.arrayContaining([
+        expect.objectContaining({ kind: "gateway_boundary_policy", id: boundary.id })
+      ])
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      event_type: "tool_call_output",
+      payload: expect.objectContaining({
+        tool_call_id: "resume_exec",
+        status: "completed",
+        action_id: "sandbox.exec",
+        stdout: "resume sandbox ok",
+        gateway_boundary: expect.objectContaining({
+          decision: "allowed",
+          action_id: "sandbox.exec",
+          policy_id: boundary.id
+        })
+      })
+    }));
+  });
+
+  it("syncs backend streamEvents into persisted backend events", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const streamBackend: AgentBackend = {
+      id: "streamable",
+      kind: "mock",
+      label: "Streamable Backend",
+      async *runTurn() {
+        yield { event_type: "run_started", payload: { input_summary: "streamable" } };
+      },
+      async *streamEvents() {
+        yield { event_type: "run_started", payload: { input_summary: "streamable" } };
+        yield { event_type: "text_delta", payload: { text: "stream text" } };
+        yield { event_type: "run_completed", payload: { output_summary: "stream completed" } };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([streamBackend]));
+    const session = await runtime.createSession();
+    const now = nowIso();
+    const message = await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "user",
+      content: "stream sync target",
+      input_locale: "ja",
+      output_locale: "ja",
+      created_at: now
+    });
+    await store.saveBackendRun({
+      id: "run_stream_sync",
+      session_id: session.id,
+      input_message_id: message.id,
+      backend_id: "streamable",
+      backend_kind: "mock",
+      status: "running",
+      started_at: now,
+      input_summary: "stream sync target",
+      metadata: {}
+    });
+
+    const synced = await runtime.syncBackendStream("run_stream_sync", { timeoutMs: 1_000 });
+    const events = await store.listBackendEvents({ runId: "run_stream_sync" });
+    await store.close();
+
+    expect(synced.status).toBe("synced");
+    expect(synced.run).toMatchObject({ status: "completed", output_summary: "stream completed" });
+    expect(events.map((event) => event.event_type)).toEqual([
+      "run_started",
+      "text_delta",
+      "run_completed",
+      "backend_stream_synced"
+    ]);
+  });
+
+  it("records backend stream unsupported as a diagnostic event", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([new MockBackend()]));
+    const session = await runtime.createSession();
+    const now = nowIso();
+    const message = await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "user",
+      content: "unsupported stream target",
+      input_locale: "ja",
+      output_locale: "ja",
+      created_at: now
+    });
+    await store.saveBackendRun({
+      id: "run_stream_unsupported",
+      session_id: session.id,
+      input_message_id: message.id,
+      backend_id: "mock",
+      backend_kind: "mock",
+      status: "running",
+      started_at: now,
+      input_summary: "unsupported stream target",
+      metadata: {}
+    });
+
+    const synced = await runtime.syncBackendStream("run_stream_unsupported");
+    const stored = await store.getBackendRun("run_stream_unsupported");
+    const events = await store.listBackendEvents({ runId: "run_stream_unsupported" });
+    await store.close();
+
+    expect(synced.status).toBe("unsupported");
+    expect(stored?.status).toBe("running");
+    expect(events).toContainEqual(expect.objectContaining({
+      event_type: "backend_stream_unavailable",
+      payload: expect.objectContaining({
+        reason: "stream_events_unsupported",
+        supports_stream_events: false
+      })
+    }));
+  });
+
+  it("normalizes backend event payloads and resource refs before persistence", async () => {
+    const noisyBackend: AgentBackend = {
+      id: "noisy",
+      kind: "mock",
+      label: "Noisy Fixture Backend",
+      async *runTurn() {
+        yield {
+          event_type: "text_delta",
+          payload: { text: "hello", non_json: undefined } as never,
+          resource_refs: [
+            { kind: "artifact", id: "artifact_ok", uri: "artifacts/artifact_ok.md" },
+            { kind: "artifact", uri: "missing-id" } as never
+          ]
+        };
+        yield {
+          event_type: "tool_call_output",
+          payload: {
+            tool_call_id: "tool_1",
+            provider_tool_name: "shell.exec",
+            stdout: "x".repeat(4100),
+            token: "secret-token"
+          }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "done" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const emittedBackendEvents: BackendEventRecord[] = [];
+    const runtime = new AgentRuntime(store, (name, payload) => {
+      if (name === "backend.event.created") {
+        emittedBackendEvents.push(payload as BackendEventRecord);
+      }
+    }, undefined, new AgentBackendRegistry([noisyBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "fixture",
+      backend_id: "noisy"
+    });
+    const event = result.backendEvents.find((item) => item.event_type === "text_delta")!;
+    const toolOutput = result.backendEvents.find((item) => item.event_type === "tool_call_output")!;
+    const emittedToolOutput = emittedBackendEvents.find((item) => item.event_type === "tool_call_output")!;
+    await store.close();
+
+    expect(event.payload.non_json).toBeNull();
+    expect(event.resource_refs).toEqual([{ kind: "artifact", id: "artifact_ok", uri: "artifacts/artifact_ok.md" }]);
+    expect(toolOutput.payload).toMatchObject({
+      stdout: "x".repeat(4100),
+      token: "secret-token"
+    });
+    expect(emittedToolOutput.payload).toMatchObject({
+      tool_call_id: "tool_1",
+      provider_tool_name: "shell.exec",
+      summary: `${"x".repeat(4000)}...[truncated]`
+    });
+    expect(emittedToolOutput.payload).not.toHaveProperty("token");
   });
 
   it("runs chat through backend run events and artifact workspace change", async () => {
@@ -133,6 +1865,25 @@ describe("agent runtime", () => {
     expect(result.reflectionSuggestions.some((suggestion) => suggestion.suggestion_type === "knowledge_wiki")).toBe(true);
     expect(result.policyDecisions).toEqual([]);
     expect(result.auditRecords).toEqual([]);
+  });
+
+  it("includes transcript and artifact content in post-run reflection proposals", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "調査メモを作って",
+      output_locale: "ja"
+    });
+    await store.close();
+
+    const wikiSuggestion = result.reflectionSuggestions.find((suggestion) => suggestion.suggestion_type === "knowledge_wiki");
+    expect(wikiSuggestion?.content).toContain("Transcript excerpt");
+    expect(wikiSuggestion?.content).toContain("Artifact context");
+    expect(wikiSuggestion?.content).toContain("# 作業メモ");
+    expect(wikiSuggestion?.content).toContain("Backend events");
+    expect(wikiSuggestion?.source_refs.some((ref) => ref.kind === "artifact")).toBe(true);
+    expect(wikiSuggestion?.source_refs.some((ref) => ref.kind === "backend_event")).toBe(true);
   });
 
   it("ignores malformed artifact tool calls without failing the chat turn", async () => {
@@ -163,7 +1914,11 @@ describe("agent runtime", () => {
     expect(result.artifacts.length).toBeGreaterThan(0);
     expect(result.approvalRequests).toEqual([]);
     expect(result.operations.some((operation) => operation.status === "pending_approval")).toBe(false);
-    expect(result.backendEvents.some((event) => event.event_type === "tool_call_output" && event.payload.status === "ignored")).toBe(true);
+    expect(result.backendEvents.some((event) =>
+      event.event_type === "tool_call_output"
+      && event.payload.status === "completed"
+      && event.payload.action_id === "external.send.prepare"
+    )).toBe(true);
   });
 
   it("archives session memory with audit activity and rollback", async () => {
@@ -251,7 +2006,10 @@ describe("agent runtime", () => {
 
   it("saves collection schema, record, and patch through policy audit rollback", async () => {
     const { store, runtime } = await createRuntime();
-    const schema = collectionSchema("contacts");
+    const schema = {
+      ...collectionSchema("contacts"),
+      actions: [{ id: "rename", kind: "patch_record", changes: { name: "Action Name" } }]
+    };
     const now = new Date().toISOString();
 
     const savedSchema = await runtime.saveCollectionSchema(schema);
@@ -274,6 +2032,11 @@ describe("agent runtime", () => {
         created_at: new Date().toISOString()
       }
     });
+    const action = await runtime.runCollectionAction({
+      collectionId: "contacts",
+      actionId: "rename",
+      recordId: "record_1"
+    });
     await expect(
       runtime.createCollectionRecord({
         id: "record_bad",
@@ -292,13 +2055,268 @@ describe("agent runtime", () => {
     expect(patched.before.data.name).toBe("Takuma");
     expect(patched.resource.data.name).toBe("Samurai");
     expect(patched.rollbackPoint).toBeDefined();
+    expect(action.operation.operation).toBe("collection.action.run");
+    expect(action.resource.data.name).toBe("Action Name");
+  });
+
+  it("runs collection plugin actions through the plugin runtime registry", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const pluginRegistry = new PluginRuntimeRegistry({
+      manifests: [{
+        id: "contacts-plugin",
+        name: "Contacts Plugin",
+        version: "1",
+        kind: "ui",
+        actions: [],
+        renderers: [{
+          id: "contacts.renderer.card",
+          kind: "custom_view",
+          renderer: "contacts.card",
+          version: "1",
+          title: "Contact card",
+          description: "Render a contact card.",
+          props_schema: { type: "object" },
+          fallback_kind: "collection_record",
+          category: "collection"
+        }],
+        resource_kinds: ["collection_record"],
+        metadata: {}
+      }],
+      actions: [{
+        id: "contacts.enrich",
+        title: "Enrich contact",
+        display_name: "Enrich contact",
+        description: "Enrich a contact through a plugin handler.",
+        input_schema: { type: "object" },
+        output_schema: { type: "object" },
+        resource_kinds: ["collection_action"],
+        handler_id: "plugin.contacts.enrich",
+        implementation_target: "plugin",
+        ui_display_category: "collection"
+      }]
+    });
+    pluginRegistry.registerHandler("plugin.contacts.enrich", async ({ input }) => ({
+      status: "completed",
+      output: {
+        received_record_id: input.record_id ?? null,
+        source: "plugin"
+      }
+    }));
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", fakeProviderOutput), undefined, pluginRegistry);
+    await runtime.saveCollectionSchema({
+      ...collectionSchema("contacts"),
+      actions: [{
+        id: "enrich",
+        kind: "plugin_action",
+        action_catalog_id: "contacts.enrich",
+        implementation_target: "plugin"
+      }]
+    });
+
+    const actions = await runtime.listCollectionActions("contacts");
+    const renderers = runtime.listSurfaceRenderers();
+    const result = await runtime.runCollectionAction({
+      collectionId: "contacts",
+      actionId: "enrich",
+      recordId: "record_plugin",
+      payload: { source: "test" }
+    });
+    await store.close();
+
+    expect(actions).toContainEqual(expect.objectContaining({
+      collection_id: "contacts",
+      action_id: "enrich",
+      catalog_action_id: "contacts.enrich",
+      availability: "available"
+    }));
+    expect(renderers).toContainEqual(expect.objectContaining({
+      id: "contacts.renderer.card",
+      kind: "custom_view",
+      renderer: "contacts.card"
+    }));
+    expect(result.operation.operation).toBe("collection.action.run");
+    expect(result.resource).toMatchObject({
+      collection_id: "contacts",
+      action_id: "enrich",
+      catalog_action_id: "contacts.enrich",
+      status: "completed",
+      output: {
+        received_record_id: "record_plugin",
+        source: "plugin"
+      }
+    });
+  });
+
+  it("returns collection record render specs with record data for refs and embeds", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = nowIso();
+    await runtime.saveCollectionSchema({
+      ...collectionSchema("contacts"),
+      fields: [
+        { id: "name", type: "string" },
+        { id: "manager_id", type: "string" }
+      ],
+      refs: [{ id: "manager_id", field: "manager_id", collection_id: "contacts" }],
+      embeds: [{ id: "profile", field: "profile", required: true }]
+    });
+    await runtime.createCollectionRecord({
+      id: "manager",
+      collection_id: "contacts",
+      data: { name: "Manager", profile: { role: "lead" } },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_collection_record",
+      kind: "collection.record.create",
+      collection_id: "contacts",
+      record_id: "record_surface",
+      data: { name: "Takuma", manager_id: "manager", profile: { role: "owner" } },
+      output_locale: "ja"
+    });
+    await store.close();
+
+    expect(result.render_spec.kind).toBe("collection_record");
+    expect(result.render_spec.props).toMatchObject({
+      collection_id: "contacts",
+      record_id: "record_surface",
+      data: {
+        name: "Takuma",
+        manager_id: "manager",
+        profile: { role: "owner" }
+      },
+      record_resource_refs: [],
+      resolved_refs: [
+        expect.objectContaining({
+          ref_id: "manager_id",
+          field: "manager_id",
+          target_collection_id: "contacts",
+          target_record_id: "manager",
+          record: expect.objectContaining({
+            id: "manager",
+            data: { name: "Manager", profile: { role: "lead" } }
+          })
+        })
+      ],
+      missing_refs: [],
+      embed_fields: [{
+        embed_id: "profile",
+        field: "profile",
+        value: { role: "owner" }
+      }]
+    });
+  });
+
+  it("runs collection trigger effects through schema actions as one-shot automation jobs", async () => {
+    const { store, runtime } = await createRuntime();
+    const schema = {
+      ...collectionSchema("contacts"),
+      triggers: [{ id: "normalize", event: "record.created", action_id: "normalize_contact", kind: "patch_record" }],
+      actions: [{ id: "normalize_contact", kind: "patch_record", changes: { name: "Normalized" } }]
+    };
+    const now = new Date().toISOString();
+
+    await runtime.saveCollectionSchema(schema);
+    await runtime.createCollectionRecord({
+      id: "record_trigger",
+      collection_id: "contacts",
+      data: { name: "Takuma" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    const queuedJobs = await store.listAutomationJobs({ enabledOnly: true });
+    const triggerJob = queuedJobs.find((job) => job.delivery_target.trigger_id === "normalize");
+    const runs = await runtime.runDueAutomationJobs(new Date(Date.now() + 1000).toISOString());
+    const refreshedJob = triggerJob ? await store.getAutomationJob(triggerJob.id) : undefined;
+    const triggerStates = await store.listCollectionTriggerStates("contacts");
+    const record = await store.getCollectionRecord("contacts", "record_trigger");
+    const operations = await store.listOperations();
+    await store.close();
+
+    expect(triggerJob).toMatchObject({
+      kind: "custom_instruction",
+      schedule: "once",
+      delivery_target: {
+        channel: "collection_trigger",
+        collection_id: "contacts",
+        record_id: "record_trigger",
+        action_id: "normalize_contact"
+      }
+    });
+    expect(runs.some((run) => run.automationRun.kind === "custom_instruction")).toBe(true);
+    expect(record?.data.name).toBe("Normalized");
+    expect(operations.some((operation) => operation.operation === "collection.action.run")).toBe(true);
+    expect(refreshedJob?.status).toBe("disabled");
+    expect(triggerStates).toContainEqual(expect.objectContaining({
+      collection_id: "contacts",
+      trigger_id: "normalize",
+      action_id: "normalize_contact",
+      action_exists: true,
+      status: "completed",
+      pending_job_count: 0,
+      last_job: expect.objectContaining({
+        status: "disabled",
+        failure_count: 0
+      })
+    }));
+  });
+
+  it("adds collection notes to context only without relaxing schema validation", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = new Date().toISOString();
+    await runtime.saveCollectionSchema(collectionSchema("contacts"));
+    await mkdir(path.join(store.rootDir, "collections", "contacts", "notes"), { recursive: true });
+    await writeFile(
+      path.join(store.rootDir, "collections", "contacts", "notes", "README.md"),
+      "nickname is a context hint, not a schema field"
+    );
+    const session = await runtime.createSession();
+
+    const context = await runtime.previewContext({
+      sessionId: session.id,
+      query: "contacts nickname"
+    });
+    const notes = await store.listCollectionNotes("contacts");
+    await expect(runtime.createCollectionRecord({
+      id: "record_notes",
+      collection_id: "contacts",
+      data: { name: "Takuma", nickname: "T" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_unknown_field");
+    await store.close();
+
+    expect(context.collection_notes).toMatchObject([{
+      collection_id: "contacts",
+      file_path: path.join("collections", "contacts", "notes", "README.md"),
+      role: "context_only"
+    }]);
+    expect(context.collection_notes[0]?.content).toContain("context hint");
+    expect(notes).toMatchObject([{
+      collection_id: "contacts",
+      file_path: path.join("collections", "contacts", "notes", "README.md"),
+      role: "context_only"
+    }]);
   });
 
   it("records cron memory review with scheduled context and automation input ref", async () => {
     const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "今後は短く覚えておける形で答えて",
+      output_locale: "ja"
+    });
 
     const result = await runtime.runMemoryReviewAutomation();
     const savedRun = await store.getAutomationRun(result.automationRun.id);
+    const reflectionRuns = await store.listReflectionRuns();
     await store.close();
 
     expect(result.automationRun.status).toBe("completed");
@@ -313,7 +2331,12 @@ describe("agent runtime", () => {
       kind: "automation_run",
       uri: `automation-runs/${result.automationRun.id}`
     });
+    expect(result.memoryReviewTrace?.reflectionRun.kind).toBe("scheduled");
+    expect(result.memoryReviewTrace?.suggestions.some((suggestion) => suggestion.suggestion_type === "memory")).toBe(true);
+    expect(result.auditRecord.outputs_summary).toContain("read recent transcript/events");
+    expect(result.auditRecord.outputs_summary).toContain("deterministic curator");
     expect(result.auditRecord.actor_identity).toBe("owner_scheduled");
+    expect(reflectionRuns.some((run) => run.kind === "curator")).toBe(true);
   });
 
   it("ignores unknown and invalid tool calls without external effects", async () => {
@@ -358,7 +2381,13 @@ describe("agent runtime", () => {
     const wiki = await runtime.createWikiProposal({
       title: "設計方針",
       content: "# 設計方針\n\nWorkspaceを正本にする。",
-      content_locale: "ja"
+      content_locale: "ja",
+      source_refs: [{
+        kind: "memory",
+        id: memory.id,
+        uri: `memory/${memory.id}`,
+        label: memory.topic
+      }]
     });
     await runtime.acceptWikiPage(wiki.resource.id);
     await store.saveSkillMarkdown({
@@ -369,20 +2398,696 @@ describe("agent runtime", () => {
         state: "project",
         title: "設計メモ手順",
         description: "設計メモを短く整える",
-        createdAt: now
+        createdAt: now,
+        required_capabilities: ["artifact.create"]
       })
+    });
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_missing_capability",
+      markdown: skillMarkdown({
+        id: "skill_missing_capability",
+        state: "project",
+        title: "設計メモ未来手順",
+        description: "設計メモを未来の未対応capabilityで処理する",
+        createdAt: now,
+        required_capabilities: ["future.unavailable"]
+      })
+    });
+    await runtime.saveSkillSupportFile({
+      skillId: "skill_context_test",
+      path: "references/style.md",
+      content: "補助資料: 箇条書きを優先する。"
+    });
+    await store.recordSkillUsage({
+      skillId: "skill_context_test",
+      runId: "run_context_usage",
+      usedAt: now
     });
 
     const context = await runtime.previewContext({
       sessionId: session.id,
       query: "設計メモ"
     });
+    const contextWithSupport = await runtime.previewContext({
+      sessionId: session.id,
+      query: "設計メモ references"
+    });
     await store.close();
 
     expect(context.active_memory.some((item) => item.id === memory.id && item.content.includes("設計メモ"))).toBe(true);
     expect(context.knowledge_wiki.some((item) => item.title === "設計方針" && item.content.includes("Workspace"))).toBe(true);
-    expect(context.selected_skills.some((item) => item.id === "skill_context_test")).toBe(true);
+    expect(context.knowledge_wiki.some((item) => item.source_refs.some((ref) => ref.id === memory.id))).toBe(true);
+    expect(context.knowledge_wiki.find((item) => item.title === "設計方針")?.provenance).toMatchObject({
+      kind: "user_authored",
+      verified: true
+    });
+    const selectedSkill = context.selected_skills.find((item) => item.id === "skill_context_test");
+    const selectedSkillWithSupport = contextWithSupport.selected_skills.find((item) => item.id === "skill_context_test");
+    expect(context.selected_skills.map((item) => item.id)).not.toContain("skill_missing_capability");
+    expect(context.skill_selection_report).toMatchObject({
+      selected_skill_ids: expect.arrayContaining(["skill_context_test"])
+    });
+    expect(context.skill_selection_report.excluded).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "skill_missing_capability",
+        reason: "missing_capability",
+        missing_capabilities: ["future.unavailable"]
+      })
+    ]));
+    expect(selectedSkill).toMatchObject({
+      disclosure_level: "body",
+      allowed_scopes: ["workspace"],
+      required_capabilities: ["artifact.create"],
+      selection: expect.objectContaining({
+        matched_capabilities: ["artifact.create"],
+        missing_capabilities: [],
+        unsupported_scopes: []
+      }),
+      usage: { use_count: 1, last_used_at: now },
+      support_file_refs: [expect.objectContaining({ path: "references/style.md" })]
+    });
+    expect(selectedSkill?.support_file_refs?.[0]?.file_path).toContain("skills/support/skill_context_test/references/style.md");
+    expect(selectedSkill?.content).toContain("Keep the note short.");
+    expect(selectedSkill?.support_files).toBeUndefined();
+    expect(selectedSkillWithSupport).toMatchObject({
+      disclosure_level: "support",
+      support_files: [expect.objectContaining({ path: "references/style.md", content: "補助資料: 箇条書きを優先する。" })]
+    });
+    expect(selectedSkillWithSupport?.support_files?.[0]?.file_path).toContain("skills/support/skill_context_test/references/style.md");
+    expect(context.session_summary).toMatchObject({
+      session_key: "web:owner:main",
+      message_count: expect.any(Number),
+      operation_count: expect.any(Number),
+      backend_run_count: expect.any(Number),
+      tool_run_count: expect.any(Number),
+      workspace_change_count: expect.any(Number)
+    });
+    expect(context.session_summary.message_count).toBeGreaterThanOrEqual(2);
+    expect(context.session_summary.backend_run_count).toBeGreaterThanOrEqual(1);
+    expect(context.external_assist).toMatchObject({
+      role: "assistive",
+      isolated_from_memory: true,
+      included_in_active_memory: false
+    });
     expect(context.available_tools).toContain("wiki.proposal.create");
+    expect(context.context_assembly.sources).toContainEqual(expect.objectContaining({
+      kind: "active_memory",
+      status: expect.any(String),
+      included_count: expect.any(Number)
+    }));
+    expect(context.context_assembly.sources).toContainEqual(expect.objectContaining({
+      kind: "knowledge_wiki",
+      included_count: expect.any(Number)
+    }));
+    expect(context.context_assembly.quality_checks).toContainEqual(expect.objectContaining({
+      id: "external_assist_isolated",
+      status: "pass"
+    }));
+    expect(context.freeze_snapshot?.soul.file_ref.uri).toBe(path.join("profile", "SOUL.md"));
+    expect(context.freeze_snapshot?.content).toContain("SOUL.md");
+    expect(context.freeze_snapshot?.memory_refs.some((ref) => ref.id === memory.id)).toBe(true);
+    expect(context.freeze_snapshot?.wiki_refs.some((ref) => ref.id === wiki.resource.id)).toBe(true);
+  });
+
+  it("passes host context assembly into native provider input and run metadata", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    let providerInput: ProviderInput | undefined;
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", (input) => {
+      providerInput = input;
+      return { content: "context ok", toolCalls: [] };
+    }));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "context assembly check",
+      output_locale: "ja"
+    });
+    await store.close();
+
+    expect(providerInput?.contextAssembly?.session_id).toBe(session.id);
+    expect(providerInput?.contextAssembly?.sources).toContainEqual(expect.objectContaining({
+      kind: "recent_messages",
+      included_count: expect.any(Number)
+    }));
+    expect(providerInput?.contextAssembly?.sources).toContainEqual(expect.objectContaining({
+      kind: "available_tools",
+      status: "included"
+    }));
+    expect(result.backendRun.metadata.context_assembly_sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "recent_messages" }),
+      expect.objectContaining({ kind: "available_tools" })
+    ]));
+  });
+
+  it("passes real Memory Wiki and Skill context into native provider input and run metadata", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    let providerInput: ProviderInput | undefined;
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", (input) => {
+      providerInput = input;
+      return { content: "real context ok", toolCalls: [] };
+    }));
+    const session = await runtime.createSession();
+    const now = new Date().toISOString();
+    await store.saveMemory(
+      memoryFrontmatter({
+        id: "memory_context_bridge",
+        state: "topic",
+        topic: "設計メモ preference"
+      }),
+      "設計メモは短く、Workspaceの正本に沿って書く。"
+    );
+    const wiki = await runtime.createWikiProposal({
+      title: "設計メモの根拠",
+      content: "# 設計メモの根拠\n\ncontext bridge needleはWorkspace正本から使う。",
+      content_locale: "ja",
+      source_refs: [{
+        kind: "memory",
+        id: "memory_context_bridge",
+        uri: "memory/memory_context_bridge",
+        label: "設計メモ preference"
+      }]
+    });
+    await runtime.acceptWikiPage(wiki.resource.id);
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_context_bridge",
+      markdown: skillMarkdown({
+        id: "skill_context_bridge",
+        state: "project",
+        title: "設計メモ bridge",
+        description: "設計メモ references を使って短くまとめる",
+        createdAt: now,
+        required_capabilities: ["artifact.create"]
+      })
+    });
+    await runtime.saveSkillSupportFile({
+      skillId: "skill_context_bridge",
+      path: "references/style.md",
+      content: "補助資料: provider inputへ渡る実データcontext。"
+    });
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "設計メモ references context bridge needle を使って短いメモを作って",
+      output_locale: "ja"
+    });
+    const usage = await store.listSkillUsage();
+    await store.close();
+
+    expect(providerInput?.activeMemory).toContainEqual(expect.objectContaining({
+      content: expect.stringContaining("設計メモは短く"),
+      frontmatter: expect.objectContaining({ id: "memory_context_bridge", state: "topic" })
+    }));
+    expect(providerInput?.knowledgeWiki).toContainEqual(expect.objectContaining({
+      id: wiki.resource.id,
+      title: "設計メモの根拠",
+      content: expect.stringContaining("context bridge needle")
+    }));
+    const selectedSkill = providerInput?.selectedSkills.find((skill) => skill.id === "skill_context_bridge");
+    expect(selectedSkill).toMatchObject({
+      disclosure_level: "support",
+      required_capabilities: ["artifact.create"],
+      selection: expect.objectContaining({
+        matched_capabilities: ["artifact.create"],
+        missing_capabilities: []
+      }),
+      support_files: [expect.objectContaining({
+        path: "references/style.md",
+        content: "補助資料: provider inputへ渡る実データcontext。"
+      })]
+    });
+    const sources = providerInput?.contextAssembly?.sources ?? [];
+    expect(sources.find((source) => source.kind === "active_memory")?.included_count).toBeGreaterThanOrEqual(1);
+    expect(sources.find((source) => source.kind === "knowledge_wiki")?.included_count).toBeGreaterThanOrEqual(1);
+    expect(sources.find((source) => source.kind === "selected_skills")?.included_count).toBeGreaterThanOrEqual(1);
+    const metadataSources = result.backendRun.metadata.context_assembly_sources as Array<{ kind: string; included_count: number }>;
+    expect(metadataSources.find((source) => source.kind === "active_memory")?.included_count).toBeGreaterThanOrEqual(1);
+    expect(metadataSources.find((source) => source.kind === "knowledge_wiki")?.included_count).toBeGreaterThanOrEqual(1);
+    expect(metadataSources.find((source) => source.kind === "selected_skills")?.included_count).toBeGreaterThanOrEqual(1);
+    expect(result.backendRun.metadata.context_assembly_quality_warnings).toEqual([]);
+    expect(result.backendRun.metadata.freeze_snapshot_hash).toEqual(expect.any(String));
+    expect(usage.some((row) => row.skill_id === "skill_context_bridge" && row.use_count > 0)).toBe(true);
+  });
+
+  it("isolates external assist failures and records sync diagnostics", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    let prefetchCount = 0;
+    const externalAssist: ExternalAssistProvider = {
+      id: "test-external",
+      async prefetch() {
+        prefetchCount += 1;
+        if (prefetchCount === 1) {
+          throw new Error("prefetch unavailable");
+        }
+        return [{
+          id: "hint_external",
+          title: "External hint",
+          summary: "Keep this separate from accepted Memory.",
+          source_uri: "external://hint"
+        }];
+      },
+      async syncTurn() {
+        return [{
+          id: "hint_sync",
+          summary: "Synced turn for next retrieval.",
+          source_uri: "external://sync"
+        }];
+      }
+    };
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/test", { content: "ok", toolCalls: [] }),
+      undefined,
+      undefined,
+      externalAssist
+    );
+    const session = await runtime.createSession();
+
+    const firstContext = await runtime.previewContext({
+      sessionId: session.id,
+      query: "external assist"
+    });
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "external assistを分けて",
+      output_locale: "ja"
+    });
+    const secondContext = await runtime.previewContext({
+      sessionId: session.id,
+      query: "external assist"
+    });
+    const records = await store.listExternalAssistRecords({ sessionId: session.id });
+    const memory = await store.listMemory();
+    await store.close();
+
+    expect(firstContext.external_assist.hints).toEqual([]);
+    expect(firstContext.external_assist.recent_failures).toContainEqual(expect.objectContaining({
+      phase: "prefetch",
+      status: "failed",
+      error: "prefetch unavailable",
+      included_in_active_memory: false
+    }));
+    expect(result.backendRun.metadata.external_assist_sync_status).toBe("completed");
+    expect(secondContext.external_assist.hints).toContainEqual(expect.objectContaining({
+      id: "hint_external",
+      summary: "Keep this separate from accepted Memory."
+    }));
+    expect(secondContext.context_assembly.sources).toContainEqual(expect.objectContaining({
+      kind: "external_assist",
+      status: "included"
+    }));
+    expect(records.some((record) => record.phase === "sync" && record.status === "completed")).toBe(true);
+    expect(memory.some((item) => item.source_kind === "external_provider")).toBe(false);
+  });
+
+  it("keeps only active Knowledge Wiki pages in backend context through lifecycle operations", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const activeProposal = await runtime.createWikiProposal({
+      title: "Active Wiki",
+      content: "# Active Wiki\n\nactive-only needle",
+      content_locale: "ja",
+      source_refs: [{
+        kind: "memory",
+        id: "memory_source",
+        uri: "memory/topic/memory_source.md",
+        label: "Memory source"
+      }]
+    });
+    const rejectedProposal = await runtime.createWikiProposal({
+      title: "Rejected Wiki",
+      content: "# Rejected Wiki\n\nactive-only needle",
+      content_locale: "ja"
+    });
+    const archivedProposal = await runtime.createWikiProposal({
+      title: "Archived Wiki",
+      content: "# Archived Wiki\n\nactive-only needle",
+      content_locale: "ja"
+    });
+
+    await runtime.acceptWikiPage(activeProposal.resource.id);
+    await runtime.patchWikiPage({
+      id: activeProposal.resource.id,
+      content: "# Active Wiki\n\nactive-only needle patched"
+    });
+    await runtime.rejectWikiPage(rejectedProposal.resource.id);
+    await runtime.archiveWikiPage(archivedProposal.resource.id);
+
+    const context = await runtime.previewContext({
+      sessionId: session.id,
+      query: "active-only needle"
+    });
+    const preview = await runtime.previewKnowledgeWiki({ query: "active-only needle" });
+    const allWiki = await store.listWiki({ activeOnly: false });
+    const operations = await store.listOperations();
+    const auditRecords = await store.listAuditRecords();
+    await store.close();
+
+    expect(allWiki.map((wiki) => ({ id: wiki.id, state: wiki.state }))).toEqual(expect.arrayContaining([
+      { id: activeProposal.resource.id, state: "active" },
+      { id: rejectedProposal.resource.id, state: "rejected" },
+      { id: archivedProposal.resource.id, state: "archived" }
+    ]));
+    expect(context.knowledge_wiki.map((wiki) => wiki.id)).toContain(activeProposal.resource.id);
+    expect(context.knowledge_wiki.map((wiki) => wiki.id)).not.toContain(rejectedProposal.resource.id);
+    expect(context.knowledge_wiki.map((wiki) => wiki.id)).not.toContain(archivedProposal.resource.id);
+    expect(context.knowledge_wiki.find((wiki) => wiki.id === activeProposal.resource.id)?.content).toContain("patched");
+    expect(context.knowledge_wiki.find((wiki) => wiki.id === activeProposal.resource.id)?.provenance).toMatchObject({
+      kind: "user_authored",
+      verified: true
+    });
+    expect(context.knowledge_wiki_report.excluded).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: rejectedProposal.resource.id, reason: "rejected" }),
+      expect.objectContaining({ id: archivedProposal.resource.id, reason: "archived" })
+    ]));
+    expect(preview.graph.nodes).toContainEqual(expect.objectContaining({
+      id: activeProposal.resource.id,
+      source_ref_count: 1
+    }));
+    expect(preview.graph.edges).toContainEqual(expect.objectContaining({
+      from_wiki_id: activeProposal.resource.id,
+      relation: "source_ref"
+    }));
+    expect(operations.map((operation) => operation.operation)).toEqual(expect.arrayContaining([
+      "wiki.proposal.create",
+      "wiki.accept",
+      "wiki.patch",
+      "wiki.reject",
+      "wiki.archive"
+    ]));
+    expect(auditRecords.some((audit) => audit.affected_resources.some((ref) => ref.id === activeProposal.resource.id))).toBe(true);
+  });
+
+  it("suggests Skill candidates from repeated tool execution traces", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "定例作業を実行して",
+      output_locale: "ja"
+    });
+    const now = nowIso();
+    for (let index = 0; index < 5; index += 1) {
+      await store.saveToolRun({
+        id: `tool_trace_${index}`,
+        run_id: result.backendRun.id,
+        session_id: session.id,
+        tool_call_id: `tool_call_${index}`,
+        provider_tool_name: index % 2 === 0 ? "file.read" : "browser.extract",
+        action_id: index % 2 === 0 ? "file.read" : "browser.extract",
+        status: index === 3 ? "ignored" : "completed",
+        input_summary: `input ${index}`,
+        output_summary: index === 3 ? "gateway_boundary_tool_not_allowed" : `output ${index}`,
+        resource_refs: [],
+        created_at: now
+      });
+    }
+
+    const reflection = await runtime.runReflection({ sessionId: session.id, sourceRunId: result.backendRun.id });
+    await store.close();
+
+    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
+    expect(skillSuggestion).toMatchObject({
+      title: "Skill candidate from execution trace",
+      confidence: 0.7
+    });
+    expect(skillSuggestion?.content).toContain("Observed tool sequence");
+    expect(skillSuggestion?.content).toContain("Reusable signals");
+    expect(skillSuggestion?.content).toContain("file.read: 3 time(s)");
+    expect(skillSuggestion?.content).toContain("Recovery notes");
+    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "tool_run")).toBe(true);
+  });
+
+  it("suggests Skill candidates from user correction signals", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const now = nowIso();
+    await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "user",
+      content: "次からこの作業は保存前に差分確認して。さっきの手順を修正して",
+      input_locale: "ja",
+      output_locale: "ja",
+      created_at: now
+    });
+    await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: "了解、次回から差分確認を先に入れます。",
+      input_locale: "ja",
+      output_locale: "ja",
+      created_at: now
+    });
+
+    const reflection = await runtime.runReflection({ sessionId: session.id });
+    await store.close();
+
+    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
+    expect(skillSuggestion).toMatchObject({
+      title: "Skill candidate from user correction",
+      confidence: 0.68
+    });
+    expect(skillSuggestion?.content).toContain("User correction signals");
+    expect(skillSuggestion?.content).toContain("次からこの作業は保存前に差分確認して");
+    expect(skillSuggestion?.content).toContain("Next-run checklist");
+    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "message")).toBe(true);
+  });
+
+  it("suggests Skill candidates from workspace-wide repeated tool traces", async () => {
+    const { store, runtime } = await createRuntime();
+    const firstSession = await runtime.createSession();
+    const firstRun = await runtime.runChatTurn({
+      sessionId: firstSession.id,
+      content: "最近の繰り返し作業をSkill候補にして",
+      output_locale: "ja"
+    });
+    const secondSession = await runtime.createSession();
+    const secondRun = await runtime.runChatTurn({
+      sessionId: secondSession.id,
+      content: "別の作業",
+      output_locale: "ja"
+    });
+    const now = nowIso();
+    const toolRuns = [
+      { run: firstRun.backendRun.id, session: firstSession.id, name: "file.read", status: "completed" as const },
+      { run: firstRun.backendRun.id, session: firstSession.id, name: "artifact.write", status: "completed" as const },
+      { run: secondRun.backendRun.id, session: secondSession.id, name: "file.read", status: "completed" as const },
+      { run: secondRun.backendRun.id, session: secondSession.id, name: "file.read", status: "completed" as const },
+      { run: secondRun.backendRun.id, session: secondSession.id, name: "artifact.write", status: "completed" as const }
+    ];
+    for (const [index, toolRun] of toolRuns.entries()) {
+      await store.saveToolRun({
+        id: `workspace_tool_trace_${index}`,
+        run_id: toolRun.run,
+        session_id: toolRun.session,
+        tool_call_id: `workspace_tool_call_${index}`,
+        provider_tool_name: toolRun.name,
+        action_id: toolRun.name,
+        status: toolRun.status,
+        input_summary: `workspace input ${index}`,
+        output_summary: `workspace output ${index}`,
+        resource_refs: [],
+        created_at: now
+      });
+    }
+
+    const reflection = await runtime.runReflection({ sessionId: firstSession.id });
+    await store.close();
+
+    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
+    expect(skillSuggestion).toMatchObject({
+      title: "Skill candidate from execution trace",
+      confidence: 0.7
+    });
+    expect(skillSuggestion?.content).toContain("file.read: 3 time(s)");
+    expect(skillSuggestion?.content).toContain("artifact.write: 2 time(s)");
+    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "tool_run" && ref.id === "workspace_tool_trace_2")).toBe(true);
+  });
+
+  it("filters provisional memory and redacts high sensitive active memory", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const provisional = memoryFrontmatter({ state: "provisional", topic: "secret draft" });
+    const sensitive = memoryFrontmatter({ state: "sensitive", topic: "secret token", sensitive_level: "high" });
+    const conflict = memoryFrontmatter({ state: "topic", topic: "secret conflict", conflicts_with: [sensitive.id] });
+    await store.saveMemory(provisional, "secret draft should not be injected");
+    await store.saveMemory(sensitive, "secret token is 12345");
+    await store.saveMemory(conflict, "secret conflict should be reviewed");
+
+    const context = await runtime.previewContext({
+      sessionId: session.id,
+      query: "secret"
+    });
+    const preview = await runtime.previewActiveMemory({ query: "secret" });
+    await store.close();
+
+    expect(context.active_memory.some((item) => item.id === provisional.id)).toBe(false);
+    expect(context.active_memory_report.excluded).toContainEqual(expect.objectContaining({
+      id: provisional.id,
+      state: "provisional",
+      reason: "provisional_pending"
+    }));
+    expect(preview.report.excluded).toContainEqual(expect.objectContaining({
+      id: provisional.id,
+      reason: "provisional_pending"
+    }));
+    const sensitiveMemory = context.active_memory.find((item) => item.id === sensitive.id);
+    expect(sensitiveMemory).toMatchObject({
+      state: "sensitive",
+      sensitive_level: "high",
+      priority: "sensitive",
+      content: "[sensitive memory withheld: secret token]"
+    });
+    expect(context.active_memory_report.sensitive_redactions).toContainEqual(expect.objectContaining({
+      id: sensitive.id,
+      sensitive_level: "high",
+      redacted: true
+    }));
+    expect(context.active_memory_report.conflict_groups).toContainEqual(expect.objectContaining({
+      memory_ids: [conflict.id, sensitive.id],
+      proposed_action: "review"
+    }));
+    expect(context.context_assembly.omissions).toContainEqual(expect.objectContaining({
+      kind: "active_memory"
+    }));
+    expect(sensitiveMemory?.content).not.toContain("12345");
+  });
+
+  it("returns dynamic chart render specs for surface operations", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_chart_test",
+      kind: "chart.request",
+      session_id: session.id,
+      title: "進捗グラフ",
+      query: "最近の進捗をグラフ化",
+      data_refs: ["collection/progress"],
+      output_locale: "ja"
+    });
+    const artifacts = await store.listArtifactsForSession(session.id);
+    const workspaceChanges = await store.listWorkspaceChanges(session.id);
+    await store.close();
+    const chartResult = result.result as { resource: { kind: string; metadata: Record<string, unknown> }; workspaceChange: { change_type: string } };
+
+    expect(result.result_kind).toBe("chart_request");
+    expect(result.render_spec).toMatchObject({
+      kind: "chart",
+      priority: "primary",
+      props: {
+        chart_id: expect.any(String),
+        chart_type: "table",
+        data_refs: ["collection/progress"]
+      },
+      fallback: {
+        kind: "artifact"
+      }
+    });
+    expect(chartResult.resource.kind).toBe("chart");
+    expect(chartResult.resource.metadata).toMatchObject({
+      surface_operation_id: "surface_chart_test",
+      surface_operation_kind: "chart.request"
+    });
+    expect(chartResult.workspaceChange.change_type).toBe("artifact_created");
+    expect(artifacts.some((artifact) => artifact.kind === "chart")).toBe(true);
+    expect(workspaceChanges.some((change) => change.resource_ref.id === (result.render_spec.resource_refs[0]?.id ?? ""))).toBe(true);
+  });
+
+  it("dispatches structured surface operations without falling back to chat prompts", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+
+    const form = await runtime.runSurfaceOperation({
+      id: "surface_form_test",
+      kind: "form.submit",
+      session_id: session.id,
+      form_id: "contact_form",
+      values: { name: "Samurai", priority: 3, subscribed: true },
+      submit_label: "保存"
+    });
+    const table = await runtime.runSurfaceOperation({
+      id: "surface_table_test",
+      kind: "table.patch",
+      session_id: session.id,
+      table_id: "contacts",
+      row_id: "row_1",
+      changes: { name: "Takuma", status: "active" }
+    });
+    const artifact = await runtime.runSurfaceOperation({
+      id: "surface_artifact_test",
+      kind: "artifact.request",
+      session_id: session.id,
+      action: "create",
+      title: "提案書",
+      instruction: "短い提案書を作る"
+    });
+    const custom = await runtime.runSurfaceOperation({
+      id: "surface_custom_test",
+      kind: "custom_view.action",
+      session_id: session.id,
+      view_id: "kanban",
+      action_id: "move_card",
+      payload: { renderer: "kanban", card_id: "card_1", column_id: "done" }
+    });
+    const operations = await store.listOperations();
+    const artifacts = await store.listArtifactsForSession(session.id);
+    await store.close();
+
+    expect(form.result_kind).toBe("form_submission");
+    expect(table.result_kind).toBe("table_patch");
+    expect(artifact.result_kind).toBe("artifact");
+    expect(custom.result_kind).toBe("custom_view_action");
+    expect(form.render_spec.kind).toBe("form");
+    expect(table.render_spec.kind).toBe("table");
+    expect(artifact.render_spec.kind).toBe("artifact");
+    expect(custom.render_spec.kind).toBe("custom_view");
+    expect(operations.filter((operation) => operation.operation === "artifact.create").length).toBeGreaterThanOrEqual(4);
+    expect(artifacts.map((item) => item.kind)).toEqual(expect.arrayContaining(["structured_draft", "table", "document"]));
+  });
+
+  it("negotiates structured surface render specs against frontend capabilities", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+
+    const custom = await runtime.runSurfaceOperation({
+      id: "surface_custom_fallback_test",
+      kind: "custom_view.action",
+      session_id: session.id,
+      view_id: "kanban",
+      action_id: "move_card",
+      payload: { renderer: "kanban", card_id: "card_1", column_id: "done" },
+      renderer_capabilities: {
+        supported_kinds: ["chat", "artifact", "status_timeline"],
+        custom_view_renderers: []
+      }
+    });
+    await store.close();
+
+    expect(custom.result_kind).toBe("custom_view_action");
+    expect(custom.render_spec).toMatchObject({
+      kind: "artifact",
+      negotiation: {
+        requested_kind: "custom_view",
+        requested_renderer: "kanban",
+        reason: "unsupported_kind",
+        applied_fallback: true
+      },
+      props: {
+        artifact_id: expect.any(String)
+      }
+    });
   });
 
   it("runs file actions through policy audit and rollback", async () => {
@@ -411,6 +3116,67 @@ describe("agent runtime", () => {
     expect(patched.rollbackPoint).toBeDefined();
   });
 
+  it("creates and revokes grants through policy audit and rollback", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const created = await runtime.createGrant({
+      operation: "external.send.dispatch",
+      reason: "Allow approved send dispatch in tests."
+    });
+    const revoked = await runtime.revokeGrant({
+      grantId: created.resource.id,
+      reason: "No longer needed."
+    });
+    const grants = await store.listGrants();
+    const rollbackPoints = await store.listRollbackPoints();
+    await store.close();
+
+    expect(created.operation.operation).toBe("grant.create");
+    expect(created.policyDecision.decision).toBe("allow_with_audit");
+    expect(created.auditRecord.rollback_point_id).toBe(created.rollbackPoint?.id);
+    expect(created.resource.operation).toBe("external.send.dispatch");
+    expect(revoked.operation.operation).toBe("grant.revoke");
+    expect(revoked.resource.revoked_at).toBeDefined();
+    expect(revoked.auditRecord.rollback_point_id).toBe(revoked.rollbackPoint?.id);
+    expect(grants.map((grant) => grant.id)).toContain(created.resource.id);
+    expect(rollbackPoints.map((point) => point.id)).toEqual(expect.arrayContaining([
+      created.rollbackPoint!.id,
+      revoked.rollbackPoint!.id
+    ]));
+  });
+
+  it("restores file content from a rollback point with audit and a new rollback", async () => {
+    const { store, runtime } = await createRuntime();
+
+    await runtime.runFileAction({
+      operation: "file.write",
+      path: "notes/restore.md",
+      content: "hello"
+    });
+    const patched = await runtime.runFileAction({
+      operation: "file.patch",
+      path: "notes/restore.md",
+      search: "hello",
+      replace: "hello samurai"
+    });
+    const restored = await runtime.restoreRollbackPoint(patched.rollbackPoint!.id);
+    const read = await runtime.runFileAction({
+      operation: "file.read",
+      path: "notes/restore.md"
+    });
+    await store.close();
+
+    expect(restored.operation.operation).toBe("rollback.restore");
+    expect(restored.resource).toMatchObject({
+      rollback_point_id: patched.rollbackPoint!.id,
+      path: "notes/restore.md",
+      action: "written"
+    });
+    expect(restored.rollbackPoint).toBeDefined();
+    expect(restored.auditRecord.rollback_point_id).toBe(restored.rollbackPoint?.id);
+    expect(read.resource.content).toBe("hello");
+  });
+
   it("prepares external sends and gates dispatch behind approval", async () => {
     const { store, runtime } = await createRuntime();
 
@@ -431,8 +3197,710 @@ describe("agent runtime", () => {
     expect(sends[0]?.status).toBe("draft");
   });
 
+  it("records non-dry-run external send success and failure statuses", async () => {
+    const { store, runtime } = await createRuntime();
+    vi.stubEnv("SAMURAI_EXTERNAL_SEND_DISPATCH", "true");
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("ok", { status: 200 }))
+      .mockResolvedValueOnce(new Response("failed", { status: 500 }))
+      .mockRejectedValueOnce(new Error("dispatch failed with raw-secret-token"));
+
+    const okDraft = await runtime.prepareExternalSend({
+      channel: "webhook",
+      target: { url: "https://example.test/ok" },
+      title: "成功通知",
+      body: "送信本文"
+    });
+    const failedDraft = await runtime.prepareExternalSend({
+      channel: "webhook",
+      target: { url: "https://example.test/fail" },
+      title: "失敗通知",
+      body: "送信本文"
+    });
+    const rejectedDraft = await runtime.prepareExternalSend({
+      channel: "webhook",
+      target: { url: "https://example.test/reject" },
+      title: "例外通知",
+      body: "送信本文"
+    });
+
+    const ok = await requestAndApproveExternalSend(runtime, store, okDraft.resource.id);
+    const failed = await requestAndApproveExternalSend(runtime, store, failedDraft.resource.id);
+    const rejected = await requestAndApproveExternalSend(runtime, store, rejectedDraft.resource.id);
+    const sends = await store.listExternalSends();
+    await store.close();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(ok).toMatchObject({
+      status: "dispatched",
+      dispatch_result: {
+        dispatched: true,
+        dry_run: false,
+        status: 200
+      }
+    });
+    expect(failed).toMatchObject({
+      status: "failed",
+      dispatch_result: {
+        dispatched: false,
+        dry_run: false,
+        status: 500,
+        message: "webhook dispatch failed."
+      }
+    });
+    expect(rejected).toMatchObject({
+      status: "failed",
+      dispatch_result: {
+        dispatched: false,
+        dry_run: false,
+        message: expect.stringContaining("[redacted]")
+      }
+    });
+    expect(JSON.stringify(rejected.dispatch_result)).not.toContain("raw-secret-token");
+    expect(sends.map((send) => [send.id, send.status])).toEqual(expect.arrayContaining([
+      [ok.id, "dispatched"],
+      [failed.id, "failed"],
+      [rejected.id, "failed"]
+    ]));
+  });
+
+  it("dispatches Slack Telegram and LINE sends through configured API transports", async () => {
+    const { store, runtime } = await createRuntime();
+    vi.stubEnv("SAMURAI_EXTERNAL_SEND_DISPATCH", "true");
+    vi.stubEnv("SAMURAI_SLACK_BOT_TOKEN", "xoxb-raw-secret-token");
+    vi.stubEnv("SAMURAI_SLACK_API_URL", "https://slack.example.test/chat.postMessage");
+    vi.stubEnv("SAMURAI_TELEGRAM_BOT_TOKEN", "123456:raw-secret-token");
+    vi.stubEnv("SAMURAI_TELEGRAM_API_BASE_URL", "https://telegram.example.test");
+    vi.stubEnv("SAMURAI_LINE_CHANNEL_ACCESS_TOKEN", "line-raw-secret-token");
+    vi.stubEnv("SAMURAI_LINE_API_BASE_URL", "https://line.example.test/v2/bot/message");
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+
+    const slackDraft = await runtime.prepareExternalSend({
+      channel: "slack",
+      target: { channel_id: "C123", thread_ts: "111.222" },
+      title: "Slack通知",
+      body: "Slack本文"
+    });
+    const telegramDraft = await runtime.prepareExternalSend({
+      channel: "telegram",
+      target: { chat_id: "-100123", message_thread_id: 7 },
+      title: "Telegram通知",
+      body: "Telegram本文"
+    });
+    const lineDraft = await runtime.prepareExternalSend({
+      channel: "line",
+      target: { to: "U456" },
+      title: "LINE通知",
+      body: "LINE本文"
+    });
+
+    const slack = await requestAndApproveExternalSend(runtime, store, slackDraft.resource.id);
+    const telegram = await requestAndApproveExternalSend(runtime, store, telegramDraft.resource.id);
+    const line = await requestAndApproveExternalSend(runtime, store, lineDraft.resource.id);
+    await store.close();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(fetchSpy).toHaveBeenNthCalledWith(1, "https://slack.example.test/chat.postMessage", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({
+        authorization: "Bearer xoxb-raw-secret-token",
+        "content-type": "application/json"
+      }),
+      body: JSON.stringify({
+        channel: "C123",
+        text: "*Slack通知*\nSlack本文",
+        thread_ts: "111.222"
+      })
+    }));
+    expect(fetchSpy).toHaveBeenNthCalledWith(2, "https://telegram.example.test/bot123456:raw-secret-token/sendMessage", expect.objectContaining({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chat_id: "-100123",
+        text: "Telegram通知\n\nTelegram本文",
+        message_thread_id: "7"
+      })
+    }));
+    expect(fetchSpy).toHaveBeenNthCalledWith(3, "https://line.example.test/v2/bot/message/push", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({
+        authorization: "Bearer line-raw-secret-token",
+        "content-type": "application/json"
+      }),
+      body: JSON.stringify({
+        to: "U456",
+        messages: [{
+          type: "text",
+          text: "LINE通知\n\nLINE本文"
+        }]
+      })
+    }));
+    expect(slack).toMatchObject({ status: "dispatched", dispatch_result: { adapter: "slack", transport: "api", dispatched: true } });
+    expect(telegram).toMatchObject({ status: "dispatched", dispatch_result: { adapter: "telegram", transport: "api", dispatched: true } });
+    expect(line).toMatchObject({ status: "dispatched", dispatch_result: { adapter: "line", transport: "api", dispatched: true } });
+    expect(JSON.stringify([slack.dispatch_result, telegram.dispatch_result, line.dispatch_result])).not.toContain("raw-secret-token");
+  });
+
+  it("dispatches Email sends through configured SMTP transport", async () => {
+    const { store, runtime } = await createRuntime();
+    vi.stubEnv("SAMURAI_EXTERNAL_SEND_DISPATCH", "true");
+    vi.stubEnv("SAMURAI_EMAIL_SMTP_HOST", "smtp.example.test");
+    vi.stubEnv("SAMURAI_EMAIL_SMTP_PORT", "2525");
+    vi.stubEnv("SAMURAI_EMAIL_SMTP_SECURE", "false");
+    vi.stubEnv("SAMURAI_EMAIL_SMTP_STARTTLS", "false");
+    vi.stubEnv("SAMURAI_EMAIL_SMTP_USER", "smtp-user");
+    vi.stubEnv("SAMURAI_EMAIL_SMTP_PASSWORD", "smtp-raw-secret-password");
+    vi.stubEnv("SAMURAI_EMAIL_FROM", "assistant@example.test");
+    const smtp = new FakeSmtpConnection([
+      { code: 220, lines: ["220 smtp ready"] },
+      { code: 250, lines: ["250 smtp.example.test"] },
+      { code: 235, lines: ["235 authenticated"] },
+      { code: 250, lines: ["250 sender ok"] },
+      { code: 250, lines: ["250 recipient ok"] },
+      { code: 250, lines: ["250 recipient ok"] },
+      { code: 354, lines: ["354 send data"] },
+      { code: 250, lines: ["250 queued"] }
+    ]);
+    setExternalSendSmtpClientConnectionFactoryForTest(async () => smtp);
+
+    const draft = await runtime.prepareExternalSend({
+      channel: "email",
+      target: {
+        to: ["client@example.test"],
+        cc: "ops@example.test"
+      },
+      title: "Email通知",
+      body: "Email本文\n.second line"
+    });
+    const sent = await requestAndApproveExternalSend(runtime, store, draft.resource.id);
+    await store.close();
+
+    expect(sent).toMatchObject({
+      status: "dispatched",
+      dispatch_result: {
+        adapter: "email",
+        transport: "smtp",
+        dispatched: true,
+        dry_run: false
+      }
+    });
+    expect(smtp.commands).toEqual([
+      "EHLO samurai-agent.local",
+      `AUTH PLAIN ${Buffer.from("\0smtp-user\0smtp-raw-secret-password", "utf8").toString("base64")}`,
+      "MAIL FROM:<assistant@example.test>",
+      "RCPT TO:<client@example.test>",
+      "RCPT TO:<ops@example.test>",
+      "DATA",
+      "QUIT"
+    ]);
+    expect(smtp.data[0]).toContain("From: assistant@example.test\r\n");
+    expect(smtp.data[0]).toContain("To: client@example.test, ops@example.test\r\n");
+    expect(smtp.data[0]).toContain("Subject: Email通知\r\n");
+    expect(smtp.data[0]).toContain("Email本文\r\n..second line\r\n.\r\n");
+    expect(smtp.closed).toBe(true);
+    expect(JSON.stringify(sent.dispatch_result)).not.toContain("smtp-raw-secret-password");
+  });
+
+  it("blocks unpaired gateway inbound messages and routes approved pairings into chat", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const blocked = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "external source/1",
+      source_label: "External Source",
+      body: "初回の外部入力です"
+    });
+    const approved = await runtime.approveGatewayPairing(blocked.pairing!.id);
+    const duplicate = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "external source/1",
+      source_label: "External Source",
+      body: "初回の外部入力です"
+    });
+    const processed = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "external source/1",
+      body: "提案書を作って",
+      output_locale: "ja"
+    });
+    const savedInbound = await store.listGatewayInboundMessages({ status: "processed" });
+    const boundaryPolicies = await store.listGatewayBoundaryPolicies({ sessionKey: "webhook:external~20source~2F1:main" });
+    const releasedLock = await store.getGatewayConcurrencyLock("webhook:external~20source~2F1:main");
+    await store.close();
+
+    expect(blocked.inbound).toMatchObject({
+      status: "blocked",
+      trusted: false,
+      pairing_id: blocked.pairing!.id
+    });
+    expect(duplicate.inbound.id).toBe(blocked.inbound.id);
+    expect(blocked.pairing).toMatchObject({
+      status: "pending",
+      source_identity: "external source/1",
+      session_key: "webhook:external~20source~2F1:main"
+    });
+    expect(approved).toMatchObject({
+      status: "approved",
+      pairing_code: undefined
+    });
+    expect(processed.inbound).toMatchObject({
+      status: "processed",
+      trusted: true,
+      session_key: "webhook:external~20source~2F1:main"
+    });
+    expect(processed.session?.session_key).toBe("webhook:external~20source~2F1:main");
+    expect(processed.boundaryPolicy).toMatchObject({
+      source_channel: "webhook",
+      source_identity: "external source/1",
+      session_key: "webhook:external~20source~2F1:main",
+      allowed_tools: [],
+      sandbox: { mode: "non_main", workspace_access: "none", network_access: "none" }
+    });
+    expect(boundaryPolicies.map((policy) => policy.id)).toContain(processed.boundaryPolicy?.id);
+    expect(processed.chat?.backendRun.metadata.gateway_boundary_policy_id).toBe(processed.boundaryPolicy?.id);
+    expect(processed.chat?.backendRun.metadata.gateway_boundary_allowed_tools).toEqual([]);
+    expect(processed.chat?.artifacts).toEqual([]);
+    expect(processed.chat?.toolRuns).toContainEqual(expect.objectContaining({
+      action_id: "artifact.create",
+      status: "ignored",
+      output_summary: "gateway_boundary_tool_not_allowed",
+      resource_refs: [expect.objectContaining({
+        kind: "gateway_boundary_policy",
+        id: processed.boundaryPolicy?.id
+      })]
+    }));
+    expect(processed.chat?.workspaceChanges).toContainEqual(expect.objectContaining({
+      change_type: "other",
+      resource_ref: expect.objectContaining({
+        kind: "gateway_boundary_policy",
+        id: processed.boundaryPolicy?.id
+      }),
+      summary: expect.stringContaining("Gateway boundary blocked tool")
+    }));
+    expect(processed.chat?.backendEvents.some((event) => event.event_type === "run_started")).toBe(true);
+    expect(processed.chat?.backendEvents).toContainEqual(expect.objectContaining({
+      event_type: "tool_call_output",
+      payload: expect.objectContaining({
+        status: "ignored",
+        gateway_boundary: expect.objectContaining({
+          decision: "denied",
+          action_id: "artifact.create",
+          reason: "tool_not_allowed",
+          policy_id: processed.boundaryPolicy?.id,
+          allowed_tools: []
+        })
+      }),
+      resource_refs: [expect.objectContaining({
+        kind: "gateway_boundary_policy",
+        id: processed.boundaryPolicy?.id
+      })]
+    }));
+    expect(processed.chat?.backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
+    expect(processed.chat?.reflectionRuns.some((run) => run.status === "completed")).toBe(true);
+    expect(releasedLock).toMatchObject({
+      lock_key: "webhook:external~20source~2F1:main",
+      status: "released"
+    });
+    expect(processed.chat?.messages.some((message) => message.role === "agent" && message.content === "対応しました。")).toBe(true);
+    expect(savedInbound.map((message) => message.id)).toContain(processed.inbound.id);
+  });
+
+  it("expires pending gateway pairings before approving or routing new inbound", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const blocked = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "expiring source",
+      source_label: "Expiring Source",
+      body: "初回"
+    });
+    const expiredAt = new Date(0).toISOString();
+    await store.saveGatewayPairing({
+      ...blocked.pairing!,
+      expires_at: expiredAt,
+      updated_at: expiredAt
+    });
+
+    const approved = await runtime.approveGatewayPairing(blocked.pairing!.id);
+    const routed = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "expiring source",
+      source_label: "Expiring Source",
+      body: "期限後の新規入力"
+    });
+    const expiredPairings = await store.listGatewayPairings("expired");
+    const pendingPairings = await store.listGatewayPairings("pending");
+    await store.close();
+
+    expect(approved).toMatchObject({
+      id: blocked.pairing!.id,
+      status: "expired",
+      pairing_code: undefined
+    });
+    expect(routed.pairing).toMatchObject({
+      status: "pending",
+      source_identity: "expiring source"
+    });
+    expect(routed.pairing?.id).not.toBe(blocked.pairing!.id);
+    expect(expiredPairings.map((pairing) => pairing.id)).toContain(blocked.pairing!.id);
+    expect(pendingPairings.map((pairing) => pairing.id)).toContain(routed.pairing!.id);
+  });
+
+  it("previews and applies gateway repair actions for expired pairings and locks", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = new Date().toISOString();
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const blocked = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "repair-source",
+      source_label: "Repair Source",
+      body: "初回"
+    });
+    await store.saveGatewayPairing({
+      ...blocked.pairing!,
+      expires_at: past,
+      updated_at: past
+    });
+    await store.acquireGatewayConcurrencyLock({
+      lockKey: "webhook:repair-source:main",
+      scope: "session",
+      policyId: "gateway-policy-repair-test",
+      ownerRef: { kind: "gateway_inbound", id: "repair-test", uri: "gateway-inbound/repair-test" },
+      ttlMs: 1_000,
+      now: past
+    });
+
+    const preview = await runtime.repairGatewayState({ dryRun: true, now });
+    const previewPairing = await store.getGatewayPairing(blocked.pairing!.id);
+    const previewLock = await store.getGatewayConcurrencyLock("webhook:repair-source:main");
+    const applied = await runtime.repairGatewayState({ dryRun: false, now });
+    const repairedPairing = await store.getGatewayPairing(blocked.pairing!.id);
+    const repairedLock = await store.getGatewayConcurrencyLock("webhook:repair-source:main");
+    await store.close();
+
+    expect(preview.dry_run).toBe(true);
+    expect(preview.applied_count).toBe(0);
+    expect(preview.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "expire_pairing", status: "planned" }),
+      expect.objectContaining({ action: "expire_concurrency_lock", status: "planned" })
+    ]));
+    expect(previewPairing?.status).toBe("pending");
+    expect(previewLock?.status).toBe("acquired");
+    expect(applied.dry_run).toBe(false);
+    expect(applied.applied_count).toBe(2);
+    expect(applied.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "expire_pairing", status: "applied", after_status: "expired" }),
+      expect.objectContaining({ action: "expire_concurrency_lock", status: "applied", after_status: "expired" })
+    ]));
+    expect(repairedPairing?.status).toBe("expired");
+    expect(repairedLock?.status).toBe("expired");
+  });
+
+  it("routes gateway pairings by account and thread session key", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const threadA = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "shared-bot",
+      account_id: "workspace/1",
+      thread_id: "thread A",
+      body: "thread A first"
+    });
+    const threadB = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "shared-bot",
+      account_id: "workspace/1",
+      thread_id: "thread B",
+      body: "thread B first"
+    });
+    await runtime.approveGatewayPairing(threadA.pairing!.id);
+
+    const processedA = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "shared-bot",
+      account_id: "workspace/1",
+      thread_id: "thread A",
+      body: "thread A follow-up",
+      output_locale: "ja"
+    });
+    const blockedB = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "shared-bot",
+      account_id: "workspace/1",
+      thread_id: "thread B",
+      body: "thread B follow-up"
+    });
+    await store.close();
+
+    expect(threadA.pairing?.session_key).toBe("webhook:workspace~2F1:thread~20A");
+    expect(threadB.pairing?.session_key).toBe("webhook:workspace~2F1:thread~20B");
+    expect(threadA.pairing?.id).not.toBe(threadB.pairing?.id);
+    expect(processedA.inbound.status).toBe("processed");
+    expect(processedA.session?.session_key).toBe("webhook:workspace~2F1:thread~20A");
+    expect(blockedB.inbound.status).toBe("blocked");
+    expect(blockedB.pairing?.id).toBe(threadB.pairing?.id);
+  });
+
+  it("blocks approved gateway inbound while the session concurrency lock is held", async () => {
+    const { store, runtime } = await createRuntime();
+    const blocked = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "busy-source",
+      source_label: "Busy Source",
+      body: "初回"
+    });
+    await runtime.approveGatewayPairing(blocked.pairing!.id);
+    await store.acquireGatewayConcurrencyLock({
+      lockKey: "webhook:busy-source:main",
+      scope: "session",
+      policyId: "manual-policy",
+      ownerRef: { kind: "gateway_inbound", id: "manual", uri: "gateway-inbound/manual" },
+      ttlMs: 60_000
+    });
+
+    const busy = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "busy-source",
+      body: "同時実行は止めて"
+    });
+    const lock = await store.getGatewayConcurrencyLock("webhook:busy-source:main");
+    const expired = await store.expireGatewayConcurrencyLocks(new Date(Date.now() + 120_000).toISOString());
+    const repairedLock = await store.getGatewayConcurrencyLock("webhook:busy-source:main");
+    await store.close();
+
+    expect(busy.inbound).toMatchObject({
+      status: "blocked",
+      trusted: true,
+      error: "gateway_concurrency_locked"
+    });
+    expect(busy.chat).toBeUndefined();
+    expect(busy.concurrencyLock).toMatchObject({
+      lock_key: "webhook:busy-source:main",
+      status: "acquired"
+    });
+    expect(lock).toMatchObject({
+      lock_key: "webhook:busy-source:main",
+      status: "acquired"
+    });
+    expect(expired).toContainEqual(expect.objectContaining({
+      lock_key: "webhook:busy-source:main",
+      status: "expired"
+    }));
+    expect(repairedLock?.status).toBe("expired");
+  });
+
+  it("rate limits noisy gateway sources before routing to Host", async () => {
+    const { store, runtime } = await createRuntime();
+
+    for (let index = 0; index < 20; index += 1) {
+      await runtime.handleGatewayInbound({
+        channel: "webhook",
+        source_identity: "rate-source",
+        body: `message ${index}`
+      });
+    }
+    const limited = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "rate-source",
+      body: "message 20"
+    });
+    await store.close();
+
+    expect(limited.inbound).toMatchObject({
+      status: "blocked",
+      trusted: false,
+      error: "gateway_rate_limited"
+    });
+  });
+
+  it("blocks gateway sources outside the configured allowlist", async () => {
+    const previous = process.env.SAMURAI_GATEWAY_SOURCE_ALLOWLIST;
+    process.env.SAMURAI_GATEWAY_SOURCE_ALLOWLIST = "webhook:allowed-source";
+    const { store, runtime } = await createRuntime();
+    try {
+      const blocked = await runtime.handleGatewayInbound({
+        channel: "webhook",
+        source_identity: "blocked-source",
+        body: "hello"
+      });
+
+      expect(blocked.inbound).toMatchObject({
+        status: "blocked",
+        trusted: false,
+        error: "gateway_source_not_allowed"
+      });
+      expect(blocked.pairing).toBeUndefined();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.SAMURAI_GATEWAY_SOURCE_ALLOWLIST;
+      } else {
+        process.env.SAMURAI_GATEWAY_SOURCE_ALLOWLIST = previous;
+      }
+      await store.close();
+    }
+  });
+
+  it("auto-approves trusted local gateway sources from channel policy", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const processed = await runtime.handleGatewayInbound({
+      channel: "local_cli",
+      source_identity: "owner-terminal",
+      body: "メモを作って",
+      route: "main",
+      output_locale: "ja"
+    });
+    const policies = await runtime.listGatewayPairingPolicies();
+    await store.close();
+
+    expect(policies).toContainEqual(expect.objectContaining({
+      channel: "local_cli",
+      trust_mode: "auto_approve"
+    }));
+    expect(processed.pairing).toMatchObject({
+      status: "approved",
+      source_identity: "owner-terminal",
+      metadata: expect.objectContaining({
+        gateway_pairing_policy_auto_approved: true
+      })
+    });
+    expect(processed.inbound).toMatchObject({
+      status: "processed",
+      trusted: true
+    });
+  });
+
+  it("blocks inbound before pairing when the saved channel policy is blocked", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = nowIso();
+    const policy: GatewayPairingPolicyRecord = {
+      id: "gateway_pairing_policy_webhook",
+      channel: "webhook",
+      status: "enabled",
+      trust_mode: "blocked",
+      allowlist: ["*"],
+      pairing_ttl_ms: 300_000,
+      duplicate_window_ms: 60_000,
+      rate_limit_window_ms: 60_000,
+      rate_limit_max: 20,
+      metadata: {},
+      created_at: now,
+      updated_at: now
+    };
+
+    await runtime.saveGatewayPairingPolicy(policy);
+    const blocked = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "blocked-by-policy",
+      body: "hello"
+    });
+    await store.close();
+
+    expect(blocked.inbound).toMatchObject({
+      status: "blocked",
+      trusted: false,
+      error: "gateway_pairing_policy_blocked"
+    });
+    expect(blocked.pairing).toBeUndefined();
+  });
+
+  it("applies saved gateway pairing policy rate limits before routing", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = nowIso();
+    const policy: GatewayPairingPolicyRecord = {
+      id: "gateway_pairing_policy_webhook",
+      channel: "webhook",
+      status: "enabled",
+      trust_mode: "pairing_required",
+      allowlist: ["*"],
+      pairing_ttl_ms: 300_000,
+      duplicate_window_ms: 60_000,
+      rate_limit_window_ms: 60_000,
+      rate_limit_max: 1,
+      metadata: {},
+      created_at: now,
+      updated_at: now
+    };
+
+    await runtime.saveGatewayPairingPolicy(policy);
+    const first = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "limited-source",
+      body: "first"
+    });
+    const limited = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "limited-source",
+      body: "second"
+    });
+    await store.close();
+
+    expect(first.inbound).toMatchObject({
+      status: "blocked",
+      trusted: false
+    });
+    expect(limited.inbound).toMatchObject({
+      status: "blocked",
+      trusted: false,
+      error: "gateway_rate_limited"
+    });
+  });
+
+  it("applies saved gateway routing policy before creating pairings", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = nowIso();
+    const policy: GatewayRoutingPolicyRecord = {
+      id: "gateway_routing_policy_webhook",
+      channel: "webhook",
+      status: "enabled",
+      session_key_strategy: "account_main",
+      default_route: "main",
+      metadata: {},
+      created_at: now,
+      updated_at: now
+    };
+
+    await runtime.saveGatewayRoutingPolicy(policy);
+    const first = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "same-source",
+      account_id: "account/1",
+      thread_id: "thread-a",
+      route: "route-a",
+      body: "first message"
+    });
+    const second = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "same-source",
+      account_id: "account/1",
+      thread_id: "thread-b",
+      route: "route-b",
+      body: "second message"
+    });
+    await store.close();
+
+    expect(first.pairing).toMatchObject({
+      status: "pending",
+      session_key: "webhook:account~2F1:main"
+    });
+    expect(second.pairing?.id).toBe(first.pairing?.id);
+    expect(second.inbound.metadata.gateway_routing_policy).toMatchObject({
+      id: policy.id,
+      session_key_strategy: "account_main"
+    });
+    expect(second.inbound.metadata.gateway_source_scope).toMatchObject({
+      account_id: "account/1",
+      thread_id: "main",
+      session_key: "webhook:account~2F1:main"
+    });
+  });
+
   it("saves and runs due automation jobs", async () => {
     const { store, runtime } = await createRuntime();
+    const preview = runtime.previewAutomationSchedule("hourly", "2026-01-01T00:00:00.000Z");
 
     const saved = await runtime.saveAutomationJob({
       title: "Wiki reindex",
@@ -445,9 +3913,81 @@ describe("agent runtime", () => {
     const refreshedJob = await store.getAutomationJob(saved.resource.id);
     await store.close();
 
+    expect(preview).toMatchObject({
+      normalized: "hourly",
+      one_shot: false,
+      next_run_at: "2026-01-01T01:00:00.000Z"
+    });
     expect(saved.operation.operation).toBe("automation.job.save");
     expect(runs[0]?.operation.operation).toBe("automation.job.run");
     expect(refreshedJob?.last_run_at).toBeTruthy();
+    expect(refreshedJob?.locked_until).toBeUndefined();
+    expect(refreshedJob?.retry_after_at).toBeUndefined();
+    expect(refreshedJob?.failure_count).toBe(0);
+  });
+
+  it("runs scheduled natural language jobs through backend chat turns", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const saved = await runtime.saveAutomationJob({
+      title: "Daily digest",
+      kind: "daily_digest",
+      schedule: "once",
+      target_instruction: "定期メモを作って",
+      next_run_at: new Date(0).toISOString()
+    });
+    const runs = await runtime.runDueAutomationJobs(new Date(Date.now() + 1000).toISOString());
+    const automationRun = runs[0]?.automationRun;
+    const refreshedRun = automationRun ? await store.getAutomationRun(automationRun.id) : undefined;
+    const backendRun = refreshedRun?.backend_run_id ? await store.getBackendRun(refreshedRun.backend_run_id) : undefined;
+    const backendEvents = backendRun ? await store.listBackendEvents({ runId: backendRun.id }) : [];
+    const messages = refreshedRun?.session_id ? await store.listMessages(refreshedRun.session_id) : [];
+    const refreshedJob = await store.getAutomationJob(saved.resource.id);
+    await store.close();
+
+    expect(runs[0]?.operation.operation).toBe("automation.job.run");
+    expect(runs[0]?.auditRecord.outputs_summary).toContain("Automation instruction ran backend");
+    expect(refreshedRun).toMatchObject({
+      status: "completed",
+      backend_run_id: backendRun?.id
+    });
+    expect(backendRun).toMatchObject({
+      status: "completed",
+      backend_id: "samurai-native"
+    });
+    expect(backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
+    expect(messages.some((message) => message.role === "user" && message.content === "定期メモを作って")).toBe(true);
+    expect(refreshedJob).toMatchObject({
+      status: "disabled",
+      failure_count: 0
+    });
+  });
+
+  it("stores automation retry state when a scheduled job fails", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const saved = await runtime.saveAutomationJob({
+      title: "Failing wiki reindex",
+      kind: "wiki_reindex",
+      schedule: "hourly",
+      target_instruction: "Reindex wiki",
+      next_run_at: new Date(0).toISOString(),
+      max_attempts: 2
+    });
+    vi.spyOn(store, "reindexWiki").mockRejectedValueOnce(new Error("reindex boom"));
+
+    await expect(runtime.runDueAutomationJobs()).rejects.toThrow("reindex boom");
+    const refreshedJob = await store.getAutomationJob(saved.resource.id);
+    await store.close();
+
+    expect(refreshedJob).toMatchObject({
+      status: "enabled",
+      failure_count: 1,
+      max_attempts: 2,
+      last_error: "reindex boom"
+    });
+    expect(refreshedJob?.retry_after_at).toBeTruthy();
+    expect(refreshedJob?.locked_until).toBeUndefined();
   });
 
   it("runs curator and evaluation jobs as reflection loops", async () => {
@@ -458,13 +3998,247 @@ describe("agent runtime", () => {
       content: "今後、失敗したtoolは手順に反映して",
       output_locale: "ja"
     });
+    const wikiProposal = await runtime.createWikiProposal({
+      title: "未検証の運用知識",
+      content: "# 未検証の運用知識\n\n確認前の知識。",
+      content_locale: "ja"
+    });
+    const skillCandidate = await runtime.createSkillCandidate({
+      title: "失敗tool手順",
+      description: "失敗したtool runを手順へ戻す",
+      content: "# 失敗tool手順"
+    });
+    await runtime.saveSkillProject({ candidateId: skillCandidate.resource.id });
 
     const curator = await runtime.runCuratorJob();
     const evaluation = await runtime.runEvaluationJob();
     await store.close();
 
     expect(curator.reflectionRun.kind).toBe("curator");
+    expect(curator.suggestions.some((suggestion) =>
+      suggestion.suggestion_type === "knowledge_wiki" && suggestion.target_ref?.id === wikiProposal.resource.id
+    )).toBe(true);
+    expect(curator.curatorReviewReport?.wiki_patch_proposals).toContainEqual(expect.objectContaining({
+      wiki_id: wikiProposal.resource.id,
+      reason: "Proposed page needs accept/reject review."
+    }));
+    expect(curator.suggestions.some((suggestion) =>
+      suggestion.suggestion_type === "skill_patch" && suggestion.title.includes("失敗tool手順")
+    )).toBe(true);
     expect(evaluation.reflectionRun.kind).toBe("evaluation");
+    expect(evaluation.evaluationReport).toMatchObject({
+      judge: {
+        deterministic_status: "completed",
+        external_status: "not_configured"
+      },
+      counts: expect.objectContaining({
+        backend_runs: expect.any(Number),
+        findings: expect.any(Number)
+      })
+    });
+    expect(evaluation.evaluationReport?.run_scores.length).toBeGreaterThan(0);
+    expect(evaluation.suggestions.some((suggestion) => suggestion.suggestion_type === "skill_patch")).toBe(true);
+  });
+
+  it("can apply an external evaluation judge to trace scores without changing workspace state", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/test", fakeProviderOutput),
+      undefined,
+      undefined,
+      undefined,
+      {
+        id: "judge/test",
+        async judge({ report }) {
+          return {
+            summary: "External judge reviewed deterministic trace scores.",
+            scoreAdjustments: report.run_scores.slice(0, 1).map((score) => ({
+              run_id: score.run_id,
+              score_delta: -5,
+              reason: "External judge wants a stricter score."
+            }))
+          };
+        }
+      }
+    );
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "提案書を作って",
+      output_locale: "ja"
+    });
+
+    const evaluation = await runtime.runEvaluationJob();
+    const runsAfterEvaluation = await store.listBackendRuns();
+    await store.close();
+
+    expect(evaluation.evaluationReport).toMatchObject({
+      judge: {
+        external_status: "completed",
+        provider_id: "judge/test",
+        summary: "External judge reviewed deterministic trace scores."
+      }
+    });
+    expect(evaluation.evaluationReport?.run_scores[0]?.findings).toContainEqual(expect.objectContaining({
+      kind: "external_judge",
+      reason: "External judge wants a stricter score."
+    }));
+    expect(runsAfterEvaluation.every((run) => run.status === "completed")).toBe(true);
+  });
+
+  it("can skip curator work when the idle gate is respected", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "最近の作業",
+      output_locale: "ja"
+    });
+
+    const curator = await runtime.runCuratorJob({ respectIdleGate: true });
+    const curatorState = await store.getCuratorState();
+    await store.close();
+
+    expect(curator.suggestions).toEqual([]);
+    expect(curator.reflectionRun.output_summary).toContain("Curator skipped");
+    expect(curatorState.last_run_summary).toContain("Curator skipped");
+  });
+
+  it("records selected skill usage and lets curator propose lifecycle actions", async () => {
+    const { store, runtime } = await createRuntime();
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_used",
+      markdown: skillMarkdown({
+        id: "skill_used",
+        state: "project",
+        title: "Used workflow",
+        description: "usage marker workflow",
+        last_reviewed_at: "2026-01-01T00:00:00.000Z"
+      })
+    });
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_old",
+      markdown: skillMarkdown({
+        id: "skill_old",
+        state: "project",
+        title: "Ancient routine",
+        description: "very old unused routine",
+        last_reviewed_at: "2025-01-01T00:00:00.000Z"
+      })
+    });
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_old_pair",
+      markdown: skillMarkdown({
+        id: "skill_old_pair",
+        state: "project",
+        title: "Ancient routine pair",
+        description: "very old unused routine pair",
+        last_reviewed_at: "2025-01-02T00:00:00.000Z"
+      })
+    });
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_pinned",
+      markdown: skillMarkdown({
+        id: "skill_pinned",
+        state: "project",
+        title: "Pinned routine",
+        description: "old pinned routine",
+        last_reviewed_at: "2025-01-01T00:00:00.000Z",
+        owner_pinned: true
+      })
+    });
+    await store.saveCuratorState({
+      stale_after_days: 7,
+      archive_after_days: 14
+    });
+    await store.saveMemory(memoryFrontmatter({
+      id: "memory_duplicate_a",
+      state: "topic",
+      topic: "duplicate routine"
+    }), "duplicate memory A");
+    await store.saveMemory(memoryFrontmatter({
+      id: "memory_duplicate_b",
+      state: "topic",
+      topic: "duplicate routine"
+    }), "duplicate memory B");
+
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "usage marker workflow を使って作業して",
+      output_locale: "ja"
+    });
+    const usage = await store.getSkillUsage("skill_used");
+    const curator = await runtime.runCuratorJob();
+    const oldSkillBeforeApply = await store.getSkill("skill_old");
+    const applied = await runtime.applyCuratorSkillAction({ skillId: "skill_old", action: "archive" });
+    const oldSkillAfterApply = await store.getSkill("skill_old");
+    const pinnedSkill = await store.getSkill("skill_pinned");
+    await store.close();
+
+    expect(usage).toMatchObject({ skill_id: "skill_used", use_count: 1 });
+    expect(curator.curatorReport).toMatchObject({
+      dry_run: true,
+      counts: expect.objectContaining({
+        skill_items: expect.any(Number),
+        suggestions: curator.suggestions.length
+      }),
+      skill_actions: expect.arrayContaining([
+        expect.objectContaining({
+          skill_id: "skill_old",
+          action: "archive",
+          proposed_state: "archived"
+        })
+      ]),
+      protected_skills: expect.arrayContaining([
+        expect.objectContaining({
+          skill_id: "skill_pinned",
+          reason: "owner_pinned"
+        })
+      ])
+    });
+    expect(curator.curatorReviewReport).toMatchObject({
+      dry_run: true,
+      counts: expect.objectContaining({
+        consolidate_candidates: expect.any(Number),
+        archive_candidates: expect.any(Number)
+      }),
+      memory_merge_groups: expect.arrayContaining([
+        expect.objectContaining({
+          topic: "duplicate routine",
+          memory_ids: expect.arrayContaining(["memory_duplicate_a", "memory_duplicate_b"])
+        })
+      ]),
+      skill_consolidation_groups: expect.arrayContaining([
+        expect.objectContaining({
+          skill_ids: expect.arrayContaining(["skill_old", "skill_old_pair"])
+        })
+      ]),
+      archive_candidates: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "skill",
+          id: "skill_old"
+        })
+      ])
+    });
+    expect(curator.suggestions.some((suggestion) =>
+      suggestion.title.includes("Ancient routine") && suggestion.content.includes("Curator action: archive")
+    )).toBe(true);
+    expect(curator.suggestions.some((suggestion) => suggestion.title.includes("Consolidate skills"))).toBe(true);
+    expect(oldSkillBeforeApply?.state).toBe("project");
+    expect(applied.operation.operation).toBe("skill.lifecycle.apply");
+    expect(applied.rollbackPoint).toBeDefined();
+    expect(oldSkillAfterApply?.state).toBe("archived");
+    expect(oldSkillAfterApply?.file_path).toBe(path.join("skills", "archived", "skill_old.md"));
+    expect(pinnedSkill?.state).toBe("project");
   });
 
   it("downloads browser content into the workspace fallback adapter", async () => {
@@ -514,6 +4288,64 @@ function collectionSchema(id: string) {
     triggers: [],
     actions: [],
     permissions: {}
+  };
+}
+
+function memoryFrontmatter(input: Partial<MemoryFrontmatter> & { state: MemoryFrontmatter["state"]; topic: string }): MemoryFrontmatter {
+  const now = nowIso();
+  return {
+    id: input.id ?? createId("memory"),
+    state: input.state,
+    topic: input.topic,
+    source: input.source ?? "test",
+    source_locale: input.source_locale ?? "ja",
+    content_locale: input.content_locale ?? "ja",
+    source_kind: input.source_kind ?? "owner_instruction",
+    instruction_authority: input.instruction_authority ?? "owner",
+    confidence: input.confidence ?? 0.9,
+    created_by: input.created_by ?? "test",
+    created_at: input.created_at ?? now,
+    updated_at: input.updated_at ?? now,
+    last_used_at: input.last_used_at,
+    related_memories: input.related_memories ?? [],
+    conflicts_with: input.conflicts_with ?? [],
+    sensitive_level: input.sensitive_level ?? "none",
+    source_refs: input.source_refs,
+    provenance: input.provenance
+  };
+}
+
+function gatewayBoundaryPolicy(allowedTools: string[]): GatewayBoundaryPolicy {
+  const now = "2026-06-26T00:00:00.000Z";
+  return {
+    id: `gateway_boundary_${allowedTools.join("_").replaceAll(".", "_") || "none"}`,
+    source_channel: "webhook",
+    source_identity: "external-source",
+    session_key: "webhook:external-source:main",
+    allowed_tools: allowedTools,
+    mcp_config_refs: [],
+    secret_refs: [],
+    sandbox: {
+      mode: "non_main",
+      scope: "session",
+      backend: "none",
+      workspace_access: "none",
+      network_access: "none",
+      allowed_paths: [],
+      denied_paths: [],
+      metadata: {}
+    },
+    path_normalization: {
+      canonical_root: "workspace",
+      reject_absolute_paths: true,
+      reject_parent_segments: true,
+      allowed_roots: ["workspace"],
+      denied_roots: []
+    },
+    allowlist: ["webhook:external-source"],
+    metadata: {},
+    created_at: now,
+    updated_at: now
   };
 }
 

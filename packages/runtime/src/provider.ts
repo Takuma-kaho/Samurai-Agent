@@ -1,5 +1,5 @@
 import type { MemoryCandidate } from "@samurai-agent/memory";
-import type { MessageEnvelope, MessageRecord } from "@samurai-agent/core-schemas";
+import type { ExternalAssistContext, FreezeSnapshot, GatewayBoundaryRuntimeSnapshot, HostContextAssembly, MessageEnvelope, MessageRecord, SupportedLocale } from "@samurai-agent/core-schemas";
 import { defaultModelForProvider, providerProfiles, type ProviderCredential, type ProviderProfile } from "./provider-profiles";
 
 export type ProviderId = "openai" | "gemini" | "anthropic" | "openrouter" | "openai-compatible";
@@ -30,7 +30,54 @@ export interface ProviderOutput {
 
 export interface ProviderInput {
   envelope: MessageEnvelope;
+  freezeSnapshot?: FreezeSnapshot;
+  gatewayBoundary?: GatewayBoundaryRuntimeSnapshot;
   activeMemory: MemoryCandidate[];
+  knowledgeWiki: Array<{ id: string; slug: string; title: string; content: string }>;
+  collectionNotes: Array<{ collection_id: string; file_path: string; content: string; role: "context_only" }>;
+  selectedSkills: Array<{
+    id: string;
+    title: string;
+    description: string;
+    tags: string[];
+    allowed_scopes?: string[];
+    required_capabilities: string[];
+    disclosure_level?: "catalog" | "body" | "support";
+    selection_reason?: string;
+    selection?: {
+      score: number;
+      matched_terms: string[];
+      matched_capabilities: string[];
+      missing_capabilities: string[];
+      unsupported_scopes: string[];
+      reasons: string[];
+    };
+    usage?: {
+      use_count: number;
+      last_used_at?: string;
+    };
+    content?: string;
+    support_file_refs?: Array<{ path: string }>;
+    support_files?: Array<{ path: string; content: string }>;
+  }>;
+  sessionSearch: Array<{ kind: string; id: string; title: string; summary: string }>;
+  sessionSummary?: {
+    session_key: string;
+    title: string;
+    ui_locale: SupportedLocale;
+    output_locale: SupportedLocale;
+    message_count: number;
+    operation_count: number;
+    backend_run_count: number;
+    tool_run_count: number;
+    workspace_change_count: number;
+    last_message_at?: string;
+    last_backend_run_id?: string;
+    last_backend_run_status?: string;
+  };
+  externalAssist?: ExternalAssistContext;
+  contextAssembly?: HostContextAssembly;
+  availableTools: string[];
   recentMessages: MessageRecord[];
 }
 

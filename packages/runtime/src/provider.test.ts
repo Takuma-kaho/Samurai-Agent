@@ -17,6 +17,11 @@ const providerInput: ProviderInput = {
     received_at: "2026-01-01T00:00:00.000Z"
   },
   activeMemory: [],
+  knowledgeWiki: [],
+  collectionNotes: [],
+  selectedSkills: [],
+  sessionSearch: [],
+  availableTools: [],
   recentMessages: []
 };
 
@@ -71,6 +76,76 @@ describe("provider profiles", () => {
     expect(openai.body).toHaveProperty("tools");
     expect(anthropic.body).toHaveProperty("messages");
     expect(anthropic.body).toHaveProperty("tools");
+    expect(JSON.stringify(gemini.body)).toContain("Output locale: ja");
+    expect(JSON.stringify(openai.body)).toContain("Output locale: ja");
+    expect(JSON.stringify(anthropic.body)).toContain("Output locale: ja");
+  });
+
+  it("injects the frozen SOUL/Profile snapshot into provider context", () => {
+    const openai = providerProfiles.openai.buildRequest("gpt-test", { apiKey: "openai-key" }, {
+      ...providerInput,
+      freezeSnapshot: {
+        id: "freeze_test",
+        soul: {
+          id: "soul",
+          kind: "soul",
+          file_ref: {
+            kind: "profile",
+            id: "soul",
+            uri: "profile/SOUL.md",
+            label: "SOUL.md"
+          },
+          content: "# SOUL.md\n\n- Keep responsibilities separate.",
+          loaded_at: "2026-01-01T00:00:00.000Z"
+        },
+        memory_refs: [],
+        skill_refs: [],
+        wiki_refs: [],
+        content: "# Frozen identity\n\n## SOUL.md\n- Keep responsibilities separate.",
+        stable_hash: "hash_test",
+        created_at: "2026-01-01T00:00:00.000Z"
+      },
+      sessionSummary: {
+        session_key: "web:owner:test",
+        title: "Test session",
+        ui_locale: "ja",
+        output_locale: "ja",
+        message_count: 2,
+        operation_count: 1,
+        backend_run_count: 1,
+        tool_run_count: 0,
+        workspace_change_count: 1,
+        last_backend_run_status: "completed"
+      },
+      externalAssist: {
+        role: "assistive",
+        isolated_from_memory: true,
+        included_in_active_memory: false,
+        note: "External provider output is assistive only.",
+        hints: [{
+          id: "hint_test",
+          title: "External context",
+          summary: "Use this only as an unverified hint.",
+          source_uri: "external://hint/test"
+        }],
+        recent_failures: []
+      },
+      collectionNotes: [{
+        collection_id: "contacts",
+        file_path: "collections/contacts/notes/README.md",
+        content: "Use the note only as context.",
+        role: "context_only"
+      }]
+    });
+
+    expect(JSON.stringify(openai.body)).toContain("Freeze snapshot");
+    expect(JSON.stringify(openai.body)).toContain("Keep responsibilities separate");
+    expect(JSON.stringify(openai.body)).toContain("Session summary");
+    expect(JSON.stringify(openai.body)).toContain("operations: 1");
+    expect(JSON.stringify(openai.body)).toContain("External assist");
+    expect(JSON.stringify(openai.body)).toContain("isolated_from_memory: yes");
+    expect(JSON.stringify(openai.body)).toContain("Collection notes (context only)");
+    expect(JSON.stringify(openai.body)).toContain("Use the note only as context");
   });
 
   it("accepts tool-call-only responses from supported providers", () => {

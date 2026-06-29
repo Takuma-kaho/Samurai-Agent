@@ -10,8 +10,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@samurai-agent/action-catalog": "workspace:*",
     "@samurai-agent/audit": "workspace:*",
+    "@samurai-agent/capability-registry": "workspace:*",
     "@samurai-agent/core-schemas": "workspace:*",
+    "@samurai-agent/gateway": "workspace:*",
+    "@samurai-agent/policy-engine": "workspace:*",
     "@samurai-agent/runtime": "workspace:*",
     "@samurai-agent/ui-protocol": "workspace:*",
     "@samurai-agent/workspace-store": "workspace:*",

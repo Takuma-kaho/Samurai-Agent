@@ -85,6 +85,9 @@ export const backendEventTypes = [
   "memory_suggested",
   "skill_candidate_created",
   "backend_waiting_for_native_input",
+  "backend_native_input_submitted",
+  "backend_stream_synced",
+  "backend_stream_unavailable",
   "run_completed",
   "run_failed"
 ] as const;
@@ -96,6 +99,29 @@ export const reflectionSuggestionStatuses = ["proposed", "applied", "rejected", 
 export const toolRunStatuses = ["completed", "ignored", "failed"] as const;
 export const automationJobStatuses = ["enabled", "disabled", "archived"] as const;
 export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed"] as const;
+export const externalSendChannels = ["webhook", "email", "slack", "telegram", "line"] as const;
+export const externalSendTransportStatuses = ["ready", "dry_run_only", "not_configured"] as const;
+export const gatewayPairingStatuses = ["pending", "approved", "rejected", "expired", "revoked"] as const;
+export const gatewayPairingPolicyStatuses = ["enabled", "disabled"] as const;
+export const gatewayPairingTrustModes = ["pairing_required", "auto_approve", "blocked"] as const;
+export const gatewayRoutingPolicyStatuses = ["enabled", "disabled"] as const;
+export const gatewayRoutingSessionKeyStrategies = ["account_thread", "account_main", "channel_main"] as const;
+export const gatewayInboundStatuses = ["blocked", "routed", "processed", "failed"] as const;
+export const gatewayChannels = ["telegram", "slack", "line", "email", "webhook", "local_cli", "cron"] as const;
+export const gatewayBoundarySources = ["web", "telegram", "slack", "line", "email", "webhook", "local_cli", "cron"] as const;
+export const secretRefSources = ["env", "file", "keychain", "external_vault"] as const;
+export const sandboxModes = ["off", "non_main", "all"] as const;
+export const sandboxScopes = ["agent", "session", "shared"] as const;
+export const sandboxBackends = ["none", "docker", "ssh", "remote"] as const;
+export const sandboxWorkspaceAccess = ["none", "read", "write", "read_write"] as const;
+export const sandboxNetworkAccess = ["none", "localhost", "external"] as const;
+export const concurrencyLockScopes = ["source_identity", "session", "workspace", "global"] as const;
+export const gatewayConcurrencyLockStatuses = ["acquired", "released", "expired"] as const;
+export const gatewaySandboxInstanceStatuses = ["ready", "recreated", "deleted", "failed"] as const;
+export const gatewaySandboxWorkspaceSyncDirections = ["seed_to_sandbox", "pull_from_sandbox", "mirror"] as const;
+export const gatewaySandboxWorkspaceSyncStatuses = ["planned", "completed", "failed", "skipped"] as const;
+export const gatewayMcpTransports = ["stdio", "http"] as const;
+export const gatewayMcpStdioFramings = ["json_lines", "content_length"] as const;
 
 export const SupportedLocaleSchema = z.enum(supportedLocales);
 export const TranslationStatusSchema = z.enum(translationStatuses);
@@ -124,6 +150,29 @@ export const ReflectionSuggestionStatusSchema = z.enum(reflectionSuggestionStatu
 export const ToolRunStatusSchema = z.enum(toolRunStatuses);
 export const AutomationJobStatusSchema = z.enum(automationJobStatuses);
 export const ExternalSendStatusSchema = z.enum(externalSendStatuses);
+export const ExternalSendChannelSchema = z.enum(externalSendChannels);
+export const ExternalSendTransportStatusSchema = z.enum(externalSendTransportStatuses);
+export const GatewayPairingStatusSchema = z.enum(gatewayPairingStatuses);
+export const GatewayPairingPolicyStatusSchema = z.enum(gatewayPairingPolicyStatuses);
+export const GatewayPairingTrustModeSchema = z.enum(gatewayPairingTrustModes);
+export const GatewayRoutingPolicyStatusSchema = z.enum(gatewayRoutingPolicyStatuses);
+export const GatewayRoutingSessionKeyStrategySchema = z.enum(gatewayRoutingSessionKeyStrategies);
+export const GatewayInboundStatusSchema = z.enum(gatewayInboundStatuses);
+export const GatewayChannelSchema = z.enum(gatewayChannels);
+export const GatewayBoundarySourceSchema = z.enum(gatewayBoundarySources);
+export const SecretRefSourceSchema = z.enum(secretRefSources);
+export const SandboxModeSchema = z.enum(sandboxModes);
+export const SandboxScopeSchema = z.enum(sandboxScopes);
+export const SandboxBackendSchema = z.enum(sandboxBackends);
+export const SandboxWorkspaceAccessSchema = z.enum(sandboxWorkspaceAccess);
+export const SandboxNetworkAccessSchema = z.enum(sandboxNetworkAccess);
+export const ConcurrencyLockScopeSchema = z.enum(concurrencyLockScopes);
+export const GatewayConcurrencyLockStatusSchema = z.enum(gatewayConcurrencyLockStatuses);
+export const GatewaySandboxInstanceStatusSchema = z.enum(gatewaySandboxInstanceStatuses);
+export const GatewaySandboxWorkspaceSyncDirectionSchema = z.enum(gatewaySandboxWorkspaceSyncDirections);
+export const GatewaySandboxWorkspaceSyncStatusSchema = z.enum(gatewaySandboxWorkspaceSyncStatuses);
+export const GatewayMcpTransportSchema = z.enum(gatewayMcpTransports);
+export const GatewayMcpStdioFramingSchema = z.enum(gatewayMcpStdioFramings);
 
 export type SupportedLocale = z.infer<typeof SupportedLocaleSchema>;
 export type TranslationStatus = z.infer<typeof TranslationStatusSchema>;
@@ -152,6 +201,29 @@ export type ReflectionSuggestionStatus = z.infer<typeof ReflectionSuggestionStat
 export type ToolRunStatus = z.infer<typeof ToolRunStatusSchema>;
 export type AutomationJobStatus = z.infer<typeof AutomationJobStatusSchema>;
 export type ExternalSendStatus = z.infer<typeof ExternalSendStatusSchema>;
+export type ExternalSendChannel = z.infer<typeof ExternalSendChannelSchema>;
+export type ExternalSendTransportStatus = z.infer<typeof ExternalSendTransportStatusSchema>;
+export type GatewayPairingStatus = z.infer<typeof GatewayPairingStatusSchema>;
+export type GatewayPairingPolicyStatus = z.infer<typeof GatewayPairingPolicyStatusSchema>;
+export type GatewayPairingTrustMode = z.infer<typeof GatewayPairingTrustModeSchema>;
+export type GatewayRoutingPolicyStatus = z.infer<typeof GatewayRoutingPolicyStatusSchema>;
+export type GatewayRoutingSessionKeyStrategy = z.infer<typeof GatewayRoutingSessionKeyStrategySchema>;
+export type GatewayInboundStatus = z.infer<typeof GatewayInboundStatusSchema>;
+export type GatewayChannel = z.infer<typeof GatewayChannelSchema>;
+export type GatewayBoundarySource = z.infer<typeof GatewayBoundarySourceSchema>;
+export type SecretRefSource = z.infer<typeof SecretRefSourceSchema>;
+export type SandboxMode = z.infer<typeof SandboxModeSchema>;
+export type SandboxScope = z.infer<typeof SandboxScopeSchema>;
+export type SandboxBackend = z.infer<typeof SandboxBackendSchema>;
+export type SandboxWorkspaceAccess = z.infer<typeof SandboxWorkspaceAccessSchema>;
+export type SandboxNetworkAccess = z.infer<typeof SandboxNetworkAccessSchema>;
+export type ConcurrencyLockScope = z.infer<typeof ConcurrencyLockScopeSchema>;
+export type GatewayConcurrencyLockStatus = z.infer<typeof GatewayConcurrencyLockStatusSchema>;
+export type GatewaySandboxInstanceStatus = z.infer<typeof GatewaySandboxInstanceStatusSchema>;
+export type GatewaySandboxWorkspaceSyncDirection = z.infer<typeof GatewaySandboxWorkspaceSyncDirectionSchema>;
+export type GatewaySandboxWorkspaceSyncStatus = z.infer<typeof GatewaySandboxWorkspaceSyncStatusSchema>;
+export type GatewayMcpTransport = z.infer<typeof GatewayMcpTransportSchema>;
+export type GatewayMcpStdioFraming = z.infer<typeof GatewayMcpStdioFramingSchema>;
 
 export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValueSchema), z.record(jsonValueSchema)])
@@ -185,9 +257,23 @@ export const LocalizedTextSchema = z.object({
 });
 export type LocalizedText = z.infer<typeof LocalizedTextSchema>;
 
+export const ResourceTranslationRecordSchema = z.object({
+  id: z.string().min(1),
+  source_ref: ResourceRefSchema,
+  source_locale: SupportedLocaleSchema,
+  target_locale: SupportedLocaleSchema,
+  status: TranslationStatusSchema,
+  original_hash: z.string().min(1),
+  translated_text: z.string(),
+  provenance: ProvenanceSchema.optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type ResourceTranslationRecord = z.infer<typeof ResourceTranslationRecordSchema>;
+
 export const MessageEnvelopeSchema = z.object({
   id: z.string().min(1),
-  source: z.enum(["web", "telegram", "slack", "line", "email", "webhook", "cron"]),
+  source: z.enum(["web", "telegram", "slack", "line", "email", "webhook", "local_cli", "cron"]),
   actor_identity: ActorIdentitySchema,
   session_key: z.string().min(1),
   user_intent: z.string().min(1),
@@ -249,27 +335,502 @@ export const WorkspaceChangeRecordSchema = z.object({
 });
 export type WorkspaceChangeRecord = z.infer<typeof WorkspaceChangeRecordSchema>;
 
+export const SkillIndexEntryReadModelSchema = z.object({
+  id: z.string().min(1),
+  state: SkillStateSchema,
+  title: z.string(),
+  description: z.string(),
+  tags: z.array(z.string()),
+  required_capabilities: z.array(z.string()),
+  file_path: z.string().min(1),
+  updated_at: z.string().datetime().optional()
+});
+export type SkillIndexEntryReadModel = z.infer<typeof SkillIndexEntryReadModelSchema>;
+
+export const ChangeHistoryEntrySchema = z.object({
+  id: z.string().min(1),
+  session_id: z.string().min(1),
+  run_id: z.string().min(1),
+  change_type: WorkspaceChangeTypeSchema,
+  resource_ref: ResourceRefSchema,
+  summary: z.string(),
+  created_at: z.string().datetime()
+});
+export type ChangeHistoryEntry = z.infer<typeof ChangeHistoryEntrySchema>;
+
+export const RunHistoryEntrySchema = z.object({
+  id: z.string().min(1),
+  session_id: z.string().min(1),
+  backend_id: z.string().min(1),
+  backend_kind: AgentBackendKindSchema,
+  status: BackendRunStatusSchema,
+  input_summary: z.string(),
+  output_summary: z.string().optional(),
+  started_at: z.string().datetime(),
+  completed_at: z.string().datetime().optional(),
+  event_count: z.number().int().nonnegative(),
+  workspace_change_count: z.number().int().nonnegative(),
+  error_code: z.string().optional()
+});
+export type RunHistoryEntry = z.infer<typeof RunHistoryEntrySchema>;
+
+export const ProfileDocumentSchema = z.object({
+  id: z.string().min(1),
+  kind: z.enum(["soul", "profile"]),
+  file_ref: ResourceRefSchema,
+  content: z.string(),
+  loaded_at: z.string().datetime()
+});
+export type ProfileDocument = z.infer<typeof ProfileDocumentSchema>;
+
+export const FreezeSnapshotSchema = z.object({
+  id: z.string().min(1),
+  soul: ProfileDocumentSchema,
+  profile: ProfileDocumentSchema.optional(),
+  memory_refs: z.array(ResourceRefSchema),
+  skill_refs: z.array(ResourceRefSchema),
+  wiki_refs: z.array(ResourceRefSchema),
+  content: z.string(),
+  stable_hash: z.string().min(1),
+  created_at: z.string().datetime()
+});
+export type FreezeSnapshot = z.infer<typeof FreezeSnapshotSchema>;
+
+export const ExternalAssistPhaseSchema = z.enum(["prefetch", "sync"]);
+export type ExternalAssistPhase = z.infer<typeof ExternalAssistPhaseSchema>;
+
+export const ExternalAssistStatusSchema = z.enum(["disabled", "skipped", "completed", "failed"]);
+export type ExternalAssistStatus = z.infer<typeof ExternalAssistStatusSchema>;
+
+export const ExternalAssistHintSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().optional(),
+  summary: z.string(),
+  source_uri: z.string().optional(),
+  source_label: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional()
+});
+export type ExternalAssistHint = z.infer<typeof ExternalAssistHintSchema>;
+
+export const ExternalAssistRecordSchema = z.object({
+  id: z.string().min(1),
+  phase: ExternalAssistPhaseSchema,
+  status: ExternalAssistStatusSchema,
+  provider_id: z.string().min(1),
+  session_id: z.string().min(1),
+  run_id: z.string().optional(),
+  input_message_id: z.string().optional(),
+  query: z.string(),
+  role: ExternalProviderRoleSchema,
+  hints: z.array(ExternalAssistHintSchema),
+  error: z.string().optional(),
+  isolated_from_memory: z.boolean(),
+  included_in_active_memory: z.boolean(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type ExternalAssistRecord = z.infer<typeof ExternalAssistRecordSchema>;
+
+export const ExternalAssistContextSchema = z.object({
+  role: ExternalProviderRoleSchema,
+  isolated_from_memory: z.boolean(),
+  included_in_active_memory: z.boolean(),
+  note: z.string(),
+  hints: z.array(ExternalAssistHintSchema),
+  last_prefetch: ExternalAssistRecordSchema.optional(),
+  recent_failures: z.array(ExternalAssistRecordSchema)
+});
+export type ExternalAssistContext = z.infer<typeof ExternalAssistContextSchema>;
+
+export const ExternalAssistDiagnosticsGroupSchema = z.object({
+  provider_id: z.string().min(1),
+  phase: ExternalAssistPhaseSchema,
+  status: ExternalAssistStatusSchema,
+  count: z.number().int().nonnegative(),
+  hint_count: z.number().int().nonnegative(),
+  latest_record: ExternalAssistRecordSchema
+});
+export type ExternalAssistDiagnosticsGroup = z.infer<typeof ExternalAssistDiagnosticsGroupSchema>;
+
+export const ExternalAssistDiagnosticsViolationSchema = z.object({
+  code: z.enum(["external_assist_not_isolated", "external_assist_included_in_active_memory"]),
+  record_id: z.string().min(1),
+  provider_id: z.string().min(1),
+  phase: ExternalAssistPhaseSchema,
+  status: ExternalAssistStatusSchema,
+  message: z.string()
+});
+export type ExternalAssistDiagnosticsViolation = z.infer<typeof ExternalAssistDiagnosticsViolationSchema>;
+
+export const ExternalAssistDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  scope: z.object({
+    session_id: z.string().optional(),
+    phase: ExternalAssistPhaseSchema.optional(),
+    status: ExternalAssistStatusSchema.optional(),
+    provider_id: z.string().optional(),
+    limit: z.number().int().positive()
+  }),
+  total_records: z.number().int().nonnegative(),
+  failed_records: z.number().int().nonnegative(),
+  hint_count: z.number().int().nonnegative(),
+  unisolated_records: z.number().int().nonnegative(),
+  included_in_active_memory_records: z.number().int().nonnegative(),
+  groups: z.array(ExternalAssistDiagnosticsGroupSchema),
+  violations: z.array(ExternalAssistDiagnosticsViolationSchema),
+  recent_failures: z.array(ExternalAssistRecordSchema),
+  recommendation: z.string()
+});
+export type ExternalAssistDiagnosticsReport = z.infer<typeof ExternalAssistDiagnosticsReportSchema>;
+
+export const ExternalAssistProviderConfigDiagnosticsSchema = z.object({
+  configured: z.boolean(),
+  source: z.enum(["none", "http", "local_file", "multiple", "invalid", "injected"]),
+  provider_id: z.string().nullable(),
+  provider_ids: z.array(z.string()).optional(),
+  provider_count: z.number().int().nonnegative().optional(),
+  provider_kind: z.enum(["http", "local_file", "multiple", "injected"]).nullable(),
+  max_hints: z.number().int().positive(),
+  timeout_ms: z.number().int().positive().nullable(),
+  token_configured: z.boolean(),
+  auth_header: z.string().nullable(),
+  endpoint_origin: z.string().optional(),
+  endpoint_path_configured: z.boolean().optional(),
+  file_name: z.string().optional(),
+  errors: z.array(z.string()),
+  warnings: z.array(z.string())
+});
+export type ExternalAssistProviderConfigDiagnostics = z.infer<typeof ExternalAssistProviderConfigDiagnosticsSchema>;
+
+export const SettingsResponseSchema = z.object({
+  ui_locale: SupportedLocaleSchema,
+  output_locale: SupportedLocaleSchema,
+  memory_capture_mode: CaptureModeSchema,
+  knowledge_wiki_capture_mode: CaptureModeSchema,
+  skill_capture_mode: CaptureModeSchema,
+  external_provider_role: ExternalProviderRoleSchema,
+  updated_at: z.string().datetime(),
+  external_assist_config: ExternalAssistProviderConfigDiagnosticsSchema
+});
+export type SettingsResponse = z.infer<typeof SettingsResponseSchema>;
+
+export const BackendReleaseManualGateSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  status: z.enum(["manual_opt_in_required"]),
+  effect: z.enum(["authenticated_external_service", "external_sandbox", "external_channel_service"]),
+  reason: z.string().min(1),
+  command: z.string().min(1),
+  confirmation_flag: z.literal("--confirm-external-effects"),
+  runbook: z.string().min(1)
+}).strict();
+export type BackendReleaseManualGate = z.infer<typeof BackendReleaseManualGateSchema>;
+
+export const BackendReleaseProfileSchema = z.object({
+  id: z.enum(["local_oss", "production_ops"]),
+  label: z.string().min(1),
+  status: z.enum(["available", "manual_opt_in_required"]),
+  non_destructive_command: z.string().min(1),
+  required_gate_ids: z.array(z.string().min(1)),
+  manual_gate_ids: z.array(z.string().min(1)),
+  runbook: z.string().min(1),
+  notes: z.array(z.string().min(1))
+}).strict();
+export type BackendReleaseProfile = z.infer<typeof BackendReleaseProfileSchema>;
+
+export const BackendReleaseReadinessHealthSchema = z.object({
+  non_destructive: z.object({
+    status: z.enum(["available"]),
+    command: z.string().min(1)
+  }).strict(),
+  external_effects_confirmed: z.literal(false),
+  manual_gate_count: z.number().int().nonnegative(),
+  manual_gates: z.array(BackendReleaseManualGateSchema),
+  profiles: z.array(BackendReleaseProfileSchema)
+}).strict();
+export type BackendReleaseReadinessHealth = z.infer<typeof BackendReleaseReadinessHealthSchema>;
+
+export const ActiveMemoryExclusionReasonSchema = z.enum([
+  "session_only",
+  "provisional_pending",
+  "archived",
+  "not_active_state",
+  "empty_content"
+]);
+export type ActiveMemoryExclusionReason = z.infer<typeof ActiveMemoryExclusionReasonSchema>;
+
+export const ActiveMemoryRetrievalReportSchema = z.object({
+  query: z.string(),
+  retrieved_at: z.string().datetime(),
+  candidate_count: z.number().int().nonnegative(),
+  included_count: z.number().int().nonnegative(),
+  included_memory_ids: z.array(z.string().min(1)),
+  excluded: z.array(z.object({
+    id: z.string().min(1),
+    topic: z.string(),
+    state: MemoryStateSchema,
+    reason: ActiveMemoryExclusionReasonSchema
+  })),
+  sensitive_redactions: z.array(z.object({
+    id: z.string().min(1),
+    topic: z.string(),
+    sensitive_level: z.enum(["low", "high"]),
+    redacted: z.boolean(),
+    reason: z.string()
+  })),
+  conflict_groups: z.array(z.object({
+    id: z.string().min(1),
+    memory_ids: z.array(z.string().min(1)),
+    reason: z.string(),
+    proposed_action: z.enum(["review", "merge", "archive_one"])
+  })),
+  resolution_suggestions: z.array(z.object({
+    kind: z.enum(["conflict_review", "sensitive_review", "provisional_review"]),
+    memory_ids: z.array(z.string().min(1)),
+    reason: z.string()
+  }))
+});
+export type ActiveMemoryRetrievalReport = z.infer<typeof ActiveMemoryRetrievalReportSchema>;
+
+export const KnowledgeWikiExclusionReasonSchema = z.enum([
+  "proposed",
+  "rejected",
+  "archived",
+  "not_active",
+  "empty_content"
+]);
+export type KnowledgeWikiExclusionReason = z.infer<typeof KnowledgeWikiExclusionReasonSchema>;
+
+export const KnowledgeWikiRetrievalReportSchema = z.object({
+  query: z.string(),
+  retrieved_at: z.string().datetime(),
+  candidate_count: z.number().int().nonnegative(),
+  included_count: z.number().int().nonnegative(),
+  included_wiki_ids: z.array(z.string().min(1)),
+  excluded: z.array(z.object({
+    id: z.string().min(1),
+    slug: z.string().min(1),
+    title: z.string(),
+    state: WikiStateSchema,
+    reason: KnowledgeWikiExclusionReasonSchema
+  })),
+  source_refs: z.array(ResourceRefSchema)
+});
+export type KnowledgeWikiRetrievalReport = z.infer<typeof KnowledgeWikiRetrievalReportSchema>;
+
+export const KnowledgeWikiGraphSchema = z.object({
+  active_only: z.boolean(),
+  nodes: z.array(z.object({
+    id: z.string().min(1),
+    slug: z.string().min(1),
+    title: z.string(),
+    state: WikiStateSchema,
+    source_ref_count: z.number().int().nonnegative()
+  })),
+  edges: z.array(z.object({
+    from_wiki_id: z.string().min(1),
+    relation: z.literal("source_ref"),
+    to_ref: ResourceRefSchema
+  }))
+});
+export type KnowledgeWikiGraph = z.infer<typeof KnowledgeWikiGraphSchema>;
+
+export const KnowledgeWikiDiagnosticsIssueSchema = z.object({
+  code: z.enum([
+    "active_wiki_empty_content",
+    "active_wiki_missing_provenance",
+    "active_wiki_unverified_provenance",
+    "active_wiki_missing_source_refs",
+    "active_wiki_retrieval_includes_non_active"
+  ]),
+  severity: z.enum(["warning", "critical"]),
+  wiki_id: z.string().min(1),
+  slug: z.string().min(1),
+  title: z.string(),
+  state: WikiStateSchema,
+  message: z.string()
+});
+export type KnowledgeWikiDiagnosticsIssue = z.infer<typeof KnowledgeWikiDiagnosticsIssueSchema>;
+
+export const KnowledgeWikiDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  total_pages: z.number().int().nonnegative(),
+  active_pages: z.number().int().nonnegative(),
+  state_counts: z.record(z.number().int().nonnegative()),
+  active_with_provenance: z.number().int().nonnegative(),
+  active_with_verified_provenance: z.number().int().nonnegative(),
+  active_with_source_refs: z.number().int().nonnegative(),
+  active_empty_pages: z.number().int().nonnegative(),
+  issues: z.array(KnowledgeWikiDiagnosticsIssueSchema),
+  recommendation: z.string()
+});
+export type KnowledgeWikiDiagnosticsReport = z.infer<typeof KnowledgeWikiDiagnosticsReportSchema>;
+
+export const HostContextAssemblySourceKindSchema = z.enum([
+  "session",
+  "recent_messages",
+  "freeze_snapshot",
+  "active_memory",
+  "knowledge_wiki",
+  "collection_notes",
+  "selected_skills",
+  "session_search",
+  "external_assist",
+  "available_tools",
+  "gateway_boundary"
+]);
+export type HostContextAssemblySourceKind = z.infer<typeof HostContextAssemblySourceKindSchema>;
+
+export const HostContextAssemblySourceStatusSchema = z.enum([
+  "included",
+  "empty",
+  "disabled",
+  "filtered",
+  "missing"
+]);
+export type HostContextAssemblySourceStatus = z.infer<typeof HostContextAssemblySourceStatusSchema>;
+
+export const HostContextAssemblyCheckStatusSchema = z.enum(["pass", "warning", "fail"]);
+export type HostContextAssemblyCheckStatus = z.infer<typeof HostContextAssemblyCheckStatusSchema>;
+
+export const HostContextAssemblySchema = z.object({
+  version: z.literal(1),
+  assembled_at: z.string().datetime(),
+  session_id: z.string().min(1),
+  query: z.string(),
+  sources: z.array(z.object({
+    kind: HostContextAssemblySourceKindSchema,
+    status: HostContextAssemblySourceStatusSchema,
+    candidate_count: z.number().int().nonnegative(),
+    included_count: z.number().int().nonnegative(),
+    reason: z.string()
+  })),
+  omissions: z.array(z.object({
+    kind: HostContextAssemblySourceKindSchema,
+    reason: z.string(),
+    count: z.number().int().nonnegative().optional()
+  })),
+  limits: z.object({
+    recent_messages: z.number().int().positive(),
+    knowledge_wiki: z.number().int().positive(),
+    collection_notes: z.number().int().positive(),
+    selected_skills: z.number().int().positive(),
+    session_search: z.number().int().positive()
+  }),
+  gateway_boundary: z.object({
+    present: z.boolean(),
+    policy_id: z.string().optional(),
+    source_channel: GatewayBoundarySourceSchema.optional(),
+    source_identity: z.string().optional(),
+    allowed_tools_count: z.number().int().nonnegative(),
+    available_tools_before_boundary: z.number().int().nonnegative(),
+    available_tools_after_boundary: z.number().int().nonnegative(),
+    filtered_tool_count: z.number().int().nonnegative(),
+    reason: z.string()
+  }),
+  quality_checks: z.array(z.object({
+    id: z.string().min(1),
+    status: HostContextAssemblyCheckStatusSchema,
+    detail: z.string()
+  }))
+});
+export type HostContextAssembly = z.infer<typeof HostContextAssemblySchema>;
+
 export const ContextPreviewSchema = z.object({
   session_id: z.string().min(1),
   query: z.string(),
+  context_assembly: HostContextAssemblySchema,
+  session_summary: z.object({
+    session_key: z.string().min(1),
+    title: z.string(),
+    ui_locale: SupportedLocaleSchema,
+    output_locale: SupportedLocaleSchema,
+    message_count: z.number().int().nonnegative(),
+    operation_count: z.number().int().nonnegative(),
+    backend_run_count: z.number().int().nonnegative(),
+    tool_run_count: z.number().int().nonnegative(),
+    workspace_change_count: z.number().int().nonnegative(),
+    last_message_at: z.string().datetime().optional(),
+    last_backend_run_id: z.string().optional(),
+    last_backend_run_status: BackendRunStatusSchema.optional()
+  }),
+  external_assist: ExternalAssistContextSchema,
+  freeze_snapshot: FreezeSnapshotSchema.optional(),
   active_memory: z.array(z.object({
     id: z.string().min(1),
     topic: z.string().min(1),
-    content: z.string()
+    content: z.string(),
+    state: z.enum(["active", "topic", "sensitive"]),
+    sensitive_level: z.enum(["none", "low", "high"]),
+    priority: z.enum(["primary", "sensitive", "conflict"]),
+    selection_reason: z.string(),
+    conflicts_with: z.array(z.string())
   })),
+  active_memory_report: ActiveMemoryRetrievalReportSchema,
   knowledge_wiki: z.array(z.object({
     id: z.string().min(1),
     slug: z.string().min(1),
     title: z.string().min(1),
-    content: z.string()
+    content: z.string(),
+    source_refs: z.array(ResourceRefSchema),
+    provenance: ProvenanceSchema
   })),
+  knowledge_wiki_report: KnowledgeWikiRetrievalReportSchema,
+  collection_notes: z.array(z.object({
+    collection_id: z.string().min(1),
+    file_path: z.string().min(1),
+    content: z.string(),
+    role: z.literal("context_only")
+  })),
+  skill_selection_report: z.object({
+    query: z.string(),
+    candidate_count: z.number().int().nonnegative(),
+    selected_count: z.number().int().nonnegative(),
+    selected_skill_ids: z.array(z.string().min(1)),
+    available_capabilities: z.array(z.string()),
+    environment: z.object({
+      runtime: z.literal("local_workspace"),
+      platform: z.string()
+    }),
+    excluded: z.array(z.object({
+      id: z.string().min(1),
+      title: z.string(),
+      reason: z.enum(["missing_capability", "scope_unsupported", "low_match"]),
+      missing_capabilities: z.array(z.string()),
+      unsupported_scopes: z.array(ExecutionScopeSchema)
+    }))
+  }),
   selected_skills: z.array(z.object({
     id: z.string().min(1),
     title: z.string(),
     description: z.string(),
     tags: z.array(z.string()),
+    allowed_scopes: z.array(ExecutionScopeSchema),
     required_capabilities: z.array(z.string()),
-    content: z.string().optional()
+    disclosure_level: z.enum(["catalog", "body", "support"]),
+    selection_reason: z.string().optional(),
+    selection: z.object({
+      score: z.number(),
+      matched_terms: z.array(z.string()),
+      matched_capabilities: z.array(z.string()),
+      missing_capabilities: z.array(z.string()),
+      unsupported_scopes: z.array(ExecutionScopeSchema),
+      reasons: z.array(z.string())
+    }).optional(),
+    usage: z.object({
+      use_count: z.number().int().nonnegative(),
+      last_used_at: z.string().datetime().optional()
+    }).optional(),
+    content: z.string().optional(),
+    support_file_refs: z.array(z.object({
+      path: z.string().min(1),
+      file_path: z.string().min(1)
+    })).optional(),
+    support_files: z.array(z.object({
+      path: z.string().min(1),
+      file_path: z.string().min(1),
+      content: z.string()
+    })).optional()
   })),
   session_search: z.array(z.object({
     kind: z.string().min(1),
@@ -285,6 +846,18 @@ export const ContextPreviewSchema = z.object({
   available_tools: z.array(z.string())
 });
 export type ContextPreview = z.infer<typeof ContextPreviewSchema>;
+
+export const ContextFreezeResponseSchema = z.object({
+  session_id: z.string().min(1),
+  query: z.string(),
+  freeze_snapshot: FreezeSnapshotSchema,
+  context_assembly: HostContextAssemblySchema,
+  session_summary: ContextPreviewSchema.shape.session_summary,
+  source_refs: z.array(ResourceRefSchema),
+  stable_hash: z.string().min(1),
+  created_at: z.string().datetime()
+});
+export type ContextFreezeResponse = z.infer<typeof ContextFreezeResponseSchema>;
 
 export const ReflectionRunRecordSchema = z.object({
   id: z.string().min(1),
@@ -315,6 +888,300 @@ export const ReflectionSuggestionRecordSchema = z.object({
 });
 export type ReflectionSuggestionRecord = z.infer<typeof ReflectionSuggestionRecordSchema>;
 
+export const ReflectionDiagnosticsIssueSchema = z.object({
+  code: z.enum([
+    "reflection_run_missing",
+    "reflection_run_failed",
+    "reflection_run_stale",
+    "reflection_suggestion_pending",
+    "curator_run_missing",
+    "curator_run_failed",
+    "curator_run_stale",
+    "curator_paused",
+    "curator_idle_gate_skipped",
+    "curator_suggestion_pending"
+  ]),
+  severity: z.enum(["info", "warning", "critical"]),
+  message: z.string(),
+  reflection_run_id: z.string().min(1).optional(),
+  suggestion_id: z.string().min(1).optional(),
+  run_kind: ReflectionRunKindSchema.optional(),
+  suggestion_type: ReflectionSuggestionTypeSchema.optional(),
+  status: z.string().min(1).optional(),
+  resource_ref: ResourceRefSchema.optional(),
+  created_at: z.string().datetime().optional()
+}).strict();
+export type ReflectionDiagnosticsIssue = z.infer<typeof ReflectionDiagnosticsIssueSchema>;
+
+export const ReflectionDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  stale_after_hours: z.number().int().positive(),
+  total_reflection_runs: z.number().int().nonnegative(),
+  completed_reflection_runs: z.number().int().nonnegative(),
+  failed_reflection_runs: z.number().int().nonnegative(),
+  total_curator_runs: z.number().int().nonnegative(),
+  completed_curator_runs: z.number().int().nonnegative(),
+  failed_curator_runs: z.number().int().nonnegative(),
+  pending_reflection_suggestions: z.number().int().nonnegative(),
+  pending_curator_suggestions: z.number().int().nonnegative(),
+  latest_reflection_run: ReflectionRunRecordSchema.optional(),
+  latest_curator_run: ReflectionRunRecordSchema.optional(),
+  curator_state: z.lazy(() => CuratorStateRecordSchema),
+  status_counts: z.object({
+    reflection_runs: z.record(z.string(), z.number().int().nonnegative()),
+    curator_runs: z.record(z.string(), z.number().int().nonnegative()),
+    suggestions: z.record(z.string(), z.number().int().nonnegative()),
+    suggestion_types: z.record(z.string(), z.number().int().nonnegative())
+  }),
+  issues: z.array(ReflectionDiagnosticsIssueSchema),
+  recommendation: z.string()
+});
+export type ReflectionDiagnosticsReport = z.infer<typeof ReflectionDiagnosticsReportSchema>;
+
+export const SkillUsageRecordSchema = z.object({
+  skill_id: z.string().min(1),
+  use_count: z.number().int().nonnegative(),
+  last_used_at: z.string().datetime().optional(),
+  last_run_id: z.string().min(1).optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type SkillUsageRecord = z.infer<typeof SkillUsageRecordSchema>;
+
+export const SkillDiagnosticsIssueSchema = z.object({
+  code: z.enum([
+    "selectable_skill_empty_markdown",
+    "selectable_skill_missing_provenance_detail",
+    "selectable_skill_unverified_provenance",
+    "selectable_skill_missing_source_refs",
+    "selectable_skill_missing_allowed_scopes",
+    "selectable_skill_unsupported_scope",
+    "selectable_skill_empty_support_file",
+    "selectable_skill_never_used"
+  ]),
+  severity: z.enum(["warning", "critical"]),
+  skill_id: z.string().min(1),
+  title: z.string(),
+  state: SkillStateSchema,
+  message: z.string()
+});
+export type SkillDiagnosticsIssue = z.infer<typeof SkillDiagnosticsIssueSchema>;
+
+export const SkillDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  total_skills: z.number().int().nonnegative(),
+  selectable_skills: z.number().int().nonnegative(),
+  state_counts: z.record(z.number().int().nonnegative()),
+  selectable_with_verified_provenance: z.number().int().nonnegative(),
+  selectable_with_source_refs: z.number().int().nonnegative(),
+  selectable_with_support_files: z.number().int().nonnegative(),
+  selectable_with_usage: z.number().int().nonnegative(),
+  empty_support_files: z.number().int().nonnegative(),
+  issues: z.array(SkillDiagnosticsIssueSchema),
+  recommendation: z.string()
+});
+export type SkillDiagnosticsReport = z.infer<typeof SkillDiagnosticsReportSchema>;
+
+export const CuratorStateRecordSchema = z.object({
+  id: z.literal("default"),
+  paused: z.boolean(),
+  interval_hours: z.number().int().positive(),
+  min_idle_hours: z.number().nonnegative(),
+  stale_after_days: z.number().int().positive(),
+  archive_after_days: z.number().int().positive(),
+  last_run_at: z.string().datetime().optional(),
+  last_run_summary: z.string().optional(),
+  run_count: z.number().int().nonnegative(),
+  updated_at: z.string().datetime()
+});
+export type CuratorStateRecord = z.infer<typeof CuratorStateRecordSchema>;
+
+export const CuratorLifecycleActionSchema = z.enum(["review", "mark_stale", "archive", "reactivate"]);
+export type CuratorLifecycleAction = z.infer<typeof CuratorLifecycleActionSchema>;
+
+export const CuratorLifecycleReportSchema = z.object({
+  id: z.string().min(1),
+  checked_at: z.string().datetime(),
+  dry_run: z.boolean(),
+  paused: z.boolean(),
+  skipped_reason: z.string().optional(),
+  thresholds: z.object({
+    stale_after_days: z.number().int().positive(),
+    archive_after_days: z.number().int().positive(),
+    min_idle_hours: z.number().nonnegative()
+  }),
+  counts: z.object({
+    memory_items: z.number().int().nonnegative(),
+    wiki_pages: z.number().int().nonnegative(),
+    skill_items: z.number().int().nonnegative(),
+    skill_usage_rows: z.number().int().nonnegative(),
+    suggestions: z.number().int().nonnegative()
+  }),
+  skill_actions: z.array(z.object({
+    skill_id: z.string().min(1),
+    title: z.string(),
+    current_state: SkillStateSchema,
+    proposed_state: SkillStateSchema.optional(),
+    action: CuratorLifecycleActionSchema,
+    reason: z.string(),
+    usage_count: z.number().int().nonnegative(),
+    last_activity_at: z.string().datetime().optional(),
+    owner_pinned: z.boolean(),
+    suggestion_id: z.string().optional()
+  })),
+  protected_skills: z.array(z.object({
+    skill_id: z.string().min(1),
+    title: z.string(),
+    state: SkillStateSchema,
+    reason: z.literal("owner_pinned")
+  }))
+});
+export type CuratorLifecycleReport = z.infer<typeof CuratorLifecycleReportSchema>;
+
+export const CuratorReviewReportSchema = z.object({
+  id: z.string().min(1),
+  checked_at: z.string().datetime(),
+  dry_run: z.boolean(),
+  counts: z.object({
+    keep_candidates: z.number().int().nonnegative(),
+    patch_candidates: z.number().int().nonnegative(),
+    consolidate_candidates: z.number().int().nonnegative(),
+    archive_candidates: z.number().int().nonnegative()
+  }),
+  keep_candidates: z.array(z.object({
+    kind: z.enum(["memory", "knowledge_wiki", "skill"]),
+    id: z.string().min(1),
+    title: z.string(),
+    reason: z.string()
+  })),
+  memory_merge_groups: z.array(z.object({
+    topic: z.string(),
+    memory_ids: z.array(z.string().min(1)),
+    reason: z.string(),
+    suggestion_id: z.string().optional()
+  })),
+  skill_consolidation_groups: z.array(z.object({
+    group_key: z.string().min(1),
+    skill_ids: z.array(z.string().min(1)),
+    suggested_umbrella_title: z.string(),
+    reason: z.string(),
+    suggestion_id: z.string().optional()
+  })),
+  wiki_patch_proposals: z.array(z.object({
+    wiki_id: z.string().min(1),
+    title: z.string(),
+    reason: z.string(),
+    suggestion_id: z.string().optional()
+  })),
+  archive_candidates: z.array(z.object({
+    kind: z.enum(["memory", "knowledge_wiki", "skill"]),
+    id: z.string().min(1),
+    title: z.string(),
+    reason: z.string(),
+    suggestion_id: z.string().optional()
+  }))
+});
+export type CuratorReviewReport = z.infer<typeof CuratorReviewReportSchema>;
+
+export const EvaluationFindingKindSchema = z.enum([
+  "run_failed",
+  "run_cancelled",
+  "waiting_for_input",
+  "tool_not_completed",
+  "no_workspace_effect",
+  "no_events",
+  "external_judge"
+]);
+export type EvaluationFindingKind = z.infer<typeof EvaluationFindingKindSchema>;
+
+export const EvaluationTraceReportSchema = z.object({
+  id: z.string().min(1),
+  checked_at: z.string().datetime(),
+  judge: z.object({
+    deterministic_status: z.literal("completed"),
+    external_status: z.enum(["not_configured", "completed", "failed"]),
+    provider_id: z.string().optional(),
+    summary: z.string()
+  }),
+  counts: z.object({
+    backend_runs: z.number().int().nonnegative(),
+    backend_events: z.number().int().nonnegative(),
+    workspace_changes: z.number().int().nonnegative(),
+    tool_runs: z.number().int().nonnegative(),
+    audit_records: z.number().int().nonnegative(),
+    findings: z.number().int().nonnegative(),
+    comparisons: z.number().int().nonnegative()
+  }),
+  run_scores: z.array(z.object({
+    run_id: z.string().min(1),
+    backend_id: z.string(),
+    status: BackendRunStatusSchema,
+    score: z.number().int().min(0).max(100),
+    verdict: z.enum(["pass", "warn", "fail"]),
+    findings: z.array(z.object({
+      kind: EvaluationFindingKindSchema,
+      severity: z.enum(["info", "warning", "critical"]),
+      reason: z.string(),
+      resource_refs: z.array(ResourceRefSchema)
+    })),
+    suggested_improvements: z.array(z.string())
+  })),
+  comparisons: z.array(z.object({
+    current_run_id: z.string().min(1),
+    baseline_run_id: z.string().min(1).optional(),
+    result: z.enum(["no_baseline", "same", "improved", "regressed"]),
+    reason: z.string()
+  }))
+});
+export type EvaluationTraceReport = z.infer<typeof EvaluationTraceReportSchema>;
+
+export const EvaluationDiagnosticsIssueSchema = z.object({
+  code: z.enum([
+    "evaluation_run_missing",
+    "evaluation_run_failed",
+    "evaluation_run_stale",
+    "evaluation_suggestion_pending",
+    "backend_run_failed",
+    "backend_run_waiting_for_input",
+    "tool_run_attention_required"
+  ]),
+  severity: z.enum(["info", "warning", "critical"]),
+  message: z.string(),
+  reflection_run_id: z.string().min(1).optional(),
+  suggestion_id: z.string().min(1).optional(),
+  run_id: z.string().min(1).optional(),
+  tool_run_id: z.string().min(1).optional(),
+  status: z.string().min(1).optional(),
+  resource_ref: ResourceRefSchema.optional(),
+  created_at: z.string().datetime().optional()
+}).strict();
+export type EvaluationDiagnosticsIssue = z.infer<typeof EvaluationDiagnosticsIssueSchema>;
+
+export const EvaluationDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  stale_after_hours: z.number().int().positive(),
+  total_evaluation_runs: z.number().int().nonnegative(),
+  completed_evaluation_runs: z.number().int().nonnegative(),
+  failed_evaluation_runs: z.number().int().nonnegative(),
+  pending_evaluation_suggestions: z.number().int().nonnegative(),
+  backend_runs: z.number().int().nonnegative(),
+  failed_backend_runs: z.number().int().nonnegative(),
+  waiting_backend_runs: z.number().int().nonnegative(),
+  tool_runs: z.number().int().nonnegative(),
+  ignored_or_failed_tool_runs: z.number().int().nonnegative(),
+  workspace_changes: z.number().int().nonnegative(),
+  latest_evaluation_run: ReflectionRunRecordSchema.optional(),
+  status_counts: z.object({
+    evaluation_runs: z.record(z.string(), z.number().int().nonnegative()),
+    evaluation_suggestions: z.record(z.string(), z.number().int().nonnegative()),
+    backend_runs: z.record(z.string(), z.number().int().nonnegative()),
+    tool_runs: z.record(z.string(), z.number().int().nonnegative())
+  }),
+  issues: z.array(EvaluationDiagnosticsIssueSchema),
+  recommendation: z.string()
+});
+export type EvaluationDiagnosticsReport = z.infer<typeof EvaluationDiagnosticsReportSchema>;
+
 export const ToolRunRecordSchema = z.object({
   id: z.string().min(1),
   run_id: z.string().min(1),
@@ -330,16 +1197,66 @@ export const ToolRunRecordSchema = z.object({
 });
 export type ToolRunRecord = z.infer<typeof ToolRunRecordSchema>;
 
+export const ToolRunDiagnosticsReasonSchema = z.object({
+  reason: z.string(),
+  count: z.number().int().nonnegative()
+});
+export type ToolRunDiagnosticsReason = z.infer<typeof ToolRunDiagnosticsReasonSchema>;
+
+export const ToolRunDiagnosticsGroupSchema = z.object({
+  provider_tool_name: z.string().min(1),
+  action_id: z.string().optional(),
+  status: ToolRunStatusSchema,
+  count: z.number().int().nonnegative(),
+  latest_tool_run: ToolRunRecordSchema,
+  reasons: z.array(ToolRunDiagnosticsReasonSchema)
+});
+export type ToolRunDiagnosticsGroup = z.infer<typeof ToolRunDiagnosticsGroupSchema>;
+
+export const ToolRunDiagnosticsAdapterRecommendationSchema = z.object({
+  provider_tool_name: z.string().min(1),
+  action_id: z.string().optional(),
+  status: ToolRunStatusSchema,
+  count: z.number().int().nonnegative(),
+  mapping_status: z.enum(["mapped_provider_tool", "action_id_only", "unmapped_provider_tool"]),
+  domain_command_id: z.string().optional(),
+  suggested_next_step: z.enum(["route_through_domain_command", "add_provider_tool_mapping", "inspect_failed_domain_command"]),
+  reason: z.string()
+});
+export type ToolRunDiagnosticsAdapterRecommendation = z.infer<typeof ToolRunDiagnosticsAdapterRecommendationSchema>;
+
+export const ToolRunDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  scope: z.object({
+    run_id: z.string().optional(),
+    session_id: z.string().optional(),
+    status: ToolRunStatusSchema.optional(),
+    limit: z.number().int().positive()
+  }),
+  total_tool_runs: z.number().int().nonnegative(),
+  ignored_or_failed_tool_runs: z.number().int().nonnegative(),
+  groups: z.array(ToolRunDiagnosticsGroupSchema),
+  repeated_ignored_provider_tools: z.array(ToolRunDiagnosticsGroupSchema),
+  adapter_recommendations: z.array(ToolRunDiagnosticsAdapterRecommendationSchema).optional(),
+  recommendation: z.string()
+});
+export type ToolRunDiagnosticsReport = z.infer<typeof ToolRunDiagnosticsReportSchema>;
+
 export const AutomationJobRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
-  kind: z.enum(["memory_review", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction"]),
+  kind: z.enum(["memory_review", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"]),
   status: AutomationJobStatusSchema,
   schedule: z.string().min(1),
   target_instruction: z.string().min(1),
   delivery_target: z.record(jsonValueSchema),
   next_run_at: z.string().datetime().optional(),
   last_run_at: z.string().datetime().optional(),
+  retry_after_at: z.string().datetime().optional(),
+  locked_until: z.string().datetime().optional(),
+  failure_count: z.number().int().nonnegative().default(0),
+  max_attempts: z.number().int().positive().default(3),
+  last_error: z.string().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 });
@@ -347,7 +1264,7 @@ export type AutomationJobRecord = z.infer<typeof AutomationJobRecordSchema>;
 
 export const ExternalSendRecordSchema = z.object({
   id: z.string().min(1),
-  channel: z.enum(["webhook", "email", "slack"]),
+  channel: ExternalSendChannelSchema,
   status: ExternalSendStatusSchema,
   target: z.record(jsonValueSchema),
   title: z.string(),
@@ -361,16 +1278,560 @@ export const ExternalSendRecordSchema = z.object({
 });
 export type ExternalSendRecord = z.infer<typeof ExternalSendRecordSchema>;
 
+export const ExternalSendDiagnosticsIssueSchema = z.object({
+  code: z.enum([
+    "external_send_pending_approval",
+    "external_send_dry_run_only",
+    "external_send_failed",
+    "external_send_stale_draft",
+    "external_send_missing_target_url"
+  ]),
+  severity: z.enum(["info", "warning", "critical"]),
+  send_id: z.string().min(1),
+  channel: ExternalSendChannelSchema,
+  status: ExternalSendStatusSchema,
+  title: z.string(),
+  message: z.string(),
+  resource_ref: ResourceRefSchema.optional()
+});
+export type ExternalSendDiagnosticsIssue = z.infer<typeof ExternalSendDiagnosticsIssueSchema>;
+
+export const ExternalSendTransportReadinessSchema = z.object({
+  channel: ExternalSendChannelSchema,
+  status: ExternalSendTransportStatusSchema,
+  configured: z.boolean(),
+  dispatch_enabled: z.boolean(),
+  requires_target_url: z.boolean(),
+  message: z.string().min(1)
+}).strict();
+export type ExternalSendTransportReadiness = z.infer<typeof ExternalSendTransportReadinessSchema>;
+
+export const ExternalSendDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  dispatch_enabled: z.boolean(),
+  dry_run_default: z.boolean(),
+  stale_after_hours: z.number().int().positive(),
+  total_sends: z.number().int().nonnegative(),
+  pending_approval_sends: z.number().int().nonnegative(),
+  failed_sends: z.number().int().nonnegative(),
+  dry_run_approved_sends: z.number().int().nonnegative(),
+  stale_draft_sends: z.number().int().nonnegative(),
+  status_counts: z.record(z.string(), z.number().int().nonnegative()),
+  channel_counts: z.record(z.string(), z.number().int().nonnegative()),
+  transport_status_counts: z.record(z.string(), z.number().int().nonnegative()),
+  transport_readiness: z.array(ExternalSendTransportReadinessSchema),
+  issues: z.array(ExternalSendDiagnosticsIssueSchema),
+  recommendation: z.string()
+});
+export type ExternalSendDiagnosticsReport = z.infer<typeof ExternalSendDiagnosticsReportSchema>;
+
+export const GatewayPairingRecordSchema = z.object({
+  id: z.string().min(1),
+  channel: GatewayChannelSchema,
+  source_identity: z.string().min(1),
+  source_label: z.string(),
+  status: GatewayPairingStatusSchema,
+  pairing_code: z.string().optional(),
+  session_key: z.string().min(1),
+  metadata: z.record(jsonValueSchema),
+  requested_at: z.string().datetime(),
+  expires_at: z.string().datetime().optional(),
+  resolved_at: z.string().datetime().optional(),
+  revoked_at: z.string().datetime().optional(),
+  updated_at: z.string().datetime()
+});
+export type GatewayPairingRecord = z.infer<typeof GatewayPairingRecordSchema>;
+
+export const GatewayPairingPolicyRecordSchema = z.object({
+  id: z.string().min(1),
+  channel: GatewayChannelSchema,
+  status: GatewayPairingPolicyStatusSchema,
+  trust_mode: GatewayPairingTrustModeSchema,
+  allowlist: z.array(z.string().min(1)),
+  pairing_ttl_ms: z.number().int().positive().optional(),
+  duplicate_window_ms: z.number().int().positive().optional(),
+  rate_limit_window_ms: z.number().int().positive().optional(),
+  rate_limit_max: z.number().int().positive().optional(),
+  metadata: z.record(jsonValueSchema),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type GatewayPairingPolicyRecord = z.infer<typeof GatewayPairingPolicyRecordSchema>;
+
+export const GatewayRoutingPolicyRecordSchema = z.object({
+  id: z.string().min(1),
+  channel: GatewayChannelSchema,
+  status: GatewayRoutingPolicyStatusSchema,
+  session_key_strategy: GatewayRoutingSessionKeyStrategySchema,
+  default_account_id: z.string().min(1).optional(),
+  default_thread_id: z.string().min(1).optional(),
+  default_route: z.string().min(1),
+  metadata: z.record(jsonValueSchema),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type GatewayRoutingPolicyRecord = z.infer<typeof GatewayRoutingPolicyRecordSchema>;
+
+export const GatewayInboundMessageRecordSchema = z.object({
+  id: z.string().min(1),
+  channel: GatewayChannelSchema,
+  source_identity: z.string().min(1),
+  body: z.string(),
+  status: GatewayInboundStatusSchema,
+  trusted: z.boolean(),
+  session_key: z.string().optional(),
+  pairing_id: z.string().optional(),
+  message_id: z.string().optional(),
+  error: z.string().optional(),
+  metadata: z.record(jsonValueSchema),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type GatewayInboundMessageRecord = z.infer<typeof GatewayInboundMessageRecordSchema>;
+
+export const SecretRefSchema = z.object({
+  id: z.string().min(1),
+  source: SecretRefSourceSchema,
+  provider: z.string().min(1),
+  key: z.string().min(1),
+  label: z.string().optional(),
+  scope: z.string().optional(),
+  created_at: z.string().datetime().optional()
+}).strict();
+export type SecretRef = z.infer<typeof SecretRefSchema>;
+
+export const GatewayMcpSecretFileBindingSchema = z.object({
+  secret_ref_id: z.string().min(1),
+  filename: z.string().min(1),
+  env: z.string().min(1),
+  mode: z.number().int().positive().optional()
+}).strict();
+export type GatewayMcpSecretFileBinding = z.infer<typeof GatewayMcpSecretFileBindingSchema>;
+
+export const GatewayMcpStdioConfigSchema = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  cwd: z.string().min(1).optional(),
+  env: z.record(z.string()).default({}),
+  secret_env: z.record(z.string().min(1)).default({}),
+  secret_files: z.array(GatewayMcpSecretFileBindingSchema).default([]),
+  framing: GatewayMcpStdioFramingSchema.default("json_lines"),
+  initialize: z.boolean().default(true),
+  timeout_ms: z.number().int().positive().optional()
+}).strict();
+export type GatewayMcpStdioConfig = z.infer<typeof GatewayMcpStdioConfigSchema>;
+
+export const GatewayMcpHttpConfigSchema = z.object({
+  endpoint_url: z.string().url(),
+  headers: z.record(z.string()).default({}),
+  secret_headers: z.record(z.string().min(1)).default({}),
+  timeout_ms: z.number().int().positive().optional()
+}).strict();
+export type GatewayMcpHttpConfig = z.infer<typeof GatewayMcpHttpConfigSchema>;
+
+export const GatewayMcpConfigRecordSchema = z.object({
+  id: z.string().min(1),
+  server_name: z.string().min(1),
+  transport: GatewayMcpTransportSchema,
+  enabled: z.boolean(),
+  allowed_tools: z.array(z.string().min(1)),
+  config_ref: ResourceRefSchema.optional(),
+  secret_refs: z.array(SecretRefSchema),
+  stdio: GatewayMcpStdioConfigSchema.optional(),
+  http: GatewayMcpHttpConfigSchema.optional(),
+  metadata: z.record(jsonValueSchema),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+}).strict().superRefine((record, ctx) => {
+  if (record.transport === "stdio" && !record.stdio) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["stdio"],
+      message: "stdio_config_required"
+    });
+  }
+  if (record.transport === "http" && !record.http) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["http"],
+      message: "http_config_required"
+    });
+  }
+});
+export type GatewayMcpConfigRecord = z.infer<typeof GatewayMcpConfigRecordSchema>;
+
+export const GatewayMcpConfigSummarySchema = z.object({
+  id: z.string().min(1),
+  server_name: z.string().min(1),
+  transport: GatewayMcpTransportSchema,
+  enabled: z.boolean(),
+  allowed_tools: z.array(z.string().min(1)),
+  config_ref: ResourceRefSchema.optional(),
+  secret_ref_ids: z.array(z.string().min(1)),
+  has_stdio: z.boolean(),
+  has_http: z.boolean(),
+  timeout_ms: z.number().int().positive().optional(),
+  metadata: z.record(jsonValueSchema),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+}).strict();
+export type GatewayMcpConfigSummary = z.infer<typeof GatewayMcpConfigSummarySchema>;
+
+export const SandboxPathAccessRuleSchema = z.object({
+  root: z.string().min(1),
+  access: SandboxWorkspaceAccessSchema.exclude(["none"]),
+  description: z.string().optional()
+}).strict();
+export type SandboxPathAccessRule = z.infer<typeof SandboxPathAccessRuleSchema>;
+
+export const SandboxPolicySchema = z.object({
+  mode: SandboxModeSchema,
+  scope: SandboxScopeSchema,
+  backend: SandboxBackendSchema,
+  workspace_access: SandboxWorkspaceAccessSchema,
+  network_access: SandboxNetworkAccessSchema,
+  allowed_paths: z.array(SandboxPathAccessRuleSchema),
+  denied_paths: z.array(z.string().min(1)),
+  timeout_ms: z.number().int().positive().optional(),
+  metadata: z.record(jsonValueSchema)
+}).strict();
+export type SandboxPolicy = z.infer<typeof SandboxPolicySchema>;
+
+export const McpConfigRefSchema = z.object({
+  id: z.string().min(1),
+  server_name: z.string().min(1),
+  config_ref: ResourceRefSchema.optional(),
+  allowed_tools: z.array(z.string().min(1)),
+  secret_refs: z.array(SecretRefSchema)
+}).strict();
+export type McpConfigRef = z.infer<typeof McpConfigRefSchema>;
+
+export const McpRuntimeConfigRefSchema = z.object({
+  id: z.string().min(1),
+  server_name: z.string().min(1),
+  config_ref: ResourceRefSchema.optional(),
+  allowed_tools: z.array(z.string().min(1)),
+  secret_ref_ids: z.array(z.string().min(1))
+}).strict();
+export type McpRuntimeConfigRef = z.infer<typeof McpRuntimeConfigRefSchema>;
+
+export const PathNormalizationPolicySchema = z.object({
+  canonical_root: z.string().min(1),
+  reject_absolute_paths: z.boolean(),
+  reject_parent_segments: z.boolean(),
+  allowed_roots: z.array(z.string().min(1)),
+  denied_roots: z.array(z.string().min(1))
+}).strict();
+export type PathNormalizationPolicy = z.infer<typeof PathNormalizationPolicySchema>;
+
+export const ConcurrencyLockPolicySchema = z.object({
+  scope: ConcurrencyLockScopeSchema,
+  key: z.string().min(1),
+  ttl_ms: z.number().int().positive()
+}).strict();
+export type ConcurrencyLockPolicy = z.infer<typeof ConcurrencyLockPolicySchema>;
+
+export const GatewayBoundaryPolicySchema = z.object({
+  id: z.string().min(1),
+  source_channel: GatewayBoundarySourceSchema,
+  source_identity: z.string().optional(),
+  session_key: z.string().min(1),
+  allowed_tools: z.array(z.string().min(1)),
+  mcp_config_refs: z.array(McpConfigRefSchema),
+  secret_refs: z.array(SecretRefSchema),
+  sandbox: SandboxPolicySchema,
+  path_normalization: PathNormalizationPolicySchema,
+  allowlist: z.array(z.string().min(1)),
+  timeout_ms: z.number().int().positive().optional(),
+  concurrency_lock: ConcurrencyLockPolicySchema.optional(),
+  metadata: z.record(jsonValueSchema),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+}).strict();
+export type GatewayBoundaryPolicy = z.infer<typeof GatewayBoundaryPolicySchema>;
+
+export const GatewayBoundaryRuntimeSnapshotSchema = z.object({
+  policy_id: z.string().min(1),
+  source_channel: GatewayBoundarySourceSchema,
+  source_identity: z.string().optional(),
+  session_key: z.string().min(1),
+  allowed_tools: z.array(z.string().min(1)),
+  mcp_config_refs: z.array(McpRuntimeConfigRefSchema),
+  secret_ref_ids: z.array(z.string().min(1)),
+  sandbox: SandboxPolicySchema,
+  path_normalization: PathNormalizationPolicySchema,
+  allowlist: z.array(z.string().min(1)),
+  timeout_ms: z.number().int().positive().optional(),
+  concurrency_lock: ConcurrencyLockPolicySchema.optional(),
+  created_at: z.string().datetime()
+}).strict();
+export type GatewayBoundaryRuntimeSnapshot = z.infer<typeof GatewayBoundaryRuntimeSnapshotSchema>;
+
+export const GatewaySandboxInstanceRecordSchema = z.object({
+  id: z.string().min(1),
+  instance_key: z.string().min(1),
+  scope: SandboxScopeSchema,
+  backend: SandboxBackendSchema,
+  status: GatewaySandboxInstanceStatusSchema,
+  sandbox: SandboxPolicySchema,
+  session_key: z.string().min(1).optional(),
+  owner_ref: ResourceRefSchema.optional(),
+  workspace_root: z.string().min(1).optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  last_used_at: z.string().datetime().optional(),
+  deleted_at: z.string().datetime().optional(),
+  metadata: z.record(jsonValueSchema)
+}).strict();
+export type GatewaySandboxInstanceRecord = z.infer<typeof GatewaySandboxInstanceRecordSchema>;
+
+export const GatewaySandboxWorkspaceSyncRecordSchema = z.object({
+  id: z.string().min(1),
+  instance_id: z.string().min(1),
+  instance_key: z.string().min(1),
+  direction: GatewaySandboxWorkspaceSyncDirectionSchema,
+  status: GatewaySandboxWorkspaceSyncStatusSchema,
+  workspace_root: z.string().min(1).optional(),
+  remote_workspace_root: z.string().min(1).optional(),
+  file_count: z.number().int().nonnegative().optional(),
+  byte_count: z.number().int().nonnegative().optional(),
+  error: z.string().min(1).optional(),
+  started_at: z.string().datetime(),
+  completed_at: z.string().datetime().optional(),
+  metadata: z.record(jsonValueSchema)
+}).strict();
+export type GatewaySandboxWorkspaceSyncRecord = z.infer<typeof GatewaySandboxWorkspaceSyncRecordSchema>;
+
+export const GatewaySandboxWorkspaceSyncResultSchema = z.object({
+  dry_run: z.boolean(),
+  sync: GatewaySandboxWorkspaceSyncRecordSchema
+}).strict();
+export type GatewaySandboxWorkspaceSyncResult = z.infer<typeof GatewaySandboxWorkspaceSyncResultSchema>;
+
+export const GatewayConcurrencyLockRecordSchema = z.object({
+  id: z.string().min(1),
+  lock_key: z.string().min(1),
+  scope: ConcurrencyLockScopeSchema,
+  policy_id: z.string().min(1).optional(),
+  owner_ref: ResourceRefSchema.optional(),
+  status: GatewayConcurrencyLockStatusSchema,
+  acquired_at: z.string().datetime(),
+  expires_at: z.string().datetime(),
+  released_at: z.string().datetime().optional(),
+  metadata: z.record(jsonValueSchema)
+}).strict();
+export type GatewayConcurrencyLockRecord = z.infer<typeof GatewayConcurrencyLockRecordSchema>;
+
+export const GatewayDiagnosticsIssueSchema = z.object({
+  code: z.enum([
+    "gateway_pending_pairing",
+    "gateway_blocked_inbound",
+    "gateway_failed_inbound",
+    "gateway_active_concurrency_lock",
+    "gateway_expired_concurrency_lock",
+    "gateway_failed_sandbox_instance",
+    "gateway_failed_sandbox_workspace_sync",
+    "gateway_pairing_policy_without_routing_policy",
+    "gateway_routing_policy_without_pairing_policy"
+  ]),
+  severity: z.enum(["warning", "critical"]),
+  resource_kind: z.enum([
+    "pairing",
+    "pairing_policy",
+    "routing_policy",
+    "inbound_message",
+    "concurrency_lock",
+    "sandbox_instance",
+    "sandbox_workspace_sync"
+  ]),
+  resource_id: z.string().min(1),
+  message: z.string()
+});
+export type GatewayDiagnosticsIssue = z.infer<typeof GatewayDiagnosticsIssueSchema>;
+
+export const GatewayDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  total_pairings: z.number().int().nonnegative(),
+  pending_pairings: z.number().int().nonnegative(),
+  approved_pairings: z.number().int().nonnegative(),
+  pairing_policies: z.number().int().nonnegative(),
+  routing_policies: z.number().int().nonnegative(),
+  inbound_messages: z.number().int().nonnegative(),
+  blocked_inbound_messages: z.number().int().nonnegative(),
+  failed_inbound_messages: z.number().int().nonnegative(),
+  boundary_policies: z.number().int().nonnegative(),
+  mcp_configs: z.number().int().nonnegative(),
+  concurrency_locks: z.number().int().nonnegative(),
+  active_concurrency_locks: z.number().int().nonnegative(),
+  expired_active_concurrency_locks: z.number().int().nonnegative(),
+  sandbox_instances: z.number().int().nonnegative(),
+  failed_sandbox_instances: z.number().int().nonnegative(),
+  sandbox_workspace_syncs: z.number().int().nonnegative(),
+  failed_sandbox_workspace_syncs: z.number().int().nonnegative(),
+  status_counts: z.object({
+    pairings: z.record(z.number().int().nonnegative()),
+    pairing_policies: z.record(z.number().int().nonnegative()),
+    routing_policies: z.record(z.number().int().nonnegative()),
+    inbound_messages: z.record(z.number().int().nonnegative()),
+    concurrency_locks: z.record(z.number().int().nonnegative()),
+    sandbox_instances: z.record(z.number().int().nonnegative()),
+    sandbox_workspace_syncs: z.record(z.number().int().nonnegative())
+  }),
+  issues: z.array(GatewayDiagnosticsIssueSchema),
+  recommendation: z.string()
+});
+export type GatewayDiagnosticsReport = z.infer<typeof GatewayDiagnosticsReportSchema>;
+
+export const GatewayRepairActionSchema = z.object({
+  action: z.enum(["expire_pairing", "expire_concurrency_lock"]),
+  status: z.enum(["planned", "applied", "skipped"]),
+  reason: z.string().min(1),
+  target_ref: ResourceRefSchema,
+  before_status: z.string().min(1).optional(),
+  after_status: z.string().min(1).optional(),
+  metadata: z.record(jsonValueSchema)
+}).strict();
+export type GatewayRepairAction = z.infer<typeof GatewayRepairActionSchema>;
+
+export const GatewayRepairResultSchema = z.object({
+  dry_run: z.boolean(),
+  checked_at: z.string().datetime(),
+  applied_count: z.number().int().nonnegative(),
+  actions: z.array(GatewayRepairActionSchema)
+}).strict();
+export type GatewayRepairResult = z.infer<typeof GatewayRepairResultSchema>;
+
 export const ActionCatalogEntrySchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
+  display_name: z.string().optional(),
   description: z.string(),
   input_schema: z.record(jsonValueSchema),
   output_schema: z.record(jsonValueSchema),
   resource_kinds: z.array(z.string()),
-  handler_id: z.string().min(1)
+  handler_id: z.string().min(1),
+  implementation_target: z.string().optional(),
+  ui_display_category: z.string().optional()
 });
 export type ActionCatalogEntry = z.infer<typeof ActionCatalogEntrySchema>;
+
+export const DomainCommandCatalogDiagnosticIssueSchema = z.object({
+  code: z.enum([
+    "duplicate_command_id",
+    "duplicate_provider_tool_name",
+    "duplicate_surface_operation_kind",
+    "missing_action_catalog_entry",
+    "action_catalog_mismatch",
+    "invalid_output_render_kind",
+    "empty_input_sources",
+    "empty_resource_kinds",
+    "empty_proposed_effects",
+    "missing_provider_tool_mapping",
+    "missing_surface_operation_mapping"
+  ]),
+  command_id: z.string().min(1).optional(),
+  reference: z.string().min(1).optional(),
+  message: z.string().min(1)
+}).strict();
+export type DomainCommandCatalogDiagnosticIssue = z.infer<typeof DomainCommandCatalogDiagnosticIssueSchema>;
+
+export const DomainCommandCatalogCoverageSchema = z.object({
+  commands: z.number().int().nonnegative(),
+  action_catalog_entries: z.number().int().nonnegative(),
+  provider_tool_mappings: z.number().int().nonnegative(),
+  surface_operation_mappings: z.number().int().nonnegative(),
+  render_kinds: z.array(z.string().min(1)),
+  input_sources: z.array(z.string().min(1))
+}).strict();
+export type DomainCommandCatalogCoverage = z.infer<typeof DomainCommandCatalogCoverageSchema>;
+
+export const DomainCommandCatalogDiagnosticsReportSchema = z.object({
+  ok: z.boolean(),
+  generated_at: z.string().datetime(),
+  coverage: DomainCommandCatalogCoverageSchema,
+  issues: z.array(DomainCommandCatalogDiagnosticIssueSchema),
+  recommendation: z.string().min(1)
+}).strict();
+export type DomainCommandCatalogDiagnosticsReport = z.infer<typeof DomainCommandCatalogDiagnosticsReportSchema>;
+
+export const PluginDiagnosticsIssueSchema = z.object({
+  code: z.enum([
+    "plugin_manifest_load_issue",
+    "plugin_without_actions",
+    "plugin_entrypoint_not_ready",
+    "plugin_unsigned_entrypoint",
+    "plugin_signature_untrusted",
+    "plugin_missing_handlers"
+  ]),
+  severity: z.enum(["info", "warning", "critical"]),
+  manifest_id: z.string().min(1).optional(),
+  file_path: z.string().min(1).optional(),
+  issue_code: z.string().min(1).optional(),
+  entrypoint_status: z.string().min(1).optional(),
+  signature_status: z.string().min(1).optional(),
+  missing_handler_ids: z.array(z.string().min(1)).optional(),
+  action_ids: z.array(z.string().min(1)).optional(),
+  message: z.string().min(1)
+}).strict();
+export type PluginDiagnosticsIssue = z.infer<typeof PluginDiagnosticsIssueSchema>;
+
+export const PluginDiagnosticsReportSchema = z.object({
+  ok: z.boolean(),
+  generated_at: z.string().datetime(),
+  total_plugins: z.number().int().nonnegative(),
+  built_in_plugins: z.number().int().nonnegative(),
+  filesystem_plugins: z.number().int().nonnegative(),
+  marketplace_plugins: z.number().int().nonnegative(),
+  total_actions: z.number().int().nonnegative(),
+  filesystem_actions: z.number().int().nonnegative(),
+  total_renderers: z.number().int().nonnegative(),
+  filesystem_renderers: z.number().int().nonnegative(),
+  entrypoint_ready_plugins: z.number().int().nonnegative(),
+  entrypoint_not_ready_plugins: z.number().int().nonnegative(),
+  unsigned_entrypoint_plugins: z.number().int().nonnegative(),
+  untrusted_signature_plugins: z.number().int().nonnegative(),
+  plugins_with_missing_handlers: z.number().int().nonnegative(),
+  registered_handlers: z.number().int().nonnegative(),
+  missing_handlers: z.number().int().nonnegative(),
+  load_issue_count: z.number().int().nonnegative(),
+  status_counts: z.object({
+    sources: z.record(z.string(), z.number().int().nonnegative()),
+    kinds: z.record(z.string(), z.number().int().nonnegative()),
+    entrypoints: z.record(z.string(), z.number().int().nonnegative()),
+    signatures: z.record(z.string(), z.number().int().nonnegative())
+  }),
+  issues: z.array(PluginDiagnosticsIssueSchema),
+  recommendation: z.string().min(1)
+}).strict();
+export type PluginDiagnosticsReport = z.infer<typeof PluginDiagnosticsReportSchema>;
+
+export const SurfaceRendererRegistryEntrySchema = z.object({
+  id: z.string().min(1),
+  kind: z.string().min(1),
+  renderer: z.string().optional(),
+  version: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string(),
+  props_schema: z.record(jsonValueSchema),
+  actions_schema: z.record(jsonValueSchema).optional(),
+  fallback_kind: z.string().optional(),
+  category: z.string().optional(),
+  metadata: z.record(jsonValueSchema).optional()
+});
+export type SurfaceRendererRegistryEntry = z.infer<typeof SurfaceRendererRegistryEntrySchema>;
+
+export const PluginManifestSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  version: z.string().min(1),
+  kind: z.enum(["ui", "tool", "collection_action", "backend_connector", "marketplace"]),
+  actions: z.array(ActionCatalogEntrySchema),
+  renderers: z.array(SurfaceRendererRegistryEntrySchema).optional(),
+  resource_kinds: z.array(z.string()),
+  entrypoint: z.string().optional(),
+  metadata: z.record(jsonValueSchema)
+});
+export type PluginManifest = z.infer<typeof PluginManifestSchema>;
 
 export const PolicyEvaluationInputSchema = z.object({
   capability_id: z.string().min(1),
@@ -478,7 +1939,7 @@ export type WikiFrontmatter = z.infer<typeof WikiFrontmatterSchema>;
 export const ArtifactRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
-  kind: z.enum(["markdown", "table", "chart", "note"]),
+  kind: z.enum(["markdown", "document", "table", "chart", "image", "pdf", "structured_draft", "generated_report", "note"]),
   locale: SupportedLocaleSchema,
   source_locales: z.array(SupportedLocaleSchema),
   file_ref: ResourceRefSchema,
@@ -566,6 +2027,54 @@ export const OperationRecordSchema = z.object({
   updated_at: z.string().datetime()
 });
 export type OperationRecord = z.infer<typeof OperationRecordSchema>;
+
+export const FileBrowserActionKindSchema = z.enum(["file", "browser"]);
+export type FileBrowserActionKind = z.infer<typeof FileBrowserActionKindSchema>;
+
+export const FileBrowserActionDiagnosticsIssueSchema = z.object({
+  code: z.enum([
+    "file_browser_action_failed",
+    "file_browser_action_blocked",
+    "file_browser_tool_run_failed",
+    "file_browser_tool_run_ignored",
+    "browser_workspace_fallback"
+  ]),
+  severity: z.enum(["info", "warning", "critical"]),
+  action_kind: FileBrowserActionKindSchema,
+  operation: z.string().min(1),
+  status: z.string().min(1),
+  message: z.string(),
+  operation_id: z.string().min(1).optional(),
+  tool_run_id: z.string().min(1).optional(),
+  run_id: z.string().min(1).optional(),
+  session_id: z.string().min(1),
+  resource_ref: ResourceRefSchema.optional(),
+  output_summary: z.string().optional(),
+  created_at: z.string().datetime()
+}).strict();
+export type FileBrowserActionDiagnosticsIssue = z.infer<typeof FileBrowserActionDiagnosticsIssueSchema>;
+
+export const FileBrowserActionDiagnosticsReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  scope: z.object({
+    session_id: z.string().optional(),
+    limit: z.number().int().positive()
+  }),
+  total_operations: z.number().int().nonnegative(),
+  total_tool_runs: z.number().int().nonnegative(),
+  file_operations: z.number().int().nonnegative(),
+  browser_operations: z.number().int().nonnegative(),
+  completed_file_operations: z.number().int().nonnegative(),
+  completed_browser_operations: z.number().int().nonnegative(),
+  failed_or_blocked_operations: z.number().int().nonnegative(),
+  ignored_or_failed_tool_runs: z.number().int().nonnegative(),
+  browser_workspace_fallbacks: z.number().int().nonnegative(),
+  operation_status_counts: z.record(z.string(), z.number().int().nonnegative()),
+  tool_run_status_counts: z.record(z.string(), z.number().int().nonnegative()),
+  issues: z.array(FileBrowserActionDiagnosticsIssueSchema),
+  recommendation: z.string()
+});
+export type FileBrowserActionDiagnosticsReport = z.infer<typeof FileBrowserActionDiagnosticsReportSchema>;
 
 export const ApprovalRequestSchema = z.object({
   id: z.string().min(1),

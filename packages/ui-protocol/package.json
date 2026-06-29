@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@samurai-agent/core-schemas": "workspace:*"
+    "@samurai-agent/core-schemas": "workspace:*",
+    "zod": "^3.25.76"
   }
 }

@@ -398,6 +398,7 @@ button {
 .backend-picker {
   align-items: center;
   display: inline-flex;
+  gap: 8px;
   min-width: 0;
   position: relative;
 }
@@ -447,6 +448,37 @@ button {
 .stage-backend-trigger:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+.surface-chip {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1;
+  min-height: 24px;
+  max-width: 132px;
+  overflow: hidden;
+  padding: 0 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.surface-chip.is-compact {
+  font-size: 10px;
+  min-height: 21px;
+  max-width: 112px;
+  padding: 0 7px;
+}
+
+.surface-chip.is-warning {
+  border-color: color-mix(in srgb, var(--warn) 42%, var(--line));
+  color: var(--warn);
 }
 
 .backend-menu {
@@ -1087,6 +1119,137 @@ button {
   display: flex;
   justify-content: space-between;
   gap: 12px;
+}
+
+.drawer-card-badges {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.workspace-actions,
+.surface-action-group {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.surface-action-group {
+  border-right: 1px solid var(--line);
+  margin-right: 4px;
+  padding-right: 6px;
+}
+
+.surface-action-group .icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.surface-render {
+  border-radius: var(--radius-card);
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px;
+}
+
+.surface-render-head {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.surface-render-head strong {
+  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.surface-form {
+  display: grid;
+  gap: 8px;
+}
+
+.surface-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.surface-form span {
+  color: var(--soft);
+  font-size: 11px;
+}
+
+.surface-form input {
+  background: var(--panel-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ui);
+  min-height: 32px;
+  padding: 0 9px;
+}
+
+.surface-table-wrap {
+  overflow: auto;
+}
+
+.surface-table {
+  border-collapse: collapse;
+  min-width: 100%;
+}
+
+.surface-table th,
+.surface-table td {
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  padding: 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.surface-table th {
+  color: var(--soft);
+  font-weight: 600;
+}
+
+.surface-chart {
+  align-items: center;
+  background: var(--panel-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ui);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 28px minmax(0, 1fr);
+  min-height: 58px;
+  padding: 10px;
+}
+
+.surface-chart div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.surface-chart span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.surface-json {
+  background: var(--panel-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ui);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
 }
 
 .artifact-head h2,
