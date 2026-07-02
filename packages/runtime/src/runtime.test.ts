@@ -270,6 +270,129 @@ describe("agent runtime", () => {
     expect([wiki, skill, schema, record].every((result) => result.render_specs.length === 1)).toBe(true);
   });
 
+  it("creates the task list App Canvas surface only for task app requests", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_task_app",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "タスク管理アプリを作って",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "task_list", versions: ["1"] }]
+      }
+    });
+    const schema = await store.getCollectionSchema("tasks");
+    const second = await runtime.runSurfaceOperation({
+      id: "surface_task_app_second",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "todo list",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "task_list", versions: ["1"] }]
+      }
+    });
+    const normal = await runtime.runSurfaceOperation({
+      id: "surface_normal_chat",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "こんにちは",
+      output_locale: "ja"
+    });
+    await store.close();
+
+    expect(schema?.id).toBe("tasks");
+    expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["chat", "custom_view"]);
+    expect(result.render_specs?.[1]).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "task_list",
+        data: expect.objectContaining({
+          collection_id: "tasks",
+          record_ids: []
+        })
+      },
+      fallback: expect.objectContaining({
+        kind: "collection",
+        props: expect.objectContaining({ record_ids: [] })
+      })
+    });
+    expect(second.render_specs?.map((spec) => spec.kind)).toEqual(["chat", "custom_view"]);
+    expect(normal.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+  });
+
+  it("validates task record create and patch data without requiring title on checkbox patches", async () => {
+    const { store, runtime } = await createRuntime();
+    await runtime.ensureTasksCollectionSchema();
+    const now = nowIso();
+
+    await expect(runtime.createCollectionRecord({
+      id: "task_bad_title",
+      collection_id: "tasks",
+      data: { title: "", completed: false },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("tasks_title_required");
+    await expect(runtime.createCollectionRecord({
+      id: "task_bad_completed",
+      collection_id: "tasks",
+      data: { title: "買い物", completed: "no" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("tasks_completed_boolean_required");
+    await expect(runtime.createCollectionRecord({
+      id: "task_bad_unknown",
+      collection_id: "tasks",
+      data: { title: "買い物", unexpected: true },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("tasks_unknown_field:unexpected");
+
+    await runtime.createCollectionRecord({
+      id: "task_1",
+      collection_id: "tasks",
+      data: { title: "買い物", completed: false },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    const patched = await runtime.applyCollectionPatch({
+      collectionId: "tasks",
+      recordId: "task_1",
+      patch: {
+        id: "patch_task_done",
+        record_id: "task_1",
+        changes: { completed: true },
+        source_operation_id: "operation_test",
+        created_at: nowIso()
+      }
+    });
+    await expect(runtime.applyCollectionPatch({
+      collectionId: "tasks",
+      recordId: "task_1",
+      patch: {
+        id: "patch_task_empty_title",
+        record_id: "task_1",
+        changes: { title: "" },
+        source_operation_id: "operation_test",
+        created_at: nowIso()
+      }
+    })).rejects.toThrow("tasks_title_required");
+    await store.close();
+
+    expect(patched.resource.data.completed).toBe(true);
+  });
+
   it("runs Knowledge Wiki lifecycle Domain Commands through active retrieval and provenance", async () => {
     const { store, runtime } = await createRuntime();
     const proposal = await runtime.runDomainCommand({

@@ -1936,6 +1936,106 @@ button {
   gap: 10px;
 }
 
+.task-list-app {
+  display: grid;
+  gap: 14px;
+}
+
+.task-add-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 40px;
+}
+
+.task-add-row input,
+.task-fields input,
+.task-fields textarea {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  font: inherit;
+  min-width: 0;
+  outline: none;
+  padding: 9px 10px;
+}
+
+.task-add-row button,
+.task-row .surface-row-save {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  display: inline-flex;
+  justify-content: center;
+}
+
+.task-add-row button:disabled,
+.task-row .surface-row-save:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.task-counts {
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  gap: 12px;
+}
+
+.task-list-columns {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.task-list-columns section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.task-list-columns h3 {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.task-row {
+  align-items: start;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-ui);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 20px minmax(0, 1fr) 34px;
+  padding: 10px;
+}
+
+.task-row input[type="checkbox"] {
+  height: 16px;
+  margin-top: 9px;
+  width: 16px;
+}
+
+.task-row.is-completed .task-fields input:first-child {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.task-fields {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-fields textarea {
+  min-height: 58px;
+  resize: vertical;
+}
+
 .surface-app-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2630,6 +2730,10 @@ button {
     padding: 12px;
     position: relative;
     top: auto;
+  }
+
+  .task-list-columns {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .session-list {

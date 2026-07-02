@@ -172,6 +172,7 @@ const memory = ref<Array<MemoryFrontmatter & { file_path: string }>>([]);
 const surfaceContract = ref<SurfaceContractPayload | null>(null);
 const surfaceContractError = ref(false);
 const lastSurfaceRenderSpec = ref<SurfaceRenderSpec | null>(null);
+const lastSurfaceRenderSpecs = ref<SurfaceRenderSpec[]>([]);
 const searchResults = ref<SearchResult[]>([]);
 const prompt = ref("");
 const attachmentInput = ref<HTMLInputElement | null>(null);
@@ -218,6 +219,9 @@ const canvasModeStorageKey = "samurai-agent.workspace-canvas-mode";
 const canvasMode = ref<CanvasMode>(readCanvasMode());
 const surfaceFormDraft = ref<Record<string, Record<string, JsonValue>>>({});
 const surfaceTableDraft = ref<Record<string, Record<string, Record<string, JsonValue>>>>({});
+const taskDraftTitle = ref("");
+const taskDrafts = ref<Record<string, { title: string; notes: string; due_date: string }>>({});
+const taskSaving = ref(false);
 const memoryContent = ref<Record<string, string>>({});
 const settingsStorageKey = "samurai-agent.settings";
 const backendStorageKey = "samurai-agent.selected-backend-id";
@@ -247,6 +251,10 @@ const selectedBackendLabel = computed(() => {
   const backend = backendOptions.value.find((item) => item.id === selectedBackendId.value);
   return backend ? backendDisplayLabel(backend) : selectedBackendId.value;
 });
+
+function envelopeRenderSpecs(envelope: { render_spec: SurfaceRenderSpec; render_specs?: SurfaceRenderSpec[] }): SurfaceRenderSpec[] {
+  return envelope.render_specs && envelope.render_specs.length > 0 ? envelope.render_specs : [envelope.render_spec];
+}
 const surfaceRendererByKind = computed(() => new Map((surfaceContract.value?.renderers ?? []).map((renderer) => [renderer.kind, renderer])));
 const surfaceCommandById = computed(() => new Map((surfaceContract.value?.commands ?? []).map((command) => [command.id, command])));
 const frontendRendererCapabilities = computed<SurfaceRendererCapabilities>(() => {
@@ -255,7 +263,7 @@ const frontendRendererCapabilities = computed<SurfaceRendererCapabilities>(() =>
   return {
     protocol_version: surfaceContract.value?.protocol_version ?? "1",
     supported_kinds: supportedKinds.length > 0 ? [...supportedKinds] : [...frontendSurfaceKinds],
-    custom_view_renderers: [{ renderer: "generic", versions: ["1"] }]
+    custom_view_renderers: [{ renderer: "generic", versions: ["1"] }, { renderer: "task_list", versions: ["1"] }]
   };
 });
 const artifactCommandSurfaceKinds = computed(() => supportedCommandSurfaceKinds("artifact.create", ["artifact"]));
@@ -392,6 +400,7 @@ const workSummaryMessageId = computed(() => {
 });
 const firstMemory = computed(() => memory.value[0]);
 const hasWorkspaceCanvas = computed(() => Boolean(activeArtifact.value || activeMemory.value || activeSurfaceSpec.value));
+const taskListSurfaceSpec = computed(() => lastSurfaceRenderSpecs.value.find(isTaskListSurfaceSpec));
 const workspaceSplitPercent = ref(readWorkspaceSplitPercent());
 const isResizingWorkspace = ref(false);
 const workspaceSplitStyle = computed<Record<string, string>>(() => ({
@@ -445,6 +454,9 @@ watch(activeSurfaceSpec, (spec) => {
       ...surfaceTableDraft.value,
       [spec.id]: Object.fromEntries(surfaceTableRows(spec).map((row, index) => [surfaceRowKey(row, index), objectToJsonRecord(row)]))
     };
+  }
+  if (isTaskListSurfaceSpec(spec)) {
+    syncTaskDrafts(spec);
   }
 });
 
@@ -752,7 +764,13 @@ async function sendMessage() {
       }
     });
     const result = envelope.result;
+    const renderSpecs = envelopeRenderSpecs(envelope);
     lastSurfaceRenderSpec.value = envelope.render_spec;
+    lastSurfaceRenderSpecs.value = renderSpecs;
+    const taskSpec = renderSpecs.find(isTaskListSurfaceSpec);
+    if (taskSpec) {
+      openSurfaceSpec(taskSpec);
+    }
     pendingUserMessage.value = null;
     flushPendingAgentTyping();
     resetPendingAgentResponse();
@@ -1221,6 +1239,16 @@ function closeWorkspaceCanvas() {
   activeArtifact.value = null;
   activeMemory.value = null;
   activeSurfaceSpec.value = null;
+}
+
+function openSurfaceSpec(spec: SurfaceRenderSpec) {
+  activeSurfaceSpec.value = spec;
+  activeArtifact.value = null;
+  activeMemory.value = null;
+  setCanvasMode(defaultCanvasMode(spec));
+  if (isTaskListSurfaceSpec(spec)) {
+    syncTaskDrafts(spec);
+  }
 }
 
 async function runArtifactSurfaceOperation(kind: "form" | "table" | "chart" | "custom_view") {
@@ -1734,6 +1762,163 @@ function surfaceChartRefs(spec: SurfaceRenderSpec): string[] {
 
 function surfaceCustomViewPayload(spec: SurfaceRenderSpec): string {
   return JSON.stringify(spec.props.data ?? spec.props, null, 2);
+}
+
+function isTaskListSurfaceSpec(spec: SurfaceRenderSpec): boolean {
+  return spec.kind === "custom_view" && spec.props.renderer === "task_list";
+}
+
+function taskListData(spec: SurfaceRenderSpec): Record<string, unknown> {
+  return spec.props.data && typeof spec.props.data === "object" && !Array.isArray(spec.props.data)
+    ? spec.props.data as Record<string, unknown>
+    : {};
+}
+
+function taskListRecords(spec: SurfaceRenderSpec): Array<Record<string, unknown>> {
+  const records = taskListData(spec).records;
+  return Array.isArray(records) ? records.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+}
+
+function taskListCounts(spec: SurfaceRenderSpec): { active: number; completed: number; total: number } {
+  const records = taskListRecords(spec);
+  return {
+    total: records.length,
+    active: records.filter((record) => record.completed !== true).length,
+    completed: records.filter((record) => record.completed === true).length
+  };
+}
+
+function taskDraft(record: Record<string, unknown>) {
+  const id = String(record.id ?? "");
+  return taskDrafts.value[id] ?? {
+    title: String(record.title ?? ""),
+    notes: String(record.notes ?? ""),
+    due_date: String(record.due_date ?? "")
+  };
+}
+
+function syncTaskDrafts(spec: SurfaceRenderSpec) {
+  taskDrafts.value = Object.fromEntries(taskListRecords(spec).map((record) => [
+    String(record.id ?? ""),
+    {
+      title: String(record.title ?? ""),
+      notes: String(record.notes ?? ""),
+      due_date: String(record.due_date ?? "")
+    }
+  ]));
+}
+
+function setTaskDraftValue(record: Record<string, unknown>, field: "title" | "notes" | "due_date", value: string) {
+  const id = String(record.id ?? "");
+  taskDrafts.value = {
+    ...taskDrafts.value,
+    [id]: {
+      ...taskDraft(record),
+      [field]: value
+    }
+  };
+}
+
+function rebuildTaskListSurfaceSpec(records: Array<CollectionRecord & { file_path: string }>, previous: SurfaceRenderSpec): SurfaceRenderSpec {
+  const taskRecords = records.map((record) => ({
+    id: record.id,
+    title: typeof record.data.title === "string" ? record.data.title : "",
+    completed: record.data.completed === true,
+    notes: typeof record.data.notes === "string" ? record.data.notes : "",
+    due_date: typeof record.data.due_date === "string" ? record.data.due_date : "",
+    order: typeof record.data.order === "number" ? record.data.order : 0,
+    source_session_id: typeof record.data.source_session_id === "string" ? record.data.source_session_id : "",
+    source_message_id: typeof record.data.source_message_id === "string" ? record.data.source_message_id : "",
+    file_path: record.file_path,
+    updated_at: record.updated_at
+  })).sort((a, b) => {
+    if (a.completed !== b.completed) {
+      return a.completed ? 1 : -1;
+    }
+    return a.order - b.order || a.title.localeCompare(b.title);
+  });
+  const active = taskRecords.filter((record) => !record.completed).length;
+  return {
+    ...previous,
+    resource_refs: records.map((record) => ({
+      kind: "collection_record",
+      id: record.id,
+      uri: record.file_path,
+      label: `tasks/${record.id}`
+    })),
+    props: {
+      ...previous.props,
+      data: {
+        ...taskListData(previous),
+        collection_id: "tasks",
+        records: taskRecords,
+        counts: {
+          total: taskRecords.length,
+          active,
+          completed: taskRecords.length - active
+        },
+        record_ids: taskRecords.map((record) => record.id)
+      }
+    }
+  };
+}
+
+async function refreshTaskListSurface(spec: SurfaceRenderSpec) {
+  const records = await api.listCollectionRecords("tasks");
+  const nextSpec = rebuildTaskListSurfaceSpec(records, spec);
+  activeSurfaceSpec.value = nextSpec;
+  lastSurfaceRenderSpec.value = nextSpec;
+  lastSurfaceRenderSpecs.value = [nextSpec, ...lastSurfaceRenderSpecs.value.filter((item) => !isTaskListSurfaceSpec(item))];
+  syncTaskDrafts(nextSpec);
+}
+
+async function addTask(spec: SurfaceRenderSpec) {
+  const title = taskDraftTitle.value.trim();
+  if (!title || taskSaving.value) {
+    return;
+  }
+  taskSaving.value = true;
+  try {
+    await api.createCollectionRecord("tasks", {
+      id: `task_${Date.now()}`,
+      data: {
+        title,
+        completed: false,
+        notes: "",
+        due_date: "",
+        order: taskListRecords(spec).length,
+        source_session_id: activeSession.value?.id ?? "",
+        source_message_id: ""
+      }
+    });
+    taskDraftTitle.value = "";
+    await refreshTaskListSurface(spec);
+  } finally {
+    taskSaving.value = false;
+  }
+}
+
+async function patchTask(spec: SurfaceRenderSpec, record: Record<string, unknown>, changes: Record<string, JsonValue>) {
+  const id = String(record.id ?? "");
+  if (!id || taskSaving.value) {
+    return;
+  }
+  taskSaving.value = true;
+  try {
+    await api.applyCollectionPatch("tasks", id, { changes });
+    await refreshTaskListSurface(spec);
+  } finally {
+    taskSaving.value = false;
+  }
+}
+
+async function saveTaskDraft(spec: SurfaceRenderSpec, record: Record<string, unknown>) {
+  const draft = taskDraft(record);
+  await patchTask(spec, record, {
+    title: draft.title,
+    notes: draft.notes,
+    due_date: draft.due_date
+  });
 }
 
 function surfaceValue(value: unknown): string {
@@ -2729,6 +2914,17 @@ function persistCanvasMode(mode: CanvasMode) {
                                 </button>
                               </div>
 
+                              <div v-if="taskListSurfaceSpec" class="work-card-stack">
+                                <button class="codex-artifact-card" type="button" @click="openSurfaceSpec(taskListSurfaceSpec)">
+                                  <span class="codex-card-icon"><PanelsTopLeft :size="19" /></span>
+                                  <span class="codex-card-main">
+                                    <strong>{{ taskListSurfaceSpec.title || "タスク" }}</strong>
+                                    <small>tasks ・ {{ taskListCounts(taskListSurfaceSpec).active }} / {{ taskListCounts(taskListSurfaceSpec).total }}</small>
+                                  </span>
+                                  <em>{{ label("artifact.open_in_workspace") }}</em>
+                                </button>
+                              </div>
+
                               <section v-if="workSummaryBlock.changes.length > 0" class="codex-change-card">
                                 <header class="codex-change-head">
                                   <span class="codex-card-icon"><FileInput :size="20" /></span>
@@ -2964,11 +3160,11 @@ function persistCanvasMode(mode: CanvasMode) {
                 </div>
               </header>
 
-              <template v-if="activeArtifact">
+              <template v-if="activeArtifact || activeSurfaceSpec">
                 <section v-if="activeSurfaceSpec && canvasMode === 'edit'" class="surface-render lit-surface">
                   <div class="surface-render-head">
                     <span class="surface-chip is-compact">{{ surfaceRendererLabel(activeSurfaceSpec.kind) }}</span>
-                    <strong>{{ activeSurfaceSpec.title || activeArtifact.artifact.title }}</strong>
+                    <strong>{{ activeSurfaceSpec.title || activeArtifact?.artifact.title || surfaceRendererLabel(activeSurfaceSpec.kind) }}</strong>
                   </div>
 
                   <div v-if="activeSurfaceSpec.kind === 'form'" class="surface-form">
@@ -3027,7 +3223,7 @@ function persistCanvasMode(mode: CanvasMode) {
                 <section v-if="activeSurfaceSpec && canvasMode === 'app'" class="surface-render lit-surface">
                   <div class="surface-render-head">
                     <span class="surface-chip is-compact">{{ surfaceRendererLabel(activeSurfaceSpec.kind) }}</span>
-                    <strong>{{ activeSurfaceSpec.title || activeArtifact.artifact.title }}</strong>
+                    <strong>{{ activeSurfaceSpec.title || activeArtifact?.artifact.title || surfaceRendererLabel(activeSurfaceSpec.kind) }}</strong>
                   </div>
 
                   <div v-if="activeSurfaceSpec.kind === 'chart'" class="surface-chart">
@@ -3035,6 +3231,51 @@ function persistCanvasMode(mode: CanvasMode) {
                     <div>
                       <strong>{{ activeSurfaceSpec.title }}</strong>
                       <span>{{ surfaceChartRefs(activeSurfaceSpec).join(" / ") }}</span>
+                    </div>
+                  </div>
+
+                  <div v-else-if="activeSurfaceSpec.kind === 'custom_view' && isTaskListSurfaceSpec(activeSurfaceSpec)" class="task-list-app">
+                    <form class="task-add-row" @submit.prevent="addTask(activeSurfaceSpec)">
+                      <input v-model="taskDraftTitle" type="text" placeholder="新しいタスク" :disabled="taskSaving" />
+                      <button type="submit" :disabled="taskSaving || !taskDraftTitle.trim()">
+                        <Plus :size="14" />
+                      </button>
+                    </form>
+
+                    <div class="task-counts">
+                      <span>未完了 {{ taskListCounts(activeSurfaceSpec).active }}</span>
+                      <span>完了 {{ taskListCounts(activeSurfaceSpec).completed }}</span>
+                    </div>
+
+                    <div class="task-list-columns">
+                      <section>
+                        <h3>未完了</h3>
+                        <article v-for="record in taskListRecords(activeSurfaceSpec).filter((item) => item.completed !== true)" :key="String(record.id)" class="task-row">
+                          <input type="checkbox" :checked="record.completed === true" :disabled="taskSaving" @change="patchTask(activeSurfaceSpec, record, { completed: ($event.target as HTMLInputElement).checked })" />
+                          <div class="task-fields">
+                            <input :value="taskDraft(record).title" :disabled="taskSaving" @input="setTaskDraftValue(record, 'title', ($event.target as HTMLInputElement).value)" />
+                            <textarea :value="taskDraft(record).notes" :disabled="taskSaving" rows="2" @input="setTaskDraftValue(record, 'notes', ($event.target as HTMLTextAreaElement).value)"></textarea>
+                            <input :value="taskDraft(record).due_date" :disabled="taskSaving" type="date" @input="setTaskDraftValue(record, 'due_date', ($event.target as HTMLInputElement).value)" />
+                          </div>
+                          <button class="surface-row-save" type="button" :disabled="taskSaving || !taskDraft(record).title.trim()" @click="saveTaskDraft(activeSurfaceSpec, record)">
+                            <Save :size="13" />
+                          </button>
+                        </article>
+                      </section>
+                      <section>
+                        <h3>完了</h3>
+                        <article v-for="record in taskListRecords(activeSurfaceSpec).filter((item) => item.completed === true)" :key="String(record.id)" class="task-row is-completed">
+                          <input type="checkbox" :checked="record.completed === true" :disabled="taskSaving" @change="patchTask(activeSurfaceSpec, record, { completed: ($event.target as HTMLInputElement).checked })" />
+                          <div class="task-fields">
+                            <input :value="taskDraft(record).title" :disabled="taskSaving" @input="setTaskDraftValue(record, 'title', ($event.target as HTMLInputElement).value)" />
+                            <textarea :value="taskDraft(record).notes" :disabled="taskSaving" rows="2" @input="setTaskDraftValue(record, 'notes', ($event.target as HTMLTextAreaElement).value)"></textarea>
+                            <input :value="taskDraft(record).due_date" :disabled="taskSaving" type="date" @input="setTaskDraftValue(record, 'due_date', ($event.target as HTMLInputElement).value)" />
+                          </div>
+                          <button class="surface-row-save" type="button" :disabled="taskSaving || !taskDraft(record).title.trim()" @click="saveTaskDraft(activeSurfaceSpec, record)">
+                            <Save :size="13" />
+                          </button>
+                        </article>
+                      </section>
                     </div>
                   </div>
 
@@ -3050,7 +3291,7 @@ function persistCanvasMode(mode: CanvasMode) {
                   <pre v-else class="surface-json">{{ surfaceCustomViewPayload(activeSurfaceSpec) }}</pre>
                 </section>
 
-                <section v-if="canvasMode === 'preview'" class="canvas-preview">
+                <section v-if="activeArtifact && canvasMode === 'preview'" class="canvas-preview">
                   <object v-if="isPdfArtifact(activeArtifact.artifact)" class="pdf-preview" :data="artifactContentUrl(activeArtifact.artifact)" type="application/pdf">
                     <a :href="artifactContentUrl(activeArtifact.artifact)" target="_blank" rel="noreferrer">{{ label("workspace.open_raw") }}</a>
                   </object>

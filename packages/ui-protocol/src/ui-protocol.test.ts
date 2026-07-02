@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { builtinSurfaceRendererRegistryEntries, negotiateSurfaceRenderSpec, parseSurfaceOperation, SurfaceOperationDispatchPlanSchema, SurfaceRenderSpecSchema, surfaceOperationResultKinds, surfaceRenderKinds } from "./index";
+import { builtinSurfaceRendererRegistryEntries, negotiateSurfaceRenderSpec, parseSurfaceOperation, SurfaceOperationDispatchPlanSchema, SurfaceRenderSpecSchema, surfaceOperationResultKinds, surfaceRenderKinds, type SurfaceOperationResultEnvelope } from "./index";
 
 describe("surface operation protocol", () => {
   it("fills ids for lightweight message submit clients", () => {
@@ -57,6 +57,43 @@ describe("surface operation protocol", () => {
     const declaredKinds = new Set(builtinSurfaceRendererRegistryEntries.map((entry) => entry.kind));
 
     expect(surfaceRenderKinds.every((kind) => declaredKinds.has(kind))).toBe(true);
+  });
+
+  it("declares the built-in task list custom renderer", () => {
+    expect(builtinSurfaceRendererRegistryEntries.find((entry) => entry.renderer === "task_list")).toMatchObject({
+      id: "surface.custom_view.task_list",
+      kind: "custom_view",
+      fallback_kind: "collection"
+    });
+  });
+
+  it("keeps single and multiple render specs compatible in operation envelopes", () => {
+    const renderSpec = SurfaceRenderSpecSchema.parse({
+      id: "render_chat",
+      kind: "chat",
+      priority: "primary",
+      resource_refs: [],
+      props: {
+        session_id: "session_1",
+        backend_run_id: "run_1",
+        backend_status: "completed",
+        message_ids: [],
+        primary_message_id: "message_1",
+        artifact_ids: [],
+        memory_ids: [],
+        reflection_suggestion_ids: []
+      }
+    });
+    const envelope: SurfaceOperationResultEnvelope = {
+      operation: parseSurfaceOperation({ kind: "message.submit", session_id: "session_1", content: "hello" }),
+      result_kind: "chat_turn",
+      render_spec: renderSpec,
+      render_specs: [renderSpec],
+      result: {}
+    };
+
+    expect(envelope.render_spec.kind).toBe("chat");
+    expect(envelope.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
   });
 
   it("validates render specs returned by Host surface operations", () => {

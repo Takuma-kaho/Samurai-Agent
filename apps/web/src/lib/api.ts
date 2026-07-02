@@ -426,6 +426,9 @@ export const api = {
       body: JSON.stringify(input)
     });
   },
+  listCollectionRecords(collectionId: string) {
+    return request<Array<CollectionRecord & { file_path: string }>>(`/api/collections/${collectionId}/records`);
+  },
   applyCollectionPatch(collectionId: string, recordId: string, input: { id?: string; changes: Record<string, unknown>; created_at?: string }) {
     return request<RuntimeWritePayload<CollectionRecord & { file_path: string }>>(
       `/api/collections/${collectionId}/records/${recordId}/patches`,

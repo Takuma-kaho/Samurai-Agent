@@ -337,6 +337,18 @@ export const builtinSurfaceRendererRegistryEntries: SurfaceRendererRegistryEntry
     actions_schema: { type: "array" },
     fallback_kind: "artifact",
     category: "custom_view"
+  },
+  {
+    id: "surface.custom_view.task_list",
+    kind: "custom_view",
+    renderer: "task_list",
+    version: "1",
+    title: "Task list",
+    description: "Render the built-in task list app backed by the tasks Collection.",
+    props_schema: { type: "object" },
+    actions_schema: { type: "array" },
+    fallback_kind: "collection",
+    category: "custom_view"
   }
 ];
 
@@ -756,6 +768,7 @@ export interface SurfaceOperationResultEnvelope<TResult = unknown> {
   operation: SurfaceOperation;
   result_kind: SurfaceOperationResultKind;
   render_spec: SurfaceRenderSpec;
+  render_specs?: SurfaceRenderSpec[];
   result: TResult;
 }
 

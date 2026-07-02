@@ -1378,6 +1378,21 @@ export class AgentRuntime {
         file_path: item.file_path
       }));
     }
+    if (toolName === "samurai.collection.search") {
+      const collectionId = typeof input.collection_id === "string" && input.collection_id.trim() ? input.collection_id.trim() : TASKS_COLLECTION_ID;
+      const records = await this.store.listCollectionRecords(collectionId);
+      const normalizedQuery = query.trim().toLowerCase();
+      return records
+        .filter((record) => !normalizedQuery || JSON.stringify(record.data).toLowerCase().includes(normalizedQuery))
+        .slice(0, limit)
+        .map((record) => ({
+          collection_id: record.collection_id,
+          id: record.id,
+          file_path: record.file_path,
+          summary: summarize(JSON.stringify(record.data), 180),
+          data: collectionId === TASKS_COLLECTION_ID ? taskSafeRecordData(record.data) : record.data
+        }));
+    }
     throw new RuntimeRequestError("conflict", "tool_bridge_tool_not_allowed");
   }
 
@@ -2143,16 +2158,27 @@ export class AgentRuntime {
           surface_operation_payload: jsonSafe(input)
         }
       });
+      const chatRender = negotiatedRenderSpec(input, chatTurnRenderSpec(result));
+      const renderSpecs = [chatRender];
+      if (isTaskListAppRequest(input.content)) {
+        await this.ensureTasksCollectionSchema();
+        const records = await this.store.listCollectionRecords("tasks");
+        renderSpecs.push(negotiatedRenderSpec(input, taskListRenderSpec(records, input.session_id, input.id)));
+      }
       return {
         operation: input,
         result_kind: "chat_turn",
-        render_spec: negotiatedRenderSpec(input, chatTurnRenderSpec(result)),
+        render_spec: chatRender,
+        render_specs: renderSpecs,
         result
       };
     }
 
     if (input.kind === "collection.record.create") {
       const now = nowIso();
+      if (input.collection_id === TASKS_COLLECTION_ID) {
+        validateTaskRecordCreateData(input.data);
+      }
       const result = await this.createCollectionRecord({
         id: input.record_id,
         collection_id: input.collection_id,
@@ -2162,15 +2188,20 @@ export class AgentRuntime {
         updated_at: now
       });
       const resolution = await this.store.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
+      const renderSpec = negotiatedRenderSpec(input, collectionRecordRenderSpec(result.resource, "Collection record", resolution));
       return {
         operation: input,
         result_kind: "collection_record",
-        render_spec: negotiatedRenderSpec(input, collectionRecordRenderSpec(result.resource, "Collection record", resolution)),
+        render_spec: renderSpec,
+        render_specs: [renderSpec],
         result
       };
     }
 
     if (input.kind === "collection.record.patch") {
+      if (input.collection_id === TASKS_COLLECTION_ID) {
+        validateTaskRecordPatchData(input.changes);
+      }
       const result = await this.applyCollectionPatch({
         collectionId: input.collection_id,
         recordId: input.record_id,
@@ -2183,10 +2214,12 @@ export class AgentRuntime {
         }
       });
       const resolution = await this.store.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
+      const renderSpec = negotiatedRenderSpec(input, collectionRecordRenderSpec(result.resource, "Collection patch applied", resolution));
       return {
         operation: input,
         result_kind: "collection_patch",
-        render_spec: negotiatedRenderSpec(input, collectionRecordRenderSpec(result.resource, "Collection patch applied", resolution)),
+        render_spec: renderSpec,
+        render_specs: [renderSpec],
         result
       };
     }
@@ -4461,6 +4494,15 @@ export class AgentRuntime {
     });
   }
 
+  async ensureTasksCollectionSchema(): Promise<CollectionSchemaWithFilePath | CollectionSchemaRuntimeResult> {
+    const existing = await this.store.getCollectionSchema(TASKS_COLLECTION_ID);
+    if (existing) {
+      ensureCompatibleTasksCollectionSchema(existing);
+      return existing;
+    }
+    return this.saveCollectionSchema(createTasksCollectionSchema());
+  }
+
   async reindexCollections(): Promise<CollectionReindexRuntimeResult> {
     const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
     const envelope = createGatewayEnvelope(webGatewayContext, "Reindex collections");
@@ -4488,6 +4530,9 @@ export class AgentRuntime {
   }
 
   async createCollectionRecord(record: CollectionRecord): Promise<CollectionRecordRuntimeResult> {
+    if (record.collection_id === TASKS_COLLECTION_ID) {
+      validateTaskRecordCreateData(record.data);
+    }
     const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
     const envelope = createGatewayEnvelope(webGatewayContext, `Create collection record: ${record.collection_id}/${record.id}`);
     const result = await this.runAllowedWrite({
@@ -4512,6 +4557,9 @@ export class AgentRuntime {
   }
 
   async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
+    if (input.collectionId === TASKS_COLLECTION_ID) {
+      validateTaskRecordPatchData(input.patch.changes);
+    }
     const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
     const envelope = createGatewayEnvelope(webGatewayContext, `Apply collection patch: ${input.collectionId}/${input.recordId}`);
     const result = await this.runAllowedWrite({
@@ -6085,6 +6133,34 @@ export class AgentRuntime {
     };
   }
 
+  private async buildTasksContextNotes(): Promise<Array<{ collection_id: string; file_path: string; content: string; role: "context_only" }>> {
+    const schema = await this.store.getCollectionSchema(TASKS_COLLECTION_ID);
+    if (!schema) {
+      return [];
+    }
+    ensureCompatibleTasksCollectionSchema(schema);
+    const records = await this.store.listCollectionRecords(TASKS_COLLECTION_ID);
+    if (records.length === 0) {
+      return [];
+    }
+    const taskRecords = records.map(taskRecordRenderData);
+    const active = taskRecords.filter((record) => record.completed !== true);
+    const completed = taskRecords.length - active.length;
+    const lines = [
+      `Tasks summary: ${active.length} active, ${completed} completed.`,
+      ...active.slice(0, 8).map((record) => {
+        const dueDate = typeof record.due_date === "string" && record.due_date ? ` due:${record.due_date}` : "";
+        return `- ${record.title}${dueDate}`;
+      })
+    ];
+    return [{
+      collection_id: TASKS_COLLECTION_ID,
+      file_path: `collections/${TASKS_COLLECTION_ID}`,
+      content: lines.join("\n"),
+      role: "context_only"
+    }];
+  }
+
   private async buildContextPreview(
     sessionId: string,
     query: string,
@@ -6187,6 +6263,8 @@ export class AgentRuntime {
       })
     )).flat();
     const collectionNotes = selectCollectionNotes(allCollectionNotes, query);
+    const taskContextNotes = skipHeavyContext ? [] : await this.buildTasksContextNotes();
+    const collectionContextNotes = [...taskContextNotes, ...collectionNotes];
     const knowledgeWiki = knowledgeWikiContext.entries;
     const sessionSearchForBackend = shouldIncludeSessionSearchInBackendContext(query)
       ? sessionSearchValues.slice(0, hostContextAssemblyLimits.session_search)
@@ -6226,8 +6304,8 @@ export class AgentRuntime {
       activeMemoryCandidateCount: activeMemoryResult.report.candidate_count,
       knowledgeWikiCandidateCount: knowledgeWikiContext.report.candidate_count,
       knowledgeWikiIncludedCount: knowledgeWiki.length,
-      collectionNoteCandidateCount: allCollectionNotes.length,
-      collectionNoteIncludedCount: collectionNotes.length,
+      collectionNoteCandidateCount: allCollectionNotes.length + taskContextNotes.length,
+      collectionNoteIncludedCount: collectionContextNotes.length,
       selectedSkillCount: selectedSkillEntries.length,
       sessionSearchCandidateCount: sessionSearchValues.length,
       sessionSearchIncludedCount: sessionSearch.length,
@@ -6268,7 +6346,7 @@ export class AgentRuntime {
       active_memory_report: activeMemoryResult.report,
       knowledge_wiki: knowledgeWiki,
       knowledge_wiki_report: knowledgeWikiContext.report,
-      collection_notes: collectionNotes,
+      collection_notes: collectionContextNotes,
       skill_selection_report: skillSelection.report,
       selected_skills: selectedSkillEntries,
       session_search: sessionSearch,
@@ -7930,6 +8008,176 @@ function chatTurnRenderSpec(result: RunChatTurnResult): SurfaceRenderSpec {
   });
 }
 
+const TASKS_COLLECTION_ID = "tasks";
+const TASK_FIELD_IDS = ["title", "completed", "notes", "due_date", "order", "source_session_id", "source_message_id"] as const;
+
+interface TaskRecordRenderData extends Record<string, JsonValue> {
+  id: string;
+  title: string;
+  completed: boolean;
+  notes: string;
+  due_date: string;
+  order: number;
+  source_session_id: string;
+  source_message_id: string;
+  file_path: string;
+  updated_at: string;
+}
+
+function isTaskListAppRequest(content: string): boolean {
+  const normalized = content.toLowerCase();
+  return [
+    "タスク管理アプリ",
+    "タスクアプリ",
+    "task list",
+    "task_list",
+    "todo app",
+    "todo list"
+  ].some((keyword) => normalized.includes(keyword));
+}
+
+function createTasksCollectionSchema(): CollectionSchema {
+  return {
+    id: TASKS_COLLECTION_ID,
+    version: "1",
+    labels: { ja: "タスク", en: "Tasks" },
+    descriptions: {
+      ja: "タスク管理アプリの保存データ。",
+      en: "Saved records for the task list app."
+    },
+    fields: [
+      { id: "title", type: "string", required: true },
+      { id: "completed", type: "boolean" },
+      { id: "notes", type: "string" },
+      { id: "due_date", type: "string" },
+      { id: "order", type: "number" },
+      { id: "source_session_id", type: "string" },
+      { id: "source_message_id", type: "string" }
+    ],
+    refs: [],
+    embeds: [],
+    derived_fields: [],
+    triggers: [],
+    actions: [],
+    permissions: {}
+  };
+}
+
+function ensureCompatibleTasksCollectionSchema(schema: CollectionSchema): void {
+  const fieldIds = new Set(schema.fields.map((field) => {
+    const id = field.id ?? field.name;
+    return typeof id === "string" ? id : "";
+  }));
+  const missing = TASK_FIELD_IDS.filter((id) => !fieldIds.has(id));
+  if (missing.length > 0) {
+    throw new RuntimeRequestError("conflict", `tasks_collection_schema_incompatible:${missing.join(",")}`);
+  }
+}
+
+function validateTaskRecordCreateData(data: Record<string, JsonValue>): void {
+  validateTaskRecordData(data, { requireTitle: true });
+}
+
+function validateTaskRecordPatchData(data: Record<string, JsonValue>): void {
+  validateTaskRecordData(data, { requireTitle: false });
+}
+
+function validateTaskRecordData(data: Record<string, JsonValue>, options: { requireTitle: boolean }): void {
+  const allowed = new Set<string>(TASK_FIELD_IDS);
+  for (const key of Object.keys(data)) {
+    if (!allowed.has(key)) {
+      throw new RuntimeRequestError("conflict", `tasks_unknown_field:${key}`);
+    }
+  }
+  if (options.requireTitle || Object.prototype.hasOwnProperty.call(data, "title")) {
+    if (typeof data.title !== "string" || data.title.trim().length === 0) {
+      throw new RuntimeRequestError("conflict", "tasks_title_required");
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "completed") && typeof data.completed !== "boolean") {
+    throw new RuntimeRequestError("conflict", "tasks_completed_boolean_required");
+  }
+  for (const key of ["notes", "due_date", "source_session_id", "source_message_id"]) {
+    if (Object.prototype.hasOwnProperty.call(data, key) && typeof data[key] !== "string") {
+      throw new RuntimeRequestError("conflict", `tasks_${key}_string_required`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "order") && typeof data.order !== "number") {
+    throw new RuntimeRequestError("conflict", "tasks_order_number_required");
+  }
+}
+
+function taskListRenderSpec(records: CollectionRecordWithFilePath[], sessionId?: string, sourceMessageId?: string): SurfaceRenderSpec {
+  const taskRecords = records.map(taskRecordRenderData).sort((a, b) => {
+    if (a.completed !== b.completed) {
+      return a.completed ? 1 : -1;
+    }
+    return a.order - b.order || a.title.localeCompare(b.title);
+  });
+  const activeCount = taskRecords.filter((record) => !record.completed).length;
+  const completedCount = taskRecords.length - activeCount;
+  const refs = records.map(collectionRecordRef);
+  return createSurfaceRenderSpec({
+    kind: "custom_view",
+    priority: "secondary",
+    state: "ready",
+    title: "タスク",
+    resource_refs: refs.length > 0 ? refs : [{
+      kind: "collection",
+      id: TASKS_COLLECTION_ID,
+      uri: `collections/${TASKS_COLLECTION_ID}`,
+      label: "tasks"
+    }],
+    props: {
+      view_id: "task_list",
+      renderer: "task_list",
+      renderer_version: "1",
+      schema_ref: `collections/${TASKS_COLLECTION_ID}/schema.json`,
+      actions: [],
+      data: {
+        collection_id: TASKS_COLLECTION_ID,
+        records: taskRecords,
+        counts: {
+          total: taskRecords.length,
+          active: activeCount,
+          completed: completedCount
+        },
+        source_session_id: sessionId ?? "",
+        source_message_id: sourceMessageId ?? "",
+        record_ids: taskRecords.map((record) => record.id)
+      }
+    },
+    fallback: {
+      kind: "collection",
+      title: "tasks",
+      message: "Open the tasks Collection if this app renderer is unavailable.",
+      props: {
+        collection_id: TASKS_COLLECTION_ID,
+        record_ids: taskRecords.map((record) => record.id)
+      }
+    }
+  });
+}
+
+function taskRecordRenderData(record: CollectionRecordWithFilePath): TaskRecordRenderData {
+  return {
+    id: record.id,
+    title: typeof record.data.title === "string" ? record.data.title : "",
+    completed: record.data.completed === true,
+    notes: typeof record.data.notes === "string" ? record.data.notes : "",
+    due_date: typeof record.data.due_date === "string" ? record.data.due_date : "",
+    order: typeof record.data.order === "number" ? record.data.order : 0,
+    source_session_id: typeof record.data.source_session_id === "string" ? record.data.source_session_id : "",
+    source_message_id: typeof record.data.source_message_id === "string" ? record.data.source_message_id : "",
+    file_path: record.file_path,
+    updated_at: record.updated_at
+  };
+}
+
+function taskSafeRecordData(data: Record<string, JsonValue>): Record<string, JsonValue> {
+  return Object.fromEntries(Object.entries(data).filter(([key]) => TASK_FIELD_IDS.includes(key as (typeof TASK_FIELD_IDS)[number])));
+}
+
 function collectionRecordRenderSpec(record: CollectionRecordWithFilePath, title = "Collection record", resolution?: CollectionRecordResolution): SurfaceRenderSpec {
   return createSurfaceRenderSpec({
     kind: "collection_record",
@@ -9561,6 +9809,19 @@ const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
       limit: { type: "number" }
     }
   }
+}, {
+  name: "samurai.collection.search",
+  provider_tool_name: "mcp__samurai__collection_search",
+  title: "Search Samurai Collections",
+  description: "Search local Collection records and return read-only summaries.",
+  input_schema: {
+    type: "object",
+    properties: {
+      collection_id: { type: "string" },
+      query: { type: "string" },
+      limit: { type: "number" }
+    }
+  }
 }];
 
 const samuraiToolBridgeTools = new Set(samuraiToolBridgeDescriptors.map((tool) => tool.name));
@@ -9635,7 +9896,9 @@ function normalizeSamuraiToolBridgeName(name: string): string {
     knowledge_wiki_search: "samurai.wiki.search",
     mcp__samurai__wiki_search: "samurai.wiki.search",
     skill_search: "samurai.skill.search",
-    mcp__samurai__skill_search: "samurai.skill.search"
+    mcp__samurai__skill_search: "samurai.skill.search",
+    collection_search: "samurai.collection.search",
+    mcp__samurai__collection_search: "samurai.collection.search"
   };
   if (aliases[normalized]) {
     return aliases[normalized];
