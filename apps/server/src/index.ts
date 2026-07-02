@@ -204,22 +204,6 @@ interface GatewayEmailImapClient {
 
 type GatewayEmailImapClientFactory = (config: GatewayEmailImapTransportConfig) => Promise<GatewayEmailImapClient>;
 
-export interface TaskItem {
-  id: string;
-  title: string;
-  done: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface TaskManagerStore {
-  list(): TaskItem[];
-  payload(): { tasks: TaskItem[]; summary: { total: number; done: number; active: number } };
-  create(title: string): TaskItem;
-  update(id: string, patch: { title?: string; done?: boolean }): TaskItem | undefined;
-  delete(id: string): boolean;
-}
-
 let gatewayEmailImapClientFactory: GatewayEmailImapClientFactory = createNodeGatewayEmailImapClient;
 
 export function setGatewayEmailImapClientFactoryForTest(factory?: GatewayEmailImapClientFactory): void {
@@ -297,7 +281,6 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     ...settings,
     external_assist_config: externalAssistConfig
   });
-  const taskStore = createInMemoryTaskManagerStore();
   const resolveDetailTranslation = async (
     query: Record<string, unknown>,
     sourceRef: ResourceRef,
@@ -342,46 +325,6 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     }
   }));
-
-  app.get("/tasks", (_req, res) => {
-    res.type("html").send(taskManagerHtml());
-  });
-
-  app.get("/api/tasks", (_req, res) => {
-    res.json(taskStore.payload());
-  });
-
-  app.post("/api/tasks", (req, res) => {
-    const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
-    if (!title) {
-      res.status(400).json({ error: "title_required" });
-      return;
-    }
-    res.status(201).json(taskStore.create(title));
-  });
-
-  app.patch("/api/tasks/:id", (req, res) => {
-    const nextTitle = typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
-    const nextDone = typeof req.body?.done === "boolean" ? req.body.done : undefined;
-    if (nextTitle === "") {
-      res.status(400).json({ error: "title_required" });
-      return;
-    }
-    const updated = taskStore.update(req.params.id, { title: nextTitle, done: nextDone });
-    if (!updated) {
-      res.status(404).json({ error: "task_not_found" });
-      return;
-    }
-    res.json(updated);
-  });
-
-  app.delete("/api/tasks/:id", (req, res) => {
-    if (!taskStore.delete(req.params.id)) {
-      res.status(404).json({ error: "task_not_found" });
-      return;
-    }
-    res.status(204).send();
-  });
 
   app.get("/api/health", async (_req, res, next) => {
     try {
@@ -6808,165 +6751,6 @@ async function workspaceReadinessSnapshot(store: WorkspaceStore): Promise<Worksp
       }
     }
   };
-}
-
-export function createInMemoryTaskManagerStore(): TaskManagerStore {
-  const tasks = new Map<string, TaskItem>();
-  const list = () => [...tasks.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
-  return {
-    list,
-    payload: () => {
-      const taskList = list();
-      const done = taskList.filter((task) => task.done).length;
-      return {
-        tasks: taskList,
-        summary: {
-          total: taskList.length,
-          done,
-          active: taskList.length - done
-        }
-      };
-    },
-    create: (title) => {
-      const now = nowIso();
-      const task: TaskItem = {
-        id: createId("task"),
-        title,
-        done: false,
-        created_at: now,
-        updated_at: now
-      };
-      tasks.set(task.id, task);
-      return task;
-    },
-    update: (id, patch) => {
-      const task = tasks.get(id);
-      if (!task) {
-        return undefined;
-      }
-      const updated: TaskItem = {
-        ...task,
-        title: patch.title ?? task.title,
-        done: patch.done ?? task.done,
-        updated_at: nowIso()
-      };
-      tasks.set(id, updated);
-      return updated;
-    },
-    delete: (id) => tasks.delete(id)
-  };
-}
-
-export function taskManagerHtml(): string {
-  return `<!doctype html>
-<html lang="ja">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>タスク管理</title>
-    <style>
-      :root { color-scheme: light; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #20242b; }
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 32px 16px; box-sizing: border-box; }
-      main { width: min(720px, 100%); background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; box-shadow: 0 18px 44px rgba(28, 33, 40, 0.08); overflow: hidden; }
-      header { padding: 24px 24px 16px; border-bottom: 1px solid #edf0f4; display: flex; justify-content: space-between; gap: 16px; align-items: end; }
-      h1 { font-size: 24px; margin: 0 0 6px; letter-spacing: 0; }
-      p { margin: 0; color: #69707d; font-size: 14px; }
-      form { display: flex; gap: 8px; padding: 18px 24px; border-bottom: 1px solid #edf0f4; }
-      input { flex: 1; min-width: 0; border: 1px solid #cfd6df; border-radius: 6px; padding: 11px 12px; font: inherit; }
-      button { border: 0; border-radius: 6px; padding: 10px 14px; font: inherit; font-weight: 700; background: #1f6feb; color: #fff; cursor: pointer; }
-      button.secondary { background: transparent; color: #59616e; border: 1px solid #d7dce4; }
-      ul { list-style: none; margin: 0; padding: 0; }
-      li { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 14px 24px; border-bottom: 1px solid #f0f2f5; }
-      li:last-child { border-bottom: 0; }
-      label { display: contents; }
-      input[type="checkbox"] { width: 18px; height: 18px; }
-      .title { overflow-wrap: anywhere; }
-      .done .title { color: #8a93a1; text-decoration: line-through; }
-      .empty { padding: 28px 24px; color: #69707d; text-align: center; }
-      .summary { white-space: nowrap; }
-      @media (max-width: 560px) {
-        header { display: block; }
-        .summary { margin-top: 10px; }
-        form { padding: 16px; }
-        li { padding: 14px 16px; }
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <header>
-        <div>
-          <h1>タスク管理</h1>
-          <p>追加、完了、削除だけに絞ったシンプル版です。</p>
-        </div>
-        <p class="summary" id="summary">0件</p>
-      </header>
-      <form id="form">
-        <input id="title" name="title" autocomplete="off" placeholder="タスクを入力">
-        <button type="submit">追加</button>
-      </form>
-      <ul id="tasks"></ul>
-      <div class="empty" id="empty">まだタスクはありません。</div>
-    </main>
-    <script>
-      const list = document.querySelector("#tasks");
-      const empty = document.querySelector("#empty");
-      const summary = document.querySelector("#summary");
-      const form = document.querySelector("#form");
-      const title = document.querySelector("#title");
-
-      async function request(path, options) {
-        const response = await fetch(path, {
-          headers: { "content-type": "application/json" },
-          ...options
-        });
-        if (!response.ok) throw new Error("request failed");
-        return response.status === 204 ? null : response.json();
-      }
-
-      async function render() {
-        const data = await request("/api/tasks");
-        list.innerHTML = "";
-        empty.hidden = data.tasks.length > 0;
-        summary.textContent = data.summary.active + "件未完了 / " + data.summary.total + "件";
-        for (const task of data.tasks) {
-          const item = document.createElement("li");
-          item.className = task.done ? "done" : "";
-          item.innerHTML = '<label><input type="checkbox"><span class="title"></span></label><button class="secondary" type="button">削除</button>';
-          const checkbox = item.querySelector("input");
-          const text = item.querySelector(".title");
-          const remove = item.querySelector("button");
-          checkbox.checked = task.done;
-          text.textContent = task.title;
-          checkbox.addEventListener("change", async () => {
-            await request("/api/tasks/" + task.id, { method: "PATCH", body: JSON.stringify({ done: checkbox.checked }) });
-            await render();
-          });
-          remove.addEventListener("click", async () => {
-            await request("/api/tasks/" + task.id, { method: "DELETE" });
-            await render();
-          });
-          list.append(item);
-        }
-      }
-
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const value = title.value.trim();
-        if (!value) return;
-        await request("/api/tasks", { method: "POST", body: JSON.stringify({ title: value }) });
-        title.value = "";
-        title.focus();
-        await render();
-      });
-
-      render().catch(() => {
-        empty.hidden = false;
-        empty.textContent = "読み込みに失敗しました。";
-      });
-    </script>
-  </body>
-</html>`;
 }
 
 const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";

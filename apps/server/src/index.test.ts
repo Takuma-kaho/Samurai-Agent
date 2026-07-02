@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
 import { stableHash } from "@samurai-agent/core-schemas";
 import { FakeProviderAdapter, ProviderRequestError, type ExternalAssistProvider, type ProviderAdapter, type ProviderInput, type ProviderOutput } from "@samurai-agent/runtime";
-import { closeApiServer, createApiServer, createInMemoryTaskManagerStore, loadServerEnv, setGatewayEmailImapClientFactoryForTest, taskManagerHtml, type ApiServer, type CreateApiServerOptions } from "./index";
+import { closeApiServer, createApiServer, loadServerEnv, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
 
 const roots: string[] = [];
 const servers: ApiServer[] = [];
@@ -234,34 +234,6 @@ describe("server env loading", () => {
       expect.objectContaining({ code: "plugin_missing_handlers", manifest_id: "broken-plugin", severity: "critical", missing_handler_ids: ["broken.echo.handler"] })
     ]));
     expect(diagnostics.recommendation).toContain("critical plugin");
-  });
-});
-
-describe("task manager", () => {
-  it("renders a simple task page", () => {
-    const html = taskManagerHtml();
-
-    expect(html).toContain("タスク管理");
-    expect(html).toContain("/api/tasks");
-  });
-
-  it("creates, updates, lists, and deletes tasks", () => {
-    const store = createInMemoryTaskManagerStore();
-    const created = store.create("請求書を確認");
-    const listed = store.payload();
-    const updated = store.update(created.id, { done: true });
-    const afterUpdate = store.payload();
-    const deleted = store.delete(created.id);
-    const afterDelete = store.payload();
-
-    expect(created).toMatchObject({ title: "請求書を確認", done: false });
-    expect(listed.tasks).toContainEqual(expect.objectContaining({ id: created.id, title: "請求書を確認" }));
-    expect(listed.summary).toMatchObject({ total: 1, active: 1, done: 0 });
-    expect(updated).toMatchObject({ id: created.id, done: true });
-    expect(afterUpdate.summary).toMatchObject({ active: 0, done: 1 });
-    expect(deleted).toBe(true);
-    expect(afterDelete.tasks).toEqual([]);
-    expect(afterDelete.summary.total).toBe(0);
   });
 });
 
