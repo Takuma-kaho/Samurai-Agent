@@ -1376,6 +1376,9 @@ rl.on("line", (line) => {
   it("records sandbox lifecycle instances for sandboxed runtime tool events", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
+    const pathBeforeTest = process.env.PATH;
+    const emptyPathRoot = await mkdtemp(path.join(tmpdir(), "samurai-runtime-empty-path-"));
+    roots.push(emptyPathRoot);
     const sandboxRuntime = new AgentRuntime(
       store,
       undefined,
@@ -1405,12 +1408,18 @@ rl.on("line", (line) => {
       }
     };
 
-    const result = await sandboxRuntime.runChatTurn({
-      sessionId: session.id,
-      content: "sandbox lifecycle",
-      output_locale: "ja",
-      gateway_boundary_policy: boundary
-    });
+    let result: Awaited<ReturnType<AgentRuntime["runChatTurn"]>>;
+    try {
+      process.env.PATH = emptyPathRoot;
+      result = await sandboxRuntime.runChatTurn({
+        sessionId: session.id,
+        content: "sandbox lifecycle",
+        output_locale: "ja",
+        gateway_boundary_policy: boundary
+      });
+    } finally {
+      process.env.PATH = pathBeforeTest;
+    }
     const instances = await store.listGatewaySandboxInstances();
     const recreated = await runtime.recreateGatewaySandboxInstance(instances[0]!.id);
     const deleted = await runtime.deleteGatewaySandboxInstance(instances[0]!.id);
