@@ -1,0 +1,1531 @@
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  createId,
+  nowIso,
+  type AutomationJobRecord,
+  type ArtifactRecord,
+  type AuditRecord,
+  type BackendEventRecord,
+  type BackendRunRecord,
+  type CollectionSchema,
+  type ExternalAssistRecord,
+  type GatewayBoundaryPolicy,
+  type GatewayInboundMessageRecord,
+  type GatewayMcpConfigRecord,
+  type GatewayPairingPolicyRecord,
+  type GatewayPairingRecord,
+  type GatewayRoutingPolicyRecord,
+  type MemoryFrontmatter,
+  type MessageEnvelope,
+  type OperationRecord,
+  type PolicyDecisionRecord,
+  type SessionRecord,
+  type SkillFrontmatter,
+  type WorkspaceChangeRecord,
+  type ToolRunRecord,
+  type WikiFrontmatter
+} from "@samurai-agent/core-schemas";
+import { WorkspaceStore, renderFrontmatter } from "./index";
+
+const roots: string[] = [];
+
+async function createTempStore() {
+  const root = await mkdtemp(path.join(tmpdir(), "samurai-store-"));
+  roots.push(root);
+  return WorkspaceStore.create({ rootDir: root });
+}
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("workspace store", () => {
+  it("creates settings and persists sessions", async () => {
+    const store = await createTempStore();
+    const settings = await store.getSettings();
+    const now = nowIso();
+    const session: SessionRecord = {
+      id: createId("session"),
+      session_key: "web:owner:main",
+      title: "Store test",
+      ui_locale: settings.ui_locale,
+      output_locale: settings.output_locale,
+      created_at: now,
+      updated_at: now
+    };
+
+    await store.createSession(session);
+    const sessions = await store.listSessions();
+    const migrations = await store.listMigrationJournal();
+    await store.close();
+
+    expect(settings).toMatchObject({
+      memory_capture_mode: "suggest",
+      knowledge_wiki_capture_mode: "suggest",
+      skill_capture_mode: "suggest",
+      external_provider_role: "assistive"
+    });
+    expect(sessions[0]?.title).toBe("Store test");
+    expect(migrations.some((entry) => entry.name === "schema.ensure" && entry.status === "completed")).toBe(true);
+  });
+
+  it("writes artifact content to filesystem", async () => {
+    const store = await createTempStore();
+    const artifactId = createId("artifact");
+    await store.writeArtifactContent(artifactId, "# Hello");
+    await store.close();
+
+    expect(artifactId.startsWith("artifact_")).toBe(true);
+  });
+
+  it("stores external assist diagnostics without becoming Memory", async () => {
+    const store = await createTempStore();
+    const settings = await store.getSettings();
+    const now = nowIso();
+    const session: SessionRecord = {
+      id: createId("session"),
+      session_key: "web:owner:main",
+      title: "External assist",
+      ui_locale: settings.ui_locale,
+      output_locale: settings.output_locale,
+      created_at: now,
+      updated_at: now
+    };
+    const record: ExternalAssistRecord = {
+      id: createId("external_assist"),
+      phase: "prefetch",
+      status: "completed",
+      provider_id: "test-provider",
+      session_id: session.id,
+      query: "memory boundary",
+      role: "assistive",
+      hints: [{
+        id: "hint_1",
+        summary: "Unverified external context.",
+        source_uri: "external://hint/1",
+        confidence: 0.8
+      }],
+      isolated_from_memory: true,
+      included_in_active_memory: false,
+      created_at: now,
+      updated_at: now
+    };
+    const violationRecord: ExternalAssistRecord = {
+      id: createId("external_assist"),
+      phase: "sync",
+      status: "failed",
+      provider_id: "test-provider",
+      session_id: session.id,
+      query: "memory boundary",
+      role: "assistive",
+      hints: [],
+      error: "external provider failed",
+      isolated_from_memory: false,
+      included_in_active_memory: true,
+      created_at: "2026-01-01T00:00:01.000Z",
+      updated_at: "2026-01-01T00:00:01.000Z"
+    };
+
+    await store.createSession(session);
+    await store.saveExternalAssistRecord(record);
+    await store.saveExternalAssistRecord(violationRecord);
+    const records = await store.listExternalAssistRecords({ sessionId: session.id, phase: "prefetch" });
+    const diagnostics = await store.getExternalAssistDiagnostics({ sessionId: session.id });
+    const memory = await store.listMemory();
+    await store.close();
+
+    expect(records).toMatchObject([{
+      id: record.id,
+      provider_id: "test-provider",
+      hints: [{ summary: "Unverified external context." }],
+      isolated_from_memory: true,
+      included_in_active_memory: false
+    }]);
+    expect(diagnostics).toMatchObject({
+      total_records: 2,
+      failed_records: 1,
+      hint_count: 1,
+      unisolated_records: 1,
+      included_in_active_memory_records: 1
+    });
+    expect(diagnostics.groups).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider_id: "test-provider", phase: "prefetch", status: "completed", count: 1, hint_count: 1 }),
+      expect.objectContaining({ provider_id: "test-provider", phase: "sync", status: "failed", count: 1, hint_count: 0 })
+    ]));
+    expect(diagnostics.violations.map((violation) => violation.code)).toEqual([
+      "external_assist_not_isolated",
+      "external_assist_included_in_active_memory"
+    ]);
+    expect(diagnostics.recent_failures[0]?.id).toBe(violationRecord.id);
+    expect(memory).toEqual([]);
+  });
+
+  it("returns saved policy decisions by id", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const decision: PolicyDecisionRecord = {
+      id: createId("policy"),
+      operation_id: createId("operation"),
+      capability_id: "proposal_workspace",
+      operation: "external.send",
+      decision: "requires_approval",
+      reason: "Needs approval.",
+      policy_inputs: {
+        capability_id: "proposal_workspace",
+        operation: "external.send",
+        actor_identity: "owner",
+        instruction_source: "owner_instruction",
+        instruction_authority: "owner",
+        channel: "web",
+        target_resource_refs: [],
+        proposed_effects: ["Prepare an outbound action."],
+        prior_grants: [],
+        recent_history: [],
+        input_hash: "abc123"
+      },
+      matched_rules: ["manifest_default:requires_approval"],
+      required_approval_level: "approval",
+      created_at: now
+    };
+
+    await store.savePolicyDecision(decision);
+    const saved = await store.getPolicyDecision(decision.id);
+    const missing = await store.getPolicyDecision("policy_missing");
+    await store.close();
+
+    expect(saved?.id).toBe(decision.id);
+    expect(missing).toBeUndefined();
+  });
+
+  it("scopes artifacts and memory to the session that created them", async () => {
+    const store = await createTempStore();
+    const sessionA = await createSessionRecord(store, "A");
+    const sessionB = await createSessionRecord(store, "B");
+    const envelopeA = await saveUserMessage(store, sessionA, "Aの文体を覚えて");
+    const envelopeB = await saveUserMessage(store, sessionB, "Bの文体を覚えて");
+    const operationA = await saveOperationRecord(store, sessionA, envelopeA.id, "artifact.create");
+    const operationB = await saveOperationRecord(store, sessionB, envelopeB.id, "artifact.create");
+    const artifactA = await saveArtifactRecord(store, operationA, "A artifact");
+    await saveArtifactRecord(store, operationB, "B artifact");
+    const memoryA = await saveMemoryRecord(store, envelopeA, "session", "A memory body");
+    await saveMemoryRecord(store, envelopeB, "session", "B memory body");
+
+    const artifacts = await store.listArtifactsForSession(sessionA.id);
+    const memories = await store.listMemoryForSession(sessionA.id);
+    await store.close();
+
+    expect(artifacts.map((artifact) => artifact.id)).toEqual([artifactA.id]);
+    expect(memories.map((memory) => memory.id)).toEqual([memoryA.id]);
+  });
+
+  it("ignores missing or broken message envelopes when scoping memory", async () => {
+    const store = await createTempStore();
+    const session = await createSessionRecord(store, "Broken envelope");
+    await store.db
+      .insertInto("messages")
+      .values({
+        id: createId("message"),
+        session_id: session.id,
+        role: "user",
+        content: "broken",
+        input_locale: "ja",
+        output_locale: "ja",
+        envelope_json: "{not-json",
+        created_at: nowIso()
+      })
+      .execute();
+
+    const memories = await store.listMemoryForSession(session.id);
+    await store.close();
+
+    expect(memories).toEqual([]);
+  });
+
+  it("reads memory content without frontmatter and archives without deleting the record", async () => {
+    const store = await createTempStore();
+    const session = await createSessionRecord(store, "Archive");
+    const envelope = await saveUserMessage(store, session, "この文体を覚えて");
+    const memory = await saveMemoryRecord(store, envelope, "topic", "本文だけ読める");
+
+    expect(await store.readMemoryContent(memory.id)).toBe("本文だけ読める");
+
+    const archive = await store.archiveMemory(memory.id);
+    const listed = await store.listMemory();
+    const direct = await store.getMemory(memory.id);
+    const archivedAgain = await store.archiveMemory(memory.id);
+    await store.close();
+
+    expect(archive?.changed).toBe(true);
+    expect(archive?.after.state).toBe("archived");
+    expect(direct?.state).toBe("archived");
+    expect(listed.some((item) => item.id === memory.id)).toBe(false);
+    expect(archivedAgain?.changed).toBe(false);
+    await expect(access(path.join(store.rootDir, memory.file_path))).rejects.toThrow();
+  });
+
+  it("searches sessions, messages, artifacts, and audit records with session context", async () => {
+    const store = await createTempStore();
+    const session = await createSessionRecord(store, "Searchable session title");
+    const envelope = await saveUserMessage(store, session, "message needle body");
+    const operation = await saveOperationRecord(store, session, envelope.id, "artifact.create");
+    const artifact = await saveArtifactRecord(store, operation, "Artifact heading", "artifact content needle");
+    const audit = await saveAuditRecord(store, operation, "audit needle input", "audit output");
+
+    const empty = await store.search("   ");
+    const sessionResults = await store.search("Searchable");
+    const messageResults = await store.search("message needle");
+    const artifactResults = await store.search("artifact content needle");
+    const auditResults = await store.search("audit needle");
+    await store.close();
+
+    expect(empty).toEqual([]);
+    expect(sessionResults.some((result) => result.kind === "session" && result.id === session.id)).toBe(true);
+    expect(messageResults.some((result) => result.kind === "message" && result.session_id === session.id)).toBe(true);
+    expect(artifactResults).toContainEqual(expect.objectContaining({ kind: "artifact", id: artifact.id, session_id: session.id, operation_id: operation.id }));
+    expect(auditResults).toContainEqual(expect.objectContaining({ kind: "audit", id: audit.id, session_id: session.id, operation_id: operation.id }));
+  });
+
+  it("does not overwrite a settled session title with later user messages", async () => {
+    const store = await createTempStore();
+    const session = await createSessionRecord(store, "New chat");
+
+    await saveUserMessage(store, session, "最初の依頼です");
+    const firstTitle = (await store.getSession(session.id))?.title;
+    await saveUserMessage(store, session, "二回目の依頼でタイトルを変えない");
+    const secondTitle = (await store.getSession(session.id))?.title;
+    await store.close();
+
+    expect(firstTitle).toBe("最初の依頼です");
+    expect(secondTitle).toBe(firstTitle);
+  });
+
+  it("stores skill markdown in filesystem and SQLite index", async () => {
+    const store = await createTempStore();
+    const markdown = skillMarkdown({ id: "skill_store", state: "candidate", title: "Store skill" });
+
+    const saved = await store.saveSkillMarkdown({ state: "candidate", skillId: "skill_store", markdown });
+    const support = await store.writeSkillSupportFile({
+      skillId: "skill_store",
+      path: "references/style.md",
+      content: "補助資料"
+    });
+    const listed = await store.listSkills();
+    const supportFiles = await store.listSkillSupportFiles("skill_store");
+    const raw = await store.readSkillMarkdown("skill_store");
+    await expect(store.writeSkillSupportFile({ skillId: "skill_store", path: "../outside.md", content: "bad" })).rejects.toThrow("skill_support_path_invalid");
+    await store.close();
+
+    expect(saved.file_path).toBe(path.join("skills", "candidate", "skill_store.md"));
+    expect(support.file_path).toBe(path.join("skills", "support", "skill_store", "references", "style.md"));
+    expect(listed.map((skill) => skill.id)).toContain("skill_store");
+    expect(supportFiles).toContainEqual(expect.objectContaining({ path: path.join("references", "style.md"), content: "補助資料" }));
+    expect(raw).toContain("Store skill");
+  });
+
+  it("records skill usage and curator state for self-improvement loops", async () => {
+    const store = await createTempStore();
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_usage",
+      markdown: skillMarkdown({ id: "skill_usage", state: "project", title: "Usage skill" })
+    });
+
+    const first = await store.recordSkillUsage({ skillId: "skill_usage", runId: "run_1", usedAt: "2026-01-01T00:00:00.000Z" });
+    const second = await store.recordSkillUsage({ skillId: "skill_usage", runId: "run_2", usedAt: "2026-01-02T00:00:00.000Z" });
+    const stale = await store.updateSkillState("skill_usage", "stale");
+    const staleMarkdown = await store.readSkillMarkdown("skill_usage");
+    const listed = await store.listSkillUsage();
+    const curatorState = await store.saveCuratorState({
+      last_run_at: "2026-01-03T00:00:00.000Z",
+      last_run_summary: "checked usage",
+      run_count: 1,
+      stale_after_days: 14
+    });
+    await store.close();
+
+    expect(first.use_count).toBe(1);
+    expect(second).toMatchObject({ skill_id: "skill_usage", use_count: 2, last_run_id: "run_2" });
+    expect(stale).toMatchObject({ id: "skill_usage", state: "stale", file_path: path.join("skills", "stale", "skill_usage.md") });
+    expect(staleMarkdown).toContain('"state": "stale"');
+    expect(listed[0]?.last_used_at).toBe("2026-01-02T00:00:00.000Z");
+    expect(curatorState).toMatchObject({ id: "default", run_count: 1, stale_after_days: 14 });
+  });
+
+  it("builds workspace read models from indexes and history tables", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const session = await createSessionRecord(store, "Read model session");
+    await store.saveSkillMarkdown({
+      state: "active",
+      skillId: "skill_read_model",
+      markdown: skillMarkdown({ id: "skill_read_model", state: "active", title: "Read model skill" })
+    });
+    const run: BackendRunRecord = {
+      id: "run_read_model",
+      session_id: session.id,
+      input_message_id: "message_in",
+      output_message_id: "message_out",
+      backend_id: "samurai-native",
+      backend_kind: "samurai_native",
+      status: "completed",
+      started_at: now,
+      completed_at: now,
+      input_summary: "build read model",
+      output_summary: "done",
+      metadata: {}
+    };
+    const event: BackendEventRecord = {
+      id: "event_read_model",
+      run_id: run.id,
+      session_id: session.id,
+      event_type: "run_completed",
+      sequence: 1,
+      payload: {},
+      resource_refs: [],
+      created_at: now
+    };
+    const artifactRef = { kind: "artifact", id: "artifact_1", uri: "artifacts/artifact_1.md", label: "Read model artifact" };
+    const operation: OperationRecord = {
+      id: "operation_read_model",
+      session_id: session.id,
+      capability_id: "proposal",
+      operation: "artifact.create",
+      actor_identity: "owner",
+      instruction_source: "owner_instruction",
+      instruction_authority: "owner",
+      channel: "web",
+      input_hash: "hash_read_model",
+      input_ref: { kind: "message", id: "message_in", uri: "messages/message_in" },
+      target_resource_refs: [artifactRef],
+      proposed_effects: ["Create artifact."],
+      status: "completed",
+      policy_decision_id: "decision_read_model",
+      result_ref: artifactRef,
+      created_at: now,
+      updated_at: now
+    };
+    const policyDecision: PolicyDecisionRecord = {
+      id: "decision_read_model",
+      operation_id: operation.id,
+      capability_id: operation.capability_id,
+      operation: operation.operation,
+      decision: "allow_auto",
+      reason: "test",
+      policy_inputs: {
+        capability_id: operation.capability_id,
+        operation: operation.operation,
+        actor_identity: operation.actor_identity,
+        instruction_source: operation.instruction_source,
+        instruction_authority: operation.instruction_authority,
+        channel: operation.channel,
+        target_resource_refs: operation.target_resource_refs,
+        proposed_effects: operation.proposed_effects,
+        prior_grants: [],
+        recent_history: [],
+        input_hash: operation.input_hash
+      },
+      matched_rules: [],
+      required_approval_level: "none",
+      created_at: now
+    };
+    const audit: AuditRecord = {
+      id: "audit_read_model",
+      actor_identity: "owner",
+      operation_id: operation.id,
+      capability_id: operation.capability_id,
+      instruction_source: operation.instruction_source,
+      inputs_summary: "Created artifact.",
+      outputs_summary: "Created artifact.",
+      policy_decision_id: policyDecision.id,
+      affected_resources: [artifactRef],
+      created_at: now
+    };
+    const artifact: ArtifactRecord = {
+      id: artifactRef.id,
+      title: "Read model artifact",
+      kind: "markdown",
+      locale: "ja",
+      source_locales: ["ja"],
+      file_ref: artifactRef,
+      metadata: {},
+      source_operation_id: operation.id,
+      created_by: "test",
+      created_at: now,
+      updated_at: now
+    };
+    const change: WorkspaceChangeRecord = {
+      id: "change_read_model",
+      run_id: run.id,
+      session_id: session.id,
+      resource_ref: artifactRef,
+      change_type: "artifact_created",
+      summary: "Created artifact.",
+      created_at: now
+    };
+    await store.writeArtifactContent(artifact.id, "# Read model artifact");
+    await store.saveOperation(operation);
+    await store.savePolicyDecision(policyDecision);
+    await store.saveAuditRecord(audit);
+    await store.saveArtifactMetadata(artifact);
+    await store.saveBackendRun(run);
+    await store.saveBackendEvent(event);
+    await store.saveWorkspaceChange(change);
+
+    const skills = await store.listSkillIndexReadModel();
+    const runs = await store.listRunHistoryEntries(session.id);
+    const changes = await store.listChangeHistoryEntries(session.id);
+    const transcript = await store.exportSessionTranscript(session.id);
+    await store.close();
+
+    expect(skills[0]).toMatchObject({ id: "skill_read_model", file_path: path.join("skills", "active", "skill_read_model.md") });
+    expect(runs[0]).toMatchObject({ id: run.id, event_count: 1, workspace_change_count: 1 });
+    expect(changes[0]).toMatchObject({ id: change.id, change_type: "artifact_created" });
+    expect(transcript?.session.id).toBe(session.id);
+    expect(transcript?.operations[0]?.id).toBe(operation.id);
+    expect(transcript?.policy_decisions[0]?.id).toBe(policyDecision.id);
+    expect(transcript?.audit_records[0]?.id).toBe(audit.id);
+    expect(transcript?.artifacts[0]?.id).toBe(artifact.id);
+    expect(transcript?.run_history[0]?.id).toBe(run.id);
+    expect(transcript?.change_history[0]?.id).toBe(change.id);
+  });
+
+  it("summarizes ignored provider tool calls for diagnostics", async () => {
+    const store = await createTempStore();
+    const session = await createSessionRecord(store, "Tool diagnostics");
+    const now = nowIso();
+    const run: BackendRunRecord = {
+      id: createId("run"),
+      session_id: session.id,
+      input_message_id: createId("message"),
+      backend_id: "samurai-native",
+      backend_kind: "samurai_native",
+      status: "completed",
+      started_at: now,
+      completed_at: now,
+      input_summary: "tool diagnostics",
+      output_summary: "done",
+      metadata: {}
+    };
+    const toolRuns: ToolRunRecord[] = [
+      toolRunRecord(run, "tool_1", "create_artifact", "artifact.create", "ignored", "provider_tool_requires_domain_command", now),
+      toolRunRecord(run, "tool_2", "create_artifact", "artifact.create", "ignored", "provider_tool_requires_domain_command", "2026-01-01T00:00:01.000Z"),
+      toolRunRecord(run, "tool_3", "unknown_tool", undefined, "failed", "runtime_tool_failed", "2026-01-01T00:00:02.000Z")
+    ];
+
+    await store.saveBackendRun(run);
+    for (const toolRun of toolRuns) {
+      await store.saveToolRun(toolRun);
+    }
+    const diagnostics = await store.getToolRunDiagnostics({ sessionId: session.id, status: "ignored" });
+    await store.close();
+
+    expect(diagnostics.total_tool_runs).toBe(2);
+    expect(diagnostics.ignored_or_failed_tool_runs).toBe(2);
+    expect(diagnostics.groups[0]).toMatchObject({
+      provider_tool_name: "create_artifact",
+      action_id: "artifact.create",
+      status: "ignored",
+      count: 2,
+      reasons: [{ reason: "provider_tool_requires_domain_command", count: 2 }]
+    });
+    expect(diagnostics.repeated_ignored_provider_tools).toHaveLength(1);
+    expect(diagnostics.repeated_ignored_provider_tools[0]?.provider_tool_name).toBe("create_artifact");
+  });
+
+  it("stores wiki markdown and indexes only active pages for active lookups", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const frontmatter: WikiFrontmatter = {
+      id: "wiki_test",
+      slug: "wiki-test",
+      title: "Wiki Test",
+      state: "proposed",
+      content_locale: "ja",
+      tags: ["design"],
+      source_refs: [],
+      provenance: {
+        kind: "user_authored",
+        summary: "test",
+        verified: true
+      },
+      created_at: now,
+      updated_at: now
+    };
+
+    const saved = await store.saveWikiPage(frontmatter, "# Wiki");
+    expect(saved.file_path).toBe(path.join("wiki", "pages", "wiki-test.md"));
+    expect(await store.readWikiContent("wiki_test")).toBe("# Wiki");
+    expect(await store.listWiki({ activeOnly: true })).toEqual([]);
+
+    const active = await store.setWikiState("wiki_test", "active");
+    const activePages = await store.listWiki({ activeOnly: true });
+    const reindex = await store.reindexWiki();
+    await store.close();
+
+    expect(active?.state).toBe("active");
+    expect(activePages.map((page) => page.id)).toEqual(["wiki_test"]);
+    expect(reindex).toMatchObject({ active: 1, total: 1, files: 1, indexed: 1, updated: 1 });
+  });
+
+  it("detects and repairs Knowledge Wiki index drift from markdown source", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const frontmatter: WikiFrontmatter = {
+      id: "wiki_manual",
+      slug: "manual-page",
+      title: "Manual Page",
+      state: "active",
+      content_locale: "ja",
+      tags: ["manual"],
+      source_refs: [],
+      provenance: {
+        kind: "user_authored",
+        summary: "created directly as a markdown file",
+        verified: true
+      },
+      created_at: now,
+      updated_at: now
+    };
+    const filePath = path.join(store.rootDir, "wiki", "pages", "manual-page.md");
+    await writeFile(filePath, `${renderFrontmatter(frontmatter)}\n# Manual\n`);
+
+    const drift = await store.inspectWorkspace();
+    const dryRun = await store.repairWorkspace();
+    const repair = await store.repairWorkspace({ dryRun: false });
+    const indexed = await store.getWiki("wiki_manual");
+    const healthy = await store.inspectWorkspace();
+    await rm(filePath);
+    const missing = await store.inspectWorkspace();
+    const repaired = await store.repairWorkspace({ dryRun: false });
+    const afterRepair = await store.inspectWorkspace();
+    await store.close();
+
+    expect(drift.ok).toBe(false);
+    expect(drift.resource_boundaries).toContainEqual(expect.objectContaining({
+      resource: "knowledge_wiki",
+      source_of_truth: "filesystem",
+      sqlite_role: "index"
+    }));
+    expect(drift.resource_boundaries).toContainEqual(expect.objectContaining({
+      resource: "session_run_history",
+      source_of_truth: "sqlite",
+      sqlite_role: "history"
+    }));
+    expect(drift.indexes.wiki.unindexed_files).toEqual([path.join("wiki", "pages", "manual-page.md")]);
+    expect(drift.repair_plan).toContainEqual(expect.objectContaining({ operation: "wiki.reindex" }));
+    expect(dryRun).toMatchObject({ dry_run: true, applied: [] });
+    expect(repair.applied).toContain("wiki.reindex");
+    expect(repair.wiki_reindex).toMatchObject({ active: 1, total: 1, files: 1, indexed: 1, created: 1, removed: 0 });
+    expect(indexed).toMatchObject({ id: "wiki_manual", state: "active" });
+    expect(healthy.ok).toBe(true);
+    expect(missing.ok).toBe(false);
+    expect(missing.indexes.wiki.missing_files).toContainEqual(expect.objectContaining({ id: "wiki_manual" }));
+    expect(repaired.wiki_reindex).toMatchObject({ active: 0, total: 0, files: 0, indexed: 0, removed: 1 });
+    expect(afterRepair.ok).toBe(true);
+  });
+
+  it("detects and repairs Memory and Skill index drift from filesystem source", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const memory: MemoryFrontmatter = {
+      id: "memory_manual",
+      state: "active",
+      topic: "Manual memory",
+      source: "manual",
+      source_locale: "ja",
+      content_locale: "ja",
+      source_kind: "owner_instruction",
+      instruction_authority: "owner",
+      confidence: 0.9,
+      created_by: "test",
+      created_at: now,
+      updated_at: now,
+      related_memories: [],
+      conflicts_with: [],
+      sensitive_level: "none"
+    };
+    const memoryPath = path.join(store.rootDir, "memory", "active", "memory_manual.md");
+    const skillPath = path.join(store.rootDir, "skills", "active", "skill_manual.md");
+    await writeFile(memoryPath, `${renderFrontmatter(memory)}\nRemember this.\n`);
+    await writeFile(skillPath, skillMarkdown({ id: "skill_manual", state: "active", title: "Manual Skill" }));
+
+    const drift = await store.inspectWorkspace();
+    const repair = await store.repairWorkspace({ dryRun: false });
+    const indexedMemory = await store.getMemory("memory_manual");
+    const indexedSkill = await store.getSkill("skill_manual");
+    const healthy = await store.inspectWorkspace();
+    await store.close();
+
+    expect(drift.ok).toBe(false);
+    expect(drift.indexes.memory.unindexed_files).toEqual([path.join("memory", "active", "memory_manual.md")]);
+    expect(drift.indexes.skills.unindexed_files).toEqual([path.join("skills", "active", "skill_manual.md")]);
+    expect(drift.repair_plan).toContainEqual(expect.objectContaining({ operation: "memory.reindex" }));
+    expect(drift.repair_plan).toContainEqual(expect.objectContaining({ operation: "skill.reindex" }));
+    expect(repair.applied).toEqual(expect.arrayContaining(["memory.reindex", "skill.reindex"]));
+    expect(repair.memory_reindex).toMatchObject({ files: 1, indexed: 1, created: 1, removed: 0 });
+    expect(repair.skill_reindex).toMatchObject({ files: 1, indexed: 1, created: 1, removed: 0 });
+    expect(indexedMemory).toMatchObject({ id: "memory_manual", topic: "Manual memory" });
+    expect(indexedSkill).toMatchObject({ id: "skill_manual", title: "Manual Skill" });
+    expect(healthy.ok).toBe(true);
+  });
+
+  it("reports Artifact inventory drift as manual repair", async () => {
+    const store = await createTempStore();
+    const settings = await store.getSettings();
+    const session = await store.createSession({
+      id: "session_artifact_drift",
+      session_key: "web:owner:artifact-drift",
+      title: "Artifact drift",
+      ui_locale: settings.ui_locale,
+      output_locale: settings.output_locale,
+      created_at: nowIso(),
+      updated_at: nowIso()
+    });
+    const operation = await saveOperationRecord(store, session, "envelope_artifact_drift", "artifact.create");
+    const artifact = await saveArtifactRecord(store, operation, "Artifact Drift");
+    await rm(path.join(store.rootDir, artifact.file_ref.uri));
+
+    const drift = await store.inspectWorkspace();
+    const repair = await store.repairWorkspace({ dryRun: false });
+    await store.close();
+
+    expect(drift.ok).toBe(false);
+    expect(drift.indexes.artifacts.missing_files).toContainEqual(expect.objectContaining({ id: artifact.id }));
+    expect(drift.repair_plan).toContainEqual(expect.objectContaining({ operation: "manual_artifact_inventory_fix" }));
+    expect(repair.skipped).toContain("manual_artifact_inventory_fix");
+  });
+
+  it("backs up and restores filesystem truth with SQLite indexes", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const frontmatter: WikiFrontmatter = {
+      id: "wiki_backup",
+      slug: "backup-page",
+      title: "Backup Page",
+      state: "active",
+      content_locale: "ja",
+      tags: ["backup"],
+      source_refs: [],
+      provenance: {
+        kind: "user_authored",
+        summary: "backup test",
+        verified: true
+      },
+      created_at: now,
+      updated_at: now
+    };
+
+    await store.saveWikiPage(frontmatter, "# Original");
+    const backup = await store.createWorkspaceBackup();
+    await store.updateWikiPage({ id: "wiki_backup", content: "# Changed" });
+    const restore = await store.restoreWorkspaceBackup(backup.id);
+    const content = await store.readWikiContent("wiki_backup");
+    const integrity = await store.checkIntegrity();
+    await store.close();
+
+    expect(backup.manifest.file_roots).toContain("wiki");
+    expect(backup.manifest.file_roots).toContain("profile");
+    expect(backup.manifest.integrity_ok).toBe(true);
+    expect(backup.manifest.resource_boundaries).toContainEqual(expect.objectContaining({
+      resource: "knowledge_wiki",
+      source_of_truth: "filesystem"
+    }));
+    expect(restore.db_restored).toBe(true);
+    expect(restore.manifest.id).toBe(backup.id);
+    expect(restore.pre_restore_health.ok).toBe(true);
+    expect(restore.health.ok).toBe(true);
+    expect(restore.integrity.ok).toBe(true);
+    expect(content).toBe("# Original");
+    expect(integrity.ok).toBe(true);
+  });
+
+  it("rejects skill id/file conflicts and removes invalid new files", async () => {
+    const store = await createTempStore();
+    await store.saveSkillMarkdown({ state: "candidate", skillId: "skill_conflict", markdown: skillMarkdown({ id: "skill_conflict", state: "candidate" }) });
+
+    await expect(
+      store.saveSkillMarkdown({ state: "candidate", skillId: "skill_conflict", markdown: skillMarkdown({ id: "skill_conflict", state: "candidate" }) })
+    ).rejects.toThrow();
+    await expect(store.saveSkillMarkdown({ state: "candidate", skillId: "skill_invalid", markdown: "---\n{broken\n---\nbody" })).rejects.toThrow();
+    await expect(access(path.join(store.rootDir, "skills", "candidate", "skill_invalid.md"))).rejects.toThrow();
+    await store.close();
+  });
+
+  it("stores collection schemas, records, notes, and automation runs", async () => {
+    const store = await createTempStore();
+    const schema = collectionSchema("contacts");
+    const now = nowIso();
+
+    const savedSchema = await store.saveCollectionSchema(schema);
+    const savedRecord = await store.saveCollectionRecord({
+      id: "record_1",
+      collection_id: "contacts",
+      data: { name: "Takuma" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await mkdir(path.join(store.rootDir, "collections", "contacts", "notes"), { recursive: true });
+    await writeFile(path.join(store.rootDir, "collections", "contacts", "notes", "README.md"), "補助メモ");
+    const notes = await store.listCollectionNotes("contacts");
+    const records = await store.listCollectionRecords("contacts");
+    const reindex = await store.reindexCollections();
+    const run = await store.createAutomationRun({
+      id: "automation_run_1",
+      kind: "memory_review",
+      source: "cron",
+      status: "started",
+      started_at: now
+    });
+    const updatedRun = await store.updateAutomationRun({ ...run, session_id: "session_1", status: "completed", completed_at: now });
+    await store.close();
+
+    expect(savedSchema.file_path).toBe(path.join("collections", "contacts", "schema.json"));
+    expect(savedRecord.file_path).toBe(path.join("collections", "contacts", "records", "record_1.json"));
+    expect(records.map((record) => record.id)).toEqual(["record_1"]);
+    expect(notes[0]?.content).toBe("補助メモ");
+    expect(reindex).toMatchObject({
+      schemas: { files: 1, indexed: 1, updated: 1, skipped: 0 },
+      records: { files: 1, indexed: 1, updated: 1, skipped: 0 }
+    });
+    expect(run.session_id).toBeUndefined();
+    expect(updatedRun.session_id).toBe("session_1");
+  });
+
+  it("summarizes and repairs automation queue state", async () => {
+    const store = await createTempStore();
+    const now = "2026-01-01T00:00:00.000Z";
+    const future = "2026-01-01T01:00:00.000Z";
+    const dueJob = automationJobRecord({
+      id: "automation_due",
+      title: "Due job",
+      next_run_at: now,
+      retry_after_at: now,
+      failure_count: 1
+    });
+    const lockedJob = automationJobRecord({
+      id: "automation_locked",
+      title: "Locked job",
+      next_run_at: now,
+      locked_until: future
+    });
+    const exhaustedJob = automationJobRecord({
+      id: "automation_exhausted",
+      title: "Exhausted job",
+      status: "disabled",
+      failure_count: 3,
+      max_attempts: 3,
+      last_error: "boom"
+    });
+
+    await store.saveAutomationJob(dueJob);
+    await store.saveAutomationJob(lockedJob);
+    await store.saveAutomationJob(exhaustedJob);
+    const summary = await store.getAutomationQueueSummary(now);
+    const released = await store.releaseAutomationJobLock("automation_locked", now);
+    const requeued = await store.requeueAutomationJob("automation_exhausted", { now });
+    await store.close();
+
+    expect(summary).toMatchObject({
+      total: 3,
+      due: 1,
+      locked: 1,
+      retry_due: 1,
+      exhausted: 1,
+      by_status: { enabled: 2, disabled: 1 },
+      by_kind: { custom_instruction: 3 }
+    });
+    expect(released?.locked_until).toBeUndefined();
+    expect(requeued).toMatchObject({
+      status: "enabled",
+      failure_count: 0,
+      last_error: undefined,
+      retry_after_at: undefined,
+      locked_until: undefined
+    });
+  });
+
+  it("stores and resolves resource translations as derived data for a source resource", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const sourceRef = { kind: "artifact" as const, id: "artifact_1", uri: "artifacts/artifact_1.md" };
+
+    await store.saveResourceTranslation({
+      id: "translation_1",
+      source_ref: sourceRef,
+      source_locale: "ja",
+      target_locale: "en",
+      status: "draft",
+      original_hash: "hash_original",
+      translated_text: "Translated text",
+      created_at: now,
+      updated_at: now
+    });
+    await store.saveResourceTranslation({
+      id: "translation_verified",
+      source_ref: sourceRef,
+      source_locale: "ja",
+      target_locale: "en",
+      status: "verified",
+      original_hash: "hash_original",
+      translated_text: "Verified text",
+      created_at: now,
+      updated_at: now
+    });
+    await store.saveResourceTranslation({
+      id: "translation_2",
+      source_ref: { kind: "artifact", id: "artifact_2", uri: "artifacts/artifact_2.md" },
+      source_locale: "ja",
+      target_locale: "en",
+      status: "verified",
+      original_hash: "hash_other",
+      translated_text: "Other text",
+      created_at: now,
+      updated_at: now
+    });
+    const translations = await store.listResourceTranslations({ sourceRef, targetLocale: "en" });
+    const resolved = await store.resolveResourceTranslation({
+      sourceRef,
+      targetLocale: "en",
+      originalHash: "hash_original",
+      fallbackText: "原文"
+    });
+    const fallback = await store.resolveResourceTranslation({
+      sourceRef,
+      targetLocale: "en",
+      originalHash: "hash_changed",
+      fallbackText: "原文"
+    });
+    await store.close();
+
+    expect(translations.map((translation) => translation.id).sort()).toEqual(["translation_1", "translation_verified"]);
+    expect(resolved).toMatchObject({
+      status: "verified",
+      source: "translation",
+      text: "Verified text",
+      translation: { id: "translation_verified" }
+    });
+    expect(fallback).toMatchObject({
+      status: "missing",
+      source: "fallback",
+      text: "原文",
+      target_locale: "en"
+    });
+  });
+
+  it("rejects collection unknown fields and record conflicts", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    await store.saveCollectionSchema(collectionSchema("contacts"));
+    await expect(
+      store.saveCollectionRecord({
+        id: "record_unknown",
+        collection_id: "contacts",
+        data: { unknown: true },
+        resource_refs: [],
+        created_at: now,
+        updated_at: now
+      })
+    ).rejects.toThrow("collection_unknown_field");
+    await store.saveCollectionRecord({
+      id: "record_conflict",
+      collection_id: "contacts",
+      data: { name: "A" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await expect(
+      store.saveCollectionRecord({
+        id: "record_conflict",
+        collection_id: "contacts",
+        data: { name: "B" },
+        resource_refs: [],
+        created_at: now,
+        updated_at: now
+      })
+    ).rejects.toThrow();
+    await store.close();
+  });
+
+  it("computes collection derived fields and validates refs embeds triggers", async () => {
+    const store = await createTempStore();
+    const schema = {
+      ...collectionSchema("contacts"),
+      fields: [
+        { id: "name", type: "string" },
+        { id: "email", type: "string" }
+      ],
+      refs: [{ id: "manager_id", field: "manager_id", collection_id: "contacts" }],
+      embeds: [{ id: "profile", field: "profile", required: true }],
+      derived_fields: [
+        { id: "display", expression: "concat:name,email", join: " <" },
+        { id: "name_length", expression: "length:name" }
+      ],
+      triggers: [{ id: "normalize", event: "record.created", action_id: "normalize_contact", kind: "patch_record" }]
+    } satisfies CollectionSchema;
+    const now = nowIso();
+    await store.saveCollectionSchema(schema);
+    await store.saveCollectionRecord({
+      id: "manager",
+      collection_id: "contacts",
+      data: {
+        name: "Manager",
+        email: "manager@example.com",
+        profile: { role: "lead" }
+      },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+
+    const saved = await store.saveCollectionRecord({
+      id: "record_derived",
+      collection_id: "contacts",
+      data: {
+        name: "Takuma",
+        email: "takuma@example.com",
+        manager_id: "manager",
+        profile: { role: "owner" }
+      },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    const effects = await store.evaluateCollectionTriggers({
+      collectionId: "contacts",
+      recordId: "record_derived",
+      event: "record.created"
+    });
+    const patched = await store.applyCollectionRecordPatch({
+      collectionId: "contacts",
+      recordId: "record_derived",
+      patch: {
+        id: "patch_derived",
+        record_id: "record_derived",
+        changes: { name: "Taku" },
+        source_operation_id: "operation_patch_derived",
+        created_at: "2026-01-02T00:00:00.000Z"
+      }
+    });
+    const patches = await store.listCollectionPatches({
+      collectionId: "contacts",
+      recordId: "record_derived"
+    });
+    const storedPatch = await store.getCollectionPatch("contacts", "record_derived", "patch_derived");
+    const resolution = await store.resolveCollectionRecordRefs("contacts", "record_derived");
+    await expect(store.saveCollectionRecord({
+      id: "bad_ref",
+      collection_id: "contacts",
+      data: {
+        name: "Bad",
+        email: "bad@example.com",
+        manager_id: "missing",
+        profile: { role: "guest" }
+      },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_ref_not_found");
+    await store.close();
+
+    expect(saved.data).toMatchObject({
+      display: "Takuma <takuma@example.com",
+      name_length: 6
+    });
+    expect(effects[0]).toMatchObject({
+      id: "normalize",
+      action_id: "normalize_contact",
+      action_kind: "patch_record",
+      status: "queued"
+    });
+    expect(patched.after.data).toMatchObject({
+      display: "Taku <takuma@example.com",
+      name_length: 4
+    });
+    expect(patches).toContainEqual(expect.objectContaining({
+      id: "patch_derived",
+      record_id: "record_derived",
+      source_operation_id: "operation_patch_derived"
+    }));
+    expect(storedPatch).toMatchObject({
+      id: "patch_derived",
+      record_id: "record_derived",
+      changes: { name: "Taku" }
+    });
+    expect(resolution.resolved_refs).toContainEqual(expect.objectContaining({
+      ref_id: "manager_id",
+      field: "manager_id",
+      target_collection_id: "contacts",
+      target_record_id: "manager"
+    }));
+    expect(resolution.embed_fields).toContainEqual({
+      embed_id: "profile",
+      field: "profile",
+      value: { role: "owner" }
+    });
+  });
+
+  it("persists gateway pairings and inbound message routing state", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const pairing: GatewayPairingRecord = {
+      id: createId("pairing"),
+      channel: "webhook",
+      source_identity: "external-source-1",
+      source_label: "External Source",
+      status: "pending",
+      pairing_code: "ABC123",
+      session_key: "webhook:external-source-1:main",
+      metadata: { route: "main" },
+      requested_at: now,
+      expires_at: new Date(Date.parse(now) + 300_000).toISOString(),
+      updated_at: now
+    };
+    const pairingPolicy: GatewayPairingPolicyRecord = {
+      id: "gateway_pairing_policy_webhook",
+      channel: "webhook",
+      status: "enabled",
+      trust_mode: "pairing_required",
+      allowlist: ["webhook:external-source-1"],
+      pairing_ttl_ms: 300_000,
+      duplicate_window_ms: 60_000,
+      rate_limit_window_ms: 60_000,
+      rate_limit_max: 20,
+      metadata: { owner: "gateway" },
+      created_at: now,
+      updated_at: now
+    };
+    const routingPolicy: GatewayRoutingPolicyRecord = {
+      id: "gateway_routing_policy_webhook",
+      channel: "webhook",
+      status: "enabled",
+      session_key_strategy: "account_thread",
+      default_route: "main",
+      metadata: { owner: "gateway" },
+      created_at: now,
+      updated_at: now
+    };
+    const inbound: GatewayInboundMessageRecord = {
+      id: createId("gateway_inbound"),
+      channel: "webhook",
+      source_identity: pairing.source_identity,
+      body: "未承認の外部入力",
+      status: "blocked",
+      trusted: false,
+      pairing_id: pairing.id,
+      metadata: { trace_id: "trace-1" },
+      created_at: now,
+      updated_at: now
+    };
+    const boundary: GatewayBoundaryPolicy = {
+      id: createId("gateway_boundary"),
+      source_channel: "webhook",
+      source_identity: pairing.source_identity,
+      session_key: pairing.session_key,
+      allowed_tools: ["collection.record.create"],
+      mcp_config_refs: [],
+      secret_refs: [
+        {
+          id: createId("secret_ref"),
+          source: "env",
+          provider: "default",
+          key: "WEBHOOK_TOKEN"
+        }
+      ],
+      sandbox: {
+        mode: "non_main",
+        scope: "session",
+        backend: "none",
+        workspace_access: "none",
+        network_access: "none",
+        allowed_paths: [],
+        denied_paths: [],
+        metadata: {}
+      },
+      path_normalization: {
+        canonical_root: "workspace",
+        reject_absolute_paths: true,
+        reject_parent_segments: true,
+        allowed_roots: ["workspace"],
+        denied_roots: []
+      },
+      allowlist: [`webhook:${pairing.source_identity}`],
+      concurrency_lock: {
+        scope: "session",
+        key: pairing.session_key,
+        ttl_ms: 60_000
+      },
+      metadata: {},
+      created_at: now,
+      updated_at: now
+    };
+    const mcpConfig: GatewayMcpConfigRecord = {
+      id: createId("gateway_mcp"),
+      server_name: "calendar",
+      transport: "stdio",
+      enabled: true,
+      allowed_tools: ["calendar.read"],
+      secret_refs: [
+        {
+          id: "secret_calendar",
+          source: "env",
+          provider: "calendar",
+          key: "CALENDAR_TOKEN"
+        }
+      ],
+      stdio: {
+        command: "node",
+        args: ["calendar-mcp.js"],
+        env: { NODE_ENV: "production" },
+        secret_env: { CALENDAR_TOKEN: "secret_calendar" },
+        secret_files: [],
+        framing: "json_lines",
+        initialize: true,
+        timeout_ms: 2000
+      },
+      metadata: { owner: "gateway" },
+      created_at: now,
+      updated_at: now
+    };
+
+    await store.saveGatewayPairingPolicy(pairingPolicy);
+    await store.saveGatewayRoutingPolicy(routingPolicy);
+    await store.saveGatewayPairing(pairing);
+    await store.saveGatewayInboundMessage(inbound);
+    await store.saveGatewayBoundaryPolicy(boundary);
+    await store.saveGatewayMcpConfig(mcpConfig);
+    const acquiredLock = await store.acquireGatewayConcurrencyLock({
+      lockKey: pairing.session_key,
+      scope: "session",
+      policyId: boundary.id,
+      ownerRef: { kind: "gateway_inbound", id: inbound.id, uri: `gateway-inbound/${inbound.id}` },
+      ttlMs: 60_000,
+      now
+    });
+    const blockedLock = await store.acquireGatewayConcurrencyLock({
+      lockKey: pairing.session_key,
+      scope: "session",
+      policyId: boundary.id,
+      ownerRef: { kind: "gateway_inbound", id: "another_inbound", uri: "gateway-inbound/another_inbound" },
+      ttlMs: 60_000,
+      now
+    });
+    const releasedLock = await store.releaseGatewayConcurrencyLock(pairing.session_key, now);
+    const storedPairingPolicy = await store.getGatewayPairingPolicy("webhook");
+    const listedPairingPolicies = await store.listGatewayPairingPolicies({ status: "enabled" });
+    const storedRoutingPolicy = await store.getGatewayRoutingPolicy("webhook");
+    const listedRoutingPolicies = await store.listGatewayRoutingPolicies({ status: "enabled" });
+    const foundPending = await store.findGatewayPairing({
+      channel: "webhook",
+      sourceIdentity: pairing.source_identity,
+      status: "pending"
+    });
+    const blockedInbound = await store.listGatewayInboundMessages({ status: "blocked" });
+    const storedBoundary = await store.getGatewayBoundaryPolicy(boundary.id);
+    const listedBoundaries = await store.listGatewayBoundaryPolicies({ sessionKey: pairing.session_key });
+    const storedMcpConfig = await store.getGatewayMcpConfig(mcpConfig.id);
+    const foundMcpConfig = await store.getGatewayMcpConfigByServerName("calendar");
+    const enabledMcpConfigs = await store.listGatewayMcpConfigs({ enabled: true });
+    await store.saveGatewayPairing({
+      ...pairing,
+      status: "approved",
+      pairing_code: undefined,
+      resolved_at: now,
+      updated_at: now
+    });
+    const approvedPairings = await store.listGatewayPairings("approved");
+    const filteredPairings = await store.listGatewayPairings({
+      status: "approved",
+      channel: "webhook",
+      sourceIdentity: pairing.source_identity,
+      sessionKey: pairing.session_key,
+      limit: 1
+    });
+    await store.close();
+
+    expect(foundPending).toMatchObject({
+      id: pairing.id,
+      status: "pending",
+      metadata: { route: "main" }
+    });
+    expect(storedPairingPolicy).toMatchObject({
+      id: pairingPolicy.id,
+      channel: "webhook",
+      trust_mode: "pairing_required",
+      allowlist: ["webhook:external-source-1"]
+    });
+    expect(listedPairingPolicies).toContainEqual(expect.objectContaining({ id: pairingPolicy.id }));
+    expect(storedRoutingPolicy).toMatchObject({
+      id: routingPolicy.id,
+      channel: "webhook",
+      session_key_strategy: "account_thread",
+      default_route: "main"
+    });
+    expect(listedRoutingPolicies).toContainEqual(expect.objectContaining({ id: routingPolicy.id }));
+    expect(blockedInbound).toContainEqual(expect.objectContaining({
+      id: inbound.id,
+      status: "blocked",
+      trusted: false,
+      metadata: { trace_id: "trace-1" }
+    }));
+    expect(storedBoundary).toMatchObject({
+      id: boundary.id,
+      source_channel: "webhook",
+      source_identity: pairing.source_identity,
+      allowed_tools: ["collection.record.create"],
+      secret_refs: [{ id: boundary.secret_refs[0]?.id, source: "env", provider: "default", key: "WEBHOOK_TOKEN" }],
+      concurrency_lock: { scope: "session", key: pairing.session_key, ttl_ms: 60_000 }
+    });
+    expect(listedBoundaries).toHaveLength(1);
+    expect(storedMcpConfig).toMatchObject({
+      id: mcpConfig.id,
+      server_name: "calendar",
+      transport: "stdio",
+      enabled: true,
+      allowed_tools: ["calendar.read"],
+      secret_refs: [{ id: "secret_calendar", source: "env", provider: "calendar", key: "CALENDAR_TOKEN" }],
+      stdio: {
+        command: "node",
+        secret_env: { CALENDAR_TOKEN: "secret_calendar" }
+      }
+    });
+    expect(foundMcpConfig?.id).toBe(mcpConfig.id);
+    expect(enabledMcpConfigs).toContainEqual(expect.objectContaining({ id: mcpConfig.id }));
+    expect(acquiredLock.acquired).toBe(true);
+    expect(blockedLock).toMatchObject({ acquired: false, lock: { lock_key: pairing.session_key, status: "acquired" } });
+    expect(releasedLock).toMatchObject({ lock_key: pairing.session_key, status: "released" });
+    expect(approvedPairings).toContainEqual(expect.objectContaining({
+      id: pairing.id,
+      status: "approved",
+      pairing_code: undefined
+    }));
+    expect(filteredPairings).toEqual([expect.objectContaining({
+      id: pairing.id,
+      status: "approved",
+      source_identity: pairing.source_identity,
+      session_key: pairing.session_key
+    })]);
+  });
+});
+
+async function createSessionRecord(store: WorkspaceStore, title: string): Promise<SessionRecord> {
+  const settings = await store.getSettings();
+  const now = nowIso();
+  const session: SessionRecord = {
+    id: createId("session"),
+    session_key: "web:owner:main",
+    title,
+    ui_locale: settings.ui_locale,
+    output_locale: settings.output_locale,
+    created_at: now,
+    updated_at: now
+  };
+  return store.createSession(session);
+}
+
+function toolRunRecord(
+  run: BackendRunRecord,
+  toolCallId: string,
+  providerToolName: string,
+  actionId: string | undefined,
+  status: ToolRunRecord["status"],
+  outputSummary: string,
+  createdAt: string
+): ToolRunRecord {
+  return {
+    id: createId("toolrun"),
+    run_id: run.id,
+    session_id: run.session_id,
+    tool_call_id: toolCallId,
+    provider_tool_name: providerToolName,
+    action_id: actionId,
+    status,
+    input_summary: providerToolName,
+    output_summary: outputSummary,
+    resource_refs: [],
+    created_at: createdAt
+  };
+}
+
+async function saveUserMessage(store: WorkspaceStore, session: SessionRecord, content: string): Promise<MessageEnvelope> {
+  const envelope: MessageEnvelope = {
+    id: createId("envelope"),
+    source: "web",
+    actor_identity: "owner",
+    session_key: session.session_key,
+    user_intent: content,
+    attachments: [],
+    input_locale: "ja",
+    output_locale: "ja",
+    metadata: {},
+    received_at: nowIso()
+  };
+  await store.saveMessage({
+    id: createId("message"),
+    session_id: session.id,
+    role: "user",
+    content,
+    input_locale: "ja",
+    output_locale: "ja",
+    envelope,
+    created_at: envelope.received_at
+  });
+  return envelope;
+}
+
+async function saveOperationRecord(store: WorkspaceStore, session: SessionRecord, envelopeId: string, operationName: string): Promise<OperationRecord> {
+  const now = nowIso();
+  const operation: OperationRecord = {
+    id: createId("operation"),
+    session_id: session.id,
+    capability_id: "proposal_workspace",
+    operation: operationName,
+    actor_identity: "owner",
+    instruction_source: "owner_instruction",
+    instruction_authority: "owner",
+    channel: "web",
+    input_hash: envelopeId,
+    input_ref: {
+      kind: "message",
+      id: envelopeId,
+      uri: `messages/${envelopeId}`
+    },
+    target_resource_refs: [],
+    proposed_effects: [],
+    status: "completed",
+    created_at: now,
+    updated_at: now
+  };
+  return store.saveOperation(operation);
+}
+
+async function saveArtifactRecord(store: WorkspaceStore, operation: OperationRecord, title: string, content = `# ${title}`): Promise<ArtifactRecord> {
+  const id = createId("artifact");
+  const uri = await store.writeArtifactContent(id, content);
+  const now = nowIso();
+  return store.saveArtifactMetadata({
+    id,
+    title,
+    kind: "markdown",
+    locale: "ja",
+    source_locales: ["ja"],
+    file_ref: {
+      kind: "artifact",
+      id,
+      uri,
+      label: title
+    },
+    metadata: {},
+    source_operation_id: operation.id,
+    created_by: "test",
+    created_at: now,
+    updated_at: now
+  });
+}
+
+function skillMarkdown(input: Partial<SkillFrontmatter> & { id: string; state: SkillFrontmatter["state"] }): string {
+  const frontmatter: SkillFrontmatter = {
+    id: input.id,
+    state: input.state,
+    title: input.title ?? "Skill",
+    description: input.description ?? "Description",
+    tags: input.tags ?? [],
+    provenance: input.provenance ?? "generated_local",
+    trust_level: input.trust_level ?? "generated_local",
+    allowed_scopes: input.allowed_scopes ?? ["skill"],
+    required_capabilities: input.required_capabilities ?? [],
+    schedule_policy: input.schedule_policy ?? {},
+    secret_policy: input.secret_policy ?? {},
+    last_reviewed_at: input.last_reviewed_at ?? nowIso(),
+    owner_pinned: input.owner_pinned ?? false
+  };
+  return ["---", JSON.stringify(frontmatter, null, 2), "---", "# Body", ""].join("\n");
+}
+
+function collectionSchema(id: string): CollectionSchema {
+  const labels = { ja: id, en: id, zh: id, ko: id, es: id, "pt-BR": id, fr: id, de: id };
+  return {
+    id,
+    version: "1",
+    labels,
+    descriptions: labels,
+    fields: [{ id: "name", type: "string" }],
+    refs: [],
+    embeds: [],
+    derived_fields: [],
+    triggers: [],
+    actions: [],
+    permissions: {}
+  };
+}
+
+function automationJobRecord(patch: Partial<AutomationJobRecord> = {}): AutomationJobRecord {
+  const now = "2026-01-01T00:00:00.000Z";
+  return {
+    id: patch.id ?? createId("automation"),
+    title: patch.title ?? "Automation job",
+    kind: patch.kind ?? "custom_instruction",
+    status: patch.status ?? "enabled",
+    schedule: patch.schedule ?? "daily",
+    target_instruction: patch.target_instruction ?? "Run automation",
+    delivery_target: patch.delivery_target ?? { channel: "activity" },
+    next_run_at: patch.next_run_at ?? now,
+    last_run_at: patch.last_run_at,
+    retry_after_at: patch.retry_after_at,
+    locked_until: patch.locked_until,
+    failure_count: patch.failure_count ?? 0,
+    max_attempts: patch.max_attempts ?? 3,
+    last_error: patch.last_error,
+    created_at: patch.created_at ?? now,
+    updated_at: patch.updated_at ?? now
+  };
+}
+
+async function saveAuditRecord(store: WorkspaceStore, operation: OperationRecord, inputsSummary: string, outputsSummary: string): Promise<AuditRecord> {
+  const audit: AuditRecord = {
+    id: createId("audit"),
+    actor_identity: "owner",
+    operation_id: operation.id,
+    capability_id: operation.capability_id,
+    instruction_source: operation.instruction_source,
+    inputs_summary: inputsSummary,
+    outputs_summary: outputsSummary,
+    policy_decision_id: createId("policy"),
+    affected_resources: [],
+    created_at: nowIso()
+  };
+  return store.saveAuditRecord(audit);
+}
+
+async function saveMemoryRecord(
+  store: WorkspaceStore,
+  envelope: MessageEnvelope,
+  state: MemoryFrontmatter["state"],
+  content: string
+): Promise<MemoryFrontmatter & { file_path: string }> {
+  const now = nowIso();
+  const frontmatter: MemoryFrontmatter = {
+    id: createId("memory"),
+    state,
+    topic: "preference",
+    source: envelope.id,
+    source_locale: "ja",
+    content_locale: "ja",
+    source_kind: "owner_instruction",
+    instruction_authority: "owner",
+    confidence: 0.7,
+    created_by: "test",
+    created_at: now,
+    updated_at: now,
+    related_memories: [],
+    conflicts_with: [],
+    sensitive_level: "none"
+  };
+  await store.saveMemory(frontmatter, content);
+  const saved = await store.getMemory(frontmatter.id);
+  return saved!;
+}

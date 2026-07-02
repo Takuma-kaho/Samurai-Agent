@@ -12,14 +12,19 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+.playwright-mcp/
 
 # Dependency and build outputs
 node_modules/
+.pnpm-store/
 dist/
+dist-ts/
 build/
 .next/
 out/
 coverage/
+workspace-data/
+*.timestamp-*.mjs
 
 # Editor / local tooling
 .idea/

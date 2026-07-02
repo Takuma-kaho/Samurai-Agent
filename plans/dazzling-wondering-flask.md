@@ -1,14 +1,22 @@
-# DESIGN.md v0.4 設計レビュー報告 + v0.5 改訂プラン
+# ARCHITECTURE.md（旧 DESIGN.md） v0.4 設計レビュー報告 + v0.5 改訂プラン
 
 ## Context
 
-`DESIGN.md`（v0.4「GUI-first Personal Agent Workspace」）のレビュー依頼。
+`ARCHITECTURE.md`（レビュー当時の `DESIGN.md`、v0.4「GUI-first Personal Agent Workspace」）のレビュー依頼。
 このドキュメントは MulmoClaude / Hermes Agent / OpenClaw の3つのOSSの「勝ち筋」を統合し、
 Policy-Bounded Agent Loop(= Human On The Loop)を中核に据えた個人用Agent Workspaceの設計書。
 同ディレクトリの `Hermes_Agent_解説.md` も参照元の理解のために突き合わせ済み。
 
 本ファイルは「レビュー報告」と「v0.5でドキュメントをどう直すか」の両方を兼ねる。
-コードはまだ存在しない（リポジトリは `DESIGN.md` と解説記事のみ）ので、レビューは設計文書そのものに対するもの。
+コードはまだ存在しない（レビュー当時のリポジトリは `DESIGN.md` と解説記事のみ）ので、レビューは設計文書そのものに対するもの。
+
+2026-06-17追記:
+`DESIGN.md` は `ARCHITECTURE.md` に改名された。
+本ファイル内の過去文脈としての `DESIGN.md` は、現在の `ARCHITECTURE.md` を指す。
+
+2026-06-18追記:
+現行方針では旧Home表現はChat Shell内のActivity Inbox / Context Drawer / badge / Audit Viewへ読み替える。
+本ファイルのレビュー本文は履歴として残すが、今後の実装判断ではダッシュボード型の初期画面やActivity Inbox専用画面を作らない。
 
 ---
 
@@ -125,7 +133,7 @@ Hermesのtraceベース評価(GEPA)は後回しで良いが、**安全境界のe
 
 ## v0.5 改訂プラン（このレビューを反映する場合の作業）
 
-対象ファイル: `DESIGN.md`（唯一の編集対象）。新規 v0.5 として改訂。
+対象ファイル: `ARCHITECTURE.md`（レビュー当時の `DESIGN.md`、唯一の編集対象）。新規 v0.5 として改訂。
 
 1. **新セクション「Policy Specification」を追加** (現5.4の昇格・拡張):
    - 正準スキーマ: `{ op_type, scope, declared_effects, channel, trust_level, history } → PolicyDecision`
@@ -138,15 +146,15 @@ Hermesのtraceベース評価(GEPA)は後回しで良いが、**安全境界のe
    - rollback pointの定義(粒度/保持/保存先: fs=git or snapshot, sqlite=before/after)。
    - 「明示的にrollback不可な操作集合」を列挙し、それらは強承認のみで担保と明記。
 4. **新セクション「Core Schemas」を追加**: ~8コアスキーマをZod相当の擬似定義で固定。
-5. **5.1/Home を拡張し「Observability for Human-On-The-Loop」**: 自律アクションのサーフェシング/日次ダイジェスト/一括undo/異常フラグ。
+5. **5.1/Chat Shell に「Observability for Human-On-The-Loop」を組み込む**: Activity Inbox / Context Drawer / badge / Audit Viewで自律アクション、rollback候補、異常フラグを見せる。
 6. **8.2を「縦切り1本のMVP定義」へ組み替え**: v1 cut line を明示。例の最薄スライス
-   = Chat → 1 Capability(proposal生成) → Artifact保存 → 低risk Memory自動更新 → Audit → Home表示、を端から端まで。
+   = Chat Shell → 1 Capability(proposal生成) → Artifact保存 → 低risk Memory自動更新 → Audit View → ActivityInboxItem表示、を端から端まで。
 7. **Safety Layer(5.10)に追記**: 出力側secret masking / skill provenance+trust matrix / 安全境界eval。
 8. **5.11に追記**: paired外部identity → 許可scope の権限マッピング。
 9. **0章 or 9章に正直さの注記**: greenfield再構築である旨 / ライセンス / caching前提のprovider依存。
 
 ## 検証（v0.5を書いた後）
-- `DESIGN.md` を通読し、6種のPolicyDecisionが全ての状態変更系操作で一意に決まるか(未割当operationが無いか)を確認。
+- `ARCHITECTURE.md`（レビュー当時の `DESIGN.md`）を通読し、6種のPolicyDecisionが全ての状態変更系操作で一意に決まるか(未割当operationが無いか)を確認。
 - 重複ポリシー表が1つに統合され、衝突(memory削除 vs ファイル削除 等)が解消しているか確認。
 - ingest/auto-reply/cron の各経路に対し、「外部由来intentがexternal-send/payment/public/deleteへ到達できない」ことが
   文面上トレースできるか確認。

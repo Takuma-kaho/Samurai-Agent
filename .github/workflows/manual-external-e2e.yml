@@ -1,0 +1,74 @@
+name: Manual External E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: External backend to verify.
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - claude
+          - codex
+      run:
+        description: Start an external backend run.
+        required: true
+        default: false
+        type: boolean
+      resume:
+        description: Resume the external backend run after completion.
+        required: true
+        default: false
+        type: boolean
+      confirm_external_effects:
+        description: Confirm external services, network, and provider quota may be used.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  external-e2e:
+    name: external-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: external-e2e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify external backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--json --backend "${{ inputs.backend }}")
+          if [[ "${{ inputs.run }}" == "true" ]]; then
+            args+=(--run --require-configured)
+          fi
+          if [[ "${{ inputs.resume }}" == "true" ]]; then
+            args+=(--resume)
+          fi
+          if [[ "${{ inputs.confirm_external_effects }}" == "true" ]]; then
+            args+=(--confirm-external-effects)
+          fi
+          CI=true pnpm run backend:external:verify -- "${args[@]}"

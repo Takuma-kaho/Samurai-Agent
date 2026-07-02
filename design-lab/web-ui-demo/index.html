@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Samurai Agent Web UI Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body data-view="empty">
+    <div class="demo-page">
+      <header class="demo-toolbar" aria-label="Demo controls">
+        <div class="demo-title">
+          <span class="demo-mark" aria-hidden="true"></span>
+          <span>Samurai Agent UI Demo</span>
+        </div>
+        <div class="demo-controls" role="group" aria-label="Screen state">
+          <button class="demo-tab is-active" type="button" data-view-target="empty">
+            Chat Empty
+          </button>
+          <button class="demo-tab" type="button" data-view-target="artifact">
+            With Artifact
+          </button>
+          <button class="demo-tab" type="button" data-view-target="workspace">
+            Workspace Peek
+          </button>
+          <button class="demo-tab" type="button" data-view-target="context">
+            Context Drawer
+          </button>
+        </div>
+      </header>
+
+      <main class="app-shell" aria-label="Samurai Agent static demo">
+        <aside class="sidebar" aria-label="Primary navigation">
+          <div class="brand-row">
+            <div class="brand-symbol" aria-hidden="true">S</div>
+            <div>
+              <div class="brand-name">Samurai</div>
+            </div>
+          </div>
+
+          <nav class="nav-block" aria-label="Workspace actions">
+            <a class="nav-item is-primary" href="#">
+              <span class="nav-icon" aria-hidden="true">+</span>
+              <span>New chat</span>
+            </a>
+            <a class="nav-item" href="#">
+              <span class="nav-icon" aria-hidden="true">/</span>
+              <span>Search</span>
+            </a>
+            <a class="nav-item" href="#">
+              <span class="nav-icon" aria-hidden="true">A</span>
+              <span>Automations</span>
+            </a>
+            <a class="nav-item" href="#">
+              <span class="nav-icon" aria-hidden="true">P</span>
+              <span>Plugins</span>
+            </a>
+          </nav>
+
+          <section class="session-list" aria-label="Sessions">
+            <div class="section-label">Today</div>
+            <button class="session-item is-current" type="button">
+              <span>Launch notes</span>
+              <span class="session-dot" aria-hidden="true"></span>
+            </button>
+            <button class="session-item" type="button">
+              <span>Invoice draft</span>
+            </button>
+            <button class="session-item" type="button">
+              <span>Weekly review</span>
+            </button>
+            <div class="section-label">Project</div>
+            <button class="session-item" type="button">
+              <span>Workspace setup</span>
+            </button>
+            <button class="session-item" type="button">
+              <span>Memory cleanup</span>
+            </button>
+          </section>
+
+          <div class="sidebar-footer">
+            <button class="nav-item footer-button" type="button">
+              <span class="nav-icon" aria-hidden="true">?</span>
+              <span>Settings</span>
+            </button>
+          </div>
+        </aside>
+
+        <section class="main-stage">
+          <header class="stage-header">
+            <div>
+              <div class="stage-title">Chat</div>
+            </div>
+            <div class="stage-actions" aria-label="View controls">
+              <button class="icon-button" type="button" aria-label="Command palette">/</button>
+              <button class="icon-button" type="button" aria-label="Open context">i</button>
+            </div>
+          </header>
+
+          <div class="view-stack">
+            <section class="screen screen-empty" data-screen="empty" aria-label="Empty chat">
+              <div class="empty-composition">
+                <h1>What should we shape today?</h1>
+                <div class="prompt-card lit-surface">
+                  <button class="prompt-mini" type="button" aria-label="Attach">+</button>
+                  <input aria-label="Prompt" placeholder="Ask Samurai anything" />
+                  <button class="voice-button" type="button" aria-label="start voice input">
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path>
+                      <path d="M5 11v1a7 7 0 0 0 14 0v-1"></path>
+                      <path d="M12 19v3"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <section class="screen screen-artifact" data-screen="artifact" aria-label="Chat with artifact">
+              <div class="conversation">
+                <article class="message message-user">
+                  <p>Create a short launch note and keep it calm.</p>
+                </article>
+                <article class="message message-agent lit-surface">
+                  <p>Drafted. I kept it direct and left room for review.</p>
+                </article>
+                <article class="artifact-card lit-surface">
+                  <div class="artifact-head">
+                    <div>
+                      <div class="artifact-type">Artifact</div>
+                      <h2>Launch note</h2>
+                    </div>
+                    <span class="status-pill"><span class="pill-dot" aria-hidden="true"></span>Draft</span>
+                  </div>
+                  <div class="artifact-preview">
+                    <p>Samurai Agent is a local-first workspace for turning daily intent into durable memory, artifacts, and audited action.</p>
+                    <div class="preview-lines" aria-hidden="true">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </div>
+                  </div>
+                  <div class="artifact-actions">
+                    <button type="button">Open</button>
+                    <button type="button">Save</button>
+                  </div>
+                </article>
+              </div>
+              <div class="prompt-card prompt-docked lit-surface">
+                <button class="prompt-mini" type="button" aria-label="Attach">+</button>
+                <input aria-label="Prompt" placeholder="Continue the work" />
+                <button class="send-button" type="button" aria-label="send message">
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M12 19V5"></path>
+                    <path d="m6 11 6-6 6 6"></path>
+                  </svg>
+                </button>
+              </div>
+            </section>
+
+            <section class="screen screen-workspace" data-screen="workspace" aria-label="Workspace peek">
+              <div class="workspace-layout">
+                <div class="workspace-chat">
+                  <article class="message message-user">
+                    <p>Open the draft next to the chat.</p>
+                  </article>
+                  <article class="message message-agent lit-surface">
+                    <p>Opened beside the chat.</p>
+                  </article>
+                  <div class="prompt-card compact-prompt lit-surface">
+                    <button class="prompt-mini" type="button" aria-label="Attach">+</button>
+                    <input aria-label="Prompt" placeholder="Ask for edits" />
+                  </div>
+                </div>
+                <article class="workspace-peek lit-surface">
+                  <header class="workspace-head">
+                    <div>
+                      <span class="artifact-type">Workspace</span>
+                      <h2>Launch note</h2>
+                    </div>
+                    <button type="button">Focus</button>
+                  </header>
+                  <div class="document-surface lit-surface">
+                    <h3>Samurai Agent</h3>
+                    <p>One quiet workspace for memory, artifacts, and bounded action.</p>
+                    <div class="doc-rule"></div>
+                    <p>The agent can work inside clear boundaries and show its work without turning the interface into a control room.</p>
+                  </div>
+                  <footer class="workspace-foot">
+                    <span>Saved locally</span>
+                    <span>2 sources</span>
+                  </footer>
+                </article>
+              </div>
+            </section>
+
+            <section class="screen screen-context" data-screen="context" aria-label="Chat with context drawer">
+              <div class="context-main">
+                <div class="conversation slim">
+                  <article class="message message-user">
+                    <p>What changed in memory?</p>
+                  </article>
+                  <article class="message message-agent lit-surface">
+                    <p>I found one candidate and held one action for review.</p>
+                  </article>
+                </div>
+                <div class="prompt-card prompt-docked lit-surface">
+                  <button class="prompt-mini" type="button" aria-label="Attach">+</button>
+                  <input aria-label="Prompt" placeholder="Review the change" />
+                  <button class="send-button" type="button" aria-label="send message">
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M12 19V5"></path>
+                      <path d="m6 11 6-6 6 6"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <aside class="context-drawer" aria-label="Context drawer">
+          <header class="drawer-header">
+            <div>
+              <div class="drawer-title">Context</div>
+            </div>
+            <button class="close-button" type="button" aria-label="Close">x</button>
+          </header>
+
+          <section class="drawer-card lit-surface">
+            <div class="drawer-card-head">
+              <span>Memory</span>
+              <span class="status-pill"><span class="pill-dot" aria-hidden="true"></span>Candidate</span>
+            </div>
+            <p>Prefers a dark workspace with restrained metallic detail.</p>
+          </section>
+
+          <section class="drawer-card lit-surface">
+            <div class="drawer-card-head">
+              <span>Approval</span>
+              <span class="status-pill warn"><span class="pill-dot" aria-hidden="true"></span>Review</span>
+            </div>
+            <p>Save design preference to active profile.</p>
+            <div class="drawer-actions">
+              <button type="button">Allow</button>
+              <button type="button">Skip</button>
+            </div>
+          </section>
+
+          <section class="drawer-card log-card lit-surface">
+            <div class="drawer-card-head">
+              <span>Tool log</span>
+              <span>3 events</span>
+            </div>
+            <ol>
+              <li><span>read</span><strong>workspace note</strong></li>
+              <li><span>draft</span><strong>artifact preview</strong></li>
+              <li><span>hold</span><strong>memory update</strong></li>
+            </ol>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script>
+      const body = document.body;
+      const tabs = Array.from(document.querySelectorAll("[data-view-target]"));
+
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          const next = tab.getAttribute("data-view-target");
+          body.setAttribute("data-view", next);
+          tabs.forEach((button) => {
+            button.classList.toggle("is-active", button === tab);
+          });
+        });
+      });
+    </script>
+  </body>
+</html>
