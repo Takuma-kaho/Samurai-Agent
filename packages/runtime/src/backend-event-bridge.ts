@@ -22,6 +22,7 @@ export class BackendEventBridge {
     runId: string;
     sessionId: string;
     startSequence?: number;
+    nextSequence?: () => number;
   }) {
     this.nextSequence = input.startSequence ?? 1;
   }
@@ -33,12 +34,14 @@ export class BackendEventBridge {
       run_id: this.input.runId,
       session_id: this.input.sessionId,
       event_type: normalized.event_type,
-      sequence: this.nextSequence,
+      sequence: this.input.nextSequence ? this.input.nextSequence() : this.nextSequence,
       payload: normalized.payload,
       resource_refs: normalized.resource_refs ?? [],
       created_at: nowIso()
     };
-    this.nextSequence += 1;
+    if (!this.input.nextSequence) {
+      this.nextSequence += 1;
+    }
     const uiPayload = projectUiPayload(record);
     const uiRecord = uiPayload
       ? {
@@ -86,6 +89,20 @@ function projectUiPayload(record: BackendEventRecord): Record<string, JsonValue>
     return undefined;
   }
   switch (record.event_type) {
+    case "agent_reasoning": {
+      const text = typeof record.payload.text === "string" ? record.payload.text : "";
+      return text ? { text: truncateText(text) } : undefined;
+    }
+    case "host_progress": {
+      const text = typeof record.payload.text === "string" ? record.payload.text : "";
+      const displayKind = typeof record.payload.display_kind === "string" ? record.payload.display_kind : "activity";
+      const activityKind = typeof record.payload.activity_kind === "string" ? record.payload.activity_kind : undefined;
+      return text ? {
+        text: truncateText(text),
+        display_kind: displayKind,
+        ...(activityKind ? { activity_kind: activityKind } : {})
+      } : undefined;
+    }
     case "text_delta": {
       const text = typeof record.payload.text === "string" ? record.payload.text : "";
       return text ? { text: truncateText(text) } : undefined;
@@ -108,7 +125,9 @@ function projectUiPayload(record: BackendEventRecord): Record<string, JsonValue>
 
 function projectUiResourceRefs(record: BackendEventRecord): ResourceRef[] {
   if (
-    record.event_type === "text_delta"
+    record.event_type === "agent_reasoning"
+    || record.event_type === "host_progress"
+    || record.event_type === "text_delta"
     || record.event_type === "tool_call_started"
     || record.event_type === "tool_call_output"
     || record.event_type === "backend_native_input_submitted"

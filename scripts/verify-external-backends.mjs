@@ -99,7 +99,6 @@ function createBackend(id, timeoutMs) {
     return new ClaudeCodeBackend(definedOptions({
       command: process.env.SAMURAI_CLAUDE_CODE_COMMAND,
       args: splitOptionalArgs(process.env.SAMURAI_CLAUDE_CODE_ARGS),
-      timeoutMs: positiveInt(process.env.SAMURAI_CLAUDE_CODE_TIMEOUT_MS) ?? timeoutMs,
       streamProbeArgs: splitOptionalArgs(process.env.SAMURAI_CLAUDE_CODE_STREAM_PROBE_ARGS),
       streamProbeTimeoutMs: positiveInt(process.env.SAMURAI_CLAUDE_CODE_STREAM_PROBE_TIMEOUT_MS) ?? timeoutMs,
       resumeArgs: splitOptionalArgs(process.env.SAMURAI_CLAUDE_CODE_RESUME_ARGS)
@@ -108,7 +107,6 @@ function createBackend(id, timeoutMs) {
   return new CodexBackend(definedOptions({
     command: process.env.SAMURAI_CODEX_COMMAND,
     args: splitOptionalArgs(process.env.SAMURAI_CODEX_ARGS),
-    timeoutMs: positiveInt(process.env.SAMURAI_CODEX_TIMEOUT_MS) ?? timeoutMs,
     streamProbeArgs: splitOptionalArgs(process.env.SAMURAI_CODEX_STREAM_PROBE_ARGS),
     streamProbeTimeoutMs: positiveInt(process.env.SAMURAI_CODEX_STREAM_PROBE_TIMEOUT_MS) ?? timeoutMs,
     resumeArgs: splitOptionalArgs(process.env.SAMURAI_CODEX_RESUME_ARGS)

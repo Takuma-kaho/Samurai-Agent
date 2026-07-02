@@ -57,9 +57,9 @@
   - Web からの通常送信は backend 側で `source=web`, `actor_identity=owner`, `instruction_source=owner_instruction`, `session_key=web:owner:main` 系の `MessageEnvelope` になる。
   - frontend は `actor_identity` や `instruction_source` を自己判断で作らない。外部入力や scheduled/local bridge 入力は Gateway / backend が正規化する。
 - backend locale contract:
-  - `backend_events[]` の `event_type=run_started` は `payload.input_locale`, `payload.output_locale`, `payload.locale_contract` を持つ。
-  - Native backend は `locale_contract.enforcement=provider_prompt`、External/Codex/Claude/Mock backend は `locale_contract.enforcement=prompt_and_environment`。
-  - frontend は返答言語の独自判定をせず、Run History / debug表示ではこの contract と `MessageEnvelope.output_locale` を表示する。
+  - Native backend の `event_type=run_started` は `payload.input_locale`, `payload.output_locale`, `payload.locale_contract` を持つ。
+  - External/Codex/Claude backend は locale を固定プロンプトや環境変数として常時渡さない。必要な文脈は `context_assembly_sources` と `context_intent` で確認する。
+  - frontend は返答言語の独自判定をせず、Run History / debug表示では `MessageEnvelope.output_locale` と文脈利用状況を表示する。
 - envelope preview:
   - `POST /api/gateway/envelope-preview`
   - Web/Cron/Local bridge/paired external の入力がどの `MessageEnvelope` へ正準化されるか確認する read-only preview。

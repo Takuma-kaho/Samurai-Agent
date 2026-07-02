@@ -148,14 +148,78 @@ describe("agent backend registry", () => {
       "run_completed"
     ]);
     expect(runEvents[0]?.payload).toMatchObject({
-      input_locale: "ja",
-      output_locale: "ja",
-      locale_contract: {
-        user_facing_text: "output_locale",
-        enforcement: "prompt_and_environment"
-      }
+      backend_id: "stream-cli",
+      input_summary: "probe backend"
     });
+    expect(runEvents[0]?.payload).not.toHaveProperty("locale_contract");
     expect(replayedEvents).toEqual(runEvents);
+  });
+
+  it("maps safe stderr progress to host progress without exposing raw stderr text", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-stderr-progress-"));
+    roots.push(root);
+    const executable = path.join(root, "backend-stderr-progress");
+    await writeFile(
+      executable,
+      [
+        "#!/bin/sh",
+        "printf 'Searching project files\\n' >&2",
+        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({
+      id: "stderr-progress-cli",
+      kind: "codex",
+      label: "Stderr Progress CLI",
+      command: executable
+    });
+
+    const events = await collectEvents(backend.runTurn(backendInput("run_stderr_progress")));
+
+    expect(events).toContainEqual(expect.objectContaining({
+      event_type: "host_progress",
+      payload: expect.objectContaining({
+        display_kind: "activity",
+        text: "コードを検索",
+        provider_stream: "stderr"
+      })
+    }));
+    expect(JSON.stringify(events)).not.toContain("Searching project files");
+  });
+
+  it("emits a waiting progress event when an external backend is initially silent", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-silent-"));
+    roots.push(root);
+    const executable = path.join(root, "backend-silent");
+    await writeFile(
+      executable,
+      [
+        "#!/bin/sh",
+        "sleep 3",
+        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({
+      id: "silent-cli",
+      kind: "codex",
+      label: "Silent CLI",
+      command: executable
+    });
+
+    const events = await collectEvents(backend.runTurn(backendInput("run_silent")));
+
+    expect(events.map((event) => event.event_type)).toContain("host_progress");
+    expect(events).toContainEqual(expect.objectContaining({
+      event_type: "host_progress",
+      payload: expect.objectContaining({
+        text: "実行部からの応答を待っています"
+      })
+    }));
+    expect(events.at(-1)?.event_type).toBe("run_completed");
   });
 
   it("runs optional external CLI stream compatibility probes for status", async () => {
@@ -350,6 +414,15 @@ describe("agent backend registry", () => {
       item: {
         id: "rs_1",
         type: "reasoning",
+        summary: [{ type: "summary_text", text: "差分の原因を確認しました" }]
+      }
+    }));
+    const emptyReasoning = parseCliOutputEvents(JSON.stringify({
+      type: "item.completed",
+      thread_id: "codex-thread-1",
+      item: {
+        id: "rs_empty",
+        type: "reasoning",
         summary: []
       }
     }));
@@ -408,7 +481,74 @@ describe("agent backend registry", () => {
         output_summary: "done"
       }
     });
-    expect(reasoning).toEqual([]);
+    expect(reasoning).toEqual([{
+      event_type: "agent_reasoning",
+      payload: {
+        backend_session_id: "codex-thread-1",
+        provider_event_type: "item.completed",
+        item_type: "reasoning",
+        text: "差分の原因を確認しました"
+      }
+    }]);
+    expect(emptyReasoning).toEqual([]);
+  });
+
+  it("does not turn Codex completion-only events into assistant text", () => {
+    expect(parseCliOutputLine(JSON.stringify({
+      type: "turn.completed",
+      thread_id: "codex-thread-empty"
+    }))).toEqual({
+      event_type: "run_completed",
+      payload: {
+        backend_session_id: "codex-thread-empty",
+        provider_event_type: "turn.completed"
+      }
+    });
+    expect(parseCliOutputLine(JSON.stringify({
+      type: "turn.completed",
+      thread_id: "codex-thread-empty",
+      output_summary: "Codex completed."
+    }))).toEqual({
+      event_type: "run_completed",
+      payload: {
+        backend_session_id: "codex-thread-empty",
+        provider_event_type: "turn.completed"
+      }
+    });
+  });
+
+  it("parses current Codex assistant output item types as text", () => {
+    const direct = parseCliOutputLine(JSON.stringify({
+      type: "output_message",
+      thread_id: "codex-thread-output",
+      content: [{ type: "output_text", text: "本文です" }]
+    }));
+    const item = parseCliOutputLine(JSON.stringify({
+      type: "item.completed",
+      thread_id: "codex-thread-output",
+      item: {
+        type: "agent_message",
+        content: [{ type: "output_text", text: "続きの本文です" }]
+      }
+    }));
+
+    expect(direct).toEqual({
+      event_type: "text_delta",
+      payload: {
+        backend_session_id: "codex-thread-output",
+        provider_event_type: "output_message",
+        text: "本文です"
+      }
+    });
+    expect(item).toEqual({
+      event_type: "text_delta",
+      payload: {
+        backend_session_id: "codex-thread-output",
+        provider_event_type: "item.completed",
+        item_type: "agent_message",
+        text: "続きの本文です"
+      }
+    });
   });
 
   it("runs Codex native resume commands with saved thread ids", async () => {
@@ -456,6 +596,33 @@ describe("agent backend registry", () => {
     });
   });
 
+  it("normalizes legacy Codex exec args to keep JSON streaming enabled", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-codex-args-"));
+    roots.push(root);
+    const executable = path.join(root, "codex-argv");
+    await writeFile(
+      executable,
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' \"$*\"",
+        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(executable, 0o755);
+    const backend = new CodexBackend({
+      command: executable,
+      args: ["exec", "-"]
+    });
+
+    const text = (await collectEvents(backend.runTurn(backendInput("run_codex_args"))))
+      .filter((event) => event.event_type === "text_delta")
+      .map((event) => event.payload.text)
+      .join("\n");
+
+    expect(text).toContain("exec --json -");
+  });
+
   it("passes locale and workspace context to external backend commands", () => {
     const input: BackendRunInput = {
       run_id: "run_1",
@@ -486,22 +653,153 @@ describe("agent backend registry", () => {
       recent_messages: [],
       metadata: {
         backend_session_id: "codex-session-1"
+      },
+      expected_outputs: ["artifact"],
+      tool_bridge: {
+        enabled: true,
+        server_name: "samurai",
+        endpoint_url: "http://127.0.0.1:4317/api/backend-runs/run_1/tool-calls",
+        token: "secret-bridge-token",
+        token_env: "SAMURAI_TOOL_BRIDGE_TOKEN",
+        tools: [{
+          name: "samurai.artifact.create",
+          provider_tool_name: "mcp__samurai__artifact_create",
+          title: "Create Samurai Artifact",
+          description: "Create a Samurai Artifact.",
+          input_schema: {
+            type: "object",
+            required: ["title", "content"]
+          }
+        }]
       }
     };
 
     const prompt = buildExternalBackendPrompt(input);
     const env = externalBackendEnv(input);
 
-    expect(prompt).toContain("output_locale: ja");
-    expect(prompt).toContain("Reply in output_locale");
-    expect(prompt).toContain("Collection notes (context only)");
-    expect(prompt).toContain("Monthly reports use bullet summaries.");
+    expect(prompt).toContain("Reference context for this turn:");
+    expect(prompt).not.toContain("Samurai Agent backend contract");
+    expect(prompt).not.toContain("Reply in output_locale");
+    expect(prompt).toContain("Collection note refs (context only)");
+    expect(prompt).toContain("collections/reports/notes/README.md");
+    expect(prompt).not.toContain("Monthly reports use bullet summaries.");
+    expect(prompt).toContain("Samurai tool bridge:");
+    expect(prompt).toContain("artifact_create");
+    expect(prompt).toContain("Use the Samurai artifact tool");
+    expect(prompt).not.toContain("secret-bridge-token");
     expect(env).toMatchObject({
       SAMURAI_RUN_ID: "run_1",
       SAMURAI_SESSION_ID: "session_1",
       SAMURAI_BACKEND_SESSION_ID: "codex-session-1",
-      SAMURAI_INPUT_LOCALE: "ja",
-      SAMURAI_OUTPUT_LOCALE: "ja"
+      SAMURAI_TOOL_BRIDGE_URL: "http://127.0.0.1:4317/api/backend-runs/run_1/tool-calls",
+      SAMURAI_TOOL_BRIDGE_TOKEN: "secret-bridge-token"
+    });
+    expect(env).not.toHaveProperty("SAMURAI_INPUT_LOCALE");
+    expect(env).not.toHaveProperty("SAMURAI_OUTPUT_LOCALE");
+  });
+
+  it("injects run-scoped Samurai Artifact MCP config into Codex and Claude Code CLI args", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-mcp-"));
+    roots.push(root);
+    const executable = path.join(root, "backend-argv");
+    await writeFile(
+      executable,
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' \"$*\"",
+        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(executable, 0o755);
+    const toolBridgeInput: BackendRunInput = {
+      ...backendInput("run_mcp"),
+      expected_outputs: ["artifact"],
+      tool_bridge: {
+        enabled: true,
+        server_name: "samurai",
+        endpoint_url: "http://127.0.0.1:4317/api/backend-runs/run_mcp/tool-calls",
+        token: "bridge-token",
+        token_env: "SAMURAI_TOOL_BRIDGE_TOKEN",
+        tools: [{
+          name: "samurai.artifact.create",
+          provider_tool_name: "mcp__samurai__artifact_create",
+          title: "Create Samurai Artifact",
+          description: "Create a Samurai Artifact.",
+          input_schema: {
+            type: "object",
+            required: ["title", "content"]
+          }
+        }]
+      }
+    };
+    const codex = new CodexBackend({
+      command: executable,
+      artifactMcpScript: "scripts/samurai-artifact-mcp.mjs"
+    });
+    const claude = new ClaudeCodeBackend({
+      command: executable,
+      args: ["-p", "--output-format", "stream-json"],
+      artifactMcpScript: "scripts/samurai-artifact-mcp.mjs"
+    });
+
+    const codexText = (await collectEvents(codex.runTurn(toolBridgeInput)))
+      .filter((event) => event.event_type === "text_delta")
+      .map((event) => event.payload.text)
+      .join("\n");
+    const claudeText = (await collectEvents(claude.runTurn(toolBridgeInput)))
+      .filter((event) => event.event_type === "text_delta")
+      .map((event) => event.payload.text)
+      .join("\n");
+
+    expect(codexText).toContain("mcp_servers.samurai.command");
+    expect(codexText).toContain("mcp_servers.samurai.args");
+    expect(codexText).toContain("mcp_servers.samurai.env_vars");
+    expect(codexText).toContain("--output-last-message");
+    expect(codexText).toContain("scripts/samurai-artifact-mcp.mjs");
+    expect(codexText).not.toContain("bridge-token");
+    expect(claudeText).toContain("--mcp-config");
+    expect(claudeText).toContain("\"mcpServers\"");
+    expect(claudeText).toContain("\"samurai\"");
+    expect(claudeText).toContain("scripts/samurai-artifact-mcp.mjs");
+    expect(claudeText).not.toContain("bridge-token");
+  });
+
+  it("uses Codex output-last-message as fallback text when JSON stream has no body", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-codex-last-message-"));
+    roots.push(root);
+    const executable = path.join(root, "codex-last-message-fixture");
+    await writeFile(
+      executable,
+      [
+        "#!/bin/sh",
+        "last_message=''",
+        "prev=''",
+        "for arg in \"$@\"; do",
+        "  if [ \"$prev\" = \"--output-last-message\" ]; then last_message=\"$arg\"; fi",
+        "  prev=\"$arg\"",
+        "done",
+        "printf '{\"type\":\"turn.completed\",\"thread_id\":\"codex-thread-empty\",\"output_summary\":\"Codex completed.\"}\\n'",
+        "printf '作業メモを作成しました。\\n' > \"$last_message\""
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(executable, 0o755);
+    const backend = new CodexBackend({ command: executable });
+
+    const events = await collectEvents(backend.runTurn(backendInput("run_last_message")));
+    const text = events
+      .filter((event) => event.event_type === "text_delta")
+      .map((event) => event.payload.text)
+      .join("");
+
+    expect(text).toContain("作業メモを作成しました。");
+    expect(events.at(-1)).toEqual({
+      event_type: "run_completed",
+      payload: {
+        backend_session_id: "codex-thread-empty",
+        provider_event_type: "turn.completed"
+      }
     });
   });
 });

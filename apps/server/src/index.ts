@@ -940,6 +940,34 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.post("/api/backend-runs/:runId/tool-calls", async (req, res, next) => {
+      try {
+        const toolName = typeof req.body?.tool_name === "string" ? req.body.tool_name.trim() : "";
+        if (!toolName) {
+          res.status(400).json({ error: "tool_name_required" });
+          return;
+        }
+        if (req.body?.input !== undefined && !isRecord(req.body.input)) {
+          res.status(400).json({ error: "invalid_tool_input" });
+          return;
+        }
+        const token = bearerToken(req);
+        if (!token) {
+          res.status(401).json({ error: "tool_bridge_token_required" });
+          return;
+        }
+        res.status(201).json(await runtime.runBackendToolBridgeCall({
+          runId: req.params.runId,
+          token,
+          toolName,
+          toolCallId: typeof req.body?.tool_call_id === "string" ? req.body.tool_call_id : undefined,
+          toolInput: jsonRecord(req.body?.input ?? {})
+        }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.get("/api/search", async (req, res, next) => {
       try {
         const query = typeof req.query.q === "string" ? req.query.q : "";
@@ -5555,6 +5583,12 @@ function externalSendEnvConfigured(key: string): boolean {
 function serverEnvString(key: string): string | undefined {
   const value = process.env[key]?.trim();
   return value ? value : undefined;
+}
+
+function bearerToken(req: Request): string | undefined {
+  const authorization = req.get("authorization")?.trim();
+  const match = authorization ? /^Bearer\s+(.+)$/i.exec(authorization) : undefined;
+  return match?.[1]?.trim() || undefined;
 }
 
 function serverEnvBoolean(key: string, fallback: boolean): boolean {

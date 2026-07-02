@@ -454,14 +454,15 @@ describe("agent runtime", () => {
     });
     expect(context.selected_skills).toContainEqual(expect.objectContaining({
       id: projectResult.resource.id,
-      disclosure_level: "support",
-      support_files: [expect.objectContaining({
-        path: "references/style.md",
-        content: "補助資料: 調査メモは箇条書きで短くする。"
-      })]
+      disclosure_level: "catalog",
+      support_file_refs: [expect.objectContaining({
+        path: "references/style.md"
+      })],
+      support_files: undefined,
+      content: undefined
     }));
     expect(context.selected_skills.find((item) => item.id === projectResult.resource.id)?.support_files?.[0]?.file_path)
-      .toContain(`skills/support/${projectResult.resource.id}/references/style.md`);
+      .toBeUndefined();
     expect(usage.some((row) => row.skill_id === projectResult.resource.id && row.use_count > 0)).toBe(true);
   });
 
@@ -546,14 +547,15 @@ describe("agent runtime", () => {
     });
     const selectedSkill = context.selected_skills.find((item) => item.id === projectResult.resource.id);
     expect(selectedSkill).toMatchObject({
-      disclosure_level: "support",
-      support_files: [expect.objectContaining({
-        path: "references/diff-check.md",
-        content: "補助資料: 差分確認は保存前に3点だけ見る。"
+      disclosure_level: "catalog",
+      support_file_refs: [expect.objectContaining({
+        path: "references/diff-check.md"
       })],
+      support_files: undefined,
+      content: undefined,
       usage: expect.objectContaining({ use_count: 1 })
     });
-    expect(selectedSkill?.selection_reason).toContain("Matched support files");
+    expect(selectedSkill?.selection_reason).toContain("Catalog match only");
     expect(usage).toMatchObject({ skill_id: projectResult.resource.id, use_count: 1 });
   });
 
@@ -678,6 +680,208 @@ describe("agent runtime", () => {
       backend_session_source_event: "run_started"
     });
     expect(savedRun?.metadata.backend_session_id).toBe("native-session-42");
+  });
+
+  it("does not inject Session Search into short greeting backend input", async () => {
+    let capturedSessionSearch: unknown;
+    let capturedActiveMemory: unknown;
+    let capturedKnowledgeWiki: unknown;
+    let capturedSelectedSkills: unknown;
+    let capturedFreezeSnapshot: unknown;
+    let capturedContextIntent: unknown;
+    const captureBackend: AgentBackend = {
+      id: "capture-context",
+      kind: "external",
+      label: "Capture Context Fixture",
+      async *runTurn(input) {
+        capturedSessionSearch = input.session_search;
+        capturedActiveMemory = input.active_memory;
+        capturedKnowledgeWiki = input.knowledge_wiki;
+        capturedSelectedSkills = input.selected_skills;
+        capturedFreezeSnapshot = input.freeze_snapshot;
+        capturedContextIntent = input.context_intent;
+        yield {
+          event_type: "text_delta",
+          payload: { text: "こんにちは" }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "ok" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([captureBackend]));
+    const previous = await runtime.createSession({ title: "Samurai Agent の続き" });
+    await store.saveMessage({
+      id: createId("message"),
+      session_id: previous.id,
+      role: "user",
+      content: "Samurai Agent の続き",
+      input_locale: "ja",
+      output_locale: "ja",
+      created_at: nowIso()
+    });
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "こんにちは",
+      output_locale: "ja",
+      backend_id: "capture-context"
+    });
+    await store.close();
+
+    expect(capturedSessionSearch).toEqual([]);
+    expect(capturedActiveMemory).toEqual([]);
+    expect(capturedKnowledgeWiki).toEqual([]);
+    expect(capturedSelectedSkills).toEqual([]);
+    expect(capturedFreezeSnapshot).toBeUndefined();
+    expect(capturedContextIntent).toBe("light_chat");
+    expect(result.backendRun.metadata.context_assembly_sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "session_search", included_count: 0, status: "skipped" }),
+      expect.objectContaining({ kind: "freeze_snapshot", included_count: 0, status: "skipped" }),
+      expect.objectContaining({ kind: "active_memory", included_count: 0, status: "skipped" }),
+      expect.objectContaining({ kind: "knowledge_wiki", included_count: 0, status: "skipped" }),
+      expect.objectContaining({ kind: "selected_skills", included_count: 0, status: "skipped" })
+    ]));
+    expect(result.backendRun.metadata.context_intent).toBe("light_chat");
+  });
+
+  it("continues workspace tasks when Session Search is slow", async () => {
+    vi.useFakeTimers();
+    let backendCalled = false;
+    const captureBackend: AgentBackend = {
+      id: "slow-context-capture",
+      kind: "external",
+      label: "Slow Context Capture Fixture",
+      async *runTurn(input) {
+        backendCalled = true;
+        expect(input.session_search).toEqual([]);
+        yield {
+          event_type: "text_delta",
+          payload: { text: "作業メモを作りました" }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "ok" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    vi.spyOn(store, "search").mockImplementation(() => new Promise(() => undefined) as never);
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([captureBackend]));
+    const session = await runtime.createSession();
+
+    const runPromise = runtime.runChatTurn({
+      sessionId: session.id,
+      content: "作業メモを作ってください",
+      output_locale: "ja",
+      backend_id: "slow-context-capture"
+    });
+    await vi.advanceTimersByTimeAsync(2_100);
+    const result = await runPromise;
+    const sessionSearchSource = result.backendRun.metadata.context_assembly_sources;
+    await store.close();
+    vi.useRealTimers();
+
+    expect(backendCalled).toBe(true);
+    expect(sessionSearchSource).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "session_search", included_count: 0, status: "skipped" })
+    ]));
+  });
+
+  it("stores a diagnostic message when backend completes without body or artifacts", async () => {
+    const emptyBackend: AgentBackend = {
+      id: "empty-complete",
+      kind: "external",
+      label: "Empty Complete Fixture",
+      async *runTurn() {
+        yield {
+          event_type: "run_completed",
+          payload: {}
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([emptyBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "本文なし完了fixture",
+      output_locale: "ja",
+      backend_id: "empty-complete"
+    });
+    await store.close();
+
+    const agentMessage = result.messages.find((message) => message.role === "agent");
+    expect(agentMessage?.content).toBe("結果本文を受け取れませんでした。実行ログを確認してください。");
+    expect(result.backendRun.output_summary).toBe("結果本文を受け取れませんでした。実行ログを確認してください。");
+  });
+
+  it("lets external backend fixtures create Artifacts through the Samurai tool bridge", async () => {
+    let runtime: AgentRuntime;
+    const bridgeBackend: AgentBackend = {
+      id: "bridge-backend",
+      kind: "codex",
+      label: "Bridge Backend Fixture",
+      async *runTurn(input) {
+        expect(input.tool_bridge?.enabled).toBe(true);
+        expect(input.tool_bridge?.server_name).toBe("samurai");
+        await runtime.runBackendToolBridgeCall({
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolName: "artifact_create",
+          toolCallId: "bridge_tool_1",
+          toolInput: {
+            title: "作業メモ",
+            content: "# 作業メモ\n\nTool Bridgeから作成しました。"
+          }
+        });
+        yield {
+          event_type: "text_delta",
+          payload: { text: "作業メモを作成しました。" }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "done" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-bridge-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([bridgeBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "作業メモを作って",
+      output_locale: "ja",
+      backend_id: "bridge-backend"
+    });
+    const content = result.artifacts[0] ? await store.readArtifactContent(result.artifacts[0].id) : undefined;
+    await store.close();
+
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      title: "作業メモ"
+    }));
+    expect(content).toContain("Tool Bridgeから作成しました。");
+    expect(result.workspaceChanges).toContainEqual(expect.objectContaining({
+      change_type: "artifact_created"
+    }));
+    expect(result.toolRuns).toContainEqual(expect.objectContaining({
+      provider_tool_name: "samurai.artifact.create",
+      action_id: "artifact.create",
+      status: "completed"
+    }));
   });
 
   it("routes streaming provider tool aliases through Domain Commands", async () => {
@@ -1422,8 +1626,8 @@ rl.on("line", (line) => {
     });
     await store.updateBackendRun({
       ...result.backendRun,
-      backend_id: "codex",
-      backend_kind: "codex",
+      backend_id: "samurai-native",
+      backend_kind: "samurai_native",
       status: "waiting_for_backend_input",
       completed_at: undefined,
       error_code: undefined
@@ -2456,7 +2660,7 @@ rl.on("line", (line) => {
       })
     ]));
     expect(selectedSkill).toMatchObject({
-      disclosure_level: "body",
+      disclosure_level: "catalog",
       allowed_scopes: ["workspace"],
       required_capabilities: ["artifact.create"],
       selection: expect.objectContaining({
@@ -2468,13 +2672,15 @@ rl.on("line", (line) => {
       support_file_refs: [expect.objectContaining({ path: "references/style.md" })]
     });
     expect(selectedSkill?.support_file_refs?.[0]?.file_path).toContain("skills/support/skill_context_test/references/style.md");
-    expect(selectedSkill?.content).toContain("Keep the note short.");
+    expect(selectedSkill?.content).toBeUndefined();
     expect(selectedSkill?.support_files).toBeUndefined();
     expect(selectedSkillWithSupport).toMatchObject({
-      disclosure_level: "support",
-      support_files: [expect.objectContaining({ path: "references/style.md", content: "補助資料: 箇条書きを優先する。" })]
+      disclosure_level: "catalog",
+      support_file_refs: [expect.objectContaining({ path: "references/style.md" })],
+      support_files: undefined,
+      content: undefined
     });
-    expect(selectedSkillWithSupport?.support_files?.[0]?.file_path).toContain("skills/support/skill_context_test/references/style.md");
+    expect(selectedSkillWithSupport?.support_file_refs?.[0]?.file_path).toContain("skills/support/skill_context_test/references/style.md");
     expect(context.session_summary).toMatchObject({
       session_key: "web:owner:main",
       message_count: expect.any(Number),
@@ -2611,16 +2817,17 @@ rl.on("line", (line) => {
     }));
     const selectedSkill = providerInput?.selectedSkills.find((skill) => skill.id === "skill_context_bridge");
     expect(selectedSkill).toMatchObject({
-      disclosure_level: "support",
+      disclosure_level: "catalog",
       required_capabilities: ["artifact.create"],
       selection: expect.objectContaining({
         matched_capabilities: ["artifact.create"],
         missing_capabilities: []
       }),
-      support_files: [expect.objectContaining({
-        path: "references/style.md",
-        content: "補助資料: provider inputへ渡る実データcontext。"
-      })]
+      support_file_refs: [expect.objectContaining({
+        path: "references/style.md"
+      })],
+      support_files: undefined,
+      content: undefined
     });
     const sources = providerInput?.contextAssembly?.sources ?? [];
     expect(sources.find((source) => source.kind === "active_memory")?.included_count).toBeGreaterThanOrEqual(1);

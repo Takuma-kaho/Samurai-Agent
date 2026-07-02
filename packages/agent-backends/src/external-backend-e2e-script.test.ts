@@ -42,7 +42,6 @@ describe("external backend verification script", () => {
         ...process.env,
         SAMURAI_CODEX_COMMAND: executable,
         SAMURAI_CODEX_ARGS: "",
-        SAMURAI_CODEX_TIMEOUT_MS: "5000",
         SAMURAI_EXTERNAL_BACKEND_E2E_CONFIRM_EXTERNAL_EFFECTS: "false"
       },
       timeout: verifierProcessTimeoutMs,
@@ -97,7 +96,6 @@ describe("external backend verification script", () => {
         ...process.env,
         SAMURAI_CODEX_COMMAND: executable,
         SAMURAI_CODEX_ARGS: "",
-        SAMURAI_CODEX_TIMEOUT_MS: "5000",
         SAMURAI_EXTERNAL_BACKEND_E2E_CONFIRM_EXTERNAL_EFFECTS: "false"
       },
       timeout: verifierProcessTimeoutMs,
@@ -149,8 +147,7 @@ describe("external backend verification script", () => {
       env: {
         ...process.env,
         SAMURAI_CODEX_COMMAND: executable,
-        SAMURAI_CODEX_ARGS: "",
-        SAMURAI_CODEX_TIMEOUT_MS: "5000"
+        SAMURAI_CODEX_ARGS: ""
       },
       timeout: verifierProcessTimeoutMs,
       maxBuffer: 1024 * 1024
@@ -186,8 +183,7 @@ describe("external backend verification script", () => {
       env: {
         ...process.env,
         SAMURAI_CODEX_COMMAND: executable,
-        SAMURAI_CODEX_ARGS: "",
-        SAMURAI_CODEX_TIMEOUT_MS: "5000"
+        SAMURAI_CODEX_ARGS: ""
       },
       timeout: verifierProcessTimeoutMs,
       maxBuffer: 1024 * 1024

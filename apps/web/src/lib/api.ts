@@ -464,6 +464,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ reason })
     });
+  },
+  restoreRollbackPoint(id: string) {
+    return request<unknown>(`/api/rollback/${id}/restore`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
   }
 };
 

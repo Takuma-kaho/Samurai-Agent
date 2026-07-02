@@ -77,6 +77,8 @@ export const agentBackendKinds = ["mock", "samurai_native", "claude_code", "code
 export const backendRunStatuses = ["queued", "running", "waiting_for_backend_input", "completed", "failed", "cancelled"] as const;
 export const backendEventTypes = [
   "run_started",
+  "agent_reasoning",
+  "host_progress",
   "text_delta",
   "tool_call_started",
   "tool_call_output",
@@ -686,9 +688,31 @@ export const HostContextAssemblySourceStatusSchema = z.enum([
   "empty",
   "disabled",
   "filtered",
-  "missing"
+  "missing",
+  "skipped"
 ]);
 export type HostContextAssemblySourceStatus = z.infer<typeof HostContextAssemblySourceStatusSchema>;
+
+export const ContextHandoffModeSchema = z.enum(["inline", "pointer", "skipped"]);
+export type ContextHandoffMode = z.infer<typeof ContextHandoffModeSchema>;
+
+export const ContextHandoffSourceSchema = z.object({
+  kind: HostContextAssemblySourceKindSchema,
+  mode: ContextHandoffModeSchema,
+  candidate_count: z.number().int().nonnegative(),
+  included_count: z.number().int().nonnegative(),
+  reason: z.string(),
+  refs: z.array(ResourceRefSchema)
+});
+export type ContextHandoffSource = z.infer<typeof ContextHandoffSourceSchema>;
+
+export const ContextHandoffSchema = z.object({
+  version: z.literal(1),
+  strategy: z.enum(["inline_context", "pointer_first"]),
+  sources: z.array(ContextHandoffSourceSchema),
+  prompt_size_warning: z.string().optional()
+});
+export type ContextHandoff = z.infer<typeof ContextHandoffSchema>;
 
 export const HostContextAssemblyCheckStatusSchema = z.enum(["pass", "warning", "fail"]);
 export type HostContextAssemblyCheckStatus = z.infer<typeof HostContextAssemblyCheckStatusSchema>;

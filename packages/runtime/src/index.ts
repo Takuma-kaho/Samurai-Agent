@@ -11,6 +11,7 @@ import {
   type DomainCommandOutputRenderKind
 } from "@samurai-agent/action-catalog";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { connect as netConnect, type Socket } from "node:net";
 import path from "node:path";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
@@ -20,10 +21,12 @@ import {
   CodexBackend,
   type AgentBackendStatus,
   type BackendOutputEvent,
+  type BackendToolBridge,
   type BackendRunInput
 } from "@samurai-agent/agent-backends";
 import {
   type ActivityInboxItem,
+  type AgentBackendKind,
   type ApprovalRequest,
   type ArtifactRecord,
   type AuditRecord,
@@ -55,6 +58,7 @@ import {
   type GrantRecord,
   type GatewayChannel,
   type HostContextAssembly,
+  type ContextHandoff,
   type InstructionSource,
   type JsonValue,
   type MemoryFrontmatter,
@@ -496,7 +500,6 @@ export function createDefaultAgentBackendRegistry(
     new ClaudeCodeBackend({
       command: env.SAMURAI_CLAUDE_CODE_COMMAND,
       args: splitArgs(env.SAMURAI_CLAUDE_CODE_ARGS),
-      timeoutMs: parseTimeout(env.SAMURAI_CLAUDE_CODE_TIMEOUT_MS),
       streamProbeArgs: splitProbeArgs(env.SAMURAI_CLAUDE_CODE_STREAM_PROBE_ARGS),
       streamProbeTimeoutMs: parseTimeout(env.SAMURAI_CLAUDE_CODE_STREAM_PROBE_TIMEOUT_MS),
       resumeArgs: splitOptionalArgs(env.SAMURAI_CLAUDE_CODE_RESUME_ARGS)
@@ -504,7 +507,6 @@ export function createDefaultAgentBackendRegistry(
     new CodexBackend({
       command: env.SAMURAI_CODEX_COMMAND,
       args: splitOptionalArgs(env.SAMURAI_CODEX_ARGS),
-      timeoutMs: parseTimeout(env.SAMURAI_CODEX_TIMEOUT_MS),
       streamProbeArgs: splitProbeArgs(env.SAMURAI_CODEX_STREAM_PROBE_ARGS),
       streamProbeTimeoutMs: parseTimeout(env.SAMURAI_CODEX_STREAM_PROBE_TIMEOUT_MS),
       resumeArgs: splitOptionalArgs(env.SAMURAI_CODEX_RESUME_ARGS)
@@ -610,6 +612,8 @@ export class AgentRuntime {
   private readonly stdioMcpProcessPool: PooledMcpToolAdapter;
   private readonly pluginRegistry: PluginRuntimeRegistry;
   private readonly externalAssistProviders: ExternalAssistProvider[];
+  private readonly backendToolBridgeTokens = new Map<string, string>();
+  private readonly backendEventSequences = new Map<string, number>();
 
   constructor(
     private readonly store: WorkspaceStore,
@@ -1249,6 +1253,134 @@ export class AgentRuntime {
     return session;
   }
 
+  async runBackendToolBridgeCall(input: {
+    runId: string;
+    token: string;
+    toolName: string;
+    toolCallId?: string;
+    toolInput: Record<string, JsonValue>;
+  }): Promise<{
+    status: "completed";
+    artifact_id?: string;
+    title?: string;
+    resource_ref?: ResourceRef;
+    output?: JsonValue;
+    tool_run_ids: string[];
+  }> {
+    const run = await this.store.getBackendRun(input.runId);
+    if (!run) {
+      throw new RuntimeRequestError("not_found", "backend_run_not_found");
+    }
+    if (run.status !== "running") {
+      throw new RuntimeRequestError("conflict", "backend_run_not_running");
+    }
+    const expectedToken = this.backendToolBridgeTokens.get(run.id);
+    if (!expectedToken || !timingSafeTokenEqual(expectedToken, input.token)) {
+      throw new RuntimeRequestError("forbidden", "tool_bridge_token_invalid");
+    }
+    const providerToolName = normalizeSamuraiToolBridgeName(input.toolName);
+    if (!samuraiToolBridgeTools.has(providerToolName)) {
+      throw new RuntimeRequestError("conflict", "tool_bridge_tool_not_allowed");
+    }
+    const runInput = await this.buildResumeToolRunInput(run, {});
+    await this.ensureBackendEventSequence(run.id);
+    const eventBridge = new BackendEventBridge({
+      runId: run.id,
+      sessionId: run.session_id,
+      nextSequence: () => this.allocateBackendEventSequence(run.id)
+    });
+    const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
+      const { record, uiRecord } = eventBridge.project(event);
+      await this.store.saveBackendEvent(record);
+      if (uiRecord) {
+        await this.emit("backend.event.created", uiRecord);
+      }
+      return record;
+    };
+    const toolCallId = input.toolCallId || createId("toolcall");
+    const startedEvent = normalizeBackendOutputEvent({
+      event_type: "tool_call_started",
+      tool_call_id: toolCallId,
+      payload: {
+        provider_tool_name: providerToolName,
+        action_id: "artifact.create",
+        tool_origin: "samurai_tool_bridge",
+        input: input.toolInput
+      }
+    });
+    await recordEvent(startedEvent);
+    if (providerToolName !== "samurai.artifact.create") {
+      const output = await this.runReadOnlyBackendTool(providerToolName, input.toolInput);
+      await recordEvent({
+        event_type: "tool_call_output",
+        tool_call_id: toolCallId,
+        payload: {
+          provider_tool_name: providerToolName,
+          action_id: providerToolName,
+          output_summary: summarize(JSON.stringify(output), 220),
+          output
+        }
+      });
+      return {
+        status: "completed",
+        output,
+        tool_run_ids: []
+      };
+    }
+    const feedback = await this.handleBackendToolStartedEvent({
+      run,
+      runInput,
+      event: startedEvent,
+      recordEvent
+    });
+    const artifact = feedback.artifacts[0];
+    return {
+      status: "completed",
+      ...(artifact ? { artifact_id: artifact.id, title: artifact.title, resource_ref: artifact.file_ref } : {}),
+      tool_run_ids: feedback.toolRuns.map((toolRun) => toolRun.id)
+    };
+  }
+
+  private async runReadOnlyBackendTool(toolName: string, input: Record<string, JsonValue>): Promise<JsonValue> {
+    const query = typeof input.query === "string" ? input.query : "";
+    const limit = typeof input.limit === "number" && Number.isFinite(input.limit) ? Math.max(1, Math.min(Math.floor(input.limit), 8)) : 5;
+    if (toolName === "samurai.session.search") {
+      return (await this.store.search(query)).slice(0, limit).map((item) => ({
+        kind: item.kind,
+        id: item.id,
+        title: item.title,
+        summary: item.summary,
+        ...(item.session_id ? { session_id: item.session_id } : {})
+      }));
+    }
+    if (toolName === "samurai.memory.search") {
+      return (await this.store.searchMemory(query, limit, { includeArchived: false })).map((item) => ({
+        id: item.id,
+        topic: item.topic,
+        state: item.state,
+        file_path: item.file_path
+      }));
+    }
+    if (toolName === "samurai.wiki.search") {
+      return (await this.store.searchWiki(query, limit, { activeOnly: true })).map((item) => ({
+        id: item.id,
+        slug: item.slug,
+        title: item.title,
+        file_path: item.file_path
+      }));
+    }
+    if (toolName === "samurai.skill.search") {
+      return (await this.store.searchSkills(query, limit, { states: ["active", "pinned", "project"] })).map((item) => ({
+        id: item.id,
+        title: item.title,
+        description: item.description,
+        tags: item.tags,
+        file_path: item.file_path
+      }));
+    }
+    throw new RuntimeRequestError("conflict", "tool_bridge_tool_not_allowed");
+  }
+
   async runChatTurn(input: RunChatTurnInput): Promise<RunChatTurnResult> {
     const session = await this.store.getSession(input.sessionId);
     if (!session) {
@@ -1279,7 +1411,81 @@ export class AgentRuntime {
     if (input.gateway_boundary_policy) {
       await this.store.saveGatewayBoundaryPolicy(input.gateway_boundary_policy);
     }
-    const contextPreview = await this.buildContextPreview(session.id, input.content);
+    const contextIntent = classifyBackendContextIntent(input.content);
+    const expectedOutputs = expectedBackendOutputs(input.content);
+    const thinExternalContext = shouldThinExternalBackendContext(backend.kind, contextIntent);
+    const backendRunId = createId("run");
+    const activeToolBridge = createBackendToolBridge({
+      backendKind: backend.kind,
+      runId: backendRunId,
+      expectedOutputs,
+      contextIntent,
+      gatewayBoundaryPresent: Boolean(input.gateway_boundary_policy)
+    });
+    let backendRun: BackendRunRecord = {
+      id: backendRunId,
+      session_id: session.id,
+      input_message_id: userMessage.id,
+      backend_id: backend.id,
+      backend_kind: backend.kind,
+      status: "running",
+      started_at: nowIso(),
+      input_summary: summarize(input.content),
+      metadata: {
+        ...jsonRecord(input.metadata ?? {}),
+        context_intent: contextIntent,
+        ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
+        ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {}),
+        context_handoff_status: "preparing"
+      }
+    };
+    if (activeToolBridge) {
+      this.backendToolBridgeTokens.set(backendRun.id, activeToolBridge.token ?? "");
+    }
+    backendRun = await this.store.saveBackendRun(backendRun);
+    await this.emit("backend.run.created", backendRun);
+
+    const operations: OperationRecord[] = [];
+    const artifacts: ArtifactRecord[] = [];
+    const memories: MemoryFrontmatter[] = [];
+    const backendEvents: BackendEventRecord[] = [];
+    const workspaceChanges: WorkspaceChangeRecord[] = [];
+    const toolRuns: ToolRunRecord[] = [];
+    const textParts: string[] = [];
+    this.backendEventSequences.set(backendRun.id, 1);
+    const eventBridge = new BackendEventBridge({
+      runId: backendRun.id,
+      sessionId: session.id,
+      nextSequence: () => this.allocateBackendEventSequence(backendRun.id)
+    });
+    const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
+      const { record, uiRecord } = eventBridge.project(event);
+      await this.store.saveBackendEvent(record);
+      backendEvents.push(record);
+      if (uiRecord) {
+        await this.emit("backend.event.created", uiRecord);
+      }
+      return record;
+    };
+    const emitHostProgress = async (displayKind: "reasoning_summary" | "activity", text: string, activityKind?: string) => {
+      await recordEvent({
+        event_type: "host_progress",
+        payload: {
+          display_kind: displayKind,
+          text,
+          ...(activityKind ? { activity_kind: activityKind } : {})
+        }
+      });
+    };
+
+    await emitHostProgress("reasoning_summary", "関連する文脈を確認し、実行部へ渡す情報を絞っています。");
+    await emitHostProgress("activity", "文脈候補を確認", "context_prepare");
+    await emitHostProgress("reasoning_summary", "必要な情報はSamurai側に残し、実行部には参照先と使える道具を渡します。");
+    const contextPreview = await this.buildContextPreview(session.id, input.content, {
+      contextIntent,
+      skipHeavyContext: thinExternalContext,
+      onProgress: emitHostProgress
+    });
     const freezeSnapshot = contextPreview.freeze_snapshot;
     const gatewayBoundary = input.gateway_boundary_policy ? gatewayBoundaryRuntimeSnapshot(input.gateway_boundary_policy) : undefined;
     const availableTools = applyGatewayBoundaryAllowedTools(contextPreview.available_tools, input.gateway_boundary_policy);
@@ -1289,11 +1495,24 @@ export class AgentRuntime {
       contextPreview.available_tools,
       availableTools
     );
+    const contextHandoff = buildContextHandoffForBackend({
+      backendKind: backend.kind,
+      contextIntent,
+      contextPreview,
+      contextAssembly,
+      gatewayBoundaryPresent: Boolean(gatewayBoundary)
+    });
+    await emitHostProgress("activity", "参照先を準備", "context_handoff");
     const boundaryMetadata = gatewayBoundary ? gatewayBoundaryRuntimeMetadata(gatewayBoundary) : {};
     const runMetadata = {
       ...jsonRecord(input.metadata ?? {}),
+      context_intent: contextIntent,
+      ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
+      ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {}),
+      context_handoff_status: "ready",
       ...boundaryMetadata,
       ...contextAssemblyRuntimeMetadata(contextAssembly),
+      ...contextHandoffRuntimeMetadata(contextHandoff),
       ...(freezeSnapshot
         ? {
             freeze_snapshot_id: freezeSnapshot.id,
@@ -1301,19 +1520,12 @@ export class AgentRuntime {
           }
         : {})
     };
-    let backendRun: BackendRunRecord = {
-      id: createId("run"),
-      session_id: session.id,
-      input_message_id: userMessage.id,
-      backend_id: backend.id,
-      backend_kind: backend.kind,
-      status: "running",
-      started_at: nowIso(),
-      input_summary: summarize(input.content),
+    backendRun = {
+      ...backendRun,
       metadata: runMetadata
     };
-    backendRun = await this.store.saveBackendRun(backendRun);
-    await this.emit("backend.run.created", backendRun);
+    await this.store.updateBackendRun(backendRun);
+    await this.emit("backend.run.updated", backendRun);
 
     const backendSession = await backend.startSession?.({
       session_id: session.id,
@@ -1321,6 +1533,7 @@ export class AgentRuntime {
       output_locale: outputLocale,
       metadata: runMetadata
     });
+    await emitHostProgress("activity", "実行部へ送信", "backend_send");
     if (backendSession) {
       backendRun = {
         ...backendRun,
@@ -1364,23 +1577,19 @@ export class AgentRuntime {
       session_summary: contextPreview.session_summary,
       external_assist: contextPreview.external_assist,
       context_assembly: contextAssembly,
+      context_handoff: contextHandoff,
+      tool_bridge: activeToolBridge,
       available_tools: availableTools,
       recent_messages: recentMessages,
-      metadata: backendRun.metadata
+      metadata: backendRun.metadata,
+      context_intent: contextIntent,
+      expected_outputs: expectedOutputs
     };
 
     for (const skill of contextPreview.selected_skills) {
       await this.store.recordSkillUsage({ skillId: skill.id, runId: backendRun.id });
     }
 
-    const operations: OperationRecord[] = [];
-    const artifacts: ArtifactRecord[] = [];
-    const memories: MemoryFrontmatter[] = [];
-    const backendEvents: BackendEventRecord[] = [];
-    const workspaceChanges: WorkspaceChangeRecord[] = [];
-    const toolRuns: ToolRunRecord[] = [];
-    const textParts: string[] = [];
-    const eventBridge = new BackendEventBridge({ runId: backendRun.id, sessionId: session.id });
     let failedEvent: BackendEventRecord | undefined;
     let waitingForBackendInput = false;
 
@@ -1400,16 +1609,6 @@ export class AgentRuntime {
     workspaceChanges.push(sessionMemoryChange);
     await this.emit("workspace.change.created", sessionMemoryChange);
     await this.emit("memory.candidate.created", sessionMemory);
-
-    const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
-      const { record, uiRecord } = eventBridge.project(event);
-      await this.store.saveBackendEvent(record);
-      backendEvents.push(record);
-      if (uiRecord) {
-        await this.emit("backend.event.created", uiRecord);
-      }
-      return record;
-    };
 
     for await (const rawEvent of backend.runTurn(runInput)) {
       const event = normalizeBackendOutputEvent(rawEvent);
@@ -1474,6 +1673,8 @@ export class AgentRuntime {
       };
       await this.store.updateBackendRun(backendRun);
       await this.emit("backend.run.updated", backendRun);
+      this.backendToolBridgeTokens.delete(backendRun.id);
+      this.backendEventSequences.delete(backendRun.id);
       const payload = { session, messages: [userMessage], backendRun, backendEvents, workspaceChanges };
       const code = wasCancelled ? "backend_cancelled" : backendRun.error_code === "provider_not_configured" ? "provider_not_configured" : "provider_failed";
       throw new RuntimeRequestError(code, typeof failedEvent.payload.message === "string" ? failedEvent.payload.message : "Provider failed.", payload, {
@@ -1485,12 +1686,32 @@ export class AgentRuntime {
       });
     }
 
+    const persistedRunState = await this.loadPersistedRunOutputs(backendRun);
+    mergeUniqueById(operations, persistedRunState.operations);
+    mergeUniqueById(artifacts, persistedRunState.artifacts);
+    mergeUniqueById(workspaceChanges, persistedRunState.workspaceChanges);
+    mergeUniqueById(toolRuns, persistedRunState.toolRuns);
+
     const agentContent = textParts.join("\n").trim();
+    if (agentContent && expectedOutputs.includes("artifact") && !gatewayBoundary && !hasCreatedArtifact(artifacts, workspaceChanges)) {
+      const fallbackArtifact = await this.createBackendArtifactFromText({
+        run: backendRun,
+        runInput,
+        title: artifactTitleFromUserInput(input.content),
+        content: agentContent,
+        recordEvent
+      });
+      operations.push(...fallbackArtifact.operations);
+      artifacts.push(...fallbackArtifact.artifacts);
+      workspaceChanges.push(...fallbackArtifact.workspaceChanges);
+    }
+    const completedWithoutBody = !agentContent && !hasMeaningfulBackendOutput(backendEvents, workspaceChanges, artifacts);
+    const visibleAgentContent = completedWithoutBody ? "結果本文を受け取れませんでした。実行ログを確認してください。" : agentContent;
     const agentMessage = await this.saveMessage({
       id: createId("message"),
       session_id: session.id,
       role: "agent",
-      content: agentContent,
+      content: visibleAgentContent,
       input_locale: envelope.input_locale,
       output_locale: envelope.output_locale,
       created_at: nowIso()
@@ -1500,11 +1721,16 @@ export class AgentRuntime {
       ...backendRun,
       output_message_id: agentMessage.id,
       status: waitingForBackendInput ? "waiting_for_backend_input" : backendRun.status === "running" ? "completed" : backendRun.status,
-      output_summary: backendRun.output_summary ?? summarize(agentContent),
+      output_summary: meaningfulBackendRunSummary(backendRun.output_summary) || summarize(visibleAgentContent),
       completed_at: waitingForBackendInput ? undefined : (backendRun.completed_at ?? nowIso())
     };
     await this.store.updateBackendRun(backendRun);
     await this.emit("backend.run.updated", backendRun);
+    if (!waitingForBackendInput) {
+      this.backendToolBridgeTokens.delete(backendRun.id);
+      this.backendEventSequences.delete(backendRun.id);
+    }
+
     const externalAssistSyncRecords = waitingForBackendInput
       ? []
       : await this.runExternalAssistSync({
@@ -2092,6 +2318,7 @@ export class AgentRuntime {
               operation,
               title,
               content: instruction,
+              kind: artifactKindPayload(payload.kind),
               locale: outputLocale,
               sourceLocales: [inputLocale],
               createdBy: "backend"
@@ -4907,9 +5134,52 @@ export class AgentRuntime {
     return saved;
   }
 
+  private async ensureBackendEventSequence(runId: string): Promise<void> {
+    if (this.backendEventSequences.has(runId)) {
+      return;
+    }
+    const existingEvents = await this.store.listBackendEvents({ runId });
+    const nextSequence = existingEvents.reduce((max, event) => Math.max(max, event.sequence), 0) + 1;
+    this.backendEventSequences.set(runId, nextSequence);
+  }
+
+  private allocateBackendEventSequence(runId: string): number {
+    const sequence = this.backendEventSequences.get(runId) ?? 1;
+    this.backendEventSequences.set(runId, sequence + 1);
+    return sequence;
+  }
+
   private async gatewayBoundaryPolicyForRun(run: BackendRunRecord): Promise<GatewayBoundaryPolicy | undefined> {
     const policyId = stringPayload(run.metadata.gateway_boundary_policy_id);
     return policyId ? this.store.getGatewayBoundaryPolicy(policyId) : undefined;
+  }
+
+  private async loadPersistedRunOutputs(run: BackendRunRecord): Promise<{
+    operations: OperationRecord[];
+    artifacts: ArtifactRecord[];
+    workspaceChanges: WorkspaceChangeRecord[];
+    toolRuns: ToolRunRecord[];
+  }> {
+    const [allChanges, allToolRuns, allOperations, allArtifacts] = await Promise.all([
+      this.store.listWorkspaceChanges(run.session_id),
+      this.store.listToolRuns({ sessionId: run.session_id }),
+      this.store.listOperations(run.session_id),
+      this.store.listArtifactsForSession(run.session_id)
+    ]);
+    const workspaceChanges = allChanges.filter((change) => change.run_id === run.id);
+    const operationIds = new Set(workspaceChanges.map((change) => change.legacy_operation_id).filter((id): id is string => Boolean(id)));
+    const artifactRefs = new Set(
+      workspaceChanges
+        .filter((change) => change.change_type === "artifact_created")
+        .flatMap((change) => [change.resource_ref.id, change.resource_ref.uri])
+        .filter(Boolean)
+    );
+    return {
+      operations: allOperations.filter((operation) => operationIds.has(operation.id)),
+      artifacts: allArtifacts.filter((artifact) => artifactRefs.has(artifact.id) || artifactRefs.has(artifact.file_ref.id) || artifactRefs.has(artifact.file_ref.uri)),
+      workspaceChanges,
+      toolRuns: allToolRuns.filter((toolRun) => toolRun.run_id === run.id)
+    };
   }
 
   private async buildResumeToolRunInput(
@@ -4958,8 +5228,6 @@ export class AgentRuntime {
   }): Promise<BackendToolEventHandlingResult> {
     const providerToolName = stringPayload(input.event.payload.provider_tool_name);
     const requestedActionId = stringPayload(input.event.payload.action_id);
-    const boundaryDecision = gatewayBoundaryToolDecision(input.gatewayBoundaryPolicy, providerToolName, requestedActionId);
-    const boundaryFeedback = gatewayBoundaryToolFeedback(boundaryDecision);
     const result: BackendToolEventHandlingResult = {
       operations: [],
       artifacts: [],
@@ -4967,6 +5235,37 @@ export class AgentRuntime {
       toolRuns: [],
       workspaceChanges: []
     };
+    if (isSamuraiToolBridgeObservedProviderTool(providerToolName, input.event.payload)) {
+      const toolRun = await this.store.saveToolRun({
+        id: createId("toolrun"),
+        run_id: input.run.id,
+        session_id: input.run.session_id,
+        tool_call_id: stringPayload(input.event.payload.tool_call_id) || input.event.tool_call_id,
+        provider_tool_name: providerToolName,
+        action_id: "artifact.create",
+        status: "ignored",
+        input_summary: summarize(JSON.stringify(input.event.payload.input ?? {}), 220),
+        output_summary: "samurai_tool_bridge_already_executed",
+        resource_refs: [],
+        created_at: nowIso()
+      });
+      result.toolRuns.push(toolRun);
+      await input.recordEvent({
+        event_type: "tool_call_output",
+        payload: {
+          status: "ignored",
+          provider_tool_name: providerToolName,
+          action_id: "artifact.create",
+          reason: "samurai_tool_bridge_already_executed",
+          already_executed: true,
+          tool_origin: "samurai_tool_bridge"
+        },
+        tool_call_id: input.event.tool_call_id
+      });
+      return result;
+    }
+    const boundaryDecision = gatewayBoundaryToolDecision(input.gatewayBoundaryPolicy, providerToolName, requestedActionId);
+    const boundaryFeedback = gatewayBoundaryToolFeedback(boundaryDecision);
 
     if (!boundaryDecision.allowed) {
       const boundaryChange = gatewayBoundaryToolBlockedChange(input.run, boundaryDecision);
@@ -5266,6 +5565,52 @@ export class AgentRuntime {
       workspaceChanges,
       events: runtimeToolWorkspaceEvents(commandId, resource, boundedResourceRefs, toolCallId)
     };
+  }
+
+  private async createBackendArtifactFromText(input: {
+    run: BackendRunRecord;
+    runInput: BackendRunInput;
+    title: string;
+    content: string;
+    recordEvent: (event: BackendOutputEvent) => Promise<BackendEventRecord>;
+  }): Promise<{ operations: OperationRecord[]; artifacts: ArtifactRecord[]; workspaceChanges: WorkspaceChangeRecord[] }> {
+    const domainResult = await this.runDomainCommand({
+      command_id: "artifact.create",
+      input_source: "provider_tool_call",
+      payload: {
+        session_id: input.run.session_id,
+        envelope_id: input.runInput.input_message_id,
+        title: input.title,
+        content: input.content,
+        instruction: input.content,
+        provider_tool_call: true,
+        input_locale: input.runInput.input_locale,
+        output_locale: input.runInput.output_locale,
+        metadata: {
+          backend_run_id: input.run.id,
+          expected_output_fallback: true
+        }
+      }
+    });
+    const writeResult = operationAuditRuntimeResult(domainResult.result);
+    if (!writeResult) {
+      return { operations: [], artifacts: [], workspaceChanges: [] };
+    }
+    const resourceRefs = uniqueResourceRefs(writeResult.resourceRefs);
+    const resource = runtimeWriteResource(domainResult.result);
+    const artifacts = isArtifactRecordResource(resource) ? [resource] : [];
+    const primaryResourceRef = resourceRefs[0] ?? writeResult.operation.result_ref;
+    const workspaceChanges = primaryResourceRef
+      ? [runtimeToolWorkspaceChange(input.run, writeResult.operation, primaryResourceRef, "artifact.create", resource)]
+      : [];
+    for (const change of workspaceChanges) {
+      await this.store.saveWorkspaceChange(change);
+      await this.emit("workspace.change.created", change);
+    }
+    for (const event of runtimeToolWorkspaceEvents("artifact.create", resource, resourceRefs)) {
+      await input.recordEvent(event);
+    }
+    return { operations: [writeResult.operation], artifacts, workspaceChanges };
   }
 
   private async handleSandboxExecToolCall(
@@ -5740,22 +6085,40 @@ export class AgentRuntime {
     };
   }
 
-  private async buildContextPreview(sessionId: string, query: string): Promise<ContextPreview> {
+  private async buildContextPreview(
+    sessionId: string,
+    query: string,
+    options: {
+      contextIntent?: BackendContextIntent;
+      skipHeavyContext?: boolean;
+      onProgress?: (displayKind: "reasoning_summary" | "activity", text: string, activityKind?: string) => Promise<void>;
+    } = {}
+  ): Promise<ContextPreview> {
+    const skipHeavyContext = options.skipHeavyContext === true;
+    const sessionSearchQuery = !skipHeavyContext && query.trim()
+      ? timeboxContextStep(this.store.search(query), [], "session_search")
+      : Promise.resolve(timeboxContextValue([], false));
     const [session, settings, activeMemoryResult, knowledgeWikiContext, skillCandidates, skillUsage, collectionSchemas, messages, operations, backendRuns, toolRuns, workspaceChanges, searchResults] = await Promise.all([
       this.store.getSession(sessionId),
       this.store.getSettings(),
-      retrieveActiveMemoryWithReport(this.store, query),
-      this.buildKnowledgeWikiContext(query),
-      this.store.searchSkills(query, 12, { states: ["active", "pinned", "project"] }),
-      this.store.listSkillUsage(),
-      this.store.listCollectionSchemas(),
+      skipHeavyContext ? Promise.resolve(emptyActiveMemoryResult(query)) : timeboxContextStep(retrieveActiveMemoryWithReport(this.store, query), emptyActiveMemoryResult(query), "active_memory").then((result) => result.value),
+      skipHeavyContext ? Promise.resolve(emptyKnowledgeWikiContext(query)) : timeboxContextStep(this.buildKnowledgeWikiContext(query), emptyKnowledgeWikiContext(query), "knowledge_wiki").then((result) => result.value),
+      skipHeavyContext ? Promise.resolve([]) : timeboxContextStep(this.store.searchSkills(query, 12, { states: ["active", "pinned", "project"] }), [], "selected_skills").then((result) => result.value),
+      skipHeavyContext ? Promise.resolve([]) : this.store.listSkillUsage(),
+      skipHeavyContext ? Promise.resolve([]) : this.store.listCollectionSchemas(),
       this.store.listMessages(sessionId),
       this.store.listOperations(sessionId),
       this.store.listBackendRuns(sessionId),
       this.store.listToolRuns({ sessionId }),
       this.store.listWorkspaceChanges(sessionId),
-      query.trim() ? this.store.search(query) : Promise.resolve([])
+      sessionSearchQuery
     ]);
+    const sessionSearchTimedOut = searchResults.timedOut;
+    const sessionSearchValues = searchResults.value;
+    if (sessionSearchTimedOut) {
+      await options.onProgress?.("reasoning_summary", "過去会話検索が遅いため、今回は軽い文脈のまま実行部へ進めます。");
+    }
+    await options.onProgress?.("activity", "参照候補を整理", "context_handoff");
     if (!session) {
       throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
     }
@@ -5766,11 +6129,13 @@ export class AgentRuntime {
       limit: hostContextAssemblyLimits.selected_skills
     });
     const selectedSkills = skillSelection.selected.map((item) => item.skill);
-    const freezeSnapshot = await loadFreezeSnapshot(this.store, {
-      memoryRefs: activeMemory.map((memory) => memoryRef(memory.frontmatter)),
-      skillRefs: selectedSkills.map((skill) => skillRef(skill)),
-      wikiRefs: knowledgeWikiContext.pages.map((wiki) => wikiRef(wiki))
-    });
+    const freezeSnapshot = skipHeavyContext
+      ? undefined
+      : await loadFreezeSnapshot(this.store, {
+          memoryRefs: activeMemory.map((memory) => memoryRef(memory.frontmatter)),
+          skillRefs: selectedSkills.map((skill) => skillRef(skill)),
+          wikiRefs: knowledgeWikiContext.pages.map((wiki) => wikiRef(wiki))
+        });
     const skillUsageById = new Map(skillUsage.map((usage) => [usage.skill_id, usage]));
     const skillSelectionById = new Map(skillSelection.selected.map((item) => [item.skill.id, item.selection]));
     const selectedSkillEntries = await Promise.all(
@@ -5823,7 +6188,10 @@ export class AgentRuntime {
     )).flat();
     const collectionNotes = selectCollectionNotes(allCollectionNotes, query);
     const knowledgeWiki = knowledgeWikiContext.entries;
-    const sessionSearch = searchResults.slice(0, 8).map((result) => ({
+    const sessionSearchForBackend = shouldIncludeSessionSearchInBackendContext(query)
+      ? sessionSearchValues.slice(0, hostContextAssemblyLimits.session_search)
+      : [];
+    const sessionSearch = sessionSearchForBackend.map((result) => ({
       kind: result.kind,
       id: result.id,
       title: result.title,
@@ -5836,13 +6204,15 @@ export class AgentRuntime {
       content: message.content
     }));
     const availableTools = proposalCapabilityManifest.agent_tools;
-    const externalAssist = await this.buildExternalAssistContext({
-      sessionId,
-      query,
-      role: settings.external_provider_role,
-      recentMessages: recentMessageRecords,
-      sessionSearch
-    });
+    const externalAssist = skipHeavyContext
+      ? emptyExternalAssistContext(settings.external_provider_role, "External assist was skipped for this lightweight chat turn.")
+      : await this.buildExternalAssistContext({
+          sessionId,
+          query,
+          role: settings.external_provider_role,
+          recentMessages: recentMessageRecords,
+          sessionSearch
+        });
     const lastMessage = messages.at(-1);
     const lastBackendRun = backendRuns[0];
     const contextAssembly = buildHostContextAssembly({
@@ -5859,12 +6229,17 @@ export class AgentRuntime {
       collectionNoteCandidateCount: allCollectionNotes.length,
       collectionNoteIncludedCount: collectionNotes.length,
       selectedSkillCount: selectedSkillEntries.length,
-      sessionSearchCandidateCount: searchResults.length,
+      sessionSearchCandidateCount: sessionSearchValues.length,
       sessionSearchIncludedCount: sessionSearch.length,
       externalAssistRole: settings.external_provider_role,
       externalAssistHintCount: externalAssist.hints.length,
       externalAssistFailureCount: externalAssist.recent_failures.length,
-      availableToolCount: availableTools.length
+      availableToolCount: availableTools.length,
+      skippedSourceKinds: skipHeavyContext
+        ? new Set(["freeze_snapshot", "active_memory", "knowledge_wiki", "collection_notes", "selected_skills", "session_search", "external_assist"])
+        : sessionSearchTimedOut
+          ? new Set(["session_search"])
+        : undefined
     });
 
     return {
@@ -8792,6 +9167,37 @@ const hostContextAssemblyLimits = {
   session_search: 8
 } as const;
 
+const contextStepTimeoutMs = 2_000;
+
+interface TimeboxedContextValue<T> {
+  value: T;
+  timedOut: boolean;
+  step: string;
+}
+
+function timeboxContextValue<T>(value: T, timedOut: boolean, step = "context"): TimeboxedContextValue<T> {
+  return { value, timedOut, step };
+}
+
+function timeboxContextStep<T>(promise: Promise<T>, fallback: T, step: string): Promise<TimeboxedContextValue<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<TimeboxedContextValue<T>>((resolve) => {
+    timer = setTimeout(() => resolve(timeboxContextValue(fallback, true, step)), contextStepTimeoutMs);
+  });
+  return Promise.race([
+    promise
+      .then((value) => timeboxContextValue(value, false, step))
+      .catch(() => timeboxContextValue(fallback, true, step)),
+    timeout
+  ]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
+type BackendContextIntent = "light_chat" | "contextual_chat" | "workspace_task";
+
 interface BuildHostContextAssemblyInput {
   sessionId: string;
   query: string;
@@ -8812,6 +9218,7 @@ interface BuildHostContextAssemblyInput {
   externalAssistHintCount: number;
   externalAssistFailureCount: number;
   availableToolCount: number;
+  skippedSourceKinds?: Set<HostContextAssembly["sources"][number]["kind"]>;
 }
 
 function buildHostContextAssembly(input: BuildHostContextAssemblyInput): HostContextAssembly {
@@ -8824,18 +9231,19 @@ function buildHostContextAssembly(input: BuildHostContextAssemblyInput): HostCon
     sources: [
       contextAssemblySource("session", input.sessionFound ? "included" : "missing", 1, input.sessionFound ? 1 : 0, input.sessionFound ? "Session record was loaded from Workspace Store." : "Session record was not found."),
       contextAssemblySource("recent_messages", contextAssemblyStatus(input.messageCount, input.recentMessageCount), input.messageCount, input.recentMessageCount, `Latest ${hostContextAssemblyLimits.recent_messages} message(s) are kept for backend context.`),
-      contextAssemblySource("freeze_snapshot", input.freezeSnapshotPresent ? "included" : "missing", input.freezeSnapshotPresent ? 1 : 0, input.freezeSnapshotPresent ? 1 : 0, input.freezeSnapshotPresent ? "SOUL/Profile freeze snapshot was loaded for this turn." : "No freeze snapshot could be loaded."),
-      contextAssemblySource("active_memory", contextAssemblyStatus(input.activeMemoryCandidateCount, input.activeMemoryCount), input.activeMemoryCandidateCount, input.activeMemoryCount, "Only accepted active/topic/sensitive Memory candidates are included for normal backend context."),
-      contextAssemblySource("knowledge_wiki", contextAssemblyStatus(input.knowledgeWikiCandidateCount, input.knowledgeWikiIncludedCount), input.knowledgeWikiCandidateCount, input.knowledgeWikiIncludedCount, "Only active Knowledge Wiki pages with readable content are included."),
-      contextAssemblySource("collection_notes", contextAssemblyStatus(input.collectionNoteCandidateCount, input.collectionNoteIncludedCount), input.collectionNoteCandidateCount, input.collectionNoteIncludedCount, "Collection notes are selected as context-only hints."),
-      contextAssemblySource("selected_skills", contextAssemblyStatus(input.selectedSkillCount, input.selectedSkillCount), input.selectedSkillCount, input.selectedSkillCount, "Skill index search selected reusable procedures with progressive disclosure."),
-      contextAssemblySource("session_search", contextAssemblyStatus(input.sessionSearchCandidateCount, input.sessionSearchIncludedCount), input.sessionSearchCandidateCount, input.sessionSearchIncludedCount, `Session Search is capped at ${hostContextAssemblyLimits.session_search} result(s).`),
+      contextAssemblySource("freeze_snapshot", input.freezeSnapshotPresent ? "included" : "missing", input.freezeSnapshotPresent ? 1 : 0, input.freezeSnapshotPresent ? 1 : 0, input.freezeSnapshotPresent ? "Profile snapshot was loaded for this turn." : "No profile snapshot could be loaded.", input.skippedSourceKinds),
+      contextAssemblySource("active_memory", contextAssemblyStatus(input.activeMemoryCandidateCount, input.activeMemoryCount), input.activeMemoryCandidateCount, input.activeMemoryCount, "Only accepted active/topic/sensitive Memory candidates are included for normal backend context.", input.skippedSourceKinds),
+      contextAssemblySource("knowledge_wiki", contextAssemblyStatus(input.knowledgeWikiCandidateCount, input.knowledgeWikiIncludedCount), input.knowledgeWikiCandidateCount, input.knowledgeWikiIncludedCount, "Only active Knowledge Wiki pages with readable content are included.", input.skippedSourceKinds),
+      contextAssemblySource("collection_notes", contextAssemblyStatus(input.collectionNoteCandidateCount, input.collectionNoteIncludedCount), input.collectionNoteCandidateCount, input.collectionNoteIncludedCount, "Collection notes are selected as context-only hints.", input.skippedSourceKinds),
+      contextAssemblySource("selected_skills", contextAssemblyStatus(input.selectedSkillCount, input.selectedSkillCount), input.selectedSkillCount, input.selectedSkillCount, "Skill index search selected reusable procedures with progressive disclosure.", input.skippedSourceKinds),
+      contextAssemblySource("session_search", contextAssemblyStatus(input.sessionSearchCandidateCount, input.sessionSearchIncludedCount), input.sessionSearchCandidateCount, input.sessionSearchIncludedCount, `Session Search is capped at ${hostContextAssemblyLimits.session_search} result(s).`, input.skippedSourceKinds),
       contextAssemblySource(
         "external_assist",
         externalAssistSourceStatus(input.externalAssistRole, input.externalAssistHintCount),
         input.externalAssistHintCount + input.externalAssistFailureCount,
         input.externalAssistHintCount,
-        externalAssistSourceReason(input.externalAssistRole, input.externalAssistHintCount, input.externalAssistFailureCount)
+        externalAssistSourceReason(input.externalAssistRole, input.externalAssistHintCount, input.externalAssistFailureCount),
+        input.skippedSourceKinds
       ),
       contextAssemblySource("available_tools", input.availableToolCount > 0 ? "included" : "empty", input.availableToolCount, input.availableToolCount, "Workspace tool catalog was exposed before any Gateway boundary filtering."),
       contextAssemblySource("gateway_boundary", "missing", 0, 0, "No Gateway boundary policy was attached to this preview.")
@@ -8878,8 +9286,10 @@ function buildHostContextAssembly(input: BuildHostContextAssemblyInput): HostCon
       },
       {
         id: "freeze_snapshot_loaded",
-        status: input.freezeSnapshotPresent ? "pass" : "warning",
-        detail: input.freezeSnapshotPresent ? "Freeze snapshot is pinned for this turn." : "Freeze snapshot is missing for this turn."
+        status: input.freezeSnapshotPresent || input.skippedSourceKinds?.has("freeze_snapshot") ? "pass" : "warning",
+        detail: input.skippedSourceKinds?.has("freeze_snapshot")
+          ? "Profile snapshot was intentionally skipped for this lightweight turn."
+          : input.freezeSnapshotPresent ? "Profile snapshot is pinned for this turn." : "Profile snapshot is missing for this turn."
       }
     ]
   };
@@ -8923,8 +9333,18 @@ function contextAssemblySource(
   status: HostContextAssembly["sources"][number]["status"],
   candidateCount: number,
   includedCount: number,
-  reason: string
+  reason: string,
+  skippedSourceKinds?: Set<HostContextAssembly["sources"][number]["kind"]>
 ): HostContextAssembly["sources"][number] {
+  if (skippedSourceKinds?.has(kind)) {
+    return {
+      kind,
+      status: "skipped",
+      candidate_count: 0,
+      included_count: 0,
+      reason: "Skipped for lightweight external backend context."
+    };
+  }
   return {
     kind,
     status,
@@ -8978,13 +9398,355 @@ function contextAssemblyOmissions(input: BuildHostContextAssemblyInput): HostCon
       reason: "External assist failures were isolated from accepted Memory and kept as diagnostics."
     });
   }
-  if (!input.freezeSnapshotPresent) {
+  if (!input.freezeSnapshotPresent && !input.skippedSourceKinds?.has("freeze_snapshot")) {
     omissions.push({
       kind: "freeze_snapshot",
       reason: "Freeze snapshot was not available for this turn."
     });
   }
   return omissions;
+}
+
+function shouldIncludeSessionSearchInBackendContext(query: string): boolean {
+  const normalized = query.trim().replace(/[！!。.,、\s]/g, "").toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const greetingOnly = new Set([
+    "こんにちは",
+    "こんばんは",
+    "おはよう",
+    "おはようございます",
+    "やあ",
+    "hi",
+    "hello",
+    "hey"
+  ]);
+  if (greetingOnly.has(normalized)) {
+    return false;
+  }
+  return query.trim().length >= 12 || /続き|前回|さっき|以前|覚えて|探して|検索|session|history|履歴/i.test(query);
+}
+
+function classifyBackendContextIntent(query: string): BackendContextIntent {
+  const trimmed = query.trim();
+  const normalized = trimmed.replace(/[！!。.,、\s]/g, "").toLowerCase();
+  if (!normalized) {
+    return "light_chat";
+  }
+  if (/続き|前回|さっき|以前|この前|覚えて|思い出|探して|検索|履歴|history|session|remember|previous|last time/i.test(trimmed)) {
+    return "contextual_chat";
+  }
+  if (/作って|作成|編集|修正|実装|調査|確認|レビュー|テスト|ビルド|実行|保存|更新|追加|削除|まとめて|書いて|生成|deploy|build|test|fix|implement|review|create|update|delete|search/i.test(trimmed)) {
+    return "workspace_task";
+  }
+  const lightChatOnly = new Set([
+    "こんにちは",
+    "こんばんは",
+    "おはよう",
+    "おはようございます",
+    "ありがとう",
+    "ありがとうございます",
+    "了解",
+    "ok",
+    "okay",
+    "hi",
+    "hello",
+    "hey",
+    "thanks",
+    "thankyou",
+    "thankyou"
+  ]);
+  if (lightChatOnly.has(normalized) || trimmed.length <= 8) {
+    return "light_chat";
+  }
+  return trimmed.length >= 24 ? "workspace_task" : "contextual_chat";
+}
+
+function expectedBackendOutputs(query: string): Array<"artifact"> {
+  return shouldCreateArtifactOutput(query) ? ["artifact"] : [];
+}
+
+function createBackendToolBridge(input: {
+  backendKind: AgentBackendKind;
+  runId: string;
+  expectedOutputs: Array<"artifact">;
+  contextIntent: BackendContextIntent;
+  gatewayBoundaryPresent: boolean;
+}): BackendToolBridge | undefined {
+  if (input.gatewayBoundaryPresent) {
+    return undefined;
+  }
+  const shouldExposeBridge = input.expectedOutputs.includes("artifact") || input.contextIntent === "workspace_task";
+  if (!shouldExposeBridge) {
+    return undefined;
+  }
+  if (input.backendKind !== "claude_code" && input.backendKind !== "codex" && input.backendKind !== "external") {
+    return undefined;
+  }
+  return {
+    enabled: true,
+    server_name: "samurai",
+    endpoint_url: toolBridgeEndpointUrl(input.runId),
+    token: randomBytes(32).toString("hex"),
+    token_env: "SAMURAI_TOOL_BRIDGE_TOKEN",
+    tools: samuraiToolBridgeDescriptors
+  };
+}
+
+const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
+  name: "samurai.artifact.create",
+  provider_tool_name: "mcp__samurai__artifact_create",
+  title: "Create Samurai Artifact",
+  description: "Create a Samurai workspace Artifact from generated user-facing content.",
+  input_schema: {
+    type: "object",
+    required: ["title", "content"],
+    properties: {
+      title: { type: "string" },
+      content: { type: "string" },
+      kind: { type: "string", enum: ["markdown", "document", "table", "chart", "structured_draft", "generated_report", "note"] },
+      metadata: { type: "object" }
+    }
+  }
+}, {
+  name: "samurai.session.search",
+  provider_tool_name: "mcp__samurai__session_search",
+  title: "Search Samurai Sessions",
+  description: "Search previous Samurai sessions without injecting them into the prompt.",
+  input_schema: {
+    type: "object",
+    required: ["query"],
+    properties: {
+      query: { type: "string" },
+      limit: { type: "number" }
+    }
+  }
+}, {
+  name: "samurai.memory.search",
+  provider_tool_name: "mcp__samurai__memory_search",
+  title: "Search Samurai Memory",
+  description: "Search accepted Samurai Memory entries by topic.",
+  input_schema: {
+    type: "object",
+    required: ["query"],
+    properties: {
+      query: { type: "string" },
+      limit: { type: "number" }
+    }
+  }
+}, {
+  name: "samurai.wiki.search",
+  provider_tool_name: "mcp__samurai__wiki_search",
+  title: "Search Samurai Knowledge Wiki",
+  description: "Search active Knowledge Wiki pages and return refs.",
+  input_schema: {
+    type: "object",
+    required: ["query"],
+    properties: {
+      query: { type: "string" },
+      limit: { type: "number" }
+    }
+  }
+}, {
+  name: "samurai.skill.search",
+  provider_tool_name: "mcp__samurai__skill_search",
+  title: "Search Samurai Skills",
+  description: "Search reusable Samurai Skills and return catalog refs.",
+  input_schema: {
+    type: "object",
+    required: ["query"],
+    properties: {
+      query: { type: "string" },
+      limit: { type: "number" }
+    }
+  }
+}];
+
+const samuraiToolBridgeTools = new Set(samuraiToolBridgeDescriptors.map((tool) => tool.name));
+
+function toolBridgeEndpointUrl(runId: string): string {
+  const explicit = process.env.SAMURAI_TOOL_BRIDGE_URL?.trim();
+  if (explicit) {
+    return explicit.replace(/\{run_id\}/g, encodeURIComponent(runId));
+  }
+  const port = process.env.PORT?.trim() || "4317";
+  return `http://127.0.0.1:${port}/api/backend-runs/${encodeURIComponent(runId)}/tool-calls`;
+}
+
+function shouldCreateArtifactOutput(query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (/実装|修正|編集|コード|テスト|ビルド|デプロイ|commit|branch|pr|pull request|fix|implement|test|build|deploy|code/i.test(trimmed)) {
+    return false;
+  }
+  if (/ファイル|保存|書き込|追加先|保存先|path|plans\/|\.md\b|markdown\s+file|save\s+as|write\s+(a\s+)?file/i.test(trimmed)) {
+    return false;
+  }
+  const asksToCreate = /作って|作成|書いて|まとめて|生成|下書き|ドラフト|create|write|draft|generate/i.test(trimmed);
+  if (!asksToCreate) {
+    return false;
+  }
+  return /作業メモ|メモ|議事録|下書き|ドラフト|提案書|企画書|レポート|報告書|資料|ドキュメント|文章|メール文|表|一覧|memo|note|minutes|draft|proposal|report|document|table|email/i.test(trimmed);
+}
+
+function artifactTitleFromUserInput(query: string): string {
+  const trimmed = summarize(query.replace(/\s+/g, " "), 60);
+  if (/作業メモ|work\s*memo/i.test(query)) {
+    return "作業メモ";
+  }
+  if (/議事録|minutes/i.test(query)) {
+    return "議事録";
+  }
+  if (/提案書|proposal/i.test(query)) {
+    return "提案書";
+  }
+  if (/レポート|報告書|report/i.test(query)) {
+    return "レポート";
+  }
+  if (/メール|email/i.test(query)) {
+    return "メール文";
+  }
+  return trimmed || "作成内容";
+}
+
+function hasCreatedArtifact(artifacts: ArtifactRecord[], workspaceChanges: WorkspaceChangeRecord[]): boolean {
+  return artifacts.length > 0 || workspaceChanges.some((change) => change.change_type === "artifact_created");
+}
+
+function normalizeSamuraiToolBridgeName(name: string): string {
+  const normalized = name.trim();
+  const descriptor = samuraiToolBridgeDescriptors.find((tool) => tool.name === normalized || tool.provider_tool_name === normalized);
+  if (descriptor) {
+    return descriptor.name;
+  }
+  const aliases: Record<string, string> = {
+    "artifact.create": "samurai.artifact.create",
+    create_artifact: "samurai.artifact.create",
+    artifact_create: "samurai.artifact.create",
+    mcp__samurai__artifact_create: "samurai.artifact.create",
+    session_search: "samurai.session.search",
+    mcp__samurai__session_search: "samurai.session.search",
+    memory_search: "samurai.memory.search",
+    mcp__samurai__memory_search: "samurai.memory.search",
+    wiki_search: "samurai.wiki.search",
+    knowledge_wiki_search: "samurai.wiki.search",
+    mcp__samurai__wiki_search: "samurai.wiki.search",
+    skill_search: "samurai.skill.search",
+    mcp__samurai__skill_search: "samurai.skill.search"
+  };
+  if (aliases[normalized]) {
+    return aliases[normalized];
+  }
+  return normalized;
+}
+
+function artifactKindPayload(value: JsonValue | undefined): ArtifactKind | undefined {
+  return typeof value === "string" && artifactKindValues.includes(value as ArtifactKind) ? value as ArtifactKind : undefined;
+}
+
+const artifactKindValues: ArtifactKind[] = ["markdown", "document", "table", "chart", "image", "pdf", "structured_draft", "generated_report", "note"];
+
+function isSamuraiToolBridgeObservedProviderTool(providerToolName: string, payload: Record<string, JsonValue>): boolean {
+  if (payload.already_executed === true && payload.tool_origin === "samurai_tool_bridge") {
+    return true;
+  }
+  return providerToolName === "mcp__samurai__artifact_create" && payload.tool_origin === "samurai_tool_bridge";
+}
+
+function timingSafeTokenEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function mergeUniqueById<T extends { id: string }>(target: T[], source: T[]): void {
+  const ids = new Set(target.map((item) => item.id));
+  for (const item of source) {
+    if (!ids.has(item.id)) {
+      target.push(item);
+      ids.add(item.id);
+    }
+  }
+}
+
+function shouldThinExternalBackendContext(kind: AgentBackendKind, intent: BackendContextIntent): boolean {
+  return intent === "light_chat" && (kind === "claude_code" || kind === "codex" || kind === "external");
+}
+
+function emptyActiveMemoryResult(query: string): Awaited<ReturnType<typeof retrieveActiveMemoryWithReport>> {
+  return {
+    candidates: [],
+    report: {
+      query,
+      retrieved_at: nowIso(),
+      candidate_count: 0,
+      included_count: 0,
+      included_memory_ids: [],
+      excluded: [],
+      sensitive_redactions: [],
+      conflict_groups: [],
+      resolution_suggestions: []
+    }
+  };
+}
+
+function emptyKnowledgeWikiContext(query: string): {
+  pages: WikiWithFilePath[];
+  entries: ContextPreview["knowledge_wiki"];
+  report: ContextPreview["knowledge_wiki_report"];
+} {
+  return {
+    pages: [],
+    entries: [],
+    report: {
+      query,
+      retrieved_at: nowIso(),
+      candidate_count: 0,
+      included_count: 0,
+      included_wiki_ids: [],
+      excluded: [],
+      source_refs: []
+    }
+  };
+}
+
+function emptyExternalAssistContext(role: "assistive" | "disabled", note: string): ContextPreview["external_assist"] {
+  return {
+    role,
+    isolated_from_memory: true,
+    included_in_active_memory: false,
+    note,
+    hints: [],
+    recent_failures: []
+  };
+}
+
+function hasMeaningfulBackendOutput(
+  events: BackendEventRecord[],
+  workspaceChanges: WorkspaceChangeRecord[],
+  artifacts: ArtifactRecord[]
+): boolean {
+  const userFacingChanges = workspaceChanges.filter((change) => change.change_type !== "memory_suggested");
+  if (artifacts.length > 0 || userFacingChanges.length > 0) {
+    return true;
+  }
+  return events.some((event) =>
+    event.event_type !== "run_started"
+    && event.event_type !== "run_completed"
+    && event.event_type !== "agent_reasoning"
+    && event.event_type !== "host_progress"
+  );
+}
+
+function meaningfulBackendRunSummary(summary: string | undefined): string {
+  const trimmed = summary?.trim() ?? "";
+  if (!trimmed || trimmed === "Codex completed.") {
+    return "";
+  }
+  return trimmed;
 }
 
 function applyGatewayBoundaryToContextAssembly(
@@ -9073,6 +9835,157 @@ function contextAssemblyRuntimeMetadata(assembly: HostContextAssembly): Record<s
     context_assembly_quality_warnings: assembly.quality_checks
       .filter((check) => check.status !== "pass")
       .map((check) => ({ id: check.id, status: check.status, detail: check.detail }))
+  };
+}
+
+function buildContextHandoffForBackend(input: {
+  backendKind: AgentBackendKind;
+  contextIntent: BackendContextIntent;
+  contextPreview: ContextPreview;
+  contextAssembly: HostContextAssembly;
+  gatewayBoundaryPresent: boolean;
+}): ContextHandoff {
+  const pointerFirst = input.backendKind === "claude_code" || input.backendKind === "codex" || input.backendKind === "external";
+  const sourceByKind = new Map(input.contextAssembly.sources.map((source) => [source.kind, source]));
+  const modeFor = (kind: HostContextAssembly["sources"][number]["kind"], includedCount: number): ContextHandoff["sources"][number]["mode"] => {
+    const source = sourceByKind.get(kind);
+    if (!source || source.status === "skipped" || includedCount === 0) {
+      return "skipped";
+    }
+    if (!pointerFirst) {
+      return "inline";
+    }
+    return kind === "session" || kind === "recent_messages" ? "inline" : "pointer";
+  };
+  const refsFor = (kind: HostContextAssembly["sources"][number]["kind"]): ResourceRef[] => {
+    switch (kind) {
+      case "freeze_snapshot":
+        return [
+          input.contextPreview.freeze_snapshot?.soul.file_ref,
+          input.contextPreview.freeze_snapshot?.profile?.file_ref,
+          ...(input.contextPreview.freeze_snapshot?.memory_refs ?? []),
+          ...(input.contextPreview.freeze_snapshot?.skill_refs ?? []),
+          ...(input.contextPreview.freeze_snapshot?.wiki_refs ?? [])
+        ].filter((ref): ref is ResourceRef => Boolean(ref));
+      case "active_memory":
+        return input.contextPreview.active_memory.map((memory) => ({
+          kind: "memory",
+          id: memory.id,
+          uri: `memory/${memory.state}/${memory.id}.md`,
+          label: memory.topic
+        }));
+      case "knowledge_wiki":
+        return input.contextPreview.knowledge_wiki.map((wiki) => ({
+          kind: "wiki",
+          id: wiki.id,
+          uri: `wiki/${wiki.slug}.md`,
+          label: wiki.title
+        }));
+      case "collection_notes":
+        return input.contextPreview.collection_notes.map((note) => fileRef(note.file_path));
+      case "selected_skills":
+        return input.contextPreview.selected_skills.flatMap((skill) => [
+          {
+            kind: "skill",
+            id: skill.id,
+            uri: `skills/${skill.id}/SKILL.md`,
+            label: skill.title
+          },
+          ...(skill.support_file_refs ?? []).map((file) => ({
+            kind: "skill_support_file",
+            id: `${skill.id}:${file.path}`,
+            uri: file.file_path,
+            label: file.path
+          }))
+        ]);
+      case "session_search":
+        return input.contextPreview.session_search.map((result) => ({
+          kind: result.kind,
+          id: result.id,
+          uri: `session-search/${result.kind}/${result.id}`,
+          label: result.title
+        }));
+      case "external_assist":
+        return input.contextPreview.external_assist.hints.map((hint) => ({
+          kind: "external_assist",
+          id: hint.id,
+          uri: hint.source_uri ?? `external-assist/${hint.id}`,
+          label: hint.title ?? hint.summary
+        }));
+      case "recent_messages":
+        return input.contextPreview.recent_messages.map((message) => ({
+          kind: "message",
+          id: message.id,
+          uri: `session/${input.contextPreview.session_id}/messages/${message.id}`,
+          label: message.role
+        }));
+      case "available_tools":
+        return input.contextPreview.available_tools.map((tool) => ({
+          kind: "tool",
+          id: stableHash(tool),
+          uri: `tool/${tool}`,
+          label: tool
+        }));
+      case "gateway_boundary":
+        return input.gatewayBoundaryPresent
+          ? [{
+              kind: "gateway_boundary",
+              id: input.contextPreview.session_id,
+              uri: `session/${input.contextPreview.session_id}/gateway-boundary`,
+              label: "Gateway Boundary"
+            }]
+          : [];
+      case "session":
+        return [{
+          kind: "session",
+          id: input.contextPreview.session_id,
+          uri: `session/${input.contextPreview.session_id}`,
+          label: input.contextPreview.session_summary.title
+        }];
+      default:
+        return [];
+    }
+  };
+  const sources = input.contextAssembly.sources.map((source) => {
+    const refs = refsFor(source.kind);
+    return {
+      kind: source.kind,
+      mode: modeFor(source.kind, source.included_count),
+      candidate_count: source.candidate_count,
+      included_count: source.included_count,
+      reason: source.reason,
+      refs
+    };
+  });
+  const estimatedSize = JSON.stringify({
+    query: input.contextPreview.query,
+    sources: sources.map((source) => ({
+      kind: source.kind,
+      mode: source.mode,
+      refs: source.refs.map((ref) => ref.uri)
+    }))
+  }).length;
+  return {
+    version: 1,
+    strategy: pointerFirst ? "pointer_first" : "inline_context",
+    sources,
+    ...(estimatedSize > 16_000 ? { prompt_size_warning: `Context handoff is ${estimatedSize} characters before backend prompt formatting.` } : {})
+  };
+}
+
+function contextHandoffRuntimeMetadata(handoff: ContextHandoff): Record<string, JsonValue> {
+  return {
+    context_handoff_version: handoff.version,
+    context_handoff_strategy: handoff.strategy,
+    context_handoff_sources: handoff.sources.map((source) => ({
+      kind: source.kind,
+      mode: source.mode,
+      candidate_count: source.candidate_count,
+      included_count: source.included_count,
+      ref_count: source.refs.length,
+      reason: source.reason
+    })),
+    ...(handoff.prompt_size_warning ? { context_handoff_prompt_size_warning: handoff.prompt_size_warning } : {})
   };
 }
 
@@ -9388,24 +10301,8 @@ function decideSkillDisclosureLevel(input: {
   content: string;
   matchedSupportFiles: SkillSupportFile[];
 }): SkillDisclosureLevel {
-  const terms = skillQueryTerms(input.query);
-  if (input.matchedSupportFiles.length > 0) {
-    return "support";
-  }
-  if (terms.length === 0) {
-    return input.index === 0 ? "body" : "catalog";
-  }
-  if (input.index === 0) {
-    return "body";
-  }
-  const catalog = normalizeSkillSearchText([
-    input.skill.title,
-    input.skill.description,
-    input.skill.tags.join(" "),
-    input.skill.required_capabilities.join(" ")
-  ].join(" "));
-  const body = normalizeSkillSearchText(input.content);
-  return terms.some((term) => catalog.includes(term) || body.includes(term)) ? "body" : "catalog";
+  void input;
+  return "catalog";
 }
 
 function selectSkillSupportFiles(files: SkillSupportFile[], query: string): SkillSupportFile[] {
