@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ActionCatalogEntrySchema, DomainCommandCatalogDiagnosticsReportSchema, PluginManifestSchema, type PluginManifest } from "@samurai-agent/core-schemas";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -232,7 +233,7 @@ export const handlers = {
       }]
     });
     const registry = new PluginRuntimeRegistry(loaded);
-    const entrypoints = await registry.loadEntrypoints();
+    const entrypoints = await registry.loadEntrypoints({ importModule: importEntrypointForTest });
     const executed = await registry.executeAction("plugin.echo", { text: "hello" });
 
     expect(loaded.issues).toEqual([]);
@@ -260,3 +261,8 @@ export const handlers = {
     });
   });
 });
+
+async function importEntrypointForTest(specifier: string): Promise<unknown> {
+  const source = await readFile(fileURLToPath(specifier), "utf8");
+  return import(`data:text/javascript;base64,${Buffer.from(source, "utf8").toString("base64")}`);
+}

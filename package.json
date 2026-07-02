@@ -8,12 +8,12 @@
     "build": "pnpm typecheck && pnpm --filter @samurai-agent/web run build",
     "dev": "node scripts/dev.mjs",
     "dev:parallel": "pnpm --parallel --filter @samurai-agent/server --filter @samurai-agent/web run dev",
-  "doctor": "node scripts/doctor.mjs",
-  "backend:release:verify": "node scripts/verify-backend-release-readiness.mjs",
-  "backend:external:verify": "node scripts/verify-external-backends.mjs",
-  "backend:channels:verify": "node scripts/verify-external-channels.mjs",
-  "backend:gateway:verify": "node --import tsx scripts/verify-gateway-recovery.mjs",
-  "sandbox:verify": "node --import tsx scripts/verify-sandbox-executors.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "backend:release:verify": "node scripts/verify-backend-release-readiness.mjs",
+    "backend:external:verify": "node scripts/verify-external-backends.mjs",
+    "backend:channels:verify": "node scripts/verify-external-channels.mjs",
+    "backend:gateway:verify": "node --import tsx scripts/verify-gateway-recovery.mjs",
+    "sandbox:verify": "node --import tsx scripts/verify-sandbox-executors.mjs",
     "i18n:check": "pnpm --filter @samurai-agent/localization run check",
     "test": "vitest run",
     "typecheck": "pnpm -r --workspace-concurrency=1 run typecheck"
@@ -23,7 +23,7 @@
     "better-sqlite3": "^11.10.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "kysely": "^0.27.6",
+    "kysely": "^0.28.17",
     "lucide-vue-next": "^0.468.0",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
@@ -37,8 +37,8 @@
     "@types/node": "^22.19.21",
     "tsx": "^4.22.4",
     "typescript": "^5.9.3",
-    "vite": "^5.4.21",
-    "vitest": "^2.1.9",
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6",
     "vue-tsc": "^2.2.12"
   }
 }

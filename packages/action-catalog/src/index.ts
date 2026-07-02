@@ -1058,7 +1058,7 @@ export class PluginRuntimeRegistry {
   async loadEntrypoints(options: PluginEntrypointLoadOptions = {}): Promise<PluginEntrypointLoadResult> {
     const issues: PluginManifestLoadIssue[] = [];
     const loaded: PluginEntrypointLoadResult["loaded"] = [];
-    const importModule = options.importModule ?? ((specifier: string) => import(specifier));
+    const importModule = options.importModule ?? nativeDynamicImport;
 
     for (const binding of this.runtimeBindings.values()) {
       if (!binding.entrypoint || !binding.entrypoint_path || binding.entrypoint_status !== "ready") {
@@ -1130,6 +1130,10 @@ export class PluginRuntimeRegistry {
     return uniqueStrings(binding.handler_ids.filter((handlerId) => this.handlers.has(handlerId) && !before.has(handlerId)));
   }
 }
+
+const nativeDynamicImport = (specifier: string): Promise<unknown> => {
+  return import(/* @vite-ignore */ specifier);
+};
 
 export async function loadPluginManifests(rootDir: string, options: PluginManifestLoadOptions = {}): Promise<PluginManifestLoadResult> {
   const manifestPaths = await findPluginManifestFiles(rootDir);
