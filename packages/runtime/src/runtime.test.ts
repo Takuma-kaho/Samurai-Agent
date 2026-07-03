@@ -1171,6 +1171,49 @@ describe("agent runtime", () => {
     ]));
   });
 
+  it("records workspace working directory metadata for backend runs", async () => {
+    let capturedWorkingDirectory: string | undefined;
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-workspace-"));
+    roots.push(root);
+    const repoRoot = path.join(root, "repo");
+    await mkdir(repoRoot, { recursive: true });
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const captureBackend: AgentBackend = {
+      id: "capture-working-dir",
+      kind: "external",
+      label: "Capture Working Dir",
+      async *runTurn(input) {
+        capturedWorkingDirectory = input.working_directory;
+        yield { event_type: "run_completed", payload: { output_summary: "ok" } };
+      }
+    };
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      undefined,
+      new AgentBackendRegistry([captureBackend]),
+      undefined,
+      undefined,
+      undefined,
+      { backendWorkingDirectoryMode: "repo", repoRoot }
+    );
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "repo mode check",
+      backend_id: "capture-working-dir"
+    });
+    await store.close();
+
+    expect(capturedWorkingDirectory).toBe(repoRoot);
+    expect(result.backendRun.metadata).toMatchObject({
+      workspace_root: root,
+      working_directory: repoRoot,
+      backend_working_directory_mode: "repo"
+    });
+  });
+
   it("stores a diagnostic message when backend completes without body or artifacts", async () => {
     const emptyBackend: AgentBackend = {
       id: "empty-complete",
@@ -2072,6 +2115,8 @@ rl.on("line", (line) => {
         yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
       },
       async *resumeRun(_runId, input) {
+        expect(input.workspace_root).toBe(root);
+        expect(input.working_directory).toBe(root);
         yield { event_type: "text_delta", payload: { text: `Resumed: ${String(input.answer ?? "")}` } };
         yield { event_type: "run_completed", payload: { output_summary: "Resume completed." } };
       }

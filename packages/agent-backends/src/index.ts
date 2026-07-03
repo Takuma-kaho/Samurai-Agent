@@ -48,6 +48,8 @@ export interface BackendRunInput {
   run_id: string;
   session_id: string;
   input_message_id: string;
+  workspace_root?: string;
+  working_directory?: string;
   envelope: MessageEnvelope;
   user_input: string;
   input_locale: SupportedLocale;
@@ -433,6 +435,7 @@ export class ExternalCliBackend implements AgentBackend {
         }),
         input: buildExternalBackendPrompt(input),
         env: externalBackendEnv(input),
+        cwd: input.working_directory,
         label: this.label,
         registerChild: (child) => this.activeRuns.set(input.run_id, { child, cancelled: false }),
         isCancelled: () => this.activeRuns.get(input.run_id)?.cancelled === true,
@@ -562,8 +565,11 @@ export class ExternalCliBackend implements AgentBackend {
         input: buildExternalBackendResumePrompt(input),
         env: {
           SAMURAI_BACKEND_RESUME_RUN_ID: runId,
+          ...(stringValue(input.workspace_root) ? { SAMURAI_WORKSPACE_ROOT: stringValue(input.workspace_root) } : {}),
+          ...(stringValue(input.working_directory) ? { SAMURAI_BACKEND_WORKING_DIRECTORY: stringValue(input.working_directory) } : {}),
           ...(backendSessionId ? { SAMURAI_BACKEND_SESSION_ID: backendSessionId } : {})
         },
+        cwd: stringValue(input.working_directory),
         label: this.label,
         registerChild: (child) => this.activeRuns.set(runId, { child, cancelled: false }),
         isCancelled: () => this.activeRuns.get(runId)?.cancelled === true,
@@ -947,6 +953,12 @@ export function externalBackendEnv(input: BackendRunInput): Record<string, strin
     SAMURAI_RUN_ID: input.run_id,
     SAMURAI_SESSION_ID: input.session_id
   };
+  if (input.workspace_root) {
+    env.SAMURAI_WORKSPACE_ROOT = input.workspace_root;
+  }
+  if (input.working_directory) {
+    env.SAMURAI_BACKEND_WORKING_DIRECTORY = input.working_directory;
+  }
   if (input.tool_bridge?.enabled) {
     env.SAMURAI_TOOL_BRIDGE_URL = input.tool_bridge.endpoint_url;
     if (input.tool_bridge.token) {
@@ -967,6 +979,7 @@ interface CommandRunInput {
   args: string[];
   input: string;
   env?: Record<string, string>;
+  cwd?: string;
   label: string;
   registerChild?: (child: ChildProcessWithoutNullStreams) => void;
   isCancelled?: () => boolean;
@@ -975,6 +988,7 @@ interface CommandRunInput {
 
 async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendOutputEvent> {
   const child = spawn(input.command, input.args, {
+    cwd: input.cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,

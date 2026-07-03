@@ -2,10 +2,11 @@ import cors from "cors";
 import express from "express";
 import type { Express, NextFunction, Request, Response } from "express";
 import { createHmac, createPublicKey, createVerify, timingSafeEqual } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import type { Server as HttpServer } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
+import path from "node:path";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Server as SocketServer } from "socket.io";
@@ -96,6 +97,7 @@ import {
 } from "@samurai-agent/gateway";
 import {
   AgentRuntime,
+  createDefaultAgentBackendRegistry,
   RuntimeRequestError,
   createExternalAssistProvidersFromEnv,
   createProviderRegistryFromEnv,
@@ -113,6 +115,7 @@ import { WorkspaceStore, type SessionTranscriptExport } from "@samurai-agent/wor
 const defaultPort = 4317;
 const defaultWorkspaceHealthReadinessTimeoutMs = 2_000;
 const defaultEnvPath = fileURLToPath(new URL("../../../.env", import.meta.url));
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const loadedEnvPaths = new Set<string>();
 
 export interface CreateApiServerOptions {
@@ -221,10 +224,68 @@ export function loadServerEnv(envPath = defaultEnvPath): void {
   loadedEnvPaths.add(envPath);
 }
 
+export function defaultWorkspaceRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || process.env.HOME || "";
+  if (process.platform === "darwin" && home) {
+    return path.join(home, "Library", "Application Support", "Samurai Agent", "workspace");
+  }
+  if (process.platform === "win32") {
+    const appData = env.APPDATA || (home ? path.join(home, "AppData", "Roaming") : "");
+    if (appData) {
+      return path.join(appData, "Samurai Agent", "workspace");
+    }
+  }
+  const dataHome = env.XDG_DATA_HOME || (home ? path.join(home, ".local", "share") : "");
+  return dataHome ? path.join(dataHome, "samurai-agent", "workspace") : path.resolve("samurai-agent-workspace");
+}
+
+export function resolveWorkspaceRoot(optionWorkspaceDataDir?: string, env: NodeJS.ProcessEnv = process.env): string {
+  return path.resolve(
+    optionWorkspaceDataDir?.trim()
+      || env.SAMURAI_WORKSPACE_ROOT?.trim()
+      || env.WORKSPACE_DATA_DIR?.trim()
+      || defaultWorkspaceRoot(env)
+  );
+}
+
+function resolveBackendWorkingDirectoryMode(env: NodeJS.ProcessEnv = process.env): "workspace" | "repo" {
+  const mode = env.SAMURAI_BACKEND_WORKING_DIR_MODE?.trim() || "workspace";
+  if (mode === "workspace" || mode === "repo") {
+    return mode;
+  }
+  throw new Error(`SAMURAI_BACKEND_WORKING_DIR_MODE must be "workspace" or "repo", got "${mode}".`);
+}
+
+function legacyWorkspaceWarnings(input: { workspaceRoot: string; legacyRepoWorkspaceDir: string; workspaceHadUserDataBeforeCreate: boolean }): Array<{ code: string; message: string; path: string }> {
+  const workspaceRoot = path.resolve(input.workspaceRoot);
+  const legacyRoot = path.resolve(input.legacyRepoWorkspaceDir);
+  if (workspaceRoot === legacyRoot || !workspaceHasUserData(legacyRoot) || input.workspaceHadUserDataBeforeCreate) {
+    return [];
+  }
+  return [{
+    code: "legacy_repo_workspace_data_detected",
+    message: "旧repo内 workspace-data にデータがあります。自動移行はしません。必要なら手動で新Workspaceへ移してください。",
+    path: legacyRoot
+  }];
+}
+
+function workspaceHasUserData(rootDir: string): boolean {
+  if (!existsSync(rootDir)) {
+    return false;
+  }
+  try {
+    return readdirSync(rootDir).some((name) => !name.startsWith("."));
+  } catch {
+    return false;
+  }
+}
+
 export async function createApiServer(options: CreateApiServerOptions = {}): Promise<ApiServer> {
   loadServerEnv();
-  const workspaceDataDir = options.workspaceDataDir ?? process.env.WORKSPACE_DATA_DIR ?? fileURLToPath(new URL("../../../workspace-data", import.meta.url));
-  const store = await WorkspaceStore.create({ rootDir: workspaceDataDir });
+  const workspaceRoot = resolveWorkspaceRoot(options.workspaceDataDir);
+  const legacyRepoWorkspaceDir = fileURLToPath(new URL("../../../workspace-data", import.meta.url));
+  const workspaceHadUserDataBeforeCreate = workspaceHasUserData(workspaceRoot);
+  const store = await WorkspaceStore.create({ rootDir: workspaceRoot });
   const app = express();
   const httpServer = createServer(app);
   const io = new SocketServer(httpServer, {
@@ -237,7 +298,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     io.emit(name, payload);
   };
   const provider = options.provider ?? createProviderRegistryFromEnv();
-  const pluginRootDir = options.pluginRootDir ?? process.env.SAMURAI_PLUGIN_ROOT_DIR ?? workspaceDataDir;
+  const pluginRootDir = options.pluginRootDir ?? process.env.SAMURAI_PLUGIN_ROOT_DIR ?? workspaceRoot;
   const pluginCatalog = await loadPluginManifests(pluginRootDir, {
     trustedSigningKeys: options.pluginTrustedSigningKeys ?? pluginTrustedSigningKeysFromEnv(),
     requireSignature: process.env.SAMURAI_REQUIRE_PLUGIN_SIGNATURE === "1"
@@ -271,7 +332,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   const externalAssistProviders = injectedExternalAssistProviders.length > 0
     ? injectedExternalAssistProviders
     : createExternalAssistProvidersFromEnv();
-  const runtime = new AgentRuntime(store, emit, provider, undefined, pluginRegistry, externalAssistProviders);
+  const backendWorkingDirectoryMode = resolveBackendWorkingDirectoryMode();
+  const backendRegistry = createDefaultAgentBackendRegistry(provider, process.env, { repoRoot });
+  const runtime = new AgentRuntime(store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, undefined, {
+    backendWorkingDirectoryMode,
+    repoRoot
+  });
   const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
   const lifecycle: ApiServerLifecycleState = {
     started_at: nowIso(),
@@ -443,7 +509,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           sandbox_workspace_sync_statuses: sandboxSyncStatuses
         },
         workspace: workspaceHealthReadinessPayload(workspaceHealth),
-        workspaceDataDir: store.rootDir
+        workspaceRoot: store.rootDir,
+        workspaceDataDir: store.rootDir,
+        workspaceWarnings: legacyWorkspaceWarnings({ workspaceRoot: store.rootDir, legacyRepoWorkspaceDir, workspaceHadUserDataBeforeCreate }),
+        backendWorkingDirectoryMode
       });
     } catch (error) {
       next(error);

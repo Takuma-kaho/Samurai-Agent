@@ -499,15 +499,23 @@ interface OperationPlan {
   };
 }
 
+interface AgentRuntimeWorkspaceOptions {
+  backendWorkingDirectoryMode?: "workspace" | "repo";
+  repoRoot?: string;
+}
+
 export function createDefaultAgentBackendRegistry(
   provider?: ProviderAdapter,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  options: { repoRoot?: string } = {}
 ): AgentBackendRegistry {
+  const artifactMcpScript = resolveArtifactMcpScriptPath(env.SAMURAI_ARTIFACT_MCP_SCRIPT, options.repoRoot);
   return new AgentBackendRegistry([
     new SamuraiNativeBackend(provider),
     new ClaudeCodeBackend({
       command: env.SAMURAI_CLAUDE_CODE_COMMAND,
       args: splitArgs(env.SAMURAI_CLAUDE_CODE_ARGS),
+      artifactMcpScript,
       streamProbeArgs: splitProbeArgs(env.SAMURAI_CLAUDE_CODE_STREAM_PROBE_ARGS),
       streamProbeTimeoutMs: parseTimeout(env.SAMURAI_CLAUDE_CODE_STREAM_PROBE_TIMEOUT_MS),
       resumeArgs: splitOptionalArgs(env.SAMURAI_CLAUDE_CODE_RESUME_ARGS)
@@ -515,11 +523,20 @@ export function createDefaultAgentBackendRegistry(
     new CodexBackend({
       command: env.SAMURAI_CODEX_COMMAND,
       args: splitOptionalArgs(env.SAMURAI_CODEX_ARGS),
+      artifactMcpScript,
       streamProbeArgs: splitProbeArgs(env.SAMURAI_CODEX_STREAM_PROBE_ARGS),
       streamProbeTimeoutMs: parseTimeout(env.SAMURAI_CODEX_STREAM_PROBE_TIMEOUT_MS),
       resumeArgs: splitOptionalArgs(env.SAMURAI_CODEX_RESUME_ARGS)
     })
   ]);
+}
+
+function resolveArtifactMcpScriptPath(value: string | undefined, repoRoot: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return repoRoot ? path.resolve(repoRoot, "scripts/samurai-artifact-mcp.mjs") : undefined;
+  }
+  return path.isAbsolute(trimmed) ? trimmed : path.resolve(repoRoot ?? process.cwd(), trimmed);
 }
 
 function defaultBackendId(env: NodeJS.ProcessEnv = process.env): string {
@@ -658,7 +675,8 @@ export class AgentRuntime {
     backendRegistry?: AgentBackendRegistry,
     pluginRegistry?: PluginRuntimeRegistry,
     externalAssistProvider?: ExternalAssistProvider | ExternalAssistProvider[],
-    private readonly evaluationJudgeProvider?: EvaluationJudgeProvider
+    private readonly evaluationJudgeProvider?: EvaluationJudgeProvider,
+    private readonly workspaceOptions: AgentRuntimeWorkspaceOptions = {}
   ) {
     this.backendRegistry = backendRegistry ?? createDefaultAgentBackendRegistry(provider);
     this.pluginRegistry = pluginRegistry ?? new PluginRuntimeRegistry();
@@ -685,6 +703,16 @@ export class AgentRuntime {
       this.store.listBackendRuns()
     ]);
     return statuses.map((status) => backendStatusWithRunHistory(status, runs));
+  }
+
+  private backendWorkingDirectoryMode(): "workspace" | "repo" {
+    return this.workspaceOptions.backendWorkingDirectoryMode ?? "workspace";
+  }
+
+  private backendWorkingDirectory(): string {
+    return this.backendWorkingDirectoryMode() === "repo"
+      ? path.resolve(this.workspaceOptions.repoRoot ?? process.cwd())
+      : this.store.rootDir;
   }
 
   async previewContext(input: { sessionId: string; query?: string }): Promise<ContextPreview> {
@@ -1466,6 +1494,9 @@ export class AgentRuntime {
     const expectedOutputs = expectedBackendOutputs(input.content);
     const thinExternalContext = shouldThinExternalBackendContext(backend.kind, contextIntent);
     const backendRunId = createId("run");
+    const workspaceRoot = this.store.rootDir;
+    const backendWorkingDirectoryMode = this.backendWorkingDirectoryMode();
+    const workingDirectory = this.backendWorkingDirectory();
     const activeToolBridge = createBackendToolBridge({
       backendKind: backend.kind,
       runId: backendRunId,
@@ -1486,6 +1517,9 @@ export class AgentRuntime {
         ...jsonRecord(input.metadata ?? {}),
         context_intent: contextIntent,
         ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
+        workspace_root: workspaceRoot,
+        working_directory: workingDirectory,
+        backend_working_directory_mode: backendWorkingDirectoryMode,
         ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {}),
         context_handoff_status: "preparing"
       }
@@ -1559,6 +1593,9 @@ export class AgentRuntime {
       ...jsonRecord(input.metadata ?? {}),
       context_intent: contextIntent,
       ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
+      workspace_root: workspaceRoot,
+      working_directory: workingDirectory,
+      backend_working_directory_mode: backendWorkingDirectoryMode,
       ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {}),
       context_handoff_status: "ready",
       ...boundaryMetadata,
@@ -1605,6 +1642,8 @@ export class AgentRuntime {
       run_id: backendRun.id,
       session_id: session.id,
       input_message_id: userMessage.id,
+      workspace_root: workspaceRoot,
+      working_directory: workingDirectory,
       envelope,
       user_input: input.content,
       input_locale: inputLocale,
@@ -2112,6 +2151,8 @@ export class AgentRuntime {
 
     const backendResumeInput = {
       ...jsonRecord(input),
+      ...(typeof backendRun.metadata.workspace_root === "string" ? { workspace_root: backendRun.metadata.workspace_root } : {}),
+      ...(typeof backendRun.metadata.working_directory === "string" ? { working_directory: backendRun.metadata.working_directory } : {}),
       ...(typeof backendRun.metadata.backend_session_id === "string" ? { backend_session_id: backendRun.metadata.backend_session_id } : {})
     };
     for await (const rawEvent of backend.resumeRun(backendRun.id, backendResumeInput)) {
@@ -5435,10 +5476,14 @@ export class AgentRuntime {
       ...run.metadata,
       resume_input: resumeInput
     });
+    const workspaceRoot = stringPayload(run.metadata.workspace_root) || this.store.rootDir;
+    const workingDirectory = stringPayload(run.metadata.working_directory) || workspaceRoot;
     return {
       run_id: run.id,
       session_id: run.session_id,
       input_message_id: run.input_message_id,
+      workspace_root: workspaceRoot,
+      working_directory: workingDirectory,
       envelope,
       user_input: userInput,
       input_locale: inputLocale,
@@ -5446,7 +5491,11 @@ export class AgentRuntime {
       active_memory: [],
       gateway_boundary: gatewayBoundaryPolicy ? gatewayBoundaryRuntimeSnapshot(gatewayBoundaryPolicy) : undefined,
       recent_messages: messages.slice(-10),
-      metadata: run.metadata
+      metadata: {
+        ...run.metadata,
+        workspace_root: workspaceRoot,
+        working_directory: workingDirectory
+      }
     };
   }
 

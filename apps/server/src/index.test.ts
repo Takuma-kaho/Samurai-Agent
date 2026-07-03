@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
 import { stableHash } from "@samurai-agent/core-schemas";
 import { FakeProviderAdapter, ProviderRequestError, type ExternalAssistProvider, type ProviderAdapter, type ProviderInput, type ProviderOutput } from "@samurai-agent/runtime";
-import { closeApiServer, createApiServer, loadServerEnv, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
+import { closeApiServer, createApiServer, loadServerEnv, resolveWorkspaceRoot, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
 
 const roots: string[] = [];
 const servers: ApiServer[] = [];
@@ -25,6 +25,27 @@ afterEach(async () => {
 describe("server env loading", () => {
   it("does nothing when the env file is missing", () => {
     expect(() => loadServerEnv(path.join(tmpdir(), `missing-samurai-${Date.now()}`, ".env"))).not.toThrow();
+  });
+
+  it("resolves Workspace root with the new env taking priority over v1 compatibility env", () => {
+    const root = path.join(tmpdir(), "samurai-workspace-root");
+    const legacy = path.join(tmpdir(), "samurai-legacy-workspace");
+
+    expect(resolveWorkspaceRoot(undefined, {
+      ...process.env,
+      SAMURAI_WORKSPACE_ROOT: root,
+      WORKSPACE_DATA_DIR: legacy
+    })).toBe(path.resolve(root));
+    expect(resolveWorkspaceRoot(undefined, {
+      ...process.env,
+      SAMURAI_WORKSPACE_ROOT: "",
+      WORKSPACE_DATA_DIR: legacy
+    })).toBe(path.resolve(legacy));
+    expect(resolveWorkspaceRoot(path.join(tmpdir(), "samurai-option-workspace"), {
+      ...process.env,
+      SAMURAI_WORKSPACE_ROOT: root,
+      WORKSPACE_DATA_DIR: legacy
+    })).toBe(path.resolve(path.join(tmpdir(), "samurai-option-workspace")));
   });
 
   it("loads env file values through process.loadEnvFile", async () => {

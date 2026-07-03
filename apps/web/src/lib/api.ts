@@ -127,7 +127,10 @@ export interface HealthPayload {
   };
   llm?: unknown;
   backends?: AgentBackendStatus[];
+  workspaceRoot?: string;
   workspaceDataDir?: string;
+  workspaceWarnings?: Array<{ code: string; message: string; path: string }>;
+  backendWorkingDirectoryMode?: "workspace" | "repo";
 }
 
 export interface ProviderErrorPayload {

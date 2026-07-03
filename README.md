@@ -202,7 +202,21 @@ Vitest results as authoritative.
 
 ## Workspace Data
 
-By default, local data is stored in `workspace-data/`.
+By default, user data is stored outside this development repo:
+
+- macOS: `~/Library/Application Support/Samurai Agent/workspace`
+- Windows: `%APPDATA%/Samurai Agent/workspace`
+- Linux: `~/.local/share/samurai-agent/workspace`
+
+Set `SAMURAI_WORKSPACE_ROOT` to choose a different location.
+`WORKSPACE_DATA_DIR` still works as a v1 compatibility alias, but
+`SAMURAI_WORKSPACE_ROOT` wins when both are set.
+
+External CLI backends run from the Workspace by default. Set
+`SAMURAI_BACKEND_WORKING_DIR_MODE=repo` only when you intentionally want the
+backend to edit this development repo. If old data still exists in repo-local
+`workspace-data/` and the new Workspace is empty, `/api/health` and
+`pnpm doctor` warn about it; Samurai Agent does not auto-migrate it.
 
 Key directories:
 

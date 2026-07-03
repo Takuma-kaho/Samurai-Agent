@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -109,6 +109,41 @@ describe("agent backend registry", () => {
       path_kind: "direct_path",
       resolved: true
     });
+  });
+
+  it("runs external CLI turns from the requested working directory", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cwd-"));
+    roots.push(root);
+    const workspaceRoot = path.join(root, "workspace");
+    const workingDirectory = path.join(workspaceRoot, "project");
+    await mkdir(workingDirectory, { recursive: true });
+    const executable = path.join(root, "backend-cwd");
+    await writeFile(executable, [
+      "#!/bin/sh",
+      "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"cwd:%s workspace:%s\"}}\\n' \"$PWD\" \"$SAMURAI_WORKSPACE_ROOT\""
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({
+      id: "cwd-backend",
+      kind: "external",
+      label: "CWD Backend",
+      command: executable
+    });
+
+    const events = await collectEvents(backend.runTurn({
+      ...backendInput("run_cwd"),
+      workspace_root: workspaceRoot,
+      working_directory: workingDirectory
+    }));
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "run_completed",
+        payload: expect.objectContaining({
+          output_summary: `cwd:${workingDirectory} workspace:${workspaceRoot}`
+        })
+      })
+    ]));
   });
 
   it("buffers external CLI events for streamEvents replay", async () => {
