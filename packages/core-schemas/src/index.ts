@@ -1986,6 +1986,7 @@ export const CollectionSchemaSchema = z.object({
   derived_fields: z.array(z.record(jsonValueSchema)),
   triggers: z.array(z.record(jsonValueSchema)),
   actions: z.array(z.record(jsonValueSchema)),
+  views: z.array(z.record(jsonValueSchema)).optional(),
   permissions: z.record(jsonValueSchema)
 });
 export type CollectionSchema = z.infer<typeof CollectionSchemaSchema>;

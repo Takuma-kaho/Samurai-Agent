@@ -2163,7 +2163,14 @@ export class AgentRuntime {
       if (isTaskListAppRequest(input.content)) {
         await this.ensureTasksCollectionSchema();
         const records = await this.store.listCollectionRecords("tasks");
-        renderSpecs.push(negotiatedRenderSpec(input, taskListRenderSpec(records, input.session_id, input.id)));
+        const schema = await this.store.getCollectionSchema("tasks");
+        renderSpecs.push(negotiatedRenderSpec(input, taskListRenderSpec(records, input.session_id, input.id, schema)));
+      } else if (isActiveTaskListAppRequest(input)) {
+        await this.ensureTasksCollectionSchema();
+        await applyAppEditPatchToTasksStore(this.store, this.provider, input.content);
+        const records = await this.store.listCollectionRecords("tasks");
+        const schema = await this.store.getCollectionSchema("tasks");
+        renderSpecs.push(negotiatedRenderSpec(input, taskListRenderSpec(records, input.session_id, input.id, schema)));
       }
       return {
         operation: input,
@@ -6143,7 +6150,7 @@ export class AgentRuntime {
     if (records.length === 0) {
       return [];
     }
-    const taskRecords = records.map(taskRecordRenderData);
+    const taskRecords = records.map((record) => taskRecordRenderData(record, schema));
     const active = taskRecords.filter((record) => record.completed !== true);
     const completed = taskRecords.length - active.length;
     const lines = [
@@ -8010,6 +8017,20 @@ function chatTurnRenderSpec(result: RunChatTurnResult): SurfaceRenderSpec {
 
 const TASKS_COLLECTION_ID = "tasks";
 const TASK_FIELD_IDS = ["title", "completed", "notes", "due_date", "order", "source_session_id", "source_message_id"] as const;
+const REQUIRED_TASK_FIELD_IDS = ["title", "completed", "notes", "due_date", "order", "source_session_id", "source_message_id"] as const;
+const APP_EDIT_FIELD_TYPES = ["string", "text", "date", "boolean", "number", "enum"] as const;
+const TASK_INTERNAL_FIELD_IDS = ["source_session_id", "source_message_id", "order"] as const;
+
+type AppEditFieldType = (typeof APP_EDIT_FIELD_TYPES)[number];
+type AppEditPatch =
+  | { op: "add_field"; field: { id: string; type: AppEditFieldType; label?: string; required?: boolean; enum_values?: string[]; default_value?: JsonValue } }
+  | { op: "update_field"; field_id: string; changes: { label?: string; enum_values?: string[]; type?: AppEditFieldType } }
+  | { op: "hide_field"; field_id: string }
+  | { op: "update_view"; view_id?: string; hidden_fields?: string[]; emphasized_fields?: string[]; density?: "comfortable" | "compact"; allow_delete?: boolean }
+  | { op: "set_sort"; field_id: string; direction: "asc" | "desc"; completed_last?: boolean }
+  | { op: "set_group"; field_id: string }
+  | { op: "set_permissions"; allow_delete?: boolean }
+  | { op: "backfill_records"; field_id: string; value: JsonValue };
 
 interface TaskRecordRenderData extends Record<string, JsonValue> {
   id: string;
@@ -8059,6 +8080,7 @@ function createTasksCollectionSchema(): CollectionSchema {
     derived_fields: [],
     triggers: [],
     actions: [],
+    views: [taskListViewConfig()],
     permissions: {}
   };
 }
@@ -8068,7 +8090,7 @@ function ensureCompatibleTasksCollectionSchema(schema: CollectionSchema): void {
     const id = field.id ?? field.name;
     return typeof id === "string" ? id : "";
   }));
-  const missing = TASK_FIELD_IDS.filter((id) => !fieldIds.has(id));
+  const missing = REQUIRED_TASK_FIELD_IDS.filter((id) => !fieldIds.has(id));
   if (missing.length > 0) {
     throw new RuntimeRequestError("conflict", `tasks_collection_schema_incompatible:${missing.join(",")}`);
   }
@@ -8085,7 +8107,7 @@ function validateTaskRecordPatchData(data: Record<string, JsonValue>): void {
 function validateTaskRecordData(data: Record<string, JsonValue>, options: { requireTitle: boolean }): void {
   const allowed = new Set<string>(TASK_FIELD_IDS);
   for (const key of Object.keys(data)) {
-    if (!allowed.has(key)) {
+    if (!allowed.has(key) && !isValidAppFieldId(key)) {
       throw new RuntimeRequestError("conflict", `tasks_unknown_field:${key}`);
     }
   }
@@ -8107,13 +8129,9 @@ function validateTaskRecordData(data: Record<string, JsonValue>, options: { requ
   }
 }
 
-function taskListRenderSpec(records: CollectionRecordWithFilePath[], sessionId?: string, sourceMessageId?: string): SurfaceRenderSpec {
-  const taskRecords = records.map(taskRecordRenderData).sort((a, b) => {
-    if (a.completed !== b.completed) {
-      return a.completed ? 1 : -1;
-    }
-    return a.order - b.order || a.title.localeCompare(b.title);
-  });
+function taskListRenderSpec(records: CollectionRecordWithFilePath[], sessionId?: string, sourceMessageId?: string, schema?: CollectionSchema): SurfaceRenderSpec {
+  const viewConfig = taskListViewConfig(records, schema);
+  const taskRecords = sortTaskRecords(records.map((record) => taskRecordRenderData(record, schema)), viewConfig);
   const activeCount = taskRecords.filter((record) => !record.completed).length;
   const completedCount = taskRecords.length - activeCount;
   const refs = records.map(collectionRecordRef);
@@ -8137,6 +8155,8 @@ function taskListRenderSpec(records: CollectionRecordWithFilePath[], sessionId?:
       data: {
         collection_id: TASKS_COLLECTION_ID,
         records: taskRecords,
+        schema_fields: taskSchemaFields(records, schema),
+        view_config: viewConfig,
         counts: {
           total: taskRecords.length,
           active: activeCount,
@@ -8159,8 +8179,8 @@ function taskListRenderSpec(records: CollectionRecordWithFilePath[], sessionId?:
   });
 }
 
-function taskRecordRenderData(record: CollectionRecordWithFilePath): TaskRecordRenderData {
-  return {
+function taskRecordRenderData(record: CollectionRecordWithFilePath, schema?: CollectionSchema): TaskRecordRenderData {
+  const data: TaskRecordRenderData = {
     id: record.id,
     title: typeof record.data.title === "string" ? record.data.title : "",
     completed: record.data.completed === true,
@@ -8172,10 +8192,339 @@ function taskRecordRenderData(record: CollectionRecordWithFilePath): TaskRecordR
     file_path: record.file_path,
     updated_at: record.updated_at
   };
+  for (const field of taskSchemaFields([record], schema)) {
+    const key = typeof field.id === "string" ? field.id : "";
+    if (!key || key in data) {
+      continue;
+    }
+    const value = record.data[key];
+    if (isJsonValue(value)) {
+      data[key] = value;
+    }
+  }
+  return data;
+}
+
+function taskSchemaFields(records: CollectionRecordWithFilePath[], schema?: CollectionSchema): Array<Record<string, JsonValue>> {
+  const byId = new Map<string, Record<string, JsonValue>>();
+  for (const field of schema?.fields ?? []) {
+    const id = typeof field.id === "string" ? field.id : typeof field.name === "string" ? field.name : "";
+    if (id && !TASK_INTERNAL_FIELD_IDS.includes(id as (typeof TASK_INTERNAL_FIELD_IDS)[number])) {
+      byId.set(id, normalizeTaskSchemaField(field));
+    }
+  }
+  for (const record of records) {
+    for (const [key, value] of Object.entries(record.data)) {
+      if (!byId.has(key) && isValidAppFieldId(key) && !TASK_INTERNAL_FIELD_IDS.includes(key as (typeof TASK_INTERNAL_FIELD_IDS)[number])) {
+        byId.set(key, { id: key, type: inferAppFieldType(value) });
+      }
+    }
+  }
+  const baseFields: Array<Record<string, JsonValue>> = [
+    { id: "title", type: "string", required: true },
+    { id: "completed", type: "boolean" },
+    { id: "notes", type: "text" },
+    { id: "due_date", type: "date" }
+  ];
+  for (const field of baseFields) {
+    const id = String(field.id);
+    byId.set(id, { ...field, ...byId.get(id) });
+  }
+  return Array.from(byId.values()).filter((field) => !taskHiddenFields(schema).has(String(field.id)));
+}
+
+function taskListViewConfig(records?: CollectionRecordWithFilePath[], schema?: CollectionSchema): Record<string, JsonValue> {
+  const configured = (schema?.views ?? []).find((view) => view.id === "task_list");
+  const editableFields = taskSchemaFields(records ?? [], schema).map((field) => String(field.id)).filter((id) => id !== "completed");
+  return {
+    id: "task_list",
+    renderer: "task_list",
+    density: typeof configured?.density === "string" ? configured.density : "comfortable",
+    allow_delete: configured?.allow_delete !== false,
+    hidden_fields: Array.isArray(configured?.hidden_fields) ? configured.hidden_fields.filter((item): item is string => typeof item === "string") : [],
+    emphasized_fields: Array.isArray(configured?.emphasized_fields) ? configured.emphasized_fields.filter((item): item is string => typeof item === "string") : [],
+    sort: configured?.sort && typeof configured.sort === "object" && !Array.isArray(configured.sort) ? unknownRecord(configured.sort) as Record<string, JsonValue> : { field_id: "order", direction: "asc", completed_last: true },
+    group_by: typeof configured?.group_by === "string" ? configured.group_by : "",
+    editable_fields: editableFields
+  };
+}
+
+function isActiveTaskListAppRequest(input: SurfaceOperation): boolean {
+  const context = unknownRecord(input.metadata?.active_app_context);
+  return input.kind === "message.submit"
+    && context.renderer === "task_list"
+    && context.collection_id === TASKS_COLLECTION_ID;
+}
+
+async function planAppEditPatch(provider: { generate(input: ProviderInput): Promise<ProviderOutput> } | undefined, schema: CollectionSchema, records: CollectionRecordWithFilePath[], content: string): Promise<AppEditPatch[]> {
+  if (!provider) {
+    throw new RuntimeRequestError("provider_not_configured", "App編集にはLLM設定が必要です。");
+  }
+  const envelope = createGatewayEnvelope(webGatewayContext, [
+    "App Edit PatchだけをJSON配列で返してください。",
+    "説明文、Markdown、コードフェンスは禁止です。",
+    "対象はtasks Collectionのみです。",
+    `ユーザー指示: ${content}`,
+    `現在のfields: ${JSON.stringify(taskSchemaFields(records, schema))}`,
+    `現在のview_config: ${JSON.stringify(taskListViewConfig(records, schema))}`,
+    `許可op: add_field, update_field, hide_field, update_view, set_sort, set_group, set_permissions, backfill_records`,
+    `許可field type: ${APP_EDIT_FIELD_TYPES.join(", ")}`
+  ].join("\n"), "ja", "ja", { app_edit_patch: true });
+  let output: ProviderOutput;
+  try {
+    output = await provider.generate({
+      envelope,
+      activeMemory: [],
+      knowledgeWiki: [],
+      collectionNotes: [],
+      selectedSkills: [],
+      sessionSearch: [],
+      availableTools: [],
+      recentMessages: []
+    });
+  } catch (error) {
+    if (error instanceof ProviderRequestError && error.diagnostics.reason === "not_configured") {
+      throw new RuntimeRequestError("provider_not_configured", "App編集にはLLM設定が必要です。");
+    }
+    throw error;
+  }
+  const parsed = parseAppEditPatchJson(output.content);
+  return validateAppEditPatch(parsed, schema);
+}
+
+async function applyAppEditPatchToTasksStore(store: { getCollectionSchema(id: string): Promise<CollectionSchemaWithFilePath | undefined>; listCollectionRecords(id: string): Promise<CollectionRecordWithFilePath[]>; updateCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaWithFilePath> }, provider: { generate(input: ProviderInput): Promise<ProviderOutput> } | undefined, content: string): Promise<void> {
+  const schema = await store.getCollectionSchema(TASKS_COLLECTION_ID);
+  if (!schema) {
+    return;
+  }
+  const records = await store.listCollectionRecords(TASKS_COLLECTION_ID);
+  const patches = await planAppEditPatch(provider, schema, records, content);
+  await applyAppEditPatch(store, schema, patches);
+}
+
+async function applyAppEditPatch(store: { updateCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaWithFilePath> }, schema: CollectionSchema, patches: AppEditPatch[]): Promise<void> {
+  const fields = [...schema.fields];
+  const currentView = taskListViewConfig([], schema);
+  const nextView: Record<string, JsonValue> = { ...currentView };
+  const fieldIndex = () => new Map(fields.map((field, index) => [String(field.id ?? field.name ?? ""), index]));
+  for (const patch of patches) {
+    if (patch.op === "add_field") {
+      if (!fieldIndex().has(patch.field.id)) {
+        fields.push(appEditFieldToCollectionField(patch.field));
+      }
+    } else if (patch.op === "update_field") {
+      const index = fieldIndex().get(patch.field_id);
+      if (index !== undefined) {
+        fields[index] = { ...fields[index], ...patch.changes };
+      }
+    } else if (patch.op === "hide_field") {
+      nextView.hidden_fields = uniqueStrings([...(Array.isArray(nextView.hidden_fields) ? nextView.hidden_fields : []), patch.field_id]);
+    } else if (patch.op === "update_view") {
+      if (patch.hidden_fields) nextView.hidden_fields = uniqueStrings(patch.hidden_fields);
+      if (patch.emphasized_fields) nextView.emphasized_fields = uniqueStrings(patch.emphasized_fields);
+      if (patch.density) nextView.density = patch.density;
+      if (patch.allow_delete === true) nextView.allow_delete = true;
+    } else if (patch.op === "set_sort") {
+      nextView.sort = { field_id: patch.field_id, direction: patch.direction, completed_last: patch.completed_last !== false };
+    } else if (patch.op === "set_group") {
+      nextView.group_by = patch.field_id;
+    } else if (patch.op === "set_permissions") {
+      if (patch.allow_delete === true) nextView.allow_delete = true;
+    }
+  }
+  const otherViews = (schema.views ?? []).filter((view) => view.id !== "task_list");
+  const changed = fields.length !== schema.fields.length
+    || JSON.stringify(nextView) !== JSON.stringify(currentView);
+  if (!changed) {
+    return;
+  }
+  await store.updateCollectionSchema({
+    ...schema,
+    fields,
+    views: [...otherViews, nextView]
+  });
 }
 
 function taskSafeRecordData(data: Record<string, JsonValue>): Record<string, JsonValue> {
-  return Object.fromEntries(Object.entries(data).filter(([key]) => TASK_FIELD_IDS.includes(key as (typeof TASK_FIELD_IDS)[number])));
+  return Object.fromEntries(Object.entries(data).filter(([key]) => TASK_FIELD_IDS.includes(key as (typeof TASK_FIELD_IDS)[number]) || isValidAppFieldId(key)));
+}
+
+function parseAppEditPatchJson(content: string): unknown {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    throw new RuntimeRequestError("conflict", "app_edit_patch_json_required");
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    throw new RuntimeRequestError("conflict", "app_edit_patch_json_required");
+  }
+}
+
+function validateAppEditPatch(value: unknown, schema: CollectionSchema): AppEditPatch[] {
+  if (!Array.isArray(value)) {
+    throw new RuntimeRequestError("conflict", "app_edit_patch_array_required");
+  }
+  const fieldIds = new Set(schema.fields.map((field) => String(field.id ?? field.name ?? "")).filter(Boolean));
+  const required = new Set(schema.fields.flatMap((field) => field.required === true ? [String(field.id ?? field.name ?? "")] : []));
+  let addCount = 0;
+  const patches: AppEditPatch[] = [];
+  for (const item of value) {
+    const patch = normalizeAppEditPatch(item);
+    if (patch.op === "add_field") {
+      addCount += 1;
+      if (addCount > 3) throw new RuntimeRequestError("conflict", "app_edit_patch_too_many_fields");
+      if (fieldIds.has(patch.field.id)) throw new RuntimeRequestError("conflict", `app_edit_field_exists:${patch.field.id}`);
+      if (patch.field.type === "enum" && (!patch.field.enum_values || patch.field.enum_values.length === 0)) {
+        throw new RuntimeRequestError("conflict", `app_edit_enum_values_required:${patch.field.id}`);
+      }
+      fieldIds.add(patch.field.id);
+    } else if (patch.op === "hide_field") {
+      if (!fieldIds.has(patch.field_id)) throw new RuntimeRequestError("conflict", `app_edit_unknown_field:${patch.field_id}`);
+      if (required.has(patch.field_id as (typeof REQUIRED_TASK_FIELD_IDS)[number])) throw new RuntimeRequestError("conflict", `app_edit_required_field_visible:${patch.field_id}`);
+    } else if (patch.op === "update_field") {
+      if (!fieldIds.has(patch.field_id)) throw new RuntimeRequestError("conflict", `app_edit_unknown_field:${patch.field_id}`);
+      if (patch.changes.type === "enum" && (!patch.changes.enum_values || patch.changes.enum_values.length === 0)) {
+        throw new RuntimeRequestError("conflict", `app_edit_enum_values_required:${patch.field_id}`);
+      }
+    } else if (patch.op === "set_sort" || patch.op === "set_group" || patch.op === "backfill_records") {
+      if (!fieldIds.has(patch.field_id)) throw new RuntimeRequestError("conflict", `app_edit_unknown_field:${patch.field_id}`);
+    } else if (patch.op === "update_view") {
+      for (const fieldId of [...(patch.hidden_fields ?? []), ...(patch.emphasized_fields ?? [])]) {
+        if (!fieldIds.has(fieldId)) throw new RuntimeRequestError("conflict", `app_edit_unknown_field:${fieldId}`);
+        if ((patch.hidden_fields ?? []).includes(fieldId) && required.has(fieldId as (typeof REQUIRED_TASK_FIELD_IDS)[number])) {
+          throw new RuntimeRequestError("conflict", `app_edit_required_field_visible:${fieldId}`);
+        }
+      }
+      if (patch.allow_delete === false) {
+        delete patch.allow_delete;
+      }
+    }
+    if (patch.op !== "backfill_records") {
+      patches.push(patch);
+    }
+  }
+  return patches;
+}
+
+function normalizeAppEditPatch(value: unknown): AppEditPatch {
+  const item = unknownRecord(value);
+  const op = String(item.op ?? "");
+  if (op === "delete_field" || op === "remove_field") {
+    const fieldId = String(item.field_id ?? item.id ?? "");
+    return { op: "hide_field", field_id: requireAppFieldId(fieldId) };
+  }
+  if (op === "add_field") {
+    const field = unknownRecord(item.field);
+    const type = requireAppFieldType(String(field.type ?? "string"));
+    const enumValues = Array.isArray(field.enum_values) ? uniqueStrings(field.enum_values) : undefined;
+    return {
+      op,
+      field: {
+        id: requireAppFieldId(String(field.id ?? "")),
+        type,
+        ...(typeof field.label === "string" ? { label: field.label } : {}),
+        ...(field.required === true ? { required: true } : {}),
+        ...(enumValues ? { enum_values: enumValues } : {}),
+        ...(isJsonValue(field.default_value) ? { default_value: field.default_value } : {})
+      }
+    };
+  }
+  if (op === "update_field") {
+    const changes = unknownRecord(item.changes);
+    return {
+      op,
+      field_id: requireAppFieldId(String(item.field_id ?? "")),
+      changes: {
+        ...(typeof changes.label === "string" ? { label: changes.label } : {}),
+        ...(typeof changes.type === "string" ? { type: requireAppFieldType(changes.type) } : {}),
+        ...(Array.isArray(changes.enum_values) ? { enum_values: uniqueStrings(changes.enum_values) } : {})
+      }
+    };
+  }
+  if (op === "hide_field") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")) };
+  if (op === "set_sort") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")), direction: item.direction === "desc" ? "desc" : "asc", completed_last: item.completed_last !== false };
+  if (op === "set_group") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")) };
+  if (op === "set_permissions") return { op, allow_delete: item.allow_delete === true };
+  if (op === "backfill_records") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")), value: isJsonValue(item.value) ? item.value : "" };
+  if (op === "update_view") {
+    return {
+      op,
+      ...(typeof item.view_id === "string" ? { view_id: item.view_id } : {}),
+      ...(Array.isArray(item.hidden_fields) ? { hidden_fields: uniqueStrings(item.hidden_fields).map(requireAppFieldId) } : {}),
+      ...(Array.isArray(item.emphasized_fields) ? { emphasized_fields: uniqueStrings(item.emphasized_fields).map(requireAppFieldId) } : {}),
+      ...(item.density === "compact" || item.density === "comfortable" ? { density: item.density } : {}),
+      ...(typeof item.allow_delete === "boolean" ? { allow_delete: item.allow_delete } : {})
+    };
+  }
+  throw new RuntimeRequestError("conflict", `app_edit_unknown_op:${op}`);
+}
+
+function appEditFieldToCollectionField(field: Extract<AppEditPatch, { op: "add_field" }>["field"]): Record<string, JsonValue> {
+  return {
+    id: field.id,
+    type: field.type,
+    ...(field.label ? { label: field.label } : {}),
+    ...(field.required === true ? { required: true } : {}),
+    ...(field.enum_values ? { enum_values: field.enum_values } : {}),
+    ...(Object.prototype.hasOwnProperty.call(field, "default_value") && isJsonValue(field.default_value) ? { default_value: field.default_value } : {})
+  };
+}
+
+function normalizeTaskSchemaField(field: Record<string, JsonValue>): Record<string, JsonValue> {
+  const id = String(field.id ?? field.name ?? "");
+  const type: AppEditFieldType = APP_EDIT_FIELD_TYPES.includes(field.type as AppEditFieldType) ? field.type as AppEditFieldType : id === "completed" ? "boolean" : id === "due_date" ? "date" : id === "notes" ? "text" : "string";
+  return { ...field, id, type };
+}
+
+function taskHiddenFields(schema?: CollectionSchema): Set<string> {
+  const view = (schema?.views ?? []).find((item) => item.id === "task_list");
+  return new Set(Array.isArray(view?.hidden_fields) ? view.hidden_fields.filter((item): item is string => typeof item === "string") : []);
+}
+
+function sortTaskRecords(records: TaskRecordRenderData[], viewConfig: Record<string, JsonValue>): TaskRecordRenderData[] {
+  const sort = unknownRecord(viewConfig.sort);
+  const fieldId = typeof sort.field_id === "string" ? sort.field_id : "order";
+  const direction = sort.direction === "desc" ? -1 : 1;
+  const completedLast = sort.completed_last !== false;
+  return [...records].sort((a, b) => {
+    if (completedLast && a.completed !== b.completed) return a.completed ? 1 : -1;
+    const av = a[fieldId];
+    const bv = b[fieldId];
+    const compared = typeof av === "number" && typeof bv === "number" ? av - bv : String(av ?? "").localeCompare(String(bv ?? ""));
+    return compared * direction || a.order - b.order || a.title.localeCompare(b.title);
+  });
+}
+
+function inferAppFieldType(value: JsonValue): AppEditFieldType {
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "number") return "number";
+  return "string";
+}
+
+function requireAppFieldId(value: string): string {
+  if (!isValidAppFieldId(value)) throw new RuntimeRequestError("conflict", `app_edit_invalid_field:${value}`);
+  return value;
+}
+
+function isValidAppFieldId(value: string): boolean {
+  return /^[a-z][a-z0-9_]{1,39}$/.test(value);
+}
+
+function requireAppFieldType(value: string): AppEditFieldType {
+  if (!APP_EDIT_FIELD_TYPES.includes(value as AppEditFieldType)) throw new RuntimeRequestError("conflict", `app_edit_invalid_field_type:${value}`);
+  return value as AppEditFieldType;
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  return Array.from(new Set(values.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)));
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || ["string", "number", "boolean"].includes(typeof value)) return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (typeof value === "object") return Object.values(value as Record<string, unknown>).every(isJsonValue);
+  return false;
 }
 
 function collectionRecordRenderSpec(record: CollectionRecordWithFilePath, title = "Collection record", resolution?: CollectionRecordResolution): SurfaceRenderSpec {

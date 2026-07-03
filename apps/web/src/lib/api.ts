@@ -438,6 +438,11 @@ export const api = {
       }
     );
   },
+  deleteCollectionRecord(collectionId: string, recordId: string) {
+    return request<CollectionRecord & { file_path: string }>(`/api/collections/${collectionId}/records/${recordId}`, {
+      method: "DELETE"
+    });
+  },
   listCollectionNotes(collectionId: string) {
     return request<Array<{ file_path: string; content: string }>>(`/api/collections/${collectionId}/notes`);
   },

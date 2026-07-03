@@ -1941,6 +1941,10 @@ button {
   gap: 14px;
 }
 
+.task-list-app.is-compact {
+  gap: 10px;
+}
+
 .task-add-row {
   display: grid;
   gap: 10px;
@@ -1949,6 +1953,7 @@ button {
 
 .task-add-row input,
 .task-fields input,
+.task-fields select,
 .task-fields textarea {
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1987,7 +1992,7 @@ button {
 .task-list-columns {
   display: grid;
   gap: 14px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .task-list-columns section {
@@ -2010,8 +2015,12 @@ button {
   border-radius: var(--radius-ui);
   display: grid;
   gap: 10px;
-  grid-template-columns: 20px minmax(0, 1fr) 34px;
+  grid-template-columns: 20px minmax(0, 1fr) repeat(2, 34px);
   padding: 10px;
+}
+
+.task-list-app.is-compact .task-row {
+  padding: 8px;
 }
 
 .task-row input[type="checkbox"] {
@@ -2029,6 +2038,16 @@ button {
   display: grid;
   gap: 8px;
   min-width: 0;
+}
+
+.task-extra-field {
+  display: grid;
+  gap: 5px;
+}
+
+.task-extra-field span {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .task-fields textarea {

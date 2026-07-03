@@ -3702,6 +3702,32 @@ export class WorkspaceStore {
     return rows.map(collectionSchemaFromRow);
   }
 
+  async updateCollectionSchema(schemaInput: CollectionSchema): Promise<CollectionSchemaWithFilePath> {
+    const existing = await this.getCollectionSchema(schemaInput.id);
+    const relativePath = existing?.file_path ?? path.join("collections", schemaInput.id, "schema.json");
+    const absolutePath = path.join(this.rootDir, relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    const schema = parseCollectionSchemaLocal(schemaInput);
+    await writeFile(absolutePath, `${JSON.stringify(schema, null, 2)}\n`);
+    await this.db
+      .insertInto("collection_schemas")
+      .values({
+        id: schema.id,
+        version: schema.version,
+        file_path: relativePath,
+        schema_json: stringify(schema),
+        updated_at: nowIso()
+      })
+      .onConflict((oc) => oc.column("id").doUpdateSet({
+        version: schema.version,
+        file_path: relativePath,
+        schema_json: stringify(schema),
+        updated_at: nowIso()
+      }))
+      .execute();
+    return { ...schema, file_path: relativePath };
+  }
+
   async saveCollectionRecord(recordInput: CollectionRecord): Promise<CollectionRecordWithFilePath> {
     const schema = await this.getCollectionSchema(recordInput.collection_id);
     if (!schema) {
@@ -3731,6 +3757,20 @@ export class WorkspaceStore {
       await unlink(absolutePath).catch(() => undefined);
       throw error;
     }
+  }
+
+  async deleteCollectionRecord(collectionId: string, recordId: string): Promise<CollectionRecordWithFilePath> {
+    const existing = await this.getCollectionRecord(collectionId, recordId);
+    if (!existing) {
+      throw new Error("collection_record_not_found");
+    }
+    await rm(path.join(this.rootDir, existing.file_path), { force: true });
+    await this.db
+      .deleteFrom("collection_records")
+      .where("collection_id", "=", collectionId)
+      .where("id", "=", recordId)
+      .execute();
+    return existing;
   }
 
   async getCollectionRecord(collectionId: string, recordId: string): Promise<CollectionRecordWithFilePath | undefined> {

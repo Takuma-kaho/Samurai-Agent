@@ -13,6 +13,7 @@ import {
   FileText,
   Eye,
   FileInput,
+  ListTodo,
   Maximize2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -27,6 +28,7 @@ import {
   Table2,
   ThumbsDown,
   ThumbsUp,
+  Trash2,
   X
 } from "lucide-vue-next";
 import type {
@@ -36,6 +38,8 @@ import type {
   AuditRecord,
   BackendEventRecord,
   BackendRunRecord,
+  CollectionRecord,
+  CollectionSchema,
   JsonValue,
   MemoryFrontmatter,
   MessageRecord,
@@ -220,8 +224,9 @@ const canvasMode = ref<CanvasMode>(readCanvasMode());
 const surfaceFormDraft = ref<Record<string, Record<string, JsonValue>>>({});
 const surfaceTableDraft = ref<Record<string, Record<string, Record<string, JsonValue>>>>({});
 const taskDraftTitle = ref("");
-const taskDrafts = ref<Record<string, { title: string; notes: string; due_date: string }>>({});
+const taskDrafts = ref<Record<string, Record<string, string>>>({});
 const taskSaving = ref(false);
+const taskAppLoading = ref(false);
 const memoryContent = ref<Record<string, string>>({});
 const settingsStorageKey = "samurai-agent.settings";
 const backendStorageKey = "samurai-agent.selected-backend-id";
@@ -279,6 +284,7 @@ const activeWorkspaceSurfaceKind = computed<SurfaceRenderKind | undefined>(() =>
   }
   return undefined;
 });
+const isTaskAppOpen = computed(() => Boolean(activeSurfaceSpec.value && isTaskListSurfaceSpec(activeSurfaceSpec.value) && canvasMode.value === "app"));
 const currentMessages = computed<ChatDisplayMessage[]>(() => {
   const displayMessages = messages.value.map(
     (message): ChatDisplayMessage => ({
@@ -760,7 +766,8 @@ async function sendMessage() {
       backendId: selectedBackendId.value,
       rendererCapabilities: frontendRendererCapabilities.value,
       metadata: {
-        frontend_surface_contract_version: surfaceContract.value?.protocol_version ?? "1"
+        frontend_surface_contract_version: surfaceContract.value?.protocol_version ?? "1",
+        ...(activeAppContext() ? { active_app_context: activeAppContext() } : {})
       }
     });
     const result = envelope.result;
@@ -804,6 +811,21 @@ async function sendMessage() {
   } finally {
     loading.value = false;
   }
+}
+
+function activeAppContext(): Record<string, JsonValue> | undefined {
+  const spec = activeSurfaceSpec.value;
+  if (!spec || !isTaskListSurfaceSpec(spec)) {
+    return undefined;
+  }
+  const data = taskListData(spec);
+  return {
+    renderer: "task_list",
+    view_id: "task_list",
+    collection_id: "tasks",
+    record_ids: taskListRecords(spec).map((record) => String(record.id ?? "")),
+    counts: toJsonValue(data.counts ?? {})
+  };
 }
 
 function schedulePromptFocus() {
@@ -1790,25 +1812,114 @@ function taskListCounts(spec: SurfaceRenderSpec): { active: number; completed: n
 
 function taskDraft(record: Record<string, unknown>) {
   const id = String(record.id ?? "");
-  return taskDrafts.value[id] ?? {
-    title: String(record.title ?? ""),
-    notes: String(record.notes ?? ""),
-    due_date: String(record.due_date ?? "")
-  };
+  const draft = taskDrafts.value[id] ?? {};
+  for (const field of taskEditableFields(activeSurfaceSpec.value)) {
+    const fieldId = String(field.id ?? "");
+    if (fieldId && !(fieldId in draft)) {
+      draft[fieldId] = String(record[fieldId] ?? "");
+    }
+  }
+  return draft;
 }
 
 function syncTaskDrafts(spec: SurfaceRenderSpec) {
   taskDrafts.value = Object.fromEntries(taskListRecords(spec).map((record) => [
     String(record.id ?? ""),
-    {
-      title: String(record.title ?? ""),
-      notes: String(record.notes ?? ""),
-      due_date: String(record.due_date ?? "")
-    }
+    Object.fromEntries(taskEditableFields(spec).map((field) => [
+      String(field.id ?? ""),
+      String(record[String(field.id ?? "")] ?? "")
+    ]))
   ]));
 }
 
-function setTaskDraftValue(record: Record<string, unknown>, field: "title" | "notes" | "due_date", value: string) {
+function taskSchemaFields(spec: SurfaceRenderSpec | null): Array<Record<string, JsonValue>> {
+  if (!spec || !isTaskListSurfaceSpec(spec)) {
+    return [];
+  }
+  const fields = taskListData(spec).schema_fields;
+  if (!Array.isArray(fields)) {
+    return [];
+  }
+  return fields.filter(isRecord) as Array<Record<string, JsonValue>>;
+}
+
+function taskEditableFields(spec: SurfaceRenderSpec | null): Array<Record<string, JsonValue>> {
+  const config = spec && isTaskListSurfaceSpec(spec) ? taskViewConfig(spec) : {};
+  const editable = Array.isArray(config.editable_fields) ? new Set(config.editable_fields.filter((item): item is string => typeof item === "string")) : undefined;
+  return taskSchemaFields(spec).filter((field) => {
+    const id = String(field.id ?? "");
+    return id && id !== "completed" && (!editable || editable.has(id));
+  });
+}
+
+function taskDisplayFields(spec: SurfaceRenderSpec | null): Array<Record<string, JsonValue>> {
+  const config = spec && isTaskListSurfaceSpec(spec) ? taskViewConfig(spec) : {};
+  const hidden = new Set((Array.isArray(config.hidden_fields) ? config.hidden_fields : []).filter((item): item is string => typeof item === "string"));
+  return taskSchemaFields(spec).filter((field) => {
+    const id = String(field.id ?? "");
+    return id && id !== "completed" && !hidden.has(id);
+  });
+}
+
+function taskViewConfig(spec: SurfaceRenderSpec): Record<string, unknown> {
+  const value = taskListData(spec).view_config;
+  return isRecord(value) ? value : {};
+}
+
+function taskAllowsDelete(spec: SurfaceRenderSpec): boolean {
+  return taskViewConfig(spec).allow_delete === true;
+}
+
+function taskIsCompact(spec: SurfaceRenderSpec): boolean {
+  return taskViewConfig(spec).density === "compact";
+}
+
+function taskRecordGroups(spec: SurfaceRenderSpec): Array<{ key: string; title: string; records: Array<Record<string, unknown>> }> {
+  const groupBy = taskViewConfig(spec).group_by;
+  const records = taskListRecords(spec);
+  if (typeof groupBy === "string" && groupBy) {
+    const grouped = new Map<string, Array<Record<string, unknown>>>();
+    for (const record of records) {
+      const key = String(record[groupBy] ?? "未設定") || "未設定";
+      grouped.set(key, [...(grouped.get(key) ?? []), record]);
+    }
+    return Array.from(grouped.entries()).map(([key, groupedRecords]) => ({ key, title: key, records: groupedRecords }));
+  }
+  return [
+    { key: "active", title: "未完了", records: records.filter((item) => item.completed !== true) },
+    { key: "completed", title: "完了", records: records.filter((item) => item.completed === true) }
+  ];
+}
+
+function taskFieldLabel(field: Record<string, unknown>): string {
+  return typeof field.label === "string" ? field.label : String(field.id ?? "");
+}
+
+function taskFieldType(field: Record<string, unknown>): string {
+  return typeof field.type === "string" ? field.type : "string";
+}
+
+function taskEnumValues(field: Record<string, unknown>): string[] {
+  const values = field.enum_values;
+  return Array.isArray(values) ? values.filter((item): item is string => typeof item === "string") : [];
+}
+
+function taskFieldId(field: Record<string, unknown>): string {
+  return String(field.id ?? "");
+}
+
+function taskPatchFromDraft(record: Record<string, unknown>): Record<string, JsonValue> {
+  const draft = taskDraft(record);
+  return Object.fromEntries(taskEditableFields(activeSurfaceSpec.value).map((field) => {
+    const id = String(field.id ?? "");
+    const type = taskFieldType(field);
+    const raw = draft[id] ?? "";
+    const value: JsonValue = type === "boolean" ? raw === "true" : type === "number" ? Number(raw) || 0 : raw;
+    return [id, value];
+  }));
+}
+
+function setTaskDraftValue(record: Record<string, unknown>, field: string, value: string) {
   const id = String(record.id ?? "");
   taskDrafts.value = {
     ...taskDrafts.value,
@@ -1820,15 +1931,16 @@ function setTaskDraftValue(record: Record<string, unknown>, field: "title" | "no
 }
 
 function rebuildTaskListSurfaceSpec(records: Array<CollectionRecord & { file_path: string }>, previous: SurfaceRenderSpec): SurfaceRenderSpec {
+  const schemaFields = taskSchemaFieldsFromRecords(records, previous);
   const taskRecords = records.map((record) => ({
+    ...Object.fromEntries(schemaFields.map((field) => {
+      const id = String(field.id ?? "");
+      return [id, record.data[id] ?? ""];
+    })),
     id: record.id,
     title: typeof record.data.title === "string" ? record.data.title : "",
     completed: record.data.completed === true,
-    notes: typeof record.data.notes === "string" ? record.data.notes : "",
-    due_date: typeof record.data.due_date === "string" ? record.data.due_date : "",
     order: typeof record.data.order === "number" ? record.data.order : 0,
-    source_session_id: typeof record.data.source_session_id === "string" ? record.data.source_session_id : "",
-    source_message_id: typeof record.data.source_message_id === "string" ? record.data.source_message_id : "",
     file_path: record.file_path,
     updated_at: record.updated_at
   })).sort((a, b) => {
@@ -1852,6 +1964,8 @@ function rebuildTaskListSurfaceSpec(records: Array<CollectionRecord & { file_pat
         ...taskListData(previous),
         collection_id: "tasks",
         records: taskRecords,
+        schema_fields: schemaFields,
+        view_config: taskViewConfig(previous),
         counts: {
           total: taskRecords.length,
           active,
@@ -1861,6 +1975,25 @@ function rebuildTaskListSurfaceSpec(records: Array<CollectionRecord & { file_pat
       }
     }
   };
+}
+
+function taskSchemaFieldsFromRecords(records: Array<CollectionRecord & { file_path: string }>, previous: SurfaceRenderSpec): Array<Record<string, JsonValue>> {
+  const data = taskListData(previous);
+  const previousFields = Array.isArray(data.schema_fields) ? data.schema_fields.filter(isRecord) as Array<Record<string, JsonValue>> : [];
+  const base = [
+    { id: "title", type: "string" },
+    { id: "completed", type: "boolean" },
+    { id: "notes", type: "text" },
+    { id: "due_date", type: "date" }
+  ];
+  const byId = new Map<string, Record<string, JsonValue>>();
+  for (const field of [...base, ...previousFields]) {
+    const id = typeof field.id === "string" ? field.id : "";
+    if (id && !["source_session_id", "source_message_id", "order"].includes(id)) {
+      byId.set(id, field);
+    }
+  }
+  return Array.from(byId.values());
 }
 
 async function refreshTaskListSurface(spec: SurfaceRenderSpec) {
@@ -1913,12 +2046,121 @@ async function patchTask(spec: SurfaceRenderSpec, record: Record<string, unknown
 }
 
 async function saveTaskDraft(spec: SurfaceRenderSpec, record: Record<string, unknown>) {
-  const draft = taskDraft(record);
-  await patchTask(spec, record, {
-    title: draft.title,
-    notes: draft.notes,
-    due_date: draft.due_date
-  });
+  await patchTask(spec, record, taskPatchFromDraft(record));
+}
+
+async function deleteTask(spec: SurfaceRenderSpec, record: Record<string, unknown>) {
+  const id = String(record.id ?? "");
+  if (!id || taskSaving.value || !taskAllowsDelete(spec)) {
+    return;
+  }
+  taskSaving.value = true;
+  try {
+    await api.deleteCollectionRecord("tasks", id);
+    await refreshTaskListSurface(spec);
+  } finally {
+    taskSaving.value = false;
+  }
+}
+
+function taskCollectionSchema(): CollectionSchema {
+  return {
+    id: "tasks",
+    version: "1",
+    labels: { ja: "タスク", en: "Tasks" },
+    descriptions: { ja: "日々の作業を保存するタスク管理", en: "A local task list for day-to-day work." },
+    fields: [
+      { id: "title", type: "string", label: "タスク", required: true },
+      { id: "completed", type: "boolean", label: "完了", default_value: false },
+      { id: "notes", type: "text", label: "メモ" },
+      { id: "due_date", type: "date", label: "期限" },
+      { id: "order", type: "number", label: "順番" },
+      { id: "source_session_id", type: "string", label: "Session" },
+      { id: "source_message_id", type: "string", label: "Message" }
+    ],
+    refs: [],
+    embeds: [],
+    derived_fields: [],
+    triggers: [],
+    actions: [],
+    views: [{
+      id: "task_list",
+      renderer: "task_list",
+      density: "comfortable",
+      allow_delete: true,
+      editable_fields: ["title", "notes", "due_date"],
+      hidden_fields: ["order", "source_session_id", "source_message_id"]
+    }],
+    permissions: {
+      create: true,
+      update: true,
+      delete: true
+    }
+  };
+}
+
+async function ensureTaskCollectionSchema() {
+  try {
+    await api.getCollectionSchema("tasks");
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      await api.saveCollectionSchema(taskCollectionSchema());
+      return;
+    }
+    throw error;
+  }
+}
+
+function emptyTaskListSurfaceSpec(): SurfaceRenderSpec {
+  return {
+    id: "surface_tasks",
+    kind: "custom_view",
+    title: "Tasks",
+    resource_refs: [],
+    props: {
+      renderer: "task_list",
+      version: "1",
+      data: {
+        collection_id: "tasks",
+        records: [],
+        schema_fields: [
+          { id: "title", type: "string", label: "タスク" },
+          { id: "completed", type: "boolean", label: "完了" },
+          { id: "notes", type: "text", label: "メモ" },
+          { id: "due_date", type: "date", label: "期限" }
+        ],
+        view_config: {
+          allow_delete: true,
+          editable_fields: ["title", "notes", "due_date"],
+          hidden_fields: [],
+          density: "comfortable"
+        },
+        counts: { total: 0, active: 0, completed: 0 },
+        record_ids: []
+      }
+    }
+  };
+}
+
+async function openTaskApp() {
+  if (taskAppLoading.value) {
+    return;
+  }
+  taskAppLoading.value = true;
+  try {
+    viewMode.value = "chat";
+    activeArtifact.value = null;
+    activeMemory.value = null;
+    const spec = emptyTaskListSurfaceSpec();
+    activeSurfaceSpec.value = spec;
+    lastSurfaceRenderSpec.value = spec;
+    canvasMode.value = "app";
+    persistCanvasMode(canvasMode.value);
+    await ensureTaskCollectionSchema();
+    await refreshTaskListSurface(spec);
+  } finally {
+    taskAppLoading.value = false;
+  }
 }
 
 function surfaceValue(value: unknown): string {
@@ -2694,6 +2936,18 @@ function persistCanvasMode(mode: CanvasMode) {
           <Search :size="16" />
           <span>{{ label("nav.search") }}</span>
         </button>
+        <button
+          class="nav-item"
+          :class="{ 'is-active': isTaskAppOpen }"
+          type="button"
+          title="Tasks"
+          aria-label="Tasks"
+          :disabled="taskAppLoading"
+          @click="openTaskApp"
+        >
+          <ListTodo :size="16" />
+          <span>Tasks</span>
+        </button>
       </nav>
 
       <section class="session-list" :aria-label="label('nav.sessions')">
@@ -3234,7 +3488,7 @@ function persistCanvasMode(mode: CanvasMode) {
                     </div>
                   </div>
 
-                  <div v-else-if="activeSurfaceSpec.kind === 'custom_view' && isTaskListSurfaceSpec(activeSurfaceSpec)" class="task-list-app">
+                  <div v-else-if="activeSurfaceSpec.kind === 'custom_view' && isTaskListSurfaceSpec(activeSurfaceSpec)" class="task-list-app" :class="{ 'is-compact': taskIsCompact(activeSurfaceSpec) }">
                     <form class="task-add-row" @submit.prevent="addTask(activeSurfaceSpec)">
                       <input v-model="taskDraftTitle" type="text" placeholder="新しいタスク" :disabled="taskSaving" />
                       <button type="submit" :disabled="taskSaving || !taskDraftTitle.trim()">
@@ -3248,31 +3502,27 @@ function persistCanvasMode(mode: CanvasMode) {
                     </div>
 
                     <div class="task-list-columns">
-                      <section>
-                        <h3>未完了</h3>
-                        <article v-for="record in taskListRecords(activeSurfaceSpec).filter((item) => item.completed !== true)" :key="String(record.id)" class="task-row">
+                      <section v-for="group in taskRecordGroups(activeSurfaceSpec)" :key="group.key">
+                        <h3>{{ group.title }}</h3>
+                        <article v-for="record in group.records" :key="String(record.id)" class="task-row" :class="{ 'is-completed': record.completed === true }">
                           <input type="checkbox" :checked="record.completed === true" :disabled="taskSaving" @change="patchTask(activeSurfaceSpec, record, { completed: ($event.target as HTMLInputElement).checked })" />
                           <div class="task-fields">
-                            <input :value="taskDraft(record).title" :disabled="taskSaving" @input="setTaskDraftValue(record, 'title', ($event.target as HTMLInputElement).value)" />
-                            <textarea :value="taskDraft(record).notes" :disabled="taskSaving" rows="2" @input="setTaskDraftValue(record, 'notes', ($event.target as HTMLTextAreaElement).value)"></textarea>
-                            <input :value="taskDraft(record).due_date" :disabled="taskSaving" type="date" @input="setTaskDraftValue(record, 'due_date', ($event.target as HTMLInputElement).value)" />
+                            <label v-for="field in taskDisplayFields(activeSurfaceSpec)" :key="taskFieldId(field)" class="task-extra-field">
+                              <span>{{ taskFieldLabel(field) }}</span>
+                              <select v-if="taskFieldType(field) === 'enum'" :value="taskDraft(record)[taskFieldId(field)]" :disabled="taskSaving" @change="setTaskDraftValue(record, taskFieldId(field), ($event.target as HTMLSelectElement).value)">
+                                <option value=""></option>
+                                <option v-for="value in taskEnumValues(field)" :key="value" :value="value">{{ value }}</option>
+                              </select>
+                              <input v-else-if="taskFieldType(field) === 'boolean'" type="checkbox" :checked="taskDraft(record)[taskFieldId(field)] === 'true'" :disabled="taskSaving" @change="setTaskDraftValue(record, taskFieldId(field), String(($event.target as HTMLInputElement).checked))" />
+                              <textarea v-else-if="taskFieldType(field) === 'text'" :value="taskDraft(record)[taskFieldId(field)]" :disabled="taskSaving" rows="2" @input="setTaskDraftValue(record, taskFieldId(field), ($event.target as HTMLTextAreaElement).value)"></textarea>
+                              <input v-else :value="taskDraft(record)[taskFieldId(field)]" :disabled="taskSaving" :type="taskFieldType(field) === 'date' ? 'date' : taskFieldType(field) === 'number' ? 'number' : 'text'" @input="setTaskDraftValue(record, taskFieldId(field), ($event.target as HTMLInputElement).value)" />
+                            </label>
                           </div>
                           <button class="surface-row-save" type="button" :disabled="taskSaving || !taskDraft(record).title.trim()" @click="saveTaskDraft(activeSurfaceSpec, record)">
                             <Save :size="13" />
                           </button>
-                        </article>
-                      </section>
-                      <section>
-                        <h3>完了</h3>
-                        <article v-for="record in taskListRecords(activeSurfaceSpec).filter((item) => item.completed === true)" :key="String(record.id)" class="task-row is-completed">
-                          <input type="checkbox" :checked="record.completed === true" :disabled="taskSaving" @change="patchTask(activeSurfaceSpec, record, { completed: ($event.target as HTMLInputElement).checked })" />
-                          <div class="task-fields">
-                            <input :value="taskDraft(record).title" :disabled="taskSaving" @input="setTaskDraftValue(record, 'title', ($event.target as HTMLInputElement).value)" />
-                            <textarea :value="taskDraft(record).notes" :disabled="taskSaving" rows="2" @input="setTaskDraftValue(record, 'notes', ($event.target as HTMLTextAreaElement).value)"></textarea>
-                            <input :value="taskDraft(record).due_date" :disabled="taskSaving" type="date" @input="setTaskDraftValue(record, 'due_date', ($event.target as HTMLInputElement).value)" />
-                          </div>
-                          <button class="surface-row-save" type="button" :disabled="taskSaving || !taskDraft(record).title.trim()" @click="saveTaskDraft(activeSurfaceSpec, record)">
-                            <Save :size="13" />
+                          <button v-if="taskAllowsDelete(activeSurfaceSpec)" class="surface-row-save" type="button" :disabled="taskSaving" @click="deleteTask(activeSurfaceSpec, record)">
+                            <Trash2 :size="13" />
                           </button>
                         </article>
                       </section>

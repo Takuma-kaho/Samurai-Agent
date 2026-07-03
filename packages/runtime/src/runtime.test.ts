@@ -356,7 +356,7 @@ describe("agent runtime", () => {
       resource_refs: [],
       created_at: now,
       updated_at: now
-    })).rejects.toThrow("tasks_unknown_field:unexpected");
+    })).rejects.toThrow("collection_unknown_field:unexpected");
 
     await runtime.createCollectionRecord({
       id: "task_1",
@@ -391,6 +391,116 @@ describe("agent runtime", () => {
     await store.close();
 
     expect(patched.resource.data.completed).toBe(true);
+  });
+
+  it("applies task app edits through AppEditPatch instead of fixed phrases", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/app-edit", (input) => {
+      if (input.envelope.metadata.app_edit_patch === true) {
+        return {
+          content: JSON.stringify([
+            { op: "add_field", field: { id: "owner", type: "string", label: "担当者" } },
+            { op: "add_field", field: { id: "importance", type: "enum", label: "重要度", enum_values: ["高", "中", "低"] } },
+            { op: "set_sort", field_id: "due_date", direction: "asc", completed_last: true },
+            { op: "set_group", field_id: "owner" },
+            { op: "update_view", density: "compact", emphasized_fields: ["importance"] },
+            { op: "hide_field", field_id: "notes" }
+          ]),
+          toolCalls: []
+        };
+      }
+      return { content: "対応しました。", toolCalls: [] };
+    }));
+    const session = await runtime.createSession();
+    await runtime.runSurfaceOperation({
+      id: "surface_task_app",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "タスク管理アプリを作って",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "task_list", versions: ["1"] }]
+      }
+    });
+
+    const edited = await runtime.runSurfaceOperation({
+      id: "surface_task_edit",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "担当者を追加して、重要度を高・中・低で選べるように。締切が近い順にして、メモ欄はいらない。完了済みは下に小さくまとめて",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "task_list",
+          collection_id: "tasks"
+        }
+      },
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "task_list", versions: ["1"] }]
+      }
+    });
+    const schema = await store.getCollectionSchema("tasks");
+    await store.close();
+
+    expect(schema?.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "owner", type: "string", label: "担当者" }),
+      expect.objectContaining({ id: "importance", type: "enum", enum_values: ["高", "中", "低"] })
+    ]));
+    expect(schema?.views?.find((view) => view.id === "task_list")).toMatchObject({
+      density: "compact",
+      hidden_fields: ["notes"],
+      emphasized_fields: ["importance"],
+      group_by: "owner",
+      sort: { field_id: "due_date", direction: "asc", completed_last: true }
+    });
+    expect(edited.render_specs?.[1].props.data.schema_fields).toEqual(expect.not.arrayContaining([
+      expect.objectContaining({ id: "notes" })
+    ]));
+    expect(edited.render_specs?.[1].props.data.view_config).toMatchObject({
+      density: "compact",
+      group_by: "owner"
+    });
+  });
+
+  it("rejects invalid task AppEditPatch without saving schema changes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/app-edit-invalid", (input) => {
+      if (input.envelope.metadata.app_edit_patch === true) {
+        return {
+          content: JSON.stringify([{ op: "hide_field", field_id: "title" }]),
+          toolCalls: []
+        };
+      }
+      return { content: "対応しました。", toolCalls: [] };
+    }));
+    const session = await runtime.createSession();
+    await runtime.ensureTasksCollectionSchema();
+
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_task_edit_invalid",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "タイトルはいらない",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "task_list",
+          collection_id: "tasks"
+        }
+      }
+    })).rejects.toThrow("app_edit_required_field_visible:title");
+    const schema = await store.getCollectionSchema("tasks");
+    await store.close();
+
+    expect(schema?.views?.find((view) => view.id === "task_list")?.hidden_fields ?? []).toEqual([]);
   });
 
   it("runs Knowledge Wiki lifecycle Domain Commands through active retrieval and provenance", async () => {

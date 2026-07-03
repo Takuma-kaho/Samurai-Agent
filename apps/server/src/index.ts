@@ -2821,6 +2821,27 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.delete("/api/collections/:collectionId/records/:recordId", async (req, res, next) => {
+      try {
+        if (req.params.collectionId === "tasks") {
+          const schema = await store.getCollectionSchema("tasks");
+          const taskView = schema?.views?.find((view) => view.id === "task_list");
+          if (taskView?.allow_delete === false) {
+            res.status(403).json({ error: "collection_record_delete_not_allowed" });
+            return;
+          }
+        }
+        const deleted = await store.deleteCollectionRecord(req.params.collectionId, req.params.recordId);
+        res.json(deleted);
+      } catch (error) {
+        if (error instanceof Error && error.message === "collection_record_not_found") {
+          res.status(404).json({ error: "collection_record_not_found" });
+          return;
+        }
+        next(error);
+      }
+    });
+
     app.get("/api/collections/:collectionId/records/:recordId/refs", async (req, res, next) => {
       try {
         res.json(await store.resolveCollectionRecordRefs(req.params.collectionId, req.params.recordId));
