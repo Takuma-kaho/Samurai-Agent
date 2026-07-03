@@ -5,8 +5,15 @@ import { fileURLToPath } from "node:url";
 const apiPort = Number(process.env.PORT ?? 4317);
 const apiUrl = `http://127.0.0.1:${apiPort}`;
 const healthUrl = `${apiUrl}/api/health`;
+const contractUrl = `${apiUrl}/api/surface/contract`;
 const healthWarnMs = Number(process.env.SAMURAI_DEV_HEALTH_WARN_MS ?? 10_000);
 const pollMs = 300;
+const requiredSurfaceOperations = [
+  "collection.view.present",
+  "collection.record.create",
+  "collection.record.patch",
+  "collection.record.delete"
+];
 const apiEntry = fileURLToPath(new URL("../apps/server/src/index.ts", import.meta.url));
 const webRoot = fileURLToPath(new URL("../apps/web", import.meta.url));
 const viteBin = fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url));
@@ -26,6 +33,12 @@ const server = preflight.kind === "unavailable"
 
 if (preflight.kind === "ready") {
   console.log(`[dev] Reusing existing API: ${healthUrl}`);
+  const contract = await probeSurfaceContract(contractUrl);
+  if (contract.kind !== "ready") {
+    console.error(`[dev] Existing API is missing required surface operations: ${contract.missing.join(", ") || "unknown"}.`);
+    console.error(`[dev] Stop the old API process on ${apiPort}, then run pnpm run dev again.`);
+    process.exit(1);
+  }
 } else if (preflight.kind === "starting") {
   console.log(`[dev] API port is already in use; waiting for existing Samurai Agent API: ${healthUrl}`);
   void monitorHealth(healthUrl);
@@ -93,6 +106,13 @@ async function monitorHealth(url) {
       if (response.ok) {
         const health = await response.json();
         if (health?.ok === true && health?.db?.ok !== false) {
+          const contract = await probeSurfaceContract(contractUrl);
+          if (contract.kind !== "ready") {
+            console.error(`[dev] API is reachable but missing required surface operations: ${contract.missing.join(", ") || "unknown"}.`);
+            console.error(`[dev] Stop the old API process on ${apiPort}, then run pnpm run dev again.`);
+            shutdown(1);
+            return;
+          }
           console.log(`[dev] API is ready: ${url}`);
           return;
         }
@@ -110,6 +130,26 @@ async function monitorHealth(url) {
       console.warn(`[dev] Web is running; API-backed actions will recover when ${url} becomes available.`);
     }
     await sleep(pollMs);
+  }
+}
+
+async function probeSurfaceContract(url) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+    if (!response.ok) {
+      return { kind: "failed", missing: requiredSurfaceOperations };
+    }
+    const contract = await response.json();
+    const operationKinds = new Set();
+    for (const command of Array.isArray(contract?.commands) ? contract.commands : []) {
+      for (const kind of Array.isArray(command?.surface_operation_kinds) ? command.surface_operation_kinds : []) {
+        operationKinds.add(kind);
+      }
+    }
+    const missing = requiredSurfaceOperations.filter((kind) => !operationKinds.has(kind));
+    return missing.length > 0 ? { kind: "missing", missing } : { kind: "ready", missing: [] };
+  } catch {
+    return { kind: "failed", missing: requiredSurfaceOperations };
   }
 }
 

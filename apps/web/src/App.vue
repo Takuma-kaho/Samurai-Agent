@@ -227,6 +227,7 @@ const taskDraftTitle = ref("");
 const taskDrafts = ref<Record<string, Record<string, string>>>({});
 const taskSaving = ref(false);
 const taskAppLoading = ref(false);
+const taskAppError = ref<string | null>(null);
 const memoryContent = ref<Record<string, string>>({});
 const settingsStorageKey = "samurai-agent.settings";
 const backendStorageKey = "samurai-agent.selected-backend-id";
@@ -407,6 +408,8 @@ const workSummaryMessageId = computed(() => {
 const firstMemory = computed(() => memory.value[0]);
 const hasWorkspaceCanvas = computed(() => Boolean(activeArtifact.value || activeMemory.value || activeSurfaceSpec.value));
 const taskListSurfaceSpec = computed(() => lastSurfaceRenderSpecs.value.find(isTaskListSurfaceSpec));
+const taskCardSurfaceSpec = computed(() => taskListSurfaceSpec.value ?? (activeSurfaceSpec.value && isTaskListSurfaceSpec(activeSurfaceSpec.value) ? activeSurfaceSpec.value : undefined));
+const taskCardMessageId = computed(() => [...currentMessages.value].reverse().find((message) => message.role === "agent" && message.state !== "loading")?.id ?? "");
 const workspaceSplitPercent = ref(readWorkspaceSplitPercent());
 const isResizingWorkspace = ref(false);
 const workspaceSplitStyle = computed<Record<string, string>>(() => ({
@@ -851,6 +854,24 @@ async function loadSurfaceContract() {
   } catch {
     surfaceContract.value = null;
     surfaceContractError.value = true;
+  }
+}
+
+function hasSurfaceOperationKind(kind: string): boolean {
+  return (surfaceContract.value?.commands ?? []).some((command) => command.surface_operation_kinds?.includes(kind));
+}
+
+function missingTaskSurfaceOperationKinds(): string[] {
+  return ["collection.view.present", "collection.record.create", "collection.record.patch", "collection.record.delete"].filter((kind) => !hasSurfaceOperationKind(kind));
+}
+
+async function ensureTaskSurfaceContract(): Promise<void> {
+  if (!surfaceContract.value && !surfaceContractError.value) {
+    await loadSurfaceContract();
+  }
+  const missing = missingTaskSurfaceOperationKinds();
+  if (missing.length > 0) {
+    throw new Error(`task_surface_contract_missing:${missing.join(",")}`);
   }
 }
 
@@ -1935,21 +1956,31 @@ function setTaskDraftValue(record: Record<string, unknown>, field: string, value
 }
 
 async function refreshTaskListSurface(spec: SurfaceRenderSpec) {
-  const envelope = await api.runSurfaceOperation<{ collection_id: string; view_id: string }>({
-    id: `surface_tasks_present_${Date.now()}`,
-    kind: "collection.view.present",
-    collection_id: "tasks",
-    view_id: "task_list",
-    renderer_capabilities: rendererCapabilities.value
-  });
-  const nextSpec = envelope.render_spec;
-  if (!isTaskListSurfaceSpec(nextSpec)) {
-    throw new Error("task_list_render_spec_required");
+  try {
+    await ensureTaskSurfaceContract();
+    const envelope = await api.runSurfaceOperation<{ collection_id: string; view_id: string }>({
+      id: `surface_tasks_present_${Date.now()}`,
+      kind: "collection.view.present",
+      collection_id: "tasks",
+      view_id: "task_list",
+      renderer_capabilities: frontendRendererCapabilities.value
+    });
+    const nextSpec = envelope.render_spec;
+    if (!isTaskListSurfaceSpec(nextSpec)) {
+      throw new Error("task_list_render_spec_required");
+    }
+    taskAppError.value = null;
+    activeSurfaceSpec.value = nextSpec;
+    lastSurfaceRenderSpec.value = nextSpec;
+    lastSurfaceRenderSpecs.value = [nextSpec, ...lastSurfaceRenderSpecs.value.filter((item) => !isTaskListSurfaceSpec(item))];
+    syncTaskDrafts(nextSpec);
+  } catch (error) {
+    taskAppError.value = taskSurfaceErrorMessage(error);
+    if (!activeSurfaceSpec.value && isTaskListSurfaceSpec(spec)) {
+      activeSurfaceSpec.value = spec;
+    }
+    throw error;
   }
-  activeSurfaceSpec.value = nextSpec;
-  lastSurfaceRenderSpec.value = nextSpec;
-  lastSurfaceRenderSpecs.value = [nextSpec, ...lastSurfaceRenderSpecs.value.filter((item) => !isTaskListSurfaceSpec(item))];
-  syncTaskDrafts(nextSpec);
 }
 
 async function addTask(spec: SurfaceRenderSpec) {
@@ -1959,12 +1990,13 @@ async function addTask(spec: SurfaceRenderSpec) {
   }
   taskSaving.value = true;
   try {
+    await ensureTaskSurfaceContract();
     const envelope = await api.runSurfaceOperation({
       id: `surface_task_create_${Date.now()}`,
       kind: "collection.record.create",
       collection_id: "tasks",
       record_id: `task_${Date.now()}`,
-      renderer_capabilities: rendererCapabilities.value,
+      renderer_capabilities: frontendRendererCapabilities.value,
       data: {
         title,
         completed: false,
@@ -1977,6 +2009,9 @@ async function addTask(spec: SurfaceRenderSpec) {
     });
     taskDraftTitle.value = "";
     await refreshTaskListSurface(envelope.render_spec ?? spec);
+    taskAppError.value = null;
+  } catch (error) {
+    taskAppError.value = taskSurfaceErrorMessage(error);
   } finally {
     taskSaving.value = false;
   }
@@ -1989,6 +2024,7 @@ async function patchTask(spec: SurfaceRenderSpec, record: Record<string, unknown
   }
   taskSaving.value = true;
   try {
+    await ensureTaskSurfaceContract();
     const envelope = await api.runSurfaceOperation({
       id: `surface_task_patch_${Date.now()}`,
       kind: "collection.record.patch",
@@ -1996,9 +2032,12 @@ async function patchTask(spec: SurfaceRenderSpec, record: Record<string, unknown
       record_id: id,
       patch_id: `task_patch_${Date.now()}`,
       changes,
-      renderer_capabilities: rendererCapabilities.value
+      renderer_capabilities: frontendRendererCapabilities.value
     });
     await refreshTaskListSurface(envelope.render_spec ?? spec);
+    taskAppError.value = null;
+  } catch (error) {
+    taskAppError.value = taskSurfaceErrorMessage(error);
   } finally {
     taskSaving.value = false;
   }
@@ -2015,13 +2054,14 @@ async function deleteTask(spec: SurfaceRenderSpec, record: Record<string, unknow
   }
   taskSaving.value = true;
   try {
+    await ensureTaskSurfaceContract();
     const envelope = await api.runSurfaceOperation({
       id: `surface_task_delete_${Date.now()}`,
       kind: "collection.record.delete",
       collection_id: "tasks",
       record_id: id,
       view_id: "task_list",
-      renderer_capabilities: rendererCapabilities.value
+      renderer_capabilities: frontendRendererCapabilities.value
     });
     const nextSpec = envelope.render_spec;
     if (isTaskListSurfaceSpec(nextSpec)) {
@@ -2032,6 +2072,9 @@ async function deleteTask(spec: SurfaceRenderSpec, record: Record<string, unknow
     } else {
       await refreshTaskListSurface(spec);
     }
+    taskAppError.value = null;
+  } catch (error) {
+    taskAppError.value = taskSurfaceErrorMessage(error);
   } finally {
     taskSaving.value = false;
   }
@@ -2089,6 +2132,7 @@ function emptyTaskListSurfaceSpec(): SurfaceRenderSpec {
   return {
     id: "surface_tasks",
     kind: "custom_view",
+    priority: "primary",
     title: "Tasks",
     resource_refs: [],
     props: {
@@ -2121,20 +2165,37 @@ async function openTaskApp() {
     return;
   }
   taskAppLoading.value = true;
+  taskAppError.value = null;
   try {
     viewMode.value = "chat";
     activeArtifact.value = null;
     activeMemory.value = null;
-    const spec = emptyTaskListSurfaceSpec();
-    activeSurfaceSpec.value = spec;
-    lastSurfaceRenderSpec.value = spec;
     canvasMode.value = "app";
     persistCanvasMode(canvasMode.value);
     await ensureTaskCollectionSchema();
+    const spec = activeSurfaceSpec.value && isTaskListSurfaceSpec(activeSurfaceSpec.value) ? activeSurfaceSpec.value : emptyTaskListSurfaceSpec();
     await refreshTaskListSurface(spec);
+  } catch (error) {
+    taskAppError.value = taskSurfaceErrorMessage(error);
+    if (!activeSurfaceSpec.value) {
+      activeSurfaceSpec.value = emptyTaskListSurfaceSpec();
+    }
   } finally {
     taskAppLoading.value = false;
   }
+}
+
+function taskSurfaceErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.startsWith("task_surface_contract_missing:")) {
+    return "Tasksを表示できません。古いAPIサーバーにつながっている可能性があります。APIとWebを同じ dev 起動で開き直してください。";
+  }
+  if (error instanceof ApiError && isRecord(error.body) && error.body.error === "invalid_surface_operation") {
+    return "Tasksを表示できません。APIサーバーが古い可能性があります。APIを再起動してください。";
+  }
+  if (error instanceof ApiError) {
+    return `Tasksを更新できませんでした。APIエラー ${error.status}`;
+  }
+  return "Tasksを更新できませんでした。API接続を確認してください。";
 }
 
 function surfaceValue(value: unknown): string {
@@ -3142,12 +3203,12 @@ function persistCanvasMode(mode: CanvasMode) {
                                 </button>
                               </div>
 
-                              <div v-if="taskListSurfaceSpec" class="work-card-stack">
-                                <button class="codex-artifact-card" type="button" @click="openSurfaceSpec(taskListSurfaceSpec)">
+                              <div v-if="taskCardSurfaceSpec && message.id === taskCardMessageId" class="work-card-stack">
+                                <button class="codex-artifact-card" type="button" @click="openSurfaceSpec(taskCardSurfaceSpec)">
                                   <span class="codex-card-icon"><PanelsTopLeft :size="19" /></span>
                                   <span class="codex-card-main">
-                                    <strong>{{ taskListSurfaceSpec.title || "タスク" }}</strong>
-                                    <small>tasks ・ {{ taskListCounts(taskListSurfaceSpec).active }} / {{ taskListCounts(taskListSurfaceSpec).total }}</small>
+                                    <strong>{{ taskCardSurfaceSpec.title || "タスク" }}</strong>
+                                    <small>tasks ・ {{ taskListCounts(taskCardSurfaceSpec).active }} / {{ taskListCounts(taskCardSurfaceSpec).total }}</small>
                                   </span>
                                   <em>{{ label("artifact.open_in_workspace") }}</em>
                                 </button>
@@ -3227,6 +3288,16 @@ function persistCanvasMode(mode: CanvasMode) {
                         </template>
                         <template v-else>
                           <p class="message-body">{{ message.content }}</p>
+                          <div v-if="message.role === 'agent' && taskCardSurfaceSpec && message.id === taskCardMessageId" class="work-card-stack">
+                            <button class="codex-artifact-card" type="button" @click="openSurfaceSpec(taskCardSurfaceSpec)">
+                              <span class="codex-card-icon"><PanelsTopLeft :size="19" /></span>
+                              <span class="codex-card-main">
+                                <strong>{{ taskCardSurfaceSpec.title || "タスク" }}</strong>
+                                <small>tasks ・ {{ taskListCounts(taskCardSurfaceSpec).active }} / {{ taskListCounts(taskCardSurfaceSpec).total }}</small>
+                              </span>
+                              <em>{{ label("artifact.open_in_workspace") }}</em>
+                            </button>
+                          </div>
                           <footer v-if="message.role === 'agent'" class="message-footer">
                             <button type="button" :title="label('message.copy')" :aria-label="label('message.copy')" @click="copyMessage(message)">
                               <Copy :size="14" />
@@ -3463,6 +3534,12 @@ function persistCanvasMode(mode: CanvasMode) {
                   </div>
 
                   <div v-else-if="activeSurfaceSpec.kind === 'custom_view' && isTaskListSurfaceSpec(activeSurfaceSpec)" class="task-list-app" :class="{ 'is-compact': taskIsCompact(activeSurfaceSpec) }">
+                    <div v-if="taskAppError" class="provider-notice is-inline">
+                      <div class="provider-notice-main">
+                        <strong>Tasksを更新できません</strong>
+                        <span>{{ taskAppError }}</span>
+                      </div>
+                    </div>
                     <form class="task-add-row" @submit.prevent="addTask(activeSurfaceSpec)">
                       <input v-model="taskDraftTitle" type="text" placeholder="新しいタスク" :disabled="taskSaving" />
                       <button type="submit" :disabled="taskSaving || !taskDraftTitle.trim()">
@@ -3492,7 +3569,7 @@ function persistCanvasMode(mode: CanvasMode) {
                               <input v-else :value="taskDraft(record)[taskFieldId(field)]" :disabled="taskSaving" :type="taskFieldType(field) === 'date' ? 'date' : taskFieldType(field) === 'number' ? 'number' : 'text'" @input="setTaskDraftValue(record, taskFieldId(field), ($event.target as HTMLInputElement).value)" />
                             </label>
                           </div>
-                          <button class="surface-row-save" type="button" :disabled="taskSaving || !taskDraft(record).title.trim()" @click="saveTaskDraft(activeSurfaceSpec, record)">
+                          <button class="surface-row-save" type="button" :disabled="taskSaving || !taskDraft(record).title?.trim()" @click="saveTaskDraft(activeSurfaceSpec, record)">
                             <Save :size="13" />
                           </button>
                           <button v-if="taskAllowsDelete(activeSurfaceSpec)" class="surface-row-save" type="button" :disabled="taskSaving" @click="deleteTask(activeSurfaceSpec, record)">

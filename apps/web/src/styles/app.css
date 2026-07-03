@@ -1303,6 +1303,11 @@ button {
   line-height: 1.45;
 }
 
+.provider-notice.is-inline {
+  margin: 0;
+  max-width: none;
+}
+
 .provider-notice-actions {
   display: flex;
   flex-wrap: wrap;
