@@ -393,6 +393,110 @@ describe("agent runtime", () => {
     expect(patched.resource.data.completed).toBe(true);
   });
 
+  it("presents and refreshes the task collection view through Runtime surface operations", async () => {
+    const { store, runtime } = await createRuntime();
+    await runtime.ensureTasksCollectionSchema();
+
+    await runtime.runSurfaceOperation({
+      id: "surface_task_create",
+      kind: "collection.record.create",
+      collection_id: "tasks",
+      record_id: "task_1",
+      data: { title: "請求書を送る", completed: false, notes: "", due_date: "2026-07-10", order: 0, source_session_id: "", source_message_id: "" },
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "task_list", versions: ["1"] }]
+      }
+    });
+    const view = await runtime.runSurfaceOperation({
+      id: "surface_task_view",
+      kind: "collection.view.present",
+      collection_id: "tasks",
+      view_id: "task_list",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "task_list", versions: ["1"] }]
+      }
+    });
+    await store.close();
+
+    expect(view.result_kind).toBe("collection_view");
+    expect(view.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "task_list",
+        actions: expect.arrayContaining([
+          expect.objectContaining({ operation_kind: "collection.record.create" }),
+          expect.objectContaining({ operation_kind: "collection.record.patch" }),
+          expect.objectContaining({ operation_kind: "collection.record.delete" })
+        ]),
+        data: expect.objectContaining({
+          collection_id: "tasks",
+          record_ids: ["task_1"],
+          records: [expect.objectContaining({ id: "task_1", title: "請求書を送る" })]
+        })
+      }
+    });
+  });
+
+  it("deletes task records through Runtime only when schema and view allow it", async () => {
+    const { store, runtime } = await createRuntime();
+    await runtime.ensureTasksCollectionSchema();
+    await runtime.createCollectionRecord({
+      id: "task_delete_ok",
+      collection_id: "tasks",
+      data: { title: "消すタスク", completed: false, notes: "", due_date: "", order: 0, source_session_id: "", source_message_id: "" },
+      resource_refs: [],
+      created_at: nowIso(),
+      updated_at: nowIso()
+    });
+
+    const deleted = await runtime.runSurfaceOperation({
+      id: "surface_task_delete_ok",
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_delete_ok",
+      view_id: "task_list",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "task_list", versions: ["1"] }]
+      }
+    });
+    expect(deleted.result_kind).toBe("collection_delete");
+    expect(deleted.render_spec.props.data).toMatchObject({ record_ids: [] });
+
+    await runtime.createCollectionRecord({
+      id: "task_delete_denied_by_permission",
+      collection_id: "tasks",
+      data: { title: "権限で消せない", completed: false, notes: "", due_date: "", order: 0, source_session_id: "", source_message_id: "" },
+      resource_refs: [],
+      created_at: nowIso(),
+      updated_at: nowIso()
+    });
+    const schema = await store.getCollectionSchema("tasks");
+    await store.updateCollectionSchema({ ...schema!, permissions: { ...(schema?.permissions ?? {}), delete: false } });
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_task_delete_denied_by_permission",
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_delete_denied_by_permission",
+      view_id: "task_list"
+    })).rejects.toThrow("collection_record_delete_not_allowed");
+
+    await store.updateCollectionSchema({ ...schema!, permissions: { ...(schema?.permissions ?? {}), delete: true }, views: [{ ...(schema?.views?.[0] ?? {}), id: "task_list", renderer: "task_list", allow_delete: false }] });
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_task_delete_denied_by_view",
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_delete_denied_by_permission",
+      view_id: "task_list"
+    })).rejects.toThrow("collection_record_delete_not_allowed");
+    await store.close();
+  });
+
   it("applies task app edits through AppEditPatch instead of fixed phrases", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
     roots.push(root);
@@ -501,6 +605,45 @@ describe("agent runtime", () => {
     await store.close();
 
     expect(schema?.views?.find((view) => view.id === "task_list")?.hidden_fields ?? []).toEqual([]);
+  });
+
+  it("stores AppEditPatch delete visibility separately from delete permission", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/app-edit-delete", (input) => {
+      if (input.envelope.metadata.app_edit_patch === true) {
+        return {
+          content: JSON.stringify([
+            { op: "update_view", allow_delete: false },
+            { op: "set_permissions", allow_delete: false }
+          ]),
+          toolCalls: []
+        };
+      }
+      return { content: "対応しました。", toolCalls: [] };
+    }));
+    const session = await runtime.createSession();
+    await runtime.ensureTasksCollectionSchema();
+
+    await runtime.runSurfaceOperation({
+      id: "surface_task_delete_edit",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "削除できないようにして",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "task_list",
+          collection_id: "tasks"
+        }
+      }
+    });
+    const schema = await store.getCollectionSchema("tasks");
+    await store.close();
+
+    expect(schema?.views?.find((view) => view.id === "task_list")?.allow_delete).toBe(false);
+    expect(schema?.permissions.delete).toBe(false);
   });
 
   it("runs Knowledge Wiki lifecycle Domain Commands through active retrieval and provenance", async () => {

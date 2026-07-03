@@ -99,8 +99,10 @@ export const surfaceOperationKinds = [
   "table.patch",
   "chart.request",
   "artifact.request",
+  "collection.view.present",
   "collection.record.create",
   "collection.record.patch",
+  "collection.record.delete",
   "custom_view.action"
 ] as const;
 
@@ -152,6 +154,12 @@ export interface ArtifactRequestOperation extends SurfaceOperationBase {
   instruction: string;
 }
 
+export interface CollectionViewPresentOperation extends SurfaceOperationBase {
+  kind: "collection.view.present";
+  collection_id: string;
+  view_id?: string;
+}
+
 export interface CollectionRecordCreateOperation extends SurfaceOperationBase {
   kind: "collection.record.create";
   collection_id: string;
@@ -167,6 +175,13 @@ export interface CollectionRecordPatchOperation extends SurfaceOperationBase {
   changes: Record<string, JsonValue>;
 }
 
+export interface CollectionRecordDeleteOperation extends SurfaceOperationBase {
+  kind: "collection.record.delete";
+  collection_id: string;
+  record_id: string;
+  view_id?: string;
+}
+
 export interface CustomViewActionOperation extends SurfaceOperationBase {
   kind: "custom_view.action";
   view_id: string;
@@ -180,8 +195,10 @@ export type SurfaceOperation =
   | TablePatchOperation
   | ChartRequestOperation
   | ArtifactRequestOperation
+  | CollectionViewPresentOperation
   | CollectionRecordCreateOperation
   | CollectionRecordPatchOperation
+  | CollectionRecordDeleteOperation
   | CustomViewActionOperation;
 
 export const surfaceRenderKinds = [
@@ -731,8 +748,10 @@ function customRendererName(spec: SurfaceRenderSpec): string | undefined {
 
 export const surfaceOperationResultKinds = [
   "chat_turn",
+  "collection_view",
   "collection_record",
   "collection_patch",
+  "collection_delete",
   "artifact",
   "form_submission",
   "table_patch",
@@ -835,6 +854,12 @@ const RawSurfaceOperationSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     ...SurfaceOperationBaseShape,
+    kind: z.literal("collection.view.present"),
+    collection_id: z.string().min(1),
+    view_id: z.string().min(1).optional()
+  }),
+  z.object({
+    ...SurfaceOperationBaseShape,
     kind: z.literal("collection.record.create"),
     collection_id: z.string().min(1),
     record_id: z.string().min(1),
@@ -847,6 +872,13 @@ const RawSurfaceOperationSchema = z.discriminatedUnion("kind", [
     record_id: z.string().min(1),
     patch_id: z.string().min(1).optional(),
     changes: z.record(jsonValueSchema)
+  }),
+  z.object({
+    ...SurfaceOperationBaseShape,
+    kind: z.literal("collection.record.delete"),
+    collection_id: z.string().min(1),
+    record_id: z.string().min(1),
+    view_id: z.string().min(1).optional()
   }),
   z.object({
     ...SurfaceOperationBaseShape,

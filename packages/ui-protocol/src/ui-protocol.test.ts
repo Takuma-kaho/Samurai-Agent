@@ -35,6 +35,30 @@ describe("surface operation protocol", () => {
     expect(operation?.kind === "collection.record.patch" ? operation.patch_id.startsWith("collection_patch_") : false).toBe(true);
   });
 
+  it("parses collection view and delete surface operations", () => {
+    expect(parseSurfaceOperation({
+      kind: "collection.view.present",
+      collection_id: "tasks",
+      view_id: "task_list"
+    })).toMatchObject({
+      kind: "collection.view.present",
+      collection_id: "tasks",
+      view_id: "task_list"
+    });
+    expect(parseSurfaceOperation({
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_1",
+      view_id: "task_list"
+    })).toMatchObject({
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_1",
+      view_id: "task_list"
+    });
+    expect(surfaceOperationResultKinds).toEqual(expect.arrayContaining(["collection_view", "collection_delete"]));
+  });
+
   it("validates surface dispatch plans", () => {
     const plan = SurfaceOperationDispatchPlanSchema.parse({
       operation_id: "surface_1",

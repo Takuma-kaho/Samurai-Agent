@@ -1867,7 +1867,11 @@ function taskViewConfig(spec: SurfaceRenderSpec): Record<string, unknown> {
 }
 
 function taskAllowsDelete(spec: SurfaceRenderSpec): boolean {
-  return taskViewConfig(spec).allow_delete === true;
+  const actions = Array.isArray(spec.props.actions) ? spec.props.actions : [];
+  const hasDeleteAction = actions.some((action) =>
+    isRecord(action) && action.operation_kind === "collection.record.delete"
+  );
+  return hasDeleteAction && taskViewConfig(spec).allow_delete !== false;
 }
 
 function taskIsCompact(spec: SurfaceRenderSpec): boolean {
@@ -1930,75 +1934,18 @@ function setTaskDraftValue(record: Record<string, unknown>, field: string, value
   };
 }
 
-function rebuildTaskListSurfaceSpec(records: Array<CollectionRecord & { file_path: string }>, previous: SurfaceRenderSpec): SurfaceRenderSpec {
-  const schemaFields = taskSchemaFieldsFromRecords(records, previous);
-  const taskRecords = records.map((record) => ({
-    ...Object.fromEntries(schemaFields.map((field) => {
-      const id = String(field.id ?? "");
-      return [id, record.data[id] ?? ""];
-    })),
-    id: record.id,
-    title: typeof record.data.title === "string" ? record.data.title : "",
-    completed: record.data.completed === true,
-    order: typeof record.data.order === "number" ? record.data.order : 0,
-    file_path: record.file_path,
-    updated_at: record.updated_at
-  })).sort((a, b) => {
-    if (a.completed !== b.completed) {
-      return a.completed ? 1 : -1;
-    }
-    return a.order - b.order || a.title.localeCompare(b.title);
-  });
-  const active = taskRecords.filter((record) => !record.completed).length;
-  return {
-    ...previous,
-    resource_refs: records.map((record) => ({
-      kind: "collection_record",
-      id: record.id,
-      uri: record.file_path,
-      label: `tasks/${record.id}`
-    })),
-    props: {
-      ...previous.props,
-      data: {
-        ...taskListData(previous),
-        collection_id: "tasks",
-        records: taskRecords,
-        schema_fields: schemaFields,
-        view_config: taskViewConfig(previous),
-        counts: {
-          total: taskRecords.length,
-          active,
-          completed: taskRecords.length - active
-        },
-        record_ids: taskRecords.map((record) => record.id)
-      }
-    }
-  };
-}
-
-function taskSchemaFieldsFromRecords(records: Array<CollectionRecord & { file_path: string }>, previous: SurfaceRenderSpec): Array<Record<string, JsonValue>> {
-  const data = taskListData(previous);
-  const previousFields = Array.isArray(data.schema_fields) ? data.schema_fields.filter(isRecord) as Array<Record<string, JsonValue>> : [];
-  const base = [
-    { id: "title", type: "string" },
-    { id: "completed", type: "boolean" },
-    { id: "notes", type: "text" },
-    { id: "due_date", type: "date" }
-  ];
-  const byId = new Map<string, Record<string, JsonValue>>();
-  for (const field of [...base, ...previousFields]) {
-    const id = typeof field.id === "string" ? field.id : "";
-    if (id && !["source_session_id", "source_message_id", "order"].includes(id)) {
-      byId.set(id, field);
-    }
-  }
-  return Array.from(byId.values());
-}
-
 async function refreshTaskListSurface(spec: SurfaceRenderSpec) {
-  const records = await api.listCollectionRecords("tasks");
-  const nextSpec = rebuildTaskListSurfaceSpec(records, spec);
+  const envelope = await api.runSurfaceOperation<{ collection_id: string; view_id: string }>({
+    id: `surface_tasks_present_${Date.now()}`,
+    kind: "collection.view.present",
+    collection_id: "tasks",
+    view_id: "task_list",
+    renderer_capabilities: rendererCapabilities.value
+  });
+  const nextSpec = envelope.render_spec;
+  if (!isTaskListSurfaceSpec(nextSpec)) {
+    throw new Error("task_list_render_spec_required");
+  }
   activeSurfaceSpec.value = nextSpec;
   lastSurfaceRenderSpec.value = nextSpec;
   lastSurfaceRenderSpecs.value = [nextSpec, ...lastSurfaceRenderSpecs.value.filter((item) => !isTaskListSurfaceSpec(item))];
@@ -2012,8 +1959,12 @@ async function addTask(spec: SurfaceRenderSpec) {
   }
   taskSaving.value = true;
   try {
-    await api.createCollectionRecord("tasks", {
-      id: `task_${Date.now()}`,
+    const envelope = await api.runSurfaceOperation({
+      id: `surface_task_create_${Date.now()}`,
+      kind: "collection.record.create",
+      collection_id: "tasks",
+      record_id: `task_${Date.now()}`,
+      renderer_capabilities: rendererCapabilities.value,
       data: {
         title,
         completed: false,
@@ -2025,7 +1976,7 @@ async function addTask(spec: SurfaceRenderSpec) {
       }
     });
     taskDraftTitle.value = "";
-    await refreshTaskListSurface(spec);
+    await refreshTaskListSurface(envelope.render_spec ?? spec);
   } finally {
     taskSaving.value = false;
   }
@@ -2038,8 +1989,16 @@ async function patchTask(spec: SurfaceRenderSpec, record: Record<string, unknown
   }
   taskSaving.value = true;
   try {
-    await api.applyCollectionPatch("tasks", id, { changes });
-    await refreshTaskListSurface(spec);
+    const envelope = await api.runSurfaceOperation({
+      id: `surface_task_patch_${Date.now()}`,
+      kind: "collection.record.patch",
+      collection_id: "tasks",
+      record_id: id,
+      patch_id: `task_patch_${Date.now()}`,
+      changes,
+      renderer_capabilities: rendererCapabilities.value
+    });
+    await refreshTaskListSurface(envelope.render_spec ?? spec);
   } finally {
     taskSaving.value = false;
   }
@@ -2056,8 +2015,23 @@ async function deleteTask(spec: SurfaceRenderSpec, record: Record<string, unknow
   }
   taskSaving.value = true;
   try {
-    await api.deleteCollectionRecord("tasks", id);
-    await refreshTaskListSurface(spec);
+    const envelope = await api.runSurfaceOperation({
+      id: `surface_task_delete_${Date.now()}`,
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: id,
+      view_id: "task_list",
+      renderer_capabilities: rendererCapabilities.value
+    });
+    const nextSpec = envelope.render_spec;
+    if (isTaskListSurfaceSpec(nextSpec)) {
+      activeSurfaceSpec.value = nextSpec;
+      lastSurfaceRenderSpec.value = nextSpec;
+      lastSurfaceRenderSpecs.value = [nextSpec, ...lastSurfaceRenderSpecs.value.filter((item) => !isTaskListSurfaceSpec(item))];
+      syncTaskDrafts(nextSpec);
+    } else {
+      await refreshTaskListSurface(spec);
+    }
   } finally {
     taskSaving.value = false;
   }

@@ -281,6 +281,7 @@ export type SkillSupportRuntimeResult = RuntimeWriteResult<SkillSupportFile>;
 export type WikiRuntimeResult = RuntimeWriteResult<WikiWithFilePath>;
 export type CollectionSchemaRuntimeResult = RuntimeWriteResult<CollectionSchemaWithFilePath>;
 export type CollectionRecordRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
+export type CollectionDeleteRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
 export type CollectionReindexRuntimeResult = RuntimeWriteResult<CollectionReindexResult>;
 export type GrantRuntimeResult = RuntimeWriteResult<GrantRecord>;
 export interface CollectionPluginActionResult {
@@ -368,8 +369,15 @@ export interface SurfaceArtifactRuntimeResult extends RuntimeWriteResult<Artifac
 }
 
 export type SurfaceOperationRuntimeResult = SurfaceOperationResultEnvelope<
-  RunChatTurnResult | CollectionRecordRuntimeResult | CollectionPatchRuntimeResult | SurfaceArtifactRuntimeResult
+  RunChatTurnResult | CollectionViewRuntimeResult | CollectionRecordRuntimeResult | CollectionPatchRuntimeResult | CollectionDeleteRuntimeResult | SurfaceArtifactRuntimeResult
 >;
+
+export interface CollectionViewRuntimeResult {
+  collection_id: string;
+  view_id: string;
+  schema: CollectionSchemaWithFilePath;
+  record_count: number;
+}
 
 export interface DomainCommandRuntimeInput {
   command_id: string;
@@ -578,6 +586,20 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
       proposedEffects: command.proposed_effects
     });
   }
+  if (operation.kind === "collection.view.present") {
+    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.view.present");
+    return surfaceDispatchPlan(operation, {
+      dispatchTarget: "collection_engine",
+      runtimeMethod: command.runtime_method,
+      operationName: command.id,
+      resultKind: "collection_view",
+      renderKind: commandRenderKind(command, "custom_view"),
+      requiresSession: false,
+      writesWorkspace: command.writes_workspace,
+      outputResourceKind: command.output_resource_kind,
+      proposedEffects: command.proposed_effects
+    });
+  }
   if (operation.kind === "collection.record.patch") {
     const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.patch.apply");
     return surfaceDispatchPlan(operation, {
@@ -586,6 +608,20 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
       operationName: command.id,
       resultKind: "collection_patch",
       renderKind: commandRenderKind(command, "collection_record"),
+      requiresSession: false,
+      writesWorkspace: command.writes_workspace,
+      outputResourceKind: command.output_resource_kind,
+      proposedEffects: command.proposed_effects
+    });
+  }
+  if (operation.kind === "collection.record.delete") {
+    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.record.delete");
+    return surfaceDispatchPlan(operation, {
+      dispatchTarget: "collection_engine",
+      runtimeMethod: command.runtime_method,
+      operationName: command.id,
+      resultKind: "collection_delete",
+      renderKind: commandRenderKind(command, "custom_view"),
       requiresSession: false,
       writesWorkspace: command.writes_workspace,
       outputResourceKind: command.output_resource_kind,
@@ -2205,6 +2241,26 @@ export class AgentRuntime {
       };
     }
 
+    if (input.kind === "collection.view.present") {
+      const result = await this.presentCollectionView({
+        collectionId: input.collection_id,
+        viewId: input.view_id
+      });
+      const renderSpec = negotiatedRenderSpec(input, result.render_spec);
+      return {
+        operation: input,
+        result_kind: "collection_view",
+        render_spec: renderSpec,
+        render_specs: [renderSpec],
+        result: {
+          collection_id: result.collection_id,
+          view_id: result.view_id,
+          schema: result.schema,
+          record_count: result.record_count
+        }
+      };
+    }
+
     if (input.kind === "collection.record.patch") {
       if (input.collection_id === TASKS_COLLECTION_ID) {
         validateTaskRecordPatchData(input.changes);
@@ -2225,6 +2281,26 @@ export class AgentRuntime {
       return {
         operation: input,
         result_kind: "collection_patch",
+        render_spec: renderSpec,
+        render_specs: [renderSpec],
+        result
+      };
+    }
+
+    if (input.kind === "collection.record.delete") {
+      const result = await this.deleteCollectionRecord({
+        collectionId: input.collection_id,
+        recordId: input.record_id,
+        viewId: input.view_id
+      });
+      const view = await this.presentCollectionView({
+        collectionId: input.collection_id,
+        viewId: input.view_id
+      });
+      const renderSpec = negotiatedRenderSpec(input, view.render_spec);
+      return {
+        operation: input,
+        result_kind: "collection_delete",
         render_spec: renderSpec,
         render_specs: [renderSpec],
         result
@@ -2510,6 +2586,17 @@ export class AgentRuntime {
       });
     }
 
+    if (command.id === "collection.view.present") {
+      const collectionId = stringPayload(payload.collection_id);
+      if (!collectionId) {
+        throw new RuntimeRequestError("conflict", "domain_command_collection_id_required");
+      }
+      return this.presentCollectionView({
+        collectionId,
+        viewId: stringPayload(payload.view_id) || undefined
+      });
+    }
+
     if (command.id === "collection.patch.apply") {
       const collectionId = stringPayload(payload.collection_id);
       const recordId = stringPayload(payload.record_id);
@@ -2526,6 +2613,19 @@ export class AgentRuntime {
           source_operation_id: stringPayload(payload.source_operation_id) || createId("domain_command"),
           created_at: nowIso()
         }
+      });
+    }
+
+    if (command.id === "collection.record.delete") {
+      const collectionId = stringPayload(payload.collection_id);
+      const recordId = stringPayload(payload.record_id);
+      if (!collectionId || !recordId) {
+        throw new RuntimeRequestError("conflict", "domain_command_collection_delete_target_required");
+      }
+      return this.deleteCollectionRecord({
+        collectionId,
+        recordId,
+        viewId: stringPayload(payload.view_id) || undefined
       });
     }
 
@@ -4563,6 +4663,50 @@ export class AgentRuntime {
     return result;
   }
 
+  async presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<CollectionViewRuntimeResult & { render_spec: SurfaceRenderSpec }> {
+    if (input.collectionId === TASKS_COLLECTION_ID) {
+      await this.ensureTasksCollectionSchema();
+      const [records, schema] = await Promise.all([
+        this.store.listCollectionRecords(TASKS_COLLECTION_ID),
+        this.store.getCollectionSchema(TASKS_COLLECTION_ID)
+      ]);
+      const savedSchema = schema;
+      if (!savedSchema) {
+        throw new RuntimeRequestError("not_found", `Collection schema not found: ${TASKS_COLLECTION_ID}`);
+      }
+      return {
+        collection_id: TASKS_COLLECTION_ID,
+        view_id: input.viewId ?? "task_list",
+        schema: savedSchema,
+        record_count: records.length,
+        render_spec: taskListRenderSpec(records, undefined, undefined, savedSchema)
+      };
+    }
+    const schema = await this.store.getCollectionSchema(input.collectionId);
+    if (!schema) {
+      throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
+    }
+    const records = await this.store.listCollectionRecords(input.collectionId);
+    return {
+      collection_id: input.collectionId,
+      view_id: input.viewId ?? "default",
+      schema,
+      record_count: records.length,
+      render_spec: createSurfaceRenderSpec({
+        kind: "collection",
+        priority: "primary",
+        state: "ready",
+        title: schema.labels?.ja ?? schema.labels?.en ?? schema.id,
+        resource_refs: records.map(collectionRecordRef),
+        props: {
+          collection_id: schema.id,
+          schema_id: schema.id,
+          record_ids: records.map((record) => record.id)
+        }
+      })
+    };
+  }
+
   async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
     if (input.collectionId === TASKS_COLLECTION_ID) {
       validateTaskRecordPatchData(input.patch.changes);
@@ -4600,6 +4744,38 @@ export class AgentRuntime {
       event: "record.patched"
     });
     return { ...result, before: (result as CollectionPatchRuntimeResult).before };
+  }
+
+  async deleteCollectionRecord(input: { collectionId: string; recordId: string; viewId?: string }): Promise<CollectionDeleteRuntimeResult> {
+    const schema = await this.store.getCollectionSchema(input.collectionId);
+    if (!schema) {
+      throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
+    }
+    assertCollectionDeleteAllowed(schema, input.viewId);
+    const record = await this.store.getCollectionRecord(input.collectionId, input.recordId);
+    if (!record) {
+      throw new RuntimeRequestError("not_found", `Collection record not found: ${input.collectionId}/${input.recordId}`);
+    }
+    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = createGatewayEnvelope(webGatewayContext, `Delete collection record: ${input.collectionId}/${input.recordId}`);
+    return this.runAllowedWrite({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName: "collection.record.delete",
+      proposedEffects: ["Delete a collection record file and SQLite index row."],
+      execute: async (operation) => {
+        const deleted = await this.store.deleteCollectionRecord(input.collectionId, input.recordId);
+        const ref = collectionRecordRef(deleted);
+        const rollbackPoint = await this.createRollbackPoint(
+          operation,
+          [ref],
+          { record: record as unknown as JsonValue },
+          {}
+        );
+        return { resource: deleted, ref, rollbackPoint, summary: `Deleted collection record ${deleted.collection_id}/${deleted.id}.` };
+      }
+    });
   }
 
   async listCollectionActions(collectionId?: string): Promise<CollectionActionDescriptor[]> {
@@ -8151,7 +8327,7 @@ function taskListRenderSpec(records: CollectionRecordWithFilePath[], sessionId?:
       renderer: "task_list",
       renderer_version: "1",
       schema_ref: `collections/${TASKS_COLLECTION_ID}/schema.json`,
-      actions: [],
+      actions: taskListActions(schema),
       data: {
         collection_id: TASKS_COLLECTION_ID,
         records: taskRecords,
@@ -8249,6 +8425,35 @@ function taskListViewConfig(records?: CollectionRecordWithFilePath[], schema?: C
   };
 }
 
+function taskListActions(schema?: CollectionSchema): Array<{ id: string; label: string; operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" }> {
+  const actions: Array<{ id: string; label: string; operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" }> = [
+    { id: "task.create", label: "追加", operation_kind: "collection.record.create" },
+    { id: "task.patch", label: "更新", operation_kind: "collection.record.patch" }
+  ];
+  if (collectionDeleteAllowed(schema, "task_list")) {
+    actions.push({ id: "task.delete", label: "削除", operation_kind: "collection.record.delete" });
+  }
+  return actions;
+}
+
+function collectionDeleteAllowed(schema: CollectionSchema | undefined, viewId?: string): boolean {
+  if (!schema) {
+    return false;
+  }
+  const permissions = unknownRecord(schema.permissions);
+  if (permissions.delete === false) {
+    return false;
+  }
+  const view = (schema.views ?? []).find((item) => item.id === (viewId ?? "task_list")) ?? (schema.views ?? [])[0];
+  return view?.allow_delete !== false;
+}
+
+function assertCollectionDeleteAllowed(schema: CollectionSchema, viewId?: string): void {
+  if (!collectionDeleteAllowed(schema, viewId)) {
+    throw new RuntimeRequestError("forbidden", "collection_record_delete_not_allowed");
+  }
+}
+
 function isActiveTaskListAppRequest(input: SurfaceOperation): boolean {
   const context = unknownRecord(input.metadata?.active_app_context);
   return input.kind === "message.submit"
@@ -8323,25 +8528,31 @@ async function applyAppEditPatch(store: { updateCollectionSchema(schema: Collect
       if (patch.hidden_fields) nextView.hidden_fields = uniqueStrings(patch.hidden_fields);
       if (patch.emphasized_fields) nextView.emphasized_fields = uniqueStrings(patch.emphasized_fields);
       if (patch.density) nextView.density = patch.density;
-      if (patch.allow_delete === true) nextView.allow_delete = true;
+      if (typeof patch.allow_delete === "boolean") nextView.allow_delete = patch.allow_delete;
     } else if (patch.op === "set_sort") {
       nextView.sort = { field_id: patch.field_id, direction: patch.direction, completed_last: patch.completed_last !== false };
     } else if (patch.op === "set_group") {
       nextView.group_by = patch.field_id;
-    } else if (patch.op === "set_permissions") {
-      if (patch.allow_delete === true) nextView.allow_delete = true;
     }
   }
   const otherViews = (schema.views ?? []).filter((view) => view.id !== "task_list");
+  const permissionsPatch = patches.find((patch): patch is Extract<AppEditPatch, { op: "set_permissions" }> =>
+    patch.op === "set_permissions" && typeof patch.allow_delete === "boolean"
+  );
+  const nextPermissions = permissionsPatch
+    ? { ...(schema.permissions ?? {}), delete: permissionsPatch.allow_delete as boolean }
+    : schema.permissions;
   const changed = fields.length !== schema.fields.length
-    || JSON.stringify(nextView) !== JSON.stringify(currentView);
+    || JSON.stringify(nextView) !== JSON.stringify(currentView)
+    || JSON.stringify(nextPermissions) !== JSON.stringify(schema.permissions);
   if (!changed) {
     return;
   }
   await store.updateCollectionSchema({
     ...schema,
     fields,
-    views: [...otherViews, nextView]
+    views: [...otherViews, nextView],
+    permissions: nextPermissions
   });
 }
 
@@ -8396,9 +8607,6 @@ function validateAppEditPatch(value: unknown, schema: CollectionSchema): AppEdit
           throw new RuntimeRequestError("conflict", `app_edit_required_field_visible:${fieldId}`);
         }
       }
-      if (patch.allow_delete === false) {
-        delete patch.allow_delete;
-      }
     }
     if (patch.op !== "backfill_records") {
       patches.push(patch);
@@ -8445,7 +8653,7 @@ function normalizeAppEditPatch(value: unknown): AppEditPatch {
   if (op === "hide_field") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")) };
   if (op === "set_sort") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")), direction: item.direction === "desc" ? "desc" : "asc", completed_last: item.completed_last !== false };
   if (op === "set_group") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")) };
-  if (op === "set_permissions") return { op, allow_delete: item.allow_delete === true };
+  if (op === "set_permissions") return { op, ...(typeof item.allow_delete === "boolean" ? { allow_delete: item.allow_delete } : {}) };
   if (op === "backfill_records") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")), value: isJsonValue(item.value) ? item.value : "" };
   if (op === "update_view") {
     return {

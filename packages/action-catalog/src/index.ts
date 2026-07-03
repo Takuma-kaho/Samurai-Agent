@@ -302,6 +302,20 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     proposed_effects: ["Create a Collection schema file and SQLite index row."]
   }),
   command({
+    id: "collection.view.present",
+    title: "Present collection view",
+    description: "Regenerate a Collection view render spec from current schema, records, actions, and permissions.",
+    runtime_method: "presentCollectionView",
+    ui_display_category: "collection",
+    input_sources: ["surface_operation", "runtime_api"],
+    surface_operation_kinds: ["collection.view.present"],
+    writes_workspace: false,
+    output_resource_kind: "collection_view",
+    output_render_kinds: ["collection", "custom_view"],
+    resource_kinds: ["collection_schema", "collection_record"],
+    proposed_effects: ["Return a current Collection view render spec without rebuilding it in the frontend."]
+  }),
+  command({
     id: "collection.record.create",
     title: "Create collection record",
     description: "Create a schema-validated Collection record.",
@@ -326,6 +340,20 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     output_resource_kind: "collection_record",
     resource_kinds: ["collection_record"],
     proposed_effects: ["Apply a schema-validated Collection patch and return the updated Collection record render spec."]
+  }),
+  command({
+    id: "collection.record.delete",
+    title: "Delete collection record",
+    description: "Delete a Collection record through Runtime permission checks.",
+    runtime_method: "deleteCollectionRecord",
+    ui_display_category: "collection",
+    input_sources: ["surface_operation", "runtime_api"],
+    surface_operation_kinds: ["collection.record.delete"],
+    writes_workspace: true,
+    output_resource_kind: "collection_record",
+    output_render_kinds: ["collection_record", "collection", "custom_view"],
+    resource_kinds: ["collection_record"],
+    proposed_effects: ["Delete a schema-validated Collection record when schema and view permissions allow it."]
   }),
   command({
     id: "collection.action.run",
