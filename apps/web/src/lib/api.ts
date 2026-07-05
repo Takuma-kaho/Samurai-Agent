@@ -10,6 +10,7 @@ import type {
   JsonValue,
   MemoryFrontmatter,
   MessageRecord,
+  MessagePresentationRecord,
   OperationRecord,
   PolicyDecisionRecord,
   RollbackPoint,
@@ -30,6 +31,7 @@ import type {
 export interface SessionDetail {
   session: SessionRecord;
   messages: MessageRecord[];
+  messagePresentations?: MessagePresentationRecord[];
   operations: OperationRecord[];
   artifacts: ArtifactRecord[];
   auditRecords: AuditRecord[];
@@ -60,6 +62,7 @@ export interface WikiDetail {
 export interface ChatTurnResult {
   session: SessionRecord;
   messages: MessageRecord[];
+  messagePresentations?: MessagePresentationRecord[];
   backendRun: BackendRunRecord;
   backendEvents: BackendEventRecord[];
   workspaceChanges: WorkspaceChangeRecord[];
@@ -276,6 +279,17 @@ export const api = {
       body: JSON.stringify(operation)
     });
   },
+  updateMessagePresentationViewState(presentationId: string, viewState: Record<string, JsonValue>) {
+    return request<SurfaceOperationResultEnvelope<MessagePresentationRecord>>("/api/surface/operations", {
+      method: "POST",
+      body: JSON.stringify({
+        id: `surface_presentation_state_${presentationId}_${Date.now()}`,
+        kind: "message.presentation.update",
+        presentation_id: presentationId,
+        view_state: viewState
+      })
+    });
+  },
   submitChatSurfaceOperation(input: {
     sessionId: string;
     content: string;
@@ -419,6 +433,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify(schema)
     });
+  },
+  listCollectionSchemas() {
+    return request<Array<CollectionSchema & { file_path: string }>>("/api/collections/schemas");
   },
   getCollectionSchema(collectionId: string) {
     return request<CollectionSchema & { file_path: string }>(`/api/collections/${collectionId}/schema`);

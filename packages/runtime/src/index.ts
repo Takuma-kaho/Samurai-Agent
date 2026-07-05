@@ -64,6 +64,7 @@ import {
   type MemoryFrontmatter,
   type MessageEnvelope,
   type MessageRecord,
+  type MessagePresentationRecord,
   type OperationRecord,
   type ExternalSendRecord,
   type GatewayInboundMessageRecord,
@@ -138,7 +139,7 @@ import {
 import { isSupportedLocale } from "@samurai-agent/localization";
 import { createSessionMemory, createTopicMemory, loadFreezeSnapshot, retrieveActiveMemoryWithReport, type MemoryCandidate } from "@samurai-agent/memory";
 import { evaluatePolicy } from "@samurai-agent/policy-engine";
-import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
+import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type MessageSubmitOperation, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import type {
   ArchiveMemoryResult,
   AutomationRunRecord,
@@ -202,6 +203,7 @@ export interface RunChatTurnInput {
 export interface RunChatTurnResult {
   session: SessionRecord;
   messages: MessageRecord[];
+  messagePresentations: MessagePresentationRecord[];
   backendRun: BackendRunRecord;
   backendEvents: BackendEventRecord[];
   workspaceChanges: WorkspaceChangeRecord[];
@@ -225,6 +227,7 @@ interface RuntimeToolCallResult {
   resourceRefs?: ResourceRef[];
   artifacts?: ArtifactRecord[];
   memories?: MemoryFrontmatter[];
+  collectionSchemas?: CollectionSchemaWithFilePath[];
   workspaceChanges?: WorkspaceChangeRecord[];
   events?: BackendOutputEvent[];
 }
@@ -233,6 +236,7 @@ interface BackendToolEventHandlingResult {
   operations: OperationRecord[];
   artifacts: ArtifactRecord[];
   memories: MemoryFrontmatter[];
+  collectionSchemas: CollectionSchemaWithFilePath[];
   toolRuns: ToolRunRecord[];
   workspaceChanges: WorkspaceChangeRecord[];
 }
@@ -369,7 +373,7 @@ export interface SurfaceArtifactRuntimeResult extends RuntimeWriteResult<Artifac
 }
 
 export type SurfaceOperationRuntimeResult = SurfaceOperationResultEnvelope<
-  RunChatTurnResult | CollectionViewRuntimeResult | CollectionRecordRuntimeResult | CollectionPatchRuntimeResult | CollectionDeleteRuntimeResult | SurfaceArtifactRuntimeResult
+  RunChatTurnResult | CollectionViewRuntimeResult | CollectionRecordRuntimeResult | CollectionPatchRuntimeResult | CollectionDeleteRuntimeResult | SurfaceArtifactRuntimeResult | MessagePresentationRecord
 >;
 
 export interface CollectionViewRuntimeResult {
@@ -478,7 +482,7 @@ export interface EvaluationJudgeProvider {
 
 export class RuntimeRequestError extends Error {
   constructor(
-    readonly code: "not_found" | "conflict" | "forbidden" | "provider_not_configured" | "provider_failed" | "backend_cancelled",
+    readonly code: "not_found" | "conflict" | "forbidden" | "provider_not_configured" | "provider_failed" | "backend_cancelled" | "backend_execution_root_not_ready",
     message: string,
     readonly payload?: ApprovalLifecycleResult | ArchiveMemoryRuntimeResult | BackendRunErrorPayload,
     readonly diagnostics?: ProviderDiagnostics
@@ -1367,12 +1371,41 @@ export class AgentRuntime {
       tool_call_id: toolCallId,
       payload: {
         provider_tool_name: providerToolName,
-        action_id: "artifact.create",
+        action_id: samuraiToolBridgeActionId(providerToolName),
         tool_origin: "samurai_tool_bridge",
         input: input.toolInput
       }
     });
     await recordEvent(startedEvent);
+    if (providerToolName === "samurai.collection.schema.save") {
+      const feedback = await this.handleRuntimeToolCall(run, runInput, startedEvent, undefined, undefined);
+      if (!feedback) {
+        throw new RuntimeRequestError("conflict", "tool_bridge_collection_schema_save_failed");
+      }
+      for (const change of feedback.workspaceChanges ?? []) {
+        await this.store.saveWorkspaceChange(change);
+        await this.emit("workspace.change.created", change);
+      }
+      await recordEvent({
+        event_type: "tool_call_output",
+        tool_call_id: toolCallId,
+        payload: feedback.outputPayload ?? {
+          status: "completed",
+          action_id: feedback.operation.operation,
+          resource_id: feedback.operation.result_ref?.id ?? feedback.operation.id
+        },
+        resource_refs: feedback.resourceRefs ?? (feedback.operation.result_ref ? [feedback.operation.result_ref] : [])
+      });
+      return {
+        status: "completed",
+        output: {
+          operation_id: feedback.operation.id,
+          ...(feedback.operation.result_ref?.id ? { collection_id: feedback.operation.result_ref.id } : {})
+        },
+        resource_ref: feedback.operation.result_ref,
+        tool_run_ids: [feedback.toolRun.id]
+      };
+    }
     if (providerToolName !== "samurai.artifact.create") {
       const output = await this.runReadOnlyBackendTool(providerToolName, input.toolInput);
       await recordEvent({
@@ -1443,21 +1476,78 @@ export class AgentRuntime {
       }));
     }
     if (toolName === "samurai.collection.search") {
-      const collectionId = typeof input.collection_id === "string" && input.collection_id.trim() ? input.collection_id.trim() : TASKS_COLLECTION_ID;
-      const records = await this.store.listCollectionRecords(collectionId);
+      const collectionId = typeof input.collection_id === "string" && input.collection_id.trim() ? input.collection_id.trim() : "";
+      if (!collectionId) {
+        const schemas = await this.store.listCollectionSchemas();
+        return matchCollectionSchemas(schemas, query)
+          .slice(0, limit)
+          .map((schema) => collectionSchemaSearchResult(schema));
+      }
+      const [schema, records] = await Promise.all([
+        this.store.getCollectionSchema(collectionId),
+        this.store.listCollectionRecords(collectionId)
+      ]);
       const normalizedQuery = query.trim().toLowerCase();
-      return records
+      const recordResults = records
         .filter((record) => !normalizedQuery || JSON.stringify(record.data).toLowerCase().includes(normalizedQuery))
         .slice(0, limit)
         .map((record) => ({
+          kind: "collection_record",
           collection_id: record.collection_id,
           id: record.id,
           file_path: record.file_path,
           summary: summarize(JSON.stringify(record.data), 180),
           data: collectionId === TASKS_COLLECTION_ID ? taskSafeRecordData(record.data) : record.data
         }));
+      return schema ? [collectionSchemaSearchResult(schema), ...recordResults] : recordResults;
+    }
+    if (toolName === "samurai.collection.view.present") {
+      const descriptor = await this.resolveCollectionPresentationDescriptor(input);
+      return descriptor;
     }
     throw new RuntimeRequestError("conflict", "tool_bridge_tool_not_allowed");
+  }
+
+  private async resolveCollectionPresentationDescriptor(input: Record<string, JsonValue>): Promise<Record<string, JsonValue>> {
+    const collectionId = typeof input.collection_id === "string" ? input.collection_id.trim() : "";
+    const query = typeof input.query === "string" ? input.query.trim() : "";
+    const viewId = typeof input.view_id === "string" ? input.view_id.trim() : "";
+    const recordId = typeof input.record_id === "string" ? input.record_id.trim() : "";
+    const schemas = await this.store.listCollectionSchemas();
+    const matches = collectionId
+      ? schemas.filter((schema) => schema.id === collectionId)
+      : matchCollectionSchemas(schemas, query);
+    if (matches.length === 0) {
+      return {
+        status: "not_found",
+        query,
+        message: "No matching Collection was found.",
+        candidates: schemas.slice(0, 8).map((schema) => collectionSchemaSearchResult(schema))
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        status: "ambiguous",
+        query,
+        message: "Multiple Collections matched. Ask the user which one to open.",
+        candidates: matches.slice(0, 8).map((schema) => collectionSchemaSearchResult(schema))
+      };
+    }
+    const schema = matches[0]!;
+    const records = await this.store.listCollectionRecords(schema.id);
+    const viewConfig = genericCollectionViewConfig(schema, viewId || undefined);
+    const resolvedViewId = String(viewConfig.id);
+    return {
+      status: "ready",
+      kind: "collection_app",
+      collection_id: schema.id,
+      view_id: resolvedViewId,
+      renderer: String(viewConfig.renderer),
+      ...(recordId ? { record_id: recordId } : {}),
+      title: collectionDisplayTitle(schema),
+      subtitle: `${schema.id} ・ ${records.length}件`,
+      record_count: records.length
+    };
   }
 
   async runChatTurn(input: RunChatTurnInput): Promise<RunChatTurnResult> {
@@ -1766,7 +1856,13 @@ export class AgentRuntime {
       this.backendToolBridgeTokens.delete(backendRun.id);
       this.backendEventSequences.delete(backendRun.id);
       const payload = { session, messages: [userMessage], backendRun, backendEvents, workspaceChanges };
-      const code = wasCancelled ? "backend_cancelled" : backendRun.error_code === "provider_not_configured" ? "provider_not_configured" : "provider_failed";
+      const code = wasCancelled
+        ? "backend_cancelled"
+        : backendRun.error_code === "provider_not_configured"
+          ? "provider_not_configured"
+          : backendRun.error_code === "backend_execution_root_not_ready"
+            ? "backend_execution_root_not_ready"
+            : "provider_failed";
       throw new RuntimeRequestError(code, typeof failedEvent.payload.message === "string" ? failedEvent.payload.message : "Provider failed.", payload, {
         reason: isProviderDiagnosticReason(failedEvent.payload.reason) ? failedEvent.payload.reason : code === "provider_not_configured" ? "not_configured" : "unknown",
         retryable: failedEvent.payload.retryable === true,
@@ -1779,6 +1875,7 @@ export class AgentRuntime {
     const persistedRunState = await this.loadPersistedRunOutputs(backendRun);
     mergeUniqueById(operations, persistedRunState.operations);
     mergeUniqueById(artifacts, persistedRunState.artifacts);
+    mergeUniqueById(backendEvents, await this.store.listBackendEvents({ runId: backendRun.id }));
     mergeUniqueById(workspaceChanges, persistedRunState.workspaceChanges);
     mergeUniqueById(toolRuns, persistedRunState.toolRuns);
 
@@ -1871,6 +1968,7 @@ export class AgentRuntime {
     return {
       session,
       messages: [userMessage, agentMessage],
+      messagePresentations: [],
       backendRun,
       backendEvents,
       workspaceChanges,
@@ -2222,6 +2320,14 @@ export class AgentRuntime {
       if (!input.session_id) {
         throw new RuntimeRequestError("conflict", "surface_operation_session_required");
       }
+      if (isTaskListAppRequest(input.content)) {
+        return this.runLocalAppSurfaceOperation(input);
+      }
+      const directCollectionPresentation = await this.resolveDirectCollectionPresentation(input);
+      if (directCollectionPresentation) {
+        return this.runDirectCollectionPresentationSurfaceOperation(input, directCollectionPresentation);
+      }
+      const collectionSchemasBefore = await this.store.listCollectionSchemas();
       const result = await this.runChatTurn({
         sessionId: input.session_id,
         content: input.content,
@@ -2237,18 +2343,58 @@ export class AgentRuntime {
       });
       const chatRender = negotiatedRenderSpec(input, chatTurnRenderSpec(result));
       const renderSpecs = [chatRender];
-      if (isTaskListAppRequest(input.content)) {
-        await this.ensureTasksCollectionSchema();
-        const records = await this.store.listCollectionRecords("tasks");
-        const schema = await this.store.getCollectionSchema("tasks");
-        renderSpecs.push(negotiatedRenderSpec(input, taskListRenderSpec(records, input.session_id, input.id, schema)));
-      } else if (isActiveTaskListAppRequest(input)) {
+      const collectionRenderSpecs = await this.collectionRenderSpecsFromWorkspaceChanges(input, result, collectionSchemasBefore);
+      renderSpecs.push(...collectionRenderSpecs);
+      for (const operation of result.operations) {
+        if (operation.operation !== "collection.schema.save" || operation.result_ref?.kind !== "collection_schema") {
+          continue;
+        }
+        if (renderSpecs.some((spec) => isCollectionRenderSpecForId(spec, operation.result_ref?.id ?? ""))) {
+          continue;
+        }
+        const schema = await this.store.getCollectionSchema(operation.result_ref.id);
+        if (!schema) {
+          continue;
+        }
+        const view = await this.presentCollectionView({
+          collectionId: schema.id,
+          viewId: defaultGenericCollectionViewId(schema)
+        });
+        renderSpecs.push(negotiatedRenderSpec(input, view.render_spec));
+      }
+      if (isActiveTaskListAppRequest(input)) {
         await this.ensureTasksCollectionSchema();
         await applyAppEditPatchToTasksStore(this.store, this.provider, input.content);
         const records = await this.store.listCollectionRecords("tasks");
         const schema = await this.store.getCollectionSchema("tasks");
         renderSpecs.push(negotiatedRenderSpec(input, taskListRenderSpec(records, input.session_id, input.id, schema)));
       }
+      const eventDescriptors = collectionPresentationDescriptorsFromBackendEvents(result.backendEvents);
+      for (const descriptor of eventDescriptors) {
+        if (descriptor.status !== "ready" || renderSpecs.some((spec) => isCollectionRenderSpecForId(spec, descriptor.collection_id))) {
+          continue;
+        }
+        const view = await this.presentCollectionView({
+          collectionId: descriptor.collection_id,
+          viewId: descriptor.view_id
+        });
+        renderSpecs.push(negotiatedRenderSpec(input, view.render_spec));
+      }
+      const agentMessageId = result.messages.find((message) => message.role === "agent")?.id;
+      const descriptorPresentations = await this.saveMessagePresentationsForBackendEvents({
+        sessionId: result.session.id,
+        messageId: agentMessageId,
+        backendEvents: result.backendEvents
+      });
+      const renderSpecPresentations = await this.saveMessagePresentationsForRenderSpecs({
+        sessionId: result.session.id,
+        messageId: agentMessageId,
+        renderSpecs: renderSpecs.filter((spec) => !descriptorPresentations.some((presentation) =>
+          presentation.collection_id === collectionRenderSpecCollectionId(spec)
+          && presentation.view_id === collectionRenderSpecViewId(spec, presentation.collection_id)
+        ))
+      });
+      result.messagePresentations = mergePresentations(descriptorPresentations, renderSpecPresentations);
       return {
         operation: input,
         result_kind: "chat_turn",
@@ -2302,6 +2448,28 @@ export class AgentRuntime {
       };
     }
 
+    if (input.kind === "message.presentation.update") {
+      const updated = await this.store.updateMessagePresentationViewState({
+        id: input.presentation_id,
+        viewState: input.view_state
+      });
+      if (!updated) {
+        throw new RuntimeRequestError("not_found", `Message presentation not found: ${input.presentation_id}`);
+      }
+      const result = await this.presentCollectionView({
+        collectionId: updated.collection_id,
+        viewId: updated.view_id
+      });
+      const renderSpec = negotiatedRenderSpec(input, result.render_spec);
+      return {
+        operation: input,
+        result_kind: "message_presentation",
+        render_spec: renderSpec,
+        render_specs: [renderSpec],
+        result: updated
+      };
+    }
+
     if (input.kind === "collection.record.patch") {
       if (input.collection_id === TASKS_COLLECTION_ID) {
         validateTaskRecordPatchData(input.changes);
@@ -2349,6 +2517,317 @@ export class AgentRuntime {
     }
 
     return this.runStructuredSurfaceOperation(input);
+  }
+
+  private async runLocalAppSurfaceOperation(input: MessageSubmitOperation): Promise<SurfaceOperationRuntimeResult> {
+    if (!input.session_id) {
+      throw new RuntimeRequestError("conflict", "surface_operation_session_required");
+    }
+    const session = await this.store.getSession(input.session_id);
+    if (!session) {
+      throw new Error(`Session not found: ${input.session_id}`);
+    }
+
+    const settings = await this.store.getSettings();
+    const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
+    const outputLocale = input.output_locale ?? session.output_locale ?? settings.output_locale;
+    const envelope = createGatewayEnvelope(webGatewayContext, input.content, inputLocale, outputLocale, {
+      ...(input.metadata ?? {}),
+      surface_operation_id: input.id,
+      surface_operation_kind: input.kind,
+      surface_operation_payload: jsonSafe(input)
+    });
+    const userMessage = await this.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "user",
+      content: input.content,
+      input_locale: envelope.input_locale,
+      output_locale: envelope.output_locale,
+      envelope,
+      created_at: envelope.received_at
+    });
+
+    const operations: OperationRecord[] = [];
+    const policyDecisions: PolicyDecisionRecord[] = [];
+    const auditRecords: AuditRecord[] = [];
+    const rollbackPoints: RollbackPoint[] = [];
+    let activity: ActivityInboxItem[] = [];
+    const schemaResult = await this.ensureTasksCollectionSchema({ session, envelope });
+    if ("operation" in schemaResult) {
+      operations.push(schemaResult.operation);
+      policyDecisions.push(schemaResult.policyDecision);
+      auditRecords.push(schemaResult.auditRecord);
+      if (schemaResult.rollbackPoint) rollbackPoints.push(schemaResult.rollbackPoint);
+      activity = schemaResult.activity;
+    }
+    const records = await this.store.listCollectionRecords(TASKS_COLLECTION_ID);
+    const schema = await this.store.getCollectionSchema(TASKS_COLLECTION_ID);
+    const appSpec = taskListRenderSpec(records, session.id, userMessage.id, schema);
+    const agentContent = outputLocale === "ja" ? "タスクアプリを作成しました。" : "Created the task app.";
+
+    const backendRun: BackendRunRecord = await this.store.saveBackendRun({
+      id: createId("run"),
+      session_id: session.id,
+      input_message_id: userMessage.id,
+      backend_id: "surface-operation",
+      backend_kind: "samurai_native",
+      status: "completed",
+      started_at: userMessage.created_at,
+      completed_at: nowIso(),
+      input_summary: summarize(input.content),
+      output_summary: agentContent,
+      metadata: {
+        surface_operation_id: input.id,
+        surface_operation_kind: input.kind,
+        local_app_operation: true
+      }
+    });
+    await this.emit("backend.run.created", backendRun);
+    await this.emit("backend.run.updated", backendRun);
+
+    const agentMessage = await this.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: agentContent,
+      input_locale: inputLocale,
+      output_locale: outputLocale,
+      created_at: nowIso()
+    });
+
+    const result: RunChatTurnResult = {
+      session: (await this.store.getSession(session.id)) ?? session,
+      messages: [userMessage, agentMessage],
+      messagePresentations: [],
+      backendRun,
+      backendEvents: [],
+      workspaceChanges: [],
+      operations,
+      policyDecisions,
+      artifacts: [],
+      memories: [],
+      approvalRequests: [],
+      auditRecords,
+      rollbackPoints,
+      activity,
+      reflectionRuns: [],
+      reflectionSuggestions: [],
+      toolRuns: []
+    };
+    const chatRender = negotiatedRenderSpec(input, chatTurnRenderSpec(result));
+    const localAppRender = negotiatedRenderSpec(input, appSpec);
+    result.messagePresentations = await this.saveMessagePresentationsForRenderSpecs({
+      sessionId: session.id,
+      messageId: agentMessage.id,
+      renderSpecs: [localAppRender]
+    });
+    return {
+      operation: input,
+      result_kind: "chat_turn",
+      render_spec: chatRender,
+      render_specs: [chatRender, localAppRender],
+      result
+    };
+  }
+
+  private async saveMessagePresentationsForRenderSpecs(input: {
+    sessionId: string;
+    messageId?: string;
+    renderSpecs: SurfaceRenderSpec[];
+  }): Promise<MessagePresentationRecord[]> {
+    if (!input.messageId) {
+      return [];
+    }
+    const presentations: MessagePresentationRecord[] = [];
+    const seen = new Set<string>();
+    for (const spec of input.renderSpecs) {
+      const presentation = messagePresentationFromRenderSpec(spec, input.sessionId, input.messageId);
+      if (!presentation || seen.has(`${presentation.collection_id}:${presentation.view_id}:${presentation.renderer}`)) {
+        continue;
+      }
+      seen.add(`${presentation.collection_id}:${presentation.view_id}:${presentation.renderer}`);
+      presentations.push(await this.store.saveMessagePresentation(presentation));
+    }
+    return presentations;
+  }
+
+  private async saveMessagePresentationsForBackendEvents(input: {
+    sessionId: string;
+    messageId?: string;
+    backendEvents: BackendEventRecord[];
+  }): Promise<MessagePresentationRecord[]> {
+    if (!input.messageId) {
+      return [];
+    }
+    const presentations: MessagePresentationRecord[] = [];
+    const seen = new Set<string>();
+    for (const event of input.backendEvents) {
+      if (event.event_type !== "tool_call_output") {
+        continue;
+      }
+      const descriptor = messagePresentationDescriptorFromToolOutput(event.payload);
+      if (!descriptor || descriptor.status !== "ready") {
+        continue;
+      }
+      const key = `${descriptor.collection_id}:${descriptor.view_id}:${descriptor.renderer}:${descriptor.record_id ?? ""}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      presentations.push(await this.store.saveMessagePresentation(messagePresentationFromDescriptor(descriptor, input.sessionId, input.messageId)));
+    }
+    return presentations;
+  }
+
+  private async resolveDirectCollectionPresentation(input: MessageSubmitOperation): Promise<CollectionPresentationDescriptor | undefined> {
+    if (!shouldPresentCollectionOutput(input.content) || shouldCreateCollectionSchemaOutput(input.content)) {
+      return undefined;
+    }
+    const descriptor = await this.resolveCollectionPresentationDescriptor({ query: input.content });
+    const presentation = messagePresentationDescriptorFromToolOutput(descriptor);
+    return presentation?.status === "ready" ? presentation : undefined;
+  }
+
+  private async runDirectCollectionPresentationSurfaceOperation(
+    input: MessageSubmitOperation,
+    descriptor: CollectionPresentationDescriptor
+  ): Promise<SurfaceOperationRuntimeResult> {
+    const session = await this.store.getSession(input.session_id ?? "");
+    if (!session) {
+      throw new Error(`Session not found: ${input.session_id}`);
+    }
+    const settings = await this.store.getSettings();
+    const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
+    const outputLocale = input.output_locale ?? session.output_locale ?? settings.output_locale;
+    const envelope = createGatewayEnvelope(webGatewayContext, input.content, inputLocale, outputLocale, {
+      ...(input.metadata ?? {}),
+      surface_operation_id: input.id,
+      surface_operation_kind: input.kind,
+      collection_present_resolution: "workspace_index"
+    });
+    const userMessage = await this.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "user",
+      content: input.content,
+      input_locale: envelope.input_locale,
+      output_locale: envelope.output_locale,
+      envelope,
+      created_at: envelope.received_at
+    });
+    const agentMessage = await this.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: `${descriptor.title ?? descriptor.collection_id}を開きました。`,
+      input_locale: envelope.input_locale,
+      output_locale: envelope.output_locale,
+      created_at: nowIso()
+    });
+    let backendRun: BackendRunRecord = {
+      id: createId("run"),
+      session_id: session.id,
+      input_message_id: userMessage.id,
+      output_message_id: agentMessage.id,
+      backend_id: "samurai_runtime",
+      backend_kind: "mock",
+      status: "completed",
+      started_at: envelope.received_at,
+      completed_at: nowIso(),
+      input_summary: summarize(input.content),
+      output_summary: `${descriptor.collection_id} presented`,
+      metadata: {
+        context_intent: "workspace_task",
+        expected_outputs: ["collection_view"],
+        collection_present_resolution: "workspace_index",
+        collection_id: descriptor.collection_id,
+        view_id: descriptor.view_id
+      }
+    };
+    backendRun = await this.store.saveBackendRun(backendRun);
+    await this.emit("backend.run.created", backendRun);
+    await this.emit("backend.run.updated", backendRun);
+    const presentation = await this.store.saveMessagePresentation(messagePresentationFromDescriptor(descriptor, session.id, agentMessage.id));
+    const view = await this.presentCollectionView({
+      collectionId: descriptor.collection_id,
+      viewId: descriptor.view_id
+    });
+    const chatRender = negotiatedRenderSpec(input, chatTurnRenderSpec({
+      session,
+      messages: [userMessage, agentMessage],
+      messagePresentations: [presentation],
+      backendRun,
+      backendEvents: [],
+      workspaceChanges: [],
+      operations: [],
+      policyDecisions: [],
+      artifacts: [],
+      memories: [],
+      approvalRequests: [],
+      auditRecords: [],
+      rollbackPoints: [],
+      activity: [],
+      reflectionRuns: [],
+      reflectionSuggestions: [],
+      toolRuns: []
+    }));
+    const appRender = negotiatedRenderSpec(input, view.render_spec);
+    return {
+      operation: input,
+      result_kind: "chat_turn",
+      render_spec: chatRender,
+      render_specs: [chatRender, appRender],
+      result: {
+        session,
+        messages: [userMessage, agentMessage],
+        messagePresentations: [presentation],
+        backendRun,
+        backendEvents: [],
+        workspaceChanges: [],
+        operations: [],
+        policyDecisions: [],
+        artifacts: [],
+        memories: [],
+        approvalRequests: [],
+        auditRecords: [],
+        rollbackPoints: [],
+        activity: [],
+        reflectionRuns: [],
+        reflectionSuggestions: [],
+        toolRuns: []
+      }
+    };
+  }
+
+  private async collectionRenderSpecsFromWorkspaceChanges(input: SurfaceOperation, result: RunChatTurnResult, schemasBefore: CollectionSchemaWithFilePath[]): Promise<SurfaceRenderSpec[]> {
+    if (input.kind !== "message.submit" || !shouldCreateCollectionSchemaOutput(input.content)) {
+      return [];
+    }
+    const beforeById = new Map(schemasBefore.map((schema) => [schema.id, collectionSchemaSignature(schema)]));
+    await this.store.reindexCollections();
+    const schemasAfter = await this.store.listCollectionSchemas();
+    const changedCollectionIds = new Set<string>();
+    for (const operation of result.operations) {
+      if (operation.operation === "collection.schema.save" && operation.result_ref?.kind === "collection_schema") {
+        changedCollectionIds.add(operation.result_ref.id);
+      }
+    }
+    for (const schema of schemasAfter) {
+      if (beforeById.get(schema.id) !== collectionSchemaSignature(schema)) {
+        changedCollectionIds.add(schema.id);
+      }
+    }
+    const renderSpecs: SurfaceRenderSpec[] = [];
+    for (const collectionId of changedCollectionIds) {
+      try {
+        const view = await this.presentCollectionView({ collectionId });
+        renderSpecs.push(negotiatedRenderSpec(input, view.render_spec));
+      } catch {
+        // Invalid or unsupported files stay in the workspace, but should not break chat.
+      }
+    }
+    return renderSpecs;
   }
 
   async runDomainCommand(input: DomainCommandRuntimeInput): Promise<DomainCommandRuntimeResult> {
@@ -4624,9 +5103,9 @@ export class AgentRuntime {
     });
   }
 
-  async saveCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Save collection schema: ${schema.id}`);
+  async saveCollectionSchema(schema: CollectionSchema, contextOverride?: { session: SessionRecord; envelope: MessageEnvelope }): Promise<CollectionSchemaRuntimeResult> {
+    const session = contextOverride?.session ?? await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = contextOverride?.envelope ?? createGatewayEnvelope(webGatewayContext, `Save collection schema: ${schema.id}`);
     return this.runAllowedWrite({
       session,
       envelope,
@@ -4642,13 +5121,13 @@ export class AgentRuntime {
     });
   }
 
-  async ensureTasksCollectionSchema(): Promise<CollectionSchemaWithFilePath | CollectionSchemaRuntimeResult> {
+  async ensureTasksCollectionSchema(contextOverride?: { session: SessionRecord; envelope: MessageEnvelope }): Promise<CollectionSchemaWithFilePath | CollectionSchemaRuntimeResult> {
     const existing = await this.store.getCollectionSchema(TASKS_COLLECTION_ID);
     if (existing) {
       ensureCompatibleTasksCollectionSchema(existing);
       return existing;
     }
-    return this.saveCollectionSchema(createTasksCollectionSchema());
+    return this.saveCollectionSchema(createTasksCollectionSchema(), contextOverride);
   }
 
   async reindexCollections(): Promise<CollectionReindexRuntimeResult> {
@@ -4728,23 +5207,13 @@ export class AgentRuntime {
       throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
     }
     const records = await this.store.listCollectionRecords(input.collectionId);
+    const renderSpec = genericCollectionRenderSpec(schema, records, input.viewId);
     return {
       collection_id: input.collectionId,
-      view_id: input.viewId ?? "default",
+      view_id: String(renderSpec.props.view_id ?? input.viewId ?? "default"),
       schema,
       record_count: records.length,
-      render_spec: createSurfaceRenderSpec({
-        kind: "collection",
-        priority: "primary",
-        state: "ready",
-        title: schema.labels?.ja ?? schema.labels?.en ?? schema.id,
-        resource_refs: records.map(collectionRecordRef),
-        props: {
-          collection_id: schema.id,
-          schema_id: schema.id,
-          record_ids: records.map((record) => record.id)
-        }
-      })
+      render_spec: renderSpec
     };
   }
 
@@ -5512,17 +5981,19 @@ export class AgentRuntime {
       operations: [],
       artifacts: [],
       memories: [],
+      collectionSchemas: [],
       toolRuns: [],
       workspaceChanges: []
     };
     if (isSamuraiToolBridgeObservedProviderTool(providerToolName, input.event.payload)) {
+      const actionId = samuraiToolBridgeActionId(normalizeSamuraiToolBridgeName(providerToolName));
       const toolRun = await this.store.saveToolRun({
         id: createId("toolrun"),
         run_id: input.run.id,
         session_id: input.run.session_id,
         tool_call_id: stringPayload(input.event.payload.tool_call_id) || input.event.tool_call_id,
         provider_tool_name: providerToolName,
-        action_id: "artifact.create",
+        action_id: actionId,
         status: "ignored",
         input_summary: summarize(JSON.stringify(input.event.payload.input ?? {}), 220),
         output_summary: "samurai_tool_bridge_already_executed",
@@ -5535,7 +6006,7 @@ export class AgentRuntime {
         payload: {
           status: "ignored",
           provider_tool_name: providerToolName,
-          action_id: "artifact.create",
+          action_id: actionId,
           reason: "samurai_tool_bridge_already_executed",
           already_executed: true,
           tool_origin: "samurai_tool_bridge"
@@ -5601,6 +6072,7 @@ export class AgentRuntime {
       result.toolRuns.push(runtimeTool.toolRun);
       result.artifacts.push(...(runtimeTool.artifacts ?? []));
       result.memories.push(...(runtimeTool.memories ?? []));
+      result.collectionSchemas.push(...(runtimeTool.collectionSchemas ?? []));
       for (const change of runtimeTool.workspaceChanges ?? []) {
         await this.store.saveWorkspaceChange(change);
         result.workspaceChanges.push(change);
@@ -5672,7 +6144,7 @@ export class AgentRuntime {
       | BrowserActionRuntimeResult
       | ExternalSendRuntimeResult
       | AutomationJobRuntimeResult
-      | RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>
+      | RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath | CollectionSchemaWithFilePath>
       | undefined;
 
     if (toolName === "file.read" || toolName === "file.list" || toolName === "file.write" || toolName === "file.patch") {
@@ -5703,6 +6175,15 @@ export class AgentRuntime {
       });
     } else if (toolName === "reflection.suggestion.apply") {
       result = await this.applyReflectionSuggestion({ suggestionId: stringPayload(args.suggestion_id) });
+    } else if (toolName === "collection.schema.save") {
+      const session = await this.store.getSession(run.session_id);
+      if (!session) {
+        throw new RuntimeRequestError("not_found", "session_not_found");
+      }
+      result = await this.saveCollectionSchema(CollectionSchemaSchema.parse(args), {
+        session,
+        envelope: runInput.envelope
+      });
     } else if (toolName === "workspace.delete") {
       const domainResult = await this.runDomainCommand({
         command_id: "workspace.delete",
@@ -5745,7 +6226,27 @@ export class AgentRuntime {
       resource_refs: withGatewayBoundaryRefs(result.operation.result_ref ? [result.operation.result_ref] : [], boundary),
       created_at: nowIso()
     });
-    return { operation: result.operation, toolRun };
+    const collectionSchema = typeof result.resource === "object" && result.resource !== null && isCollectionSchemaRenderResource(result.resource as Record<string, unknown>)
+      ? result.resource as CollectionSchemaWithFilePath
+      : undefined;
+    const workspaceChanges = collectionSchema && result.operation.result_ref
+      ? [{
+        id: createId("change"),
+        run_id: run.id,
+        session_id: run.session_id,
+        resource_ref: result.operation.result_ref,
+        change_type: "collection_changed" as const,
+        summary: `Saved collection schema ${collectionSchema.id}.`,
+        legacy_operation_id: result.operation.id,
+        created_at: nowIso()
+      }]
+      : undefined;
+    return {
+      operation: result.operation,
+      toolRun,
+      ...(collectionSchema ? { collectionSchemas: [collectionSchema] } : {}),
+      ...(workspaceChanges ? { workspaceChanges } : {})
+    };
   }
 
   private async handleProviderDomainCommandToolCall(
@@ -8245,6 +8746,9 @@ const TASK_FIELD_IDS = ["title", "completed", "notes", "due_date", "order", "sou
 const REQUIRED_TASK_FIELD_IDS = ["title", "completed", "notes", "due_date", "order", "source_session_id", "source_message_id"] as const;
 const APP_EDIT_FIELD_TYPES = ["string", "text", "date", "boolean", "number", "enum"] as const;
 const TASK_INTERNAL_FIELD_IDS = ["source_session_id", "source_message_id", "order"] as const;
+const GENERIC_COLLECTION_RENDERER = "collection_table";
+const COLLECTION_RENDERERS = ["collection_table", "collection_gallery", "calendar_view", "collection_kanban"] as const;
+const FUTURE_COLLECTION_RENDERERS = ["collection_gallery", "calendar_view", "collection_kanban", "study_deck", "document_reader"] as const;
 
 type AppEditFieldType = (typeof APP_EDIT_FIELD_TYPES)[number];
 type AppEditPatch =
@@ -8402,6 +8906,336 @@ function taskListRenderSpec(records: CollectionRecordWithFilePath[], sessionId?:
       }
     }
   });
+}
+
+function genericCollectionRenderSpec(schema: CollectionSchema, records: CollectionRecordWithFilePath[], requestedViewId?: string): SurfaceRenderSpec {
+  const viewConfig = genericCollectionViewConfig(schema, requestedViewId);
+  const recordData = records.map((record) => genericCollectionRecordRenderData(record, schema));
+  const refs = records.map(collectionRecordRef);
+  const title = schema.labels?.ja ?? schema.labels?.en ?? schema.id;
+  const recordIds = recordData.map((record) => String(record.id));
+  return createSurfaceRenderSpec({
+    kind: "custom_view",
+    priority: "secondary",
+    state: "ready",
+    title,
+    resource_refs: refs.length > 0 ? refs : [{
+      kind: "collection",
+      id: schema.id,
+      uri: `collections/${schema.id}`,
+      label: schema.id
+    }],
+    props: {
+      view_id: String(viewConfig.id),
+      renderer: String(viewConfig.renderer),
+      renderer_version: "1",
+      schema_ref: `collections/${schema.id}/schema.json`,
+      actions: genericCollectionActions(schema, String(viewConfig.id)),
+      data: {
+        collection_id: schema.id,
+        records: recordData,
+        schema_fields: genericCollectionSchemaFields(schema),
+        view_config: viewConfig,
+        counts: {
+          total: recordData.length
+        },
+        record_ids: recordIds
+      }
+    },
+    fallback: {
+      kind: "collection",
+      title: schema.id,
+      message: "Open this Collection if the app renderer is unavailable.",
+      props: {
+        collection_id: schema.id,
+        schema_id: schema.id,
+        record_ids: recordIds
+      }
+    }
+  });
+}
+
+function isCollectionRenderSpecForId(spec: SurfaceRenderSpec, collectionId: string): boolean {
+  if (!collectionId || spec.kind !== "custom_view" || !isCollectionRenderer(String(spec.props.renderer ?? ""))) {
+    return false;
+  }
+  const data = spec.props.data;
+  return typeof data === "object"
+    && data !== null
+    && !Array.isArray(data)
+    && (data as Record<string, unknown>).collection_id === collectionId;
+}
+
+interface CollectionPresentationDescriptor {
+  status: "ready";
+  kind: "collection_app";
+  collection_id: string;
+  view_id: string;
+  renderer: string;
+  title?: string;
+  subtitle?: string;
+  record_id?: string;
+  view_state?: Record<string, JsonValue>;
+}
+
+function messagePresentationDescriptorFromToolOutput(payload: Record<string, JsonValue>): CollectionPresentationDescriptor | undefined {
+  const output = payload.output && typeof payload.output === "object" && !Array.isArray(payload.output)
+    ? payload.output as Record<string, JsonValue>
+    : payload;
+  if (output.status !== "ready" || output.kind !== "collection_app") {
+    return undefined;
+  }
+  const collectionId = typeof output.collection_id === "string" ? output.collection_id.trim() : "";
+  if (!collectionId) {
+    return undefined;
+  }
+  const viewId = typeof output.view_id === "string" && output.view_id.trim() ? output.view_id.trim() : `${collectionId}_table`;
+  const renderer = typeof output.renderer === "string" && output.renderer.trim() ? output.renderer.trim() : GENERIC_COLLECTION_RENDERER;
+  const recordId = typeof output.record_id === "string" && output.record_id.trim() ? output.record_id.trim() : undefined;
+  const viewState = output.view_state && typeof output.view_state === "object" && !Array.isArray(output.view_state)
+    ? output.view_state as Record<string, JsonValue>
+    : undefined;
+  return {
+    status: "ready",
+    kind: "collection_app",
+    collection_id: collectionId,
+    view_id: viewId,
+    renderer,
+    ...(typeof output.title === "string" && output.title.trim() ? { title: output.title.trim() } : {}),
+    ...(typeof output.subtitle === "string" && output.subtitle.trim() ? { subtitle: output.subtitle.trim() } : {}),
+    ...(recordId ? { record_id: recordId } : {}),
+    ...(viewState ? { view_state: viewState } : {})
+  };
+}
+
+function collectionPresentationDescriptorsFromBackendEvents(events: BackendEventRecord[]): CollectionPresentationDescriptor[] {
+  return events
+    .filter((event) => event.event_type === "tool_call_output")
+    .map((event) => messagePresentationDescriptorFromToolOutput(event.payload))
+    .filter((descriptor): descriptor is CollectionPresentationDescriptor => Boolean(descriptor));
+}
+
+function messagePresentationFromDescriptor(descriptor: CollectionPresentationDescriptor, sessionId: string, messageId: string): MessagePresentationRecord {
+  const now = nowIso();
+  const viewState = {
+    ...(descriptor.view_state ?? {}),
+    ...(descriptor.record_id ? { record_id: descriptor.record_id } : {})
+  };
+  return {
+    id: createId("presentation"),
+    session_id: sessionId,
+    message_id: messageId,
+    kind: "collection_app",
+    title: descriptor.title ?? descriptor.collection_id,
+    subtitle: descriptor.subtitle ?? `${descriptor.collection_id} ・ 0件`,
+    collection_id: descriptor.collection_id,
+    view_id: descriptor.view_id,
+    renderer: descriptor.renderer,
+    ...(Object.keys(viewState).length > 0 ? { view_state: viewState } : {}),
+    created_at: now,
+    updated_at: now
+  };
+}
+
+function mergePresentations(primary: MessagePresentationRecord[], fallback: MessagePresentationRecord[]): MessagePresentationRecord[] {
+  const merged: MessagePresentationRecord[] = [];
+  const seen = new Set<string>();
+  for (const presentation of [...primary, ...fallback]) {
+    const key = `${presentation.message_id}:${presentation.collection_id}:${presentation.view_id}:${presentation.renderer}:${String(presentation.view_state?.record_id ?? "")}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(presentation);
+  }
+  return merged;
+}
+
+function messagePresentationFromRenderSpec(spec: SurfaceRenderSpec, sessionId: string, messageId: string): MessagePresentationRecord | undefined {
+  if (spec.kind !== "custom_view" || (!isCollectionRenderer(String(spec.props.renderer ?? "")) && spec.props.renderer !== "task_list")) {
+    return undefined;
+  }
+  const collectionId = collectionRenderSpecCollectionId(spec);
+  if (!collectionId) {
+    return undefined;
+  }
+  const records = collectionRenderSpecRecords(spec);
+  const now = nowIso();
+  return {
+    id: createId("presentation"),
+    session_id: sessionId,
+    message_id: messageId,
+    kind: "collection_app",
+    title: typeof spec.title === "string" && spec.title.trim() ? spec.title : collectionId,
+    subtitle: spec.props.renderer === "task_list"
+      ? `tasks ・ ${records.filter((record) => record.completed !== true).length} / ${records.length}`
+      : `${collectionId} ・ ${records.length}件`,
+    collection_id: collectionId,
+    view_id: collectionRenderSpecViewId(spec, collectionId),
+    renderer: typeof spec.props.renderer === "string" ? spec.props.renderer : GENERIC_COLLECTION_RENDERER,
+    created_at: now,
+    updated_at: now
+  };
+}
+
+function collectionRenderSpecCollectionId(spec: SurfaceRenderSpec): string {
+  const data = spec.props.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const collectionId = (data as Record<string, unknown>).collection_id;
+    if (typeof collectionId === "string" && collectionId.trim()) {
+      return collectionId;
+    }
+  }
+  const fallbackProps = spec.fallback?.props;
+  if (fallbackProps && typeof fallbackProps === "object" && !Array.isArray(fallbackProps)) {
+    const collectionId = (fallbackProps as Record<string, unknown>).collection_id;
+    if (typeof collectionId === "string" && collectionId.trim()) {
+      return collectionId;
+    }
+  }
+  return spec.resource_refs.find((item) => item.kind === "collection" && item.id)?.id ?? "";
+}
+
+function collectionRenderSpecViewId(spec: SurfaceRenderSpec, collectionId: string): string {
+  if (typeof spec.props.view_id === "string" && spec.props.view_id.trim()) {
+    return spec.props.view_id;
+  }
+  const data = spec.props.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const viewConfig = (data as Record<string, unknown>).view_config;
+    if (viewConfig && typeof viewConfig === "object" && !Array.isArray(viewConfig)) {
+      const viewId = (viewConfig as Record<string, unknown>).id;
+      if (typeof viewId === "string" && viewId.trim()) {
+        return viewId;
+      }
+    }
+  }
+  return collectionId === TASKS_COLLECTION_ID ? "task_list" : `${collectionId}_table`;
+}
+
+function collectionRenderSpecRecords(spec: SurfaceRenderSpec): Array<Record<string, unknown>> {
+  const data = spec.props.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return [];
+  }
+  const records = (data as Record<string, unknown>).records;
+  return Array.isArray(records) ? records.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+}
+
+function collectionSchemaSignature(schema: CollectionSchemaWithFilePath): string {
+  const { file_path: _filePath, ...schemaBody } = schema;
+  return JSON.stringify(schemaBody);
+}
+
+function collectionDisplayTitle(schema: CollectionSchema): string {
+  return schema.labels?.ja ?? schema.labels?.en ?? schema.id;
+}
+
+function collectionSchemaSearchResult(schema: CollectionSchemaWithFilePath): Record<string, JsonValue> {
+  const viewConfig = genericCollectionViewConfig(schema);
+  return {
+    kind: "collection_schema",
+    collection_id: schema.id,
+    id: schema.id,
+    title: collectionDisplayTitle(schema),
+    description: schema.descriptions?.ja ?? schema.descriptions?.en ?? "",
+    file_path: schema.file_path,
+    view_id: String(viewConfig.id),
+    renderer: String(viewConfig.renderer)
+  };
+}
+
+function matchCollectionSchemas(schemas: CollectionSchemaWithFilePath[], query: string): CollectionSchemaWithFilePath[] {
+  const normalizedQuery = normalizeCollectionSearchText(query);
+  if (!normalizedQuery) {
+    return schemas;
+  }
+  const exact = schemas.filter((schema) => collectionSchemaSearchTexts(schema).some((text) => text === normalizedQuery));
+  if (exact.length > 0) {
+    return exact;
+  }
+  return schemas.filter((schema) => collectionSchemaSearchTexts(schema).some((text) => text.includes(normalizedQuery) || normalizedQuery.includes(text)));
+}
+
+function collectionSchemaSearchTexts(schema: CollectionSchema): string[] {
+  return [
+    schema.id,
+    schema.labels?.ja,
+    schema.labels?.en,
+    schema.descriptions?.ja,
+    schema.descriptions?.en
+  ].map((item) => normalizeCollectionSearchText(item ?? "")).filter(Boolean);
+}
+
+function normalizeCollectionSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/アプリ|app|collection|コレクション|一覧|ログ/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function genericCollectionRecordRenderData(record: CollectionRecordWithFilePath, schema: CollectionSchema): Record<string, JsonValue> {
+  const fieldIds = new Set(genericCollectionSchemaFields(schema).map((field) => String(field.id)).filter(Boolean));
+  return {
+    id: record.id,
+    file_path: record.file_path,
+    updated_at: record.updated_at,
+    ...Object.fromEntries(Object.entries(record.data).filter(([key, value]) => fieldIds.has(key) && isJsonValue(value)))
+  };
+}
+
+function genericCollectionSchemaFields(schema: CollectionSchema): Array<Record<string, JsonValue>> {
+  return schema.fields.map((field) => normalizeGenericSchemaField(field)).filter((field) => Boolean(field.id));
+}
+
+function normalizeGenericSchemaField(field: Record<string, JsonValue>): Record<string, JsonValue> {
+  const id = String(field.id ?? field.name ?? "");
+  const type: AppEditFieldType = APP_EDIT_FIELD_TYPES.includes(field.type as AppEditFieldType)
+    ? field.type as AppEditFieldType
+    : "string";
+  return { ...field, id, type };
+}
+
+function genericCollectionViewConfig(schema: CollectionSchema, requestedViewId?: string): Record<string, JsonValue> {
+  const configured = (schema.views ?? []).find((view) => view.id === requestedViewId)
+    ?? (schema.views ?? [])[0]
+    ?? (schema.views ?? []).find((view) => view.renderer === GENERIC_COLLECTION_RENDERER);
+  const id = typeof configured?.id === "string" ? configured.id : defaultGenericCollectionViewId(schema);
+  const renderer = typeof configured?.renderer === "string" && isCollectionRenderer(configured.renderer)
+    ? configured.renderer
+    : GENERIC_COLLECTION_RENDERER;
+  const fieldIds = genericCollectionSchemaFields(schema).map((field) => String(field.id)).filter(Boolean);
+  return {
+    ...(configured ?? {}),
+    id,
+    renderer,
+    density: configured?.density === "compact" ? "compact" : "comfortable",
+    allow_delete: configured?.allow_delete !== false,
+    hidden_fields: Array.isArray(configured?.hidden_fields) ? configured.hidden_fields.filter((item): item is string => typeof item === "string") : [],
+    editable_fields: Array.isArray(configured?.editable_fields) ? configured.editable_fields.filter((item): item is string => typeof item === "string") : fieldIds
+  };
+}
+
+function defaultGenericCollectionViewId(schema: CollectionSchema): string {
+  const firstView = (schema.views ?? [])[0];
+  return typeof firstView?.id === "string" && firstView.id ? firstView.id : `${schema.id}_table`;
+}
+
+function isCollectionRenderer(renderer: string): boolean {
+  return (COLLECTION_RENDERERS as readonly string[]).includes(renderer);
+}
+
+function genericCollectionActions(schema: CollectionSchema, viewId: string): Array<{ id: string; label: string; operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" | "collection.view.present" }> {
+  const actions: Array<{ id: string; label: string; operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" | "collection.view.present" }> = [
+    { id: "collection.create", label: "追加", operation_kind: "collection.record.create" },
+    { id: "collection.patch", label: "更新", operation_kind: "collection.record.patch" },
+    { id: "collection.refresh", label: "更新", operation_kind: "collection.view.present" }
+  ];
+  if (collectionDeleteAllowed(schema, viewId)) {
+    actions.push({ id: "collection.delete", label: "削除", operation_kind: "collection.record.delete" });
+  }
+  return actions;
 }
 
 function taskRecordRenderData(record: CollectionRecordWithFilePath, schema?: CollectionSchema): TaskRecordRenderData {
@@ -10317,21 +11151,33 @@ function classifyBackendContextIntent(query: string): BackendContextIntent {
   return trimmed.length >= 24 ? "workspace_task" : "contextual_chat";
 }
 
-function expectedBackendOutputs(query: string): Array<"artifact"> {
-  return shouldCreateArtifactOutput(query) ? ["artifact"] : [];
+type BackendExpectedOutput = "artifact" | "collection_schema" | "collection_view";
+
+function expectedBackendOutputs(query: string): BackendExpectedOutput[] {
+  const outputs: BackendExpectedOutput[] = [];
+  if (shouldCreateArtifactOutput(query)) {
+    outputs.push("artifact");
+  }
+  if (shouldCreateCollectionSchemaOutput(query)) {
+    outputs.push("collection_schema");
+  }
+  if (shouldPresentCollectionOutput(query)) {
+    outputs.push("collection_view");
+  }
+  return outputs;
 }
 
 function createBackendToolBridge(input: {
   backendKind: AgentBackendKind;
   runId: string;
-  expectedOutputs: Array<"artifact">;
+  expectedOutputs: BackendExpectedOutput[];
   contextIntent: BackendContextIntent;
   gatewayBoundaryPresent: boolean;
 }): BackendToolBridge | undefined {
   if (input.gatewayBoundaryPresent) {
     return undefined;
   }
-  const shouldExposeBridge = input.expectedOutputs.includes("artifact") || input.contextIntent === "workspace_task";
+  const shouldExposeBridge = input.expectedOutputs.length > 0 || input.contextIntent === "workspace_task";
   if (!shouldExposeBridge) {
     return undefined;
   }
@@ -10428,9 +11274,59 @@ const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
       limit: { type: "number" }
     }
   }
+}, {
+  name: "samurai.collection.schema.save",
+  provider_tool_name: "mcp__samurai__collection_schema_save",
+  title: "Save Samurai Collection Schema",
+  description: "Save a validated CollectionSchema for a personal Workspace data app.",
+  input_schema: {
+    type: "object",
+    required: ["id", "version", "fields", "views", "permissions"],
+    properties: {
+      id: { type: "string" },
+      version: { type: "string" },
+      labels: { type: "object" },
+      descriptions: { type: "object" },
+      fields: { type: "array" },
+      refs: { type: "array" },
+      embeds: { type: "array" },
+      derived_fields: { type: "array" },
+      triggers: { type: "array" },
+      actions: { type: "array" },
+      views: { type: "array" },
+      permissions: { type: "object" }
+    }
+  }
+}, {
+  name: "samurai.collection.view.present",
+  provider_tool_name: "mcp__samurai__collection_view_present",
+  title: "Present Samurai Collection",
+  description: "Present an existing Collection as an interactive Workspace card without creating or overwriting its schema.",
+  input_schema: {
+    type: "object",
+    properties: {
+      collection_id: { type: "string" },
+      query: { type: "string" },
+      view_id: { type: "string" },
+      record_id: { type: "string" }
+    }
+  }
 }];
 
 const samuraiToolBridgeTools = new Set(samuraiToolBridgeDescriptors.map((tool) => tool.name));
+
+function samuraiToolBridgeActionId(toolName: string): string {
+  if (toolName === "samurai.artifact.create") {
+    return "artifact.create";
+  }
+  if (toolName === "samurai.collection.schema.save") {
+    return "collection.schema.save";
+  }
+  if (toolName === "samurai.collection.view.present") {
+    return "collection.view.present";
+  }
+  return toolName;
+}
 
 function toolBridgeEndpointUrl(runId: string): string {
   const explicit = process.env.SAMURAI_TOOL_BRIDGE_URL?.trim();
@@ -10457,6 +11353,23 @@ function shouldCreateArtifactOutput(query: string): boolean {
     return false;
   }
   return /作業メモ|メモ|議事録|下書き|ドラフト|提案書|企画書|レポート|報告書|資料|ドキュメント|文章|メール文|表|一覧|memo|note|minutes|draft|proposal|report|document|table|email/i.test(trimmed);
+}
+
+function shouldCreateCollectionSchemaOutput(query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return false;
+  }
+  return /アプリ.*作って|作って.*アプリ|app/i.test(trimmed) && !isTaskListAppRequest(trimmed);
+}
+
+function shouldPresentCollectionOutput(query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed || shouldCreateCollectionSchemaOutput(trimmed)) {
+    return false;
+  }
+  return /(開いて|表示して|見せて|出して|呼び出して|open|show|present)/i.test(trimmed)
+    && /(アプリ|ログ|collection|app|table|一覧)/i.test(trimmed);
 }
 
 function artifactTitleFromUserInput(query: string): string {
@@ -10504,7 +11417,15 @@ function normalizeSamuraiToolBridgeName(name: string): string {
     skill_search: "samurai.skill.search",
     mcp__samurai__skill_search: "samurai.skill.search",
     collection_search: "samurai.collection.search",
-    mcp__samurai__collection_search: "samurai.collection.search"
+    mcp__samurai__collection_search: "samurai.collection.search",
+    "collection.schema.save": "samurai.collection.schema.save",
+    save_collection_schema: "samurai.collection.schema.save",
+    collection_schema_save: "samurai.collection.schema.save",
+    mcp__samurai__collection_schema_save: "samurai.collection.schema.save",
+    "collection.view.present": "samurai.collection.view.present",
+    present_collection: "samurai.collection.view.present",
+    collection_view_present: "samurai.collection.view.present",
+    mcp__samurai__collection_view_present: "samurai.collection.view.present"
   };
   if (aliases[normalized]) {
     return aliases[normalized];
@@ -10522,7 +11443,11 @@ function isSamuraiToolBridgeObservedProviderTool(providerToolName: string, paylo
   if (payload.already_executed === true && payload.tool_origin === "samurai_tool_bridge") {
     return true;
   }
-  return providerToolName === "mcp__samurai__artifact_create" && payload.tool_origin === "samurai_tool_bridge";
+  return (
+    providerToolName === "mcp__samurai__artifact_create"
+    || providerToolName === "mcp__samurai__collection_schema_save"
+    || providerToolName === "mcp__samurai__collection_view_present"
+  ) && payload.tool_origin === "samurai_tool_bridge";
 }
 
 function timingSafeTokenEqual(left: string, right: string): boolean {

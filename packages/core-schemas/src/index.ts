@@ -2203,6 +2203,21 @@ export interface MessageRecord {
   created_at: string;
 }
 
+export interface MessagePresentationRecord {
+  id: string;
+  session_id: string;
+  message_id: string;
+  kind: "collection_app";
+  title: string;
+  subtitle: string;
+  collection_id: string;
+  view_id: string;
+  renderer: string;
+  view_state?: Record<string, JsonValue>;
+  created_at: string;
+  updated_at: string;
+}
+
 export const createId = (prefix: string) => `${prefix}_${createRandomId()}`;
 export const nowIso = () => new Date().toISOString();
 

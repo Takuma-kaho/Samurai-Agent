@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -135,12 +135,13 @@ describe("agent backend registry", () => {
       workspace_root: workspaceRoot,
       working_directory: workingDirectory
     }));
+    const realWorkingDirectory = await realpath(workingDirectory);
 
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({
         event_type: "run_completed",
         payload: expect.objectContaining({
-          output_summary: `cwd:${workingDirectory} workspace:${workspaceRoot}`
+          output_summary: `cwd:${realWorkingDirectory} workspace:${workspaceRoot}`
         })
       })
     ]));
@@ -656,6 +657,40 @@ describe("agent backend registry", () => {
       .join("\n");
 
     expect(text).toContain("exec --json -");
+  });
+
+  it("passes the Samurai Workspace root to Codex with -C instead of skip-git-repo-check", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-codex-cd-"));
+    roots.push(root);
+    const workspaceRoot = path.join(root, "workspace");
+    await mkdir(workspaceRoot, { recursive: true });
+    const executable = path.join(root, "codex-argv-cd");
+    await writeFile(
+      executable,
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' \"$*\"",
+        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(executable, 0o755);
+    const backend = new CodexBackend({
+      command: executable,
+      args: ["exec", "--json", "-"]
+    });
+
+    const text = (await collectEvents(backend.runTurn({
+      ...backendInput("run_codex_cd"),
+      workspace_root: workspaceRoot,
+      working_directory: workspaceRoot
+    })))
+      .filter((event) => event.event_type === "text_delta")
+      .map((event) => event.payload.text)
+      .join("\n");
+
+    expect(text).toContain(`-C ${workspaceRoot}`);
+    expect(text).not.toContain("--skip-git-repo-check");
   });
 
   it("passes locale and workspace context to external backend commands", () => {

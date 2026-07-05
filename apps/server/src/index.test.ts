@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createHmac, generateKeyPairSync, sign } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -185,6 +186,12 @@ describe("server env loading", () => {
     expect(repair).toMatchObject({ dry_run: true, health: { ok: true } });
     expect(backup.id.startsWith("backup_")).toBe(true);
     expect(backups.map((item) => item.id)).toContain(backup.id);
+  });
+
+  it("bootstraps the managed Workspace as an execution root", async () => {
+    const { root } = await startTestServer();
+
+    expect(existsSync(path.join(root, ".git"))).toBe(true);
   });
 
   it("exposes plugin diagnostics for filesystem plugin runtime readiness", async () => {
@@ -3534,12 +3541,27 @@ describe("backend run API", () => {
     expect(badSkill.error).toBe("title_and_description_required");
     expect(badRecord.error).toBe("conflict");
   });
+
+  it("hides internal operation-only sessions from the chat session list", async () => {
+    const { baseUrl, server } = await startTestServer();
+
+    await server.runtime.saveCollectionSchema(collectionSchema("internal_only"));
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+    await postJson(`${baseUrl}/api/chat/sessions/${session.id}/messages`, {
+      content: "こんにちは",
+      output_locale: "ja"
+    }, 201);
+    const sessions = await getJson<Array<{ id: string; title: string }>>(`${baseUrl}/api/chat/sessions`);
+
+    expect(sessions.map((item) => item.title)).not.toContain("Workspace operations");
+    expect(sessions.map((item) => item.id)).toContain(session.id);
+  });
 });
 
 async function startTestServer(
   provider: ProviderAdapter = new FakeProviderAdapter("fake/test", fakeProviderOutput),
   options: Omit<CreateApiServerOptions, "provider" | "workspaceDataDir" | "automationScheduler"> = {}
-): Promise<{ baseUrl: string; server: ApiServer }> {
+): Promise<{ baseUrl: string; server: ApiServer; root: string }> {
   const root = await mkdtemp(path.join(tmpdir(), "samurai-api-"));
   roots.push(root);
   const server = await createApiServer({ workspaceDataDir: root, provider, automationScheduler: false, ...options });
@@ -3550,7 +3572,8 @@ async function startTestServer(
   const address = server.httpServer.address() as AddressInfo;
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
-    server
+    server,
+    root
   };
 }
 

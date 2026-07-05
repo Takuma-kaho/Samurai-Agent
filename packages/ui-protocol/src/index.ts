@@ -103,6 +103,7 @@ export const surfaceOperationKinds = [
   "collection.record.create",
   "collection.record.patch",
   "collection.record.delete",
+  "message.presentation.update",
   "custom_view.action"
 ] as const;
 
@@ -182,6 +183,12 @@ export interface CollectionRecordDeleteOperation extends SurfaceOperationBase {
   view_id?: string;
 }
 
+export interface MessagePresentationUpdateOperation extends SurfaceOperationBase {
+  kind: "message.presentation.update";
+  presentation_id: string;
+  view_state: Record<string, JsonValue>;
+}
+
 export interface CustomViewActionOperation extends SurfaceOperationBase {
   kind: "custom_view.action";
   view_id: string;
@@ -199,6 +206,7 @@ export type SurfaceOperation =
   | CollectionRecordCreateOperation
   | CollectionRecordPatchOperation
   | CollectionRecordDeleteOperation
+  | MessagePresentationUpdateOperation
   | CustomViewActionOperation;
 
 export const surfaceRenderKinds = [
@@ -362,6 +370,54 @@ export const builtinSurfaceRendererRegistryEntries: SurfaceRendererRegistryEntry
     version: "1",
     title: "Task list",
     description: "Render the built-in task list app backed by the tasks Collection.",
+    props_schema: { type: "object" },
+    actions_schema: { type: "array" },
+    fallback_kind: "collection",
+    category: "custom_view"
+  },
+  {
+    id: "surface.custom_view.collection_table",
+    kind: "custom_view",
+    renderer: "collection_table",
+    version: "1",
+    title: "Collection table",
+    description: "Render a user-created personal data app backed by a Collection.",
+    props_schema: { type: "object" },
+    actions_schema: { type: "array" },
+    fallback_kind: "collection",
+    category: "custom_view"
+  },
+  {
+    id: "surface.custom_view.collection_gallery",
+    kind: "custom_view",
+    renderer: "collection_gallery",
+    version: "1",
+    title: "Collection gallery",
+    description: "Render a Collection as card-like records backed by the same Collection data.",
+    props_schema: { type: "object" },
+    actions_schema: { type: "array" },
+    fallback_kind: "collection",
+    category: "custom_view"
+  },
+  {
+    id: "surface.custom_view.calendar_view",
+    kind: "custom_view",
+    renderer: "calendar_view",
+    version: "1",
+    title: "Collection calendar",
+    description: "Render a date-oriented Collection view backed by the same Collection data.",
+    props_schema: { type: "object" },
+    actions_schema: { type: "array" },
+    fallback_kind: "collection",
+    category: "custom_view"
+  },
+  {
+    id: "surface.custom_view.collection_kanban",
+    kind: "custom_view",
+    renderer: "collection_kanban",
+    version: "1",
+    title: "Collection kanban",
+    description: "Render an enum-grouped Collection view backed by the same Collection data.",
     props_schema: { type: "object" },
     actions_schema: { type: "array" },
     fallback_kind: "collection",
@@ -752,6 +808,7 @@ export const surfaceOperationResultKinds = [
   "collection_record",
   "collection_patch",
   "collection_delete",
+  "message_presentation",
   "artifact",
   "form_submission",
   "table_patch",
@@ -879,6 +936,12 @@ const RawSurfaceOperationSchema = z.discriminatedUnion("kind", [
     collection_id: z.string().min(1),
     record_id: z.string().min(1),
     view_id: z.string().min(1).optional()
+  }),
+  z.object({
+    ...SurfaceOperationBaseShape,
+    kind: z.literal("message.presentation.update"),
+    presentation_id: z.string().min(1),
+    view_state: z.record(jsonValueSchema)
   }),
   z.object({
     ...SurfaceOperationBaseShape,

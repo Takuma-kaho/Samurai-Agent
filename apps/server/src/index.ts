@@ -3,10 +3,12 @@ import express from "express";
 import type { Express, NextFunction, Request, Response } from "express";
 import { createHmac, createPublicKey, createVerify, timingSafeEqual } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Server as HttpServer } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Server as SocketServer } from "socket.io";
@@ -280,11 +282,27 @@ function workspaceHasUserData(rootDir: string): boolean {
   }
 }
 
+async function bootstrapWorkspaceExecutionRoot(workspaceRoot: string): Promise<void> {
+  await mkdir(workspaceRoot, { recursive: true });
+  if (existsSync(path.join(workspaceRoot, ".git"))) {
+    return;
+  }
+  const result = spawnSync("git", ["init"], {
+    cwd: workspaceRoot,
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "unknown error").trim();
+    throw new Error(`Workspace execution root could not be initialized: ${detail}`);
+  }
+}
+
 export async function createApiServer(options: CreateApiServerOptions = {}): Promise<ApiServer> {
   loadServerEnv();
   const workspaceRoot = resolveWorkspaceRoot(options.workspaceDataDir);
   const legacyRepoWorkspaceDir = fileURLToPath(new URL("../../../workspace-data", import.meta.url));
   const workspaceHadUserDataBeforeCreate = workspaceHasUserData(workspaceRoot);
+  await bootstrapWorkspaceExecutionRoot(workspaceRoot);
   const store = await WorkspaceStore.create({ rootDir: workspaceRoot });
   const app = express();
   const httpServer = createServer(app);
@@ -677,11 +695,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       const activeSessions = await Promise.all(
         sessions.map(async (session) => ({
           session,
-          messageCount: (await store.listMessages(session.id)).length,
-          operationCount: (await store.listOperations(session.id)).length
+          messageCount: (await store.listMessages(session.id)).length
         }))
       );
-      res.json(activeSessions.filter((item) => item.messageCount > 0 || item.operationCount > 0).map((item) => item.session));
+      res.json(activeSessions.filter((item) => item.messageCount > 0).map((item) => item.session));
     } catch (error) {
       next(error);
     }
@@ -917,8 +934,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "session_not_found" });
           return;
         }
-        const [messages, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
+        const [messages, messagePresentations, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
           store.listMessages(session.id),
+          store.listMessagePresentations({ sessionId: session.id }),
           store.listOperations(session.id),
           store.listArtifactsForSession(session.id),
           store.listAuditRecords(),
@@ -930,7 +948,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           store.listToolRuns({ sessionId: session.id }),
           store.listReflectionRuns(session.id)
         ]);
-        res.json({ session, messages, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns });
+        res.json({ session, messages, messagePresentations, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns });
       } catch (error) {
         next(error);
       }

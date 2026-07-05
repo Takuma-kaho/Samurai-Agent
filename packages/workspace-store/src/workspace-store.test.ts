@@ -72,6 +72,100 @@ describe("workspace store", () => {
     expect(migrations.some((entry) => entry.name === "schema.ensure" && entry.status === "completed")).toBe(true);
   });
 
+  it("persists message presentations for chat cards", async () => {
+    const store = await createTempStore();
+    const settings = await store.getSettings();
+    const now = nowIso();
+    const session: SessionRecord = {
+      id: createId("session"),
+      session_key: "web:owner:cards",
+      title: "Card test",
+      ui_locale: settings.ui_locale,
+      output_locale: settings.output_locale,
+      created_at: now,
+      updated_at: now
+    };
+    await store.createSession(session);
+    const message = await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: "映画ログを作りました。",
+      input_locale: settings.ui_locale,
+      output_locale: settings.output_locale,
+      created_at: now
+    });
+    const presentation = await store.saveMessagePresentation({
+      id: createId("presentation"),
+      session_id: session.id,
+      message_id: message.id,
+      kind: "collection_app",
+      title: "映画ログ",
+      subtitle: "movies ・ 0件",
+      collection_id: "movies",
+      view_id: "movies_table",
+      renderer: "collection_table",
+      created_at: now,
+      updated_at: now
+    });
+    const presentations = await store.listMessagePresentations({ sessionId: session.id, messageId: message.id });
+    await store.close();
+
+    expect(presentations).toEqual([presentation]);
+  });
+
+  it("updates message presentation view state", async () => {
+    const store = await createTempStore();
+    const settings = await store.getSettings();
+    const now = nowIso();
+    const session: SessionRecord = {
+      id: createId("session"),
+      session_key: "web:owner:card-state",
+      title: "Card state test",
+      ui_locale: settings.ui_locale,
+      output_locale: settings.output_locale,
+      created_at: now,
+      updated_at: now
+    };
+    await store.createSession(session);
+    const message = await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: "映画ログを開きました。",
+      input_locale: settings.ui_locale,
+      output_locale: settings.output_locale,
+      created_at: now
+    });
+    const presentation = await store.saveMessagePresentation({
+      id: createId("presentation"),
+      session_id: session.id,
+      message_id: message.id,
+      kind: "collection_app",
+      title: "映画ログ",
+      subtitle: "movies ・ 0件",
+      collection_id: "movies",
+      view_id: "movies_table",
+      renderer: "collection_table",
+      created_at: now,
+      updated_at: now
+    });
+    const updated = await store.updateMessagePresentationViewState({
+      id: presentation.id,
+      viewState: { selected_view_id: "movies_gallery", filters: { status: "観た" } },
+      updatedAt: "2026-07-05T00:00:00.000Z"
+    });
+    const presentations = await store.listMessagePresentations({ sessionId: session.id, messageId: message.id });
+    await store.close();
+
+    expect(updated).toMatchObject({
+      id: presentation.id,
+      view_state: { selected_view_id: "movies_gallery", filters: { status: "観た" } },
+      updated_at: "2026-07-05T00:00:00.000Z"
+    });
+    expect(presentations[0]?.view_state).toEqual(updated?.view_state);
+  });
+
   it("writes artifact content to filesystem", async () => {
     const store = await createTempStore();
     const artifactId = createId("artifact");

@@ -28,6 +28,7 @@ import {
   type MemoryFrontmatter,
   MemoryFrontmatterSchema,
   type MessageRecord,
+  type MessagePresentationRecord,
   type OperationRecord,
   type ExternalSendRecord,
   type GatewayBoundaryPolicy,
@@ -91,6 +92,21 @@ interface MessagesTable {
   output_locale: string;
   envelope_json: JsonColumn | null;
   created_at: string;
+}
+
+interface MessagePresentationsTable {
+  id: string;
+  session_id: string;
+  message_id: string;
+  kind: string;
+  title: string;
+  subtitle: string;
+  collection_id: string;
+  view_id: string;
+  renderer: string;
+  view_state_json: JsonColumn | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface OperationsTable {
@@ -610,6 +626,7 @@ interface ResourceTranslationsTable {
 interface WorkspaceDb {
   sessions: SessionsTable;
   messages: MessagesTable;
+  message_presentations: MessagePresentationsTable;
   operations: OperationsTable;
   policy_decisions: PolicyDecisionsTable;
   approval_requests: ApprovalRequestsTable;
@@ -766,6 +783,7 @@ export interface CollectionNote {
 export interface SessionTranscriptExport {
   session: SessionRecord;
   messages: MessageRecord[];
+  message_presentations: MessagePresentationRecord[];
   operations: OperationRecord[];
   policy_decisions: PolicyDecisionRecord[];
   audit_records: AuditRecord[];
@@ -1087,6 +1105,23 @@ export class WorkspaceStore {
         created_at TEXT NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id)
       )`,
+      `CREATE TABLE IF NOT EXISTS message_presentations (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        subtitle TEXT NOT NULL,
+        collection_id TEXT NOT NULL,
+        view_id TEXT NOT NULL,
+        renderer TEXT NOT NULL,
+        view_state_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id),
+        FOREIGN KEY (message_id) REFERENCES messages(id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_message_presentations_session_message ON message_presentations(session_id, message_id)`,
       `CREATE TABLE IF NOT EXISTS operations (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
@@ -1702,8 +1737,9 @@ export class WorkspaceStore {
     if (!session) {
       return undefined;
     }
-    const [messages, operations, artifacts, backendRuns, backendEvents, toolRuns, workspaceChanges, changeHistory, runHistory] = await Promise.all([
+    const [messages, messagePresentations, operations, artifacts, backendRuns, backendEvents, toolRuns, workspaceChanges, changeHistory, runHistory] = await Promise.all([
       this.listMessages(sessionId),
+      this.listMessagePresentations({ sessionId }),
       this.listOperations(sessionId),
       this.listArtifactsForSession(sessionId),
       this.listBackendRuns(sessionId),
@@ -1721,6 +1757,7 @@ export class WorkspaceStore {
     return {
       session,
       messages,
+      message_presentations: messagePresentations,
       operations,
       policy_decisions: policyDecisions.filter((decision) => operationIds.has(decision.operation_id)),
       audit_records: auditRecords.filter((record) => operationIds.has(record.operation_id)),
@@ -1768,6 +1805,44 @@ export class WorkspaceStore {
   async listMessages(sessionId: string): Promise<MessageRecord[]> {
     const rows = await this.db.selectFrom("messages").selectAll().where("session_id", "=", sessionId).orderBy("created_at").execute();
     return rows.map(messageFromRow);
+  }
+
+  async saveMessagePresentation(presentation: MessagePresentationRecord): Promise<MessagePresentationRecord> {
+    await this.db
+      .insertInto("message_presentations")
+      .values(messagePresentationToRow(presentation))
+      .execute();
+    return presentation;
+  }
+
+  async updateMessagePresentationViewState(input: { id: string; viewState: Record<string, JsonValue>; updatedAt?: string }): Promise<MessagePresentationRecord | undefined> {
+    const updatedAt = input.updatedAt ?? nowIso();
+    await this.db
+      .updateTable("message_presentations")
+      .set({
+        view_state_json: stringify(input.viewState),
+        updated_at: updatedAt
+      })
+      .where("id", "=", input.id)
+      .execute();
+    const row = await this.db
+      .selectFrom("message_presentations")
+      .selectAll()
+      .where("id", "=", input.id)
+      .executeTakeFirst();
+    return row ? messagePresentationFromRow(row) : undefined;
+  }
+
+  async listMessagePresentations(input: { sessionId: string; messageId?: string }): Promise<MessagePresentationRecord[]> {
+    let query = this.db
+      .selectFrom("message_presentations")
+      .selectAll()
+      .where("session_id", "=", input.sessionId);
+    if (input.messageId) {
+      query = query.where("message_id", "=", input.messageId);
+    }
+    const rows = await query.orderBy("created_at").execute();
+    return rows.map(messagePresentationFromRow);
   }
 
   async saveOperation(operation: OperationRecord): Promise<OperationRecord> {
@@ -6730,6 +6805,40 @@ function toolRunFromRow(row: ToolRunsTable): ToolRunRecord {
     output_summary: row.output_summary,
     resource_refs: parse(row.resource_refs_json),
     created_at: row.created_at
+  };
+}
+
+function messagePresentationToRow(presentation: MessagePresentationRecord): MessagePresentationsTable {
+  return {
+    id: presentation.id,
+    session_id: presentation.session_id,
+    message_id: presentation.message_id,
+    kind: presentation.kind,
+    title: presentation.title,
+    subtitle: presentation.subtitle,
+    collection_id: presentation.collection_id,
+    view_id: presentation.view_id,
+    renderer: presentation.renderer,
+    view_state_json: presentation.view_state ? stringify(presentation.view_state) : null,
+    created_at: presentation.created_at,
+    updated_at: presentation.updated_at
+  };
+}
+
+function messagePresentationFromRow(row: MessagePresentationsTable): MessagePresentationRecord {
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    message_id: row.message_id,
+    kind: "collection_app",
+    title: row.title,
+    subtitle: row.subtitle,
+    collection_id: row.collection_id,
+    view_id: row.view_id,
+    renderer: row.renderer,
+    view_state: row.view_state_json ? parse<Record<string, JsonValue>>(row.view_state_json) : undefined,
+    created_at: row.created_at,
+    updated_at: row.updated_at
   };
 }
 

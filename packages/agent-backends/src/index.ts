@@ -100,7 +100,7 @@ export interface BackendRunInput {
   recent_messages: MessageRecord[];
   metadata: Record<string, JsonValue>;
   context_intent?: "light_chat" | "contextual_chat" | "workspace_task";
-  expected_outputs?: Array<"artifact">;
+  expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view">;
   tool_bridge?: BackendToolBridge;
 }
 
@@ -430,6 +430,7 @@ export class ExternalCliBackend implements AgentBackend {
           runId: input.run_id,
           backendKind: this.kind,
           args: this.args,
+          workingDirectory: input.working_directory,
           toolBridge: input.tool_bridge,
           artifactMcpScript: this.artifactMcpScript
         }),
@@ -560,7 +561,8 @@ export class ExternalCliBackend implements AgentBackend {
         args: externalBackendArgsForRun({
           runId,
           backendKind: this.kind,
-          args
+          args,
+          workingDirectory: stringValue(input.working_directory)
         }),
         input: buildExternalBackendResumePrompt(input),
         env: {
@@ -780,15 +782,33 @@ function providerToolNameForPrompt(tool: BackendToolBridgeToolDescriptor): strin
 }
 
 function formatExpectedOutputsForPrompt(input: BackendRunInput): string {
-  if (!input.expected_outputs?.includes("artifact")) {
+  const outputs: string[] = [];
+  if (input.expected_outputs?.includes("artifact")) {
+    outputs.push(
+      "- artifact: The user is asking Samurai to create user-facing content such as a memo, draft, report, document, table, or note.",
+      "- Do not create or edit workspace files for artifact requests unless the user explicitly asks for a file path, Markdown file, repository edit, save, or code change.",
+      "- Prefer returning the complete artifact content as assistant text.",
+      "- If tool events are available, emit artifact.create with { title, content } instead of writing a file directly."
+    );
+  }
+  if (input.expected_outputs?.includes("collection_schema")) {
+    outputs.push(
+      "- collection_schema: The user is asking for a personal Workspace data app.",
+      "- Decide the app's CollectionSchema from the user's intent, including id, labels, fields, permissions, and a view using renderer \"collection_table\".",
+      "- Save it through samurai.collection.schema.save / mcp__samurai__collection_schema_save. Do not fake success before the tool call completes."
+    );
+  }
+  if (input.expected_outputs?.includes("collection_view")) {
+    outputs.push(
+      "- collection_view: The user is asking to open, show, or present an existing Workspace data app.",
+      "- Search existing Collections when needed, then present the matching Collection through samurai.collection.view.present / mcp__samurai__collection_view_present.",
+      "- Do not create or overwrite a CollectionSchema when the user only asks to open or show an existing app."
+    );
+  }
+  if (outputs.length === 0) {
     return "(none)";
   }
-  return [
-    "- artifact: The user is asking Samurai to create user-facing content such as a memo, draft, report, document, table, or note.",
-    "- Do not create or edit workspace files for this request unless the user explicitly asks for a file path, Markdown file, repository edit, save, or code change.",
-    "- Prefer returning the complete artifact content as assistant text.",
-    "- If tool events are available, emit artifact.create with { title, content } instead of writing a file directly."
-  ].join("\n");
+  return outputs.join("\n");
 }
 
 function localeContractPayload(input: BackendRunInput): Record<string, JsonValue> {
@@ -825,10 +845,13 @@ function externalBackendArgsForRun(input: {
   runId: string;
   backendKind: AgentBackendKind;
   args: string[];
+  workingDirectory?: string;
   toolBridge?: BackendToolBridge;
   artifactMcpScript?: string;
 }): string[] {
-  let args = input.backendKind === "codex" ? injectCodexOutputLastMessageArgs(input.args, input.runId) : input.args;
+  let args = input.backendKind === "codex"
+    ? injectCodexWorkingDirectoryArgs(injectCodexOutputLastMessageArgs(input.args, input.runId), input.workingDirectory)
+    : input.args;
   if (!input.toolBridge?.enabled || input.toolBridge.tools.length === 0) {
     return args;
   }
@@ -839,6 +862,13 @@ function externalBackendArgsForRun(input: {
     return injectClaudeMcpArgs(args, input.toolBridge, input.artifactMcpScript);
   }
   return args;
+}
+
+function injectCodexWorkingDirectoryArgs(args: string[], workingDirectory: string | undefined): string[] {
+  if (!workingDirectory || args.includes("-C") || args.includes("--cd") || args.some((arg) => arg.startsWith("--cd="))) {
+    return args;
+  }
+  return insertBeforeStdinPrompt(args, ["-C", workingDirectory]);
 }
 
 function injectCodexOutputLastMessageArgs(args: string[], runId: string): string[] {
@@ -1210,8 +1240,10 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
     settle({
       event_type: "run_failed",
       payload: {
-        error_code: "backend_failed",
-        message: `${input.label} failed.`,
+        error_code: input.backendKind === "codex" && isCodexExecutionRootError(stderr) ? "backend_execution_root_not_ready" : "backend_failed",
+        message: input.backendKind === "codex" && isCodexExecutionRootError(stderr)
+          ? "Codex could not run because the Workspace execution root is not ready."
+          : `${input.label} failed.`,
         reason: "exit_code",
         retryable: false,
         exit_code: exitCode,
@@ -1243,6 +1275,10 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
       yield next;
     }
   }
+}
+
+function isCodexExecutionRootError(stderr: string): boolean {
+  return /Not inside a trusted directory|--skip-git-repo-check|outside a Git repository|not.*git repository/i.test(stderr);
 }
 
 function readCodexOutputLastMessage(runId: string): string {
