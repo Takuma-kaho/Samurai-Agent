@@ -106,6 +106,7 @@
   "nav.settings": "Settings",
   "nav.collapse_sidebar": "Collapse sidebar",
   "nav.expand_sidebar": "Expand sidebar",
+  "nav.resize_sidebar": "Resize sidebar",
   "search.placeholder": "Search",
   "search.title": "Search",
   "search.empty": "No search results yet",

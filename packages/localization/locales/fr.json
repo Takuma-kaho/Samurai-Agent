@@ -106,6 +106,7 @@
   "nav.settings": "Settings",
   "nav.collapse_sidebar": "Réduire la barre latérale",
   "nav.expand_sidebar": "Développer la barre latérale",
+  "nav.resize_sidebar": "Redimensionner la barre latérale",
   "search.placeholder": "Search",
   "search.title": "Search",
   "search.empty": "Aucun résultat pour le moment",

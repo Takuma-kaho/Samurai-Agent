@@ -28,6 +28,8 @@
   --icon-hover: rgba(255, 255, 255, 0.09);
   --header-glass: rgba(5, 5, 5, 0.72);
   --header-line: rgba(41, 45, 48, 0.78);
+  --sidebar-width: 244px;
+  --sidebar-collapsed-width: 60px;
   --shadow: none;
   --radius-ui: 8px;
   --radius-card: 8px;
@@ -120,7 +122,7 @@ button {
   border-radius: 0;
   box-shadow: none;
   display: grid;
-  grid-template-columns: 244px minmax(0, 1fr) 0px;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0px;
   height: 100dvh;
   margin: 0;
   max-width: none;
@@ -131,26 +133,74 @@ button {
 }
 
 .app-shell.has-drawer {
-  grid-template-columns: 244px minmax(0, 1fr) 320px;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 320px;
 }
 
 .app-shell.sidebar-collapsed {
-  grid-template-columns: 60px minmax(0, 1fr) 0px;
+  grid-template-columns: var(--sidebar-collapsed-width) minmax(0, 1fr) 0px;
 }
 
 .app-shell.sidebar-collapsed.has-drawer {
-  grid-template-columns: 60px minmax(0, 1fr) 320px;
+  grid-template-columns: var(--sidebar-collapsed-width) minmax(0, 1fr) 320px;
+}
+
+.app-shell.is-resizing-sidebar {
+  transition: none;
+}
+
+.app-shell.is-resizing-sidebar * {
+  user-select: none;
 }
 
 .sidebar {
-  background: var(--rail);
-  border-right: 1px solid var(--line);
+  -webkit-backdrop-filter: blur(24px) saturate(1.24);
+  backdrop-filter: blur(24px) saturate(1.24);
+  background:
+    linear-gradient(180deg, rgba(6, 8, 10, 0.7), rgba(2, 3, 4, 0.78)),
+    var(--rail);
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
   overflow: hidden;
   padding: 14px;
+  position: relative;
+}
+
+.sidebar::before,
+.sidebar::after {
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.sidebar::before {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.02), rgba(0, 0, 0, 0.24)),
+    url("../assets/sidebar-backgrounds/gradient-dark17.jpeg") center / cover no-repeat;
+  filter: blur(10px) saturate(1.18);
+  opacity: 0.86;
+  transform: scale(1.08);
+  z-index: 0;
+}
+
+.sidebar::after {
+  -webkit-backdrop-filter: blur(20px) saturate(1.22);
+  backdrop-filter: blur(20px) saturate(1.22);
+  background:
+    radial-gradient(ellipse 180px 320px at 18% 70%, rgba(190, 57, 42, 0.2), transparent 72%),
+    linear-gradient(180deg, rgba(8, 12, 15, 0.68), rgba(5, 6, 8, 0.82));
+  box-shadow:
+    inset -1px 0 0 rgba(255, 255, 255, 0.07),
+    inset 1px 0 0 rgba(255, 255, 255, 0.035);
+  z-index: 1;
+}
+
+.sidebar > * {
+  position: relative;
+  z-index: 2;
 }
 
 .brand-row {
@@ -164,7 +214,7 @@ button {
 
 .brand-symbol {
   align-items: center;
-  background: var(--ink);
+  background: rgba(244, 245, 241, 0.92);
   border-radius: 8px;
   color: var(--stage);
   display: grid;
@@ -215,31 +265,31 @@ button {
 }
 
 .nav-item {
-  color: var(--muted);
+  color: rgba(226, 229, 224, 0.76);
   width: 100%;
 }
 
 .nav-item svg {
-  color: var(--muted);
+  color: rgba(226, 229, 224, 0.72);
   flex: 0 0 auto;
   transition: none;
 }
 
 .nav-item:hover,
 .session-item:hover {
-  background: var(--nav-hover);
+  background: rgba(255, 255, 255, 0.105);
   color: var(--ink);
 }
 
 .nav-item.is-active,
 .session-item.is-current {
-  background: var(--nav-active);
+  background: rgba(255, 255, 255, 0.135);
   color: var(--ink);
 }
 
 .nav-item:hover svg,
 .nav-item.is-active svg {
-  color: var(--muted);
+  color: rgba(226, 229, 224, 0.78);
 }
 
 .session-list {
@@ -255,14 +305,14 @@ button {
 .section-label,
 .artifact-type,
 .result-kind {
-  color: var(--soft);
+  color: rgba(198, 202, 197, 0.54);
   font-size: 11px;
   letter-spacing: 0;
   text-transform: uppercase;
 }
 
 .session-item {
-  color: var(--muted);
+  color: rgba(226, 229, 224, 0.74);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   justify-content: initial;
@@ -278,7 +328,7 @@ button {
 
 .session-state {
   align-items: center;
-  color: var(--muted);
+  color: rgba(226, 229, 224, 0.72);
   display: flex;
   gap: 8px;
   min-height: 30px;
@@ -311,7 +361,7 @@ button {
 }
 
 .state-pulse {
-  background: var(--muted);
+  background: rgba(226, 229, 224, 0.72);
   border-radius: 999px;
   flex: 0 0 auto;
   height: 6px;
@@ -324,8 +374,77 @@ button {
   margin-top: auto;
 }
 
+.sidebar-resizer {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  bottom: 0;
+  cursor: col-resize;
+  margin: 0;
+  padding: 0;
+  position: absolute;
+  right: -5px;
+  top: 0;
+  touch-action: none;
+  width: 10px;
+  z-index: 5;
+}
+
+.sidebar-resizer::before {
+  background: rgba(255, 255, 255, 0.11);
+  bottom: 0;
+  content: "";
+  opacity: 0.34;
+  position: absolute;
+  right: 5px;
+  top: 0;
+  transition:
+    background-color 140ms ease,
+    opacity 140ms ease;
+  width: 1px;
+}
+
+.sidebar-resizer::after {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  content: "";
+  height: 22px;
+  opacity: 0;
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  width: 5px;
+}
+
+.sidebar-resizer:hover::before,
+.sidebar-resizer:focus-visible::before,
+.app-shell.is-resizing-sidebar .sidebar-resizer::before {
+  background: rgba(255, 255, 255, 0.32);
+  opacity: 1;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+.app-shell.is-resizing-sidebar .sidebar-resizer::after {
+  opacity: 1;
+  transform: translateY(-50%) scale(1.08);
+}
+
+.sidebar-resizer:focus-visible {
+  outline: 0;
+}
+
 .app-shell.sidebar-collapsed .sidebar {
   padding: 12px 8px;
+}
+
+.app-shell.sidebar-collapsed .sidebar-resizer {
+  display: none;
 }
 
 .app-shell.sidebar-collapsed .brand-row {
@@ -1370,6 +1489,12 @@ button {
 .chat-column.is-empty .prompt-dock {
   margin-top: 0;
   padding-top: 0;
+}
+
+.chat-column.is-empty .prompt-card {
+  justify-self: center;
+  max-width: 760px;
+  width: min(100%, 760px);
 }
 
 .prompt-dock::before {
@@ -3404,6 +3529,15 @@ button {
     border-bottom: 1px solid var(--line);
     border-right: 0;
     min-height: auto;
+  }
+
+  .sidebar::before {
+    background-size: cover;
+    filter: blur(8px) saturate(1.12);
+  }
+
+  .sidebar-resizer {
+    display: none;
   }
 
   .app-shell.sidebar-collapsed .sidebar {

@@ -110,6 +110,10 @@ hover / active で文字の太さ、letter spacing、padding を変えない。�
 左ナビ内の icon は hover で白く変化させず、グレーの円形/角丸背景面で反応を見せる。
 左サイドバーは desktop で icon rail へ collapse できる。
 collapse 時も New Chat、Search、Settings の主要導線はアイコンとして残す。
+左サイドバーは desktop でユーザーが幅を調整できる。
+幅は UI preference として `localStorage` に保存し、server 設定や DB schema には入れない。
+左サイドバーの背景は、固定背景画像の上に半透明 tint と blur を重ねた glass rail として扱ってよい。
+ただし背景切り替えUIは作らず、中央のチャット作業面は静かな黒基調を保つ。
 
 ### 3.2 Main Stage
 

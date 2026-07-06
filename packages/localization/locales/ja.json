@@ -106,6 +106,7 @@
   "nav.settings": "Settings",
   "nav.collapse_sidebar": "サイドバーを閉じる",
   "nav.expand_sidebar": "サイドバーを開く",
+  "nav.resize_sidebar": "サイドバーの幅を調整",
   "search.placeholder": "Search",
   "search.title": "Search",
   "search.empty": "検索結果はまだありません",
