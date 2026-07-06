@@ -1986,6 +1986,7 @@ export const CollectionSchemaSchema = z.object({
   derived_fields: z.array(z.record(jsonValueSchema)),
   triggers: z.array(z.record(jsonValueSchema)),
   actions: z.array(z.record(jsonValueSchema)),
+  views: z.array(z.record(jsonValueSchema)).optional(),
   permissions: z.record(jsonValueSchema)
 });
 export type CollectionSchema = z.infer<typeof CollectionSchemaSchema>;
@@ -2200,6 +2201,21 @@ export interface MessageRecord {
   output_locale: SupportedLocale;
   envelope?: MessageEnvelope;
   created_at: string;
+}
+
+export interface MessagePresentationRecord {
+  id: string;
+  session_id: string;
+  message_id: string;
+  kind: "collection_app";
+  title: string;
+  subtitle: string;
+  collection_id: string;
+  view_id: string;
+  renderer: string;
+  view_state?: Record<string, JsonValue>;
+  created_at: string;
+  updated_at: string;
 }
 
 export const createId = (prefix: string) => `${prefix}_${createRandomId()}`;

@@ -48,6 +48,8 @@ export interface BackendRunInput {
   run_id: string;
   session_id: string;
   input_message_id: string;
+  workspace_root?: string;
+  working_directory?: string;
   envelope: MessageEnvelope;
   user_input: string;
   input_locale: SupportedLocale;
@@ -98,7 +100,7 @@ export interface BackendRunInput {
   recent_messages: MessageRecord[];
   metadata: Record<string, JsonValue>;
   context_intent?: "light_chat" | "contextual_chat" | "workspace_task";
-  expected_outputs?: Array<"artifact">;
+  expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view">;
   tool_bridge?: BackendToolBridge;
 }
 
@@ -428,11 +430,13 @@ export class ExternalCliBackend implements AgentBackend {
           runId: input.run_id,
           backendKind: this.kind,
           args: this.args,
+          workingDirectory: input.working_directory,
           toolBridge: input.tool_bridge,
           artifactMcpScript: this.artifactMcpScript
         }),
         input: buildExternalBackendPrompt(input),
         env: externalBackendEnv(input),
+        cwd: input.working_directory,
         label: this.label,
         registerChild: (child) => this.activeRuns.set(input.run_id, { child, cancelled: false }),
         isCancelled: () => this.activeRuns.get(input.run_id)?.cancelled === true,
@@ -557,13 +561,17 @@ export class ExternalCliBackend implements AgentBackend {
         args: externalBackendArgsForRun({
           runId,
           backendKind: this.kind,
-          args
+          args,
+          workingDirectory: stringValue(input.working_directory)
         }),
         input: buildExternalBackendResumePrompt(input),
         env: {
           SAMURAI_BACKEND_RESUME_RUN_ID: runId,
+          ...(stringValue(input.workspace_root) ? { SAMURAI_WORKSPACE_ROOT: stringValue(input.workspace_root) } : {}),
+          ...(stringValue(input.working_directory) ? { SAMURAI_BACKEND_WORKING_DIRECTORY: stringValue(input.working_directory) } : {}),
           ...(backendSessionId ? { SAMURAI_BACKEND_SESSION_ID: backendSessionId } : {})
         },
+        cwd: stringValue(input.working_directory),
         label: this.label,
         registerChild: (child) => this.activeRuns.set(runId, { child, cancelled: false }),
         isCancelled: () => this.activeRuns.get(runId)?.cancelled === true,
@@ -761,7 +769,8 @@ function formatToolBridgeForPrompt(bridge: BackendToolBridge | undefined): strin
       `- ${providerToolNameForPrompt(tool)} (${tool.name}): ${tool.description}`,
       `  input_schema: ${JSON.stringify(tool.input_schema)}`
     ].join("\n")),
-    "Use the Samurai artifact tool for memos, drafts, reports, documents, tables, or notes unless the user explicitly asks you to save a workspace file."
+    "Use the Samurai artifact tool for memos, drafts, reports, documents, tables, or notes unless the user explicitly asks you to save a workspace file.",
+    "Use the Samurai Collection tools for Collection schemas, records, and presentation. Do not create or edit collections/* files directly."
   ].join("\n");
 }
 
@@ -774,15 +783,37 @@ function providerToolNameForPrompt(tool: BackendToolBridgeToolDescriptor): strin
 }
 
 function formatExpectedOutputsForPrompt(input: BackendRunInput): string {
-  if (!input.expected_outputs?.includes("artifact")) {
+  const outputs: string[] = [];
+  if (input.expected_outputs?.includes("artifact")) {
+    outputs.push(
+      "- artifact: The user is asking Samurai to create user-facing content such as a memo, draft, report, document, table, or note.",
+      "- Do not create or edit workspace files for artifact requests unless the user explicitly asks for a file path, Markdown file, repository edit, save, or code change.",
+      "- Prefer returning the complete artifact content as assistant text.",
+      "- If tool events are available, emit artifact.create with { title, content } instead of writing a file directly."
+    );
+  }
+  if (input.expected_outputs?.includes("collection_schema")) {
+    outputs.push(
+      "- collection_schema: The user is asking for a personal Workspace data app.",
+      "- Decide the app's CollectionSchema from the user's intent, including id, labels, fields, permissions, and useful views.",
+      "- Prefer renderer choices that fit the schema: collection_table for general records, collection_gallery for logs/catalogs, calendar_view when a date/datetime field exists, and collection_kanban when an enum/status field exists. Use a custom view for dashboard-style summaries instead of a fixed dashboard renderer.",
+      "- Do not add generic/custom HTML view actions unless the user explicitly asks for a bespoke UI; built-in table/gallery/calendar/kanban/dashboard views are the default route.",
+      "- Save the schema through samurai.collection.schema.save / mcp__samurai__collection_schema_save. Do not write collections/*/schema.json directly.",
+      "- If the user provided initial records, create them through samurai.collection.record.create / mcp__samurai__collection_record_create after the schema save. Do not write collections/*/records/*.json directly.",
+      "- Do not fake success before the Runtime tool call completes."
+    );
+  }
+  if (input.expected_outputs?.includes("collection_view")) {
+    outputs.push(
+      "- collection_view: The user is asking to open, show, or present an existing Workspace data app.",
+      "- Search existing Collections when needed, then present the matching Collection through samurai.collection.view.present / mcp__samurai__collection_view_present.",
+      "- Do not create or overwrite a CollectionSchema when the user only asks to open or show an existing app."
+    );
+  }
+  if (outputs.length === 0) {
     return "(none)";
   }
-  return [
-    "- artifact: The user is asking Samurai to create user-facing content such as a memo, draft, report, document, table, or note.",
-    "- Do not create or edit workspace files for this request unless the user explicitly asks for a file path, Markdown file, repository edit, save, or code change.",
-    "- Prefer returning the complete artifact content as assistant text.",
-    "- If tool events are available, emit artifact.create with { title, content } instead of writing a file directly."
-  ].join("\n");
+  return outputs.join("\n");
 }
 
 function localeContractPayload(input: BackendRunInput): Record<string, JsonValue> {
@@ -819,10 +850,13 @@ function externalBackendArgsForRun(input: {
   runId: string;
   backendKind: AgentBackendKind;
   args: string[];
+  workingDirectory?: string;
   toolBridge?: BackendToolBridge;
   artifactMcpScript?: string;
 }): string[] {
-  let args = input.backendKind === "codex" ? injectCodexOutputLastMessageArgs(input.args, input.runId) : input.args;
+  let args = input.backendKind === "codex"
+    ? injectCodexWorkingDirectoryArgs(injectCodexOutputLastMessageArgs(input.args, input.runId), input.workingDirectory)
+    : input.args;
   if (!input.toolBridge?.enabled || input.toolBridge.tools.length === 0) {
     return args;
   }
@@ -833,6 +867,13 @@ function externalBackendArgsForRun(input: {
     return injectClaudeMcpArgs(args, input.toolBridge, input.artifactMcpScript);
   }
   return args;
+}
+
+function injectCodexWorkingDirectoryArgs(args: string[], workingDirectory: string | undefined): string[] {
+  if (!workingDirectory || args.includes("-C") || args.includes("--cd") || args.some((arg) => arg.startsWith("--cd="))) {
+    return args;
+  }
+  return insertBeforeStdinPrompt(args, ["-C", workingDirectory]);
 }
 
 function injectCodexOutputLastMessageArgs(args: string[], runId: string): string[] {
@@ -947,6 +988,12 @@ export function externalBackendEnv(input: BackendRunInput): Record<string, strin
     SAMURAI_RUN_ID: input.run_id,
     SAMURAI_SESSION_ID: input.session_id
   };
+  if (input.workspace_root) {
+    env.SAMURAI_WORKSPACE_ROOT = input.workspace_root;
+  }
+  if (input.working_directory) {
+    env.SAMURAI_BACKEND_WORKING_DIRECTORY = input.working_directory;
+  }
   if (input.tool_bridge?.enabled) {
     env.SAMURAI_TOOL_BRIDGE_URL = input.tool_bridge.endpoint_url;
     if (input.tool_bridge.token) {
@@ -967,6 +1014,7 @@ interface CommandRunInput {
   args: string[];
   input: string;
   env?: Record<string, string>;
+  cwd?: string;
   label: string;
   registerChild?: (child: ChildProcessWithoutNullStreams) => void;
   isCancelled?: () => boolean;
@@ -975,6 +1023,7 @@ interface CommandRunInput {
 
 async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendOutputEvent> {
   const child = spawn(input.command, input.args, {
+    cwd: input.cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
@@ -1196,8 +1245,10 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
     settle({
       event_type: "run_failed",
       payload: {
-        error_code: "backend_failed",
-        message: `${input.label} failed.`,
+        error_code: input.backendKind === "codex" && isCodexExecutionRootError(stderr) ? "backend_execution_root_not_ready" : "backend_failed",
+        message: input.backendKind === "codex" && isCodexExecutionRootError(stderr)
+          ? "Codex could not run because the Workspace execution root is not ready."
+          : `${input.label} failed.`,
         reason: "exit_code",
         retryable: false,
         exit_code: exitCode,
@@ -1229,6 +1280,10 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
       yield next;
     }
   }
+}
+
+function isCodexExecutionRootError(stderr: string): boolean {
+  return /Not inside a trusted directory|--skip-git-repo-check|outside a Git repository|not.*git repository/i.test(stderr);
 }
 
 function readCodexOutputLastMessage(runId: string): string {

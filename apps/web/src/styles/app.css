@@ -1099,6 +1099,28 @@ button {
   min-width: 0;
 }
 
+.codex-card-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.codex-card-meta span {
+  background: #1d1d1d;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  max-width: 140px;
+  overflow: hidden;
+  padding: 3px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .codex-artifact-card em {
   white-space: nowrap;
 }
@@ -1301,6 +1323,11 @@ button {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.provider-notice.is-inline {
+  margin: 0;
+  max-width: none;
 }
 
 .provider-notice-actions {
@@ -1934,6 +1961,831 @@ button {
 .surface-app {
   display: grid;
   gap: 10px;
+}
+
+.custom-view-frame {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.custom-view-iframe {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ui);
+  color-scheme: light;
+  min-height: 360px;
+  width: 100%;
+}
+
+.collection-table-app {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.collection-table-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.collection-action-bar,
+.collection-record-action-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.collection-action-bar {
+  justify-content: flex-start;
+}
+
+.collection-action-button {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--ink);
+  min-width: 0;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+
+.collection-action-button span {
+  font-size: 12px;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.collection-view-switch {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-ui);
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-width: 0;
+  padding: 3px;
+}
+
+.collection-view-switch button {
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--radius-ui) - 2px);
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 28px;
+  padding: 0 9px;
+}
+
+.collection-view-switch button:hover,
+.collection-view-switch button.is-active {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ink);
+}
+
+.collection-view-switch button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.collection-controls {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, auto) 32px minmax(120px, auto) minmax(130px, auto);
+  min-width: 0;
+}
+
+.collection-search-control,
+.collection-group-control {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-ui);
+  color: var(--muted);
+  display: grid;
+  gap: 7px;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-width: 0;
+  padding: 0 9px;
+}
+
+.collection-search-control input,
+.collection-group-control select,
+.collection-controls > select {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  min-height: 32px;
+  min-width: 0;
+  outline: none;
+  width: 100%;
+}
+
+.collection-group-control select {
+  padding: 0;
+}
+
+.collection-controls > select {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  padding: 0 9px;
+}
+
+.collection-search-control input::placeholder {
+  color: var(--soft);
+}
+
+.collection-table input,
+.collection-table select,
+.collection-table textarea {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  font: inherit;
+  min-width: 130px;
+  outline: none;
+  padding: 8px 9px;
+  width: 100%;
+}
+
+.collection-table textarea {
+  min-height: 42px;
+  resize: vertical;
+}
+
+.collection-readonly-value {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--radius-ui);
+  color: var(--muted);
+  display: inline-flex;
+  min-height: 32px;
+  min-width: 80px;
+  overflow-wrap: anywhere;
+  padding: 7px 9px;
+  white-space: normal;
+}
+
+.collection-card-fields label.is-readonly .collection-readonly-value {
+  width: 100%;
+}
+
+.collection-ref-warning {
+  color: var(--warn);
+  display: block;
+  font-size: 11px;
+  margin-top: 5px;
+}
+
+.collection-required-mark,
+.collection-new-panel label > span small,
+.collection-card-fields label > span small {
+  background: rgba(255, 196, 87, 0.11);
+  border: 1px solid rgba(255, 196, 87, 0.18);
+  border-radius: var(--radius-ui);
+  color: var(--warn);
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  margin-left: 6px;
+  padding: 3px 5px;
+  vertical-align: middle;
+}
+
+.collection-validation-note {
+  color: var(--warn);
+  display: block;
+  font-size: 11px;
+  line-height: 1.35;
+  margin-top: 5px;
+}
+
+.collection-new-panel > .collection-validation-note {
+  align-self: center;
+  margin-top: 0;
+}
+
+.collection-empty-state {
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-ui);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 14px;
+  text-align: center;
+}
+
+.collection-new-row td {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.collection-table tr.is-selected td {
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.collection-gallery-card.is-selected,
+.collection-date-record.is-selected,
+.collection-kanban-card.is-selected,
+.collection-dashboard-record.is-selected {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.collection-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 96px;
+}
+
+.collection-new-panel {
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-ui);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)) auto;
+  padding: 10px;
+}
+
+.collection-new-panel label,
+.collection-card-fields label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.collection-new-panel span,
+.collection-card-fields span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.collection-card-fields .collection-validation-note {
+  color: var(--warn);
+}
+
+.collection-new-panel input,
+.collection-new-panel select,
+.collection-new-panel textarea,
+.collection-card-fields input,
+.collection-card-fields select,
+.collection-card-fields textarea {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  font: inherit;
+  min-width: 0;
+  outline: none;
+  padding: 8px 9px;
+  width: 100%;
+}
+
+.collection-gallery-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.collection-gallery-grid > .collection-empty-state,
+.collection-kanban-board > .collection-empty-state {
+  grid-column: 1 / -1;
+}
+
+.collection-gallery-card,
+.collection-date-record,
+.collection-kanban-card {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-ui);
+  min-width: 0;
+}
+
+.collection-gallery-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.collection-dashboard-app {
+  display: grid;
+  gap: 12px;
+}
+
+.collection-dashboard-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.collection-dashboard-metric {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-ui);
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.collection-dashboard-metric small,
+.collection-dashboard-metric span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.collection-dashboard-metric strong {
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 620;
+  line-height: 1.1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.collection-dashboard-metric.is-enum {
+  background: rgba(97, 214, 142, 0.065);
+  border-color: rgba(97, 214, 142, 0.13);
+}
+
+.collection-dashboard-metric.is-number {
+  background: rgba(255, 196, 87, 0.065);
+  border-color: rgba(255, 196, 87, 0.14);
+}
+
+.collection-dashboard-records {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.collection-dashboard-record {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-ui);
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.collection-card-head {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.collection-card-head strong,
+.collection-date-record strong,
+.collection-kanban-card strong {
+  font-size: 14px;
+  line-height: 1.35;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection-card-head small,
+.collection-gallery-card p,
+.collection-kanban-card p,
+.collection-kanban-card small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.collection-gallery-highlights {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.collection-gallery-chip {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 5px;
+  line-height: 1.2;
+  max-width: 100%;
+  min-height: 26px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection-gallery-chip small {
+  color: var(--soft);
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  min-width: 0;
+}
+
+.collection-gallery-chip.is-status {
+  background: rgba(97, 214, 142, 0.09);
+  border-color: rgba(97, 214, 142, 0.17);
+}
+
+.collection-gallery-chip.is-rating {
+  background: rgba(255, 196, 87, 0.09);
+  border-color: rgba(255, 196, 87, 0.18);
+}
+
+.collection-card-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.collection-kanban-card .collection-card-fields {
+  gap: 7px;
+}
+
+.collection-kanban-card .collection-card-fields input,
+.collection-kanban-card .collection-card-fields select,
+.collection-kanban-card .collection-card-fields textarea,
+.collection-kanban-card .collection-readonly-value {
+  min-height: 30px;
+  padding: 6px 8px;
+}
+
+.collection-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
+.collection-calendar-app {
+  display: grid;
+  gap: 12px;
+}
+
+.collection-calendar-head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.collection-calendar-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.collection-calendar-head strong {
+  font-size: 14px;
+}
+
+.collection-calendar-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.collection-calendar-nav {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.collection-calendar-nav button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  width: 28px;
+}
+
+.collection-calendar-nav button:hover {
+  background: rgba(255, 255, 255, 0.075);
+  color: var(--ink);
+}
+
+.collection-calendar-nav button:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.34);
+  outline-offset: 2px;
+}
+
+.collection-calendar-nav button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.collection-calendar-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.collection-calendar-create {
+  display: grid;
+  gap: 8px;
+}
+
+.collection-calendar-create-head {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.collection-calendar-create-head strong {
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.collection-calendar-create-head span {
+  color: var(--muted);
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection-calendar-day {
+  align-items: start;
+  aspect-ratio: 1;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  display: grid;
+  min-width: 0;
+  padding: 7px;
+  text-align: left;
+}
+
+.collection-calendar-day.is-outside {
+  color: var(--soft);
+  opacity: 0.5;
+}
+
+.collection-calendar-day.is-selected,
+.collection-calendar-day:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.collection-calendar-day.is-today span {
+  color: var(--ok);
+}
+
+.collection-calendar-day small {
+  align-self: end;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.collection-date-list {
+  display: grid;
+  gap: 8px;
+}
+
+.collection-date-record {
+  display: grid;
+  gap: 7px;
+  padding: 9px 10px;
+}
+
+.collection-kanban-board {
+  align-items: start;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  overflow-x: auto;
+}
+
+.collection-kanban-column {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: var(--radius-ui);
+  display: grid;
+  gap: 9px;
+  min-height: 160px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.collection-kanban-column h3 {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  font-weight: 500;
+  justify-content: space-between;
+  margin: 0;
+}
+
+.collection-kanban-card {
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+}
+
+.collection-kanban-drag-handle {
+  cursor: grab;
+}
+
+.collection-kanban-drag-handle:active {
+  cursor: grabbing;
+}
+
+.collections-stage {
+  align-content: start;
+}
+
+.collection-list {
+  display: grid;
+  gap: 10px;
+}
+
+.collection-list-item {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  min-height: 68px;
+  padding: 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.collection-list-item:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.collection-list-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.collection-list-main strong,
+.collection-list-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection-list-main small,
+.collection-list-item em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.task-list-app {
+  display: grid;
+  gap: 14px;
+}
+
+.task-list-app.is-compact {
+  gap: 10px;
+}
+
+.task-add-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 40px;
+}
+
+.task-add-row input,
+.task-fields input,
+.task-fields select,
+.task-fields textarea {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  font: inherit;
+  min-width: 0;
+  outline: none;
+  padding: 9px 10px;
+}
+
+.task-add-row button,
+.task-row .surface-row-save {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  display: inline-flex;
+  justify-content: center;
+}
+
+.task-add-row button:disabled,
+.task-row .surface-row-save:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.task-counts {
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  gap: 12px;
+}
+
+.task-list-columns {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.task-list-columns section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.task-list-columns h3 {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.task-row {
+  align-items: start;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-ui);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 20px minmax(0, 1fr) repeat(2, 34px);
+  padding: 10px;
+}
+
+.task-list-app.is-compact .task-row {
+  padding: 8px;
+}
+
+.task-row input[type="checkbox"] {
+  height: 16px;
+  margin-top: 9px;
+  width: 16px;
+}
+
+.task-row.is-completed .task-fields input:first-child {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.task-fields {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-extra-field {
+  display: grid;
+  gap: 5px;
+}
+
+.task-extra-field span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.task-fields textarea {
+  min-height: 58px;
+  resize: vertical;
 }
 
 .surface-app-actions {
@@ -2632,6 +3484,19 @@ button {
     top: auto;
   }
 
+  .task-list-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .collection-controls {
+    grid-template-columns: minmax(0, 1fr) minmax(110px, auto) 32px;
+  }
+
+  .collection-controls > select:last-child,
+  .collection-controls > .collection-group-control:last-child {
+    grid-column: 1 / -1;
+  }
+
   .session-list {
     display: none;
   }
@@ -2749,5 +3614,20 @@ button {
 
   .settings-group label {
     grid-template-columns: 1fr;
+  }
+
+  .collection-table-toolbar,
+  .collection-controls,
+  .collection-new-panel {
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .collection-table-toolbar {
+    display: grid;
+  }
+
+  .collection-controls .surface-row-save {
+    justify-self: start;
   }
 }

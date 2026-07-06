@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -109,6 +109,42 @@ describe("agent backend registry", () => {
       path_kind: "direct_path",
       resolved: true
     });
+  });
+
+  it("runs external CLI turns from the requested working directory", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cwd-"));
+    roots.push(root);
+    const workspaceRoot = path.join(root, "workspace");
+    const workingDirectory = path.join(workspaceRoot, "project");
+    await mkdir(workingDirectory, { recursive: true });
+    const executable = path.join(root, "backend-cwd");
+    await writeFile(executable, [
+      "#!/bin/sh",
+      "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"cwd:%s workspace:%s\"}}\\n' \"$PWD\" \"$SAMURAI_WORKSPACE_ROOT\""
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({
+      id: "cwd-backend",
+      kind: "external",
+      label: "CWD Backend",
+      command: executable
+    });
+
+    const events = await collectEvents(backend.runTurn({
+      ...backendInput("run_cwd"),
+      workspace_root: workspaceRoot,
+      working_directory: workingDirectory
+    }));
+    const realWorkingDirectory = await realpath(workingDirectory);
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "run_completed",
+        payload: expect.objectContaining({
+          output_summary: `cwd:${realWorkingDirectory} workspace:${workspaceRoot}`
+        })
+      })
+    ]));
   });
 
   it("buffers external CLI events for streamEvents replay", async () => {
@@ -623,6 +659,40 @@ describe("agent backend registry", () => {
     expect(text).toContain("exec --json -");
   });
 
+  it("passes the Samurai Workspace root to Codex with -C instead of skip-git-repo-check", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-codex-cd-"));
+    roots.push(root);
+    const workspaceRoot = path.join(root, "workspace");
+    await mkdir(workspaceRoot, { recursive: true });
+    const executable = path.join(root, "codex-argv-cd");
+    await writeFile(
+      executable,
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' \"$*\"",
+        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(executable, 0o755);
+    const backend = new CodexBackend({
+      command: executable,
+      args: ["exec", "--json", "-"]
+    });
+
+    const text = (await collectEvents(backend.runTurn({
+      ...backendInput("run_codex_cd"),
+      workspace_root: workspaceRoot,
+      working_directory: workspaceRoot
+    })))
+      .filter((event) => event.event_type === "text_delta")
+      .map((event) => event.payload.text)
+      .join("\n");
+
+    expect(text).toContain(`-C ${workspaceRoot}`);
+    expect(text).not.toContain("--skip-git-repo-check");
+  });
+
   it("passes locale and workspace context to external backend commands", () => {
     const input: BackendRunInput = {
       run_id: "run_1",
@@ -696,6 +766,42 @@ describe("agent backend registry", () => {
     });
     expect(env).not.toHaveProperty("SAMURAI_INPUT_LOCALE");
     expect(env).not.toHaveProperty("SAMURAI_OUTPUT_LOCALE");
+  });
+
+  it("tells external backends to use Collection bridge tools instead of direct collection files", () => {
+    const input: BackendRunInput = {
+      ...backendInput("run_collection_prompt"),
+      expected_outputs: ["collection_schema"],
+      tool_bridge: {
+        enabled: true,
+        server_name: "samurai",
+        endpoint_url: "http://127.0.0.1:4317/api/backend-runs/run_collection_prompt/tool-calls",
+        token: "bridge-token",
+        token_env: "SAMURAI_TOOL_BRIDGE_TOKEN",
+        tools: [{
+          name: "samurai.collection.schema.save",
+          provider_tool_name: "mcp__samurai__collection_schema_save",
+          title: "Save Samurai Collection Schema",
+          description: "Save a validated CollectionSchema.",
+          input_schema: { type: "object" }
+        }, {
+          name: "samurai.collection.record.create",
+          provider_tool_name: "mcp__samurai__collection_record_create",
+          title: "Create Samurai Collection Record",
+          description: "Create a schema-validated Collection record.",
+          input_schema: { type: "object" }
+        }]
+      }
+    };
+
+    const prompt = buildExternalBackendPrompt(input);
+
+    expect(prompt).toContain("collection_schema");
+    expect(prompt).toContain("collection_record_create");
+    expect(prompt).toContain("built-in table/gallery/calendar/kanban/dashboard views are the default route");
+    expect(prompt).toContain("Do not write collections/*/schema.json directly.");
+    expect(prompt).toContain("Do not write collections/*/records/*.json directly.");
+    expect(prompt).toContain("Do not create or edit collections/* files directly.");
   });
 
   it("injects run-scoped Samurai Artifact MCP config into Codex and Claude Code CLI args", async () => {

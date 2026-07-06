@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { builtinSurfaceRendererRegistryEntries, negotiateSurfaceRenderSpec, parseSurfaceOperation, SurfaceOperationDispatchPlanSchema, SurfaceRenderSpecSchema, surfaceOperationResultKinds, surfaceRenderKinds } from "./index";
+import { builtinSurfaceRendererRegistryEntries, negotiateSurfaceRenderSpec, parseSurfaceOperation, SurfaceOperationDispatchPlanSchema, SurfaceRenderSpecSchema, surfaceOperationResultKinds, surfaceRenderKinds, type SurfaceOperationResultEnvelope } from "./index";
 
 describe("surface operation protocol", () => {
   it("fills ids for lightweight message submit clients", () => {
@@ -35,6 +35,44 @@ describe("surface operation protocol", () => {
     expect(operation?.kind === "collection.record.patch" ? operation.patch_id.startsWith("collection_patch_") : false).toBe(true);
   });
 
+  it("parses collection view, delete, and action surface operations", () => {
+    expect(parseSurfaceOperation({
+      kind: "collection.view.present",
+      collection_id: "tasks",
+      view_id: "task_list"
+    })).toMatchObject({
+      kind: "collection.view.present",
+      collection_id: "tasks",
+      view_id: "task_list"
+    });
+    expect(parseSurfaceOperation({
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_1",
+      view_id: "task_list"
+    })).toMatchObject({
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_1",
+      view_id: "task_list"
+    });
+    expect(parseSurfaceOperation({
+      kind: "collection.action.run",
+      collection_id: "movies",
+      action_id: "summarize",
+      record_id: "movie_1",
+      view_id: "movies_table"
+    })).toMatchObject({
+      kind: "collection.action.run",
+      collection_id: "movies",
+      action_id: "summarize",
+      record_id: "movie_1",
+      view_id: "movies_table",
+      payload: {}
+    });
+    expect(surfaceOperationResultKinds).toEqual(expect.arrayContaining(["collection_view", "collection_delete", "collection_action"]));
+  });
+
   it("validates surface dispatch plans", () => {
     const plan = SurfaceOperationDispatchPlanSchema.parse({
       operation_id: "surface_1",
@@ -57,6 +95,39 @@ describe("surface operation protocol", () => {
     const declaredKinds = new Set(builtinSurfaceRendererRegistryEntries.map((entry) => entry.kind));
 
     expect(surfaceRenderKinds.every((kind) => declaredKinds.has(kind))).toBe(true);
+  });
+
+  it("does not declare legacy task_list as a built-in custom renderer", () => {
+    expect(builtinSurfaceRendererRegistryEntries.find((entry) => entry.renderer === "task_list")).toBeUndefined();
+  });
+
+  it("keeps single and multiple render specs compatible in operation envelopes", () => {
+    const renderSpec = SurfaceRenderSpecSchema.parse({
+      id: "render_chat",
+      kind: "chat",
+      priority: "primary",
+      resource_refs: [],
+      props: {
+        session_id: "session_1",
+        backend_run_id: "run_1",
+        backend_status: "completed",
+        message_ids: [],
+        primary_message_id: "message_1",
+        artifact_ids: [],
+        memory_ids: [],
+        reflection_suggestion_ids: []
+      }
+    });
+    const envelope: SurfaceOperationResultEnvelope = {
+      operation: parseSurfaceOperation({ kind: "message.submit", session_id: "session_1", content: "hello" }),
+      result_kind: "chat_turn",
+      render_spec: renderSpec,
+      render_specs: [renderSpec],
+      result: {}
+    };
+
+    expect(envelope.render_spec.kind).toBe("chat");
+    expect(envelope.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
   });
 
   it("validates render specs returned by Host surface operations", () => {
@@ -86,6 +157,65 @@ describe("surface operation protocol", () => {
     expect(renderSpec.kind).toBe("chat");
     expect(renderSpec.state).toBe("ready");
     expect(renderSpec.resource_refs[0]?.kind).toBe("session");
+  });
+
+  it("validates custom view sandbox and capability contracts", () => {
+    const renderSpec = SurfaceRenderSpecSchema.parse({
+      id: "render_custom_view_contract",
+      kind: "custom_view",
+      priority: "primary",
+      title: "Board",
+      resource_refs: [{
+        kind: "artifact",
+        id: "artifact_board",
+        uri: "artifacts/board.json",
+        label: "Board data"
+      }],
+      props: {
+        view_id: "board_view",
+        renderer: "task_board",
+        renderer_version: "1",
+        sandbox: {
+          mode: "iframe",
+          allow_scripts: true,
+          allow_forms: false,
+          allow_same_origin: false,
+          network_access: "none",
+          workspace_access: "none"
+        },
+        capability: {
+          token_id: "custom_view:board",
+          allowed_actions: ["move_card"],
+          read_resource_refs: [{
+            kind: "artifact",
+            id: "artifact_board",
+            uri: "artifacts/board.json",
+            label: "Board data"
+          }],
+          write_operations: ["custom_view.action"]
+        },
+        actions: [{
+          id: "move_card",
+          label: "Move card",
+          operation_kind: "custom_view.action",
+          action_kind: "drag",
+          description: "Move a card between columns.",
+          scope: "record"
+        }],
+        data: { columns: [] }
+      }
+    });
+
+    expect(renderSpec.props.sandbox).toMatchObject({
+      mode: "iframe",
+      network_access: "none",
+      workspace_access: "none"
+    });
+    expect(renderSpec.props.capability).toMatchObject({
+      token_id: "custom_view:board",
+      allowed_actions: ["move_card"],
+      write_operations: ["custom_view.action"]
+    });
   });
 
   it("validates collection record render props with resolved refs and embeds", () => {

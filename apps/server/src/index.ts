@@ -2,10 +2,13 @@ import cors from "cors";
 import express from "express";
 import type { Express, NextFunction, Request, Response } from "express";
 import { createHmac, createPublicKey, createVerify, timingSafeEqual } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Server as HttpServer } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Server as SocketServer } from "socket.io";
@@ -96,6 +99,7 @@ import {
 } from "@samurai-agent/gateway";
 import {
   AgentRuntime,
+  createDefaultAgentBackendRegistry,
   RuntimeRequestError,
   createExternalAssistProvidersFromEnv,
   createProviderRegistryFromEnv,
@@ -113,11 +117,13 @@ import { WorkspaceStore, type SessionTranscriptExport } from "@samurai-agent/wor
 const defaultPort = 4317;
 const defaultWorkspaceHealthReadinessTimeoutMs = 2_000;
 const defaultEnvPath = fileURLToPath(new URL("../../../.env", import.meta.url));
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const loadedEnvPaths = new Set<string>();
 
 export interface CreateApiServerOptions {
   workspaceDataDir?: string;
   provider?: ProviderAdapter;
+  backendRegistry?: ReturnType<typeof createDefaultAgentBackendRegistry>;
   automationScheduler?: boolean;
   pluginRootDir?: string;
   loadPluginEntrypoints?: boolean;
@@ -221,10 +227,84 @@ export function loadServerEnv(envPath = defaultEnvPath): void {
   loadedEnvPaths.add(envPath);
 }
 
+export function defaultWorkspaceRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || process.env.HOME || "";
+  if (process.platform === "darwin" && home) {
+    return path.join(home, "Library", "Application Support", "Samurai Agent", "workspace");
+  }
+  if (process.platform === "win32") {
+    const appData = env.APPDATA || (home ? path.join(home, "AppData", "Roaming") : "");
+    if (appData) {
+      return path.join(appData, "Samurai Agent", "workspace");
+    }
+  }
+  const dataHome = env.XDG_DATA_HOME || (home ? path.join(home, ".local", "share") : "");
+  return dataHome ? path.join(dataHome, "samurai-agent", "workspace") : path.resolve("samurai-agent-workspace");
+}
+
+export function resolveWorkspaceRoot(optionWorkspaceDataDir?: string, env: NodeJS.ProcessEnv = process.env): string {
+  return path.resolve(
+    optionWorkspaceDataDir?.trim()
+      || env.SAMURAI_WORKSPACE_ROOT?.trim()
+      || env.WORKSPACE_DATA_DIR?.trim()
+      || defaultWorkspaceRoot(env)
+  );
+}
+
+function resolveBackendWorkingDirectoryMode(env: NodeJS.ProcessEnv = process.env): "workspace" | "repo" {
+  const mode = env.SAMURAI_BACKEND_WORKING_DIR_MODE?.trim() || "workspace";
+  if (mode === "workspace" || mode === "repo") {
+    return mode;
+  }
+  throw new Error(`SAMURAI_BACKEND_WORKING_DIR_MODE must be "workspace" or "repo", got "${mode}".`);
+}
+
+function legacyWorkspaceWarnings(input: { workspaceRoot: string; legacyRepoWorkspaceDir: string; workspaceHadUserDataBeforeCreate: boolean }): Array<{ code: string; message: string; path: string }> {
+  const workspaceRoot = path.resolve(input.workspaceRoot);
+  const legacyRoot = path.resolve(input.legacyRepoWorkspaceDir);
+  if (workspaceRoot === legacyRoot || !workspaceHasUserData(legacyRoot) || input.workspaceHadUserDataBeforeCreate) {
+    return [];
+  }
+  return [{
+    code: "legacy_repo_workspace_data_detected",
+    message: "旧repo内 workspace-data にデータがあります。自動移行はしません。必要なら手動で新Workspaceへ移してください。",
+    path: legacyRoot
+  }];
+}
+
+function workspaceHasUserData(rootDir: string): boolean {
+  if (!existsSync(rootDir)) {
+    return false;
+  }
+  try {
+    return readdirSync(rootDir).some((name) => !name.startsWith("."));
+  } catch {
+    return false;
+  }
+}
+
+async function bootstrapWorkspaceExecutionRoot(workspaceRoot: string): Promise<void> {
+  await mkdir(workspaceRoot, { recursive: true });
+  if (existsSync(path.join(workspaceRoot, ".git"))) {
+    return;
+  }
+  const result = spawnSync("git", ["init"], {
+    cwd: workspaceRoot,
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "unknown error").trim();
+    throw new Error(`Workspace execution root could not be initialized: ${detail}`);
+  }
+}
+
 export async function createApiServer(options: CreateApiServerOptions = {}): Promise<ApiServer> {
   loadServerEnv();
-  const workspaceDataDir = options.workspaceDataDir ?? process.env.WORKSPACE_DATA_DIR ?? fileURLToPath(new URL("../../../workspace-data", import.meta.url));
-  const store = await WorkspaceStore.create({ rootDir: workspaceDataDir });
+  const workspaceRoot = resolveWorkspaceRoot(options.workspaceDataDir);
+  const legacyRepoWorkspaceDir = fileURLToPath(new URL("../../../workspace-data", import.meta.url));
+  const workspaceHadUserDataBeforeCreate = workspaceHasUserData(workspaceRoot);
+  await bootstrapWorkspaceExecutionRoot(workspaceRoot);
+  const store = await WorkspaceStore.create({ rootDir: workspaceRoot });
   const app = express();
   const httpServer = createServer(app);
   const io = new SocketServer(httpServer, {
@@ -237,7 +317,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     io.emit(name, payload);
   };
   const provider = options.provider ?? createProviderRegistryFromEnv();
-  const pluginRootDir = options.pluginRootDir ?? process.env.SAMURAI_PLUGIN_ROOT_DIR ?? workspaceDataDir;
+  const pluginRootDir = options.pluginRootDir ?? process.env.SAMURAI_PLUGIN_ROOT_DIR ?? workspaceRoot;
   const pluginCatalog = await loadPluginManifests(pluginRootDir, {
     trustedSigningKeys: options.pluginTrustedSigningKeys ?? pluginTrustedSigningKeysFromEnv(),
     requireSignature: process.env.SAMURAI_REQUIRE_PLUGIN_SIGNATURE === "1"
@@ -271,7 +351,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   const externalAssistProviders = injectedExternalAssistProviders.length > 0
     ? injectedExternalAssistProviders
     : createExternalAssistProvidersFromEnv();
-  const runtime = new AgentRuntime(store, emit, provider, undefined, pluginRegistry, externalAssistProviders);
+  const backendWorkingDirectoryMode = resolveBackendWorkingDirectoryMode();
+  const backendRegistry = options.backendRegistry ?? createDefaultAgentBackendRegistry(provider, process.env, { repoRoot });
+  const runtime = new AgentRuntime(store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, undefined, {
+    backendWorkingDirectoryMode,
+    repoRoot
+  });
   const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
   const lifecycle: ApiServerLifecycleState = {
     started_at: nowIso(),
@@ -443,7 +528,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           sandbox_workspace_sync_statuses: sandboxSyncStatuses
         },
         workspace: workspaceHealthReadinessPayload(workspaceHealth),
-        workspaceDataDir: store.rootDir
+        workspaceRoot: store.rootDir,
+        workspaceDataDir: store.rootDir,
+        workspaceWarnings: legacyWorkspaceWarnings({ workspaceRoot: store.rootDir, legacyRepoWorkspaceDir, workspaceHadUserDataBeforeCreate }),
+        backendWorkingDirectoryMode
       });
     } catch (error) {
       next(error);
@@ -608,11 +696,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       const activeSessions = await Promise.all(
         sessions.map(async (session) => ({
           session,
-          messageCount: (await store.listMessages(session.id)).length,
-          operationCount: (await store.listOperations(session.id)).length
+          messageCount: (await store.listMessages(session.id)).length
         }))
       );
-      res.json(activeSessions.filter((item) => item.messageCount > 0 || item.operationCount > 0).map((item) => item.session));
+      res.json(activeSessions.filter((item) => item.messageCount > 0).map((item) => item.session));
     } catch (error) {
       next(error);
     }
@@ -848,8 +935,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "session_not_found" });
           return;
         }
-        const [messages, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
+        const [messages, messagePresentations, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
           store.listMessages(session.id),
+          store.listMessagePresentations({ sessionId: session.id }),
           store.listOperations(session.id),
           store.listArtifactsForSession(session.id),
           store.listAuditRecords(),
@@ -861,7 +949,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           store.listToolRuns({ sessionId: session.id }),
           store.listReflectionRuns(session.id)
         ]);
-        res.json({ session, messages, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns });
+        res.json({ session, messages, messagePresentations, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns });
       } catch (error) {
         next(error);
       }
@@ -2787,6 +2875,36 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.get("/api/collections/:collectionId/view-data", async (req, res, next) => {
+      try {
+        const ids = queryStringList(req.query.ids);
+        const fields = queryStringList(req.query.fields);
+        const result = await runtime.manageCollection({
+          action: "getItems",
+          collection_id: req.params.collectionId,
+          ...(ids.length > 0 ? { ids } : {}),
+          ...(fields.length > 0 ? { fields } : {})
+        });
+        res.json(result.resource);
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.put("/api/collections/:collectionId/view-data", async (req, res, next) => {
+      try {
+        const result = await runtime.manageCollection({
+          action: "putItems",
+          collection_id: req.params.collectionId,
+          items: Array.isArray(req.body?.items) ? req.body.items : [],
+          mode: typeof req.body?.mode === "string" ? req.body.mode : "merge"
+        });
+        res.json(result.resource);
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.get("/api/collections/:collectionId/patches", async (req, res, next) => {
       try {
         res.json(await store.listCollectionPatches({ collectionId: req.params.collectionId }));
@@ -2816,6 +2934,19 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           content
         );
         res.json({ ...record, ...translation });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.delete("/api/collections/:collectionId/records/:recordId", async (req, res, next) => {
+      try {
+        const result = await runtime.deleteCollectionRecord({
+          collectionId: req.params.collectionId,
+          recordId: req.params.recordId,
+          viewId: typeof req.query.view_id === "string" ? req.query.view_id : undefined
+        });
+        res.json(runtimeWritePayload(result));
       } catch (error) {
         next(error);
       }
@@ -2896,6 +3027,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const result = await runtime.runCollectionAction({
           collectionId: req.params.collectionId,
           actionId: req.params.actionId,
+          backendId: typeof req.body?.backend_id === "string" ? req.body.backend_id : undefined,
           recordId: typeof req.body?.record_id === "string" ? req.body.record_id : undefined,
           payload: isRecord(req.body?.payload) ? req.body.payload : undefined
         });
@@ -3448,6 +3580,14 @@ function numberFromRecord(body: Record<string, unknown>, key: string): number | 
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
+}
+
+function queryStringList(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  return raw
+    .flatMap((item) => typeof item === "string" ? item.split(",") : [])
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function booleanFromRecord(body: Record<string, unknown>, key: string): boolean | undefined {

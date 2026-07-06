@@ -24,6 +24,47 @@ const searchInputSchema = {
   }
 };
 
+const collectionSchemaInputSchema = {
+  type: "object",
+  required: ["id", "version", "fields", "views", "permissions"],
+  properties: {
+    id: { type: "string", description: "Stable Collection id." },
+    version: { type: "string", description: "Collection schema version." },
+    labels: { type: "object", description: "Localized display labels." },
+    descriptions: { type: "object", description: "Localized descriptions." },
+    fields: { type: "array", description: "Collection field definitions." },
+    refs: { type: "array", description: "Optional linked Collection references." },
+    embeds: { type: "array", description: "Optional embedded linked data definitions." },
+    derived_fields: { type: "array", description: "Optional display-only computed fields." },
+    triggers: { type: "array", description: "Optional Collection trigger definitions." },
+    actions: { type: "array", description: "Optional Collection action definitions." },
+    views: { type: "array", description: "Workspace view definitions." },
+    permissions: { type: "object", description: "Collection permissions." }
+  }
+};
+
+const collectionRecordInputSchema = {
+  type: "object",
+  required: ["collection_id", "data"],
+  properties: {
+    collection_id: { type: "string", description: "Target Collection id." },
+    id: { type: "string", description: "Optional record id." },
+    record_id: { type: "string", description: "Optional record id." },
+    data: { type: "object", description: "Schema-validated record data." },
+    resource_refs: { type: "array", description: "Optional source resource refs." }
+  }
+};
+
+const collectionPresentInputSchema = {
+  type: "object",
+  properties: {
+    collection_id: { type: "string", description: "Collection id to present." },
+    query: { type: "string", description: "Natural language search query." },
+    view_id: { type: "string", description: "Optional view id." },
+    record_id: { type: "string", description: "Optional focused record id." }
+  }
+};
+
 const tools = [{
   name: "artifact_create",
   bridgeName: "samurai.artifact.create",
@@ -49,6 +90,21 @@ const tools = [{
   bridgeName: "samurai.skill.search",
   description: "Search Samurai Skill catalog refs.",
   inputSchema: searchInputSchema
+}, {
+  name: "collection_schema_save",
+  bridgeName: "samurai.collection.schema.save",
+  description: "Save a validated Samurai CollectionSchema through Runtime. Use this for personal Workspace data apps instead of writing collection files directly.",
+  inputSchema: collectionSchemaInputSchema
+}, {
+  name: "collection_record_create",
+  bridgeName: "samurai.collection.record.create",
+  description: "Create a schema-validated Samurai Collection record through Runtime. Use this for initial records instead of writing record files directly.",
+  inputSchema: collectionRecordInputSchema
+}, {
+  name: "collection_view_present",
+  bridgeName: "samurai.collection.view.present",
+  description: "Present an existing Samurai Collection through Runtime without creating or overwriting schema files.",
+  inputSchema: collectionPresentInputSchema
 }];
 
 let buffer = Buffer.alloc(0);
@@ -159,7 +215,7 @@ async function callBridgeTool(tool, args, requestId) {
     body: JSON.stringify({
       tool_name: tool.bridgeName,
       tool_call_id: `mcp_${String(requestId)}`,
-      input: tool.bridgeName === "samurai.artifact.create" ? sanitizeArtifactInput(args) : sanitizeSearchInput(args)
+      input: sanitizeToolInput(tool, args)
     })
   });
   const text = await response.text();
@@ -174,8 +230,33 @@ function bridgeResultText(tool, result) {
   if (tool.bridgeName === "samurai.artifact.create") {
     return `Artifact created: ${result.title ?? result.artifact_id ?? "created"}`;
   }
+  if (tool.bridgeName === "samurai.collection.schema.save") {
+    return `Collection schema saved: ${result.output?.collection_id ?? result.resource_ref?.id ?? "saved"}`;
+  }
+  if (tool.bridgeName === "samurai.collection.record.create") {
+    return `Collection record created: ${result.output?.record_id ?? result.resource_ref?.id ?? "created"}`;
+  }
+  if (tool.bridgeName === "samurai.collection.view.present") {
+    return `Collection presentation: ${result.output?.status ?? "completed"}`;
+  }
   const output = Array.isArray(result.output) ? result.output : [];
   return `${tool.name} returned ${output.length} result(s).`;
+}
+
+function sanitizeToolInput(tool, args) {
+  if (tool.bridgeName === "samurai.artifact.create") {
+    return sanitizeArtifactInput(args);
+  }
+  if (tool.bridgeName === "samurai.collection.schema.save") {
+    return sanitizeCollectionSchemaInput(args);
+  }
+  if (tool.bridgeName === "samurai.collection.record.create") {
+    return sanitizeCollectionRecordInput(args);
+  }
+  if (tool.bridgeName === "samurai.collection.view.present") {
+    return sanitizeCollectionPresentInput(args);
+  }
+  return sanitizeSearchInput(args);
 }
 
 function sanitizeArtifactInput(args) {
@@ -192,6 +273,71 @@ function sanitizeArtifactInput(args) {
     content,
     ...(typeof args.kind === "string" ? { kind: args.kind } : {}),
     ...(args.metadata && typeof args.metadata === "object" && !Array.isArray(args.metadata) ? { metadata: args.metadata } : {})
+  };
+}
+
+function sanitizeCollectionSchemaInput(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("Tool input must be an object.");
+  }
+  const id = typeof args.id === "string" ? args.id.trim() : "";
+  const version = typeof args.version === "string" ? args.version.trim() : "";
+  if (!id || !version || !Array.isArray(args.fields) || !Array.isArray(args.views) || !args.permissions || typeof args.permissions !== "object" || Array.isArray(args.permissions)) {
+    throw new Error("Collection schema input requires id, version, fields, views, and permissions.");
+  }
+  return {
+    id,
+    version,
+    ...(args.labels && typeof args.labels === "object" && !Array.isArray(args.labels) ? { labels: args.labels } : {}),
+    ...(args.descriptions && typeof args.descriptions === "object" && !Array.isArray(args.descriptions) ? { descriptions: args.descriptions } : {}),
+    fields: args.fields,
+    refs: Array.isArray(args.refs) ? args.refs : [],
+    embeds: Array.isArray(args.embeds) ? args.embeds : [],
+    derived_fields: Array.isArray(args.derived_fields) ? args.derived_fields : [],
+    triggers: Array.isArray(args.triggers) ? args.triggers : [],
+    actions: Array.isArray(args.actions) ? args.actions : [],
+    views: args.views,
+    permissions: args.permissions
+  };
+}
+
+function sanitizeCollectionRecordInput(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("Tool input must be an object.");
+  }
+  const collectionId = typeof args.collection_id === "string" ? args.collection_id.trim() : "";
+  if (!collectionId || !args.data || typeof args.data !== "object" || Array.isArray(args.data)) {
+    throw new Error("Collection record input requires collection_id and data.");
+  }
+  const id = typeof args.id === "string" && args.id.trim()
+    ? args.id.trim()
+    : typeof args.record_id === "string" && args.record_id.trim()
+      ? args.record_id.trim()
+      : "";
+  return {
+    collection_id: collectionId,
+    ...(id ? { id, record_id: id } : {}),
+    data: args.data,
+    resource_refs: Array.isArray(args.resource_refs) ? args.resource_refs : []
+  };
+}
+
+function sanitizeCollectionPresentInput(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("Tool input must be an object.");
+  }
+  const collectionId = typeof args.collection_id === "string" ? args.collection_id.trim() : "";
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  const viewId = typeof args.view_id === "string" ? args.view_id.trim() : "";
+  const recordId = typeof args.record_id === "string" ? args.record_id.trim() : "";
+  if (!collectionId && !query) {
+    throw new Error("collection_id or query is required.");
+  }
+  return {
+    ...(collectionId ? { collection_id: collectionId } : {}),
+    ...(query ? { query } : {}),
+    ...(viewId ? { view_id: viewId } : {}),
+    ...(recordId ? { record_id: recordId } : {})
   };
 }
 

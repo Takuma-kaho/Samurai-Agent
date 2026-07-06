@@ -5,7 +5,8 @@ import path from "node:path";
 const root = process.cwd();
 const envFile = readEnvFile(path.join(root, ".env"));
 const env = envFile.values;
-const workspaceDir = env.WORKSPACE_DATA_DIR || path.join(root, "workspace-data");
+const workspaceDir = resolveWorkspaceRoot(env);
+const legacyRepoWorkspaceDir = path.join(root, "workspace-data");
 const dbPath = path.join(workspaceDir, "workspace.sqlite");
 const apiPort = Number(env.PORT || process.env.PORT || 4317);
 const apiUrl = `http://127.0.0.1:${apiPort}`;
@@ -14,6 +15,7 @@ const repairRequested = process.argv.includes("--repair");
 const checks = [];
 const initialChecks = [
   () => checkWorkspaceLayout(workspaceDir),
+  () => checkLegacyRepoWorkspaceData(workspaceDir, legacyRepoWorkspaceDir),
   () => checkDb(dbPath),
   () => checkEnvFile(envFile),
   () => checkProviderEnv(env),
@@ -72,6 +74,20 @@ function checkWorkspaceLayout(workspaceDir) {
     name: "workspace",
     ok: missing.length === 0,
     message: missing.length === 0 ? `layout ok: ${workspaceDir}` : `missing: ${missing.join(", ")}`
+  };
+}
+
+function checkLegacyRepoWorkspaceData(workspaceDir, legacyRepoWorkspaceDir) {
+  if (path.resolve(workspaceDir) === path.resolve(legacyRepoWorkspaceDir)) {
+    return { name: "legacy-workspace", ok: true, message: "repo内 workspace-data を明示使用中" };
+  }
+  if (!workspaceHasUserData(legacyRepoWorkspaceDir) || workspaceHasUserData(workspaceDir)) {
+    return { name: "legacy-workspace", ok: true, message: "移行警告なし" };
+  }
+  return {
+    name: "legacy-workspace",
+    ok: false,
+    message: `旧repo内 workspace-data にデータがあります。自動移行はしません: ${legacyRepoWorkspaceDir}`
   };
 }
 
@@ -839,6 +855,40 @@ function parseList(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function resolveWorkspaceRoot(envValues) {
+  return path.resolve(
+    envValues.SAMURAI_WORKSPACE_ROOT?.trim()
+      || envValues.WORKSPACE_DATA_DIR?.trim()
+      || defaultWorkspaceRoot()
+  );
+}
+
+function defaultWorkspaceRoot() {
+  const home = process.env.HOME || "";
+  if (process.platform === "darwin" && home) {
+    return path.join(home, "Library", "Application Support", "Samurai Agent", "workspace");
+  }
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || (home ? path.join(home, "AppData", "Roaming") : "");
+    if (appData) {
+      return path.join(appData, "Samurai Agent", "workspace");
+    }
+  }
+  const dataHome = process.env.XDG_DATA_HOME || (home ? path.join(home, ".local", "share") : "");
+  return dataHome ? path.join(dataHome, "samurai-agent", "workspace") : path.resolve("samurai-agent-workspace");
+}
+
+function workspaceHasUserData(rootDir) {
+  if (!existsSync(rootDir)) {
+    return false;
+  }
+  try {
+    return readdirSync(rootDir).some((name) => !name.startsWith("."));
+  } catch {
+    return false;
+  }
 }
 
 function formatReasonCounts(value) {

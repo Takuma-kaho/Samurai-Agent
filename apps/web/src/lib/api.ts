@@ -10,6 +10,7 @@ import type {
   JsonValue,
   MemoryFrontmatter,
   MessageRecord,
+  MessagePresentationRecord,
   OperationRecord,
   PolicyDecisionRecord,
   RollbackPoint,
@@ -30,6 +31,7 @@ import type {
 export interface SessionDetail {
   session: SessionRecord;
   messages: MessageRecord[];
+  messagePresentations?: MessagePresentationRecord[];
   operations: OperationRecord[];
   artifacts: ArtifactRecord[];
   auditRecords: AuditRecord[];
@@ -60,6 +62,7 @@ export interface WikiDetail {
 export interface ChatTurnResult {
   session: SessionRecord;
   messages: MessageRecord[];
+  messagePresentations?: MessagePresentationRecord[];
   backendRun: BackendRunRecord;
   backendEvents: BackendEventRecord[];
   workspaceChanges: WorkspaceChangeRecord[];
@@ -127,7 +130,10 @@ export interface HealthPayload {
   };
   llm?: unknown;
   backends?: AgentBackendStatus[];
+  workspaceRoot?: string;
   workspaceDataDir?: string;
+  workspaceWarnings?: Array<{ code: string; message: string; path: string }>;
+  backendWorkingDirectoryMode?: "workspace" | "repo";
 }
 
 export interface ProviderErrorPayload {
@@ -271,6 +277,17 @@ export const api = {
     return request<SurfaceOperationResultEnvelope<T>>("/api/surface/operations", {
       method: "POST",
       body: JSON.stringify(operation)
+    });
+  },
+  updateMessagePresentationViewState(presentationId: string, viewState: Record<string, JsonValue>) {
+    return request<SurfaceOperationResultEnvelope<MessagePresentationRecord>>("/api/surface/operations", {
+      method: "POST",
+      body: JSON.stringify({
+        id: `surface_presentation_state_${presentationId}_${Date.now()}`,
+        kind: "message.presentation.update",
+        presentation_id: presentationId,
+        view_state: viewState
+      })
     });
   },
   submitChatSurfaceOperation(input: {
@@ -417,6 +434,9 @@ export const api = {
       body: JSON.stringify(schema)
     });
   },
+  listCollectionSchemas() {
+    return request<Array<CollectionSchema & { file_path: string }>>("/api/collections/schemas");
+  },
   getCollectionSchema(collectionId: string) {
     return request<CollectionSchema & { file_path: string }>(`/api/collections/${collectionId}/schema`);
   },
@@ -426,6 +446,9 @@ export const api = {
       body: JSON.stringify(input)
     });
   },
+  listCollectionRecords(collectionId: string) {
+    return request<Array<CollectionRecord & { file_path: string }>>(`/api/collections/${collectionId}/records`);
+  },
   applyCollectionPatch(collectionId: string, recordId: string, input: { id?: string; changes: Record<string, unknown>; created_at?: string }) {
     return request<RuntimeWritePayload<CollectionRecord & { file_path: string }>>(
       `/api/collections/${collectionId}/records/${recordId}/patches`,
@@ -434,6 +457,11 @@ export const api = {
         body: JSON.stringify(input)
       }
     );
+  },
+  deleteCollectionRecord(collectionId: string, recordId: string) {
+    return request<CollectionRecord & { file_path: string }>(`/api/collections/${collectionId}/records/${recordId}`, {
+      method: "DELETE"
+    });
   },
   listCollectionNotes(collectionId: string) {
     return request<Array<{ file_path: string; content: string }>>(`/api/collections/${collectionId}/notes`);

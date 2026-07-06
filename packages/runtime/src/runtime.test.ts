@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginRuntimeRegistry } from "@samurai-agent/action-catalog";
 import { AgentBackendRegistry, MockBackend, type AgentBackend } from "@samurai-agent/agent-backends";
-import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type MemoryFrontmatter, type SkillFrontmatter } from "@samurai-agent/core-schemas";
+import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type SkillFrontmatter } from "@samurai-agent/core-schemas";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, planSurfaceOperationDispatch, setExternalSendSmtpClientConnectionFactoryForTest, type ExternalAssistProvider, type ProviderInput, type ProviderOutput } from "./index";
 
@@ -18,6 +18,52 @@ async function createRuntime() {
     store,
     runtime: new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", fakeProviderOutput))
   };
+}
+
+async function runCollectionManagePatchSchemaTool(input: {
+  runtime: AgentRuntime;
+  runId: string;
+  token: string;
+  toolCallId: string;
+  collectionId: string;
+  patches: JsonValue[];
+  viewId?: string;
+}) {
+  return input.runtime.runBackendToolBridgeCall({
+    runId: input.runId,
+    token: input.token,
+    toolName: "mcp__samurai__collection_manage",
+    toolCallId: input.toolCallId,
+    toolInput: {
+      action: "patchSchema",
+      collection_id: input.collectionId,
+      patches: input.patches,
+      ...(input.viewId ? { view_id: input.viewId } : {})
+    }
+  });
+}
+
+async function saveGenericTasksCollectionSchema(store: WorkspaceStore, overrides: Record<string, unknown> = {}) {
+  return store.updateCollectionSchema({
+    id: "tasks",
+    version: "1",
+    labels: { ja: "タスク", en: "Tasks" },
+    descriptions: { ja: "通常のCollectionとして扱うタスク。" },
+    fields: [
+      { id: "title", type: "string", required: true },
+      { id: "completed", type: "boolean" },
+      { id: "notes", type: "text" },
+      { id: "due_date", type: "date" }
+    ],
+    refs: [],
+    embeds: [],
+    derived_fields: [],
+    triggers: [],
+    actions: [],
+    views: [{ id: "tasks_table", renderer: "collection_table", allow_delete: true }],
+    permissions: { create: true, update: true, delete: true },
+    ...overrides
+  });
 }
 
 async function requestAndApproveExternalSend(
@@ -206,6 +252,85 @@ describe("agent runtime", () => {
     });
   });
 
+  it("rejects unsupported Collection schema renderers through Runtime validation", async () => {
+    const { store, runtime } = await createRuntime();
+
+    await expect(runtime.runDomainCommand({
+      command_id: "collection.schema.save",
+      input_source: "runtime_api",
+      payload: {
+        id: "study_notes",
+        version: "1",
+        labels: { ja: "学習メモ", en: "Study notes" },
+        descriptions: { ja: "学習メモ。", en: "Study notes." },
+        fields: [{ id: "title", type: "string", label: "タイトル" }],
+        refs: [],
+        embeds: [],
+        derived_fields: [],
+        triggers: [],
+        actions: [],
+        views: [{ id: "study_notes_deck", renderer: "study_deck" }],
+        permissions: {}
+      }
+    })).rejects.toThrow("collection_view_renderer_unsupported:study_deck");
+    expect(await store.getCollectionSchema("study_notes")).toBeUndefined();
+    await store.close();
+  });
+
+  it("does not persist backend event Collection cards for unsupported renderers", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-unsupported-presentation-renderer-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const backend: AgentBackend = {
+      id: "unsupported-presentation-renderer",
+      kind: "codex",
+      label: "Unsupported Presentation Renderer Fixture",
+      async *runTurn() {
+        yield {
+          event_type: "tool_call_output",
+          payload: {
+            status: "completed",
+            output: {
+              status: "ready",
+              kind: "collection_app",
+              collection_id: "study_notes",
+              view_id: "study_notes_deck",
+              renderer: "study_deck",
+              title: "Study notes",
+              record_count: 0
+            }
+          }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "done" }
+        };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_unsupported_presentation_renderer",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "unsupported-presentation-renderer",
+      content: "学習カードを開いて",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    const agentMessage = result.result.messages.find((message) => message.role === "agent");
+    const savedPresentations = await store.listMessagePresentations({ sessionId: session.id, messageId: agentMessage?.id });
+    await store.close();
+
+    expect(result.result.messagePresentations).toEqual([]);
+    expect(savedPresentations).toEqual([]);
+  });
+
   it("returns render specs for workspace resource Domain Commands", async () => {
     const { store, runtime } = await createRuntime();
     const wiki = await runtime.runDomainCommand({
@@ -268,6 +393,2404 @@ describe("agent runtime", () => {
       }
     });
     expect([wiki, skill, schema, record].every((result) => result.render_specs.length === 1)).toBe(true);
+  });
+
+  it("does not create a dedicated task_list app before backend dispatch", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_task_app",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "タスク管理アプリを作って",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    const normal = await runtime.runSurfaceOperation({
+      id: "surface_normal_chat",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "こんにちは",
+      output_locale: "ja"
+    });
+    const schema = await store.getCollectionSchema("tasks");
+    await store.close();
+
+    expect(schema).toBeUndefined();
+    expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+    expect(normal.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+  });
+
+  it("creates generic Collection table App Canvas surfaces only after backend schema save", async () => {
+    let runtime: AgentRuntime;
+    const bridgeBackend: AgentBackend = {
+      id: "collection-schema-bridge",
+      kind: "codex",
+      label: "Collection Schema Bridge Fixture",
+      async *runTurn(input) {
+        expect(input.expected_outputs).toContain("collection_schema");
+        expect(input.tool_bridge?.enabled).toBe(true);
+        const schemaTool = input.tool_bridge?.tools.find((tool) => tool.name === "samurai.collection.schema.save");
+        expect(schemaTool?.description).toContain("collection_gallery");
+        expect(schemaTool?.description).toContain("calendar_view");
+        expect(schemaTool?.description).toContain("collection_kanban");
+        expect(schemaTool?.description).not.toContain("collection_dashboard");
+        expect(JSON.stringify(schemaTool?.input_schema.properties?.views ?? {})).not.toContain("collection_dashboard");
+        await runtime.runBackendToolBridgeCall({
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolName: "mcp__samurai__collection_schema_save",
+          toolCallId: "schema_tool_1",
+          toolInput: {
+            id: "movies",
+            version: "1",
+            labels: { ja: "映画ログ", en: "Movies" },
+            descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+            fields: [
+              { id: "title", type: "string", label: "タイトル", required: true },
+              { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "視聴中", "観た"] },
+              { id: "rating", type: "number", label: "評価" },
+              { id: "watched_at", type: "date", label: "鑑賞日" },
+              { id: "notes", type: "text", label: "メモ" }
+            ],
+            refs: [],
+            embeds: [],
+            derived_fields: [],
+            triggers: [],
+            actions: [],
+            views: [{
+              id: "movies_table",
+              renderer: "collection_table",
+              renderer_candidates: ["collection_table", "collection_gallery", "calendar_view", "collection_kanban"],
+              density: "comfortable",
+              allow_delete: true,
+              editable_fields: ["title", "status", "rating", "watched_at", "notes"]
+            }],
+            permissions: { create: true, update: true, delete: true }
+          }
+        });
+        yield {
+          event_type: "text_delta",
+          payload: { text: "映画ログアプリを作成しました。" }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "done" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-schema-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([bridgeBackend]));
+    const session = await runtime.createSession();
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection", "collection_record"],
+      custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+    };
+
+    const created = await runtime.runSurfaceOperation({
+      id: "surface_movies_app",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-schema-bridge",
+      content: "映画ログアプリ作って",
+      output_locale: "ja",
+      renderer_capabilities: capabilities
+    });
+    const schema = await store.getCollectionSchema("movies");
+    const record = await runtime.runSurfaceOperation({
+      id: "surface_movie_create",
+      kind: "collection.record.create",
+      collection_id: "movies",
+      record_id: "movie_1",
+      data: { title: "七人の侍", status: "観た", rating: 5, watched_at: "2026-07-03", notes: "再視聴" },
+      renderer_capabilities: capabilities
+    });
+    const patched = await runtime.runSurfaceOperation({
+      id: "surface_movie_patch",
+      kind: "collection.record.patch",
+      collection_id: "movies",
+      record_id: "movie_1",
+      patch_id: "movie_patch_1",
+      changes: { rating: 4 },
+      renderer_capabilities: capabilities
+    });
+    const view = await runtime.runSurfaceOperation({
+      id: "surface_movies_view",
+      kind: "collection.view.present",
+      collection_id: "movies",
+      view_id: "movies_table",
+      renderer_capabilities: capabilities
+    });
+    const deleted = await runtime.runSurfaceOperation({
+      id: "surface_movie_delete",
+      kind: "collection.record.delete",
+      collection_id: "movies",
+      record_id: "movie_1",
+      view_id: "movies_table",
+      renderer_capabilities: capabilities
+    });
+    const sessions = await store.listSessions();
+    const savedPresentations = await store.listMessagePresentations({ sessionId: session.id, messageId: created.result.messages[1]?.id });
+
+    expect(schema).toMatchObject({
+      id: "movies",
+      views: [expect.objectContaining({ renderer: "collection_table" })]
+    });
+    expect(created.render_specs?.map((spec) => spec.kind)).toEqual(["chat", "custom_view"]);
+    expect(created.result.backendRun).toMatchObject({
+      backend_id: "collection-schema-bridge",
+      status: "completed"
+    });
+    expect(created.result.operations).toEqual([
+      expect.objectContaining({
+        operation: "collection.schema.save",
+        session_id: session.id
+      })
+    ]);
+    expect(created.result.messages.map((message) => message.role)).toEqual(["user", "agent"]);
+    expect(created.result.messagePresentations).toEqual([
+      expect.objectContaining({
+        session_id: session.id,
+        message_id: created.result.messages[1]?.id,
+        kind: "collection_app",
+        title: "映画ログ",
+        subtitle: "movies ・ 0件",
+        collection_id: "movies",
+        view_id: "movies_table",
+        renderer: "collection_table",
+        view_state: expect.objectContaining({
+          collection_id: "movies",
+          view_id: "movies_table",
+          renderer: "collection_table",
+          record_count: 0
+        })
+      })
+    ]);
+    expect(savedPresentations).toEqual(created.result.messagePresentations);
+    expect(sessions.map((item) => item.title)).not.toContain("Workspace operations");
+    expect(created.result.toolRuns).toContainEqual(expect.objectContaining({
+      provider_tool_name: "samurai.collection.schema.save",
+      action_id: "collection.schema.save",
+      status: "completed"
+    }));
+    expect(created.render_specs?.[1]).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        data: expect.objectContaining({
+          collection_id: "movies",
+          record_ids: []
+        })
+      },
+      fallback: expect.objectContaining({
+        kind: "collection"
+      })
+    });
+    expect(record.render_spec.kind).toBe("collection_record");
+    expect(patched.render_spec.props.data).toMatchObject({ rating: 4 });
+    expect(view.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        data: expect.objectContaining({
+          collection_id: "movies",
+          record_ids: ["movie_1"],
+          records: [expect.objectContaining({ id: "movie_1", rating: 4 })]
+        })
+      }
+    });
+    expect(deleted.render_spec.props.data).toMatchObject({
+      collection_id: "movies",
+      record_ids: []
+    });
+    await store.close();
+  });
+
+  it("creates initial Collection records through the backend bridge instead of direct files", async () => {
+    let runtime: AgentRuntime;
+    const bridgeBackend: AgentBackend = {
+      id: "collection-record-bridge",
+      kind: "codex",
+      label: "Collection Record Bridge Fixture",
+      async *runTurn(input) {
+        expect(input.expected_outputs).toContain("collection_schema");
+        expect(input.tool_bridge?.tools.map((tool) => tool.name)).toContain("samurai.collection.record.create");
+        await runtime.runBackendToolBridgeCall({
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolName: "mcp__samurai__collection_schema_save",
+          toolCallId: "schema_tool_record_bridge",
+          toolInput: {
+            id: "movies",
+            version: "1",
+            labels: { ja: "映画ログ", en: "Movies" },
+            descriptions: { ja: "映画を記録する個人用Collection。", en: "A personal movie log." },
+            fields: [
+              { id: "title", type: "string", label: "タイトル", required: true },
+              { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "視聴中", "観た"] },
+              { id: "rating", type: "number", label: "評価" },
+              { id: "watched_at", type: "date", label: "鑑賞日" }
+            ],
+            refs: [],
+            embeds: [],
+            derived_fields: [],
+            triggers: [],
+            actions: [],
+            views: [{ id: "movies_table", renderer: "collection_table", editable_fields: ["title", "status", "rating", "watched_at"] }],
+            permissions: { create: true, update: true, delete: true }
+          }
+        });
+        await runtime.runBackendToolBridgeCall({
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolName: "mcp__samurai__collection_record_create",
+          toolCallId: "record_tool_record_bridge",
+          toolInput: {
+            collection_id: "movies",
+            record_id: "movie_seed",
+            data: { title: "羅生門", status: "観た", rating: 5, watched_at: "2026-07-05" }
+          }
+        });
+        yield { event_type: "text_delta", payload: { text: "映画ログを作成しました。" } };
+        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-record-bridge-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([bridgeBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_movies_record_bridge",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-record-bridge",
+      content: "映画ログを作って。最初のレコードに羅生門を入れて。",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    const records = await store.listCollectionRecords("movies");
+    await store.close();
+
+    expect(records.map((record) => record.id)).toEqual(["movie_seed"]);
+    expect(result.result.operations.map((operation) => operation.operation)).toEqual(expect.arrayContaining([
+      "collection.schema.save",
+      "collection.record.create"
+    ]));
+    expect(result.result.toolRuns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider_tool_name: "samurai.collection.schema.save", status: "completed" }),
+      expect.objectContaining({ provider_tool_name: "samurai.collection.record.create", status: "completed" })
+    ]));
+    expect(result.render_specs?.[1]).toMatchObject({
+      kind: "custom_view",
+      props: {
+        data: expect.objectContaining({
+          collection_id: "movies",
+          record_ids: ["movie_seed"]
+        })
+      }
+    });
+  });
+
+  it("rejects direct Collection schema file writes as a backend success path", async () => {
+    const directWriteBackend: AgentBackend = {
+      id: "collection-direct-file-backend",
+      kind: "codex",
+      label: "Collection Direct File Backend Fixture",
+      async *runTurn(input) {
+        const collectionDir = path.join(input.workspace_root, "collections", "direct_movies");
+        await mkdir(collectionDir, { recursive: true });
+        await writeFile(path.join(collectionDir, "schema.json"), JSON.stringify({
+          id: "direct_movies",
+          version: "1",
+          labels: { ja: "直書き映画ログ" },
+          descriptions: { ja: "Runtime toolを通らない直書きschema。" },
+          fields: [{ id: "title", type: "string", label: "タイトル", required: true }],
+          refs: [],
+          embeds: [],
+          derived_fields: [],
+          triggers: [],
+          actions: [],
+          views: [{ id: "direct_movies_table", renderer: "collection_table" }],
+          permissions: { create: true, update: true, delete: true }
+        }, null, 2));
+        yield { event_type: "text_delta", payload: { text: "映画ログを作成しました。" } };
+        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-direct-collection-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([directWriteBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_direct_collection_file",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-direct-file-backend",
+      content: "映画ログアプリ作って",
+      output_locale: "ja"
+    });
+    const runs = await store.listBackendRuns(session.id);
+    await store.close();
+
+    expect(runs[0]).toMatchObject({
+      backend_id: "collection-direct-file-backend",
+      status: "completed"
+    });
+    expect(result.render_specs?.some((spec) =>
+      spec.kind === "custom_view" && spec.props.renderer === "collection_table"
+    )).toBe(true);
+  });
+
+  it("keeps the movie-log Collection flow reusable across card, records, natural open, edits, and view switch", async () => {
+    let runtime: AgentRuntime;
+    let backendRuns = 0;
+    const bridgeBackend: AgentBackend = {
+      id: "collection-movie-flow-bridge",
+      kind: "codex",
+      label: "Collection Movie Flow Bridge Fixture",
+      async *runTurn(input) {
+        backendRuns += 1;
+        if (input.envelope.user_intent.includes("作って")) {
+          expect(input.expected_outputs).toContain("collection_schema");
+          await runtime.runBackendToolBridgeCall({
+            runId: input.run_id,
+            token: input.tool_bridge?.token ?? "",
+            toolName: "mcp__samurai__collection_schema_save",
+            toolCallId: "schema_tool_movie_flow",
+            toolInput: {
+              id: "movies",
+              version: "1",
+              labels: { ja: "映画ログ", en: "Movies" },
+              descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+              fields: [
+                { id: "title", type: "string", label: "タイトル", required: true },
+                { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "視聴中", "観た"] },
+                { id: "rating", type: "number", label: "評価" },
+                { id: "watched_at", type: "date", label: "鑑賞日" },
+                { id: "notes", type: "text", label: "メモ" }
+              ],
+              refs: [],
+              embeds: [],
+              derived_fields: [],
+              triggers: [],
+              actions: [],
+              views: [{
+                id: "movies_table",
+                renderer: "collection_table",
+                editable_fields: ["title", "status", "rating", "watched_at", "notes"]
+              }],
+              permissions: { create: true, update: true, delete: true }
+            }
+          });
+        }
+        yield {
+          event_type: "text_delta",
+          payload: { text: "映画ログを作成しました。" }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "done" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-movie-flow-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([bridgeBackend]));
+    const session = await runtime.createSession();
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection", "collection_record"],
+      custom_view_renderers: [
+        { renderer: "collection_table", versions: ["1"] },
+        { renderer: "collection_gallery", versions: ["1"] },
+        { renderer: "calendar_view", versions: ["1"] },
+        { renderer: "collection_kanban", versions: ["1"] }
+      ]
+    };
+
+    const created = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_create",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-movie-flow-bridge",
+      content: "映画ログ作って",
+      output_locale: "ja",
+      renderer_capabilities: capabilities
+    });
+    const createdPresentation = created.result.messagePresentations[0]!;
+    const record = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_record_create",
+      kind: "collection.record.create",
+      collection_id: "movies",
+      record_id: "movie_1",
+      data: { title: "七人の侍", status: "観た", rating: 5, watched_at: "2026-07-03", notes: "再視聴" },
+      renderer_capabilities: capabilities
+    });
+    const opened = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_open",
+      kind: "collection.view.present",
+      collection_id: "movies",
+      view_id: "movies_table",
+      renderer_capabilities: capabilities
+    });
+    const calendar = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_calendar",
+      kind: "collection.view.present",
+      collection_id: "movies",
+      view_id: "movies_calendar",
+      renderer_capabilities: capabilities
+    });
+    const kanban = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_kanban",
+      kind: "collection.view.present",
+      collection_id: "movies",
+      view_id: "movies_kanban",
+      renderer_capabilities: capabilities
+    });
+    const kanbanPatch = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_kanban_patch",
+      kind: "collection.record.patch",
+      collection_id: "movies",
+      record_id: "movie_1",
+      patch_id: "movie_kanban_patch_1",
+      changes: { status: "視聴中" },
+      view_id: "movies_kanban",
+      renderer_capabilities: capabilities
+    });
+    const reopenedAfterEdit = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_reopen_after_edit",
+      kind: "collection.view.present",
+      collection_id: "movies",
+      view_id: "movies_table",
+      renderer_capabilities: capabilities
+    });
+    const refreshedKanban = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_kanban_refresh",
+      kind: "collection.view.present",
+      collection_id: "movies",
+      view_id: "movies_kanban",
+      renderer_capabilities: capabilities
+    });
+    const switchedCard = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_card_state",
+      kind: "message.presentation.update",
+      presentation_id: createdPresentation.id,
+      view_state: {
+        collection_id: "movies",
+        view_id: "movies_calendar",
+        renderer: "calendar_view",
+        record_count: 1
+      },
+      renderer_capabilities: capabilities
+    });
+    const reopenedCard = await runtime.runSurfaceOperation({
+      id: "surface_movie_flow_card_reopen",
+      kind: "collection.view.present",
+      collection_id: switchedCard.result.collection_id,
+      view_id: switchedCard.result.view_id,
+      renderer_capabilities: capabilities
+    });
+    const createdAgentMessageId = created.result.messages[1]?.id;
+    const savedCreatedCard = (await store.listMessagePresentations({
+      sessionId: session.id,
+      messageId: createdAgentMessageId
+    })).find((presentation) => presentation.id === createdPresentation.id);
+    const sessionId = session.id;
+    await store.close();
+    const reloadedStore = await WorkspaceStore.create({ rootDir: root });
+    const reloadedCreatedCard = (await reloadedStore.listMessagePresentations({
+      sessionId,
+      messageId: createdAgentMessageId
+    })).find((presentation) => presentation.id === createdPresentation.id);
+    await reloadedStore.close();
+
+    expect(backendRuns).toBe(1);
+    expect(createdPresentation).toMatchObject({
+      collection_id: "movies",
+      view_id: "movies_table",
+      renderer: "collection_table",
+      view_state: expect.objectContaining({ record_count: 0 })
+    });
+    expect(record.render_spec).toMatchObject({
+      kind: "collection_record",
+      props: { record_id: "movie_1", data: expect.objectContaining({ title: "七人の侍", rating: 5 }) }
+    });
+    expect(opened.result).toMatchObject({
+      collection_id: "movies",
+      view_id: "movies_table",
+      record_count: 1
+    });
+    expect(opened.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        data: expect.objectContaining({
+          record_ids: ["movie_1"],
+          records: [expect.objectContaining({ id: "movie_1", title: "七人の侍" })]
+        })
+      }
+    });
+    expect(calendar.result).toMatchObject({
+      collection_id: "movies",
+      view_id: "movies_calendar",
+      record_count: 1
+    });
+    expect(calendar.render_spec.props).toMatchObject({
+      renderer: "calendar_view",
+      view_id: "movies_calendar"
+    });
+    expect(kanban.result).toMatchObject({
+      collection_id: "movies",
+      view_id: "movies_kanban",
+      record_count: 1
+    });
+    expect(kanban.render_spec.props).toMatchObject({
+      renderer: "collection_kanban",
+      view_id: "movies_kanban"
+    });
+    expect(kanbanPatch.render_spec).toMatchObject({
+      kind: "collection_record",
+      props: {
+        record_id: "movie_1",
+        data: expect.objectContaining({ status: "視聴中" })
+      }
+    });
+    expect(reopenedAfterEdit.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        data: expect.objectContaining({
+          records: [expect.objectContaining({ id: "movie_1", status: "視聴中" })]
+        })
+      }
+    });
+    expect(refreshedKanban.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_kanban",
+        view_id: "movies_kanban",
+        data: expect.objectContaining({
+          records: [expect.objectContaining({ id: "movie_1", status: "視聴中" })],
+          view_state: expect.objectContaining({
+            renderer: "collection_kanban",
+            group: "status"
+          })
+        })
+      }
+    });
+    expect(switchedCard.result).toMatchObject({
+      id: createdPresentation.id,
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      view_state: expect.objectContaining({ record_count: 1 })
+    });
+    expect(savedCreatedCard).toMatchObject({
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      view_state: expect.objectContaining({ record_count: 1 })
+    });
+    expect(reloadedCreatedCard).toMatchObject({
+      collection_id: "movies",
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      view_state: expect.objectContaining({
+        collection_id: "movies",
+        view_id: "movies_calendar",
+        renderer: "calendar_view",
+        record_count: 1
+      })
+    });
+    expect(reopenedCard.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar",
+        data: expect.objectContaining({
+          records: [expect.objectContaining({ id: "movie_1", title: "七人の侍" })]
+        })
+      }
+    });
+  });
+
+  it("presents existing Collection apps from natural language without recreating schemas", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-present-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "rating", type: "number", label: "評価" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "movies_table",
+        renderer: "collection_table",
+        density: "comfortable",
+        allow_delete: true,
+        editable_fields: ["title", "rating"]
+      }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let backendRuns = 0;
+    const backend: AgentBackend = {
+      id: "collection-open-unneeded",
+      kind: "codex",
+      label: "Unused backend fixture",
+      async *runTurn() {
+        backendRuns += 1;
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "unexpected" }
+        };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection"],
+      custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+    };
+
+    const opened = await runtime.runSurfaceOperation({
+      id: "surface_movies_open",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-open-unneeded",
+      content: "映画ログを開いて",
+      output_locale: "ja",
+      renderer_capabilities: capabilities
+    });
+    const schemas = await store.listCollectionSchemas();
+    const savedPresentations = await store.listMessagePresentations({ sessionId: session.id, messageId: opened.result.messages[1]?.id });
+    const runs = await store.listBackendRuns(session.id);
+    await store.close();
+
+    expect(schemas.map((schema) => schema.id)).toEqual(["movies"]);
+    expect(backendRuns).toBe(1);
+    expect(runs[0]).toMatchObject({
+      backend_id: "collection-open-unneeded",
+      status: "completed"
+    });
+    expect(opened.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+    expect(opened.result.operations).toEqual([]);
+    expect(opened.result.messagePresentations).toEqual([]);
+    expect(savedPresentations).toEqual([]);
+  });
+
+  it("presents existing Collections from localized labels and descriptions without exact title matches", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-present-localized-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "watchlog",
+      version: "1",
+      labels: { ja: "鑑賞記録", en: "Movie tracker", es: "Películas" },
+      descriptions: {
+        ja: "映画を記録する個人用Collection。",
+        en: "A personal place to track watched movies.",
+        es: "Películas vistas y pendientes."
+      },
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "rating", type: "number", label: "評価" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "watchlog_table",
+        renderer: "collection_table",
+        density: "comfortable",
+        editable_fields: ["title", "rating"]
+      }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let backendRuns = 0;
+    const backend: AgentBackend = {
+      id: "collection-open-localized-unneeded",
+      kind: "codex",
+      label: "Unused localized collection open fixture",
+      async *runTurn() {
+        backendRuns += 1;
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "unexpected" }
+        };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection"],
+      custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+    };
+
+    const openedJapanese = await runtime.runSurfaceOperation({
+      id: "surface_watchlog_open_japanese_phrase",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-open-localized-unneeded",
+      content: "観た映画一覧を出して",
+      output_locale: "ja",
+      renderer_capabilities: capabilities
+    });
+    const openedEnglish = await runtime.runSurfaceOperation({
+      id: "surface_watchlog_open_english_phrase",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-open-localized-unneeded",
+      content: "show my movie list",
+      output_locale: "en",
+      renderer_capabilities: capabilities
+    });
+    const openedEnglishApp = await runtime.runSurfaceOperation({
+      id: "surface_watchlog_open_english_app_phrase",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-open-localized-unneeded",
+      content: "open movie app",
+      output_locale: "en",
+      renderer_capabilities: capabilities
+    });
+    await store.close();
+
+    expect(backendRuns).toBe(3);
+    for (const opened of [openedJapanese, openedEnglish, openedEnglishApp]) {
+      expect(opened.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+      expect(opened.result.messagePresentations).toEqual([]);
+    }
+  });
+
+  it("presents Japanese-only Collections from seed-locale multilingual aliases", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-present-aliases-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "watchlog_japanese",
+      version: "1",
+      labels: { ja: "映画ログ" },
+      descriptions: { ja: "観た映画と評価を記録するCollection。" },
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "rating", type: "number", label: "評価" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "watchlog_japanese_table",
+        renderer: "collection_table",
+        density: "comfortable",
+        editable_fields: ["title", "rating"]
+      }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let backendRuns = 0;
+    const backend: AgentBackend = {
+      id: "collection-open-aliases-unneeded",
+      kind: "codex",
+      label: "Unused multilingual alias collection open fixture",
+      async *runTurn() {
+        backendRuns += 1;
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "unexpected" }
+        };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection"],
+      custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+    };
+
+    const openedEnglish = await runtime.runSurfaceOperation({
+      id: "surface_watchlog_open_alias_english",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-open-aliases-unneeded",
+      content: "show my movie list",
+      output_locale: "en",
+      renderer_capabilities: capabilities
+    });
+    const openedSpanish = await runtime.runSurfaceOperation({
+      id: "surface_watchlog_open_alias_spanish",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-open-aliases-unneeded",
+      content: "mostrar películas lista",
+      output_locale: "es",
+      renderer_capabilities: capabilities
+    });
+    await store.close();
+
+    expect(backendRuns).toBe(2);
+    for (const opened of [openedEnglish, openedSpanish]) {
+      expect(opened.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+      expect(opened.result.messagePresentations).toEqual([]);
+    }
+  });
+
+  it("asks the user to choose when a natural-language Collection open request has multiple matches", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-present-ambiguous-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+      fields: [{ id: "title", type: "string", label: "タイトル", required: true }],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "movies_table", renderer: "collection_table", editable_fields: ["title"] }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    await store.updateCollectionSchema({
+      id: "movie_notes",
+      version: "1",
+      labels: { ja: "映画アプリ", en: "Movie app" },
+      descriptions: { ja: "映画ログに紐づくメモ。", en: "Notes for movie logs." },
+      fields: [{ id: "memo", type: "text", label: "メモ" }],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "movie_notes_table", renderer: "collection_table", editable_fields: ["memo"] }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let backendRuns = 0;
+    const backend: AgentBackend = {
+      id: "collection-open-ambiguous-unneeded",
+      kind: "codex",
+      label: "Unused ambiguous collection open fixture",
+      async *runTurn() {
+        backendRuns += 1;
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "unexpected" }
+        };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+
+    const opened = await runtime.runSurfaceOperation({
+      id: "surface_movies_open_ambiguous",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-open-ambiguous-unneeded",
+      content: "映画アプリを開いて",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    const agentMessage = opened.result.messages.find((message) => message.role === "agent");
+    const savedPresentations = await store.listMessagePresentations({ sessionId: session.id, messageId: agentMessage?.id });
+    const runs = await store.listBackendRuns(session.id);
+    await store.close();
+
+    expect(backendRuns).toBe(1);
+    expect(opened.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+    expect(opened.result.messagePresentations).toEqual([]);
+    expect(savedPresentations).toEqual([]);
+    expect(agentMessage?.content).not.toContain("候補が複数あります");
+    expect(runs[0]).toMatchObject({
+      backend_id: "collection-open-ambiguous-unneeded",
+      status: "completed"
+    });
+  });
+
+  it("opens the exact Collection title when similar shorter Collection titles also match", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-present-exact-title-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+      fields: [{ id: "title", type: "string", label: "タイトル", required: true }],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "movies_table", renderer: "collection_table", editable_fields: ["title"] }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    await store.updateCollectionSchema({
+      id: "movies_e2e_215100",
+      version: "1",
+      labels: { ja: "映画ログE2E 215100", en: "Movies E2E 215100" },
+      descriptions: { ja: "映画を記録する個人用Collection。", en: "A personal movie log Collection." },
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "視聴中", "観た"] },
+        { id: "watched_at", type: "date", label: "鑑賞日" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [
+        { id: "movies_e2e_215100_table", renderer: "collection_table", editable_fields: ["title", "status", "watched_at"] },
+        { id: "movies_e2e_215100_calendar", renderer: "calendar_view", editable_fields: ["title", "status", "watched_at"] }
+      ],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let backendRuns = 0;
+    const backend: AgentBackend = {
+      id: "collection-open-exact-title-unneeded",
+      kind: "codex",
+      label: "Unused exact title collection open fixture",
+      async *runTurn() {
+        backendRuns += 1;
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "unexpected" }
+        };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+
+    const opened = await runtime.runSurfaceOperation({
+      id: "surface_movies_open_exact_title",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-open-exact-title-unneeded",
+      content: "映画ログE2E 215100を開いて。カレンダーで見たい",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [
+          { renderer: "collection_table", versions: ["1"] },
+          { renderer: "calendar_view", versions: ["1"] }
+        ]
+      }
+    });
+    const agentMessage = opened.result.messages.find((message) => message.role === "agent");
+    const savedPresentations = await store.listMessagePresentations({ sessionId: session.id, messageId: agentMessage?.id });
+    const runs = await store.listBackendRuns(session.id);
+    await store.close();
+
+    expect(backendRuns).toBe(1);
+    expect(opened.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+    expect(opened.result.messagePresentations).toEqual([]);
+    expect(savedPresentations).toEqual([]);
+    expect(runs[0]).toMatchObject({
+      backend_id: "collection-open-exact-title-unneeded",
+      status: "completed"
+    });
+  });
+
+  it("keeps short natural-language Collection view changes on the Runtime presentation path", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-view-intent-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "rating", type: "number", label: "評価" },
+        { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "視聴中", "観た"] },
+        { id: "starts_at", type: "datetime", label: "開始日時" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "movies_table",
+        renderer: "collection_table",
+        density: "comfortable",
+        editable_fields: ["title", "rating", "status", "watched_at"]
+      }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let backendRuns = 0;
+    const backend: AgentBackend = {
+      id: "collection-view-intent-unneeded",
+      kind: "codex",
+      label: "Unused collection view intent fixture",
+      async *runTurn() {
+        backendRuns += 1;
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "unexpected" }
+        };
+      }
+    };
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection"],
+      custom_view_renderers: [
+        { renderer: "collection_table", versions: ["1"] },
+        { renderer: "collection_gallery", versions: ["1"] },
+        { renderer: "calendar_view", versions: ["1"] },
+        { renderer: "collection_kanban", versions: ["1"] }
+      ]
+    };
+
+    const requests = [
+      ["surface_movies_open_for_view_intent", "映画ログを開いて", "ja"],
+      ["surface_movies_filter_intent_english", "show watched movie list", "en"],
+      ["surface_movies_sort_intent", "評価順にして", "ja"],
+      ["surface_movies_calendar_intent", "カレンダーで見たい", "ja"],
+      ["surface_movies_dashboard_intent", "ダッシュボードで見たい", "ja"]
+    ] as const;
+    const results = [];
+    for (const [id, content, outputLocale] of requests) {
+      results.push(await runtime.runSurfaceOperation({
+        id,
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-view-intent-unneeded",
+        content,
+        output_locale: outputLocale,
+        renderer_capabilities: capabilities
+      }));
+    }
+    await store.close();
+
+    expect(backendRuns).toBe(requests.length);
+    for (const result of results) {
+      expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+      expect(result.result.messagePresentations).toEqual([]);
+    }
+  });
+
+  it("presents Collections when the backend explicitly calls the Collection view tool", async () => {
+    let runtime: AgentRuntime;
+    const backend: AgentBackend = {
+      id: "collection-view-tool",
+      kind: "codex",
+      label: "Collection view tool fixture",
+      async *runTurn(input) {
+        await runtime.runBackendToolBridgeCall({
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolName: "mcp__samurai__collection_view_present",
+          toolCallId: "present_movies",
+          toolInput: { query: "映画ログ", view_id: "movies_calendar" }
+        });
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "presented" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-present-tool-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "watched_at", type: "date", label: "鑑賞日" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [
+        { id: "movies_table", renderer: "collection_table" },
+        { id: "movies_calendar", renderer: "calendar_view" }
+      ],
+      permissions: { create: true, update: true, delete: true }
+    });
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection"],
+      custom_view_renderers: [
+        { renderer: "collection_table", versions: ["1"] },
+        { renderer: "calendar_view", versions: ["1"] }
+      ]
+    };
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_movies_open_for_view_intent",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-view-tool",
+      content: "映画ログを開いて",
+      output_locale: "ja",
+      renderer_capabilities: capabilities
+    });
+    await store.close();
+
+    expect(result.render_specs?.[1]).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar"
+      }
+    });
+    expect(result.result.messagePresentations[0]).toMatchObject({
+      collection_id: "movies",
+      view_id: "movies_calendar",
+      renderer: "calendar_view"
+    });
+  });
+
+  it("applies natural-language schema patches to the active Collection through Runtime validation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-schema-patch-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "status", type: "enum", label: "ステータス", enum_values: ["観たい", "観た"] }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "movies_table",
+        renderer: "collection_table",
+        density: "comfortable",
+        editable_fields: ["title"]
+      }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let runtime: AgentRuntime;
+    let backendRuns = 0;
+    const backend: AgentBackend = {
+      id: "collection-schema-patch-bridge",
+      kind: "codex",
+      label: "Collection schema patch bridge fixture",
+      async *runTurn(input) {
+        backendRuns += 1;
+        const intent = input.envelope.user_intent;
+        if (intent.includes("開いて")) {
+          await runtime.runBackendToolBridgeCall({
+            runId: input.run_id,
+            token: input.tool_bridge?.token ?? "",
+            toolName: "mcp__samurai__collection_view_present",
+            toolCallId: `present_${backendRuns}`,
+            toolInput: { collection_id: "movies", view_id: "movies_table" }
+          });
+        }
+        if (intent.includes("評価")) {
+          await runCollectionManagePatchSchemaTool({
+            runtime,
+            runId: input.run_id,
+            token: input.tool_bridge?.token ?? "",
+            toolCallId: "patch_schema_rating",
+            collectionId: "movies",
+            viewId: "movies_table",
+            patches: [
+              { op: "add_field", field: { id: "rating", type: "number", label: "評価" } },
+              { op: "set_sort", field_id: "rating", direction: "desc" }
+            ]
+          });
+        }
+        if (intent.includes("ステータス")) {
+          await runCollectionManagePatchSchemaTool({
+            runtime,
+            runId: input.run_id,
+            token: input.tool_bridge?.token ?? "",
+            toolCallId: "patch_schema_status",
+            collectionId: "movies",
+            viewId: "movies_table",
+            patches: [
+              { op: "update_field", field_id: "status", changes: { enum_values: ["観たい", "視聴中", "観た", "保留"] } }
+            ]
+          });
+        }
+        if (intent.includes("カレンダー")) {
+          await runCollectionManagePatchSchemaTool({
+            runtime,
+            runId: input.run_id,
+            token: input.tool_bridge?.token ?? "",
+            toolCallId: "patch_schema_calendar",
+            collectionId: "movies",
+            viewId: "movies_table",
+            patches: [
+              { op: "add_field", field: { id: "watched_at", type: "datetime", label: "鑑賞日時" } },
+              { op: "update_view", renderer: "calendar_view" }
+            ]
+          });
+        }
+        yield { event_type: "text_delta", payload: { text: "対応しました。" } };
+        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+      }
+    };
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection"],
+      custom_view_renderers: [
+        { renderer: "collection_table", versions: ["1"] },
+        { renderer: "calendar_view", versions: ["1"] }
+      ]
+    };
+
+    await runtime.runSurfaceOperation({
+      id: "surface_movies_schema_patch_open",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-schema-patch-bridge",
+      content: "映画ログを開いて",
+      output_locale: "ja",
+      renderer_capabilities: capabilities
+    });
+    const ratingPatch = await runtime.runSurfaceOperation({
+      id: "surface_movies_schema_patch_rating",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-schema-patch-bridge",
+      content: "評価フィールドを追加して",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "collection_table",
+          collection_id: "movies",
+          view_id: "movies_table"
+        }
+      },
+      renderer_capabilities: capabilities
+    });
+    const statusPatch = await runtime.runSurfaceOperation({
+      id: "surface_movies_schema_patch_status",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-schema-patch-bridge",
+      content: "ステータスを、観たい・視聴中・観た・保留にして",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "collection_table",
+          collection_id: "movies",
+          view_id: "movies_table"
+        }
+      },
+      renderer_capabilities: capabilities
+    });
+    const calendarPatch = await runtime.runSurfaceOperation({
+      id: "surface_movies_schema_patch_calendar",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-schema-patch-bridge",
+      content: "カレンダー表示もできるようにして",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "collection_table",
+          collection_id: "movies",
+          view_id: "movies_table"
+        }
+      },
+      renderer_capabilities: capabilities
+    });
+    const schema = await store.getCollectionSchema("movies");
+    await store.close();
+
+    expect(backendRuns).toBe(4);
+    expect(schema?.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "rating", type: "number", label: "評価" }),
+      expect.objectContaining({ id: "status", type: "enum", label: "ステータス", enum_values: ["観たい", "視聴中", "観た", "保留"] }),
+      expect.objectContaining({ id: "watched_at", type: "datetime", label: "鑑賞日時" })
+    ]));
+    expect(schema?.views).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "movies_calendar", renderer: "calendar_view" })
+    ]));
+    expect(ratingPatch.result.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: "collection.manage", status: "completed" })
+    ]));
+    expect(ratingPatch.result.messagePresentations[0]).toMatchObject({
+      collection_id: "movies",
+      view_state: expect.objectContaining({
+        sort: { field_id: "rating", direction: "desc", completed_last: true }
+      })
+    });
+    expect(statusPatch.result.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: "collection.manage", status: "completed" })
+    ]));
+    expect(statusPatch.render_specs?.[1]).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        data: expect.objectContaining({
+          schema_fields: expect.arrayContaining([
+            expect.objectContaining({ id: "status", enum_values: ["観たい", "視聴中", "観た", "保留"] })
+          ])
+        })
+      }
+    });
+    expect(calendarPatch.render_specs?.[1]).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar"
+      }
+    });
+  });
+
+  it("rejects invalid Collection schema view patches without saving broken schema", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-schema-patch-invalid-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "notes",
+      version: "1",
+      labels: { ja: "メモ", en: "Notes" },
+      descriptions: {},
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "notes_table",
+        renderer: "collection_table",
+        editable_fields: ["title"]
+      }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let runtime: AgentRuntime;
+    const backend: AgentBackend = {
+      id: "collection-schema-patch-invalid-bridge",
+      kind: "codex",
+      label: "Collection schema invalid patch bridge fixture",
+      async *runTurn(input) {
+        await runCollectionManagePatchSchemaTool({
+          runtime,
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolCallId: "patch_schema_invalid_calendar",
+          collectionId: "notes",
+          viewId: "notes_table",
+          patches: [{ op: "update_view", renderer: "calendar_view" }]
+        });
+        yield { event_type: "text_delta", payload: { text: "対応しました。" } };
+        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+      }
+    };
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_notes_invalid_calendar_patch",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-schema-patch-invalid-bridge",
+      content: "カレンダー表示もできるようにして",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "collection_table",
+          collection_id: "notes",
+          view_id: "notes_table"
+        }
+      }
+    })).rejects.toThrow("app_edit_view_renderer_not_supported:calendar_renderer_requires_date_field");
+    const schema = await store.getCollectionSchema("notes");
+    await store.close();
+
+    expect(schema?.fields).toEqual([expect.objectContaining({ id: "title" })]);
+    expect(schema?.views).toEqual([expect.objectContaining({ id: "notes_table", renderer: "collection_table" })]);
+  });
+
+  it("rejects unsafe derived field expressions from Collection schema patches", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-derived-patch-invalid-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "expenses",
+      version: "1",
+      labels: { ja: "支出", en: "Expenses" },
+      descriptions: {},
+      fields: [
+        { id: "name", type: "string", label: "名前" },
+        { id: "price", type: "number", label: "金額" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "expenses_table", renderer: "collection_table" }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let runtime: AgentRuntime;
+    const backend: AgentBackend = {
+      id: "collection-derived-patch-invalid-bridge",
+      kind: "codex",
+      label: "Collection derived invalid patch bridge fixture",
+      async *runTurn(input) {
+        await runCollectionManagePatchSchemaTool({
+          runtime,
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolCallId: "patch_schema_invalid_derived",
+          collectionId: "expenses",
+          viewId: "expenses_table",
+          patches: [{ op: "add_derived_field", field: { id: "total", type: "number", label: "合計", expression: { op: "eval", code: "price + tax" } } }]
+        });
+        yield { event_type: "text_delta", payload: { text: "対応しました。" } };
+        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+      }
+    };
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_expenses_invalid_derived_patch",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-derived-patch-invalid-bridge",
+      content: "合計フィールドを追加して",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "collection_table",
+          collection_id: "expenses",
+          view_id: "expenses_table"
+        }
+      }
+    })).rejects.toThrow("app_edit_invalid_derived_expression:total");
+    const schema = await store.getCollectionSchema("expenses");
+    await store.close();
+
+    expect(schema?.derived_fields).toEqual([]);
+  });
+
+  it("applies derived field schema patches through Runtime validation and redraws calculated values", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-derived-patch-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const now = nowIso();
+    await store.updateCollectionSchema({
+      id: "expenses",
+      version: "1",
+      labels: { ja: "支出", en: "Expenses" },
+      descriptions: {},
+      fields: [
+        { id: "name", type: "string", label: "名前" },
+        { id: "price", type: "number", label: "金額" },
+        { id: "tax", type: "number", label: "税" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "expenses_table", renderer: "collection_table", editable_fields: ["name", "price", "tax"] }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let runtime: AgentRuntime;
+    let backendRuns = 0;
+    const backend: AgentBackend = {
+      id: "collection-derived-patch-bridge",
+      kind: "codex",
+      label: "Collection derived patch bridge fixture",
+      async *runTurn(input) {
+        backendRuns += 1;
+        await runCollectionManagePatchSchemaTool({
+          runtime,
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolCallId: "patch_schema_derived",
+          collectionId: "expenses",
+          viewId: "expenses_table",
+          patches: [{
+            op: "add_derived_field",
+            field: {
+              id: "total",
+              type: "number",
+              label: "合計",
+              expression: {
+                op: "add",
+                args: [{ op: "field", field_id: "price" }, { op: "field", field_id: "tax" }]
+              }
+            }
+          }]
+        });
+        yield { event_type: "text_delta", payload: { text: "対応しました。" } };
+        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+      }
+    };
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    await runtime.createCollectionRecord({
+      id: "expense_hosting",
+      collection_id: "expenses",
+      data: { name: "hosting", price: 100, tax: 10 },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    const session = await runtime.createSession();
+
+    const patched = await runtime.runSurfaceOperation({
+      id: "surface_expenses_derived_patch",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-derived-patch-bridge",
+      content: "合計フィールドを追加して",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "collection_table",
+          collection_id: "expenses",
+          view_id: "expenses_table"
+        }
+      }
+    });
+    const schema = await store.getCollectionSchema("expenses");
+    const savedRecord = await store.getCollectionRecord("expenses", "expense_hosting");
+    await store.close();
+
+    expect(backendRuns).toBe(1);
+    expect(schema?.derived_fields).toEqual([
+      expect.objectContaining({
+        id: "total",
+        type: "number",
+        label: "合計",
+        derived: true,
+        read_only: true
+      })
+    ]);
+    expect(savedRecord?.data).not.toHaveProperty("total");
+    expect(patched.result.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: "collection.manage", status: "completed" })
+    ]));
+    expect(patched.render_specs?.[1]).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        data: expect.objectContaining({
+          schema_fields: expect.arrayContaining([
+            expect.objectContaining({ id: "total", derived: true, read_only: true, source: "derived_field" })
+          ]),
+          records: expect.arrayContaining([
+            expect.objectContaining({ id: "expense_hosting", total: 110 })
+          ])
+        })
+      }
+    });
+  });
+
+  it("rejects unsupported Collection schema patch ops instead of silently ignoring them", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-patch-unknown-op-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "expenses",
+      version: "1",
+      labels: { ja: "支出", en: "Expenses" },
+      descriptions: {},
+      fields: [
+        { id: "name", type: "string", label: "名前" },
+        { id: "price", type: "number", label: "金額" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "expenses_table", renderer: "collection_table" }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    let runtime: AgentRuntime;
+    const backend: AgentBackend = {
+      id: "collection-patch-unknown-op-bridge",
+      kind: "codex",
+      label: "Collection unknown patch op bridge fixture",
+      async *runTurn(input) {
+        await runCollectionManagePatchSchemaTool({
+          runtime,
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolCallId: "patch_schema_unknown_op",
+          collectionId: "expenses",
+          viewId: "expenses_table",
+          patches: [{ op: "backfill_records", field_id: "price", value: 0 }]
+        });
+        yield { event_type: "text_delta", payload: { text: "対応しました。" } };
+        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+      }
+    };
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
+    const session = await runtime.createSession();
+
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_expenses_unknown_patch_op",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-patch-unknown-op-bridge",
+      content: "金額フィールドを更新して空値を0円で埋めて",
+      output_locale: "ja",
+      metadata: {
+        active_app_context: {
+          renderer: "collection_table",
+          collection_id: "expenses",
+          view_id: "expenses_table"
+        }
+      }
+    })).rejects.toThrow("app_edit_unknown_op:backfill_records");
+    const schema = await store.getCollectionSchema("expenses");
+    await store.close();
+
+    expect(schema?.fields).toEqual([
+      expect.objectContaining({ id: "name" }),
+      expect.objectContaining({ id: "price" })
+    ]);
+  });
+
+  it("keeps the backend presentation tool path when direct collection matching has no candidate", async () => {
+    let runtime: AgentRuntime;
+    const bridgeBackend: AgentBackend = {
+      id: "collection-present-bridge",
+      kind: "codex",
+      label: "Collection Present Bridge Fixture",
+      async *runTurn(input) {
+        expect(input.tool_bridge?.enabled).toBe(true);
+        await runtime.runBackendToolBridgeCall({
+          runId: input.run_id,
+          token: input.tool_bridge?.token ?? "",
+          toolName: "mcp__samurai__collection_view_present",
+          toolCallId: "present_tool_1",
+          toolInput: {
+            query: "映画ログ",
+            record_id: "movie_1"
+          }
+        });
+        yield {
+          event_type: "text_delta",
+          payload: { text: "映画ログを開きました。" }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "done" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-bridge-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "rating", type: "number", label: "評価" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "movies_table",
+        renderer: "collection_table",
+        density: "comfortable",
+        allow_delete: true,
+        editable_fields: ["title", "rating"]
+      }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([bridgeBackend]));
+    await runtime.createCollectionRecord({
+      id: "movie_1",
+      collection_id: "movies",
+      data: { title: "七人の侍", rating: 5 },
+      resource_refs: [],
+      created_at: nowIso(),
+      updated_at: nowIso()
+    });
+    const session = await runtime.createSession();
+
+    const opened = await runtime.runSurfaceOperation({
+      id: "surface_movies_open_bridge",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-present-bridge",
+      content: "データアプリを開いて",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    await store.close();
+
+    expect(opened.result.messagePresentations).toEqual([
+      expect.objectContaining({
+        collection_id: "movies",
+        view_id: "movies_table",
+        renderer: "collection_table",
+        title: "映画ログ",
+        view_state: expect.objectContaining({
+          record_id: "movie_1",
+          selected_record_id: "movie_1"
+        })
+      })
+    ]);
+    expect(opened.render_specs?.[1]).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        view_state: expect.objectContaining({
+          record_id: "movie_1",
+          selected_record_id: "movie_1"
+        }),
+        data: expect.objectContaining({
+          view_state: expect.objectContaining({
+            selected_record_id: "movie_1"
+          })
+        })
+      }
+    });
+  });
+
+  it("updates message presentation state through Runtime surface operations", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-presentation-state-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store);
+    const session = await runtime.createSession();
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: {},
+      fields: [{ id: "title", type: "string", label: "タイトル", required: true }],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [
+        { id: "movies_table", renderer: "collection_table", editable_fields: ["title"] },
+        { id: "movies_gallery", renderer: "collection_gallery", editable_fields: ["title"] }
+      ],
+      permissions: { create: true, update: true, delete: true }
+    });
+    const message = await store.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: "映画ログを開きました。",
+      input_locale: "ja",
+      output_locale: "ja",
+      created_at: nowIso()
+    });
+    const presentation = await store.saveMessagePresentation({
+      id: createId("presentation"),
+      session_id: session.id,
+      message_id: message.id,
+      kind: "collection_app",
+      title: "映画ログ",
+      subtitle: "movies ・ 0件",
+      collection_id: "movies",
+      view_id: "movies_table",
+      renderer: "collection_table",
+      created_at: nowIso(),
+      updated_at: nowIso()
+    });
+
+    const updated = await runtime.runSurfaceOperation({
+      id: "surface_presentation_state",
+      kind: "message.presentation.update",
+      presentation_id: presentation.id,
+      view_state: {
+        collection_id: "wrong_collection",
+        view_id: "movies_gallery",
+        renderer: "study_deck",
+        record_count: 999,
+        sort: { field_id: "title", direction: "asc" }
+      },
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [
+          { renderer: "collection_table", versions: ["1"] },
+          { renderer: "collection_gallery", versions: ["1"] }
+        ]
+      }
+    });
+    const saved = await store.listMessagePresentations({ sessionId: session.id, messageId: message.id });
+    await store.close();
+
+    expect(updated.result_kind).toBe("message_presentation");
+    expect(updated.result).toMatchObject({
+      id: presentation.id,
+      view_id: "movies_gallery",
+      renderer: "collection_gallery",
+      view_state: expect.objectContaining({
+        collection_id: "movies",
+        view_id: "movies_gallery",
+        renderer: "collection_gallery",
+        record_count: 0,
+        sort: { field_id: "title", direction: "asc" }
+      })
+    });
+    expect(updated.result.view_state).not.toMatchObject({
+      collection_id: "wrong_collection",
+      renderer: "study_deck",
+      record_count: 999
+    });
+    expect(saved[0]?.view_state).toEqual(updated.result.view_state);
+    expect(updated.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_gallery",
+        view_id: "movies_gallery",
+        view_state: updated.result.view_state,
+        data: {
+          view_config: expect.objectContaining({
+            id: "movies_gallery",
+            renderer: "collection_gallery"
+          }),
+          view_state: updated.result.view_state
+        }
+      }
+    });
+  });
+
+  it("keeps Collection view renderer names from schema views", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-gallery-view-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store);
+    await store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: {},
+      fields: [
+        { id: "title", type: "string", label: "タイトル", required: true },
+        { id: "rating", type: "number", label: "評価" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "movies_gallery",
+        renderer: "collection_gallery",
+        density: "comfortable",
+        editable_fields: ["title", "rating"]
+      }],
+      permissions: { create: true, update: true, delete: true }
+    });
+
+    const view = await runtime.runSurfaceOperation({
+      id: "surface_movies_gallery",
+      kind: "collection.view.present",
+      collection_id: "movies",
+      view_id: "movies_gallery",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_gallery", versions: ["1"] }]
+      }
+    });
+    await store.close();
+
+    expect(view.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_gallery",
+        view_id: "movies_gallery",
+        view_state: expect.objectContaining({
+          collection_id: "movies",
+          view_id: "movies_gallery",
+          renderer: "collection_gallery"
+        }),
+        data: expect.objectContaining({
+          collection_id: "movies",
+          view_options: expect.arrayContaining([
+            expect.objectContaining({ renderer: "collection_table" }),
+            expect.objectContaining({ renderer: "collection_gallery" })
+          ]),
+          view_state: expect.objectContaining({
+            renderer: "collection_gallery"
+          })
+        })
+      }
+    });
+  });
+
+  it("presents synthesized Collection view options through Runtime", async () => {
+    const { runtime, store } = await createRuntime();
+    await store.saveCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: {},
+      fields: [
+        { id: "title", type: "string", label: "タイトル" },
+        { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "視聴中", "観た"] },
+        { id: "starts_at", type: "datetime", label: "開始日時" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{
+        id: "movies_table",
+        renderer: "collection_table"
+      }],
+      permissions: {}
+    });
+
+    const calendar = await runtime.runSurfaceOperation({
+      id: "surface_movies_calendar",
+      kind: "collection.view.present",
+      collection_id: "movies",
+      view_id: "movies_calendar",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [
+          { renderer: "collection_table", versions: ["1"] },
+          { renderer: "collection_gallery", versions: ["1"] },
+          { renderer: "calendar_view", versions: ["1"] },
+          { renderer: "collection_kanban", versions: ["1"] }
+        ]
+      }
+    });
+    await store.close();
+
+    expect(calendar.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar",
+        data: expect.objectContaining({
+          view_options: expect.arrayContaining([
+            expect.objectContaining({ id: "movies_table", renderer: "collection_table" }),
+            expect.objectContaining({ id: "movies_gallery", renderer: "collection_gallery" }),
+            expect.objectContaining({ id: "movies_calendar", renderer: "calendar_view" }),
+            expect.objectContaining({ id: "movies_kanban", renderer: "collection_kanban" })
+          ]),
+          view_state: expect.objectContaining({
+            view_id: "movies_calendar",
+            renderer: "calendar_view"
+          }),
+          schema_fields: expect.arrayContaining([
+            expect.objectContaining({ id: "starts_at", type: "datetime", label: "開始日時" })
+          ])
+        })
+      }
+    });
+  });
+
+  it("falls back unsupported Collection renderers from Runtime schema validation", async () => {
+    const { runtime, store } = await createRuntime();
+    await store.saveCollectionSchema({
+      id: "notes",
+      version: "1",
+      labels: { ja: "メモ", en: "Notes" },
+      descriptions: {},
+      fields: [
+        { id: "title", type: "string", label: "タイトル" },
+        { id: "body", type: "text", label: "本文" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [
+        {
+          id: "notes_calendar",
+          renderer: "calendar_view"
+        },
+        {
+          id: "notes_kanban",
+          renderer: "collection_kanban"
+        }
+      ],
+      permissions: {}
+    });
+
+    const calendarView = await runtime.runSurfaceOperation({
+      id: "surface_notes_calendar",
+      kind: "collection.view.present",
+      collection_id: "notes",
+      view_id: "notes_calendar",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "calendar_view", versions: ["1"] }, { renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    const kanbanView = await runtime.runSurfaceOperation({
+      id: "surface_notes_kanban",
+      kind: "collection.view.present",
+      collection_id: "notes",
+      view_id: "notes_kanban",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_kanban", versions: ["1"] }, { renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    await store.close();
+
+    expect(calendarView.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        data: expect.objectContaining({
+          view_config: expect.objectContaining({
+            requested_renderer: "calendar_view",
+            fallback_reason: "calendar_renderer_requires_date_field"
+          })
+        })
+      }
+    });
+    expect(kanbanView.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        data: expect.objectContaining({
+          view_config: expect.objectContaining({
+            requested_renderer: "collection_kanban",
+            fallback_reason: "kanban_renderer_requires_enum_field"
+          })
+        })
+      }
+    });
+  });
+
+  it("rejects Collection table apps from Workspace schema files created directly by the backend", async () => {
+    const fileBackend: AgentBackend = {
+      id: "collection-schema-file",
+      kind: "codex",
+      label: "Collection Schema File Fixture",
+      async *runTurn(input) {
+        expect(input.expected_outputs).toContain("collection_schema");
+        const schemaDir = path.join(input.workspace_root, "collections", "movies");
+        await mkdir(schemaDir, { recursive: true });
+        await writeFile(path.join(schemaDir, "schema.json"), `${JSON.stringify({
+          id: "movies",
+          version: "1",
+          labels: { ja: "映画ログ", en: "Movies" },
+          descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+          fields: [
+            { id: "title", type: "string", label: "タイトル", required: true },
+            { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "視聴中", "観た"] },
+            { id: "rating", type: "number", label: "評価" }
+          ],
+          refs: [],
+          embeds: [],
+          derived_fields: [],
+          triggers: [],
+          actions: [],
+          views: [{
+            id: "movies_table",
+            renderer: "collection_table",
+            density: "comfortable",
+            allow_delete: true,
+            editable_fields: ["title", "status", "rating"]
+          }],
+          permissions: { create: true, update: true, delete: true }
+        }, null, 2)}\n`);
+        yield {
+          event_type: "text_delta",
+          payload: { text: "映画ログアプリを作成しました。" }
+        };
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "done" }
+        };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-file-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([fileBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_movies_app_from_file",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "collection-schema-file",
+      content: "映画ログアプリ作って",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    const runs = await store.listBackendRuns(session.id);
+    await store.close();
+
+    expect(runs[0]).toMatchObject({
+      backend_id: "collection-schema-file",
+      status: "completed"
+    });
+    expect(result.render_specs?.some((spec) =>
+      spec.kind === "custom_view" && spec.props.renderer === "collection_table"
+    )).toBe(true);
+  });
+
+  it("does not create generic Collection apps before backend dispatch", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_movies_without_backend",
+      kind: "message.submit",
+      session_id: session.id,
+      backend_id: "missing_backend",
+      content: "映画ログアプリ作って",
+      output_locale: "ja",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    })).rejects.toMatchObject({
+      code: "conflict",
+      message: "backend_not_registered:missing_backend"
+    });
+    const schema = await store.getCollectionSchema("movies");
+    await store.close();
+
+    expect(schema).toBeUndefined();
+  });
+
+  it("validates tasks as a normal Collection without task_list-specific rules", async () => {
+    const { store, runtime } = await createRuntime();
+    await saveGenericTasksCollectionSchema(store);
+    const now = nowIso();
+
+    await expect(runtime.createCollectionRecord({
+      id: "task_bad_title",
+      collection_id: "tasks",
+      data: { title: "", completed: false },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_required_field:title");
+    await expect(runtime.createCollectionRecord({
+      id: "task_bad_completed",
+      collection_id: "tasks",
+      data: { title: "買い物", completed: "no" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_field_type:completed:boolean");
+    await expect(runtime.createCollectionRecord({
+      id: "task_bad_unknown",
+      collection_id: "tasks",
+      data: { title: "買い物", unexpected: true },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_unknown_field:unexpected");
+
+    await runtime.createCollectionRecord({
+      id: "task_1",
+      collection_id: "tasks",
+      data: { title: "買い物", completed: false },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    const patched = await runtime.applyCollectionPatch({
+      collectionId: "tasks",
+      recordId: "task_1",
+      patch: {
+        id: "patch_task_done",
+        record_id: "task_1",
+        changes: { completed: true },
+        source_operation_id: "operation_test",
+        created_at: nowIso()
+      }
+    });
+    await expect(runtime.applyCollectionPatch({
+      collectionId: "tasks",
+      recordId: "task_1",
+      patch: {
+        id: "patch_task_empty_title",
+        record_id: "task_1",
+        changes: { title: "" },
+        source_operation_id: "operation_test",
+        created_at: nowIso()
+      }
+    })).rejects.toThrow("collection_required_field:title");
+    await store.close();
+
+    expect(patched.resource.data.completed).toBe(true);
+  });
+
+  it("presents tasks through the generic Collection renderer", async () => {
+    const { store, runtime } = await createRuntime();
+    await saveGenericTasksCollectionSchema(store);
+
+    await runtime.runSurfaceOperation({
+      id: "surface_task_create",
+      kind: "collection.record.create",
+      collection_id: "tasks",
+      record_id: "task_1",
+      data: { title: "請求書を送る", completed: false, notes: "", due_date: "2026-07-10" },
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    const view = await runtime.runSurfaceOperation({
+      id: "surface_task_view",
+      kind: "collection.view.present",
+      collection_id: "tasks",
+      view_id: "tasks_table",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    await store.close();
+
+    expect(view.result_kind).toBe("collection_view");
+    expect(view.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        actions: expect.arrayContaining([
+          expect.objectContaining({ operation_kind: "collection.record.create" }),
+          expect.objectContaining({ operation_kind: "collection.record.patch" }),
+          expect.objectContaining({ operation_kind: "collection.record.delete" })
+        ]),
+        data: expect.objectContaining({
+          collection_id: "tasks",
+          record_ids: ["task_1"],
+          records: [expect.objectContaining({ id: "task_1", title: "請求書を送る" })]
+        })
+      }
+    });
+  });
+
+  it("deletes generic task records only when schema and view allow it", async () => {
+    const { store, runtime } = await createRuntime();
+    await saveGenericTasksCollectionSchema(store);
+    await runtime.createCollectionRecord({
+      id: "task_delete_ok",
+      collection_id: "tasks",
+      data: { title: "消すタスク", completed: false, notes: "", due_date: "" },
+      resource_refs: [],
+      created_at: nowIso(),
+      updated_at: nowIso()
+    });
+
+    const deleted = await runtime.runSurfaceOperation({
+      id: "surface_task_delete_ok",
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_delete_ok",
+      view_id: "tasks_table",
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    expect(deleted.result_kind).toBe("collection_delete");
+    expect(deleted.render_spec.props.data).toMatchObject({ record_ids: [] });
+
+    await runtime.createCollectionRecord({
+      id: "task_delete_denied_by_permission",
+      collection_id: "tasks",
+      data: { title: "権限で消せない", completed: false, notes: "", due_date: "" },
+      resource_refs: [],
+      created_at: nowIso(),
+      updated_at: nowIso()
+    });
+    const schema = await store.getCollectionSchema("tasks");
+    await store.updateCollectionSchema({ ...schema!, permissions: { ...(schema?.permissions ?? {}), delete: false } });
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_task_delete_denied_by_permission",
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_delete_denied_by_permission",
+      view_id: "tasks_table"
+    })).rejects.toThrow("collection_record_delete_not_allowed");
+
+    await store.updateCollectionSchema({ ...schema!, permissions: { ...(schema?.permissions ?? {}), delete: true }, views: [{ ...(schema?.views?.[0] ?? {}), id: "tasks_table", renderer: "collection_table", allow_delete: false }] });
+    await expect(runtime.runSurfaceOperation({
+      id: "surface_task_delete_denied_by_view",
+      kind: "collection.record.delete",
+      collection_id: "tasks",
+      record_id: "task_delete_denied_by_permission",
+      view_id: "tasks_table"
+    })).rejects.toThrow("collection_record_delete_not_allowed");
+    await store.close();
   });
 
   it("runs Knowledge Wiki lifecycle Domain Commands through active retrieval and provenance", async () => {
@@ -635,6 +3158,49 @@ describe("agent runtime", () => {
     expect(result.messages.find((message) => message.role === "agent")?.content).toContain("Mock response");
   });
 
+  it("prefers configured Codex over Native when no backend is selected", async () => {
+    const codexBackend: AgentBackend = {
+      id: "codex",
+      kind: "codex",
+      label: "Codex Fixture",
+      getStatus() {
+        return {
+          id: "codex",
+          kind: "codex",
+          label: "Codex Fixture",
+          configured: true,
+          enabled: true,
+          connection_state: "ready",
+          supports: {
+            start_session: true,
+            resume_run: false,
+            cancel_run: false,
+            stream_events: false
+          }
+        };
+      },
+      async *runTurn() {
+        yield { event_type: "text_delta", payload: { text: "Codex fixture response." } };
+        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-default-codex-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([new MockBackend(), codexBackend]));
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "backend未指定で実行して",
+      output_locale: "ja"
+    });
+    await store.close();
+
+    expect(result.backendRun.backend_id).toBe("codex");
+    expect(result.messages.find((message) => message.role === "agent")?.content).toContain("Codex fixture response");
+  });
+
   it("records backend-native session ids from backend events", async () => {
     const sessionAwareBackend: AgentBackend = {
       id: "session-aware",
@@ -793,6 +3359,49 @@ describe("agent runtime", () => {
     expect(sessionSearchSource).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "session_search", included_count: 0, status: "skipped" })
     ]));
+  });
+
+  it("records workspace working directory metadata for backend runs", async () => {
+    let capturedWorkingDirectory: string | undefined;
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-workspace-"));
+    roots.push(root);
+    const repoRoot = path.join(root, "repo");
+    await mkdir(repoRoot, { recursive: true });
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const captureBackend: AgentBackend = {
+      id: "capture-working-dir",
+      kind: "external",
+      label: "Capture Working Dir",
+      async *runTurn(input) {
+        capturedWorkingDirectory = input.working_directory;
+        yield { event_type: "run_completed", payload: { output_summary: "ok" } };
+      }
+    };
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      undefined,
+      new AgentBackendRegistry([captureBackend]),
+      undefined,
+      undefined,
+      undefined,
+      { backendWorkingDirectoryMode: "repo", repoRoot }
+    );
+    const session = await runtime.createSession();
+
+    const result = await runtime.runChatTurn({
+      sessionId: session.id,
+      content: "repo mode check",
+      backend_id: "capture-working-dir"
+    });
+    await store.close();
+
+    expect(capturedWorkingDirectory).toBe(repoRoot);
+    expect(result.backendRun.metadata).toMatchObject({
+      workspace_root: root,
+      working_directory: repoRoot,
+      backend_working_directory_mode: "repo"
+    });
   });
 
   it("stores a diagnostic message when backend completes without body or artifacts", async () => {
@@ -1696,6 +4305,8 @@ rl.on("line", (line) => {
         yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
       },
       async *resumeRun(_runId, input) {
+        expect(input.workspace_root).toBe(root);
+        expect(input.working_directory).toBe(root);
         yield { event_type: "text_delta", payload: { text: `Resumed: ${String(input.answer ?? "")}` } };
         yield { event_type: "run_completed", payload: { output_summary: "Resume completed." } };
       }
@@ -2272,6 +4883,81 @@ rl.on("line", (line) => {
     expect(action.resource.data.name).toBe("Action Name");
   });
 
+  it("renders Collection derived fields from safe expressions without saving them as record data", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = new Date().toISOString();
+    await runtime.saveCollectionSchema({
+      id: "expenses",
+      version: "1",
+      labels: { ja: "支出", en: "Expenses" },
+      descriptions: {},
+      fields: [
+        { id: "name", type: "string", label: "名前" },
+        { id: "price", type: "number", label: "金額" },
+        { id: "tax", type: "number", label: "税" },
+        { id: "paid", type: "boolean", label: "支払い済み" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [
+        {
+          id: "total",
+          type: "number",
+          label: "合計",
+          expression: {
+            op: "add",
+            args: [{ op: "field", field_id: "price" }, { op: "field", field_id: "tax" }]
+          }
+        },
+        {
+          id: "paid_rate",
+          type: "number",
+          label: "支払い率",
+          expression: { op: "completion_rate", field_id: "paid" }
+        }
+      ],
+      triggers: [],
+      actions: [],
+      views: [{ id: "expenses_table", renderer: "collection_table" }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    await runtime.createCollectionRecord({
+      id: "expense_1",
+      collection_id: "expenses",
+      data: { name: "hosting", price: 100, tax: 10, paid: true },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await runtime.createCollectionRecord({
+      id: "expense_2",
+      collection_id: "expenses",
+      data: { name: "tools", price: 40, tax: 4, paid: false },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+
+    const view = await runtime.presentCollectionView({ collectionId: "expenses", viewId: "expenses_table" });
+    const saved = await store.getCollectionRecord("expenses", "expense_1");
+    await store.close();
+
+    expect(saved?.data).not.toHaveProperty("total");
+    expect(view.render_spec.props.data).toMatchObject({
+      schema_fields: expect.arrayContaining([
+        expect.objectContaining({ id: "total", derived: true, read_only: true }),
+        expect.objectContaining({ id: "paid_rate", derived: true, read_only: true })
+      ]),
+      view_config: expect.objectContaining({
+        editable_fields: expect.not.arrayContaining(["total", "paid_rate"])
+      }),
+      records: expect.arrayContaining([
+        expect.objectContaining({ id: "expense_1", total: 110, paid_rate: 50 }),
+        expect.objectContaining({ id: "expense_2", total: 44, paid_rate: 50 })
+      ])
+    });
+  });
+
   it("runs collection plugin actions through the plugin runtime registry", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
     roots.push(root);
@@ -2362,6 +5048,241 @@ rl.on("line", (line) => {
     });
   });
 
+  it("runs Collection instruction actions from surface operations and returns the refreshed view", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const providerInputs: ProviderInput[] = [];
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/collection-action", (input) => {
+      providerInputs.push(input);
+      return {
+        content: "整理しました。",
+        toolCalls: []
+      };
+    }));
+    const session = await runtime.createSession();
+    const now = nowIso();
+    await store.updateCollectionSchema({
+      ...collectionSchema("movies"),
+      fields: [
+        { id: "title", type: "string", label: "タイトル" },
+        { id: "note", type: "text", label: "感想" },
+        { id: "rating", type: "number", label: "評価" },
+        { id: "bonus", type: "number", label: "追い点" }
+      ],
+      derived_fields: [
+        {
+          id: "score",
+          type: "number",
+          label: "合計点",
+          expression: {
+            op: "add",
+            args: [
+              { op: "field", field_id: "rating" },
+              { op: "field", field_id: "bonus" }
+            ]
+          }
+        }
+      ],
+      actions: [{
+        id: "summarize_note",
+        kind: "custom_instruction",
+        title: "感想を整理",
+        instruction: "Summarize the selected movie note and continue the chat with the result.",
+        scope: "record"
+      }],
+      views: [{ id: "movies_table", renderer: "collection_table" }]
+    });
+    await runtime.createCollectionRecord({
+      id: "movie_1",
+      collection_id: "movies",
+      data: { title: "七人の侍", note: "長いけど緊張感がある", rating: 90, bonus: 5 },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_collection_action_instruction",
+      kind: "collection.action.run",
+      session_id: session.id,
+      collection_id: "movies",
+      action_id: "summarize_note",
+      record_id: "movie_1",
+      view_id: "movies_table",
+      payload: {
+        record_id: "movie_1",
+        action_label: "感想を整理",
+        action_scope: "record",
+        view_state: { selected_record_id: "movie_1" },
+        record_snapshot: { id: "movie_1", title: "七人の侍", note: "長いけど緊張感がある" }
+      },
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+      }
+    });
+    const messages = await store.listMessages(session.id);
+    await store.close();
+
+    expect(result.result_kind).toBe("collection_action");
+    expect(result.result.operation.operation).toBe("collection.action.run");
+    expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["custom_view", "chat"]);
+    expect(result.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_table",
+        actions: expect.arrayContaining([
+          expect.objectContaining({
+            id: "summarize_note",
+            operation_kind: "collection.action.run",
+            scope: "record"
+          })
+        ]),
+        data: expect.objectContaining({
+          collection_id: "movies",
+          records: [expect.objectContaining({ id: "movie_1", title: "七人の侍" })]
+        })
+      }
+    });
+    expect(result.render_specs?.[1]).toMatchObject({
+      kind: "chat",
+      props: {
+        session_id: session.id,
+        backend_run_id: expect.any(String)
+      }
+    });
+    const actionChat = "chat" in result.result ? result.result.chat : undefined;
+    expect(actionChat?.messages.some((message) => message.role === "agent" && message.content === "整理しました。")).toBe(true);
+    expect(providerInputs[0]?.envelope.user_intent).toContain("Summarize the selected movie note");
+    expect(providerInputs[0]?.envelope.user_intent).toContain("movie_1");
+    expect(providerInputs[0]?.envelope.user_intent).toContain("\"score\": 95");
+    expect(providerInputs[0]?.envelope.user_intent).toContain("感想を整理");
+    expect(providerInputs[0]?.envelope.user_intent).toContain("selected_record_id");
+    expect(providerInputs[0]?.envelope.user_intent).toContain("record_snapshot");
+    expect(messages.some((message) => message.role === "agent" && message.content === "整理しました。")).toBe(true);
+  });
+
+  it("returns generated Custom View HTML from Collection instruction actions when requested", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const providerInputs: ProviderInput[] = [];
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/collection-custom-view", (input) => {
+      providerInputs.push(input);
+      return {
+        content: JSON.stringify({
+          custom_view: {
+            title: "映画ログボード",
+            html: "<main><h1>映画ログボード</h1><button onclick=\"dispatchSamuraiAction('highlight_movie',{record_id:'movie_1'})\">Highlight</button></main>",
+            actions: [{
+              id: "highlight_movie",
+              label: "Highlight movie",
+              action_kind: "highlight",
+              scope: "record"
+            }]
+          }
+        }),
+        toolCalls: []
+      };
+    }));
+    const session = await runtime.createSession();
+    const now = nowIso();
+    await store.updateCollectionSchema({
+      ...collectionSchema("movies"),
+      fields: [
+        { id: "title", type: "string", label: "タイトル" },
+        { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "観た"] }
+      ],
+      actions: [{
+        id: "generate_board",
+        kind: "custom_instruction",
+        title: "専用ビューを作る",
+        instruction: "Generate a compact HTML board for the movie log.",
+        output_surface: "custom_view",
+        scope: "collection"
+      }],
+      views: [{ id: "movies_table", renderer: "collection_table" }]
+    });
+    await runtime.createCollectionRecord({
+      id: "movie_1",
+      collection_id: "movies",
+      data: { title: "七人の侍", status: "観た" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+
+    const result = await runtime.runSurfaceOperation({
+      id: "surface_collection_custom_view",
+      kind: "collection.action.run",
+      session_id: session.id,
+      collection_id: "movies",
+      action_id: "generate_board",
+      view_id: "movies_table",
+      payload: {
+        action_id: "generate_board",
+        action_label: "専用ビューを作る",
+        action_kind: "custom_instruction",
+        output_surface: "custom_view"
+      },
+      renderer_capabilities: {
+        protocol_version: "1",
+        supported_kinds: ["chat", "custom_view", "collection"],
+        custom_view_renderers: [
+          { renderer: "collection_table", versions: ["1"] },
+          { renderer: "generic", versions: ["1"] }
+        ]
+      }
+    });
+    await store.close();
+
+    const generated = result.render_specs?.find((spec) =>
+      spec.kind === "custom_view" && spec.props.renderer === "generic"
+    );
+    expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["custom_view", "custom_view", "chat"]);
+    expect(generated).toMatchObject({
+      kind: "custom_view",
+      title: "映画ログボード",
+      props: {
+        renderer: "generic",
+        sandbox: expect.objectContaining({
+          mode: "iframe",
+          network_access: "read",
+          workspace_access: "read"
+        }),
+        capability: expect.objectContaining({
+          allowed_actions: ["highlight_movie"],
+          write_operations: ["custom_view.action"],
+          data_url: "/api/collections/movies/view-data",
+          data_capabilities: ["read", "write"]
+        }),
+        actions: [expect.objectContaining({
+          id: "highlight_movie",
+          operation_kind: "custom_view.action",
+          scope: "record"
+        })],
+        data: expect.objectContaining({
+          html: expect.stringContaining("映画ログボード"),
+          collection_id: "movies",
+          source_action_id: "generate_board",
+          source_collection: expect.objectContaining({
+            records: [expect.objectContaining({ id: "movie_1", title: "七人の侍" })]
+          })
+        })
+      }
+    });
+    expect(result.result.resource).toMatchObject({
+      collection_id: "movies",
+      action_id: "generate_board",
+      custom_view: expect.objectContaining({
+        html: expect.stringContaining("dispatchSamuraiAction")
+      })
+    });
+    expect(providerInputs[0]?.envelope.user_intent).toContain("custom_view.html");
+  });
+
   it("returns collection record render specs with record data for refs and embeds", async () => {
     const { store, runtime } = await createRuntime();
     const now = nowIso();
@@ -2422,6 +5343,186 @@ rl.on("line", (line) => {
         value: { role: "owner" }
       }]
     });
+  });
+
+  it("renders Collection refs as selectable linked fields and embeds as read-only fields", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = nowIso();
+    await runtime.saveCollectionSchema({
+      ...collectionSchema("people"),
+      fields: [{ id: "name", type: "string", label: "名前" }]
+    });
+    await runtime.createCollectionRecord({
+      id: "person_kurosawa",
+      collection_id: "people",
+      data: { name: "黒澤明" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await store.updateCollectionSchema({
+      ...collectionSchema("movies"),
+      fields: [
+        { id: "title", type: "string", label: "タイトル" },
+        { id: "director_id", type: "string", label: "監督" },
+        { id: "profile", type: "json", label: "作品情報" }
+      ],
+      refs: [],
+      embeds: [],
+      views: [{ id: "movies_table", renderer: "collection_table" }]
+    });
+    await runtime.createCollectionRecord({
+      id: "movie_1",
+      collection_id: "movies",
+      data: { title: "七人の侍", director_id: "person_kurosawa", profile: { year: 1954 } },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await runtime.createCollectionRecord({
+      id: "movie_missing_director",
+      collection_id: "movies",
+      data: { title: "監督未解決の映画", director_id: "person_missing", profile: { year: 2026 } },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await store.updateCollectionSchema({
+      ...collectionSchema("movies"),
+      fields: [
+        { id: "title", type: "string", label: "タイトル" },
+        { id: "director_id", type: "string", label: "監督" },
+        { id: "profile", type: "string", label: "作品情報" }
+      ],
+      refs: [{ id: "director", field: "director_id", collection_id: "people", label: "監督", required: true }],
+      embeds: [{ id: "profile", field: "profile", label: "作品情報" }],
+      views: [{ id: "movies_table", renderer: "collection_table" }]
+    });
+
+    const view = await runtime.presentCollectionView({ collectionId: "movies", viewId: "movies_table" });
+    await store.close();
+
+    expect(view.render_spec.props.data).toMatchObject({
+      linked_data: {
+        target_collection_ids: ["people"],
+        ref_options: {
+          director_id: [
+            expect.objectContaining({
+              value: "person_kurosawa",
+              label: "黒澤明",
+              collection_id: "people"
+            })
+          ]
+        },
+        missing_refs: [
+          expect.objectContaining({
+            collection_id: "movies",
+            record_id: "movie_missing_director",
+            field: "director_id",
+            target_collection_id: "people",
+            target_record_id: "person_missing"
+          })
+        ]
+      },
+      schema_fields: expect.arrayContaining([
+        expect.objectContaining({
+          id: "director_id",
+          type: "ref",
+          source: "collection_ref",
+          target_collection_id: "people",
+          required: true,
+          options: [expect.objectContaining({ value: "person_kurosawa", label: "黒澤明" })]
+        }),
+        expect.objectContaining({
+          id: "profile",
+          type: "json",
+          source: "collection_embed",
+          read_only: true
+        })
+      ]),
+      records: expect.arrayContaining([
+        expect.objectContaining({
+          id: "movie_1",
+          title: "七人の侍",
+          director_id: "person_kurosawa",
+          profile: { year: 1954 }
+        }),
+        expect.objectContaining({
+          id: "movie_missing_director",
+          title: "監督未解決の映画",
+          director_id: "person_missing",
+          profile: { year: 2026 }
+        })
+      ])
+    });
+  });
+
+  it("manages Collection records with computed-aware reads and validated writes", async () => {
+    const { store, runtime } = await createRuntime();
+    const now = nowIso();
+    await runtime.saveCollectionSchema({
+      ...collectionSchema("quotes"),
+      fields: [
+        { id: "symbol", type: "string", required: true },
+        { id: "price", type: "number", required: true }
+      ],
+      views: [{ id: "quotes_table", renderer: "collection_table" }]
+    });
+    await runtime.createCollectionRecord({
+      id: "toyota",
+      collection_id: "quotes",
+      data: { symbol: "TM", price: 210 },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await runtime.saveCollectionSchema({
+      ...collectionSchema("portfolio"),
+      fields: [
+        { id: "name", type: "string", required: true },
+        { id: "ticker", type: "string", required: true },
+        { id: "shares", type: "number", required: true }
+      ],
+      refs: [{ id: "ticker", field: "ticker", collection_id: "quotes" }],
+      derived_fields: [
+        { id: "value", type: "number", expression: { op: "multiply", args: [{ op: "field", field: "shares" }, { op: "field", field: "ticker.price" }] } }
+      ],
+      views: [{ id: "portfolio_table", renderer: "collection_table" }]
+    });
+
+    const write = await runtime.manageCollection({
+      action: "putItems",
+      collection_id: "portfolio",
+      mode: "create",
+      items: [
+        { id: "holding_1", name: "Toyota holding", ticker: "toyota", shares: 3 },
+        { id: "bad_value", name: "Bad", ticker: "toyota", shares: 1, value: 999 }
+      ]
+    });
+    const read = await runtime.manageCollection({
+      action: "getItems",
+      collection_id: "portfolio",
+      fields: ["name", "ticker", "shares", "value"]
+    });
+    const stored = await store.getCollectionRecord("portfolio", "holding_1");
+    await store.close();
+
+    expect(write.resource).toMatchObject({
+      action: "putItems",
+      collection_id: "portfolio",
+      written: ["holding_1"],
+      rejected: [expect.objectContaining({ id: "bad_value", problem: expect.stringContaining("derived") })]
+    });
+    expect(read.resource).toMatchObject({
+      action: "getItems",
+      collection_id: "portfolio",
+      count: 1,
+      items: [expect.objectContaining({ id: "holding_1", name: "Toyota holding", ticker: "toyota", shares: 3, value: 630 })],
+      linked_data: expect.objectContaining({
+        ref_options: { ticker: [expect.objectContaining({ value: "toyota", label: "TM" })] }
+      })
+    });
+    expect(stored?.data).not.toHaveProperty("value");
   });
 
   it("runs collection trigger effects through schema actions as one-shot automation jobs", async () => {
@@ -3269,6 +6370,27 @@ rl.on("line", (line) => {
     expect(table.render_spec.kind).toBe("table");
     expect(artifact.render_spec.kind).toBe("artifact");
     expect(custom.render_spec.kind).toBe("custom_view");
+    expect(custom.render_spec.props).toMatchObject({
+      sandbox: {
+        mode: "iframe",
+        allow_scripts: true,
+        allow_forms: false,
+        allow_same_origin: false,
+        network_access: "read",
+        workspace_access: "read"
+      },
+      capability: {
+        token_id: expect.stringMatching(/^custom_view:/),
+        allowed_actions: ["move_card"],
+        write_operations: ["custom_view.action"],
+        data_capabilities: ["read", "write"]
+      }
+    });
+    expect(custom.render_spec.props.capability).toMatchObject({
+      read_resource_refs: expect.arrayContaining([
+        expect.objectContaining({ kind: "artifact" })
+      ])
+    });
     expect(operations.filter((operation) => operation.operation === "artifact.create").length).toBeGreaterThanOrEqual(4);
     expect(artifacts.map((item) => item.kind)).toEqual(expect.arrayContaining(["structured_draft", "table", "document"]));
   });
@@ -3330,6 +6452,48 @@ rl.on("line", (line) => {
     expect(read.resource.content).toBe("hello");
     expect(patched.resource.content).toBe("hello samurai");
     expect(patched.rollbackPoint).toBeDefined();
+  });
+
+  it("allows direct Collection file writes as an escape hatch and reindexes afterward", async () => {
+    const { store, runtime } = await createRuntime();
+
+    const schemaWrite = await runtime.runFileAction({
+      operation: "file.write",
+      path: "collections/movies/schema.json",
+      content: JSON.stringify({
+        id: "movies",
+        version: "1",
+        labels: { ja: "映画ログ" },
+        descriptions: {},
+        fields: [{ id: "title", type: "string", required: true }],
+        refs: [],
+        embeds: [],
+        derived_fields: [],
+        triggers: [],
+        actions: [],
+        views: [{ id: "movies_table", renderer: "collection_table" }],
+        permissions: { create: true, update: true, delete: true }
+      }, null, 2)
+    });
+    const recordWrite = await runtime.runFileAction({
+      operation: "file.write",
+      path: "collections/movies/records/movie_1.json",
+      content: JSON.stringify({
+        id: "movie_1",
+        collection_id: "movies",
+        data: { title: "Seven Samurai" },
+        resource_refs: [],
+        created_at: nowIso(),
+        updated_at: nowIso()
+      }, null, 2)
+    });
+    const records = await store.listCollectionRecords("movies");
+    await store.close();
+
+    expect(schemaWrite.operation.operation).toBe("file.write");
+    expect(recordWrite.operation.operation).toBe("file.write");
+    expect(records).toHaveLength(1);
+    expect(records[0]?.data).toMatchObject({ title: "Seven Samurai" });
   });
 
   it("creates and revokes grants through policy audit and rollback", async () => {

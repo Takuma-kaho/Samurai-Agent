@@ -1,16 +1,53 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createHmac, generateKeyPairSync, sign } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
-import { stableHash } from "@samurai-agent/core-schemas";
-import { FakeProviderAdapter, ProviderRequestError, type ExternalAssistProvider, type ProviderAdapter, type ProviderInput, type ProviderOutput } from "@samurai-agent/runtime";
-import { closeApiServer, createApiServer, loadServerEnv, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
+import { stableHash, type JsonValue } from "@samurai-agent/core-schemas";
+import { createDefaultAgentBackendRegistry, FakeProviderAdapter, ProviderRequestError, type ExternalAssistProvider, type ProviderAdapter, type ProviderInput, type ProviderOutput } from "@samurai-agent/runtime";
+import { closeApiServer, createApiServer, loadServerEnv, resolveWorkspaceRoot, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
 
 const roots: string[] = [];
 const servers: ApiServer[] = [];
 const managedEnv = new Map<string, string | undefined>();
+
+interface SurfaceRenderSpecApi {
+  kind: string;
+  props: Record<string, unknown>;
+}
+
+interface SurfaceMessagePresentation {
+  id: string;
+  collection_id: string;
+  view_id: string;
+  renderer: string;
+  view_state?: Record<string, unknown>;
+}
+
+interface SurfaceOperationApiResult {
+  operation: { kind: string };
+  result_kind: string;
+  render_spec: SurfaceRenderSpecApi;
+  render_specs: SurfaceRenderSpecApi[];
+  result: Record<string, unknown> & {
+    collection_id?: string;
+    view_id?: string;
+    messagePresentations: SurfaceMessagePresentation[];
+    chat?: {
+      messages?: Array<{ role?: string; content?: string }>;
+      backendRun?: { id?: string; status?: string };
+    };
+  };
+}
+
+interface ActionBackendInputSnapshot {
+  envelope: {
+    metadata: Record<string, JsonValue>;
+    user_intent: string;
+  };
+}
 
 afterEach(async () => {
   try {
@@ -25,6 +62,27 @@ afterEach(async () => {
 describe("server env loading", () => {
   it("does nothing when the env file is missing", () => {
     expect(() => loadServerEnv(path.join(tmpdir(), `missing-samurai-${Date.now()}`, ".env"))).not.toThrow();
+  });
+
+  it("resolves Workspace root with the new env taking priority over v1 compatibility env", () => {
+    const root = path.join(tmpdir(), "samurai-workspace-root");
+    const legacy = path.join(tmpdir(), "samurai-legacy-workspace");
+
+    expect(resolveWorkspaceRoot(undefined, {
+      ...process.env,
+      SAMURAI_WORKSPACE_ROOT: root,
+      WORKSPACE_DATA_DIR: legacy
+    })).toBe(path.resolve(root));
+    expect(resolveWorkspaceRoot(undefined, {
+      ...process.env,
+      SAMURAI_WORKSPACE_ROOT: "",
+      WORKSPACE_DATA_DIR: legacy
+    })).toBe(path.resolve(legacy));
+    expect(resolveWorkspaceRoot(path.join(tmpdir(), "samurai-option-workspace"), {
+      ...process.env,
+      SAMURAI_WORKSPACE_ROOT: root,
+      WORKSPACE_DATA_DIR: legacy
+    })).toBe(path.resolve(path.join(tmpdir(), "samurai-option-workspace")));
   });
 
   it("loads env file values through process.loadEnvFile", async () => {
@@ -164,6 +222,12 @@ describe("server env loading", () => {
     expect(repair).toMatchObject({ dry_run: true, health: { ok: true } });
     expect(backup.id.startsWith("backup_")).toBe(true);
     expect(backups.map((item) => item.id)).toContain(backup.id);
+  });
+
+  it("bootstraps the managed Workspace as an execution root", async () => {
+    const { root } = await startTestServer();
+
+    expect(existsSync(path.join(root, ".git"))).toBe(true);
   });
 
   it("exposes plugin diagnostics for filesystem plugin runtime readiness", async () => {
@@ -624,6 +688,855 @@ describe("backend run API", () => {
       surface_operation_kind: "message.submit"
     });
     expect(result.result.messages.some((message) => message.role === "agent")).toBe(true);
+  });
+
+  it("runs the movie-log Collection flow through the HTTP Surface API", async () => {
+    let apiServer: ApiServer | undefined;
+    let backendRuns = 0;
+    const actionBackendInputs: ActionBackendInputSnapshot[] = [];
+    const movieProviderInputs: ProviderInput[] = [];
+    const movieProvider = new FakeProviderAdapter("fake/movie-flow", (input) => {
+      movieProviderInputs.push(input);
+      if (input.envelope.metadata.app_edit_patch === true && input.envelope.metadata.collection_id === "movies") {
+        return {
+          content: JSON.stringify([
+            { op: "add_field", field: { id: "director", type: "string", label: "監督" } },
+            { op: "update_view", emphasized_fields: ["title", "director", "rating", "status"] }
+          ]),
+          toolCalls: []
+        };
+      }
+      if (input.envelope.metadata.collection_action_id === "summarize_note") {
+        return {
+          content: "感想を整理しました。",
+          toolCalls: []
+        };
+      }
+      if (input.envelope.metadata.collection_action_id === "generate_board") {
+        return {
+          content: JSON.stringify({
+            custom_view: {
+              title: "映画ログボード",
+              html: "<main><h1>映画ログボード</h1><button onclick=\"dispatchSamuraiAction('highlight_movie',{record_id:'movie_1'})\">Highlight</button></main>",
+              actions: [{ id: "highlight_movie", label: "Highlight movie", action_kind: "highlight", scope: "record" }]
+            }
+          }),
+          toolCalls: []
+        };
+      }
+      return fakeProviderOutput(input);
+    });
+    const backendRegistry = createDefaultAgentBackendRegistry(movieProvider, process.env, { repoRoot: process.cwd() });
+    backendRegistry.register({
+      id: "collection-movie-api-bridge",
+      kind: "codex",
+      label: "Collection Movie API Bridge Fixture",
+      async *runTurn(input) {
+        backendRuns += 1;
+        if (input.envelope.user_intent.includes("作って")) {
+          expect(input.expected_outputs).toContain("collection_schema");
+          if (!apiServer) {
+            throw new Error("api_server_not_ready");
+          }
+          await apiServer.runtime.runBackendToolBridgeCall({
+            runId: input.run_id,
+            token: input.tool_bridge?.token ?? "",
+            toolName: "mcp__samurai__collection_schema_save",
+            toolCallId: "schema_tool_movie_api",
+            toolInput: movieLogCollectionSchema()
+          });
+        }
+        const textPayload: Record<string, JsonValue> = { text: "映画ログを作成しました。" };
+        const completedPayload: Record<string, JsonValue> = { output_summary: "done" };
+        yield {
+          event_type: "text_delta",
+          payload: textPayload
+        };
+        yield {
+          event_type: "run_completed",
+          payload: completedPayload
+        };
+      }
+    });
+    backendRegistry.register({
+      id: "collection-movie-action-codex",
+      kind: "codex",
+      label: "Collection Movie Action Codex Fixture",
+      async *runTurn(input) {
+        actionBackendInputs.push(input);
+        const actionId = typeof input.envelope.metadata.collection_action_id === "string"
+          ? input.envelope.metadata.collection_action_id
+          : "";
+        const text = actionId === "generate_board"
+          ? JSON.stringify({
+            custom_view: {
+              title: "映画ログボード",
+              html: "<main><h1>映画ログボード</h1><button onclick=\"dispatchSamuraiAction('highlight_movie',{record_id:'movie_1'})\">Highlight</button></main>",
+              actions: [{ id: "highlight_movie", label: "Highlight movie", action_kind: "highlight", scope: "record" }]
+            }
+          })
+          : "感想を整理しました。";
+        const textPayload: Record<string, JsonValue> = { text };
+        const completedPayload: Record<string, JsonValue> = { output_summary: "done" };
+        yield {
+          event_type: "text_delta",
+          payload: textPayload
+        };
+        yield {
+          event_type: "run_completed",
+          payload: completedPayload
+        };
+      }
+    });
+    const started = await startTestServer(movieProvider, { backendRegistry });
+    apiServer = started.server;
+    const { baseUrl } = started;
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection", "collection_record"],
+      custom_view_renderers: [
+        { renderer: "generic", versions: ["1"] },
+        { renderer: "collection_table", versions: ["1"] },
+        { renderer: "collection_gallery", versions: ["1"] },
+        { renderer: "calendar_view", versions: ["1"] },
+        { renderer: "collection_kanban", versions: ["1"] }
+      ]
+    };
+
+    const created = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_create",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-movie-api-bridge",
+        content: "映画ログアプリ作って",
+        output_locale: "ja",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const createdCard = created.result.messagePresentations[0]!;
+    const record = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_record_create",
+        kind: "collection.record.create",
+        collection_id: "movies",
+        record_id: "movie_1",
+        data: { title: "七人の侍", status: "観た", rating: 5, watched_at: "2026-07-03", notes: "再視聴" },
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const opened = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_open",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-movie-api-bridge",
+        content: "映画ログを開いて",
+        output_locale: "ja",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const sorted = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_sort",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-movie-api-bridge",
+        content: "評価順にして",
+        output_locale: "ja",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const gallery = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_gallery",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-movie-api-bridge",
+        content: "ギャラリーで見たい",
+        output_locale: "ja",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const calendar = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_calendar",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-movie-api-bridge",
+        content: "カレンダーで見たい",
+        output_locale: "ja",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const kanban = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_kanban",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-movie-api-bridge",
+        content: "カンバンで見たい",
+        output_locale: "ja",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const patched = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_record_patch",
+        kind: "collection.record.patch",
+        collection_id: "movies",
+        record_id: "movie_1",
+        patch_id: "movie_api_patch_1",
+        changes: { status: "視聴中" },
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const refreshedGallery = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_gallery_refresh",
+        kind: "collection.view.present",
+        collection_id: "movies",
+        view_id: "movies_gallery",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const refreshedKanban = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_kanban_refresh",
+        kind: "collection.view.present",
+        collection_id: "movies",
+        view_id: "movies_kanban",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const reopenedAfterEdit = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_reopen_after_edit",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-movie-api-bridge",
+        content: "映画ログを開いて",
+        output_locale: "ja",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const calendarViewState = {
+      collection_id: "movies",
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      record_count: 1
+    };
+    const switchedCard = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_card_state",
+        kind: "message.presentation.update",
+        presentation_id: createdCard.id,
+        view_state: calendarViewState,
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const reopenedCard = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_reopen_card",
+        kind: "collection.view.present",
+        collection_id: switchedCard.result.collection_id,
+        view_id: switchedCard.result.view_id,
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const workspaceCreated = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_workspace_create",
+        kind: "collection.record.create",
+        collection_id: "movies",
+        record_id: "movie_2",
+        data: { title: "羅生門", status: "観たい", rating: 4, watched_at: "2026-07-05", notes: "次に観る" },
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const refreshedCardCalendar = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_card_calendar_refresh_after_create",
+        kind: "collection.view.present",
+        collection_id: switchedCard.result.collection_id,
+        view_id: switchedCard.result.view_id,
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const refreshedCardData = refreshedCardCalendar.render_spec.props.data;
+    const refreshedCardViewState = refreshedCardData && typeof refreshedCardData === "object" && !Array.isArray(refreshedCardData)
+      ? (refreshedCardData as Record<string, unknown>).view_state
+      : undefined;
+    if (!refreshedCardViewState || typeof refreshedCardViewState !== "object" || Array.isArray(refreshedCardViewState)) {
+      throw new Error("refreshed_card_view_state_required");
+    }
+    const syncedCardAfterCreate = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_card_state_after_workspace_create",
+        kind: "message.presentation.update",
+        presentation_id: createdCard.id,
+        view_state: refreshedCardViewState,
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const transcriptAfterCreate = await getJson<{ message_presentations: SurfaceMessagePresentation[] }>(`${baseUrl}/api/chat/sessions/${session.id}/transcript`);
+    const savedCreatedCardAfterCreate = transcriptAfterCreate.message_presentations.find((presentation) => presentation.id === createdCard.id);
+    const reopenedCardAfterWorkspaceCreate = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_reopen_card_after_workspace_create",
+        kind: "collection.view.present",
+        collection_id: syncedCardAfterCreate.result.collection_id,
+        view_id: syncedCardAfterCreate.result.view_id,
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const workspaceDeleted = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_workspace_delete",
+        kind: "collection.record.delete",
+        collection_id: "movies",
+        record_id: "movie_2",
+        view_id: "movies_calendar",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const refreshedCardCalendarAfterDelete = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_card_calendar_refresh_after_delete",
+        kind: "collection.view.present",
+        collection_id: syncedCardAfterCreate.result.collection_id,
+        view_id: syncedCardAfterCreate.result.view_id,
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const deletedCardData = refreshedCardCalendarAfterDelete.render_spec.props.data;
+    const deletedCardViewState = deletedCardData && typeof deletedCardData === "object" && !Array.isArray(deletedCardData)
+      ? (deletedCardData as Record<string, unknown>).view_state
+      : undefined;
+    if (!deletedCardViewState || typeof deletedCardViewState !== "object" || Array.isArray(deletedCardViewState)) {
+      throw new Error("deleted_card_view_state_required");
+    }
+    const syncedCardAfterDelete = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_card_state_after_workspace_delete",
+        kind: "message.presentation.update",
+        presentation_id: createdCard.id,
+        view_state: deletedCardViewState,
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const reopenedCardAfterWorkspaceDelete = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_reopen_card_after_workspace_delete",
+        kind: "collection.view.present",
+        collection_id: syncedCardAfterDelete.result.collection_id,
+        view_id: syncedCardAfterDelete.result.view_id,
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const schemaPatched = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_schema_patch_director",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-movie-api-bridge",
+        content: "監督フィールドを追加して",
+        output_locale: "ja",
+        metadata: {
+          active_app_context: {
+            renderer: "collection_table",
+            collection_id: "movies",
+            view_id: "movies_table"
+          }
+        },
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const action = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_action_summarize_note",
+        kind: "collection.action.run",
+        session_id: session.id,
+        collection_id: "movies",
+        action_id: "summarize_note",
+        backend_id: "collection-movie-action-codex",
+        record_id: "movie_1",
+        view_id: "movies_table",
+        payload: {
+          action_id: "summarize_note",
+          action_label: "感想を整理",
+          action_kind: "custom_instruction",
+          scope: "record",
+          view_state: { selected_record_id: "movie_1" },
+          record_snapshot: { id: "movie_1", title: "七人の侍", notes: "再視聴" }
+        },
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const customViewAction = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_action_generate_board",
+        kind: "collection.action.run",
+        session_id: session.id,
+        collection_id: "movies",
+        action_id: "generate_board",
+        backend_id: "collection-movie-action-codex",
+        view_id: "movies_table",
+        payload: {
+          action_id: "generate_board",
+          action_label: "専用ビューを作る",
+          action_kind: "custom_instruction",
+          output_surface: "custom_view"
+        },
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const transcript = await getJson<{ message_presentations: SurfaceMessagePresentation[] }>(`${baseUrl}/api/chat/sessions/${session.id}/transcript`);
+    const savedCreatedCard = transcript.message_presentations.find((presentation) => presentation.id === createdCard.id);
+
+    expect(backendRuns).toBe(8);
+    expect(movieProviderInputs.some((input) => input.envelope.metadata.app_edit_patch === true)).toBe(false);
+    const actionProviderInput = actionBackendInputs.find((input) => input.envelope.metadata.collection_action_id === "summarize_note");
+    expect(actionProviderInput).toBeDefined();
+    expect(actionProviderInput?.envelope.metadata).toMatchObject({
+      collection_id: "movies",
+      collection_action_id: "summarize_note",
+      collection_action_kind: "custom_instruction",
+      collection_record_id: "movie_1"
+    });
+    expect(actionProviderInput?.envelope.user_intent).toContain("感想を整理");
+    expect(actionProviderInput?.envelope.user_intent).toContain("selected_record_id");
+    expect(actionProviderInput?.envelope.user_intent).toContain("record_snapshot");
+    expect(actionProviderInput?.envelope.user_intent).toContain("movie_1");
+    expect(created.render_specs.map((spec) => spec.kind)).toEqual(["chat", "custom_view"]);
+    expect(createdCard).toMatchObject({
+      collection_id: "movies",
+      view_id: "movies_table",
+      renderer: "collection_table",
+      view_state: expect.objectContaining({ record_count: 0 })
+    });
+    expect(record.render_spec).toMatchObject({
+      kind: "collection_record",
+      props: {
+        record_id: "movie_1",
+        data: expect.objectContaining({ title: "七人の侍", rating: 5 })
+      }
+    });
+    for (const naturalResult of [opened, sorted, gallery, calendar, kanban]) {
+      expect(naturalResult.render_specs.map((spec) => spec.kind)).toEqual(["chat"]);
+      expect(naturalResult.result.messagePresentations).toEqual([]);
+    }
+    expect(patched.render_spec).toMatchObject({
+      kind: "collection_record",
+      props: {
+        record_id: "movie_1",
+        data: expect.objectContaining({ status: "視聴中" })
+      }
+    });
+    expect(refreshedKanban.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_kanban",
+        view_id: "movies_kanban",
+        data: expect.objectContaining({
+          records: [expect.objectContaining({ id: "movie_1", status: "視聴中" })],
+          view_state: expect.objectContaining({
+            renderer: "collection_kanban",
+            group: "status"
+          })
+        })
+      }
+    });
+    expect(refreshedGallery.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "collection_gallery",
+        view_id: "movies_gallery",
+        data: expect.objectContaining({
+          records: [expect.objectContaining({ id: "movie_1", status: "視聴中" })],
+          view_state: expect.objectContaining({
+            renderer: "collection_gallery"
+          })
+        })
+      }
+    });
+    expect(reopenedAfterEdit.render_specs.map((spec) => spec.kind)).toEqual(["chat"]);
+    expect(reopenedAfterEdit.result.messagePresentations).toEqual([]);
+    expect(switchedCard.result).toMatchObject({
+      id: createdCard.id,
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      view_state: expect.objectContaining({ record_count: 1 })
+    });
+    expect(reopenedCard.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar",
+        data: expect.objectContaining({
+          records: [expect.objectContaining({ id: "movie_1", title: "七人の侍" })]
+        })
+      }
+    });
+    expect(workspaceCreated.render_spec).toMatchObject({
+      kind: "collection_record",
+      props: {
+        record_id: "movie_2",
+        data: expect.objectContaining({ title: "羅生門", status: "観たい" })
+      }
+    });
+    expect(refreshedCardCalendar.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar",
+        data: expect.objectContaining({
+          records: expect.arrayContaining([
+            expect.objectContaining({ id: "movie_1", title: "七人の侍" }),
+            expect.objectContaining({ id: "movie_2", title: "羅生門" })
+          ]),
+          view_state: expect.objectContaining({ record_count: 2 })
+        })
+      }
+    });
+    expect(syncedCardAfterCreate.result).toMatchObject({
+      id: createdCard.id,
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      view_state: expect.objectContaining({ record_count: 2 })
+    });
+    expect(savedCreatedCardAfterCreate).toMatchObject({
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      view_state: expect.objectContaining({ record_count: 2 })
+    });
+    expect(reopenedCardAfterWorkspaceCreate.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar",
+        data: expect.objectContaining({
+          records: expect.arrayContaining([
+            expect.objectContaining({ id: "movie_1", title: "七人の侍" }),
+            expect.objectContaining({ id: "movie_2", title: "羅生門" })
+          ]),
+          view_state: expect.objectContaining({ record_count: 2 })
+        })
+      }
+    });
+    expect(workspaceDeleted.result_kind).toBe("collection_delete");
+    expect(workspaceDeleted.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar",
+        data: expect.objectContaining({
+          record_ids: ["movie_1"],
+          view_state: expect.objectContaining({ record_count: 1 })
+        })
+      }
+    });
+    expect(refreshedCardCalendarAfterDelete.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar",
+        data: expect.objectContaining({
+          record_ids: ["movie_1"],
+          view_state: expect.objectContaining({ record_count: 1 })
+        })
+      }
+    });
+    expect(syncedCardAfterDelete.result).toMatchObject({
+      id: createdCard.id,
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      view_state: expect.objectContaining({ record_count: 1 })
+    });
+    expect(savedCreatedCard).toMatchObject({
+      view_id: "movies_calendar",
+      renderer: "calendar_view",
+      view_state: expect.objectContaining({ record_count: 1 })
+    });
+    expect(reopenedCardAfterWorkspaceDelete.render_spec).toMatchObject({
+      kind: "custom_view",
+      props: {
+        renderer: "calendar_view",
+        view_id: "movies_calendar",
+        data: expect.objectContaining({
+          record_ids: ["movie_1"],
+          view_state: expect.objectContaining({ record_count: 1 })
+        })
+      }
+    });
+    expect(schemaPatched.render_specs.map((spec) => spec.kind)).toEqual(["chat"]);
+    expect(schemaPatched.result.messagePresentations).toEqual([]);
+    expect(action.render_specs.map((spec) => spec.kind)).toEqual(["custom_view", "chat"]);
+    expect(action.render_specs[1]).toMatchObject({
+      kind: "chat",
+      props: {
+        backend_status: "completed",
+        backend_run_id: expect.any(String)
+      }
+    });
+    expect(action.result.chat?.messages?.some((message) => message.role === "agent" && message.content === "感想を整理しました。")).toBe(true);
+    const generatedCustomView = customViewAction.render_specs.find((spec) =>
+      spec.kind === "custom_view" && spec.props.renderer === "generic"
+    );
+    expect(generatedCustomView).toMatchObject({
+      kind: "custom_view",
+      title: "映画ログボード",
+      props: {
+        renderer: "generic",
+        data: expect.objectContaining({
+          html: expect.stringContaining("映画ログボード"),
+          collection_id: "movies",
+          source_action_id: "generate_board",
+          source_collection: expect.objectContaining({
+            records: [expect.objectContaining({ id: "movie_1", title: "七人の侍" })]
+          })
+        }),
+        capability: expect.objectContaining({
+          allowed_actions: ["highlight_movie"]
+        })
+      }
+    });
+    expect(customViewAction.render_specs.map((spec) => spec.kind)).toEqual(["custom_view", "custom_view", "chat"]);
+  });
+
+  it("asks for a user choice when a Collection open request is ambiguous through the HTTP Surface API", async () => {
+    let backendRuns = 0;
+    const backendRegistry = createDefaultAgentBackendRegistry(new FakeProviderAdapter("fake/movie-ambiguous-api", fakeProviderOutput), process.env, { repoRoot: process.cwd() });
+    backendRegistry.register({
+      id: "collection-open-api-ambiguous-unneeded",
+      kind: "codex",
+      label: "Unused Ambiguous Collection Open Fixture",
+      async *runTurn() {
+        backendRuns += 1;
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "unexpected" }
+        };
+      }
+    });
+    const { baseUrl, server } = await startTestServer(undefined, { backendRegistry });
+    await server.store.updateCollectionSchema({
+      id: "movies",
+      version: "1",
+      labels: { ja: "映画ログ", en: "Movies" },
+      descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+      fields: [{ id: "title", type: "string", label: "タイトル", required: true }],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "movies_table", renderer: "collection_table", editable_fields: ["title"] }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    await server.store.updateCollectionSchema({
+      id: "movie_notes",
+      version: "1",
+      labels: { ja: "映画アプリ", en: "Movie app" },
+      descriptions: { ja: "映画ログに紐づくメモ。", en: "Notes for movie logs." },
+      fields: [{ id: "memo", type: "text", label: "メモ" }],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "movie_notes_table", renderer: "collection_table", editable_fields: ["memo"] }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+
+    const opened = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_movie_api_ambiguous_open",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-open-api-ambiguous-unneeded",
+        content: "映画アプリを開いて",
+        output_locale: "ja",
+        renderer_capabilities: {
+          protocol_version: "1",
+          supported_kinds: ["chat", "custom_view", "collection"],
+          custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+        }
+      },
+      201
+    );
+    const transcript = await getJson<{ message_presentations: SurfaceMessagePresentation[] }>(`${baseUrl}/api/chat/sessions/${session.id}/transcript`);
+    const runs = await server.store.listBackendRuns(session.id);
+    const messages = Array.isArray(opened.result.messages) ? opened.result.messages as Array<{ role?: string; content?: string }> : [];
+    const agentMessage = messages.find((message) => message.role === "agent");
+
+    expect(backendRuns).toBe(1);
+    expect(opened.render_specs.map((spec) => spec.kind)).toEqual(["chat"]);
+    expect(opened.result.messagePresentations).toEqual([]);
+    expect(transcript.message_presentations).toEqual([]);
+    expect(agentMessage?.content).not.toContain("候補が複数あります");
+    expect(runs[0]).toMatchObject({
+      backend_id: "collection-open-api-ambiguous-unneeded",
+      status: "completed"
+    });
+  });
+
+  it("opens existing Collections through HTTP from multilingual labels, descriptions, and field labels", async () => {
+    let backendRuns = 0;
+    const backendRegistry = createDefaultAgentBackendRegistry(new FakeProviderAdapter("fake/multilingual-collection-open", fakeProviderOutput), process.env, { repoRoot: process.cwd() });
+    backendRegistry.register({
+      id: "collection-open-multilingual-unneeded",
+      kind: "codex",
+      label: "Unused Multilingual Collection Open Fixture",
+      async *runTurn() {
+        backendRuns += 1;
+        yield {
+          event_type: "run_completed",
+          payload: { output_summary: "unexpected" }
+        };
+      }
+    });
+    const { baseUrl, server } = await startTestServer(undefined, { backendRegistry });
+    await server.store.updateCollectionSchema({
+      id: "watchlog",
+      version: "1",
+      labels: { ja: "鑑賞記録", en: "Movie tracker", es: "Películas" },
+      descriptions: {
+        ja: "映画を記録する個人用Collection。",
+        en: "A personal place to track watched movies.",
+        es: "Películas vistas y pendientes."
+      },
+      fields: [
+        { id: "title", type: "string", label: "Title", required: true },
+        { id: "rating", type: "number", label: "Rating" }
+      ],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "watchlog_table", renderer: "collection_table", editable_fields: ["title", "rating"] }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    await server.store.updateCollectionSchema({
+      id: "recipes",
+      version: "1",
+      labels: { ja: "レシピ", en: "Recipes", es: "Recetas" },
+      descriptions: { ja: "料理メモ。", en: "Cooking notes.", es: "Notas de cocina." },
+      fields: [{ id: "name", type: "string", label: "Name", required: true }],
+      refs: [],
+      embeds: [],
+      derived_fields: [],
+      triggers: [],
+      actions: [],
+      views: [{ id: "recipes_table", renderer: "collection_table", editable_fields: ["name"] }],
+      permissions: { create: true, update: true, delete: true }
+    });
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+    const capabilities = {
+      protocol_version: "1",
+      supported_kinds: ["chat", "custom_view", "collection"],
+      custom_view_renderers: [{ renderer: "collection_table", versions: ["1"] }]
+    };
+
+    const openedEnglish = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_watchlog_open_english_http",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-open-multilingual-unneeded",
+        content: "show my movie list",
+        output_locale: "en",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const openedSpanish = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_watchlog_open_spanish_http",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-open-multilingual-unneeded",
+        content: "abre la lista de películas",
+        output_locale: "es",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const openedByFieldLabel = await postJson<SurfaceOperationApiResult>(
+      `${baseUrl}/api/surface/operations`,
+      {
+        id: "surface_watchlog_open_rating_field_http",
+        kind: "message.submit",
+        session_id: session.id,
+        backend_id: "collection-open-multilingual-unneeded",
+        content: "open rating tracker",
+        output_locale: "en",
+        renderer_capabilities: capabilities
+      },
+      201
+    );
+    const transcript = await getJson<{ message_presentations: SurfaceMessagePresentation[] }>(`${baseUrl}/api/chat/sessions/${session.id}/transcript`);
+
+    expect(backendRuns).toBe(3);
+    for (const opened of [openedEnglish, openedSpanish, openedByFieldLabel]) {
+      expect(opened.render_specs.map((spec) => spec.kind)).toEqual(["chat"]);
+      expect(opened.result.messagePresentations).toEqual([]);
+    }
+    expect(transcript.message_presentations.filter((presentation) => presentation.collection_id === "watchlog")).toHaveLength(0);
   });
 
   it("keeps external assist as isolated API context hints", async () => {
@@ -3059,6 +3972,13 @@ describe("backend run API", () => {
     const recordDetail = await getJson<{ data: { name: string }; translation_resolution?: { source: string; text: string; status: string }; locale: { original_hash: string } }>(
       `${baseUrl}/api/collections/contacts/records/record_1?target_locale=en`
     );
+    const viewWrite = await putJson<{ written: string[]; rejected: unknown[] }>(
+      `${baseUrl}/api/collections/contacts/view-data`,
+      { items: [{ id: "record_1", name: "View API" }], mode: "merge" }
+    );
+    const viewRead = await getJson<{ action: string; collection_id: string; items: Array<{ id: string; name: string }> }>(
+      `${baseUrl}/api/collections/contacts/view-data?fields=name`
+    );
     const translationJob = await postJson<{ resource: { id: string; kind: string; delivery_target: { target_locale: string } }; operation: { operation: string } }>(
       `${baseUrl}/api/resource-translations/jobs`,
       {
@@ -3128,6 +4048,8 @@ describe("backend run API", () => {
     expect(recordDetail.data.name).toBe("Action API");
     expect(recordDetail.locale.original_hash).toBe(stableHash(recordSourceText));
     expect(recordDetail.translation_resolution).toMatchObject({ source: "translation", status: "verified", text: "Translated collection record" });
+    expect(viewWrite).toMatchObject({ written: ["record_1"], rejected: [] });
+    expect(viewRead).toMatchObject({ action: "getItems", collection_id: "contacts", items: [expect.objectContaining({ id: "record_1", name: "View API" })] });
     expect(translationJob.resource).toMatchObject({ kind: "resource_translation", delivery_target: { target_locale: "fr" } });
     expect(translationJob.operation.operation).toBe("automation.job.save");
     expect(translationRuns).toContainEqual(expect.objectContaining({ automationRun: expect.objectContaining({ status: "completed" }) }));
@@ -3513,14 +4435,30 @@ describe("backend run API", () => {
     expect(badSkill.error).toBe("title_and_description_required");
     expect(badRecord.error).toBe("conflict");
   });
+
+  it("hides internal operation-only sessions from the chat session list", async () => {
+    const { baseUrl, server } = await startTestServer();
+
+    await server.runtime.saveCollectionSchema(collectionSchema("internal_only"));
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+    await postJson(`${baseUrl}/api/chat/sessions/${session.id}/messages`, {
+      content: "こんにちは",
+      output_locale: "ja"
+    }, 201);
+    const sessions = await getJson<Array<{ id: string; title: string }>>(`${baseUrl}/api/chat/sessions`);
+
+    expect(sessions.map((item) => item.title)).not.toContain("Workspace operations");
+    expect(sessions.map((item) => item.id)).toContain(session.id);
+  });
 });
 
 async function startTestServer(
   provider: ProviderAdapter = new FakeProviderAdapter("fake/test", fakeProviderOutput),
   options: Omit<CreateApiServerOptions, "provider" | "workspaceDataDir" | "automationScheduler"> = {}
-): Promise<{ baseUrl: string; server: ApiServer }> {
+): Promise<{ baseUrl: string; server: ApiServer; root: string }> {
   const root = await mkdtemp(path.join(tmpdir(), "samurai-api-"));
   roots.push(root);
+  setManagedEnv("SAMURAI_BACKEND_DEFAULT", "samurai-native");
   const server = await createApiServer({ workspaceDataDir: root, provider, automationScheduler: false, ...options });
   servers.push(server);
   await new Promise<void>((resolve) => {
@@ -3529,7 +4467,8 @@ async function startTestServer(
   const address = server.httpServer.address() as AddressInfo;
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
-    server
+    server,
+    root
   };
 }
 
@@ -3640,7 +4579,7 @@ async function postJson<T>(url: string, body: unknown, expectedStatus = 200): Pr
     body: JSON.stringify(body)
   });
   const payload = (await response.json()) as T;
-  expect(response.status).toBe(expectedStatus);
+  expect(response.status, JSON.stringify(payload)).toBe(expectedStatus);
   return payload;
 }
 
@@ -3712,6 +4651,19 @@ async function patchJson<T>(url: string, body: unknown, expectedStatus = 200): P
   return payload;
 }
 
+async function putJson<T>(url: string, body: unknown, expectedStatus = 200): Promise<T> {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  const payload = (await response.json()) as T;
+  expect(response.status, JSON.stringify(payload)).toBe(expectedStatus);
+  return payload;
+}
+
 function collectionSchema(id: string) {
   const labels = { ja: id, en: id, zh: id, ko: id, es: id, "pt-BR": id, fr: id, de: id };
   return {
@@ -3726,5 +4678,47 @@ function collectionSchema(id: string) {
     triggers: [],
     actions: [],
     permissions: {}
+  };
+}
+
+function movieLogCollectionSchema(): Record<string, JsonValue> {
+  const fields: Array<Record<string, JsonValue>> = [
+    { id: "title", type: "string", label: "タイトル", required: true },
+    { id: "status", type: "enum", label: "状態", enum_values: ["観たい", "視聴中", "観た"] },
+    { id: "rating", type: "number", label: "評価" },
+    { id: "watched_at", type: "date", label: "鑑賞日" },
+    { id: "notes", type: "text", label: "メモ" }
+  ];
+  const views: Array<Record<string, JsonValue>> = [{
+    id: "movies_table",
+    renderer: "collection_table",
+    editable_fields: ["title", "status", "rating", "watched_at", "notes"]
+  }];
+  return {
+    id: "movies",
+    version: "1",
+    labels: { ja: "映画ログ", en: "Movies" },
+    descriptions: { ja: "映画を記録する個人用アプリ。", en: "A personal movie log." },
+    fields,
+    refs: [],
+    embeds: [],
+    derived_fields: [],
+    triggers: [],
+    actions: [{
+      id: "summarize_note",
+      kind: "custom_instruction",
+      title: "感想を整理",
+      instruction: "Summarize the selected movie note and continue the chat with the result.",
+      scope: "record"
+    }, {
+      id: "generate_board",
+      kind: "custom_instruction",
+      title: "専用ビューを作る",
+      instruction: "Generate a compact HTML board for the movie log.",
+      output_surface: "custom_view",
+      scope: "collection"
+    }],
+    views,
+    permissions: { create: true, update: true, delete: true }
   };
 }
