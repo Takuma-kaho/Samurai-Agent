@@ -292,7 +292,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
   command({
     id: "collection.schema.save",
     title: "Save collection schema",
-    description: "Save a Collection schema to the local workspace.",
+    description: "Save a Collection schema with validated fields and Workspace view definitions.",
     runtime_method: "saveCollectionSchema",
     ui_display_category: "collection",
     input_sources: ["runtime_api", "provider_tool_call"],
@@ -300,7 +300,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     writes_workspace: true,
     output_resource_kind: "collection_schema",
     resource_kinds: ["collection_schema"],
-    proposed_effects: ["Create a Collection schema file and SQLite index row."]
+    proposed_effects: ["Create a Collection schema file, renderer view definitions, and SQLite index row."]
   }),
   command({
     id: "collection.view.present",
@@ -323,7 +323,8 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     description: "Create a schema-validated Collection record.",
     runtime_method: "createCollectionRecord",
     ui_display_category: "collection",
-    input_sources: ["surface_operation", "runtime_api", "scheduled_context"],
+    input_sources: ["surface_operation", "runtime_api", "provider_tool_call", "scheduled_context"],
+    provider_tool_names: ["samurai.collection.record.create", "collection.record.create", "create_collection_record", "mcp__samurai__collection_record_create"],
     surface_operation_kinds: ["collection.record.create"],
     writes_workspace: true,
     output_resource_kind: "collection_record",
@@ -358,6 +359,20 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     proposed_effects: ["Delete a schema-validated Collection record when schema and view permissions allow it."]
   }),
   command({
+    id: "collection.manage",
+    title: "Manage collection",
+    description: "Read or write Collection items and schemas through the shared Collection management surface.",
+    runtime_method: "manageCollection",
+    ui_display_category: "collection",
+    input_sources: ["runtime_api", "provider_tool_call", "scheduled_context"],
+    provider_tool_names: ["samurai.collection.manage", "collection.manage", "manage_collection", "collection_manage", "mcp__samurai__collection_manage"],
+    writes_workspace: true,
+    output_resource_kind: "collection",
+    output_render_kinds: ["collection", "collection_record", "custom_view"],
+    resource_kinds: ["collection_schema", "collection_record", "collection_index"],
+    proposed_effects: ["Run a Collection management action through the shared Collection surface."]
+  }),
+  command({
     id: "message.presentation.update",
     title: "Update message presentation state",
     description: "Persist card-local UI state for a chat message presentation.",
@@ -377,10 +392,11 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     description: "Run a schema-defined Collection action such as patch, create, or reindex.",
     runtime_method: "runCollectionAction",
     ui_display_category: "collection",
-    input_sources: ["runtime_api", "scheduled_context"],
+    input_sources: ["surface_operation", "runtime_api", "scheduled_context"],
+    surface_operation_kinds: ["collection.action.run"],
     writes_workspace: true,
     output_resource_kind: "collection_record",
-    output_render_kinds: ["collection_record", "collection", "status_timeline"],
+    output_render_kinds: ["collection_record", "collection", "custom_view", "status_timeline"],
     resource_kinds: ["collection_record", "collection_index"],
     proposed_effects: ["Run a schema-defined Collection action through the runtime boundary."]
   }),

@@ -123,6 +123,7 @@ const loadedEnvPaths = new Set<string>();
 export interface CreateApiServerOptions {
   workspaceDataDir?: string;
   provider?: ProviderAdapter;
+  backendRegistry?: ReturnType<typeof createDefaultAgentBackendRegistry>;
   automationScheduler?: boolean;
   pluginRootDir?: string;
   loadPluginEntrypoints?: boolean;
@@ -351,7 +352,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     ? injectedExternalAssistProviders
     : createExternalAssistProvidersFromEnv();
   const backendWorkingDirectoryMode = resolveBackendWorkingDirectoryMode();
-  const backendRegistry = createDefaultAgentBackendRegistry(provider, process.env, { repoRoot });
+  const backendRegistry = options.backendRegistry ?? createDefaultAgentBackendRegistry(provider, process.env, { repoRoot });
   const runtime = new AgentRuntime(store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, undefined, {
     backendWorkingDirectoryMode,
     repoRoot
@@ -2874,6 +2875,36 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.get("/api/collections/:collectionId/view-data", async (req, res, next) => {
+      try {
+        const ids = queryStringList(req.query.ids);
+        const fields = queryStringList(req.query.fields);
+        const result = await runtime.manageCollection({
+          action: "getItems",
+          collection_id: req.params.collectionId,
+          ...(ids.length > 0 ? { ids } : {}),
+          ...(fields.length > 0 ? { fields } : {})
+        });
+        res.json(result.resource);
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.put("/api/collections/:collectionId/view-data", async (req, res, next) => {
+      try {
+        const result = await runtime.manageCollection({
+          action: "putItems",
+          collection_id: req.params.collectionId,
+          items: Array.isArray(req.body?.items) ? req.body.items : [],
+          mode: typeof req.body?.mode === "string" ? req.body.mode : "merge"
+        });
+        res.json(result.resource);
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.get("/api/collections/:collectionId/patches", async (req, res, next) => {
       try {
         res.json(await store.listCollectionPatches({ collectionId: req.params.collectionId }));
@@ -2996,6 +3027,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const result = await runtime.runCollectionAction({
           collectionId: req.params.collectionId,
           actionId: req.params.actionId,
+          backendId: typeof req.body?.backend_id === "string" ? req.body.backend_id : undefined,
           recordId: typeof req.body?.record_id === "string" ? req.body.record_id : undefined,
           payload: isRecord(req.body?.payload) ? req.body.payload : undefined
         });
@@ -3548,6 +3580,14 @@ function numberFromRecord(body: Record<string, unknown>, key: string): number | 
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
+}
+
+function queryStringList(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  return raw
+    .flatMap((item) => typeof item === "string" ? item.split(",") : [])
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function booleanFromRecord(body: Record<string, unknown>, key: string): boolean | undefined {

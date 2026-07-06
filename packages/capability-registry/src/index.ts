@@ -423,6 +423,19 @@ export const proposalCapabilityManifest: CapabilityManifest = {
       default_decision: "allow_with_audit"
     },
     {
+      operation: "collection.manage",
+      description: "Read or write Collection items and schemas through the shared Collection management surface.",
+      input_schema_ref: "collection.manage.input",
+      output_schema_ref: "collection.manage.output",
+      risk: "medium",
+      scope: "collection",
+      reversibility: true,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "scheduled_context"],
+      default_decision: "allow_with_audit"
+    },
+    {
       operation: "collection.action.run",
       description: "Run a collection-defined local action through the runtime policy boundary.",
       input_schema_ref: "collection.action.run.input",
@@ -545,6 +558,7 @@ export const proposalCapabilityManifest: CapabilityManifest = {
     "collection.record.create",
     "collection.patch.apply",
     "collection.record.delete",
+    "collection.manage",
     "collection.action.run",
     "collection.reindex",
     "automation.memory_review.run",

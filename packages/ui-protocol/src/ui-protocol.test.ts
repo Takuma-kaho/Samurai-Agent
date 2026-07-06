@@ -35,7 +35,7 @@ describe("surface operation protocol", () => {
     expect(operation?.kind === "collection.record.patch" ? operation.patch_id.startsWith("collection_patch_") : false).toBe(true);
   });
 
-  it("parses collection view and delete surface operations", () => {
+  it("parses collection view, delete, and action surface operations", () => {
     expect(parseSurfaceOperation({
       kind: "collection.view.present",
       collection_id: "tasks",
@@ -56,7 +56,21 @@ describe("surface operation protocol", () => {
       record_id: "task_1",
       view_id: "task_list"
     });
-    expect(surfaceOperationResultKinds).toEqual(expect.arrayContaining(["collection_view", "collection_delete"]));
+    expect(parseSurfaceOperation({
+      kind: "collection.action.run",
+      collection_id: "movies",
+      action_id: "summarize",
+      record_id: "movie_1",
+      view_id: "movies_table"
+    })).toMatchObject({
+      kind: "collection.action.run",
+      collection_id: "movies",
+      action_id: "summarize",
+      record_id: "movie_1",
+      view_id: "movies_table",
+      payload: {}
+    });
+    expect(surfaceOperationResultKinds).toEqual(expect.arrayContaining(["collection_view", "collection_delete", "collection_action"]));
   });
 
   it("validates surface dispatch plans", () => {
@@ -83,12 +97,8 @@ describe("surface operation protocol", () => {
     expect(surfaceRenderKinds.every((kind) => declaredKinds.has(kind))).toBe(true);
   });
 
-  it("declares the built-in task list custom renderer", () => {
-    expect(builtinSurfaceRendererRegistryEntries.find((entry) => entry.renderer === "task_list")).toMatchObject({
-      id: "surface.custom_view.task_list",
-      kind: "custom_view",
-      fallback_kind: "collection"
-    });
+  it("does not declare legacy task_list as a built-in custom renderer", () => {
+    expect(builtinSurfaceRendererRegistryEntries.find((entry) => entry.renderer === "task_list")).toBeUndefined();
   });
 
   it("keeps single and multiple render specs compatible in operation envelopes", () => {
@@ -147,6 +157,65 @@ describe("surface operation protocol", () => {
     expect(renderSpec.kind).toBe("chat");
     expect(renderSpec.state).toBe("ready");
     expect(renderSpec.resource_refs[0]?.kind).toBe("session");
+  });
+
+  it("validates custom view sandbox and capability contracts", () => {
+    const renderSpec = SurfaceRenderSpecSchema.parse({
+      id: "render_custom_view_contract",
+      kind: "custom_view",
+      priority: "primary",
+      title: "Board",
+      resource_refs: [{
+        kind: "artifact",
+        id: "artifact_board",
+        uri: "artifacts/board.json",
+        label: "Board data"
+      }],
+      props: {
+        view_id: "board_view",
+        renderer: "task_board",
+        renderer_version: "1",
+        sandbox: {
+          mode: "iframe",
+          allow_scripts: true,
+          allow_forms: false,
+          allow_same_origin: false,
+          network_access: "none",
+          workspace_access: "none"
+        },
+        capability: {
+          token_id: "custom_view:board",
+          allowed_actions: ["move_card"],
+          read_resource_refs: [{
+            kind: "artifact",
+            id: "artifact_board",
+            uri: "artifacts/board.json",
+            label: "Board data"
+          }],
+          write_operations: ["custom_view.action"]
+        },
+        actions: [{
+          id: "move_card",
+          label: "Move card",
+          operation_kind: "custom_view.action",
+          action_kind: "drag",
+          description: "Move a card between columns.",
+          scope: "record"
+        }],
+        data: { columns: [] }
+      }
+    });
+
+    expect(renderSpec.props.sandbox).toMatchObject({
+      mode: "iframe",
+      network_access: "none",
+      workspace_access: "none"
+    });
+    expect(renderSpec.props.capability).toMatchObject({
+      token_id: "custom_view:board",
+      allowed_actions: ["move_card"],
+      write_operations: ["custom_view.action"]
+    });
   });
 
   it("validates collection record render props with resolved refs and embeds", () => {

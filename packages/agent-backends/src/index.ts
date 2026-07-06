@@ -769,7 +769,8 @@ function formatToolBridgeForPrompt(bridge: BackendToolBridge | undefined): strin
       `- ${providerToolNameForPrompt(tool)} (${tool.name}): ${tool.description}`,
       `  input_schema: ${JSON.stringify(tool.input_schema)}`
     ].join("\n")),
-    "Use the Samurai artifact tool for memos, drafts, reports, documents, tables, or notes unless the user explicitly asks you to save a workspace file."
+    "Use the Samurai artifact tool for memos, drafts, reports, documents, tables, or notes unless the user explicitly asks you to save a workspace file.",
+    "Use the Samurai Collection tools for Collection schemas, records, and presentation. Do not create or edit collections/* files directly."
   ].join("\n");
 }
 
@@ -794,8 +795,12 @@ function formatExpectedOutputsForPrompt(input: BackendRunInput): string {
   if (input.expected_outputs?.includes("collection_schema")) {
     outputs.push(
       "- collection_schema: The user is asking for a personal Workspace data app.",
-      "- Decide the app's CollectionSchema from the user's intent, including id, labels, fields, permissions, and a view using renderer \"collection_table\".",
-      "- Save it through samurai.collection.schema.save / mcp__samurai__collection_schema_save. Do not fake success before the tool call completes."
+      "- Decide the app's CollectionSchema from the user's intent, including id, labels, fields, permissions, and useful views.",
+      "- Prefer renderer choices that fit the schema: collection_table for general records, collection_gallery for logs/catalogs, calendar_view when a date/datetime field exists, and collection_kanban when an enum/status field exists. Use a custom view for dashboard-style summaries instead of a fixed dashboard renderer.",
+      "- Do not add generic/custom HTML view actions unless the user explicitly asks for a bespoke UI; built-in table/gallery/calendar/kanban/dashboard views are the default route.",
+      "- Save the schema through samurai.collection.schema.save / mcp__samurai__collection_schema_save. Do not write collections/*/schema.json directly.",
+      "- If the user provided initial records, create them through samurai.collection.record.create / mcp__samurai__collection_record_create after the schema save. Do not write collections/*/records/*.json directly.",
+      "- Do not fake success before the Runtime tool call completes."
     );
   }
   if (input.expected_outputs?.includes("collection_view")) {

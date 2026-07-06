@@ -768,6 +768,42 @@ describe("agent backend registry", () => {
     expect(env).not.toHaveProperty("SAMURAI_OUTPUT_LOCALE");
   });
 
+  it("tells external backends to use Collection bridge tools instead of direct collection files", () => {
+    const input: BackendRunInput = {
+      ...backendInput("run_collection_prompt"),
+      expected_outputs: ["collection_schema"],
+      tool_bridge: {
+        enabled: true,
+        server_name: "samurai",
+        endpoint_url: "http://127.0.0.1:4317/api/backend-runs/run_collection_prompt/tool-calls",
+        token: "bridge-token",
+        token_env: "SAMURAI_TOOL_BRIDGE_TOKEN",
+        tools: [{
+          name: "samurai.collection.schema.save",
+          provider_tool_name: "mcp__samurai__collection_schema_save",
+          title: "Save Samurai Collection Schema",
+          description: "Save a validated CollectionSchema.",
+          input_schema: { type: "object" }
+        }, {
+          name: "samurai.collection.record.create",
+          provider_tool_name: "mcp__samurai__collection_record_create",
+          title: "Create Samurai Collection Record",
+          description: "Create a schema-validated Collection record.",
+          input_schema: { type: "object" }
+        }]
+      }
+    };
+
+    const prompt = buildExternalBackendPrompt(input);
+
+    expect(prompt).toContain("collection_schema");
+    expect(prompt).toContain("collection_record_create");
+    expect(prompt).toContain("built-in table/gallery/calendar/kanban/dashboard views are the default route");
+    expect(prompt).toContain("Do not write collections/*/schema.json directly.");
+    expect(prompt).toContain("Do not write collections/*/records/*.json directly.");
+    expect(prompt).toContain("Do not create or edit collections/* files directly.");
+  });
+
   it("injects run-scoped Samurai Artifact MCP config into Codex and Claude Code CLI args", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-mcp-"));
     roots.push(root);

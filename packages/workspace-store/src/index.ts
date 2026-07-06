@@ -1815,11 +1815,28 @@ export class WorkspaceStore {
     return presentation;
   }
 
+  async getMessagePresentation(id: string): Promise<MessagePresentationRecord | undefined> {
+    const row = await this.db
+      .selectFrom("message_presentations")
+      .selectAll()
+      .where("id", "=", id)
+      .executeTakeFirst();
+    return row ? messagePresentationFromRow(row) : undefined;
+  }
+
   async updateMessagePresentationViewState(input: { id: string; viewState: Record<string, JsonValue>; updatedAt?: string }): Promise<MessagePresentationRecord | undefined> {
     const updatedAt = input.updatedAt ?? nowIso();
+    const viewId = typeof input.viewState.view_id === "string" && input.viewState.view_id.trim()
+      ? input.viewState.view_id
+      : undefined;
+    const renderer = typeof input.viewState.renderer === "string" && input.viewState.renderer.trim()
+      ? input.viewState.renderer
+      : undefined;
     await this.db
       .updateTable("message_presentations")
       .set({
+        ...(viewId ? { view_id: viewId } : {}),
+        ...(renderer ? { renderer } : {}),
         view_state_json: stringify(input.viewState),
         updated_at: updatedAt
       })
@@ -3834,6 +3851,40 @@ export class WorkspaceStore {
     }
   }
 
+  async upsertCollectionRecord(recordInput: CollectionRecord): Promise<CollectionRecordWithFilePath> {
+    const schema = await this.getCollectionSchema(recordInput.collection_id);
+    if (!schema) {
+      throw new Error("collection_schema_not_found");
+    }
+    const existing = await this.getCollectionRecord(recordInput.collection_id, recordInput.id);
+    const record = parseCollectionRecordLocal({
+      ...recordInput,
+      created_at: existing?.created_at ?? recordInput.created_at
+    }, schema);
+    await this.validateCollectionRecordLinks(record, schema);
+    const relativePath = existing?.file_path ?? path.join("collections", recordInput.collection_id, "records", `${recordInput.id}.json`);
+    const absolutePath = path.join(this.rootDir, relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, `${JSON.stringify(record, null, 2)}\n`);
+    await this.db
+      .insertInto("collection_records")
+      .values({
+        id: record.id,
+        collection_id: record.collection_id,
+        file_path: relativePath,
+        record_json: stringify(record),
+        created_at: record.created_at,
+        updated_at: record.updated_at
+      })
+      .onConflict((oc) => oc.columns(["collection_id", "id"]).doUpdateSet({
+        file_path: relativePath,
+        record_json: stringify(record),
+        updated_at: record.updated_at
+      }))
+      .execute();
+    return { ...record, file_path: relativePath };
+  }
+
   async deleteCollectionRecord(collectionId: string, recordId: string): Promise<CollectionRecordWithFilePath> {
     const existing = await this.getCollectionRecord(collectionId, recordId);
     if (!existing) {
@@ -5598,7 +5649,36 @@ function parseCollectionSchemaLocal(value: unknown): CollectionSchema {
     }
     seen.add(id);
   }
+  validateCollectionViewRenderersLocal(schema);
   return schema;
+}
+
+const supportedCollectionViewRenderersLocal = new Set([
+  "collection_table",
+  "collection_gallery",
+  "calendar_view",
+  "collection_kanban"
+]);
+
+const legacyCollectionViewRenderersLocal = new Set([
+  "collection_dashboard",
+  "task_list"
+]);
+
+function validateCollectionViewRenderersLocal(schema: CollectionSchema): void {
+  for (const view of schema.views ?? []) {
+    const renderer = typeof view.renderer === "string" ? view.renderer.trim() : "";
+    if (!renderer) {
+      continue;
+    }
+    if (supportedCollectionViewRenderersLocal.has(renderer)) {
+      continue;
+    }
+    if (legacyCollectionViewRenderersLocal.has(renderer)) {
+      continue;
+    }
+    throw new Error(`collection_view_renderer_unsupported:${renderer}`);
+  }
 }
 
 function parseCollectionRecordLocal(value: unknown, schema: CollectionSchema): CollectionRecord {
@@ -5606,8 +5686,10 @@ function parseCollectionRecordLocal(value: unknown, schema: CollectionSchema): C
   if (record.collection_id !== schema.id) {
     throw new Error("collection_record_collection_id_mismatch");
   }
-  const data = applyCollectionDerivedFieldsLocal(record.data, schema);
+  const data = stripCollectionDerivedFieldsLocal(record.data, schema);
   rejectUnknownCollectionFields(data, schema);
+  validateCollectionRequiredFields(data, schema);
+  validateCollectionFieldValues(data, schema);
   return { ...record, data };
 }
 
@@ -5616,11 +5698,13 @@ function applyCollectionPatchLocal(record: CollectionRecord, patch: CollectionPa
     throw new Error("collection_patch_record_id_mismatch");
   }
   rejectUnknownCollectionFields(patch.changes, schema);
-  const data = applyCollectionDerivedFieldsLocal({
-    ...record.data,
+  const data = {
+    ...stripCollectionDerivedFieldsLocal(record.data, schema),
     ...patch.changes
-  }, schema);
+  };
   rejectUnknownCollectionFields(data, schema);
+  validateCollectionRequiredFields(data, schema);
+  validateCollectionFieldValues(data, schema);
   return {
     ...record,
     data,
@@ -5630,11 +5714,10 @@ function applyCollectionPatchLocal(record: CollectionRecord, patch: CollectionPa
 
 function rejectUnknownCollectionFields(data: Record<string, JsonValue>, schema: CollectionSchema): void {
   const allowed = new Set([
-    ...schema.fields,
-    ...schema.refs,
-    ...schema.embeds,
-    ...schema.derived_fields
-  ].map(collectionFieldId).filter((id): id is string => Boolean(id)));
+    ...schema.fields.map(collectionFieldId),
+    ...schema.refs.map(collectionDefinitionField),
+    ...schema.embeds.map(collectionDefinitionField)
+  ].filter((id): id is string => Boolean(id)));
   for (const key of Object.keys(data)) {
     if (!allowed.has(key)) {
       throw new Error(`collection_unknown_field:${key}`);
@@ -5642,19 +5725,124 @@ function rejectUnknownCollectionFields(data: Record<string, JsonValue>, schema: 
   }
 }
 
+function validateCollectionRequiredFields(data: Record<string, JsonValue>, schema: CollectionSchema): void {
+  for (const field of schema.fields) {
+    if (field.required !== true) {
+      continue;
+    }
+    const id = collectionFieldId(field);
+    if (!id) {
+      continue;
+    }
+    if (collectionRequiredValueMissing(data[id])) {
+      throw new Error(`collection_required_field:${id}`);
+    }
+  }
+}
+
+function validateCollectionFieldValues(data: Record<string, JsonValue>, schema: CollectionSchema): void {
+  for (const field of schema.fields) {
+    const id = collectionFieldId(field);
+    if (!id || !(id in data)) {
+      continue;
+    }
+    const value = data[id];
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    const type = collectionDefinitionString(field, "type") ?? "string";
+    if (!collectionFieldValueMatchesType(value, field, type)) {
+      throw new Error(`collection_field_type:${id}:${type}`);
+    }
+    if (type === "enum") {
+      const values = collectionDefinitionStringArray(field, "enum_values");
+      if (values.length > 0 && (typeof value !== "string" || !values.includes(value))) {
+        throw new Error(`collection_enum_value:${id}`);
+      }
+    }
+  }
+}
+
+function collectionFieldValueMatchesType(value: JsonValue, field: Record<string, JsonValue>, type: string): boolean {
+  if (type === "number") {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+  if (type === "integer") {
+    return typeof value === "number" && Number.isInteger(value);
+  }
+  if (type === "boolean") {
+    return typeof value === "boolean";
+  }
+  if (type === "date") {
+    return typeof value === "string" && collectionDateStringValid(value);
+  }
+  if (type === "datetime") {
+    return typeof value === "string" && collectionDateTimeStringValid(value);
+  }
+  if (type === "enum" || type === "ref") {
+    return typeof value === "string";
+  }
+  if (type === "array") {
+    return Array.isArray(value);
+  }
+  if (type === "object") {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+  if (type === "json") {
+    return true;
+  }
+  if (["string", "text", "markdown", "url", "email", "image"].includes(type)) {
+    return typeof value === "string";
+  }
+  const enumValues = collectionDefinitionStringArray(field, "enum_values");
+  if (enumValues.length > 0) {
+    return typeof value === "string" && enumValues.includes(value);
+  }
+  return true;
+}
+
+function collectionDateStringValid(value: string): boolean {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return false;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function collectionDateTimeStringValid(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}[tT\s]\d{2}:\d{2}/.test(value)) {
+    return false;
+  }
+  return !Number.isNaN(Date.parse(value));
+}
+
+function collectionRequiredValueMissing(value: JsonValue | undefined): boolean {
+  if (value === undefined || value === null) {
+    return true;
+  }
+  if (typeof value === "string") {
+    return value.trim().length === 0;
+  }
+  return false;
+}
+
 function collectionFieldId(field: Record<string, JsonValue>): string | undefined {
   const value = field.id ?? field.name;
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function applyCollectionDerivedFieldsLocal(data: Record<string, JsonValue>, schema: CollectionSchema): Record<string, JsonValue> {
+function stripCollectionDerivedFieldsLocal(data: Record<string, JsonValue>, schema: CollectionSchema): Record<string, JsonValue> {
+  const derived = new Set(schema.derived_fields.map(collectionFieldId).filter((id): id is string => Boolean(id)));
+  if (derived.size === 0) {
+    return data;
+  }
   const next = { ...data };
-  for (const field of schema.derived_fields) {
-    const id = collectionFieldId(field);
-    if (!id) {
-      continue;
-    }
-    next[id] = evaluateCollectionDerivedField(field, next);
+  for (const id of derived) {
+    delete next[id];
   }
   return next;
 }
@@ -5709,6 +5897,11 @@ function collectionDefinitionField(definition: Record<string, JsonValue>): strin
 function collectionDefinitionString(definition: Record<string, JsonValue>, key: string): string | undefined {
   const value = definition[key];
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function collectionDefinitionStringArray(definition: Record<string, JsonValue>, key: string): string[] {
+  const value = definition[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function collectionDefinitionBoolean(definition: Record<string, JsonValue>, key: string): boolean {

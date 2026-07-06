@@ -1,35 +1,33 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import {
-  Archive,
-  ArrowDown,
-  ArrowLeft,
-  ArrowUp,
-  BarChart3,
-  Brain,
-  ChevronRight,
-  Clock3,
-  Copy,
-  FileText,
-  Eye,
-  FileInput,
-  Maximize2,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightOpen,
-  PanelsTopLeft,
-  Pencil,
-  Plus,
-  RotateCcw,
-  Save,
-  Search,
-  Settings,
-  Table2,
-  ThumbsDown,
-  ThumbsUp,
-  Trash2,
-  X
-} from "lucide-vue-next";
+import Archive from "lucide-vue-next/dist/esm/icons/archive.js";
+import ArrowDown from "lucide-vue-next/dist/esm/icons/arrow-down.js";
+import ArrowLeft from "lucide-vue-next/dist/esm/icons/arrow-left.js";
+import ArrowUp from "lucide-vue-next/dist/esm/icons/arrow-up.js";
+import BarChart3 from "lucide-vue-next/dist/esm/icons/chart-column.js";
+import Brain from "lucide-vue-next/dist/esm/icons/brain.js";
+import ChevronRight from "lucide-vue-next/dist/esm/icons/chevron-right.js";
+import Clock3 from "lucide-vue-next/dist/esm/icons/clock-3.js";
+import Copy from "lucide-vue-next/dist/esm/icons/copy.js";
+import Eye from "lucide-vue-next/dist/esm/icons/eye.js";
+import FileInput from "lucide-vue-next/dist/esm/icons/file-input.js";
+import FileText from "lucide-vue-next/dist/esm/icons/file-text.js";
+import Maximize2 from "lucide-vue-next/dist/esm/icons/maximize-2.js";
+import PanelLeftClose from "lucide-vue-next/dist/esm/icons/panel-left-close.js";
+import PanelLeftOpen from "lucide-vue-next/dist/esm/icons/panel-left-open.js";
+import PanelRightOpen from "lucide-vue-next/dist/esm/icons/panel-right-open.js";
+import PanelsTopLeft from "lucide-vue-next/dist/esm/icons/panels-top-left.js";
+import Pencil from "lucide-vue-next/dist/esm/icons/pencil.js";
+import Plus from "lucide-vue-next/dist/esm/icons/plus.js";
+import RotateCcw from "lucide-vue-next/dist/esm/icons/rotate-ccw.js";
+import Save from "lucide-vue-next/dist/esm/icons/save.js";
+import Search from "lucide-vue-next/dist/esm/icons/search.js";
+import Settings from "lucide-vue-next/dist/esm/icons/settings.js";
+import Table2 from "lucide-vue-next/dist/esm/icons/table-2.js";
+import ThumbsDown from "lucide-vue-next/dist/esm/icons/thumbs-down.js";
+import ThumbsUp from "lucide-vue-next/dist/esm/icons/thumbs-up.js";
+import Trash2 from "lucide-vue-next/dist/esm/icons/trash-2.js";
+import X from "lucide-vue-next/dist/esm/icons/x.js";
 import type {
   ActivityInboxItem,
   ApprovalRequest,
@@ -69,6 +67,31 @@ import {
   type SessionDetail,
   type SurfaceContractPayload
 } from "./lib/api";
+import CollectionWorkspaceView from "./components/CollectionWorkspaceView.vue";
+import CustomViewFrame from "./components/CustomViewFrame.vue";
+import {
+  appCollectionData,
+  appCollectionRecords,
+  appCollectionViewConfig,
+  collectionActionRunPayload,
+  collectionCalendarDateSelection,
+  collectionCreateDataForView,
+  collectionCreateDraftForView,
+  collectionDraftValueFromRaw,
+  collectionKanbanColumnsForRecords,
+  collectionKanbanDragPayload,
+  collectionKanbanDropPatch,
+  collectionPresentationOpenOperation,
+  collectionPresentationForSpec,
+  collectionPresentationPreviewSpec,
+  collectionRenderer,
+  collectionTableId,
+  collectionTableViewId,
+  collectionUserViewState,
+  collectionViewState,
+  withCollectionViewState,
+  withPresentationViewState
+} from "./lib/collection-view-state";
 
 type ViewMode = "chat" | "search" | "settings" | "runs" | "memory" | "collections";
 type CanvasMode = "preview" | "edit" | "app";
@@ -234,6 +257,8 @@ const collectionDrafts = ref<Record<string, Record<string, string>>>({});
 const collectionNewDraft = ref<Record<string, string>>({});
 const collectionSaving = ref(false);
 const collectionAppError = ref<string | null>(null);
+const activeMessagePresentationId = ref<string | null>(null);
+const collectionDraggedRecordId = ref<string | null>(null);
 const taskSaving = ref(false);
 const taskAppError = ref<string | null>(null);
 const memoryContent = ref<Record<string, string>>({});
@@ -244,9 +269,10 @@ const workspaceSplitMin = 32;
 const workspaceSplitMax = 68;
 const workspaceSplitDefault = 50;
 const frontendSurfaceKinds = ["chat", "status_timeline", "form", "table", "chart", "artifact", "memory", "run_history", "custom_view"] as const satisfies readonly SurfaceRenderKind[];
+const preferredExternalBackendIds = ["codex", "claude-code"] as const;
 let chatScrollResizeObserver: ResizeObserver | undefined;
 let observedChatScrollElement: HTMLDivElement | null = null;
-const selectedBackendId = ref("samurai-native");
+const selectedBackendId = ref("codex");
 const backendPickerOpen = ref(false);
 const fallbackBackends: AgentBackendStatus[] = [
   {
@@ -279,7 +305,6 @@ const frontendRendererCapabilities = computed<SurfaceRendererCapabilities>(() =>
     supported_kinds: supportedKinds.length > 0 ? [...supportedKinds] : [...frontendSurfaceKinds],
     custom_view_renderers: [
       { renderer: "generic", versions: ["1"] },
-      { renderer: "task_list", versions: ["1"] },
       { renderer: "collection_table", versions: ["1"] },
       { renderer: "collection_gallery", versions: ["1"] },
       { renderer: "calendar_view", versions: ["1"] },
@@ -803,7 +828,11 @@ async function sendMessage() {
     lastSurfaceRenderSpecs.value = renderSpecs;
     const appSpec = renderSpecs.find((spec) => isTaskListSurfaceSpec(spec) || isCollectionTableSurfaceSpec(spec));
     if (appSpec) {
-      openSurfaceSpec(appSpec);
+      const appPresentation = isCollectionTableSurfaceSpec(appSpec)
+        ? collectionPresentationForSpec(appSpec, result.messagePresentations ?? [])
+        : undefined;
+      openSurfaceSpec(appPresentation ? withPresentationViewState(appSpec, appPresentation) : appSpec);
+      activeMessagePresentationId.value = appPresentation?.id ?? null;
     }
     pendingUserMessage.value = null;
     flushPendingAgentTyping();
@@ -887,15 +916,21 @@ function hasSurfaceOperationKind(kind: string): boolean {
   return (surfaceContract.value?.commands ?? []).some((command) => command.surface_operation_kinds?.includes(kind));
 }
 
-function missingTaskSurfaceOperationKinds(): string[] {
-  return ["collection.view.present", "collection.record.create", "collection.record.patch", "collection.record.delete"].filter((kind) => !hasSurfaceOperationKind(kind));
+function missingTaskSurfaceOperationKinds(extraKinds: string[] = []): string[] {
+  return [
+    "collection.view.present",
+    "collection.record.create",
+    "collection.record.patch",
+    "collection.record.delete",
+    ...extraKinds
+  ].filter((kind) => !hasSurfaceOperationKind(kind));
 }
 
-async function ensureTaskSurfaceContract(): Promise<void> {
+async function ensureTaskSurfaceContract(extraKinds: string[] = []): Promise<void> {
   if (!surfaceContract.value && !surfaceContractError.value) {
     await loadSurfaceContract();
   }
-  const missing = missingTaskSurfaceOperationKinds();
+  const missing = missingTaskSurfaceOperationKinds(extraKinds);
   if (missing.length > 0) {
     throw new Error(`task_surface_contract_missing:${missing.join(",")}`);
   }
@@ -903,10 +938,25 @@ async function ensureTaskSurfaceContract(): Promise<void> {
 
 function chooseInitialBackend() {
   const stored = readStoredBackendId();
-  const nextBackend = backendOptions.value.find((backend) => backend.id === stored) ?? backendOptions.value.find((backend) => backend.configured) ?? backendOptions.value[0];
+  const storedBackend = backendOptions.value.find((backend) => backend.id === stored);
+  const preferredBackend = preferredExternalBackendIds
+    .map((id) => backendOptions.value.find((backend) => backend.id === id && isRunnableBackend(backend)))
+    .find((backend): backend is AgentBackendStatus => Boolean(backend));
+  const nextBackend = (
+    storedBackend && storedBackend.id !== "samurai-native" && isRunnableBackend(storedBackend)
+      ? storedBackend
+      : preferredBackend
+        ?? (storedBackend && isRunnableBackend(storedBackend) ? storedBackend : undefined)
+        ?? backendOptions.value.find(isRunnableBackend)
+        ?? backendOptions.value[0]
+  );
   if (nextBackend) {
     selectedBackendId.value = nextBackend.id;
   }
+}
+
+function isRunnableBackend(backend: AgentBackendStatus): boolean {
+  return backend.configured && backend.enabled !== false;
 }
 
 function setSelectedBackend(id: string) {
@@ -1308,16 +1358,15 @@ async function openCollectionApp(schema: CollectionSchema & { file_path: string 
 async function openMessagePresentation(presentation: MessagePresentationRecord) {
   collectionAppError.value = null;
   try {
+    const operation = collectionPresentationOpenOperation(presentation, `surface_presentation_open_${presentation.collection_id}_${Date.now()}`);
     const envelope = await api.runSurfaceOperation({
-      id: `surface_presentation_open_${presentation.collection_id}_${Date.now()}`,
-      kind: "collection.view.present",
-      collection_id: presentation.collection_id,
-      view_id: presentation.view_id,
+      ...operation,
       renderer_capabilities: frontendRendererCapabilities.value
     });
     const spec = envelope.render_spec;
     if (isCollectionTableSurfaceSpec(spec) || isTaskListSurfaceSpec(spec)) {
-      openSurfaceSpec(spec);
+      openSurfaceSpec(withPresentationViewState(spec, presentation));
+      activeMessagePresentationId.value = presentation.id;
       viewMode.value = "chat";
       return;
     }
@@ -1351,12 +1400,14 @@ async function openArtifact(id: string) {
   activeArtifact.value = await api.getArtifact(id);
   activeMemory.value = null;
   activeSurfaceSpec.value = null;
+  activeMessagePresentationId.value = null;
 }
 
 async function openMemory(id: string) {
   activeMemory.value = await api.getMemory(id);
   activeArtifact.value = null;
   activeSurfaceSpec.value = null;
+  activeMessagePresentationId.value = null;
   memoryContent.value = {
     ...memoryContent.value,
     [id]: activeMemory.value.content
@@ -1367,12 +1418,14 @@ function closeWorkspaceCanvas() {
   activeArtifact.value = null;
   activeMemory.value = null;
   activeSurfaceSpec.value = null;
+  activeMessagePresentationId.value = null;
 }
 
 function openSurfaceSpec(spec: SurfaceRenderSpec) {
   activeSurfaceSpec.value = spec;
   activeArtifact.value = null;
   activeMemory.value = null;
+  activeMessagePresentationId.value = null;
   setCanvasMode(defaultCanvasMode(spec));
   if (isTaskListSurfaceSpec(spec)) {
     syncTaskDrafts(spec);
@@ -1519,7 +1572,7 @@ async function saveSurfaceTableRow(spec: SurfaceRenderSpec, row: Record<string, 
   }
 }
 
-async function runCustomViewAction(spec: SurfaceRenderSpec, action: { id: string; label: string }) {
+async function runCustomViewAction(spec: SurfaceRenderSpec, action: { id: string; label: string }, actionPayload: Record<string, JsonValue> = {}) {
   if (!activeSession.value || spec.kind !== "custom_view" || loading.value) {
     return;
   }
@@ -1532,6 +1585,7 @@ async function runCustomViewAction(spec: SurfaceRenderSpec, action: { id: string
       view_id: String(spec.props.view_id),
       action_id: action.id,
       payload: {
+        ...actionPayload,
         renderer: String(spec.props.renderer),
         source_render_spec_id: spec.id,
         data: toJsonValue(spec.props.data)
@@ -1906,25 +1960,448 @@ function isCollectionTableSurfaceSpec(spec: SurfaceRenderSpec): boolean {
 
 const collectionSurfaceRenderers = new Set(["collection_table", "collection_gallery", "calendar_view", "collection_kanban"]);
 
-function appCollectionData(spec: SurfaceRenderSpec): Record<string, unknown> {
-  return spec.props.data && typeof spec.props.data === "object" && !Array.isArray(spec.props.data)
-    ? spec.props.data as Record<string, unknown>
-    : {};
-}
-
-function appCollectionRecords(spec: SurfaceRenderSpec): Array<Record<string, unknown>> {
-  const records = appCollectionData(spec).records;
-  return Array.isArray(records) ? records.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
-}
-
 function appCollectionSchemaFields(spec: SurfaceRenderSpec): Array<Record<string, JsonValue>> {
   const fields = appCollectionData(spec).schema_fields;
   return Array.isArray(fields) ? fields.filter(isRecord) as Array<Record<string, JsonValue>> : [];
 }
 
-function appCollectionViewConfig(spec: SurfaceRenderSpec): Record<string, unknown> {
-  const value = appCollectionData(spec).view_config;
-  return isRecord(value) ? value : {};
+function collectionViewOptions(spec: SurfaceRenderSpec): Array<Record<string, JsonValue>> {
+  const options = appCollectionData(spec).view_options;
+  if (Array.isArray(options)) {
+    return options.filter(isRecord) as Array<Record<string, JsonValue>>;
+  }
+  return [{
+    id: collectionTableViewId(spec),
+    renderer: collectionRenderer(spec),
+    label: collectionViewOptionLabel({ renderer: collectionRenderer(spec) })
+  }];
+}
+
+function collectionViewOptionLabel(option: Record<string, unknown>): string {
+  if (typeof option.label === "string" && option.label.trim()) {
+    return option.label;
+  }
+  const renderer = String(option.renderer ?? "collection_table");
+  if (renderer === "collection_gallery") return "Gallery";
+  if (renderer === "calendar_view") return "Calendar";
+  if (renderer === "collection_kanban") return "Kanban";
+  return "Table";
+}
+
+function isActiveCollectionViewOption(spec: SurfaceRenderSpec, option: Record<string, unknown>): boolean {
+  return String(option.id ?? "") === collectionTableViewId(spec);
+}
+
+async function switchCollectionView(spec: SurfaceRenderSpec, option: Record<string, JsonValue>) {
+  const viewId = String(option.id ?? "");
+  if (!viewId || viewId === collectionTableViewId(spec) || collectionSaving.value) {
+    return;
+  }
+  const presentationId = activeMessagePresentationId.value;
+  const previousState = collectionUserViewState(spec);
+  collectionSaving.value = true;
+  try {
+    const envelope = await api.runSurfaceOperation({
+      id: `surface_collection_view_switch_${Date.now()}`,
+      kind: "collection.view.present",
+      collection_id: collectionTableId(spec),
+      view_id: viewId,
+      renderer_capabilities: frontendRendererCapabilities.value
+    });
+    const nextSpec = envelope.render_spec;
+    if (!isCollectionTableSurfaceSpec(nextSpec)) {
+      throw new Error("collection_view_switch_render_spec_required");
+    }
+    openSurfaceSpec(nextSpec);
+    activeMessagePresentationId.value = presentationId;
+    lastSurfaceRenderSpec.value = nextSpec;
+    lastSurfaceRenderSpecs.value = [nextSpec, ...lastSurfaceRenderSpecs.value.filter((item) => !(isCollectionTableSurfaceSpec(item) && collectionTableId(item) === collectionTableId(nextSpec)))];
+    await updateActiveCollectionViewState({
+      ...previousState,
+      view_id: collectionTableViewId(nextSpec),
+      renderer: collectionRenderer(nextSpec)
+    });
+  } catch (error) {
+    collectionAppError.value = collectionSurfaceErrorMessage(error);
+  } finally {
+    collectionSaving.value = false;
+  }
+}
+
+function collectionSearchQuery(spec: SurfaceRenderSpec): string {
+  const value = collectionViewState(spec).search;
+  return typeof value === "string" ? value : "";
+}
+
+function collectionSortState(spec: SurfaceRenderSpec): Record<string, JsonValue> {
+  const stateSort = collectionViewState(spec).sort;
+  if (isRecord(stateSort)) {
+    return stateSort as Record<string, JsonValue>;
+  }
+  const configSort = appCollectionViewConfig(spec).sort;
+  return isRecord(configSort) ? configSort as Record<string, JsonValue> : {};
+}
+
+function collectionSortFieldId(spec: SurfaceRenderSpec): string {
+  const fieldId = collectionSortState(spec).field_id;
+  return typeof fieldId === "string" ? fieldId : "";
+}
+
+function collectionSortDirection(spec: SurfaceRenderSpec): "asc" | "desc" {
+  return collectionSortState(spec).direction === "desc" ? "desc" : "asc";
+}
+
+function collectionFilterState(spec: SurfaceRenderSpec): Record<string, JsonValue> {
+  const value = collectionViewState(spec).filter;
+  return isRecord(value) ? value as Record<string, JsonValue> : {};
+}
+
+function collectionFilterFieldId(spec: SurfaceRenderSpec): string {
+  const fieldId = collectionFilterState(spec).field_id;
+  return typeof fieldId === "string" ? fieldId : "";
+}
+
+function collectionFilterValue(spec: SurfaceRenderSpec): string {
+  const value = collectionFilterState(spec).value;
+  return typeof value === "string" ? value : "";
+}
+
+function collectionFilterField(spec: SurfaceRenderSpec): Record<string, JsonValue> | undefined {
+  const stateField = collectionFilterFieldId(spec);
+  if (stateField) {
+    return collectionTableFields(spec).find((field) => collectionFieldId(field) === stateField);
+  }
+  return collectionEnumField(spec);
+}
+
+function collectionFilterOptions(spec: SurfaceRenderSpec): string[] {
+  const field = collectionFilterField(spec);
+  if (!field) return [];
+  const fieldId = collectionFieldId(field);
+  const configured = collectionEnumValues(field);
+  const fromRecords = [...new Set(appCollectionRecords(spec).map((record) => collectionRecordText(record, fieldId)).filter(Boolean))];
+  return configured.length > 0 ? configured : fromRecords;
+}
+
+function collectionGroupFieldId(spec: SurfaceRenderSpec): string {
+  const stateGroup = collectionViewState(spec).group;
+  if (typeof stateGroup === "string") {
+    return stateGroup;
+  }
+  const configGroup = appCollectionViewConfig(spec).group ?? appCollectionViewConfig(spec).group_by;
+  return typeof configGroup === "string" ? configGroup : "";
+}
+
+function collectionGroupFields(spec: SurfaceRenderSpec): Array<Record<string, JsonValue>> {
+  return collectionTableFields(spec).filter((field) => {
+    const id = collectionFieldId(field);
+    const type = collectionFieldType(field);
+    return Boolean(id) && ["enum", "ref", "boolean", "date", "datetime", "string", "number"].includes(type);
+  });
+}
+
+function collectionVisibleRecords(spec: SurfaceRenderSpec): Array<Record<string, unknown>> {
+  const query = collectionSearchQuery(spec).trim().toLowerCase();
+  const filterField = collectionFilterField(spec);
+  const filterFieldId = filterField ? collectionFieldId(filterField) : "";
+  const filterValue = collectionFilterValue(spec);
+  const sortFieldId = collectionSortFieldId(spec);
+  const direction = collectionSortDirection(spec) === "desc" ? -1 : 1;
+  const records = appCollectionRecords(spec).filter((record) => {
+    if (query && !collectionRecordSearchText(record).includes(query)) {
+      return false;
+    }
+    if (filterFieldId && filterValue && collectionRecordText(record, filterFieldId) !== filterValue) {
+      return false;
+    }
+    return true;
+  });
+  if (!sortFieldId) {
+    return records;
+  }
+  return [...records].sort((left, right) => compareCollectionValues(left[sortFieldId], right[sortFieldId]) * direction);
+}
+
+function collectionStateSourceSpec(spec: SurfaceRenderSpec): SurfaceRenderSpec {
+  return activeSurfaceSpec.value && isCollectionTableSurfaceSpec(activeSurfaceSpec.value) && collectionTableId(activeSurfaceSpec.value) === collectionTableId(spec)
+    ? activeSurfaceSpec.value
+    : spec;
+}
+
+function collectionSelectedRecordId(spec: SurfaceRenderSpec): string {
+  const value = collectionViewState(collectionStateSourceSpec(spec)).selected_record_id;
+  return typeof value === "string" ? value : "";
+}
+
+function collectionRecordId(record: Record<string, unknown>): string {
+  return String(record.id ?? "");
+}
+
+function collectionRecordSelected(spec: SurfaceRenderSpec, record: Record<string, unknown>): boolean {
+  const id = collectionRecordId(record);
+  return Boolean(id) && collectionSelectedRecordId(spec) === id;
+}
+
+async function selectCollectionRecord(spec: SurfaceRenderSpec, record: Record<string, unknown>) {
+  const id = collectionRecordId(record);
+  if (!id || collectionSelectedRecordId(spec) === id) {
+    return;
+  }
+  await updateActiveCollectionViewState({ selected_record_id: id });
+}
+
+function collectionRecordSearchText(record: Record<string, unknown>): string {
+  return Object.values(record).map((value) => {
+    if (value === null || value === undefined) return "";
+    return typeof value === "object" ? JSON.stringify(value) : String(value);
+  }).join(" ").toLowerCase();
+}
+
+function compareCollectionValues(left: unknown, right: unknown): number {
+  if (typeof left === "number" && typeof right === "number") {
+    return left - right;
+  }
+  return String(left ?? "").localeCompare(String(right ?? ""), "ja", { numeric: true });
+}
+
+async function setCollectionSearchQuery(spec: SurfaceRenderSpec, search: string) {
+  await updateActiveCollectionViewState({ search });
+}
+
+async function setCollectionSortField(spec: SurfaceRenderSpec, fieldId: string) {
+  await updateActiveCollectionViewState({
+    sort: fieldId ? { field_id: fieldId, direction: collectionSortDirection(spec) } : {}
+  });
+}
+
+async function toggleCollectionSortDirection(spec: SurfaceRenderSpec) {
+  const fieldId = collectionSortFieldId(spec);
+  if (!fieldId) return;
+  await updateActiveCollectionViewState({
+    sort: { field_id: fieldId, direction: collectionSortDirection(spec) === "desc" ? "asc" : "desc" }
+  });
+}
+
+async function setCollectionFilterValue(spec: SurfaceRenderSpec, value: string) {
+  const field = collectionFilterField(spec);
+  await updateActiveCollectionViewState({
+    filter: field && value ? { field_id: collectionFieldId(field), value } : {}
+  });
+}
+
+async function setCollectionGroupField(spec: SurfaceRenderSpec, fieldId: string) {
+  await updateActiveCollectionViewState({ group: fieldId || null });
+}
+
+async function updateActiveCollectionViewState(patch: Record<string, JsonValue>) {
+  if (!activeSurfaceSpec.value || !isCollectionTableSurfaceSpec(activeSurfaceSpec.value)) {
+    return;
+  }
+  const nextSpec = withCollectionViewState(activeSurfaceSpec.value, patch);
+  activeSurfaceSpec.value = nextSpec;
+  await persistActiveCollectionPresentationState(nextSpec);
+}
+
+async function persistActiveCollectionPresentationState(spec: SurfaceRenderSpec) {
+  if (!activeMessagePresentationId.value) {
+    return;
+  }
+  try {
+    const envelope = await api.updateMessagePresentationViewState(activeMessagePresentationId.value, collectionViewState(spec));
+    const updated = envelope.result;
+    messagePresentations.value = mergeById(messagePresentations.value, [updated]);
+  } catch {
+    // Workspace state can still move locally if the card state write fails.
+  }
+}
+
+function collectionFieldId(field: Record<string, unknown>): string {
+  return String(field.id ?? field.name ?? "");
+}
+
+function collectionRecordText(record: Record<string, unknown>, fieldId: string): string {
+  const value = record[fieldId];
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function collectionFirstField(spec: SurfaceRenderSpec, options: { ids?: RegExp; types?: string[] } = {}): Record<string, JsonValue> | undefined {
+  return collectionTableFields(spec).find((field) => {
+    const id = collectionFieldId(field).toLowerCase();
+    const type = collectionFieldType(field);
+    return (!options.ids || options.ids.test(id)) && (!options.types || options.types.includes(type));
+  });
+}
+
+function collectionTitleField(spec: SurfaceRenderSpec): Record<string, JsonValue> | undefined {
+  return collectionFirstField(spec, { ids: /title|name|subject|label|作品|映画|本|名前|タイトル/, types: ["string", "text"] })
+    ?? collectionFirstField(spec, { types: ["string", "text"] });
+}
+
+function collectionSummaryField(spec: SurfaceRenderSpec): Record<string, JsonValue> | undefined {
+  return collectionFirstField(spec, { ids: /note|memo|summary|description|comment|感想|メモ|説明/, types: ["string", "text"] });
+}
+
+function collectionDateField(spec: SurfaceRenderSpec): Record<string, JsonValue> | undefined {
+  return collectionFirstField(spec, { types: ["date", "datetime"] })
+    ?? collectionFirstField(spec, { ids: /date|day|due|deadline|watched_at|created_at|updated_at|期限|日付/ });
+}
+
+function collectionCalendarFieldLabel(spec: SurfaceRenderSpec): string {
+  const field = collectionDateField(spec);
+  return field ? collectionFieldLabel(field) : "";
+}
+
+function collectionEnumField(spec: SurfaceRenderSpec): Record<string, JsonValue> | undefined {
+  return collectionFirstField(spec, { ids: /status|state|stage|phase|状態|進捗/, types: ["enum"] })
+    ?? collectionFirstField(spec, { types: ["enum"] });
+}
+
+function collectionRecordTitle(spec: SurfaceRenderSpec, record: Record<string, unknown>): string {
+  const field = collectionTitleField(spec);
+  return field ? collectionRecordText(record, collectionFieldId(field)) || String(record.id ?? "") : String(record.id ?? "");
+}
+
+function collectionRecordSummary(spec: SurfaceRenderSpec, record: Record<string, unknown>): string {
+  const field = collectionSummaryField(spec);
+  return field ? collectionRecordText(record, collectionFieldId(field)) : "";
+}
+
+function collectionDateKey(value: unknown): string {
+  const text = typeof value === "string" ? value : "";
+  const match = text.match(/^\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : "";
+}
+
+function collectionDateKeyFromDate(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function collectionCalendarMonthDate(spec: SurfaceRenderSpec): Date {
+  const selected = typeof collectionViewState(spec).selected_date === "string" ? String(collectionViewState(spec).selected_date) : "";
+  const selectedDate = selected ? new Date(`${selected}T00:00:00`) : undefined;
+  if (selectedDate && Number.isFinite(selectedDate.getTime())) {
+    return selectedDate;
+  }
+  const field = collectionDateField(spec);
+  const fieldId = field ? collectionFieldId(field) : "";
+  const firstRecordDate = fieldId ? collectionVisibleRecords(spec).map((record) => collectionDateKey(record[fieldId])).find(Boolean) : "";
+  const firstDate = firstRecordDate ? new Date(`${firstRecordDate}T00:00:00`) : undefined;
+  return firstDate && Number.isFinite(firstDate.getTime()) ? firstDate : new Date();
+}
+
+function collectionCalendarMonthLabel(spec: SurfaceRenderSpec): string {
+  const date = collectionCalendarMonthDate(spec);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function collectionCalendarMonthOffsetDate(spec: SurfaceRenderSpec, offset: number): string {
+  const base = collectionCalendarMonthDate(spec);
+  const target = new Date(base.getFullYear(), base.getMonth() + offset, 1);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(base.getDate(), lastDay));
+  return collectionDateKeyFromDate(target);
+}
+
+async function shiftCollectionCalendarMonth(spec: SurfaceRenderSpec, offset: number) {
+  await updateActiveCollectionViewState({ selected_date: collectionCalendarMonthOffsetDate(spec, offset) });
+}
+
+function collectionSelectedDateKey(spec: SurfaceRenderSpec): string {
+  const selected = typeof collectionViewState(spec).selected_date === "string" ? String(collectionViewState(spec).selected_date) : "";
+  return selected || collectionDateKeyFromDate(collectionCalendarMonthDate(spec));
+}
+
+function collectionCalendarDays(spec: SurfaceRenderSpec): Array<{ key: string; date: string; day: number; inMonth: boolean; records: Array<Record<string, unknown>>; selected: boolean; today: boolean }> {
+  const field = collectionDateField(spec);
+  const fieldId = field ? collectionFieldId(field) : "";
+  const monthDate = collectionCalendarMonthDate(spec);
+  const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const gridStart = new Date(monthStart);
+  gridStart.setDate(monthStart.getDate() - monthStart.getDay());
+  const selected = collectionSelectedDateKey(spec);
+  const today = collectionDateKeyFromDate(new Date());
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    const dateKey = collectionDateKeyFromDate(date);
+    const records = fieldId ? collectionVisibleRecords(spec).filter((record) => collectionDateKey(record[fieldId]) === dateKey) : [];
+    return {
+      key: dateKey,
+      date: dateKey,
+      day: date.getDate(),
+      inMonth: date.getMonth() === monthDate.getMonth(),
+      records,
+      selected: dateKey === selected,
+      today: dateKey === today
+    };
+  });
+}
+
+function collectionSelectedDateRecords(spec: SurfaceRenderSpec): Array<Record<string, unknown>> {
+  const selected = collectionSelectedDateKey(spec);
+  const field = collectionDateField(spec);
+  const fieldId = field ? collectionFieldId(field) : "";
+  return selected && fieldId ? collectionVisibleRecords(spec).filter((record) => collectionDateKey(record[fieldId]) === selected) : [];
+}
+
+async function selectCollectionCalendarDate(spec: SurfaceRenderSpec, date: string) {
+  const selection = collectionCalendarDateSelection(collectionDateField(spec), date);
+  if (selection.draft) {
+    setCollectionNewDraftValue(selection.draft.field_id, selection.draft.value);
+  }
+  await updateActiveCollectionViewState(selection.view_state);
+}
+
+function collectionKanbanColumns(spec: SurfaceRenderSpec): Array<{ value: string; records: Array<Record<string, unknown>> }> {
+  return collectionKanbanColumnsForRecords(spec, collectionVisibleRecords(spec));
+}
+
+function beginCollectionKanbanDrag(record: Record<string, unknown>, event?: DragEvent) {
+  const payload = collectionKanbanDragPayload(record);
+  collectionDraggedRecordId.value = payload?.record_id ?? "";
+  if (!payload || !event?.dataTransfer) {
+    return;
+  }
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("application/x-samurai-collection-record", JSON.stringify(payload));
+  event.dataTransfer.setData("text/plain", payload.record_id);
+}
+
+function collectionKanbanDroppedRecordId(event?: DragEvent): string | null {
+  if (collectionDraggedRecordId.value) {
+    return collectionDraggedRecordId.value;
+  }
+  const transfer = event?.dataTransfer;
+  if (!transfer) {
+    return null;
+  }
+  const payload = transfer.getData("application/x-samurai-collection-record");
+  if (payload) {
+    try {
+      const parsed = JSON.parse(payload);
+      if (isRecord(parsed) && typeof parsed.record_id === "string" && parsed.record_id.trim()) {
+        return parsed.record_id.trim();
+      }
+    } catch {
+      // Ignore malformed drag payloads and fall back to plain text.
+    }
+  }
+  const plain = transfer.getData("text/plain").trim();
+  return plain || null;
+}
+
+async function dropCollectionKanbanRecord(spec: SurfaceRenderSpec, value: string, event?: DragEvent) {
+  const recordId = collectionKanbanDroppedRecordId(event);
+  collectionDraggedRecordId.value = null;
+  const patch = collectionKanbanDropPatch(spec, recordId, value);
+  if (!patch) return;
+  await patchCollectionRecordFields(spec, patch.record_id, patch.changes);
+  await updateActiveCollectionViewState(patch.view_state);
 }
 
 function taskListData(spec: SurfaceRenderSpec): Record<string, unknown> {
@@ -2216,14 +2693,6 @@ async function deleteTask(spec: SurfaceRenderSpec, record: Record<string, unknow
   }
 }
 
-function collectionTableId(spec: SurfaceRenderSpec): string {
-  return String(appCollectionData(spec).collection_id ?? "");
-}
-
-function collectionTableViewId(spec: SurfaceRenderSpec): string {
-  return String(spec.props.view_id ?? appCollectionViewConfig(spec).id ?? `${collectionTableId(spec)}_table`);
-}
-
 function collectionTableFields(spec: SurfaceRenderSpec): Array<Record<string, JsonValue>> {
   const hidden = new Set((Array.isArray(appCollectionViewConfig(spec).hidden_fields) ? appCollectionViewConfig(spec).hidden_fields : []).filter((item): item is string => typeof item === "string"));
   return appCollectionSchemaFields(spec).filter((field) => {
@@ -2238,7 +2707,7 @@ function collectionTableEditableFields(spec: SurfaceRenderSpec): Array<Record<st
     : undefined;
   return collectionTableFields(spec).filter((field) => {
     const id = String(field.id ?? "");
-    return !editable || editable.has(id);
+    return !collectionFieldReadOnly(field) && (!editable || editable.has(id));
   });
 }
 
@@ -2248,6 +2717,108 @@ function collectionFieldLabel(field: Record<string, unknown>): string {
 
 function collectionFieldType(field: Record<string, unknown>): string {
   return typeof field.type === "string" ? field.type : "string";
+}
+
+function collectionFieldInputType(field: Record<string, unknown>): "date" | "datetime-local" | "number" | "text" {
+  const type = collectionFieldType(field);
+  if (type === "date") return "date";
+  if (type === "datetime") return "datetime-local";
+  if (type === "number") return "number";
+  return "text";
+}
+
+function collectionFieldInputValue(field: Record<string, unknown>, value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+  const type = collectionFieldType(field);
+  if (type === "date") {
+    return collectionDateKey(text) || text;
+  }
+  if (type === "datetime") {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+      return `${text}T00:00`;
+    }
+    return text.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)?.[0] ?? text;
+  }
+  return text;
+}
+
+function collectionFieldReadOnly(field: Record<string, unknown>): boolean {
+  return field.read_only === true || field.derived === true || field.source === "derived_field" || field.source === "collection_embed";
+}
+
+function collectionFieldRequired(field: Record<string, unknown>): boolean {
+  return field.required === true;
+}
+
+function collectionRecordFieldDisplay(record: Record<string, unknown>, field: Record<string, unknown>): string {
+  const value = record[collectionFieldId(field)];
+  if (field.source === "collection_ref") {
+    return collectionRefLabel(field, value);
+  }
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function collectionFieldOptions(field: Record<string, unknown>): Array<{ value: string; label: string }> {
+  const options = Array.isArray(field.options) ? field.options : [];
+  return options.filter(isRecord).flatMap((option) => {
+    const value = option.value ?? option.record_id;
+    const label = option.label ?? value;
+    if (typeof value !== "string" || typeof label !== "string") {
+      return [];
+    }
+    return [{ value, label }];
+  });
+}
+
+function collectionRefLabel(field: Record<string, unknown>, value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "-";
+  return collectionFieldOptions(field).find((option) => option.value === value)?.label ?? value;
+}
+
+function collectionRefMissing(record: Record<string, unknown>, field: Record<string, unknown>): boolean {
+  if (field.source !== "collection_ref") return false;
+  const value = record[collectionFieldId(field)];
+  if (typeof value !== "string" || !value.trim()) return false;
+  return !collectionFieldOptions(field).some((option) => option.value === value);
+}
+
+type CollectionUiAction = {
+  id: string;
+  label: string;
+  operationKind: string;
+  actionKind?: string;
+  description?: string;
+  scope: "collection" | "record";
+};
+
+function collectionSchemaActions(spec: SurfaceRenderSpec): CollectionUiAction[] {
+  const actions = Array.isArray(spec.props.actions) ? spec.props.actions : [];
+  return actions.filter(isRecord).flatMap((action) => {
+    if (typeof action.id !== "string" || typeof action.label !== "string" || action.operation_kind !== "collection.action.run") {
+      return [];
+    }
+    const scope = action.scope === "record" ? "record" : "collection";
+    return [{
+      id: action.id,
+      label: action.label,
+      operationKind: String(action.operation_kind),
+      actionKind: typeof action.action_kind === "string" ? action.action_kind : undefined,
+      description: typeof action.description === "string" ? action.description : undefined,
+      scope
+    }];
+  });
+}
+
+function collectionLevelActions(spec: SurfaceRenderSpec): CollectionUiAction[] {
+  return collectionSchemaActions(spec).filter((action) => action.scope === "collection");
+}
+
+function collectionRecordActions(spec: SurfaceRenderSpec): CollectionUiAction[] {
+  return collectionSchemaActions(spec).filter((action) => action.scope === "record");
 }
 
 function collectionEnumValues(field: Record<string, unknown>): string[] {
@@ -2286,10 +2857,7 @@ function setCollectionNewDraftValue(field: string, value: string) {
 }
 
 function collectionValueFromRaw(field: Record<string, unknown>, raw: string): JsonValue {
-  const type = collectionFieldType(field);
-  if (type === "boolean") return raw === "true";
-  if (type === "number") return raw.trim() ? Number(raw) || 0 : 0;
-  return raw;
+  return collectionDraftValueFromRaw(field, raw);
 }
 
 function collectionPatchFromDraft(spec: SurfaceRenderSpec, record: Record<string, unknown>): Record<string, JsonValue> {
@@ -2301,18 +2869,48 @@ function collectionPatchFromDraft(spec: SurfaceRenderSpec, record: Record<string
 }
 
 function collectionCreateData(spec: SurfaceRenderSpec): Record<string, JsonValue> {
-  return Object.fromEntries(collectionTableEditableFields(spec).map((field) => {
-    const id = String(field.id ?? "");
-    return [id, collectionValueFromRaw(field, collectionNewDraft.value[id] ?? "")];
-  }));
+  return collectionCreateDataForView(spec, collectionNewDraft.value, { selectedDate: collectionSelectedDateKey(spec) });
 }
 
-function collectionRequiredReady(spec: SurfaceRenderSpec, data: Record<string, JsonValue>): boolean {
-  return collectionTableEditableFields(spec).every((field) => {
-    if (field.required !== true) return true;
-    const value = data[String(field.id ?? "")];
-    return typeof value === "string" ? value.trim().length > 0 : value !== null && value !== undefined;
-  });
+function collectionCreateDraft(spec: SurfaceRenderSpec): Record<string, string> {
+  return collectionCreateDraftForView(spec, collectionNewDraft.value, { selectedDate: collectionSelectedDateKey(spec) });
+}
+
+function collectionCreateDraftValue(spec: SurfaceRenderSpec, field: Record<string, unknown>): string {
+  return collectionCreateDraft(spec)[collectionFieldId(field)] ?? "";
+}
+
+function collectionCreateReady(spec: SurfaceRenderSpec): boolean {
+  return collectionRequiredReady(spec, collectionCreateDraft(spec));
+}
+
+function collectionRequiredReady(spec: SurfaceRenderSpec, draft: Record<string, string>): boolean {
+  return collectionMissingRequiredFields(spec, draft).length === 0;
+}
+
+function collectionMissingRequiredFields(spec: SurfaceRenderSpec, draft: Record<string, string>): string[] {
+  return collectionTableEditableFields(spec).filter((field) => {
+    if (!collectionFieldRequired(field)) return false;
+    return collectionRequiredValueMissing(field, draft[String(field.id ?? "")]);
+  }).map(collectionFieldLabel);
+}
+
+function collectionRequiredValueMissing(field: Record<string, unknown>, value: string | undefined): boolean {
+  if (collectionFieldType(field) === "boolean") return false;
+  return typeof value !== "string" || value.trim().length === 0;
+}
+
+function collectionValidationMessage(spec: SurfaceRenderSpec, draft: Record<string, string>): string {
+  const missing = collectionMissingRequiredFields(spec, draft);
+  return missing.length > 0 ? `必須: ${missing.join(" / ")}` : "";
+}
+
+function collectionCreateValidationMessage(spec: SurfaceRenderSpec): string {
+  return collectionValidationMessage(spec, collectionCreateDraft(spec));
+}
+
+function collectionVisibleEmptyMessage(spec: SurfaceRenderSpec): string {
+  return appCollectionRecords(spec).length === 0 ? "まだレコードがありません" : "条件に合うレコードがありません";
 }
 
 function syncCollectionDrafts(spec: SurfaceRenderSpec) {
@@ -2329,6 +2927,7 @@ function syncCollectionDrafts(spec: SurfaceRenderSpec) {
 async function refreshCollectionTableSurface(spec: SurfaceRenderSpec) {
   try {
     await ensureTaskSurfaceContract();
+    const previousState = collectionUserViewState(collectionStateSourceSpec(spec));
     const envelope = await api.runSurfaceOperation({
       id: `surface_collection_present_${Date.now()}`,
       kind: "collection.view.present",
@@ -2340,11 +2939,13 @@ async function refreshCollectionTableSurface(spec: SurfaceRenderSpec) {
     if (!isCollectionTableSurfaceSpec(nextSpec)) {
       throw new Error("collection_table_render_spec_required");
     }
+    const nextSpecWithState = withCollectionViewState(nextSpec, previousState);
     collectionAppError.value = null;
-    activeSurfaceSpec.value = nextSpec;
-    lastSurfaceRenderSpec.value = nextSpec;
-    lastSurfaceRenderSpecs.value = [nextSpec, ...lastSurfaceRenderSpecs.value.filter((item) => !(isCollectionTableSurfaceSpec(item) && collectionTableId(item) === collectionTableId(nextSpec)))];
-    syncCollectionDrafts(nextSpec);
+    activeSurfaceSpec.value = nextSpecWithState;
+    lastSurfaceRenderSpec.value = nextSpecWithState;
+    lastSurfaceRenderSpecs.value = [nextSpecWithState, ...lastSurfaceRenderSpecs.value.filter((item) => !(isCollectionTableSurfaceSpec(item) && collectionTableId(item) === collectionTableId(nextSpecWithState)))];
+    syncCollectionDrafts(nextSpecWithState);
+    await persistActiveCollectionPresentationState(nextSpecWithState);
   } catch (error) {
     collectionAppError.value = collectionSurfaceErrorMessage(error);
     if (!activeSurfaceSpec.value && isCollectionTableSurfaceSpec(spec)) {
@@ -2356,20 +2957,27 @@ async function refreshCollectionTableSurface(spec: SurfaceRenderSpec) {
 
 async function addCollectionRecord(spec: SurfaceRenderSpec) {
   if (collectionSaving.value) return;
+  const draft = collectionCreateDraft(spec);
   const data = collectionCreateData(spec);
-  if (!collectionRequiredReady(spec, data)) return;
+  if (!collectionRequiredReady(spec, draft)) {
+    collectionAppError.value = collectionValidationMessage(spec, draft);
+    return;
+  }
   collectionSaving.value = true;
   try {
     await ensureTaskSurfaceContract();
+    const recordId = `record_${Date.now()}`;
     const envelope = await api.runSurfaceOperation({
       id: `surface_collection_create_${Date.now()}`,
       kind: "collection.record.create",
       collection_id: collectionTableId(spec),
-      record_id: `record_${Date.now()}`,
+      record_id: recordId,
       renderer_capabilities: frontendRendererCapabilities.value,
       data
     });
-    await refreshCollectionTableSurface(envelope.render_spec ?? spec);
+    void envelope;
+    await refreshCollectionTableSurface(spec);
+    await updateActiveCollectionViewState({ selected_record_id: recordId });
   } catch (error) {
     collectionAppError.value = collectionSurfaceErrorMessage(error);
   } finally {
@@ -2380,6 +2988,18 @@ async function addCollectionRecord(spec: SurfaceRenderSpec) {
 async function saveCollectionRecord(spec: SurfaceRenderSpec, record: Record<string, unknown>) {
   const id = String(record.id ?? "");
   if (!id || collectionSaving.value) return;
+  const changes = collectionPatchFromDraft(spec, record);
+  const draft = collectionDraft(record);
+  if (!collectionRequiredReady(spec, draft)) {
+    collectionAppError.value = collectionValidationMessage(spec, draft);
+    return;
+  }
+  await selectCollectionRecord(spec, record);
+  await patchCollectionRecordFields(spec, id, changes);
+}
+
+async function patchCollectionRecordFields(spec: SurfaceRenderSpec, recordId: string, changes: Record<string, JsonValue>) {
+  if (!recordId || collectionSaving.value) return;
   collectionSaving.value = true;
   try {
     await ensureTaskSurfaceContract();
@@ -2387,12 +3007,14 @@ async function saveCollectionRecord(spec: SurfaceRenderSpec, record: Record<stri
       id: `surface_collection_patch_${Date.now()}`,
       kind: "collection.record.patch",
       collection_id: collectionTableId(spec),
-      record_id: id,
+      record_id: recordId,
       patch_id: `collection_patch_${Date.now()}`,
-      changes: collectionPatchFromDraft(spec, record),
+      changes,
       renderer_capabilities: frontendRendererCapabilities.value
     });
-    await refreshCollectionTableSurface(envelope.render_spec ?? spec);
+    void envelope;
+    await refreshCollectionTableSurface(spec);
+    await updateActiveCollectionViewState({ selected_record_id: recordId });
   } catch (error) {
     collectionAppError.value = collectionSurfaceErrorMessage(error);
   } finally {
@@ -2403,6 +3025,8 @@ async function saveCollectionRecord(spec: SurfaceRenderSpec, record: Record<stri
 async function deleteCollectionRecordFromTable(spec: SurfaceRenderSpec, record: Record<string, unknown>) {
   const id = String(record.id ?? "");
   if (!id || collectionSaving.value) return;
+  const previousState = collectionUserViewState(collectionStateSourceSpec(spec));
+  const nextState = { ...previousState, selected_record_id: null };
   collectionSaving.value = true;
   try {
     await ensureTaskSurfaceContract();
@@ -2416,18 +3040,109 @@ async function deleteCollectionRecordFromTable(spec: SurfaceRenderSpec, record: 
     });
     const nextSpec = envelope.render_spec;
     if (isCollectionTableSurfaceSpec(nextSpec)) {
-      activeSurfaceSpec.value = nextSpec;
-      lastSurfaceRenderSpec.value = nextSpec;
-      syncCollectionDrafts(nextSpec);
+      const nextSpecWithState = withCollectionViewState(nextSpec, nextState);
+      activeSurfaceSpec.value = nextSpecWithState;
+      lastSurfaceRenderSpec.value = nextSpecWithState;
+      syncCollectionDrafts(nextSpecWithState);
     } else {
       await refreshCollectionTableSurface(spec);
     }
+    await updateActiveCollectionViewState({ selected_record_id: null });
   } catch (error) {
     collectionAppError.value = collectionSurfaceErrorMessage(error);
   } finally {
     collectionSaving.value = false;
   }
 }
+
+async function runCollectionSchemaAction(spec: SurfaceRenderSpec, action: CollectionUiAction, record?: Record<string, unknown>) {
+  const recordId = record ? String(record.id ?? "") : "";
+  if (collectionSaving.value || (record && !recordId)) return;
+  collectionSaving.value = true;
+  try {
+    await ensureTaskSurfaceContract(["collection.action.run"]);
+    const previousState = {
+      ...collectionUserViewState(collectionStateSourceSpec(spec)),
+      ...(recordId ? { selected_record_id: recordId } : {})
+    };
+    const envelope = await api.runSurfaceOperation({
+      id: `surface_collection_action_${Date.now()}`,
+      kind: "collection.action.run",
+      session_id: activeSession.value?.id,
+      collection_id: collectionTableId(spec),
+      action_id: action.id,
+      backend_id: selectedBackendId.value,
+      record_id: recordId || undefined,
+      view_id: collectionTableViewId(spec),
+      payload: collectionActionRunPayload(collectionStateSourceSpec(spec), {
+        action_id: action.id,
+        action_label: action.label,
+        action_kind: action.actionKind,
+        scope: action.scope,
+        ...(record ? { record } : {})
+      }),
+      renderer_capabilities: frontendRendererCapabilities.value
+    });
+    const renderSpecs = envelopeRenderSpecs(envelope);
+    const generatedCustomView = renderSpecs.find((item) =>
+      item.kind === "custom_view"
+      && !isCollectionTableSurfaceSpec(item)
+      && !isTaskListSurfaceSpec(item)
+    );
+    const nextSpec = envelope.render_spec;
+    if (generatedCustomView) {
+      activeSurfaceSpec.value = generatedCustomView;
+      activeArtifact.value = null;
+      activeMemory.value = null;
+      activeMessagePresentationId.value = null;
+      setCanvasMode(defaultCanvasMode(generatedCustomView));
+      lastSurfaceRenderSpec.value = generatedCustomView;
+      lastSurfaceRenderSpecs.value = renderSpecs;
+    } else if (isCollectionTableSurfaceSpec(nextSpec)) {
+      const nextSpecWithState = withCollectionViewState(nextSpec, previousState);
+      activeSurfaceSpec.value = nextSpecWithState;
+      lastSurfaceRenderSpec.value = nextSpecWithState;
+      lastSurfaceRenderSpecs.value = [nextSpecWithState, ...lastSurfaceRenderSpecs.value.filter((item) => !(isCollectionTableSurfaceSpec(item) && collectionTableId(item) === collectionTableId(nextSpecWithState)))];
+      syncCollectionDrafts(nextSpecWithState);
+      await persistActiveCollectionPresentationState(nextSpecWithState);
+    } else {
+      await refreshCollectionTableSurface(spec);
+    }
+    if (recordId) {
+      await updateActiveCollectionViewState({ selected_record_id: recordId });
+    }
+    if (activeSession.value) {
+      await reloadActiveSession();
+    }
+    collectionAppError.value = null;
+  } catch (error) {
+    collectionAppError.value = collectionSurfaceErrorMessage(error);
+  } finally {
+    collectionSaving.value = false;
+  }
+}
+
+const collectionWorkspaceController = {
+  switchCollectionView,
+  refreshCollectionTableSurface,
+  runCollectionSchemaAction,
+  setCollectionSearchQuery,
+  setCollectionSortField,
+  toggleCollectionSortDirection,
+  setCollectionFilterValue,
+  setCollectionGroupField,
+  setCollectionNewDraftValue,
+  addCollectionRecord,
+  selectCollectionRecord,
+  collectionDraft,
+  setCollectionDraftValue,
+  saveCollectionRecord,
+  deleteCollectionRecordFromTable,
+  shiftCollectionCalendarMonth,
+  selectCollectionCalendarDate,
+  beginCollectionKanbanDrag,
+  dropCollectionKanbanRecord
+};
 
 function taskSurfaceErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.startsWith("task_surface_contract_missing:")) {
@@ -2589,16 +3304,6 @@ function setTableDraftValue(spec: SurfaceRenderSpec, row: Record<string, unknown
       }
     }
   };
-}
-
-function surfaceActions(spec: SurfaceRenderSpec): Array<{ id: string; label: string }> {
-  const actions = Array.isArray(spec.props.actions) ? spec.props.actions : [];
-  return actions.filter(isRecord).flatMap((action) => {
-    if (typeof action.id !== "string" || typeof action.label !== "string") {
-      return [];
-    }
-    return [{ id: action.id, label: action.label }];
-  });
 }
 
 function toJsonValue(value: unknown): JsonValue {
@@ -3460,14 +4165,19 @@ function persistCanvasMode(mode: CanvasMode) {
                               </div>
 
                               <div v-if="message.presentations.length > 0" class="work-card-stack">
-                                <button v-for="presentation in message.presentations" :key="presentation.id" class="codex-artifact-card" type="button" @click="openMessagePresentation(presentation)">
-                                  <span class="codex-card-icon"><PanelsTopLeft :size="19" /></span>
-                                  <span class="codex-card-main">
-                                    <strong>{{ presentation.title }}</strong>
-                                    <small>{{ presentation.subtitle }}</small>
-                                  </span>
-                                  <em>{{ label("artifact.open_in_workspace") }}</em>
-                                </button>
+                                <CollectionWorkspaceView
+                                  v-for="presentation in message.presentations"
+                                  :key="presentation.id"
+                                  mode="card"
+                                  :spec="collectionPresentationPreviewSpec(presentation)"
+                                  :presentation="presentation"
+                                  :saving="collectionSaving"
+                                  :error="collectionAppError"
+                                  :new-draft="collectionNewDraft"
+                                  :controller="collectionWorkspaceController"
+                                  :open-label="label('artifact.open_in_workspace')"
+                                  @open="openMessagePresentation(presentation)"
+                                />
                               </div>
 
                               <section v-if="workSummaryBlock.changes.length > 0" class="codex-change-card">
@@ -3545,14 +4255,19 @@ function persistCanvasMode(mode: CanvasMode) {
                         <template v-else>
                           <p class="message-body">{{ message.content }}</p>
                           <div v-if="message.role === 'agent' && message.presentations.length > 0" class="work-card-stack">
-                            <button v-for="presentation in message.presentations" :key="presentation.id" class="codex-artifact-card" type="button" @click="openMessagePresentation(presentation)">
-                              <span class="codex-card-icon"><PanelsTopLeft :size="19" /></span>
-                              <span class="codex-card-main">
-                                <strong>{{ presentation.title }}</strong>
-                                <small>{{ presentation.subtitle }}</small>
-                              </span>
-                              <em>{{ label("artifact.open_in_workspace") }}</em>
-                            </button>
+                            <CollectionWorkspaceView
+                              v-for="presentation in message.presentations"
+                              :key="presentation.id"
+                              mode="card"
+                              :spec="collectionPresentationPreviewSpec(presentation)"
+                              :presentation="presentation"
+                              :saving="collectionSaving"
+                              :error="collectionAppError"
+                              :new-draft="collectionNewDraft"
+                              :controller="collectionWorkspaceController"
+                              :open-label="label('artifact.open_in_workspace')"
+                              @open="openMessagePresentation(presentation)"
+                            />
                           </div>
                           <footer v-if="message.role === 'agent'" class="message-footer">
                             <button type="button" :title="label('message.copy')" :aria-label="label('message.copy')" @click="copyMessage(message)">
@@ -3789,126 +4504,21 @@ function persistCanvasMode(mode: CanvasMode) {
                     </div>
                   </div>
 
-                  <div v-else-if="activeSurfaceSpec.kind === 'custom_view' && isTaskListSurfaceSpec(activeSurfaceSpec)" class="task-list-app" :class="{ 'is-compact': taskIsCompact(activeSurfaceSpec) }">
-                    <div v-if="taskAppError" class="provider-notice is-inline">
-                      <div class="provider-notice-main">
-                        <strong>Tasksを更新できません</strong>
-                        <span>{{ taskAppError }}</span>
-                      </div>
-                    </div>
-                    <form class="task-add-row" @submit.prevent="addTask(activeSurfaceSpec)">
-                      <input v-model="taskDraftTitle" type="text" placeholder="新しいタスク" :disabled="taskSaving" />
-                      <button type="submit" :disabled="taskSaving || !taskDraftTitle.trim()">
-                        <Plus :size="14" />
-                      </button>
-                    </form>
+                  <CollectionWorkspaceView
+                    v-else-if="activeSurfaceSpec.kind === 'custom_view' && isCollectionTableSurfaceSpec(activeSurfaceSpec)"
+                    :spec="activeSurfaceSpec"
+                    :saving="collectionSaving"
+                    :error="collectionAppError"
+                    :new-draft="collectionNewDraft"
+                    :controller="collectionWorkspaceController"
+                  />
 
-                    <div class="task-counts">
-                      <span>未完了 {{ taskListCounts(activeSurfaceSpec).active }}</span>
-                      <span>完了 {{ taskListCounts(activeSurfaceSpec).completed }}</span>
-                    </div>
-
-                    <div class="task-list-columns">
-                      <section v-for="group in taskRecordGroups(activeSurfaceSpec)" :key="group.key">
-                        <h3>{{ group.title }}</h3>
-                        <article v-for="record in group.records" :key="String(record.id)" class="task-row" :class="{ 'is-completed': record.completed === true }">
-                          <input type="checkbox" :checked="record.completed === true" :disabled="taskSaving" @change="patchTask(activeSurfaceSpec, record, { completed: ($event.target as HTMLInputElement).checked })" />
-                          <div class="task-fields">
-                            <label v-for="field in taskDisplayFields(activeSurfaceSpec)" :key="taskFieldId(field)" class="task-extra-field">
-                              <span>{{ taskFieldLabel(field) }}</span>
-                              <select v-if="taskFieldType(field) === 'enum'" :value="taskDraft(record)[taskFieldId(field)]" :disabled="taskSaving" @change="setTaskDraftValue(record, taskFieldId(field), ($event.target as HTMLSelectElement).value)">
-                                <option value=""></option>
-                                <option v-for="value in taskEnumValues(field)" :key="value" :value="value">{{ value }}</option>
-                              </select>
-                              <input v-else-if="taskFieldType(field) === 'boolean'" type="checkbox" :checked="taskDraft(record)[taskFieldId(field)] === 'true'" :disabled="taskSaving" @change="setTaskDraftValue(record, taskFieldId(field), String(($event.target as HTMLInputElement).checked))" />
-                              <textarea v-else-if="taskFieldType(field) === 'text'" :value="taskDraft(record)[taskFieldId(field)]" :disabled="taskSaving" rows="2" @input="setTaskDraftValue(record, taskFieldId(field), ($event.target as HTMLTextAreaElement).value)"></textarea>
-                              <input v-else :value="taskDraft(record)[taskFieldId(field)]" :disabled="taskSaving" :type="taskFieldType(field) === 'date' ? 'date' : taskFieldType(field) === 'number' ? 'number' : 'text'" @input="setTaskDraftValue(record, taskFieldId(field), ($event.target as HTMLInputElement).value)" />
-                            </label>
-                          </div>
-                          <button class="surface-row-save" type="button" :disabled="taskSaving || !taskDraft(record).title?.trim()" @click="saveTaskDraft(activeSurfaceSpec, record)">
-                            <Save :size="13" />
-                          </button>
-                          <button v-if="taskAllowsDelete(activeSurfaceSpec)" class="surface-row-save" type="button" :disabled="taskSaving" @click="deleteTask(activeSurfaceSpec, record)">
-                            <Trash2 :size="13" />
-                          </button>
-                        </article>
-                      </section>
-                    </div>
-                  </div>
-
-                  <div v-else-if="activeSurfaceSpec.kind === 'custom_view' && isCollectionTableSurfaceSpec(activeSurfaceSpec)" class="collection-table-app">
-                    <div v-if="collectionAppError" class="provider-notice is-inline">
-                      <div class="provider-notice-main">
-                        <strong>Collectionを更新できません</strong>
-                        <span>{{ collectionAppError }}</span>
-                      </div>
-                    </div>
-                    <div class="collection-table-toolbar">
-                      <div class="task-counts">
-                        <span>{{ appCollectionRecords(activeSurfaceSpec).length }}件</span>
-                        <span>{{ collectionTableId(activeSurfaceSpec) }}</span>
-                      </div>
-                      <button class="surface-row-save" type="button" :disabled="collectionSaving" @click="refreshCollectionTableSurface(activeSurfaceSpec)">
-                        <RotateCcw :size="13" />
-                      </button>
-                    </div>
-                    <div class="surface-table-wrap">
-                      <table class="surface-table collection-table">
-                        <thead>
-                          <tr>
-                            <th v-for="field in collectionTableFields(activeSurfaceSpec)" :key="String(field.id)">{{ collectionFieldLabel(field) }}</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr class="collection-new-row">
-                            <td v-for="field in collectionTableFields(activeSurfaceSpec)" :key="String(field.id)">
-                              <select v-if="collectionFieldType(field) === 'enum'" :value="collectionNewDraft[String(field.id)] ?? ''" :disabled="collectionSaving" @change="setCollectionNewDraftValue(String(field.id), ($event.target as HTMLSelectElement).value)">
-                                <option value=""></option>
-                                <option v-for="value in collectionEnumValues(field)" :key="value" :value="value">{{ value }}</option>
-                              </select>
-                              <input v-else-if="collectionFieldType(field) === 'boolean'" type="checkbox" :checked="collectionNewDraft[String(field.id)] === 'true'" :disabled="collectionSaving" @change="setCollectionNewDraftValue(String(field.id), String(($event.target as HTMLInputElement).checked))" />
-                              <textarea v-else-if="collectionFieldType(field) === 'text'" :value="collectionNewDraft[String(field.id)] ?? ''" :disabled="collectionSaving" rows="2" @input="setCollectionNewDraftValue(String(field.id), ($event.target as HTMLTextAreaElement).value)"></textarea>
-                              <input v-else :value="collectionNewDraft[String(field.id)] ?? ''" :disabled="collectionSaving" :type="collectionFieldType(field) === 'date' ? 'date' : collectionFieldType(field) === 'number' ? 'number' : 'text'" @input="setCollectionNewDraftValue(String(field.id), ($event.target as HTMLInputElement).value)" />
-                            </td>
-                            <td>
-                              <button class="surface-row-save" type="button" :disabled="collectionSaving || !collectionRequiredReady(activeSurfaceSpec, collectionCreateData(activeSurfaceSpec))" @click="addCollectionRecord(activeSurfaceSpec)">
-                                <Plus :size="13" />
-                              </button>
-                            </td>
-                          </tr>
-                          <tr v-for="record in appCollectionRecords(activeSurfaceSpec)" :key="String(record.id)">
-                            <td v-for="field in collectionTableFields(activeSurfaceSpec)" :key="String(field.id)">
-                              <select v-if="collectionFieldType(field) === 'enum'" :value="collectionDraft(record)[String(field.id)] ?? ''" :disabled="collectionSaving" @change="setCollectionDraftValue(record, String(field.id), ($event.target as HTMLSelectElement).value)">
-                                <option value=""></option>
-                                <option v-for="value in collectionEnumValues(field)" :key="value" :value="value">{{ value }}</option>
-                              </select>
-                              <input v-else-if="collectionFieldType(field) === 'boolean'" type="checkbox" :checked="collectionDraft(record)[String(field.id)] === 'true'" :disabled="collectionSaving" @change="setCollectionDraftValue(record, String(field.id), String(($event.target as HTMLInputElement).checked))" />
-                              <textarea v-else-if="collectionFieldType(field) === 'text'" :value="collectionDraft(record)[String(field.id)] ?? ''" :disabled="collectionSaving" rows="2" @input="setCollectionDraftValue(record, String(field.id), ($event.target as HTMLTextAreaElement).value)"></textarea>
-                              <input v-else :value="collectionDraft(record)[String(field.id)] ?? ''" :disabled="collectionSaving" :type="collectionFieldType(field) === 'date' ? 'date' : collectionFieldType(field) === 'number' ? 'number' : 'text'" @input="setCollectionDraftValue(record, String(field.id), ($event.target as HTMLInputElement).value)" />
-                            </td>
-                            <td class="collection-row-actions">
-                              <button class="surface-row-save" type="button" :disabled="collectionSaving" @click="saveCollectionRecord(activeSurfaceSpec, record)">
-                                <Save :size="13" />
-                              </button>
-                              <button class="surface-row-save" type="button" :disabled="collectionSaving" @click="deleteCollectionRecordFromTable(activeSurfaceSpec, record)">
-                                <Trash2 :size="13" />
-                              </button>
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  <div v-else-if="activeSurfaceSpec.kind === 'custom_view'" class="surface-app">
-                    <pre class="surface-json">{{ surfaceCustomViewPayload(activeSurfaceSpec) }}</pre>
-                    <div v-if="surfaceActions(activeSurfaceSpec).length > 0" class="surface-app-actions">
-                      <button v-for="action in surfaceActions(activeSurfaceSpec)" :key="action.id" type="button" :disabled="loading" @click="runCustomViewAction(activeSurfaceSpec, action)">
-                        {{ action.label }}
-                      </button>
-                    </div>
-                  </div>
+                  <CustomViewFrame
+                    v-else-if="activeSurfaceSpec.kind === 'custom_view'"
+                    :spec="activeSurfaceSpec"
+                    :saving="loading"
+                    :run-action="runCustomViewAction"
+                  />
 
                   <pre v-else class="surface-json">{{ surfaceCustomViewPayload(activeSurfaceSpec) }}</pre>
                 </section>

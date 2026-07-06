@@ -103,6 +103,7 @@ export const surfaceOperationKinds = [
   "collection.record.create",
   "collection.record.patch",
   "collection.record.delete",
+  "collection.action.run",
   "message.presentation.update",
   "custom_view.action"
 ] as const;
@@ -183,6 +184,16 @@ export interface CollectionRecordDeleteOperation extends SurfaceOperationBase {
   view_id?: string;
 }
 
+export interface CollectionActionRunOperation extends SurfaceOperationBase {
+  kind: "collection.action.run";
+  collection_id: string;
+  action_id: string;
+  backend_id?: string;
+  record_id?: string;
+  view_id?: string;
+  payload: Record<string, JsonValue>;
+}
+
 export interface MessagePresentationUpdateOperation extends SurfaceOperationBase {
   kind: "message.presentation.update";
   presentation_id: string;
@@ -206,6 +217,7 @@ export type SurfaceOperation =
   | CollectionRecordCreateOperation
   | CollectionRecordPatchOperation
   | CollectionRecordDeleteOperation
+  | CollectionActionRunOperation
   | MessagePresentationUpdateOperation
   | CustomViewActionOperation;
 
@@ -361,18 +373,6 @@ export const builtinSurfaceRendererRegistryEntries: SurfaceRendererRegistryEntry
     props_schema: { type: "object" },
     actions_schema: { type: "array" },
     fallback_kind: "artifact",
-    category: "custom_view"
-  },
-  {
-    id: "surface.custom_view.task_list",
-    kind: "custom_view",
-    renderer: "task_list",
-    version: "1",
-    title: "Task list",
-    description: "Render the built-in task list app backed by the tasks Collection.",
-    props_schema: { type: "object" },
-    actions_schema: { type: "array" },
-    fallback_kind: "collection",
     category: "custom_view"
   },
   {
@@ -654,15 +654,38 @@ const RunHistoryRenderPropsSchema = jsonProps({
   selected_run_id: z.string().optional()
 });
 
+const CustomViewSandboxSchema = z.object({
+  mode: z.enum(["iframe"]),
+  allow_scripts: z.boolean(),
+  allow_forms: z.boolean(),
+  allow_same_origin: z.boolean(),
+  network_access: z.enum(["none", "read"]),
+  workspace_access: z.enum(["none", "read", "write"])
+});
+
+const CustomViewCapabilitySchema = z.object({
+  token_id: z.string().min(1),
+  allowed_actions: z.array(z.string().min(1)),
+  read_resource_refs: z.array(ResourceRefSchema),
+  write_operations: z.array(z.enum(surfaceOperationKinds)),
+  data_url: z.string().optional(),
+  data_capabilities: z.array(z.enum(["read", "write"])).optional()
+});
+
 const CustomViewRenderPropsSchema = jsonProps({
   view_id: z.string().min(1),
   renderer: z.string().min(1),
   renderer_version: z.string().optional(),
   schema_ref: z.string().optional(),
+  sandbox: CustomViewSandboxSchema.optional(),
+  capability: CustomViewCapabilitySchema.optional(),
   actions: z.array(z.object({
     id: z.string().min(1),
     label: z.string().min(1),
-    operation_kind: z.enum(surfaceOperationKinds).optional()
+    operation_kind: z.enum(surfaceOperationKinds).optional(),
+    action_kind: z.string().optional(),
+    description: z.string().optional(),
+    scope: z.enum(["collection", "record"]).optional()
   })).optional(),
   data: jsonValueSchema.optional()
 });
@@ -808,6 +831,7 @@ export const surfaceOperationResultKinds = [
   "collection_record",
   "collection_patch",
   "collection_delete",
+  "collection_action",
   "message_presentation",
   "artifact",
   "form_submission",
@@ -936,6 +960,16 @@ const RawSurfaceOperationSchema = z.discriminatedUnion("kind", [
     collection_id: z.string().min(1),
     record_id: z.string().min(1),
     view_id: z.string().min(1).optional()
+  }),
+  z.object({
+    ...SurfaceOperationBaseShape,
+    kind: z.literal("collection.action.run"),
+    collection_id: z.string().min(1),
+    action_id: z.string().min(1),
+    backend_id: z.string().min(1).optional(),
+    record_id: z.string().min(1).optional(),
+    view_id: z.string().min(1).optional(),
+    payload: z.record(jsonValueSchema).optional().default({})
   }),
   z.object({
     ...SurfaceOperationBaseShape,

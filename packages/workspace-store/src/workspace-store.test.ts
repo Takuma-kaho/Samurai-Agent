@@ -152,7 +152,7 @@ describe("workspace store", () => {
     });
     const updated = await store.updateMessagePresentationViewState({
       id: presentation.id,
-      viewState: { selected_view_id: "movies_gallery", filters: { status: "観た" } },
+      viewState: { view_id: "movies_gallery", renderer: "collection_gallery", filter: { status: "観た" } },
       updatedAt: "2026-07-05T00:00:00.000Z"
     });
     const presentations = await store.listMessagePresentations({ sessionId: session.id, messageId: message.id });
@@ -160,7 +160,9 @@ describe("workspace store", () => {
 
     expect(updated).toMatchObject({
       id: presentation.id,
-      view_state: { selected_view_id: "movies_gallery", filters: { status: "観た" } },
+      view_id: "movies_gallery",
+      renderer: "collection_gallery",
+      view_state: { view_id: "movies_gallery", renderer: "collection_gallery", filter: { status: "観た" } },
       updated_at: "2026-07-05T00:00:00.000Z"
     });
     expect(presentations[0]?.view_state).toEqual(updated?.view_state);
@@ -889,6 +891,24 @@ describe("workspace store", () => {
     expect(updatedRun.session_id).toBe("session_1");
   });
 
+  it("rejects unsupported collection view renderers before indexing schema files", async () => {
+    const store = await createTempStore();
+    await expect(store.saveCollectionSchema({
+      ...collectionSchema("unsupported_view"),
+      views: [{ id: "unsupported_view_cards", renderer: "study_deck" }]
+    })).rejects.toThrow("collection_view_renderer_unsupported:study_deck");
+    await expect(access(path.join(store.rootDir, "collections", "unsupported_view", "schema.json"))).rejects.toThrow();
+
+    const legacy = await store.saveCollectionSchema({
+      ...collectionSchema("tasks"),
+      fields: [{ id: "title", type: "string" }],
+      views: [{ id: "task_list", renderer: "task_list" }]
+    });
+    await store.close();
+
+    expect(legacy.views).toEqual([expect.objectContaining({ id: "task_list", renderer: "task_list" })]);
+  });
+
   it("summarizes and repairs automation queue state", async () => {
     const store = await createTempStore();
     const now = "2026-01-01T00:00:00.000Z";
@@ -1045,7 +1065,99 @@ describe("workspace store", () => {
     await store.close();
   });
 
-  it("computes collection derived fields and validates refs embeds triggers", async () => {
+  it("rejects collection records and patches that violate schema field types", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    await store.saveCollectionSchema({
+      ...collectionSchema("movies"),
+      fields: [
+        { id: "title", type: "string", required: true },
+        { id: "rating", type: "number" },
+        { id: "status", type: "enum", enum_values: ["観たい", "視聴中", "観た"] },
+        { id: "watched_at", type: "date" },
+        { id: "starts_at", type: "datetime" },
+        { id: "published", type: "boolean" },
+        { id: "metadata", type: "json" }
+      ]
+    });
+
+    await expect(store.saveCollectionRecord({
+      id: "movie_bad_number",
+      collection_id: "movies",
+      data: { title: "七人の侍", rating: "5" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_field_type:rating:number");
+    await expect(store.saveCollectionRecord({
+      id: "movie_bad_enum",
+      collection_id: "movies",
+      data: { title: "七人の侍", status: "完了" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_enum_value:status");
+    await expect(store.saveCollectionRecord({
+      id: "movie_bad_date",
+      collection_id: "movies",
+      data: { title: "七人の侍", watched_at: "2026-99-99" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_field_type:watched_at:date");
+    await store.saveCollectionRecord({
+      id: "movie_ok",
+      collection_id: "movies",
+      data: {
+        title: "七人の侍",
+        rating: 5,
+        status: "観た",
+        watched_at: "2026-07-05",
+        starts_at: "2026-07-05T20:00",
+        published: false,
+        metadata: { source: "manual" }
+      },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await store.saveCollectionRecord({
+      id: "movie_null_optional",
+      collection_id: "movies",
+      data: { title: "空欄あり", rating: null, status: null, watched_at: null, starts_at: null },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await expect(store.applyCollectionRecordPatch({
+      collectionId: "movies",
+      recordId: "movie_ok",
+      patch: {
+        id: "patch_bad_rating",
+        record_id: "movie_ok",
+        changes: { rating: "高評価" },
+        source_operation_id: "operation_bad_rating",
+        created_at: nowIso()
+      }
+    })).rejects.toThrow("collection_field_type:rating:number");
+    await expect(store.applyCollectionRecordPatch({
+      collectionId: "movies",
+      recordId: "movie_ok",
+      patch: {
+        id: "patch_bad_status",
+        record_id: "movie_ok",
+        changes: { status: "保留" },
+        source_operation_id: "operation_bad_status",
+        created_at: nowIso()
+      }
+    })).rejects.toThrow("collection_enum_value:status");
+    const records = await store.listCollectionRecords("movies");
+    await store.close();
+
+    expect(records.map((record) => record.id).sort()).toEqual(["movie_null_optional", "movie_ok"]);
+  });
+
+  it("keeps collection derived fields display-only and validates refs embeds triggers", async () => {
     const store = await createTempStore();
     const schema = {
       ...collectionSchema("contacts"),
@@ -1127,9 +1239,13 @@ describe("workspace store", () => {
     await store.close();
 
     expect(saved.data).toMatchObject({
-      display: "Takuma <takuma@example.com",
-      name_length: 6
+      name: "Takuma",
+      email: "takuma@example.com",
+      manager_id: "manager",
+      profile: { role: "owner" }
     });
+    expect(saved.data).not.toHaveProperty("display");
+    expect(saved.data).not.toHaveProperty("name_length");
     expect(effects[0]).toMatchObject({
       id: "normalize",
       action_id: "normalize_contact",
@@ -1137,9 +1253,13 @@ describe("workspace store", () => {
       status: "queued"
     });
     expect(patched.after.data).toMatchObject({
-      display: "Taku <takuma@example.com",
-      name_length: 4
+      name: "Taku",
+      email: "takuma@example.com",
+      manager_id: "manager",
+      profile: { role: "owner" }
     });
+    expect(patched.after.data).not.toHaveProperty("display");
+    expect(patched.after.data).not.toHaveProperty("name_length");
     expect(patches).toContainEqual(expect.objectContaining({
       id: "patch_derived",
       record_id: "record_derived",
@@ -1161,6 +1281,47 @@ describe("workspace store", () => {
       field: "profile",
       value: { role: "owner" }
     });
+  });
+
+  it("rejects missing required collection fields on create and patch", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    await store.saveCollectionSchema({
+      ...collectionSchema("movies"),
+      fields: [
+        { id: "title", type: "string", required: true },
+        { id: "rating", type: "number", required: true }
+      ]
+    });
+
+    await expect(store.saveCollectionRecord({
+      id: "movie_missing_title",
+      collection_id: "movies",
+      data: { title: "", rating: 5 },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    })).rejects.toThrow("collection_required_field:title");
+    await store.saveCollectionRecord({
+      id: "movie_ok",
+      collection_id: "movies",
+      data: { title: "七人の侍", rating: 5 },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    await expect(store.applyCollectionRecordPatch({
+      collectionId: "movies",
+      recordId: "movie_ok",
+      patch: {
+        id: "patch_empty_title",
+        record_id: "movie_ok",
+        changes: { title: "" },
+        source_operation_id: "operation_required_patch",
+        created_at: nowIso()
+      }
+    })).rejects.toThrow("collection_required_field:title");
+    await store.close();
   });
 
   it("persists gateway pairings and inbound message routing state", async () => {

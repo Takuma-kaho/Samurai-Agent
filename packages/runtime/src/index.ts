@@ -287,6 +287,7 @@ export type CollectionSchemaRuntimeResult = RuntimeWriteResult<CollectionSchemaW
 export type CollectionRecordRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
 export type CollectionDeleteRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
 export type CollectionReindexRuntimeResult = RuntimeWriteResult<CollectionReindexResult>;
+export type CollectionManageRuntimeResult = RuntimeWriteResult<Record<string, JsonValue>>;
 export type GrantRuntimeResult = RuntimeWriteResult<GrantRecord>;
 export interface CollectionPluginActionResult {
   collection_id: string;
@@ -298,6 +299,17 @@ export interface CollectionPluginActionResult {
   output?: JsonValue;
 }
 export type CollectionPluginActionRuntimeResult = RuntimeWriteResult<CollectionPluginActionResult>;
+export interface CollectionInstructionActionResult {
+  collection_id: string;
+  action_id: string;
+  action_kind: string;
+  status: "completed";
+  backend_run_id: string;
+  session_id: string;
+  custom_view?: Record<string, JsonValue>;
+  output?: JsonValue;
+}
+export type CollectionInstructionActionRuntimeResult = RuntimeWriteResult<CollectionInstructionActionResult> & { chat?: RunChatTurnResult };
 export interface CollectionActionDescriptor {
   collection_id: string;
   action_id: string;
@@ -313,7 +325,7 @@ export interface CollectionActionDescriptor {
   unsupported_reason?: string;
   definition: Record<string, JsonValue>;
 }
-export type CollectionActionRuntimeResult = CollectionRecordRuntimeResult | CollectionPatchRuntimeResult | CollectionReindexRuntimeResult | CollectionPluginActionRuntimeResult;
+export type CollectionActionRuntimeResult = CollectionRecordRuntimeResult | CollectionPatchRuntimeResult | CollectionReindexRuntimeResult | CollectionPluginActionRuntimeResult | CollectionInstructionActionRuntimeResult;
 export type AutomationJobRuntimeResult = RuntimeWriteResult<AutomationJobRecord>;
 export type ExternalSendRuntimeResult = RuntimeWriteResult<ExternalSendRecord>;
 
@@ -373,7 +385,7 @@ export interface SurfaceArtifactRuntimeResult extends RuntimeWriteResult<Artifac
 }
 
 export type SurfaceOperationRuntimeResult = SurfaceOperationResultEnvelope<
-  RunChatTurnResult | CollectionViewRuntimeResult | CollectionRecordRuntimeResult | CollectionPatchRuntimeResult | CollectionDeleteRuntimeResult | SurfaceArtifactRuntimeResult | MessagePresentationRecord
+  RunChatTurnResult | CollectionViewRuntimeResult | CollectionRecordRuntimeResult | CollectionPatchRuntimeResult | CollectionDeleteRuntimeResult | CollectionActionRuntimeResult | SurfaceArtifactRuntimeResult | MessagePresentationRecord
 >;
 
 export interface CollectionViewRuntimeResult {
@@ -547,6 +559,21 @@ function defaultBackendId(env: NodeJS.ProcessEnv = process.env): string {
   return env.SAMURAI_BACKEND_DEFAULT?.trim() || "samurai-native";
 }
 
+function hasExplicitDefaultBackend(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.SAMURAI_BACKEND_DEFAULT?.trim());
+}
+
+function defaultBackendIdFromStatuses(statuses: AgentBackendStatus[]): string {
+  const runnable = statuses.filter((status) => status.configured && status.enabled !== false);
+  return (
+    runnable.find((status) => status.id === "codex")?.id
+    ?? runnable.find((status) => status.id === "claude-code")?.id
+    ?? runnable.find((status) => status.kind === "codex" || status.kind === "claude_code" || status.kind === "external")?.id
+    ?? runnable.find((status) => status.id === "samurai-native")?.id
+    ?? "samurai-native"
+  );
+}
+
 function splitArgs(value: string | undefined): string[] {
   return value?.split(" ").map((item) => item.trim()).filter(Boolean) ?? [];
 }
@@ -649,6 +676,20 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
       proposedEffects: command.proposed_effects
     });
   }
+  if (operation.kind === "collection.action.run") {
+    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.action.run");
+    return surfaceDispatchPlan(operation, {
+      dispatchTarget: "collection_engine",
+      runtimeMethod: command.runtime_method,
+      operationName: command.id,
+      resultKind: "collection_action",
+      renderKind: commandRenderKind(command, "custom_view"),
+      requiresSession: false,
+      writesWorkspace: command.writes_workspace,
+      outputResourceKind: command.output_resource_kind,
+      proposedEffects: command.proposed_effects
+    });
+  }
   const structuredOperation = operation as StructuredSurfaceOperation;
   const command = getDomainCommandForSurfaceOperationKind(structuredOperation.kind) ?? requireDomainCommandEntry("artifact.create");
   return surfaceDispatchPlan(structuredOperation, {
@@ -711,6 +752,13 @@ export class AgentRuntime {
 
   private backendWorkingDirectoryMode(): "workspace" | "repo" {
     return this.workspaceOptions.backendWorkingDirectoryMode ?? "workspace";
+  }
+
+  private defaultBackendIdForRun(): string {
+    if (hasExplicitDefaultBackend()) {
+      return defaultBackendId();
+    }
+    return defaultBackendIdFromStatuses(this.backendRegistry.statuses());
   }
 
   private backendWorkingDirectory(): string {
@@ -1377,10 +1425,10 @@ export class AgentRuntime {
       }
     });
     await recordEvent(startedEvent);
-    if (providerToolName === "samurai.collection.schema.save") {
+    if (samuraiToolBridgeWriteTools.has(providerToolName)) {
       const feedback = await this.handleRuntimeToolCall(run, runInput, startedEvent, undefined, undefined);
       if (!feedback) {
-        throw new RuntimeRequestError("conflict", "tool_bridge_collection_schema_save_failed");
+        throw new RuntimeRequestError("conflict", "tool_bridge_write_tool_failed");
       }
       for (const change of feedback.workspaceChanges ?? []) {
         await this.store.saveWorkspaceChange(change);
@@ -1400,7 +1448,11 @@ export class AgentRuntime {
         status: "completed",
         output: {
           operation_id: feedback.operation.id,
-          ...(feedback.operation.result_ref?.id ? { collection_id: feedback.operation.result_ref.id } : {})
+          ...(feedback.outputPayload?.output && typeof feedback.outputPayload.output === "object" && !Array.isArray(feedback.outputPayload.output)
+            ? { result: feedback.outputPayload.output }
+            : {}),
+          ...(feedback.operation.result_ref?.kind === "collection_schema" && feedback.operation.result_ref.id ? { collection_id: feedback.operation.result_ref.id } : {}),
+          ...(feedback.operation.result_ref?.kind === "collection_record" && feedback.operation.result_ref.id ? { record_id: feedback.operation.result_ref.id } : {})
         },
         resource_ref: feedback.operation.result_ref,
         tool_run_ids: [feedback.toolRun.id]
@@ -1497,13 +1549,20 @@ export class AgentRuntime {
           id: record.id,
           file_path: record.file_path,
           summary: summarize(JSON.stringify(record.data), 180),
-          data: collectionId === TASKS_COLLECTION_ID ? taskSafeRecordData(record.data) : record.data
+          data: record.data
         }));
       return schema ? [collectionSchemaSearchResult(schema), ...recordResults] : recordResults;
     }
     if (toolName === "samurai.collection.view.present") {
       const descriptor = await this.resolveCollectionPresentationDescriptor(input);
       return descriptor;
+    }
+    if (toolName === "samurai.collection.manage") {
+      const sessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
+      const session = sessionId ? await this.store.getSession(sessionId) : undefined;
+      const envelope = createGatewayEnvelope(webGatewayContext, `Manage collection: ${stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.action)}`);
+      const result = await this.manageCollection(input, session ? { session, envelope } : undefined);
+      return result.resource;
     }
     throw new RuntimeRequestError("conflict", "tool_bridge_tool_not_allowed");
   }
@@ -1513,8 +1572,13 @@ export class AgentRuntime {
     const query = typeof input.query === "string" ? input.query.trim() : "";
     const viewId = typeof input.view_id === "string" ? input.view_id.trim() : "";
     const recordId = typeof input.record_id === "string" ? input.record_id.trim() : "";
+    const sessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
     const schemas = await this.store.listCollectionSchemas();
-    const matches = collectionId
+    const recentPresentation = sessionId ? await this.latestCollectionPresentation(sessionId) : undefined;
+    const recentSchema = recentPresentation
+      ? schemas.find((schema) => schema.id === recentPresentation.collection_id)
+      : undefined;
+    let matches = collectionId
       ? schemas.filter((schema) => schema.id === collectionId)
       : matchCollectionSchemas(schemas, query);
     if (matches.length === 0) {
@@ -1535,8 +1599,12 @@ export class AgentRuntime {
     }
     const schema = matches[0]!;
     const records = await this.store.listCollectionRecords(schema.id);
-    const viewConfig = genericCollectionViewConfig(schema, viewId || undefined);
+    const recentState = recentPresentation?.collection_id === schema.id ? recentPresentation.view_state : undefined;
+    const requestedViewId = viewId
+      || (recentPresentation?.collection_id === schema.id ? recentPresentation.view_id : "");
+    const viewConfig = genericCollectionViewConfig(schema, requestedViewId || undefined);
     const resolvedViewId = String(viewConfig.id);
+    const viewState = reusableCollectionViewState(recentState);
     return {
       status: "ready",
       kind: "collection_app",
@@ -1546,8 +1614,16 @@ export class AgentRuntime {
       ...(recordId ? { record_id: recordId } : {}),
       title: collectionDisplayTitle(schema),
       subtitle: `${schema.id} ・ ${records.length}件`,
-      record_count: records.length
+      record_count: records.length,
+      ...(Object.keys(viewState).length > 0 ? { view_state: viewState } : {})
     };
+  }
+
+  private async latestCollectionPresentation(sessionId: string): Promise<MessagePresentationRecord | undefined> {
+    const presentations = await this.store.listMessagePresentations({ sessionId });
+    return presentations
+      .filter((presentation) => presentation.kind === "collection_app")
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.created_at.localeCompare(left.created_at))[0];
   }
 
   async runChatTurn(input: RunChatTurnInput): Promise<RunChatTurnResult> {
@@ -1572,7 +1648,7 @@ export class AgentRuntime {
       created_at: envelope.received_at
     });
 
-    const backendId = input.backend_id?.trim() || defaultBackendId();
+    const backendId = input.backend_id?.trim() || this.defaultBackendIdForRun();
     const backend = this.backendRegistry.get(backendId);
     if (!backend) {
       throw new RuntimeRequestError("conflict", `backend_not_registered:${backendId}`);
@@ -2320,13 +2396,6 @@ export class AgentRuntime {
       if (!input.session_id) {
         throw new RuntimeRequestError("conflict", "surface_operation_session_required");
       }
-      if (isTaskListAppRequest(input.content)) {
-        return this.runLocalAppSurfaceOperation(input);
-      }
-      const directCollectionPresentation = await this.resolveDirectCollectionPresentation(input);
-      if (directCollectionPresentation) {
-        return this.runDirectCollectionPresentationSurfaceOperation(input, directCollectionPresentation);
-      }
       const collectionSchemasBefore = await this.store.listCollectionSchemas();
       const result = await this.runChatTurn({
         sessionId: input.session_id,
@@ -2346,13 +2415,18 @@ export class AgentRuntime {
       const collectionRenderSpecs = await this.collectionRenderSpecsFromWorkspaceChanges(input, result, collectionSchemasBefore);
       renderSpecs.push(...collectionRenderSpecs);
       for (const operation of result.operations) {
-        if (operation.operation !== "collection.schema.save" || operation.result_ref?.kind !== "collection_schema") {
+        const collectionId = operation.operation === "collection.schema.save" && operation.result_ref?.kind === "collection_schema"
+          ? operation.result_ref.id
+          : operation.operation === "collection.manage" && operation.result_ref?.kind === "collection"
+            ? operation.result_ref.id
+            : "";
+        if (!collectionId) {
           continue;
         }
-        if (renderSpecs.some((spec) => isCollectionRenderSpecForId(spec, operation.result_ref?.id ?? ""))) {
+        if (renderSpecs.some((spec) => isCollectionRenderSpecForId(spec, collectionId))) {
           continue;
         }
-        const schema = await this.store.getCollectionSchema(operation.result_ref.id);
+        const schema = await this.store.getCollectionSchema(collectionId);
         if (!schema) {
           continue;
         }
@@ -2362,23 +2436,28 @@ export class AgentRuntime {
         });
         renderSpecs.push(negotiatedRenderSpec(input, view.render_spec));
       }
-      if (isActiveTaskListAppRequest(input)) {
-        await this.ensureTasksCollectionSchema();
-        await applyAppEditPatchToTasksStore(this.store, this.provider, input.content);
-        const records = await this.store.listCollectionRecords("tasks");
-        const schema = await this.store.getCollectionSchema("tasks");
-        renderSpecs.push(negotiatedRenderSpec(input, taskListRenderSpec(records, input.session_id, input.id, schema)));
-      }
       const eventDescriptors = collectionPresentationDescriptorsFromBackendEvents(result.backendEvents);
       for (const descriptor of eventDescriptors) {
-        if (descriptor.status !== "ready" || renderSpecs.some((spec) => isCollectionRenderSpecForId(spec, descriptor.collection_id))) {
+        if (descriptor.status !== "ready") {
+          continue;
+        }
+        const descriptorState = collectionDescriptorViewState(descriptor);
+        const existingIndex = renderSpecs.findIndex((spec) => isCollectionRenderSpecForId(spec, descriptor.collection_id));
+        if (existingIndex >= 0 && renderSpecs[existingIndex]) {
+          renderSpecs[existingIndex] = negotiatedRenderSpec(
+            input,
+            applyCollectionPresentationViewState(renderSpecs[existingIndex], descriptorState)
+          );
           continue;
         }
         const view = await this.presentCollectionView({
           collectionId: descriptor.collection_id,
           viewId: descriptor.view_id
         });
-        renderSpecs.push(negotiatedRenderSpec(input, view.render_spec));
+        renderSpecs.push(negotiatedRenderSpec(
+          input,
+          applyCollectionPresentationViewState(view.render_spec, descriptorState)
+        ));
       }
       const agentMessageId = result.messages.find((message) => message.role === "agent")?.id;
       const descriptorPresentations = await this.saveMessagePresentationsForBackendEvents({
@@ -2406,9 +2485,6 @@ export class AgentRuntime {
 
     if (input.kind === "collection.record.create") {
       const now = nowIso();
-      if (input.collection_id === TASKS_COLLECTION_ID) {
-        validateTaskRecordCreateData(input.data);
-      }
       const result = await this.createCollectionRecord({
         id: input.record_id,
         collection_id: input.collection_id,
@@ -2449,18 +2525,30 @@ export class AgentRuntime {
     }
 
     if (input.kind === "message.presentation.update") {
+      const existing = await this.store.getMessagePresentation(input.presentation_id);
+      if (!existing) {
+        throw new RuntimeRequestError("not_found", `Message presentation not found: ${input.presentation_id}`);
+      }
+      const requestedViewState = jsonRecordOrEmpty(input.view_state);
+      const requestedViewId = typeof requestedViewState.view_id === "string" && requestedViewState.view_id.trim()
+        ? requestedViewState.view_id.trim()
+        : undefined;
+      const result = await this.presentCollectionView({
+        collectionId: existing.collection_id,
+        viewId: requestedViewId ?? existing.view_id
+      });
+      const renderSpecWithState = applyCollectionPresentationViewState(
+        result.render_spec,
+        collectionPresentationUserViewStatePatch(requestedViewState)
+      );
       const updated = await this.store.updateMessagePresentationViewState({
         id: input.presentation_id,
-        viewState: input.view_state
+        viewState: collectionRenderSpecViewState(renderSpecWithState)
       });
       if (!updated) {
         throw new RuntimeRequestError("not_found", `Message presentation not found: ${input.presentation_id}`);
       }
-      const result = await this.presentCollectionView({
-        collectionId: updated.collection_id,
-        viewId: updated.view_id
-      });
-      const renderSpec = negotiatedRenderSpec(input, result.render_spec);
+      const renderSpec = negotiatedRenderSpec(input, renderSpecWithState);
       return {
         operation: input,
         result_kind: "message_presentation",
@@ -2471,9 +2559,6 @@ export class AgentRuntime {
     }
 
     if (input.kind === "collection.record.patch") {
-      if (input.collection_id === TASKS_COLLECTION_ID) {
-        validateTaskRecordPatchData(input.changes);
-      }
       const result = await this.applyCollectionPatch({
         collectionId: input.collection_id,
         recordId: input.record_id,
@@ -2516,119 +2601,34 @@ export class AgentRuntime {
       };
     }
 
+    if (input.kind === "collection.action.run") {
+      const result = await this.runCollectionAction({
+        collectionId: input.collection_id,
+        actionId: input.action_id,
+        backendId: input.backend_id,
+        recordId: input.record_id,
+        sessionId: input.session_id,
+        payload: input.payload
+      });
+      const view = await this.presentCollectionView({
+        collectionId: input.collection_id,
+        viewId: input.view_id
+      });
+      const renderSpec = negotiatedRenderSpec(input, view.render_spec);
+      const actionChat = "chat" in result ? result.chat : undefined;
+      const actionCustomView = collectionActionGeneratedCustomViewRenderSpec(input, renderSpec, result);
+      const actionCustomViewRenderSpec = actionCustomView ? negotiatedRenderSpec(input, actionCustomView) : undefined;
+      const chatRenderSpec = actionChat ? negotiatedRenderSpec(input, chatTurnRenderSpec(actionChat)) : undefined;
+      return {
+        operation: input,
+        result_kind: "collection_action",
+        render_spec: renderSpec,
+        render_specs: [renderSpec, actionCustomViewRenderSpec, chatRenderSpec].filter((spec): spec is SurfaceRenderSpec => Boolean(spec)),
+        result
+      };
+    }
+
     return this.runStructuredSurfaceOperation(input);
-  }
-
-  private async runLocalAppSurfaceOperation(input: MessageSubmitOperation): Promise<SurfaceOperationRuntimeResult> {
-    if (!input.session_id) {
-      throw new RuntimeRequestError("conflict", "surface_operation_session_required");
-    }
-    const session = await this.store.getSession(input.session_id);
-    if (!session) {
-      throw new Error(`Session not found: ${input.session_id}`);
-    }
-
-    const settings = await this.store.getSettings();
-    const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
-    const outputLocale = input.output_locale ?? session.output_locale ?? settings.output_locale;
-    const envelope = createGatewayEnvelope(webGatewayContext, input.content, inputLocale, outputLocale, {
-      ...(input.metadata ?? {}),
-      surface_operation_id: input.id,
-      surface_operation_kind: input.kind,
-      surface_operation_payload: jsonSafe(input)
-    });
-    const userMessage = await this.saveMessage({
-      id: createId("message"),
-      session_id: session.id,
-      role: "user",
-      content: input.content,
-      input_locale: envelope.input_locale,
-      output_locale: envelope.output_locale,
-      envelope,
-      created_at: envelope.received_at
-    });
-
-    const operations: OperationRecord[] = [];
-    const policyDecisions: PolicyDecisionRecord[] = [];
-    const auditRecords: AuditRecord[] = [];
-    const rollbackPoints: RollbackPoint[] = [];
-    let activity: ActivityInboxItem[] = [];
-    const schemaResult = await this.ensureTasksCollectionSchema({ session, envelope });
-    if ("operation" in schemaResult) {
-      operations.push(schemaResult.operation);
-      policyDecisions.push(schemaResult.policyDecision);
-      auditRecords.push(schemaResult.auditRecord);
-      if (schemaResult.rollbackPoint) rollbackPoints.push(schemaResult.rollbackPoint);
-      activity = schemaResult.activity;
-    }
-    const records = await this.store.listCollectionRecords(TASKS_COLLECTION_ID);
-    const schema = await this.store.getCollectionSchema(TASKS_COLLECTION_ID);
-    const appSpec = taskListRenderSpec(records, session.id, userMessage.id, schema);
-    const agentContent = outputLocale === "ja" ? "タスクアプリを作成しました。" : "Created the task app.";
-
-    const backendRun: BackendRunRecord = await this.store.saveBackendRun({
-      id: createId("run"),
-      session_id: session.id,
-      input_message_id: userMessage.id,
-      backend_id: "surface-operation",
-      backend_kind: "samurai_native",
-      status: "completed",
-      started_at: userMessage.created_at,
-      completed_at: nowIso(),
-      input_summary: summarize(input.content),
-      output_summary: agentContent,
-      metadata: {
-        surface_operation_id: input.id,
-        surface_operation_kind: input.kind,
-        local_app_operation: true
-      }
-    });
-    await this.emit("backend.run.created", backendRun);
-    await this.emit("backend.run.updated", backendRun);
-
-    const agentMessage = await this.saveMessage({
-      id: createId("message"),
-      session_id: session.id,
-      role: "agent",
-      content: agentContent,
-      input_locale: inputLocale,
-      output_locale: outputLocale,
-      created_at: nowIso()
-    });
-
-    const result: RunChatTurnResult = {
-      session: (await this.store.getSession(session.id)) ?? session,
-      messages: [userMessage, agentMessage],
-      messagePresentations: [],
-      backendRun,
-      backendEvents: [],
-      workspaceChanges: [],
-      operations,
-      policyDecisions,
-      artifacts: [],
-      memories: [],
-      approvalRequests: [],
-      auditRecords,
-      rollbackPoints,
-      activity,
-      reflectionRuns: [],
-      reflectionSuggestions: [],
-      toolRuns: []
-    };
-    const chatRender = negotiatedRenderSpec(input, chatTurnRenderSpec(result));
-    const localAppRender = negotiatedRenderSpec(input, appSpec);
-    result.messagePresentations = await this.saveMessagePresentationsForRenderSpecs({
-      sessionId: session.id,
-      messageId: agentMessage.id,
-      renderSpecs: [localAppRender]
-    });
-    return {
-      operation: input,
-      result_kind: "chat_turn",
-      render_spec: chatRender,
-      render_specs: [chatRender, localAppRender],
-      result
-    };
   }
 
   private async saveMessagePresentationsForRenderSpecs(input: {
@@ -2680,13 +2680,123 @@ export class AgentRuntime {
     return presentations;
   }
 
-  private async resolveDirectCollectionPresentation(input: MessageSubmitOperation): Promise<CollectionPresentationDescriptor | undefined> {
-    if (!shouldPresentCollectionOutput(input.content) || shouldCreateCollectionSchemaOutput(input.content)) {
+  private async resolveDirectCollectionPresentation(input: MessageSubmitOperation): Promise<CollectionPresentationResolution | undefined> {
+    if (shouldCreateCollectionSchemaOutput(input.content)) {
       return undefined;
     }
-    const descriptor = await this.resolveCollectionPresentationDescriptor({ query: input.content });
+    if (!shouldPresentCollectionOutput(input.content) && !shouldUpdateCollectionViewOutput(input.content)) {
+      return undefined;
+    }
+    const descriptor = await this.resolveCollectionPresentationDescriptor({
+      query: input.content,
+      session_id: input.session_id ?? ""
+    });
     const presentation = messagePresentationDescriptorFromToolOutput(descriptor);
-    return presentation?.status === "ready" ? presentation : undefined;
+    if (presentation?.status === "ready") {
+      return presentation;
+    }
+    if (descriptor.status === "ambiguous") {
+      const candidates = Array.isArray(descriptor.candidates)
+        ? descriptor.candidates.filter((candidate): candidate is Record<string, JsonValue> => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate))
+        : [];
+      return {
+        status: "ambiguous",
+        query: typeof descriptor.query === "string" ? descriptor.query : input.content,
+        message: typeof descriptor.message === "string" ? descriptor.message : "Multiple Collections matched.",
+        candidates
+      };
+    }
+    return undefined;
+  }
+
+  private async runDirectCollectionPresentationAmbiguitySurfaceOperation(
+    input: MessageSubmitOperation,
+    ambiguity: CollectionPresentationAmbiguity
+  ): Promise<SurfaceOperationRuntimeResult> {
+    const session = await this.store.getSession(input.session_id ?? "");
+    if (!session) {
+      throw new Error(`Session not found: ${input.session_id}`);
+    }
+    const settings = await this.store.getSettings();
+    const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
+    const outputLocale = input.output_locale ?? session.output_locale ?? settings.output_locale;
+    const envelope = createGatewayEnvelope(webGatewayContext, input.content, inputLocale, outputLocale, {
+      ...(input.metadata ?? {}),
+      surface_operation_id: input.id,
+      surface_operation_kind: input.kind,
+      collection_present_resolution: "ambiguous",
+      collection_present_candidates: ambiguity.candidates as unknown as JsonValue
+    });
+    const userMessage = await this.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "user",
+      content: input.content,
+      input_locale: envelope.input_locale,
+      output_locale: envelope.output_locale,
+      envelope,
+      created_at: envelope.received_at
+    });
+    const agentContent = collectionPresentationAmbiguityMessage(ambiguity.candidates, outputLocale);
+    const agentMessage = await this.saveMessage({
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: agentContent,
+      input_locale: envelope.input_locale,
+      output_locale: envelope.output_locale,
+      created_at: nowIso()
+    });
+    let backendRun: BackendRunRecord = {
+      id: createId("run"),
+      session_id: session.id,
+      input_message_id: userMessage.id,
+      output_message_id: agentMessage.id,
+      backend_id: "samurai_runtime",
+      backend_kind: "mock",
+      status: "completed",
+      started_at: envelope.received_at,
+      completed_at: nowIso(),
+      input_summary: summarize(input.content),
+      output_summary: "Collection presentation needs user choice",
+      metadata: {
+        context_intent: "workspace_task",
+        expected_outputs: ["collection_view"],
+        collection_present_resolution: "ambiguous",
+        collection_present_query: ambiguity.query,
+        collection_present_candidates: ambiguity.candidates as unknown as JsonValue
+      }
+    };
+    backendRun = await this.store.saveBackendRun(backendRun);
+    await this.emit("backend.run.created", backendRun);
+    await this.emit("backend.run.updated", backendRun);
+    const result: RunChatTurnResult = {
+      session,
+      messages: [userMessage, agentMessage],
+      messagePresentations: [],
+      backendRun,
+      backendEvents: [],
+      workspaceChanges: [],
+      operations: [],
+      policyDecisions: [],
+      artifacts: [],
+      memories: [],
+      approvalRequests: [],
+      auditRecords: [],
+      rollbackPoints: [],
+      activity: [],
+      reflectionRuns: [],
+      reflectionSuggestions: [],
+      toolRuns: []
+    };
+    const chatRender = negotiatedRenderSpec(input, chatTurnRenderSpec(result));
+    return {
+      operation: input,
+      result_kind: "chat_turn",
+      render_spec: chatRender,
+      render_specs: [chatRender],
+      result
+    };
   }
 
   private async runDirectCollectionPresentationSurfaceOperation(
@@ -2753,6 +2863,7 @@ export class AgentRuntime {
       collectionId: descriptor.collection_id,
       viewId: descriptor.view_id
     });
+    const viewSpec = applyCollectionPresentationViewState(view.render_spec, collectionDescriptorViewState(descriptor));
     const chatRender = negotiatedRenderSpec(input, chatTurnRenderSpec({
       session,
       messages: [userMessage, agentMessage],
@@ -2772,7 +2883,7 @@ export class AgentRuntime {
       reflectionSuggestions: [],
       toolRuns: []
     }));
-    const appRender = negotiatedRenderSpec(input, view.render_spec);
+    const appRender = negotiatedRenderSpec(input, viewSpec);
     return {
       operation: input,
       result_kind: "chat_turn",
@@ -2808,15 +2919,21 @@ export class AgentRuntime {
     await this.store.reindexCollections();
     const schemasAfter = await this.store.listCollectionSchemas();
     const changedCollectionIds = new Set<string>();
+    const runtimeSavedCollectionIds = new Set<string>();
     for (const operation of result.operations) {
       if (operation.operation === "collection.schema.save" && operation.result_ref?.kind === "collection_schema") {
+        runtimeSavedCollectionIds.add(operation.result_ref.id);
         changedCollectionIds.add(operation.result_ref.id);
       }
     }
     for (const schema of schemasAfter) {
-      if (beforeById.get(schema.id) !== collectionSchemaSignature(schema)) {
-        changedCollectionIds.add(schema.id);
+      if (beforeById.get(schema.id) === collectionSchemaSignature(schema)) {
+        continue;
       }
+      if (runtimeSavedCollectionIds.has(schema.id)) {
+        continue;
+      }
+      changedCollectionIds.add(schema.id);
     }
     const renderSpecs: SurfaceRenderSpec[] = [];
     for (const collectionId of changedCollectionIds) {
@@ -3157,7 +3274,9 @@ export class AgentRuntime {
       return this.runCollectionAction({
         collectionId: stringPayload(payload.collection_id),
         actionId: stringPayload(payload.action_id),
+        backendId: stringPayload(payload.backend_id) || undefined,
         recordId: stringPayload(payload.record_id) || undefined,
+        sessionId: stringPayload(payload.session_id) || undefined,
         payload: recordPayload(payload.payload)
       });
     }
@@ -3780,6 +3899,9 @@ export class AgentRuntime {
         }
         await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
         await writeFile(workspacePath.absolutePath, nextContent);
+        if (isManagedCollectionWorkspacePath(workspacePath.relativePath)) {
+          await this.store.reindexCollections();
+        }
         const rollbackPoint = await this.createRollbackPoint(
           operation,
           [ref],
@@ -5121,15 +5243,6 @@ export class AgentRuntime {
     });
   }
 
-  async ensureTasksCollectionSchema(contextOverride?: { session: SessionRecord; envelope: MessageEnvelope }): Promise<CollectionSchemaWithFilePath | CollectionSchemaRuntimeResult> {
-    const existing = await this.store.getCollectionSchema(TASKS_COLLECTION_ID);
-    if (existing) {
-      ensureCompatibleTasksCollectionSchema(existing);
-      return existing;
-    }
-    return this.saveCollectionSchema(createTasksCollectionSchema(), contextOverride);
-  }
-
   async reindexCollections(): Promise<CollectionReindexRuntimeResult> {
     const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
     const envelope = createGatewayEnvelope(webGatewayContext, "Reindex collections");
@@ -5157,9 +5270,6 @@ export class AgentRuntime {
   }
 
   async createCollectionRecord(record: CollectionRecord): Promise<CollectionRecordRuntimeResult> {
-    if (record.collection_id === TASKS_COLLECTION_ID) {
-      validateTaskRecordCreateData(record.data);
-    }
     const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
     const envelope = createGatewayEnvelope(webGatewayContext, `Create collection record: ${record.collection_id}/${record.id}`);
     const result = await this.runAllowedWrite({
@@ -5183,31 +5293,214 @@ export class AgentRuntime {
     return result;
   }
 
-  async presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<CollectionViewRuntimeResult & { render_spec: SurfaceRenderSpec }> {
-    if (input.collectionId === TASKS_COLLECTION_ID) {
-      await this.ensureTasksCollectionSchema();
-      const [records, schema] = await Promise.all([
-        this.store.listCollectionRecords(TASKS_COLLECTION_ID),
-        this.store.getCollectionSchema(TASKS_COLLECTION_ID)
-      ]);
-      const savedSchema = schema;
-      if (!savedSchema) {
-        throw new RuntimeRequestError("not_found", `Collection schema not found: ${TASKS_COLLECTION_ID}`);
+  async manageCollection(input: Record<string, JsonValue>, contextOverride?: { session: SessionRecord; envelope: MessageEnvelope }): Promise<CollectionManageRuntimeResult> {
+    const action = stringPayload(input.action);
+    const collectionId = stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.id);
+    const session = contextOverride?.session ?? await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const envelope = contextOverride?.envelope ?? createGatewayEnvelope(webGatewayContext, `Manage collection: ${collectionId || action || "collection"}`);
+    const operationName = "collection.manage";
+    return this.runAllowedWrite<Record<string, JsonValue>, Record<string, unknown>>({
+      session,
+      envelope,
+      context: webGatewayContext,
+      operationName,
+      proposedEffects: [`Run Collection manage action ${action || "unknown"}.`],
+      execute: async (operation) => {
+        const payload = await this.executeCollectionManageAction(input, operation);
+        const ref = collectionManageResultRef(payload, collectionId || stringPayload(payload.collection_id) || action || "collection");
+        return {
+          resource: payload,
+          ref,
+          summary: `Ran Collection manage action ${action}.`
+        };
       }
+    });
+  }
+
+  private async executeCollectionManageAction(input: Record<string, JsonValue>, operation: OperationRecord): Promise<Record<string, JsonValue>> {
+    const action = stringPayload(input.action);
+    const collectionId = stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.id);
+    if (action === "schemaDocs") {
       return {
-        collection_id: TASKS_COLLECTION_ID,
-        view_id: input.viewId ?? "task_list",
-        schema: savedSchema,
-        record_count: records.length,
-        render_spec: taskListRenderSpec(records, undefined, undefined, savedSchema)
+        action,
+        schema_docs: collectionSchemaDocs()
       };
     }
+    if (action === "putSchema") {
+      const schemaInput = recordPayload(input.schema) && Object.keys(recordPayload(input.schema)).length > 0
+        ? recordPayload(input.schema)
+        : input;
+      const schema = CollectionSchemaSchema.parse(schemaInput);
+      const saved = await this.store.updateCollectionSchema(schema);
+      return {
+        action,
+        collection_id: saved.id,
+        schema: saved as unknown as JsonValue,
+        status: "written"
+      };
+    }
+    if (!collectionId) {
+      throw new RuntimeRequestError("conflict", "collection_manage_collection_id_required");
+    }
+    const schema = await this.store.getCollectionSchema(collectionId);
+    if (!schema) {
+      throw new RuntimeRequestError("not_found", `Collection schema not found: ${collectionId}`);
+    }
+    if (action === "getSchema") {
+      return {
+        action,
+        collection_id: schema.id,
+        schema: schema as unknown as JsonValue
+      };
+    }
+    if (action === "patchSchema") {
+      const rawPatches = input.patches ?? input.patch;
+      const patches = validateAppEditPatch(rawPatches, schema);
+      const nextSchema = buildAppEditPatchedSchema(schema, patches, {
+        viewId: stringPayload(input.view_id)
+      });
+      if (!nextSchema) {
+        return {
+          action,
+          collection_id: schema.id,
+          status: "unchanged",
+          schema: schema as unknown as JsonValue
+        };
+      }
+      const saved = await this.store.updateCollectionSchema(nextSchema);
+      return {
+        action,
+        collection_id: saved.id,
+        status: "patched",
+        schema: saved as unknown as JsonValue
+      };
+    }
+    if (action === "getItems") {
+      const result = await this.collectionManageGetItems(schema, {
+        ids: jsonStringArray(input.ids),
+        fields: jsonStringArray(input.fields)
+      });
+      return {
+        action,
+        ...result
+      };
+    }
+    if (action === "putItems") {
+      const items = Array.isArray(input.items) ? input.items.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item) && isJsonValue(item)) : [];
+      if (items.length === 0) {
+        throw new RuntimeRequestError("conflict", "collection_manage_items_required");
+      }
+      const mode = collectionManagePutMode(input.mode);
+      const result = await this.collectionManagePutItems(schema, items, mode, operation);
+      return {
+        action,
+        ...result
+      };
+    }
+    throw new RuntimeRequestError("conflict", `collection_manage_action_unsupported:${action || "missing"}`);
+  }
+
+  private async collectionManageGetItems(schema: CollectionSchemaWithFilePath, options: { ids?: string[]; fields?: string[] } = {}): Promise<Record<string, JsonValue>> {
+    const loaded = options.ids && options.ids.length > 0
+      ? (await Promise.all(options.ids.map((id) => this.store.getCollectionRecord(schema.id, id)))).filter((record): record is CollectionRecordWithFilePath => Boolean(record))
+      : await this.store.listCollectionRecords(schema.id);
+    const linkedData = await this.genericCollectionLinkedData(schema, loaded);
+    const records = loaded.map((record) => genericCollectionRecordRenderData(record, schema, loaded, linkedData));
+    const projected = options.fields && options.fields.length > 0
+      ? records.map((record) => projectCollectionManageFields(record, options.fields ?? []))
+      : records;
+    return {
+      collection_id: schema.id,
+      count: projected.length,
+      items: projected as unknown as JsonValue,
+      linked_data: linkedData as unknown as JsonValue,
+      schema_fields: genericCollectionSchemaFields(schema, linkedData) as unknown as JsonValue
+    };
+  }
+
+  private async collectionActionResolvedRecordData(schema: CollectionSchemaWithFilePath, record: CollectionRecordWithFilePath): Promise<Record<string, JsonValue> | undefined> {
+    const result = await this.collectionManageGetItems(schema, { ids: [record.id] });
+    const items = Array.isArray(result.items) ? result.items : [];
+    const item = recordPayload(items[0]);
+    return Object.keys(item).length > 0 ? item : undefined;
+  }
+
+  private async collectionManagePutItems(
+    schema: CollectionSchemaWithFilePath,
+    items: Array<Record<string, JsonValue>>,
+    mode: "create" | "upsert" | "merge",
+    operation: OperationRecord
+  ): Promise<Record<string, JsonValue>> {
+    const written: string[] = [];
+    const rejected: Array<Record<string, JsonValue>> = [];
+    for (const item of items) {
+      const recordId = stringPayload(item.id) || stringPayload(item.record_id);
+      if (!recordId) {
+        rejected.push({ id: "(missing)", problem: "record_id_required" });
+        continue;
+      }
+      const computedProblem = collectionComputedWriteProblem(schema, item);
+      if (computedProblem) {
+        rejected.push({ id: recordId, problem: computedProblem });
+        continue;
+      }
+      try {
+        const existing = await this.store.getCollectionRecord(schema.id, recordId);
+        if (mode === "create" && existing) {
+          rejected.push({ id: recordId, problem: "record_already_exists" });
+          continue;
+        }
+        if (mode === "merge" && !existing) {
+          rejected.push({ id: recordId, problem: "record_not_found" });
+          continue;
+        }
+        const now = nowIso();
+        const data = mode === "merge" && existing
+          ? { ...existing.data, ...collectionManageRecordData(item) }
+          : collectionManageRecordData(item);
+        const saved = existing || mode !== "create"
+          ? await this.store.upsertCollectionRecord({
+              id: recordId,
+              collection_id: schema.id,
+              data,
+              resource_refs: existing?.resource_refs ?? resourceRefsPayload(item.resource_refs),
+              created_at: existing?.created_at ?? now,
+              updated_at: now
+            })
+          : await this.store.saveCollectionRecord({
+              id: recordId,
+              collection_id: schema.id,
+              data,
+              resource_refs: resourceRefsPayload(item.resource_refs),
+              created_at: now,
+              updated_at: now
+            });
+        written.push(saved.id);
+        await this.queueCollectionTriggerAutomations({
+          collectionId: saved.collection_id,
+          recordId: saved.id,
+          event: existing ? "record.patched" : "record.created"
+        });
+      } catch (error) {
+        rejected.push({ id: recordId, problem: safeRuntimeErrorMessage(error, "collection_record_write_failed") });
+      }
+    }
+    return {
+      collection_id: schema.id,
+      mode,
+      written,
+      rejected
+    };
+  }
+
+  async presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<CollectionViewRuntimeResult & { render_spec: SurfaceRenderSpec }> {
     const schema = await this.store.getCollectionSchema(input.collectionId);
     if (!schema) {
       throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
     }
     const records = await this.store.listCollectionRecords(input.collectionId);
-    const renderSpec = genericCollectionRenderSpec(schema, records, input.viewId);
+    const linkedData = await this.genericCollectionLinkedData(schema, records);
+    const renderSpec = genericCollectionRenderSpec(schema, records, input.viewId, linkedData);
     return {
       collection_id: input.collectionId,
       view_id: String(renderSpec.props.view_id ?? input.viewId ?? "default"),
@@ -5217,10 +5510,89 @@ export class AgentRuntime {
     };
   }
 
-  async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
-    if (input.collectionId === TASKS_COLLECTION_ID) {
-      validateTaskRecordPatchData(input.patch.changes);
+  private async genericCollectionLinkedData(schema: CollectionSchema, records: CollectionRecordWithFilePath[] = []): Promise<GenericCollectionLinkedData> {
+    const refOptions: Record<string, Array<Record<string, JsonValue>>> = {};
+    const refRecords: Record<string, Record<string, Record<string, JsonValue>>> = {};
+    const embedRecords: Record<string, Record<string, JsonValue> | null> = {};
+    const targetCollections = new Set<string>();
+    const missingRefs: Array<Record<string, JsonValue>> = [];
+    for (const ref of schema.refs) {
+      const field = collectionDefinitionFieldRuntime(ref);
+      if (!field) {
+        continue;
+      }
+      const targetCollectionId = collectionDefinitionStringRuntime(ref, "collection_id")
+        ?? collectionDefinitionStringRuntime(ref, "target_collection_id")
+        ?? schema.id;
+      targetCollections.add(targetCollectionId);
+      const [targetSchema, targetRecords] = await Promise.all([
+        this.store.getCollectionSchema(targetCollectionId),
+        this.store.listCollectionRecords(targetCollectionId)
+      ]);
+      const targetRecordIds = new Set(targetRecords.map((record) => record.id));
+      refOptions[field] = targetRecords.map((record) => genericCollectionRefOption(record));
+      refRecords[field] = Object.fromEntries(targetRecords.map((record) => [
+        record.id,
+        genericCollectionRecordRenderData(record, targetSchema ?? schema, targetRecords)
+      ]));
+      const refId = collectionDefinitionStringRuntime(ref, "id") ?? field;
+      for (const record of records) {
+        const targetRecordId = record.data[field];
+        if (typeof targetRecordId !== "string" || !targetRecordId.trim() || targetRecordIds.has(targetRecordId)) {
+          continue;
+        }
+        missingRefs.push({
+          collection_id: schema.id,
+          record_id: record.id,
+          field,
+          ref_id: refId,
+          target_collection_id: targetCollectionId,
+          target_record_id: targetRecordId,
+          message: `Missing referenced record: ${targetCollectionId}/${targetRecordId}`
+        });
+      }
     }
+    for (const embed of schema.embeds) {
+      const field = collectionDefinitionFieldRuntime(embed);
+      if (!field) {
+        continue;
+      }
+      const targetCollectionId = collectionDefinitionStringRuntime(embed, "collection_id")
+        ?? collectionDefinitionStringRuntime(embed, "target_collection_id")
+        ?? collectionDefinitionStringRuntime(embed, "to");
+      const targetRecordId = collectionDefinitionStringRuntime(embed, "record_id")
+        ?? collectionDefinitionStringRuntime(embed, "target_record_id")
+        ?? collectionDefinitionStringRuntime(embed, "target_id");
+      if (!targetCollectionId || !targetRecordId) {
+        continue;
+      }
+      targetCollections.add(targetCollectionId);
+      const [targetSchema, target] = await Promise.all([
+        this.store.getCollectionSchema(targetCollectionId),
+        this.store.getCollectionRecord(targetCollectionId, targetRecordId)
+      ]);
+      embedRecords[field] = target ? genericCollectionRecordRenderData(target, targetSchema ?? schema, [target]) : null;
+      if (!target) {
+        missingRefs.push({
+          collection_id: schema.id,
+          field,
+          embed_id: collectionDefinitionStringRuntime(embed, "id") ?? field,
+          target_collection_id: targetCollectionId,
+          target_record_id: targetRecordId,
+          message: `Missing embedded record: ${targetCollectionId}/${targetRecordId}`
+        });
+      }
+    }
+    return {
+      ref_options: refOptions,
+      ref_records: refRecords,
+      embed_records: embedRecords,
+      target_collection_ids: [...targetCollections],
+      missing_refs: missingRefs
+    };
+  }
+
+  async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
     const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
     const envelope = createGatewayEnvelope(webGatewayContext, `Apply collection patch: ${input.collectionId}/${input.recordId}`);
     const result = await this.runAllowedWrite({
@@ -5299,7 +5671,9 @@ export class AgentRuntime {
   async runCollectionAction(input: {
     collectionId: string;
     actionId: string;
+    backendId?: string;
     recordId?: string;
+    sessionId?: string;
     payload?: Record<string, unknown>;
   }): Promise<CollectionActionRuntimeResult> {
     const schema = await this.store.getCollectionSchema(input.collectionId);
@@ -5312,10 +5686,15 @@ export class AgentRuntime {
     }
     const kind = collectionActionKind(action);
     const payload = jsonRecord(input.payload ?? {});
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    const session = input.sessionId
+      ? await this.store.getSession(input.sessionId)
+      : await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+    if (!session) {
+      throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
+    }
     const envelope = createGatewayEnvelope(webGatewayContext, `Run collection action: ${input.collectionId}/${input.actionId}`);
     let patchBefore: CollectionRecordWithFilePath | undefined;
-    const result = await this.runAllowedWrite<CollectionRecordWithFilePath | CollectionReindexResult | CollectionPluginActionResult, Record<string, unknown>>({
+    const result = await this.runAllowedWrite<CollectionRecordWithFilePath | CollectionReindexResult | CollectionPluginActionResult | CollectionInstructionActionResult, { chat?: RunChatTurnResult }>({
       session,
       envelope,
       context: webGatewayContext,
@@ -5394,6 +5773,64 @@ export class AgentRuntime {
             summary: `Ran collection action ${input.actionId} and reindexed collections.`
           };
         }
+        if (isInstructionCollectionActionKind(kind)) {
+          const recordId = input.recordId ?? collectionActionString(action, "record_id") ?? stringPayload(payload.record_id);
+          const record = recordId ? await this.store.getCollectionRecord(input.collectionId, recordId) : undefined;
+          if (recordId && !record) {
+            throw new RuntimeRequestError("not_found", `Collection record not found: ${input.collectionId}/${recordId}`);
+          }
+          const resolvedRecordData = record ? await this.collectionActionResolvedRecordData(schema, record) : undefined;
+          const instruction = collectionActionInstruction(action, payload);
+          if (!instruction) {
+            throw new RuntimeRequestError("conflict", `collection_action_instruction_required:${input.actionId}`);
+          }
+          const chat = await this.runChatTurn({
+            sessionId: session.id,
+            content: collectionActionInstructionPrompt({
+              collectionId: input.collectionId,
+              actionId: input.actionId,
+              instruction,
+              record,
+              resolvedRecordData,
+              payload,
+              outputSurface: collectionActionOutputSurface(action, payload)
+            }),
+            backend_id: input.backendId,
+            input_locale: session.ui_locale,
+            output_locale: session.output_locale,
+            metadata: {
+              collection_action_operation_id: operation.id,
+              collection_id: input.collectionId,
+              collection_action_id: input.actionId,
+              collection_action_kind: kind,
+              ...(recordId ? { collection_record_id: recordId } : {})
+            },
+            gateway_context: webGatewayContext
+          });
+          const customView = collectionActionOutputSurface(action, payload) === "custom_view"
+            ? collectionActionCustomViewOutput(chat)
+            : undefined;
+          const resource: CollectionInstructionActionResult = {
+            collection_id: input.collectionId,
+            action_id: input.actionId,
+            action_kind: kind,
+            status: "completed",
+            backend_run_id: chat.backendRun.id,
+            session_id: chat.session.id,
+            ...(customView ? { custom_view: customView } : {}),
+            output: {
+              backend_status: chat.backendRun.status,
+              message_ids: chat.messages.map((message) => message.id),
+              ...(customView ? { custom_view: customView } : {})
+            }
+          };
+          return {
+            resource,
+            ref: collectionActionExecutionRef(input.collectionId, input.actionId, operation.id),
+            chat,
+            summary: `Ran collection instruction action ${input.collectionId}/${input.actionId}.`
+          };
+        }
         if (isPluginCollectionAction(action, kind)) {
           const catalogActionId = collectionActionCatalogId(action, input.actionId);
           const pluginInput: Record<string, JsonValue> = {
@@ -5447,7 +5884,7 @@ export class AgentRuntime {
         event: "record.created"
       });
     }
-    return result as CollectionRecordRuntimeResult | CollectionReindexRuntimeResult | CollectionPluginActionRuntimeResult;
+    return result as CollectionRecordRuntimeResult | CollectionReindexRuntimeResult | CollectionPluginActionRuntimeResult | CollectionInstructionActionRuntimeResult;
   }
 
   private async runMemoryReviewTraceReflection(session: SessionRecord): Promise<ReflectionRuntimeResult> {
@@ -5908,7 +6345,9 @@ export class AgentRuntime {
       this.store.listArtifactsForSession(run.session_id)
     ]);
     const workspaceChanges = allChanges.filter((change) => change.run_id === run.id);
+    const runToolRuns = allToolRuns.filter((toolRun) => toolRun.run_id === run.id);
     const operationIds = new Set(workspaceChanges.map((change) => change.legacy_operation_id).filter((id): id is string => Boolean(id)));
+    const toolRunResourceKeys = new Set(runToolRuns.flatMap((toolRun) => toolRun.resource_refs.flatMap(resourceRefLookupKeys)));
     const artifactRefs = new Set(
       workspaceChanges
         .filter((change) => change.change_type === "artifact_created")
@@ -5916,10 +6355,13 @@ export class AgentRuntime {
         .filter(Boolean)
     );
     return {
-      operations: allOperations.filter((operation) => operationIds.has(operation.id)),
+      operations: allOperations.filter((operation) =>
+        operationIds.has(operation.id)
+        || (operation.result_ref ? resourceRefLookupKeys(operation.result_ref).some((key) => toolRunResourceKeys.has(key)) : false)
+      ),
       artifacts: allArtifacts.filter((artifact) => artifactRefs.has(artifact.id) || artifactRefs.has(artifact.file_ref.id) || artifactRefs.has(artifact.file_ref.uri)),
       workspaceChanges,
-      toolRuns: allToolRuns.filter((toolRun) => toolRun.run_id === run.id)
+      toolRuns: runToolRuns
     };
   }
 
@@ -6144,7 +6586,7 @@ export class AgentRuntime {
       | BrowserActionRuntimeResult
       | ExternalSendRuntimeResult
       | AutomationJobRuntimeResult
-      | RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath | CollectionSchemaWithFilePath>
+      | RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath | CollectionSchemaWithFilePath | CollectionRecordWithFilePath | Record<string, JsonValue>>
       | undefined;
 
     if (toolName === "file.read" || toolName === "file.list" || toolName === "file.write" || toolName === "file.patch") {
@@ -6181,6 +6623,28 @@ export class AgentRuntime {
         throw new RuntimeRequestError("not_found", "session_not_found");
       }
       result = await this.saveCollectionSchema(CollectionSchemaSchema.parse(args), {
+        session,
+        envelope: runInput.envelope
+      });
+    } else if (toolName === "collection.record.create") {
+      const collectionId = stringPayload(args.collection_id);
+      if (!collectionId) {
+        throw new RuntimeRequestError("conflict", "collection_record_create_collection_id_required");
+      }
+      result = await this.createCollectionRecord({
+        id: stringPayload(args.record_id) || stringPayload(args.id) || createId("collection_record"),
+        collection_id: collectionId,
+        data: recordPayload(args.data),
+        resource_refs: resourceRefsPayload(args.resource_refs),
+        created_at: nowIso(),
+        updated_at: nowIso()
+      });
+    } else if (toolName === "collection.manage" || toolName === "samurai.collection.manage" || normalizeSamuraiToolBridgeName(toolName) === "samurai.collection.manage") {
+      const session = await this.store.getSession(run.session_id);
+      if (!session) {
+        throw new RuntimeRequestError("not_found", "session_not_found");
+      }
+      result = await this.manageCollection(args, {
         session,
         envelope: runInput.envelope
       });
@@ -6241,9 +6705,19 @@ export class AgentRuntime {
         created_at: nowIso()
       }]
       : undefined;
+    const collectionManageOutput = isCollectionManageResource(result.resource)
+      ? {
+          status: "completed",
+          provider_tool_name: providerToolName || toolName,
+          action_id: "collection.manage",
+          output_summary: summarize(JSON.stringify(result.resource), 220),
+          output: result.resource
+        }
+      : undefined;
     return {
       operation: result.operation,
       toolRun,
+      ...(collectionManageOutput ? { outputPayload: collectionManageOutput } : {}),
       ...(collectionSchema ? { collectionSchemas: [collectionSchema] } : {}),
       ...(workspaceChanges ? { workspaceChanges } : {})
     };
@@ -6866,34 +7340,6 @@ export class AgentRuntime {
     };
   }
 
-  private async buildTasksContextNotes(): Promise<Array<{ collection_id: string; file_path: string; content: string; role: "context_only" }>> {
-    const schema = await this.store.getCollectionSchema(TASKS_COLLECTION_ID);
-    if (!schema) {
-      return [];
-    }
-    ensureCompatibleTasksCollectionSchema(schema);
-    const records = await this.store.listCollectionRecords(TASKS_COLLECTION_ID);
-    if (records.length === 0) {
-      return [];
-    }
-    const taskRecords = records.map((record) => taskRecordRenderData(record, schema));
-    const active = taskRecords.filter((record) => record.completed !== true);
-    const completed = taskRecords.length - active.length;
-    const lines = [
-      `Tasks summary: ${active.length} active, ${completed} completed.`,
-      ...active.slice(0, 8).map((record) => {
-        const dueDate = typeof record.due_date === "string" && record.due_date ? ` due:${record.due_date}` : "";
-        return `- ${record.title}${dueDate}`;
-      })
-    ];
-    return [{
-      collection_id: TASKS_COLLECTION_ID,
-      file_path: `collections/${TASKS_COLLECTION_ID}`,
-      content: lines.join("\n"),
-      role: "context_only"
-    }];
-  }
-
   private async buildContextPreview(
     sessionId: string,
     query: string,
@@ -6996,8 +7442,7 @@ export class AgentRuntime {
       })
     )).flat();
     const collectionNotes = selectCollectionNotes(allCollectionNotes, query);
-    const taskContextNotes = skipHeavyContext ? [] : await this.buildTasksContextNotes();
-    const collectionContextNotes = [...taskContextNotes, ...collectionNotes];
+    const collectionContextNotes = collectionNotes;
     const knowledgeWiki = knowledgeWikiContext.entries;
     const sessionSearchForBackend = shouldIncludeSessionSearchInBackendContext(query)
       ? sessionSearchValues.slice(0, hostContextAssemblyLimits.session_search)
@@ -7037,7 +7482,7 @@ export class AgentRuntime {
       activeMemoryCandidateCount: activeMemoryResult.report.candidate_count,
       knowledgeWikiCandidateCount: knowledgeWikiContext.report.candidate_count,
       knowledgeWikiIncludedCount: knowledgeWiki.length,
-      collectionNoteCandidateCount: allCollectionNotes.length + taskContextNotes.length,
+      collectionNoteCandidateCount: allCollectionNotes.length,
       collectionNoteIncludedCount: collectionContextNotes.length,
       selectedSkillCount: selectedSkillEntries.length,
       sessionSearchCandidateCount: sessionSearchValues.length,
@@ -8640,6 +9085,7 @@ function surfaceArtifactRenderSpec(
     });
   }
   if (operation.kind === "custom_view.action") {
+    const customViewContract = customViewSandboxContract(operation, refs);
     return createSurfaceRenderSpec({
       kind: "custom_view",
       priority: "primary",
@@ -8649,6 +9095,8 @@ function surfaceArtifactRenderSpec(
       props: {
         view_id: operation.view_id,
         renderer: typeof operation.payload.renderer === "string" ? operation.payload.renderer : "generic",
+        sandbox: customViewContract.sandbox,
+        capability: customViewContract.capability,
         actions: [],
         data: {
           ...operation.payload,
@@ -8673,6 +9121,41 @@ function surfaceArtifactRenderSpec(
       source_artifact_id: result.sourceArtifact?.id ?? null
     }
   });
+}
+
+function customViewSandboxContract(operation: { id?: string; view_id: string; action_id: string; allowed_action_ids?: string[] }, resourceRefs: ResourceRef[]): {
+  sandbox: Record<string, JsonValue>;
+  capability: Record<string, JsonValue>;
+} {
+  const allowedActions = operation.allowed_action_ids?.length ? operation.allowed_action_ids : [operation.action_id];
+  return {
+    sandbox: {
+      mode: "iframe",
+      allow_scripts: true,
+      allow_forms: false,
+      allow_same_origin: false,
+      network_access: "read",
+      workspace_access: "read"
+    },
+    capability: {
+      token_id: `custom_view:${stableHash(`${operation.id ?? ""}:${operation.view_id}:${operation.action_id}`).slice(0, 16)}`,
+      allowed_actions: allowedActions,
+      read_resource_refs: resourceRefs.map((ref) => jsonSafe(ref)),
+      write_operations: ["custom_view.action"],
+      data_url: customViewDataUrl(resourceRefs),
+      data_capabilities: ["read", "write"]
+    }
+  };
+}
+
+function customViewDataUrl(resourceRefs: ResourceRef[]): string {
+  const collectionRef = resourceRefs.find((ref) => ref.kind === "collection");
+  const collectionId = collectionRef?.id
+    ?? resourceRefs
+      .map((ref) => ref.uri.match(/^collections\/([^/]+)/)?.[1])
+      .find((id): id is string => Boolean(id))
+    ?? "";
+  return collectionId ? `/api/collections/${encodeURIComponent(collectionId)}/view-data` : "";
 }
 
 function surfaceFormFieldType(value: JsonValue): "text" | "textarea" | "number" | "select" | "checkbox" | "date" | "datetime" | "file" | "hidden" {
@@ -8741,179 +9224,63 @@ function chatTurnRenderSpec(result: RunChatTurnResult): SurfaceRenderSpec {
   });
 }
 
-const TASKS_COLLECTION_ID = "tasks";
-const TASK_FIELD_IDS = ["title", "completed", "notes", "due_date", "order", "source_session_id", "source_message_id"] as const;
-const REQUIRED_TASK_FIELD_IDS = ["title", "completed", "notes", "due_date", "order", "source_session_id", "source_message_id"] as const;
-const APP_EDIT_FIELD_TYPES = ["string", "text", "date", "boolean", "number", "enum"] as const;
-const TASK_INTERNAL_FIELD_IDS = ["source_session_id", "source_message_id", "order"] as const;
+const APP_EDIT_FIELD_TYPES = ["string", "text", "date", "datetime", "boolean", "number", "enum"] as const;
 const GENERIC_COLLECTION_RENDERER = "collection_table";
 const COLLECTION_RENDERERS = ["collection_table", "collection_gallery", "calendar_view", "collection_kanban"] as const;
+type CollectionRenderer = (typeof COLLECTION_RENDERERS)[number];
 const FUTURE_COLLECTION_RENDERERS = ["collection_gallery", "calendar_view", "collection_kanban", "study_deck", "document_reader"] as const;
 
 type AppEditFieldType = (typeof APP_EDIT_FIELD_TYPES)[number];
 type AppEditPatch =
   | { op: "add_field"; field: { id: string; type: AppEditFieldType; label?: string; required?: boolean; enum_values?: string[]; default_value?: JsonValue } }
+  | { op: "add_derived_field"; field: { id: string; type: AppEditFieldType; label?: string; expression: JsonValue } }
   | { op: "update_field"; field_id: string; changes: { label?: string; enum_values?: string[]; type?: AppEditFieldType } }
   | { op: "hide_field"; field_id: string }
-  | { op: "update_view"; view_id?: string; hidden_fields?: string[]; emphasized_fields?: string[]; density?: "comfortable" | "compact"; allow_delete?: boolean }
+  | { op: "update_view"; view_id?: string; renderer?: CollectionRenderer; hidden_fields?: string[]; emphasized_fields?: string[]; density?: "comfortable" | "compact"; allow_delete?: boolean }
   | { op: "set_sort"; field_id: string; direction: "asc" | "desc"; completed_last?: boolean }
   | { op: "set_group"; field_id: string }
-  | { op: "set_permissions"; allow_delete?: boolean }
-  | { op: "backfill_records"; field_id: string; value: JsonValue };
+  | { op: "set_permissions"; allow_delete?: boolean };
 
-interface TaskRecordRenderData extends Record<string, JsonValue> {
-  id: string;
-  title: string;
-  completed: boolean;
-  notes: string;
-  due_date: string;
-  order: number;
-  source_session_id: string;
-  source_message_id: string;
-  file_path: string;
-  updated_at: string;
+interface AppEditPatchOptions {
+  viewId?: string;
+  targetDescription?: string;
+  renderer?: string;
 }
 
-function isTaskListAppRequest(content: string): boolean {
-  const normalized = content.toLowerCase();
-  return [
-    "タスク管理アプリ",
-    "タスクアプリ",
-    "task list",
-    "task_list",
-    "todo app",
-    "todo list"
-  ].some((keyword) => normalized.includes(keyword));
-}
+type GenericCollectionLinkedData = {
+  ref_options: Record<string, Array<Record<string, JsonValue>>>;
+  ref_records: Record<string, Record<string, Record<string, JsonValue>>>;
+  embed_records: Record<string, Record<string, JsonValue> | null>;
+  target_collection_ids: string[];
+  missing_refs: Array<Record<string, JsonValue>>;
+};
 
-function createTasksCollectionSchema(): CollectionSchema {
-  return {
-    id: TASKS_COLLECTION_ID,
-    version: "1",
-    labels: { ja: "タスク", en: "Tasks" },
-    descriptions: {
-      ja: "タスク管理アプリの保存データ。",
-      en: "Saved records for the task list app."
-    },
-    fields: [
-      { id: "title", type: "string", required: true },
-      { id: "completed", type: "boolean" },
-      { id: "notes", type: "string" },
-      { id: "due_date", type: "string" },
-      { id: "order", type: "number" },
-      { id: "source_session_id", type: "string" },
-      { id: "source_message_id", type: "string" }
-    ],
-    refs: [],
-    embeds: [],
-    derived_fields: [],
-    triggers: [],
-    actions: [],
-    views: [taskListViewConfig()],
-    permissions: {}
-  };
-}
+const emptyGenericCollectionLinkedData: GenericCollectionLinkedData = {
+  ref_options: {},
+  ref_records: {},
+  embed_records: {},
+  target_collection_ids: [],
+  missing_refs: []
+};
 
-function ensureCompatibleTasksCollectionSchema(schema: CollectionSchema): void {
-  const fieldIds = new Set(schema.fields.map((field) => {
-    const id = field.id ?? field.name;
-    return typeof id === "string" ? id : "";
-  }));
-  const missing = REQUIRED_TASK_FIELD_IDS.filter((id) => !fieldIds.has(id));
-  if (missing.length > 0) {
-    throw new RuntimeRequestError("conflict", `tasks_collection_schema_incompatible:${missing.join(",")}`);
-  }
-}
-
-function validateTaskRecordCreateData(data: Record<string, JsonValue>): void {
-  validateTaskRecordData(data, { requireTitle: true });
-}
-
-function validateTaskRecordPatchData(data: Record<string, JsonValue>): void {
-  validateTaskRecordData(data, { requireTitle: false });
-}
-
-function validateTaskRecordData(data: Record<string, JsonValue>, options: { requireTitle: boolean }): void {
-  const allowed = new Set<string>(TASK_FIELD_IDS);
-  for (const key of Object.keys(data)) {
-    if (!allowed.has(key) && !isValidAppFieldId(key)) {
-      throw new RuntimeRequestError("conflict", `tasks_unknown_field:${key}`);
-    }
-  }
-  if (options.requireTitle || Object.prototype.hasOwnProperty.call(data, "title")) {
-    if (typeof data.title !== "string" || data.title.trim().length === 0) {
-      throw new RuntimeRequestError("conflict", "tasks_title_required");
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "completed") && typeof data.completed !== "boolean") {
-    throw new RuntimeRequestError("conflict", "tasks_completed_boolean_required");
-  }
-  for (const key of ["notes", "due_date", "source_session_id", "source_message_id"]) {
-    if (Object.prototype.hasOwnProperty.call(data, key) && typeof data[key] !== "string") {
-      throw new RuntimeRequestError("conflict", `tasks_${key}_string_required`);
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "order") && typeof data.order !== "number") {
-    throw new RuntimeRequestError("conflict", "tasks_order_number_required");
-  }
-}
-
-function taskListRenderSpec(records: CollectionRecordWithFilePath[], sessionId?: string, sourceMessageId?: string, schema?: CollectionSchema): SurfaceRenderSpec {
-  const viewConfig = taskListViewConfig(records, schema);
-  const taskRecords = sortTaskRecords(records.map((record) => taskRecordRenderData(record, schema)), viewConfig);
-  const activeCount = taskRecords.filter((record) => !record.completed).length;
-  const completedCount = taskRecords.length - activeCount;
-  const refs = records.map(collectionRecordRef);
-  return createSurfaceRenderSpec({
-    kind: "custom_view",
-    priority: "secondary",
-    state: "ready",
-    title: "タスク",
-    resource_refs: refs.length > 0 ? refs : [{
-      kind: "collection",
-      id: TASKS_COLLECTION_ID,
-      uri: `collections/${TASKS_COLLECTION_ID}`,
-      label: "tasks"
-    }],
-    props: {
-      view_id: "task_list",
-      renderer: "task_list",
-      renderer_version: "1",
-      schema_ref: `collections/${TASKS_COLLECTION_ID}/schema.json`,
-      actions: taskListActions(schema),
-      data: {
-        collection_id: TASKS_COLLECTION_ID,
-        records: taskRecords,
-        schema_fields: taskSchemaFields(records, schema),
-        view_config: viewConfig,
-        counts: {
-          total: taskRecords.length,
-          active: activeCount,
-          completed: completedCount
-        },
-        source_session_id: sessionId ?? "",
-        source_message_id: sourceMessageId ?? "",
-        record_ids: taskRecords.map((record) => record.id)
-      }
-    },
-    fallback: {
-      kind: "collection",
-      title: "tasks",
-      message: "Open the tasks Collection if this app renderer is unavailable.",
-      props: {
-        collection_id: TASKS_COLLECTION_ID,
-        record_ids: taskRecords.map((record) => record.id)
-      }
-    }
-  });
-}
-
-function genericCollectionRenderSpec(schema: CollectionSchema, records: CollectionRecordWithFilePath[], requestedViewId?: string): SurfaceRenderSpec {
+function genericCollectionRenderSpec(
+  schema: CollectionSchema,
+  records: CollectionRecordWithFilePath[],
+  requestedViewId?: string,
+  linkedData: GenericCollectionLinkedData = emptyGenericCollectionLinkedData
+): SurfaceRenderSpec {
   const viewConfig = genericCollectionViewConfig(schema, requestedViewId);
-  const recordData = records.map((record) => genericCollectionRecordRenderData(record, schema));
+  const viewOptions = genericCollectionViewOptions(schema);
+  const recordData = records.map((record) => genericCollectionRecordRenderData(record, schema, records, linkedData));
   const refs = records.map(collectionRecordRef);
   const title = schema.labels?.ja ?? schema.labels?.en ?? schema.id;
   const recordIds = recordData.map((record) => String(record.id));
+  const viewState = collectionViewState({
+    collectionId: schema.id,
+    viewConfig,
+    renderer: String(viewConfig.renderer),
+    recordCount: recordData.length
+  });
   return createSurfaceRenderSpec({
     kind: "custom_view",
     priority: "secondary",
@@ -8929,13 +9296,17 @@ function genericCollectionRenderSpec(schema: CollectionSchema, records: Collecti
       view_id: String(viewConfig.id),
       renderer: String(viewConfig.renderer),
       renderer_version: "1",
+      view_state: viewState,
       schema_ref: `collections/${schema.id}/schema.json`,
       actions: genericCollectionActions(schema, String(viewConfig.id)),
       data: {
         collection_id: schema.id,
         records: recordData,
-        schema_fields: genericCollectionSchemaFields(schema),
+        schema_fields: genericCollectionSchemaFields(schema, linkedData),
         view_config: viewConfig,
+        view_options: viewOptions,
+        view_state: viewState,
+        linked_data: linkedData as unknown as JsonValue,
         counts: {
           total: recordData.length
         },
@@ -8952,6 +9323,91 @@ function genericCollectionRenderSpec(schema: CollectionSchema, records: Collecti
         record_ids: recordIds
       }
     }
+  });
+}
+
+function collectionActionGeneratedCustomViewRenderSpec(
+  operation: Extract<SurfaceOperation, { kind: "collection.action.run" }>,
+  collectionRenderSpec: SurfaceRenderSpec,
+  actionResult: CollectionActionRuntimeResult
+): SurfaceRenderSpec | undefined {
+  const customView = collectionActionResultCustomView(actionResult);
+  if (!customView) {
+    return undefined;
+  }
+  const viewId = stringPayload(customView.view_id)
+    || `${operation.collection_id}_${operation.action_id}_custom`;
+  const renderer = stringPayload(customView.renderer) || "generic";
+  const actions = collectionActionGeneratedCustomViewActions(customView);
+  const allowedActionIds = actions.map((action) => stringPayload(action.id)).filter(Boolean);
+  const contract = customViewSandboxContract({
+    id: operation.id,
+    view_id: viewId,
+    action_id: operation.action_id,
+    allowed_action_ids: allowedActionIds.length > 0 ? allowedActionIds : [operation.action_id]
+  }, collectionRenderSpec.resource_refs);
+  const collectionData = recordPayload(collectionRenderSpec.props.data);
+  const sourceViewState = recordPayload(collectionData.view_state);
+  const data: Record<string, JsonValue> = {
+    ...customView,
+    collection_id: operation.collection_id,
+    source_collection_view_id: String(collectionRenderSpec.props.view_id ?? ""),
+    source_action_id: operation.action_id,
+    source_view_state: sourceViewState,
+    source_collection: collectionData
+  };
+  return createSurfaceRenderSpec({
+    kind: "custom_view",
+    priority: "primary",
+    state: "ready",
+    title: stringPayload(customView.title) || collectionRenderSpec.title || operation.action_id,
+    resource_refs: collectionRenderSpec.resource_refs,
+    props: {
+      view_id: viewId,
+      renderer,
+      renderer_version: stringPayload(customView.renderer_version) || "1",
+      sandbox: contract.sandbox,
+      capability: contract.capability,
+      actions,
+      data
+    },
+    fallback: {
+      kind: "collection",
+      title: collectionRenderSpec.title || operation.collection_id,
+      message: "Open the source Collection if this custom view is unavailable.",
+      props: {
+        collection_id: operation.collection_id,
+        view_id: String(collectionRenderSpec.props.view_id ?? "")
+      }
+    }
+  });
+}
+
+function collectionActionResultCustomView(result: CollectionActionRuntimeResult): Record<string, JsonValue> | undefined {
+  const resource = unknownRecord(result.resource);
+  const customView = recordPayload(resource.custom_view as JsonValue | undefined);
+  return Object.keys(customView).length > 0 ? customView : undefined;
+}
+
+function collectionActionGeneratedCustomViewActions(customView: Record<string, JsonValue>): Array<Record<string, JsonValue>> {
+  if (!Array.isArray(customView.actions)) {
+    return [];
+  }
+  return customView.actions.flatMap((item) => {
+    const action = recordPayload(item);
+    const id = stringPayload(action.id);
+    const label = stringPayload(action.label);
+    if (!id || !label) {
+      return [];
+    }
+    return [{
+      id,
+      label,
+      operation_kind: "custom_view.action",
+      ...(stringPayload(action.action_kind) ? { action_kind: stringPayload(action.action_kind) } : {}),
+      ...(stringPayload(action.description) ? { description: stringPayload(action.description) } : {}),
+      ...(stringPayload(action.scope) === "collection" || stringPayload(action.scope) === "record" ? { scope: stringPayload(action.scope) } : {})
+    }];
   });
 }
 
@@ -8974,9 +9430,19 @@ interface CollectionPresentationDescriptor {
   renderer: string;
   title?: string;
   subtitle?: string;
+  record_count?: number;
   record_id?: string;
   view_state?: Record<string, JsonValue>;
 }
+
+interface CollectionPresentationAmbiguity {
+  status: "ambiguous";
+  query: string;
+  message: string;
+  candidates: Array<Record<string, JsonValue>>;
+}
+
+type CollectionPresentationResolution = CollectionPresentationDescriptor | CollectionPresentationAmbiguity;
 
 function messagePresentationDescriptorFromToolOutput(payload: Record<string, JsonValue>): CollectionPresentationDescriptor | undefined {
   const output = payload.output && typeof payload.output === "object" && !Array.isArray(payload.output)
@@ -8991,6 +9457,12 @@ function messagePresentationDescriptorFromToolOutput(payload: Record<string, Jso
   }
   const viewId = typeof output.view_id === "string" && output.view_id.trim() ? output.view_id.trim() : `${collectionId}_table`;
   const renderer = typeof output.renderer === "string" && output.renderer.trim() ? output.renderer.trim() : GENERIC_COLLECTION_RENDERER;
+  if (!isMessagePresentationRenderer(renderer)) {
+    return undefined;
+  }
+  const recordCount = typeof output.record_count === "number" && Number.isFinite(output.record_count) && output.record_count >= 0
+    ? output.record_count
+    : undefined;
   const recordId = typeof output.record_id === "string" && output.record_id.trim() ? output.record_id.trim() : undefined;
   const viewState = output.view_state && typeof output.view_state === "object" && !Array.isArray(output.view_state)
     ? output.view_state as Record<string, JsonValue>
@@ -9003,9 +9475,14 @@ function messagePresentationDescriptorFromToolOutput(payload: Record<string, Jso
     renderer,
     ...(typeof output.title === "string" && output.title.trim() ? { title: output.title.trim() } : {}),
     ...(typeof output.subtitle === "string" && output.subtitle.trim() ? { subtitle: output.subtitle.trim() } : {}),
+    ...(recordCount !== undefined ? { record_count: recordCount } : {}),
     ...(recordId ? { record_id: recordId } : {}),
     ...(viewState ? { view_state: viewState } : {})
   };
+}
+
+function isMessagePresentationRenderer(renderer: string): boolean {
+  return isCollectionRenderer(renderer);
 }
 
 function collectionPresentationDescriptorsFromBackendEvents(events: BackendEventRecord[]): CollectionPresentationDescriptor[] {
@@ -9017,10 +9494,7 @@ function collectionPresentationDescriptorsFromBackendEvents(events: BackendEvent
 
 function messagePresentationFromDescriptor(descriptor: CollectionPresentationDescriptor, sessionId: string, messageId: string): MessagePresentationRecord {
   const now = nowIso();
-  const viewState = {
-    ...(descriptor.view_state ?? {}),
-    ...(descriptor.record_id ? { record_id: descriptor.record_id } : {})
-  };
+  const viewState = collectionDescriptorViewState(descriptor);
   return {
     id: createId("presentation"),
     session_id: sessionId,
@@ -9037,6 +9511,50 @@ function messagePresentationFromDescriptor(descriptor: CollectionPresentationDes
   };
 }
 
+function collectionDescriptorViewState(descriptor: CollectionPresentationDescriptor): Record<string, JsonValue> {
+  return {
+    collection_id: descriptor.collection_id,
+    view_id: descriptor.view_id,
+    renderer: descriptor.renderer,
+    ...(typeof descriptor.record_count === "number" ? { record_count: descriptor.record_count } : {}),
+    ...(descriptor.view_state ?? {}),
+    ...(descriptor.record_id
+      ? {
+          record_id: descriptor.record_id,
+          selected_record_id: descriptor.record_id
+        }
+      : {})
+  };
+}
+
+function collectionPresentationAmbiguityMessage(candidates: Array<Record<string, JsonValue>>, outputLocale: SupportedLocale): string {
+  const candidateLines = candidates.slice(0, 8).map((candidate) => {
+    const title = typeof candidate.title === "string" && candidate.title.trim()
+      ? candidate.title.trim()
+      : typeof candidate.collection_id === "string" && candidate.collection_id.trim()
+        ? candidate.collection_id.trim()
+        : typeof candidate.id === "string" && candidate.id.trim()
+          ? candidate.id.trim()
+          : "Untitled";
+    const id = typeof candidate.collection_id === "string" && candidate.collection_id.trim()
+      ? candidate.collection_id.trim()
+      : typeof candidate.id === "string" && candidate.id.trim()
+        ? candidate.id.trim()
+        : "";
+    return id && id !== title ? `- ${title} (${id})` : `- ${title}`;
+  });
+  if (outputLocale === "ja") {
+    return [
+      "候補が複数あります。どれを開くか教えてください。",
+      ...candidateLines
+    ].join("\n").trim();
+  }
+  return [
+    "Multiple matches were found. Tell me which one to open.",
+    ...candidateLines
+  ].join("\n").trim();
+}
+
 function mergePresentations(primary: MessagePresentationRecord[], fallback: MessagePresentationRecord[]): MessagePresentationRecord[] {
   const merged: MessagePresentationRecord[] = [];
   const seen = new Set<string>();
@@ -9051,8 +9569,62 @@ function mergePresentations(primary: MessagePresentationRecord[], fallback: Mess
   return merged;
 }
 
+function applyCollectionPresentationViewState(spec: SurfaceRenderSpec, viewState?: Record<string, JsonValue>): SurfaceRenderSpec {
+  const patch = jsonRecordOrEmpty(viewState);
+  if (Object.keys(patch).length === 0 || spec.kind !== "custom_view") {
+    return spec;
+  }
+  const nextState = {
+    ...collectionRenderSpecViewState(spec),
+    ...patch
+  };
+  const collectionId = collectionRenderSpecCollectionId(spec);
+  const viewId = typeof nextState.view_id === "string" && nextState.view_id.trim()
+    ? nextState.view_id.trim()
+    : collectionRenderSpecViewId(spec, collectionId);
+  const renderer = typeof nextState.renderer === "string" && nextState.renderer.trim()
+    ? nextState.renderer.trim()
+    : typeof spec.props.renderer === "string" && spec.props.renderer.trim()
+      ? spec.props.renderer.trim()
+      : GENERIC_COLLECTION_RENDERER;
+  const data = spec.props.data;
+  const dataRecord = data && typeof data === "object" && !Array.isArray(data)
+    ? data as Record<string, JsonValue>
+    : undefined;
+  const nextData = dataRecord
+    ? {
+        ...dataRecord,
+        view_config: {
+          ...jsonRecordOrEmpty(dataRecord.view_config),
+          id: viewId,
+          renderer
+        },
+        view_state: nextState
+      }
+    : data;
+  return {
+    ...spec,
+    props: {
+      ...spec.props,
+      view_id: viewId,
+      renderer,
+      view_state: nextState,
+      ...(nextData !== data ? { data: nextData as JsonValue } : {})
+    }
+  };
+}
+
+function collectionPresentationUserViewStatePatch(viewState: Record<string, JsonValue>): Record<string, JsonValue> {
+  return Object.fromEntries(Object.entries(viewState).filter(([key]) => ![
+    "collection_id",
+    "view_id",
+    "renderer",
+    "record_count"
+  ].includes(key))) as Record<string, JsonValue>;
+}
+
 function messagePresentationFromRenderSpec(spec: SurfaceRenderSpec, sessionId: string, messageId: string): MessagePresentationRecord | undefined {
-  if (spec.kind !== "custom_view" || (!isCollectionRenderer(String(spec.props.renderer ?? "")) && spec.props.renderer !== "task_list")) {
+  if (spec.kind !== "custom_view" || !isCollectionRenderer(String(spec.props.renderer ?? ""))) {
     return undefined;
   }
   const collectionId = collectionRenderSpecCollectionId(spec);
@@ -9060,6 +9632,7 @@ function messagePresentationFromRenderSpec(spec: SurfaceRenderSpec, sessionId: s
     return undefined;
   }
   const records = collectionRenderSpecRecords(spec);
+  const viewState = collectionRenderSpecViewState(spec);
   const now = nowIso();
   return {
     id: createId("presentation"),
@@ -9067,15 +9640,73 @@ function messagePresentationFromRenderSpec(spec: SurfaceRenderSpec, sessionId: s
     message_id: messageId,
     kind: "collection_app",
     title: typeof spec.title === "string" && spec.title.trim() ? spec.title : collectionId,
-    subtitle: spec.props.renderer === "task_list"
-      ? `tasks ・ ${records.filter((record) => record.completed !== true).length} / ${records.length}`
-      : `${collectionId} ・ ${records.length}件`,
+    subtitle: `${collectionId} ・ ${records.length}件`,
     collection_id: collectionId,
     view_id: collectionRenderSpecViewId(spec, collectionId),
     renderer: typeof spec.props.renderer === "string" ? spec.props.renderer : GENERIC_COLLECTION_RENDERER,
+    ...(Object.keys(viewState).length > 0 ? { view_state: viewState } : {}),
     created_at: now,
     updated_at: now
   };
+}
+
+function collectionViewState(input: {
+  collectionId: string;
+  viewConfig: Record<string, JsonValue>;
+  renderer: string;
+  recordCount: number;
+  extra?: Record<string, JsonValue>;
+}): Record<string, JsonValue> {
+  const state: Record<string, JsonValue> = {
+    collection_id: input.collectionId,
+    view_id: String(input.viewConfig.id ?? `${input.collectionId}_table`),
+    renderer: input.renderer,
+    record_count: input.recordCount,
+    ...(input.extra ?? {})
+  };
+  for (const [sourceKey, targetKey] of [
+    ["sort", "sort"],
+    ["filter", "filter"],
+    ["filters", "filter"],
+    ["group", "group"],
+    ["group_by", "group"],
+    ["selected_record_id", "selected_record_id"]
+  ] as const) {
+    if (state[targetKey] !== undefined) {
+      continue;
+    }
+    const value = input.viewConfig[sourceKey];
+    if (isJsonValue(value) && value !== undefined) {
+      state[targetKey] = value;
+    }
+  }
+  return state;
+}
+
+function collectionRenderSpecViewState(spec: SurfaceRenderSpec): Record<string, JsonValue> {
+  const collectionId = collectionRenderSpecCollectionId(spec);
+  const renderer = typeof spec.props.renderer === "string" ? spec.props.renderer : GENERIC_COLLECTION_RENDERER;
+  const records = collectionRenderSpecRecords(spec);
+  const data = spec.props.data;
+  const dataViewState = data && typeof data === "object" && !Array.isArray(data)
+    ? jsonRecordOrEmpty((data as Record<string, unknown>).view_state)
+    : {};
+  const propsViewState = jsonRecordOrEmpty(spec.props.view_state);
+  return {
+    collection_id: collectionId,
+    view_id: collectionRenderSpecViewId(spec, collectionId),
+    renderer,
+    record_count: records.length,
+    ...dataViewState,
+    ...propsViewState
+  };
+}
+
+function jsonRecordOrEmpty(value: unknown): Record<string, JsonValue> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => isJsonValue(item))) as Record<string, JsonValue>;
 }
 
 function collectionRenderSpecCollectionId(spec: SurfaceRenderSpec): string {
@@ -9110,7 +9741,7 @@ function collectionRenderSpecViewId(spec: SurfaceRenderSpec, collectionId: strin
       }
     }
   }
-  return collectionId === TASKS_COLLECTION_ID ? "task_list" : `${collectionId}_table`;
+  return `${collectionId}_table`;
 }
 
 function collectionRenderSpecRecords(spec: SurfaceRenderSpec): Array<Record<string, unknown>> {
@@ -9146,6 +9777,10 @@ function collectionSchemaSearchResult(schema: CollectionSchemaWithFilePath): Rec
 }
 
 function matchCollectionSchemas(schemas: CollectionSchemaWithFilePath[], query: string): CollectionSchemaWithFilePath[] {
+  const exactIdentityMatches = exactIdentityCollectionSchemaMatches(schemas, query);
+  if (exactIdentityMatches.length > 0) {
+    return exactIdentityMatches;
+  }
   const normalizedQuery = normalizeCollectionSearchText(query);
   if (!normalizedQuery) {
     return schemas;
@@ -9154,39 +9789,540 @@ function matchCollectionSchemas(schemas: CollectionSchemaWithFilePath[], query: 
   if (exact.length > 0) {
     return exact;
   }
-  return schemas.filter((schema) => collectionSchemaSearchTexts(schema).some((text) => text.includes(normalizedQuery) || normalizedQuery.includes(text)));
+  const substringMatches = schemas.filter((schema) => collectionSchemaSearchTexts(schema).some((text) => text.includes(normalizedQuery) || normalizedQuery.includes(text)));
+  if (substringMatches.length > 0) {
+    return substringMatches;
+  }
+  const queryTerms = collectionSearchTermsFromQuery(query);
+  if (queryTerms.length === 0) {
+    return [];
+  }
+  return schemas.filter((schema) => {
+    const texts = collectionSchemaSearchTexts(schema);
+    return queryTerms.some((term) => texts.some((text) => text.includes(term) || term.includes(text)));
+  });
+}
+
+function exactIdentityCollectionSchemaMatches(schemas: CollectionSchemaWithFilePath[], query: string): CollectionSchemaWithFilePath[] {
+  const normalizedQuery = normalizeCollectionExactIdentityText(query);
+  if (!normalizedQuery) {
+    return [];
+  }
+  let bestLength = 0;
+  const matches: CollectionSchemaWithFilePath[] = [];
+  const seen = new Set<string>();
+  for (const schema of schemas) {
+    const identityTexts = collectionSchemaExactIdentityTexts(schema);
+    const matchedLength = identityTexts.reduce((best, text) => {
+      if (!isSpecificCollectionExactIdentityText(text)) {
+        return best;
+      }
+      if (normalizedQuery === text || normalizedQuery.includes(text)) {
+        return Math.max(best, text.length);
+      }
+      return best;
+    }, 0);
+    if (matchedLength === 0) {
+      continue;
+    }
+    if (matchedLength > bestLength) {
+      bestLength = matchedLength;
+      matches.length = 0;
+      seen.clear();
+    }
+    if (matchedLength === bestLength && !seen.has(schema.id)) {
+      matches.push(schema);
+      seen.add(schema.id);
+    }
+  }
+  return matches;
+}
+
+function isSpecificCollectionExactIdentityText(text: string): boolean {
+  return text.length >= 8 || /[0-9_]/.test(text);
+}
+
+function collectionSchemaExactIdentityTexts(schema: CollectionSchema): string[] {
+  const seen = new Set<string>();
+  return [schema.id, ...localizedRecordValues(schema.labels)]
+    .map((value) => normalizeCollectionExactIdentityText(value))
+    .filter((text) => {
+      if (!text || seen.has(text)) {
+        return false;
+      }
+      seen.add(text);
+      return true;
+    });
 }
 
 function collectionSchemaSearchTexts(schema: CollectionSchema): string[] {
-  return [
+  const fields = genericCollectionSchemaFields(schema)
+    .flatMap((field) => [field.id, field.label])
+    .map((item) => typeof item === "string" ? item : "")
+    .filter(Boolean);
+  return collectionSearchTextsWithAliases([...collectionSchemaIdentitySearchTexts(schema), ...fields]);
+}
+
+function collectionSchemaIdentitySearchTexts(schema: CollectionSchema): string[] {
+  return collectionSearchTextsWithAliases([
     schema.id,
-    schema.labels?.ja,
-    schema.labels?.en,
-    schema.descriptions?.ja,
-    schema.descriptions?.en
-  ].map((item) => normalizeCollectionSearchText(item ?? "")).filter(Boolean);
+    ...localizedRecordValues(schema.labels),
+    ...localizedRecordValues(schema.descriptions)
+  ]);
+}
+
+function localizedRecordValues(value: Record<string, string> | undefined): string[] {
+  return Object.values(value ?? {}).filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function shouldUseRecentCollectionForViewRequest(query: string, matches: CollectionSchemaWithFilePath[]): boolean {
+  if (!shouldUpdateCollectionViewOutput(query)) {
+    return false;
+  }
+  if (matches.length === 0) {
+    return true;
+  }
+  const normalizedQuery = normalizeCollectionSearchText(query);
+  const hasCollectionIdentity = matches.some((schema) =>
+    collectionSchemaIdentitySearchTexts(schema)
+      .some((text) => text.length >= 2 && normalizedQuery.includes(text))
+  );
+  return !hasCollectionIdentity;
+}
+
+function collectionViewIdAfterPatch(schema: CollectionSchema, patches: AppEditPatch[], fallbackViewId: string): string {
+  const viewPatch = [...patches].reverse().find((patch): patch is Extract<AppEditPatch, { op: "update_view" }> => patch.op === "update_view");
+  if (viewPatch?.view_id) {
+    return viewPatch.view_id;
+  }
+  if (viewPatch?.renderer) {
+    return collectionViewIdForRenderer(schema, viewPatch.renderer);
+  }
+  return fallbackViewId;
+}
+
+function reusableCollectionViewState(value?: Record<string, JsonValue>): Record<string, JsonValue> {
+  if (!value) {
+    return {};
+  }
+  const allowed = new Set(["search", "sort", "filter", "group", "selected_date", "selected_record_id"]);
+  return Object.fromEntries(Object.entries(value).filter(([key, item]) => allowed.has(key) && isJsonValue(item))) as Record<string, JsonValue>;
+}
+
+function collectionSortStateFromQuery(schema: CollectionSchema, query: string): Record<string, JsonValue> | undefined {
+  if (!/(順|並び|並べ|sort|高い|低い|大きい|小さい|多い|少ない|新しい|古い|昇順|降順|ordenar|ordem|orden|trier|tri|sortieren|정렬|排序|puntuación|pontuação|score|rating)/i.test(query)) {
+    return undefined;
+  }
+  const field = collectionSchemaFieldFromQuery(schema, query)
+    ?? collectionPreferredSortField(schema, query);
+  if (!field) {
+    return undefined;
+  }
+  return {
+    field_id: String(field.id ?? ""),
+    direction: collectionSortDirectionFromQuery(field, query)
+  };
+}
+
+function collectionFilterStateFromQuery(schema: CollectionSchema, query: string): Record<string, JsonValue> | undefined {
+  const normalizedQuery = normalizeCollectionSearchText(query);
+  if (!normalizedQuery) {
+    return undefined;
+  }
+  for (const field of genericCollectionSchemaFields(schema).filter((item) => item.type === "enum")) {
+    const values = collectionSchemaEnumValues(field)
+      .map((value) => ({
+        value,
+        aliases: collectionEnumValueSearchAliases(value)
+          .filter((alias) => isCollectionEnumFilterAlias(alias))
+          .sort((left, right) => right.length - left.length)
+      }))
+      .filter((item) => item.aliases.length > 0)
+      .sort((left, right) => (right.aliases[0]?.length ?? 0) - (left.aliases[0]?.length ?? 0));
+    const match = values.find((item) => item.aliases.some((alias) =>
+      normalizedQuery.includes(alias) && !isAmbiguousViewVerbFilterAlias(query, alias)
+    ));
+    if (match) {
+      return {
+        field_id: String(field.id ?? ""),
+        value: match.value
+      };
+    }
+  }
+  return undefined;
+}
+
+function isAmbiguousViewVerbFilterAlias(query: string, alias: string): boolean {
+  const ambiguousAliases = new Set([
+    normalizeCollectionSearchText("見たい"),
+    normalizeCollectionSearchText("見た")
+  ]);
+  if (!ambiguousAliases.has(alias)) {
+    return false;
+  }
+  return !hasCollectionFilterIntent(query);
+}
+
+function hasCollectionFilterIntent(query: string): boolean {
+  return /(観たい|読みたい|観た|見た(?!い)|読んだ|完了|済み|だけ|のみ|絞|フィルタ|filter|ステータス|状態|status|todo|to watch|watchlist|want to watch|want to read|wishlist|pending|not done|unwatched|unread|watched|seen|done|completed|pendiente|por ver|quiero ver|quero ver|à voir|a voir|보고싶은|읽고싶은|想看|想读|想讀|未看|未読|未讀)/i.test(query);
+}
+
+function collectionEnumValueSearchAliases(value: string): string[] {
+  const normalized = normalizeCollectionSearchText(value);
+  if (!normalized) {
+    return [];
+  }
+  const aliases = new Set<string>([normalized]);
+  for (const group of collectionMultilingualSearchTermGroups) {
+    const normalizedGroup = group.map((term) => normalizeCollectionSearchText(term)).filter((term) => term.length >= 2);
+    if (normalizedGroup.includes(normalized)) {
+      for (const term of normalizedGroup) {
+        aliases.add(term);
+      }
+    }
+  }
+  return Array.from(aliases);
+}
+
+function isCollectionEnumFilterAlias(alias: string): boolean {
+  if (!alias) {
+    return false;
+  }
+  return /[^\x00-\x7F]/.test(alias) ? alias.length >= 2 : alias.length >= 4;
+}
+
+function collectionSchemaFieldFromQuery(schema: CollectionSchema, query: string): Record<string, JsonValue> | undefined {
+  const normalizedQuery = normalizeCollectionSearchText(query);
+  return genericCollectionSchemaFields(schema).find((field) =>
+    collectionSchemaFieldSearchTexts(field)
+      .some((text) => text.length >= 2 && normalizedQuery.includes(text))
+  );
+}
+
+function collectionPreferredSortField(schema: CollectionSchema, query: string): Record<string, JsonValue> | undefined {
+  const fields = genericCollectionSchemaFields(schema);
+  if (/評価|rating|score|点数|スコア|puntuación|pontuação|bewertung|평점|评分|評分/i.test(query)) {
+    return fields.find((field) => collectionSchemaFieldSearchTexts(field).some((text) => /評価|rating|score|点数|スコア/.test(text)));
+  }
+  if (/日付|期限|date|day|due|deadline|新しい|古い|fecha|data|datum|날짜|日期/i.test(query)) {
+    return collectionSchemaDateField(schema);
+  }
+  if (/タイトル|名前|title|name|título|titulo|nome|nom|제목|名称|名稱/i.test(query)) {
+    return fields.find((field) => collectionSchemaFieldSearchTexts(field).some((text) => /タイトル|名前|title|name/.test(text)));
+  }
+  return undefined;
+}
+
+function collectionSortDirectionFromQuery(field: Record<string, JsonValue>, query: string): "asc" | "desc" {
+  if (/昇順|低い|小さい|少ない|古い|asc|ascending|a-z|ascendente|crescente|croissant|aufsteigend|오름차순|升序/i.test(query)) {
+    return "asc";
+  }
+  if (/降順|高い|大きい|多い|新しい|最近|desc|descending|z-a|descendente|decrescente|décroissant|decroissant|absteigend|내림차순|降序/i.test(query)) {
+    return "desc";
+  }
+  const type = String(field.type ?? "");
+  const texts = collectionSchemaFieldSearchTexts(field).join(" ");
+  if (type === "string" || type === "text" || /タイトル|名前|title|name/.test(texts)) {
+    return "asc";
+  }
+  return "desc";
+}
+
+function collectionSchemaFieldSearchTexts(field: Record<string, JsonValue>): string[] {
+  return [field.id, field.label]
+    .map((item) => typeof item === "string" ? normalizeCollectionSearchText(item) : "")
+    .filter(Boolean);
+}
+
+function collectionSchemaEnumValues(field: Record<string, JsonValue>): string[] {
+  return Array.isArray(field.enum_values)
+    ? field.enum_values.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function normalizeCollectionSearchText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/アプリ|app|collection|コレクション|一覧|ログ/g, "")
+  return normalizeCollectionSearchTextBase(value)
+    .replace(/アプリ|collection|コレクション|一覧|ログ/g, "")
+    .replace(/\bapp\b/g, "")
     .replace(/\s+/g, "")
     .trim();
 }
 
-function genericCollectionRecordRenderData(record: CollectionRecordWithFilePath, schema: CollectionSchema): Record<string, JsonValue> {
-  const fieldIds = new Set(genericCollectionSchemaFields(schema).map((field) => String(field.id)).filter(Boolean));
+function normalizeCollectionExactIdentityText(value: string): string {
+  return normalizeCollectionSearchTextBase(value)
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function normalizeCollectionSearchTextBase(value: string): string {
+  return value.normalize("NFKC").toLowerCase();
+}
+
+function collectionSearchTermsFromQuery(query: string): string[] {
+  const stripped = collectionGenericSearchTerms.reduce(
+    (text, term) => text.split(term).join(" "),
+    normalizeCollectionSearchTextBase(query)
+  )
+    .replace(/[をにへとがはもでやの]/g, " ")
+    .replace(/[^\p{L}\p{N}_]+/gu, " ");
+  const seen = new Set<string>();
+  return stripped
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2)
+    .flatMap((term) => collectionSearchTextAliases(term))
+    .filter((term) => {
+      if (seen.has(term)) {
+        return false;
+      }
+      seen.add(term);
+      return true;
+    });
+}
+
+function collectionSearchTextsWithAliases(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  return values
+    .flatMap((value) => collectionSearchTextAliases(value ?? ""))
+    .filter((text) => {
+      if (!text || seen.has(text)) {
+        return false;
+      }
+      seen.add(text);
+      return true;
+    });
+}
+
+function collectionSearchTextAliases(value: string): string[] {
+  const normalized = normalizeCollectionSearchText(value);
+  if (!normalized) {
+    return [];
+  }
+  const aliases = new Set<string>([normalized]);
+  for (const group of collectionMultilingualSearchTermGroups) {
+    const normalizedGroup = group.map((term) => normalizeCollectionSearchText(term)).filter((term) => term.length >= 2);
+    if (normalizedGroup.some((term) => normalized.includes(term) || term.includes(normalized))) {
+      for (const term of normalizedGroup) {
+        aliases.add(term);
+      }
+    }
+  }
+  return Array.from(aliases);
+}
+
+const collectionGenericSearchTerms = [
+  "前に作った",
+  "前作った",
+  "作った",
+  "既存",
+  "過去",
+  "最近",
+  "この",
+  "その",
+  "あの",
+  "開いて",
+  "表示して",
+  "見せて",
+  "出して",
+  "呼び出して",
+  "ください",
+  "お願い",
+  "観た",
+  "見た",
+  "みた",
+  "読んだ",
+  "行った",
+  "使った",
+  "すべて",
+  "全部",
+  "だけ",
+  "のみ",
+  "アプリ",
+  "コレクション",
+  "一覧",
+  "ログ",
+  "カレンダー",
+  "ギャラリー",
+  "カンバン",
+  "テーブル",
+  "評価順",
+  "日付順",
+  "期限順",
+  "タイトル順",
+  "名前順",
+  "並び",
+  "並べ",
+  "絞り",
+  "open",
+  "show",
+  "present",
+  "view",
+  "display",
+  "list",
+  "table",
+  "gallery",
+  "calendar",
+  "kanban",
+  "sort",
+  "filter",
+  "app",
+  "application",
+  "collection",
+  "log",
+  "tracker",
+  "my",
+  "the",
+  "打开",
+  "開啟",
+  "显示",
+  "顯示",
+  "展示",
+  "列出",
+  "列表",
+  "应用",
+  "應用",
+  "集合",
+  "日志",
+  "日誌",
+  "记录",
+  "紀錄",
+  "日历",
+  "日曆",
+  "画廊",
+  "圖庫",
+  "看板",
+  "表格",
+  "열어",
+  "열기",
+  "보여",
+  "표시",
+  "목록",
+  "앱",
+  "컬렉션",
+  "로그",
+  "기록",
+  "캘린더",
+  "갤러리",
+  "칸반",
+  "테이블",
+  "abrir",
+  "abre",
+  "mostrar",
+  "muestra",
+  "muéstrame",
+  "ver",
+  "lista",
+  "aplicación",
+  "aplicacion",
+  "colección",
+  "coleccion",
+  "tabla",
+  "calendario",
+  "galería",
+  "galeria",
+  "aplicação",
+  "aplicacao",
+  "coleção",
+  "colecao",
+  "calendário",
+  "ouvrir",
+  "afficher",
+  "montre",
+  "voir",
+  "liste",
+  "application",
+  "tableau",
+  "calendrier",
+  "galerie",
+  "öffnen",
+  "offnen",
+  "anzeigen",
+  "zeigen",
+  "anwendung",
+  "sammlung",
+  "tabelle",
+  "kalender"
+];
+
+const collectionMultilingualSearchTermGroups = [
+  ["映画", "鑑賞", "movie", "movies", "film", "films", "cinema", "película", "peliculas", "películas", "filme", "filmes", "cinéma", "kino", "영화", "电影", "電影"],
+  ["読書", "書籍", "book", "books", "reading", "libro", "libros", "livro", "livros", "livre", "livres", "buch", "bücher", "책", "도서", "书籍", "書籍"],
+  ["タスク", "作業", "todo", "to-do", "task", "tasks", "tarea", "tareas", "tarefa", "tarefas", "tâche", "tâches", "aufgabe", "aufgaben", "작업", "할일", "任务", "任務"],
+  ["予定", "日程", "イベント", "schedule", "schedules", "event", "events", "appointment", "appointments", "agenda", "calendario", "calendário", "calendrier", "termin", "termine", "일정", "予定表", "日程表", "日历", "日曆"],
+  ["支出", "出費", "経費", "expense", "expenses", "spending", "cost", "costs", "gasto", "gastos", "despesa", "despesas", "dépense", "dépenses", "ausgabe", "ausgaben", "지출", "费用", "費用"],
+  ["メモ", "ノート", "memo", "memos", "note", "notes", "nota", "notas", "notiz", "notizen", "메모", "노트", "笔记", "筆記"],
+  ["場所", "店舗", "店", "place", "places", "location", "locations", "store", "stores", "restaurant", "restaurants", "lugar", "lugares", "local", "locais", "lieu", "lieux", "ort", "orte", "장소", "가게", "地点", "地點", "店铺", "店鋪"],
+  ["評価", "点数", "rating", "ratings", "score", "scores", "puntuación", "pontuação", "bewertung", "평점", "評価点", "评分", "評分"],
+  ["状態", "ステータス", "進捗", "status", "state", "progress", "estado", "statut", "zustand", "상태", "状态", "狀態"],
+  ["観た", "見た", "視聴済み", "読んだ", "完了", "済み", "done", "completed", "watched", "seen", "finished", "visto", "vista", "vistos", "vistas", "assistido", "assistida", "assistidos", "assistidas", "vu", "vue", "vus", "vues", "gesehen", "gelesen", "완료", "봤다", "읽었다", "已看", "看过", "看過", "已读", "已讀"],
+  ["観たい", "見たい", "読みたい", "あとで", "未完了", "未視聴", "未読", "todo", "to-do", "to watch", "watchlist", "want to watch", "want to read", "wishlist", "pending", "not done", "unwatched", "unread", "pendiente", "pendientes", "por ver", "quiero ver", "quero ver", "a voir", "à voir", "voir plus tard", "ungelesen", "보고싶은", "읽고싶은", "想看", "想读", "想讀", "未看", "未读", "未讀"],
+  ["視聴中", "見ている", "読書中", "途中", "進行中", "作業中", "in progress", "inprogress", "watching", "reading", "current", "ongoing", "viendo", "leyendo", "assistindo", "lendo", "en cours", "laufend", "진행중", "보는중", "읽는중", "正在看", "正在读", "正在讀"],
+  ["保留", "保留中", "一時停止", "中断", "paused", "on hold", "hold", "deferred", "suspended", "pausado", "pausada", "suspendu", "suspendue", "pausiert", "보류", "일시정지", "暂停", "暫停"]
+];
+
+function genericCollectionRecordRenderData(
+  record: CollectionRecordWithFilePath,
+  schema: CollectionSchema,
+  records: CollectionRecordWithFilePath[] = [record],
+  linkedData: GenericCollectionLinkedData = emptyGenericCollectionLinkedData
+): Record<string, JsonValue> {
+  const fieldIds = new Set(genericCollectionStoredSchemaFields(schema, linkedData).map((field) => String(field.id)).filter(Boolean));
+  const storedData = Object.fromEntries(Object.entries(record.data).filter(([key, value]) => fieldIds.has(key) && isJsonValue(value)));
+  for (const [field, value] of Object.entries(linkedData.embed_records)) {
+    if (value === null || isJsonValue(value)) {
+      storedData[field] = value;
+    }
+  }
   return {
     id: record.id,
     file_path: record.file_path,
     updated_at: record.updated_at,
-    ...Object.fromEntries(Object.entries(record.data).filter(([key, value]) => fieldIds.has(key) && isJsonValue(value)))
+    ...storedData,
+    ...collectionDerivedRenderValues(schema, record, records, linkedData)
   };
 }
 
-function genericCollectionSchemaFields(schema: CollectionSchema): Array<Record<string, JsonValue>> {
-  return schema.fields.map((field) => normalizeGenericSchemaField(field)).filter((field) => Boolean(field.id));
+function genericCollectionSchemaFields(schema: CollectionSchema, linkedData: GenericCollectionLinkedData = emptyGenericCollectionLinkedData): Array<Record<string, JsonValue>> {
+  return [
+    ...genericCollectionStoredSchemaFields(schema, linkedData),
+    ...genericCollectionDerivedSchemaFields(schema)
+  ];
+}
+
+function genericCollectionStoredSchemaFields(schema: CollectionSchema, linkedData: GenericCollectionLinkedData = emptyGenericCollectionLinkedData): Array<Record<string, JsonValue>> {
+  const fields = new Map<string, Record<string, JsonValue>>();
+  const addField = (field: Record<string, JsonValue>) => {
+    const id = String(field.id ?? "");
+    if (!id) {
+      return;
+    }
+    const existing = fields.get(id);
+    fields.set(id, {
+      ...(existing ?? {}),
+      ...field,
+      label: existing?.label ?? field.label ?? id
+    });
+  };
+  for (const field of schema.fields.map((item) => normalizeGenericSchemaField(item))) {
+    addField(field);
+  }
+  for (const ref of schema.refs.map((item) => normalizeGenericRefField(item, schema, linkedData)).filter((field) => Boolean(field.id))) {
+    addField(ref);
+  }
+  for (const embed of schema.embeds.map((item) => normalizeGenericEmbedField(item)).filter((field) => Boolean(field.id))) {
+    addField(embed);
+  }
+  return [...fields.values()];
+}
+
+function genericCollectionEditableSchemaFields(schema: CollectionSchema, linkedData: GenericCollectionLinkedData = emptyGenericCollectionLinkedData): Array<Record<string, JsonValue>> {
+  return genericCollectionStoredSchemaFields(schema, linkedData).filter((field) => field.read_only !== true && field.derived !== true);
+}
+
+function genericCollectionDerivedSchemaFields(schema: CollectionSchema): Array<Record<string, JsonValue>> {
+  return schema.derived_fields
+    .map((field) => normalizeGenericDerivedField(field))
+    .filter((field) => Boolean(field.id));
 }
 
 function normalizeGenericSchemaField(field: Record<string, JsonValue>): Record<string, JsonValue> {
@@ -9197,24 +10333,482 @@ function normalizeGenericSchemaField(field: Record<string, JsonValue>): Record<s
   return { ...field, id, type };
 }
 
+function normalizeGenericRefField(ref: Record<string, JsonValue>, schema: CollectionSchema, linkedData: GenericCollectionLinkedData): Record<string, JsonValue> {
+  const field = collectionDefinitionFieldRuntime(ref);
+  if (!field) {
+    return {};
+  }
+  const targetCollectionId = collectionDefinitionStringRuntime(ref, "collection_id")
+    ?? collectionDefinitionStringRuntime(ref, "target_collection_id")
+    ?? schema.id;
+  return {
+    ...ref,
+    id: field,
+    field,
+    type: "ref",
+    source: "collection_ref",
+    target_collection_id: targetCollectionId,
+    ref_id: collectionDefinitionStringRuntime(ref, "id") ?? field,
+    label: ref.label ?? ref.title ?? field,
+    required: ref.required === true,
+    options: linkedData.ref_options[field] ?? []
+  };
+}
+
+function normalizeGenericEmbedField(embed: Record<string, JsonValue>): Record<string, JsonValue> {
+  const field = collectionDefinitionFieldRuntime(embed);
+  if (!field) {
+    return {};
+  }
+  return {
+    ...embed,
+    id: field,
+    field,
+    type: "json",
+    source: "collection_embed",
+    embed_id: collectionDefinitionStringRuntime(embed, "id") ?? field,
+    label: embed.label ?? embed.title ?? field,
+    required: embed.required === true,
+    read_only: true
+  };
+}
+
+function collectionDefinitionFieldRuntime(definition: Record<string, JsonValue>): string | undefined {
+  return collectionDefinitionStringRuntime(definition, "field")
+    ?? collectionDefinitionStringRuntime(definition, "field_id")
+    ?? collectionDefinitionStringRuntime(definition, "id")
+    ?? collectionDefinitionStringRuntime(definition, "name");
+}
+
+function collectionDefinitionStringRuntime(definition: Record<string, JsonValue>, key: string): string | undefined {
+  const value = definition[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function genericCollectionRefOption(record: CollectionRecordWithFilePath): Record<string, JsonValue> {
+  const label = collectionRecordDisplayLabel(record);
+  return {
+    value: record.id,
+    label,
+    record_id: record.id,
+    collection_id: record.collection_id
+  };
+}
+
+function collectionRecordDisplayLabel(record: CollectionRecordWithFilePath): string {
+  for (const key of ["display", "title", "name", "label"]) {
+    const value = record.data[key];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+  const firstString = Object.values(record.data).find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  return firstString ?? record.id;
+}
+
+function normalizeGenericDerivedField(field: Record<string, JsonValue>): Record<string, JsonValue> {
+  const normalized = normalizeGenericSchemaField(field);
+  return {
+    ...normalized,
+    derived: true,
+    read_only: true,
+    source: "derived_field"
+  };
+}
+
+function collectionDerivedRenderValues(schema: CollectionSchema, record: CollectionRecordWithFilePath, records: CollectionRecordWithFilePath[], linkedData: GenericCollectionLinkedData = emptyGenericCollectionLinkedData): Record<string, JsonValue> {
+  const values: Record<string, JsonValue> = {};
+  for (const field of genericCollectionDerivedSchemaFields(schema)) {
+    const id = String(field.id ?? "");
+    if (!id) {
+      continue;
+    }
+    const expression = collectionDerivedExpression(field);
+    const value = evaluateCollectionDerivedExpression(expression, {
+      record,
+      records,
+      now: new Date(),
+      linkedData
+    });
+    if (isJsonValue(value)) {
+      values[id] = value;
+    }
+  }
+  return values;
+}
+
+function collectionDerivedExpression(field: Record<string, JsonValue>): JsonValue {
+  if (field.expression !== undefined) return field.expression;
+  if (field.formula !== undefined) return field.formula;
+  if (field.value !== undefined) return field.value;
+  return null;
+}
+
+function evaluateCollectionDerivedExpression(
+  expression: JsonValue,
+  context: { record: CollectionRecordWithFilePath; records: CollectionRecordWithFilePath[]; now: Date; linkedData?: GenericCollectionLinkedData },
+  depth = 0
+): JsonValue {
+  if (depth > 8) {
+    return null;
+  }
+  if (expression === null || typeof expression === "string" || typeof expression === "number" || typeof expression === "boolean") {
+    return expression;
+  }
+  if (Array.isArray(expression)) {
+    return expression.map((item) => evaluateCollectionDerivedExpression(item, context, depth + 1));
+  }
+  const op = typeof expression.op === "string" ? expression.op : "";
+  if (op === "literal") {
+    return isJsonValue(expression.value) ? expression.value : null;
+  }
+  if (op === "field") {
+    return collectionDerivedRecordValue(context.record, String(expression.field_id ?? expression.field ?? ""), context.linkedData);
+  }
+  if (op === "concat") {
+    const args = Array.isArray(expression.args) ? expression.args : [];
+    const separator = typeof expression.separator === "string" ? expression.separator : "";
+    return args.map((item) => collectionDerivedText(evaluateCollectionDerivedExpression(item, context, depth + 1))).join(separator);
+  }
+  if (op === "add" || op === "sum_values") {
+    return collectionDerivedArgs(expression, context, depth).reduce<number>((total, value) => total + collectionDerivedNumber(value), 0);
+  }
+  if (op === "subtract") {
+    const args = collectionDerivedArgs(expression, context, depth).map(collectionDerivedNumber);
+    return args.length === 0 ? 0 : args.slice(1).reduce((total, value) => total - value, args[0] ?? 0);
+  }
+  if (op === "multiply") {
+    return collectionDerivedArgs(expression, context, depth).map(collectionDerivedNumber).reduce((total, value) => total * value, 1);
+  }
+  if (op === "divide") {
+    const args = collectionDerivedArgs(expression, context, depth).map(collectionDerivedNumber);
+    const denominator = args[1] ?? 0;
+    return denominator === 0 ? null : (args[0] ?? 0) / denominator;
+  }
+  if (op === "percent") {
+    const numerator = collectionDerivedNumber(evaluateCollectionDerivedExpression(expression.numerator ?? null, context, depth + 1));
+    const denominator = collectionDerivedNumber(evaluateCollectionDerivedExpression(expression.denominator ?? null, context, depth + 1));
+    return denominator === 0 ? null : Math.round((numerator / denominator) * 1000) / 10;
+  }
+  if (op === "days_until") {
+    const value = collectionDerivedRecordValue(context.record, String(expression.field_id ?? expression.field ?? ""), context.linkedData);
+    const date = collectionDerivedDate(value);
+    if (!date) return null;
+    const today = Date.UTC(context.now.getUTCFullYear(), context.now.getUTCMonth(), context.now.getUTCDate());
+    const target = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    return Math.ceil((target - today) / 86_400_000);
+  }
+  if (op === "sum" || op === "average" || op === "count" || op === "completion_rate") {
+    return evaluateCollectionAggregateExpression(expression, context);
+  }
+  return null;
+}
+
+function collectionDerivedArgs(expression: Record<string, JsonValue>, context: { record: CollectionRecordWithFilePath; records: CollectionRecordWithFilePath[]; now: Date; linkedData?: GenericCollectionLinkedData }, depth: number): JsonValue[] {
+  const args = Array.isArray(expression.args)
+    ? expression.args
+    : [expression.left, expression.right].filter((item): item is JsonValue => item !== undefined && isJsonValue(item));
+  return args.map((item) => evaluateCollectionDerivedExpression(item, context, depth + 1));
+}
+
+function evaluateCollectionAggregateExpression(expression: Record<string, JsonValue>, context: { record: CollectionRecordWithFilePath; records: CollectionRecordWithFilePath[]; linkedData?: GenericCollectionLinkedData }): JsonValue {
+  const fieldId = String(expression.field_id ?? expression.field ?? "");
+  const filtered = context.records.filter((record) => collectionRecordMatchesDerivedFilter(record, expression.filter));
+  if (expression.op === "count") {
+    return filtered.length;
+  }
+  if (expression.op === "completion_rate") {
+    const statusField = fieldId || "completed";
+    const completedValue = expression.completed_value ?? true;
+    if (filtered.length === 0) return 0;
+    const completed = filtered.filter((record) => collectionDerivedRecordValue(record, statusField, context.linkedData) === completedValue).length;
+    return Math.round((completed / filtered.length) * 1000) / 10;
+  }
+  if (!fieldId) {
+    return null;
+  }
+  const values = filtered.map((record) => collectionDerivedNumber(collectionDerivedRecordValue(record, fieldId, context.linkedData)));
+  if (expression.op === "sum") {
+    return values.reduce((total, value) => total + value, 0);
+  }
+  if (expression.op === "average") {
+    return values.length === 0 ? null : values.reduce((total, value) => total + value, 0) / values.length;
+  }
+  return null;
+}
+
+function collectionRecordMatchesDerivedFilter(record: CollectionRecordWithFilePath, filter: JsonValue | undefined): boolean {
+  if (!filter || typeof filter !== "object" || Array.isArray(filter)) {
+    return true;
+  }
+  const fieldId = String(filter.field_id ?? filter.field ?? "");
+  if (!fieldId) {
+    return true;
+  }
+  return collectionDerivedRecordValue(record, fieldId) === filter.value;
+}
+
+function collectionDerivedRecordValue(record: CollectionRecordWithFilePath, fieldId: string, linkedData: GenericCollectionLinkedData = emptyGenericCollectionLinkedData): JsonValue {
+  if (fieldId.includes(".")) {
+    const [refField, ...pathParts] = fieldId.split(".");
+    const targetId = record.data[refField ?? ""];
+    const target = typeof targetId === "string" ? linkedData.ref_records[refField ?? ""]?.[targetId] : undefined;
+    if (target && pathParts.length > 0) {
+      return jsonPathValue(target, pathParts);
+    }
+  }
+  const value = record.data[fieldId];
+  return isJsonValue(value) ? value : null;
+}
+
+function jsonPathValue(root: Record<string, JsonValue>, pathParts: string[]): JsonValue {
+  let current: JsonValue = root;
+  for (const part of pathParts) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return null;
+    }
+    current = current[part] ?? null;
+  }
+  return isJsonValue(current) ? current : null;
+}
+
+function collectionManagePutMode(value: JsonValue | undefined): "create" | "upsert" | "merge" {
+  return value === "create" || value === "merge" || value === "upsert" ? value : "upsert";
+}
+
+function collectionManageRecordData(item: Record<string, JsonValue>): Record<string, JsonValue> {
+  const { id: _id, record_id: _recordId, collection_id: _collectionId, resource_refs: _resourceRefs, ...data } = item;
+  return data;
+}
+
+function collectionComputedWriteProblem(schema: CollectionSchema, item: Record<string, JsonValue>): string | undefined {
+  const derived = new Set(schema.derived_fields.map((field) => collectionDefinitionFieldRuntime(field)).filter((id): id is string => Boolean(id)));
+  const embeds = new Set(schema.embeds.map((field) => collectionDefinitionFieldRuntime(field)).filter((id): id is string => Boolean(id)));
+  for (const key of Object.keys(item)) {
+    if (derived.has(key)) {
+      return `'${key}' is derived — computed by the host`;
+    }
+    if (embeds.has(key)) {
+      return `'${key}' is an embed — computed by the host`;
+    }
+  }
+  return undefined;
+}
+
+function projectCollectionManageFields(record: Record<string, JsonValue>, fields: string[]): Record<string, JsonValue> {
+  const keep = new Set(["id", ...fields]);
+  return Object.fromEntries(Object.entries(record).filter(([key]) => keep.has(key)));
+}
+
+function collectionSchemaDocs(): JsonValue {
+  return {
+    actions: ["getItems", "putItems", "schemaDocs", "getSchema", "putSchema", "patchSchema"],
+    record_io: "Use getItems for computed-aware reads and putItems for schema-validated writes. Raw file I/O remains an escape hatch.",
+    computed_fields: "derived and embed fields are host-computed and must not be written by putItems.",
+    put_modes: ["create", "upsert", "merge"],
+    supported_renderers: [...COLLECTION_RENDERERS]
+  };
+}
+
+function collectionManageResultRef(payload: Record<string, JsonValue>, fallbackId: string): ResourceRef {
+  const collectionId = stringPayload(payload.collection_id) || fallbackId;
+  const action = stringPayload(payload.action) || "manage";
+  return {
+    kind: "collection",
+    id: collectionId,
+    uri: `collections/${collectionId}`,
+    label: `Collection ${action}`
+  };
+}
+
+function jsonStringArray(value: JsonValue | undefined): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function isCollectionManageResource(value: unknown): value is Record<string, JsonValue> {
+  return Boolean(value)
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as { action?: unknown }).action === "string";
+}
+
+function collectionDerivedNumber(value: JsonValue): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function collectionDerivedText(value: JsonValue): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function collectionDerivedDate(value: JsonValue): Date | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const match = value.match(/^\d{4}-\d{2}-\d{2}/);
+  if (!match) {
+    return undefined;
+  }
+  const date = new Date(`${match[0]}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) ? date : undefined;
+}
+
 function genericCollectionViewConfig(schema: CollectionSchema, requestedViewId?: string): Record<string, JsonValue> {
-  const configured = (schema.views ?? []).find((view) => view.id === requestedViewId)
-    ?? (schema.views ?? [])[0]
-    ?? (schema.views ?? []).find((view) => view.renderer === GENERIC_COLLECTION_RENDERER);
+  const configured = requestedViewId
+    ? (schema.views ?? []).find((view) => view.id === requestedViewId) ?? syntheticCollectionViewForId(schema, requestedViewId)
+    : undefined;
+  const fallbackConfigured = (schema.views ?? [])[0]
+    ?? (schema.views ?? []).find((view) => view.renderer === GENERIC_COLLECTION_RENDERER)
+    ?? syntheticCollectionViewForRenderer(schema, GENERIC_COLLECTION_RENDERER);
+  const candidate = configured ?? fallbackConfigured;
+  return normalizeGenericCollectionViewConfig(schema, candidate);
+}
+
+function normalizeGenericCollectionViewConfig(schema: CollectionSchema, configured: Record<string, JsonValue> | undefined): Record<string, JsonValue> {
   const id = typeof configured?.id === "string" ? configured.id : defaultGenericCollectionViewId(schema);
-  const renderer = typeof configured?.renderer === "string" && isCollectionRenderer(configured.renderer)
+  const requestedRenderer = typeof configured?.renderer === "string" && isCollectionRenderer(configured.renderer)
     ? configured.renderer
     : GENERIC_COLLECTION_RENDERER;
-  const fieldIds = genericCollectionSchemaFields(schema).map((field) => String(field.id)).filter(Boolean);
+  const renderer = collectionRendererSupportedBySchema(schema, requestedRenderer)
+    ? requestedRenderer
+    : GENERIC_COLLECTION_RENDERER;
+  const fieldIds = genericCollectionEditableSchemaFields(schema).map((field) => String(field.id)).filter(Boolean);
+  const kanbanGroupField = renderer === "collection_kanban" ? collectionSchemaEnumField(schema) : undefined;
+  const kanbanGroupBy = typeof configured?.group_by === "string" && configured.group_by.trim()
+    ? configured.group_by.trim()
+    : typeof configured?.group === "string" && configured.group.trim()
+      ? configured.group.trim()
+      : kanbanGroupField
+        ? String(kanbanGroupField.id ?? "")
+        : "";
   return {
     ...(configured ?? {}),
     id,
     renderer,
+    ...(renderer !== requestedRenderer ? {
+      requested_renderer: requestedRenderer,
+      fallback_reason: collectionRendererFallbackReason(schema, requestedRenderer)
+    } : {}),
     density: configured?.density === "compact" ? "compact" : "comfortable",
     allow_delete: configured?.allow_delete !== false,
+    ...(kanbanGroupBy ? { group_by: kanbanGroupBy } : {}),
     hidden_fields: Array.isArray(configured?.hidden_fields) ? configured.hidden_fields.filter((item): item is string => typeof item === "string") : [],
     editable_fields: Array.isArray(configured?.editable_fields) ? configured.editable_fields.filter((item): item is string => typeof item === "string") : fieldIds
   };
+}
+
+function genericCollectionViewOptions(schema: CollectionSchema): Array<Record<string, JsonValue>> {
+  const byRenderer = new Map<string, Record<string, JsonValue>>();
+  for (const view of schema.views ?? []) {
+    const normalized = normalizeGenericCollectionViewConfig(schema, view);
+    const renderer = String(normalized.renderer ?? "");
+    if (!isCollectionRenderer(renderer) || normalized.fallback_reason) {
+      continue;
+    }
+    if (!byRenderer.has(renderer)) {
+      byRenderer.set(renderer, collectionViewOption(normalized));
+    }
+  }
+  for (const renderer of COLLECTION_RENDERERS) {
+    if (byRenderer.has(renderer)) {
+      continue;
+    }
+    const normalized = normalizeGenericCollectionViewConfig(schema, syntheticCollectionViewForRenderer(schema, renderer));
+    if (normalized.fallback_reason) {
+      continue;
+    }
+    byRenderer.set(renderer, collectionViewOption(normalized));
+  }
+  return [...byRenderer.values()];
+}
+
+function collectionViewOption(viewConfig: Record<string, JsonValue>): Record<string, JsonValue> {
+  const renderer = String(viewConfig.renderer ?? GENERIC_COLLECTION_RENDERER);
+  return {
+    id: String(viewConfig.id ?? ""),
+    renderer,
+    label: collectionRendererLabel(renderer)
+  };
+}
+
+function syntheticCollectionViewForId(schema: CollectionSchema, viewId: string): Record<string, JsonValue> | undefined {
+  return (COLLECTION_RENDERERS as readonly string[])
+    .map((renderer) => syntheticCollectionViewForRenderer(schema, renderer))
+    .find((view) => view.id === viewId);
+}
+
+function syntheticCollectionViewForRenderer(schema: CollectionSchema, renderer: string): Record<string, JsonValue> {
+  return {
+    id: collectionViewIdForRenderer(schema, renderer),
+    renderer
+  };
+}
+
+function collectionViewIdForRenderer(schema: CollectionSchema, renderer: string): string {
+  const configured = (schema.views ?? []).find((view) => view.renderer === renderer && typeof view.id === "string");
+  if (typeof configured?.id === "string" && configured.id) {
+    return configured.id;
+  }
+  const suffix: Record<string, string> = {
+    collection_table: "table",
+    collection_gallery: "gallery",
+    calendar_view: "calendar",
+    collection_kanban: "kanban"
+  };
+  return `${schema.id}_${suffix[renderer] ?? "table"}`;
+}
+
+function collectionRendererLabel(renderer: string): string {
+  if (renderer === "collection_gallery") return "Gallery";
+  if (renderer === "calendar_view") return "Calendar";
+  if (renderer === "collection_kanban") return "Kanban";
+  return "Table";
+}
+
+function collectionRendererSupportedBySchema(schema: CollectionSchema, renderer: string): boolean {
+  if (renderer === "calendar_view") {
+    return collectionSchemaDateField(schema) !== undefined;
+  }
+  if (renderer === "collection_kanban") {
+    return collectionSchemaEnumField(schema) !== undefined;
+  }
+  return renderer === "collection_table" || renderer === "collection_gallery";
+}
+
+function collectionRendererFallbackReason(schema: CollectionSchema, renderer: string): string {
+  if (renderer === "calendar_view" && !collectionSchemaDateField(schema)) {
+    return "calendar_renderer_requires_date_field";
+  }
+  if (renderer === "collection_kanban" && !collectionSchemaEnumField(schema)) {
+    return "kanban_renderer_requires_enum_field";
+  }
+  return "unsupported_collection_renderer";
+}
+
+function collectionSchemaDateField(schema: CollectionSchema): Record<string, JsonValue> | undefined {
+  return genericCollectionSchemaFields(schema).find((field) => {
+    const type = String(field.type ?? "");
+    const id = String(field.id ?? "").toLowerCase();
+    return type === "date" || type === "datetime" || /date|day|due|deadline|watched_at|created_at|updated_at|期限|日付/.test(id);
+  });
+}
+
+function collectionSchemaEnumField(schema: CollectionSchema): Record<string, JsonValue> | undefined {
+  return genericCollectionSchemaFields(schema).find((field) => {
+    const type = String(field.type ?? "");
+    const id = String(field.id ?? "").toLowerCase();
+    return type === "enum" || /status|state|stage|phase|状態|進捗/.test(id);
+  });
 }
 
 function defaultGenericCollectionViewId(schema: CollectionSchema): string {
@@ -9222,12 +10816,21 @@ function defaultGenericCollectionViewId(schema: CollectionSchema): string {
   return typeof firstView?.id === "string" && firstView.id ? firstView.id : `${schema.id}_table`;
 }
 
-function isCollectionRenderer(renderer: string): boolean {
+function isCollectionRenderer(renderer: string): renderer is CollectionRenderer {
   return (COLLECTION_RENDERERS as readonly string[]).includes(renderer);
 }
 
-function genericCollectionActions(schema: CollectionSchema, viewId: string): Array<{ id: string; label: string; operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" | "collection.view.present" }> {
-  const actions: Array<{ id: string; label: string; operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" | "collection.view.present" }> = [
+type GenericCollectionUiAction = {
+  id: string;
+  label: string;
+  operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" | "collection.view.present" | "collection.action.run";
+  action_kind?: string;
+  description?: string;
+  scope?: "collection" | "record";
+};
+
+function genericCollectionActions(schema: CollectionSchema, viewId: string): GenericCollectionUiAction[] {
+  const actions: GenericCollectionUiAction[] = [
     { id: "collection.create", label: "追加", operation_kind: "collection.record.create" },
     { id: "collection.patch", label: "更新", operation_kind: "collection.record.patch" },
     { id: "collection.refresh", label: "更新", operation_kind: "collection.view.present" }
@@ -9235,86 +10838,26 @@ function genericCollectionActions(schema: CollectionSchema, viewId: string): Arr
   if (collectionDeleteAllowed(schema, viewId)) {
     actions.push({ id: "collection.delete", label: "削除", operation_kind: "collection.record.delete" });
   }
-  return actions;
-}
-
-function taskRecordRenderData(record: CollectionRecordWithFilePath, schema?: CollectionSchema): TaskRecordRenderData {
-  const data: TaskRecordRenderData = {
-    id: record.id,
-    title: typeof record.data.title === "string" ? record.data.title : "",
-    completed: record.data.completed === true,
-    notes: typeof record.data.notes === "string" ? record.data.notes : "",
-    due_date: typeof record.data.due_date === "string" ? record.data.due_date : "",
-    order: typeof record.data.order === "number" ? record.data.order : 0,
-    source_session_id: typeof record.data.source_session_id === "string" ? record.data.source_session_id : "",
-    source_message_id: typeof record.data.source_message_id === "string" ? record.data.source_message_id : "",
-    file_path: record.file_path,
-    updated_at: record.updated_at
-  };
-  for (const field of taskSchemaFields([record], schema)) {
-    const key = typeof field.id === "string" ? field.id : "";
-    if (!key || key in data) {
+  const existingIds = new Set(actions.map((action) => action.id));
+  for (const action of schema.actions) {
+    const id = collectionActionString(action, "id")
+      ?? collectionActionString(action, "name")
+      ?? collectionActionString(action, "action_id");
+    if (!id || existingIds.has(id)) {
       continue;
     }
-    const value = record.data[key];
-    if (isJsonValue(value)) {
-      data[key] = value;
-    }
-  }
-  return data;
-}
-
-function taskSchemaFields(records: CollectionRecordWithFilePath[], schema?: CollectionSchema): Array<Record<string, JsonValue>> {
-  const byId = new Map<string, Record<string, JsonValue>>();
-  for (const field of schema?.fields ?? []) {
-    const id = typeof field.id === "string" ? field.id : typeof field.name === "string" ? field.name : "";
-    if (id && !TASK_INTERNAL_FIELD_IDS.includes(id as (typeof TASK_INTERNAL_FIELD_IDS)[number])) {
-      byId.set(id, normalizeTaskSchemaField(field));
-    }
-  }
-  for (const record of records) {
-    for (const [key, value] of Object.entries(record.data)) {
-      if (!byId.has(key) && isValidAppFieldId(key) && !TASK_INTERNAL_FIELD_IDS.includes(key as (typeof TASK_INTERNAL_FIELD_IDS)[number])) {
-        byId.set(key, { id: key, type: inferAppFieldType(value) });
-      }
-    }
-  }
-  const baseFields: Array<Record<string, JsonValue>> = [
-    { id: "title", type: "string", required: true },
-    { id: "completed", type: "boolean" },
-    { id: "notes", type: "text" },
-    { id: "due_date", type: "date" }
-  ];
-  for (const field of baseFields) {
-    const id = String(field.id);
-    byId.set(id, { ...field, ...byId.get(id) });
-  }
-  return Array.from(byId.values()).filter((field) => !taskHiddenFields(schema).has(String(field.id)));
-}
-
-function taskListViewConfig(records?: CollectionRecordWithFilePath[], schema?: CollectionSchema): Record<string, JsonValue> {
-  const configured = (schema?.views ?? []).find((view) => view.id === "task_list");
-  const editableFields = taskSchemaFields(records ?? [], schema).map((field) => String(field.id)).filter((id) => id !== "completed");
-  return {
-    id: "task_list",
-    renderer: "task_list",
-    density: typeof configured?.density === "string" ? configured.density : "comfortable",
-    allow_delete: configured?.allow_delete !== false,
-    hidden_fields: Array.isArray(configured?.hidden_fields) ? configured.hidden_fields.filter((item): item is string => typeof item === "string") : [],
-    emphasized_fields: Array.isArray(configured?.emphasized_fields) ? configured.emphasized_fields.filter((item): item is string => typeof item === "string") : [],
-    sort: configured?.sort && typeof configured.sort === "object" && !Array.isArray(configured.sort) ? unknownRecord(configured.sort) as Record<string, JsonValue> : { field_id: "order", direction: "asc", completed_last: true },
-    group_by: typeof configured?.group_by === "string" ? configured.group_by : "",
-    editable_fields: editableFields
-  };
-}
-
-function taskListActions(schema?: CollectionSchema): Array<{ id: string; label: string; operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" }> {
-  const actions: Array<{ id: string; label: string; operation_kind: "collection.record.create" | "collection.record.patch" | "collection.record.delete" }> = [
-    { id: "task.create", label: "追加", operation_kind: "collection.record.create" },
-    { id: "task.patch", label: "更新", operation_kind: "collection.record.patch" }
-  ];
-  if (collectionDeleteAllowed(schema, "task_list")) {
-    actions.push({ id: "task.delete", label: "削除", operation_kind: "collection.record.delete" });
+    const actionKind = collectionActionKind(action);
+    actions.push({
+      id,
+      label: collectionActionString(action, "label")
+        ?? collectionActionString(action, "title")
+        ?? id,
+      operation_kind: "collection.action.run",
+      action_kind: actionKind,
+      description: collectionActionString(action, "description"),
+      scope: collectionActionScope(action, actionKind)
+    });
+    existingIds.add(id);
   }
   return actions;
 }
@@ -9327,7 +10870,7 @@ function collectionDeleteAllowed(schema: CollectionSchema | undefined, viewId?: 
   if (permissions.delete === false) {
     return false;
   }
-  const view = (schema.views ?? []).find((item) => item.id === (viewId ?? "task_list")) ?? (schema.views ?? [])[0];
+  const view = (schema.views ?? []).find((item) => item.id === viewId) ?? (schema.views ?? [])[0];
   return view?.allow_delete !== false;
 }
 
@@ -9337,68 +10880,22 @@ function assertCollectionDeleteAllowed(schema: CollectionSchema, viewId?: string
   }
 }
 
-function isActiveTaskListAppRequest(input: SurfaceOperation): boolean {
-  const context = unknownRecord(input.metadata?.active_app_context);
-  return input.kind === "message.submit"
-    && context.renderer === "task_list"
-    && context.collection_id === TASKS_COLLECTION_ID;
-}
-
-async function planAppEditPatch(provider: { generate(input: ProviderInput): Promise<ProviderOutput> } | undefined, schema: CollectionSchema, records: CollectionRecordWithFilePath[], content: string): Promise<AppEditPatch[]> {
-  if (!provider) {
-    throw new RuntimeRequestError("provider_not_configured", "App編集にはLLM設定が必要です。");
-  }
-  const envelope = createGatewayEnvelope(webGatewayContext, [
-    "App Edit PatchだけをJSON配列で返してください。",
-    "説明文、Markdown、コードフェンスは禁止です。",
-    "対象はtasks Collectionのみです。",
-    `ユーザー指示: ${content}`,
-    `現在のfields: ${JSON.stringify(taskSchemaFields(records, schema))}`,
-    `現在のview_config: ${JSON.stringify(taskListViewConfig(records, schema))}`,
-    `許可op: add_field, update_field, hide_field, update_view, set_sort, set_group, set_permissions, backfill_records`,
-    `許可field type: ${APP_EDIT_FIELD_TYPES.join(", ")}`
-  ].join("\n"), "ja", "ja", { app_edit_patch: true });
-  let output: ProviderOutput;
-  try {
-    output = await provider.generate({
-      envelope,
-      activeMemory: [],
-      knowledgeWiki: [],
-      collectionNotes: [],
-      selectedSkills: [],
-      sessionSearch: [],
-      availableTools: [],
-      recentMessages: []
-    });
-  } catch (error) {
-    if (error instanceof ProviderRequestError && error.diagnostics.reason === "not_configured") {
-      throw new RuntimeRequestError("provider_not_configured", "App編集にはLLM設定が必要です。");
-    }
-    throw error;
-  }
-  const parsed = parseAppEditPatchJson(output.content);
-  return validateAppEditPatch(parsed, schema);
-}
-
-async function applyAppEditPatchToTasksStore(store: { getCollectionSchema(id: string): Promise<CollectionSchemaWithFilePath | undefined>; listCollectionRecords(id: string): Promise<CollectionRecordWithFilePath[]>; updateCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaWithFilePath> }, provider: { generate(input: ProviderInput): Promise<ProviderOutput> } | undefined, content: string): Promise<void> {
-  const schema = await store.getCollectionSchema(TASKS_COLLECTION_ID);
-  if (!schema) {
-    return;
-  }
-  const records = await store.listCollectionRecords(TASKS_COLLECTION_ID);
-  const patches = await planAppEditPatch(provider, schema, records, content);
-  await applyAppEditPatch(store, schema, patches);
-}
-
-async function applyAppEditPatch(store: { updateCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaWithFilePath> }, schema: CollectionSchema, patches: AppEditPatch[]): Promise<void> {
+function buildAppEditPatchedSchema(schema: CollectionSchema, patches: AppEditPatch[], options: AppEditPatchOptions = {}): CollectionSchema | undefined {
   const fields = [...schema.fields];
-  const currentView = taskListViewConfig([], schema);
+  const derivedFields = [...schema.derived_fields];
+  const currentView = genericCollectionViewConfig(schema, options.viewId);
   const nextView: Record<string, JsonValue> = { ...currentView };
+  const originalViewId = String(nextView.id ?? options.viewId ?? defaultGenericCollectionViewId(schema));
   const fieldIndex = () => new Map(fields.map((field, index) => [String(field.id ?? field.name ?? ""), index]));
+  const derivedFieldIndex = () => new Map(derivedFields.map((field, index) => [String(field.id ?? field.name ?? ""), index]));
   for (const patch of patches) {
     if (patch.op === "add_field") {
       if (!fieldIndex().has(patch.field.id)) {
         fields.push(appEditFieldToCollectionField(patch.field));
+      }
+    } else if (patch.op === "add_derived_field") {
+      if (!derivedFieldIndex().has(patch.field.id)) {
+        derivedFields.push(appEditDerivedFieldToCollectionField(patch.field));
       }
     } else if (patch.op === "update_field") {
       const index = fieldIndex().get(patch.field_id);
@@ -9408,6 +10905,13 @@ async function applyAppEditPatch(store: { updateCollectionSchema(schema: Collect
     } else if (patch.op === "hide_field") {
       nextView.hidden_fields = uniqueStrings([...(Array.isArray(nextView.hidden_fields) ? nextView.hidden_fields : []), patch.field_id]);
     } else if (patch.op === "update_view") {
+      if (patch.renderer) {
+        nextView.renderer = patch.renderer;
+        if (!patch.view_id) {
+          nextView.id = collectionViewIdForRenderer({ ...schema, fields }, patch.renderer);
+        }
+      }
+      if (patch.view_id) nextView.id = patch.view_id;
       if (patch.hidden_fields) nextView.hidden_fields = uniqueStrings(patch.hidden_fields);
       if (patch.emphasized_fields) nextView.emphasized_fields = uniqueStrings(patch.emphasized_fields);
       if (patch.density) nextView.density = patch.density;
@@ -9418,41 +10922,33 @@ async function applyAppEditPatch(store: { updateCollectionSchema(schema: Collect
       nextView.group_by = patch.field_id;
     }
   }
-  const otherViews = (schema.views ?? []).filter((view) => view.id !== "task_list");
+  const schemaWithFields = { ...schema, fields };
+  const normalizedView = normalizeGenericCollectionViewConfig(schemaWithFields, nextView);
+  if (normalizedView.fallback_reason) {
+    throw new RuntimeRequestError("conflict", `app_edit_view_renderer_not_supported:${normalizedView.fallback_reason}`);
+  }
+  const nextViewId = String(normalizedView.id ?? originalViewId);
+  const otherViews = (schema.views ?? []).filter((view) => view.id !== originalViewId && view.id !== nextViewId);
   const permissionsPatch = patches.find((patch): patch is Extract<AppEditPatch, { op: "set_permissions" }> =>
     patch.op === "set_permissions" && typeof patch.allow_delete === "boolean"
   );
   const nextPermissions = permissionsPatch
     ? { ...(schema.permissions ?? {}), delete: permissionsPatch.allow_delete as boolean }
     : schema.permissions;
-  const changed = fields.length !== schema.fields.length
-    || JSON.stringify(nextView) !== JSON.stringify(currentView)
+  const changed = JSON.stringify(fields) !== JSON.stringify(schema.fields)
+    || JSON.stringify(derivedFields) !== JSON.stringify(schema.derived_fields)
+    || JSON.stringify(normalizedView) !== JSON.stringify(currentView)
     || JSON.stringify(nextPermissions) !== JSON.stringify(schema.permissions);
   if (!changed) {
-    return;
+    return undefined;
   }
-  await store.updateCollectionSchema({
+  return CollectionSchemaSchema.parse({
     ...schema,
     fields,
-    views: [...otherViews, nextView],
+    derived_fields: derivedFields,
+    views: [...otherViews, normalizedView],
     permissions: nextPermissions
   });
-}
-
-function taskSafeRecordData(data: Record<string, JsonValue>): Record<string, JsonValue> {
-  return Object.fromEntries(Object.entries(data).filter(([key]) => TASK_FIELD_IDS.includes(key as (typeof TASK_FIELD_IDS)[number]) || isValidAppFieldId(key)));
-}
-
-function parseAppEditPatchJson(content: string): unknown {
-  const trimmed = content.trim();
-  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-    throw new RuntimeRequestError("conflict", "app_edit_patch_json_required");
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    throw new RuntimeRequestError("conflict", "app_edit_patch_json_required");
-  }
 }
 
 function validateAppEditPatch(value: unknown, schema: CollectionSchema): AppEditPatch[] {
@@ -9460,6 +10956,7 @@ function validateAppEditPatch(value: unknown, schema: CollectionSchema): AppEdit
     throw new RuntimeRequestError("conflict", "app_edit_patch_array_required");
   }
   const fieldIds = new Set(schema.fields.map((field) => String(field.id ?? field.name ?? "")).filter(Boolean));
+  const derivedFieldIds = new Set(schema.derived_fields.map((field) => String(field.id ?? field.name ?? "")).filter(Boolean));
   const required = new Set(schema.fields.flatMap((field) => field.required === true ? [String(field.id ?? field.name ?? "")] : []));
   let addCount = 0;
   const patches: AppEditPatch[] = [];
@@ -9473,27 +10970,34 @@ function validateAppEditPatch(value: unknown, schema: CollectionSchema): AppEdit
         throw new RuntimeRequestError("conflict", `app_edit_enum_values_required:${patch.field.id}`);
       }
       fieldIds.add(patch.field.id);
+      if (patch.field.required === true) {
+        required.add(patch.field.id);
+      }
+    } else if (patch.op === "add_derived_field") {
+      addCount += 1;
+      if (addCount > 3) throw new RuntimeRequestError("conflict", "app_edit_patch_too_many_fields");
+      if (fieldIds.has(patch.field.id) || derivedFieldIds.has(patch.field.id)) throw new RuntimeRequestError("conflict", `app_edit_field_exists:${patch.field.id}`);
+      if (!isValidCollectionDerivedExpression(patch.field.expression)) throw new RuntimeRequestError("conflict", `app_edit_invalid_derived_expression:${patch.field.id}`);
+      derivedFieldIds.add(patch.field.id);
     } else if (patch.op === "hide_field") {
       if (!fieldIds.has(patch.field_id)) throw new RuntimeRequestError("conflict", `app_edit_unknown_field:${patch.field_id}`);
-      if (required.has(patch.field_id as (typeof REQUIRED_TASK_FIELD_IDS)[number])) throw new RuntimeRequestError("conflict", `app_edit_required_field_visible:${patch.field_id}`);
+      if (required.has(patch.field_id)) throw new RuntimeRequestError("conflict", `app_edit_required_field_visible:${patch.field_id}`);
     } else if (patch.op === "update_field") {
       if (!fieldIds.has(patch.field_id)) throw new RuntimeRequestError("conflict", `app_edit_unknown_field:${patch.field_id}`);
       if (patch.changes.type === "enum" && (!patch.changes.enum_values || patch.changes.enum_values.length === 0)) {
         throw new RuntimeRequestError("conflict", `app_edit_enum_values_required:${patch.field_id}`);
       }
-    } else if (patch.op === "set_sort" || patch.op === "set_group" || patch.op === "backfill_records") {
+    } else if (patch.op === "set_sort" || patch.op === "set_group") {
       if (!fieldIds.has(patch.field_id)) throw new RuntimeRequestError("conflict", `app_edit_unknown_field:${patch.field_id}`);
     } else if (patch.op === "update_view") {
       for (const fieldId of [...(patch.hidden_fields ?? []), ...(patch.emphasized_fields ?? [])]) {
         if (!fieldIds.has(fieldId)) throw new RuntimeRequestError("conflict", `app_edit_unknown_field:${fieldId}`);
-        if ((patch.hidden_fields ?? []).includes(fieldId) && required.has(fieldId as (typeof REQUIRED_TASK_FIELD_IDS)[number])) {
+        if ((patch.hidden_fields ?? []).includes(fieldId) && required.has(fieldId)) {
           throw new RuntimeRequestError("conflict", `app_edit_required_field_visible:${fieldId}`);
         }
       }
     }
-    if (patch.op !== "backfill_records") {
-      patches.push(patch);
-    }
+    patches.push(patch);
   }
   return patches;
 }
@@ -9521,6 +11025,23 @@ function normalizeAppEditPatch(value: unknown): AppEditPatch {
       }
     };
   }
+  if (op === "add_derived_field") {
+    const field = unknownRecord(item.field);
+    const type = requireAppFieldType(String(field.type ?? "number"));
+    const expression = isJsonValue(field.expression) ? field.expression : field.formula;
+    if (!isJsonValue(expression)) {
+      throw new RuntimeRequestError("conflict", "app_edit_derived_expression_required");
+    }
+    return {
+      op,
+      field: {
+        id: requireAppFieldId(String(field.id ?? "")),
+        type,
+        ...(typeof field.label === "string" ? { label: field.label } : {}),
+        expression
+      }
+    };
+  }
   if (op === "update_field") {
     const changes = unknownRecord(item.changes);
     return {
@@ -9537,11 +11058,11 @@ function normalizeAppEditPatch(value: unknown): AppEditPatch {
   if (op === "set_sort") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")), direction: item.direction === "desc" ? "desc" : "asc", completed_last: item.completed_last !== false };
   if (op === "set_group") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")) };
   if (op === "set_permissions") return { op, ...(typeof item.allow_delete === "boolean" ? { allow_delete: item.allow_delete } : {}) };
-  if (op === "backfill_records") return { op, field_id: requireAppFieldId(String(item.field_id ?? "")), value: isJsonValue(item.value) ? item.value : "" };
   if (op === "update_view") {
     return {
       op,
-      ...(typeof item.view_id === "string" ? { view_id: item.view_id } : {}),
+      ...(typeof item.view_id === "string" ? { view_id: requireAppFieldId(item.view_id) } : {}),
+      ...(typeof item.renderer === "string" && isCollectionRenderer(item.renderer) ? { renderer: item.renderer } : {}),
       ...(Array.isArray(item.hidden_fields) ? { hidden_fields: uniqueStrings(item.hidden_fields).map(requireAppFieldId) } : {}),
       ...(Array.isArray(item.emphasized_fields) ? { emphasized_fields: uniqueStrings(item.emphasized_fields).map(requireAppFieldId) } : {}),
       ...(item.density === "compact" || item.density === "comfortable" ? { density: item.density } : {}),
@@ -9562,28 +11083,30 @@ function appEditFieldToCollectionField(field: Extract<AppEditPatch, { op: "add_f
   };
 }
 
-function normalizeTaskSchemaField(field: Record<string, JsonValue>): Record<string, JsonValue> {
-  const id = String(field.id ?? field.name ?? "");
-  const type: AppEditFieldType = APP_EDIT_FIELD_TYPES.includes(field.type as AppEditFieldType) ? field.type as AppEditFieldType : id === "completed" ? "boolean" : id === "due_date" ? "date" : id === "notes" ? "text" : "string";
-  return { ...field, id, type };
+function appEditDerivedFieldToCollectionField(field: Extract<AppEditPatch, { op: "add_derived_field" }>["field"]): Record<string, JsonValue> {
+  return {
+    id: field.id,
+    type: field.type,
+    derived: true,
+    read_only: true,
+    ...(field.label ? { label: field.label } : {}),
+    expression: field.expression
+  };
 }
 
-function taskHiddenFields(schema?: CollectionSchema): Set<string> {
-  const view = (schema?.views ?? []).find((item) => item.id === "task_list");
-  return new Set(Array.isArray(view?.hidden_fields) ? view.hidden_fields.filter((item): item is string => typeof item === "string") : []);
-}
-
-function sortTaskRecords(records: TaskRecordRenderData[], viewConfig: Record<string, JsonValue>): TaskRecordRenderData[] {
-  const sort = unknownRecord(viewConfig.sort);
-  const fieldId = typeof sort.field_id === "string" ? sort.field_id : "order";
-  const direction = sort.direction === "desc" ? -1 : 1;
-  const completedLast = sort.completed_last !== false;
-  return [...records].sort((a, b) => {
-    if (completedLast && a.completed !== b.completed) return a.completed ? 1 : -1;
-    const av = a[fieldId];
-    const bv = b[fieldId];
-    const compared = typeof av === "number" && typeof bv === "number" ? av - bv : String(av ?? "").localeCompare(String(bv ?? ""));
-    return compared * direction || a.order - b.order || a.title.localeCompare(b.title);
+function isValidCollectionDerivedExpression(expression: JsonValue, depth = 0): boolean {
+  if (depth > 8) return false;
+  if (expression === null || typeof expression === "string" || typeof expression === "number" || typeof expression === "boolean") return true;
+  if (Array.isArray(expression)) return expression.every((item) => isValidCollectionDerivedExpression(item, depth + 1));
+  const op = typeof expression.op === "string" ? expression.op : "";
+  if (!["literal", "field", "concat", "add", "sum_values", "subtract", "multiply", "divide", "percent", "days_until", "count", "sum", "average", "completion_rate"].includes(op)) {
+    return false;
+  }
+  const expressionKeys = ["args", "left", "right", "numerator", "denominator"] as const;
+  return expressionKeys.every((key) => {
+    const value = expression[key];
+    if (value === undefined) return true;
+    return isJsonValue(value) && isValidCollectionDerivedExpression(value, depth + 1);
   });
 }
 
@@ -11161,9 +12684,6 @@ function expectedBackendOutputs(query: string): BackendExpectedOutput[] {
   if (shouldCreateCollectionSchemaOutput(query)) {
     outputs.push("collection_schema");
   }
-  if (shouldPresentCollectionOutput(query)) {
-    outputs.push("collection_view");
-  }
   return outputs;
 }
 
@@ -11177,7 +12697,7 @@ function createBackendToolBridge(input: {
   if (input.gatewayBoundaryPresent) {
     return undefined;
   }
-  const shouldExposeBridge = input.expectedOutputs.length > 0 || input.contextIntent === "workspace_task";
+  const shouldExposeBridge = true;
   if (!shouldExposeBridge) {
     return undefined;
   }
@@ -11275,10 +12795,31 @@ const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
     }
   }
 }, {
+  name: "samurai.collection.manage",
+  provider_tool_name: "mcp__samurai__collection_manage",
+  title: "Manage Samurai Collection",
+  description: "Read and write Collection data through the host. Prefer this over raw file I/O for Collection records and schema edits; raw file I/O remains an escape hatch. getItems returns computed derived/embed values. putItems validates rows and returns written/rejected. patchSchema validates before saving.",
+  input_schema: {
+    type: "object",
+    required: ["action"],
+    properties: {
+      action: { type: "string", enum: ["getItems", "putItems", "schemaDocs", "getSchema", "putSchema", "patchSchema"] },
+      collection_id: { type: "string" },
+      slug: { type: "string" },
+      ids: { type: "array", items: { type: "string" } },
+      fields: { type: "array", items: { type: "string" } },
+      items: { type: "array", items: { type: "object" } },
+      mode: { type: "string", enum: ["create", "upsert", "merge"] },
+      schema: { type: "object" },
+      patches: { type: "array" },
+      view_id: { type: "string" }
+    }
+  }
+}, {
   name: "samurai.collection.schema.save",
   provider_tool_name: "mcp__samurai__collection_schema_save",
   title: "Save Samurai Collection Schema",
-  description: "Save a validated CollectionSchema for a personal Workspace data app.",
+  description: "Save a validated CollectionSchema for a personal Workspace data app. Prefer this validated path for schema writes; raw file I/O remains an escape hatch. Include views that match the user's use case: collection_table for general records, collection_gallery for movie/book/recipe/place logs, calendar_view when a date/datetime field exists, and collection_kanban when an enum/status field exists. For dashboard-style layouts, create or present a custom view rather than using a fixed dashboard renderer.",
   input_schema: {
     type: "object",
     required: ["id", "version", "fields", "views", "permissions"],
@@ -11293,8 +12834,41 @@ const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
       derived_fields: { type: "array" },
       triggers: { type: "array" },
       actions: { type: "array" },
-      views: { type: "array" },
+      views: {
+        type: "array",
+        description: "Workspace view definitions. Each view should have an id and one supported renderer. Prefer multiple useful views when the schema supports them, for example table + gallery for movie logs, table + calendar for dated logs, and table + kanban for status workflows. Dashboard-style layouts should be custom views.",
+        items: {
+          type: "object",
+          required: ["id", "renderer"],
+          properties: {
+            id: { type: "string" },
+            renderer: { type: "string", enum: [...COLLECTION_RENDERERS] },
+            editable_fields: { type: "array", items: { type: "string" } },
+            emphasized_fields: { type: "array", items: { type: "string" } },
+            hidden_fields: { type: "array", items: { type: "string" } },
+            group_by: { type: "string" },
+            density: { type: "string", enum: ["comfortable", "compact"] },
+            allow_delete: { type: "boolean" }
+          }
+        }
+      },
       permissions: { type: "object" }
+    }
+  }
+}, {
+  name: "samurai.collection.record.create",
+  provider_tool_name: "mcp__samurai__collection_record_create",
+  title: "Create Samurai Collection Record",
+  description: "Create a schema-validated Collection record through Runtime. Prefer this path for validated writes; raw collections/<id>/records file I/O remains an escape hatch.",
+  input_schema: {
+    type: "object",
+    required: ["collection_id", "data"],
+    properties: {
+      collection_id: { type: "string" },
+      id: { type: "string" },
+      record_id: { type: "string" },
+      data: { type: "object" },
+      resource_refs: { type: "array" }
     }
   }
 }, {
@@ -11314,6 +12888,11 @@ const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
 }];
 
 const samuraiToolBridgeTools = new Set(samuraiToolBridgeDescriptors.map((tool) => tool.name));
+const samuraiToolBridgeWriteTools = new Set([
+  "samurai.collection.manage",
+  "samurai.collection.schema.save",
+  "samurai.collection.record.create"
+]);
 
 function samuraiToolBridgeActionId(toolName: string): string {
   if (toolName === "samurai.artifact.create") {
@@ -11322,8 +12901,14 @@ function samuraiToolBridgeActionId(toolName: string): string {
   if (toolName === "samurai.collection.schema.save") {
     return "collection.schema.save";
   }
+  if (toolName === "samurai.collection.record.create") {
+    return "collection.record.create";
+  }
   if (toolName === "samurai.collection.view.present") {
     return "collection.view.present";
+  }
+  if (toolName === "samurai.collection.manage") {
+    return "collection.manage";
   }
   return toolName;
 }
@@ -11360,16 +12945,17 @@ function shouldCreateCollectionSchemaOutput(query: string): boolean {
   if (!trimmed) {
     return false;
   }
-  return /アプリ.*作って|作って.*アプリ|app/i.test(trimmed) && !isTaskListAppRequest(trimmed);
+  const createIntent = /作って|作成|作る|create|make|build|crear|criar|créer|creer|erstellen|machen|만들|생성|创建|建立|創建/i.test(trimmed);
+  const collectionNoun = /アプリ|コレクション|ログ|collection|app|application|log|tracker|aplicación|aplicacion|aplicação|aplicacao|appli|anwendung|앱|컬렉션|로그|기록|应用|應用|集合|日志|日誌|记录|紀錄/i.test(trimmed);
+  return createIntent && collectionNoun;
 }
 
 function shouldPresentCollectionOutput(query: string): boolean {
-  const trimmed = query.trim();
-  if (!trimmed || shouldCreateCollectionSchemaOutput(trimmed)) {
-    return false;
-  }
-  return /(開いて|表示して|見せて|出して|呼び出して|open|show|present)/i.test(trimmed)
-    && /(アプリ|ログ|collection|app|table|一覧)/i.test(trimmed);
+  return false;
+}
+
+function shouldUpdateCollectionViewOutput(query: string): boolean {
+  return false;
 }
 
 function artifactTitleFromUserInput(query: string): string {
@@ -11418,10 +13004,18 @@ function normalizeSamuraiToolBridgeName(name: string): string {
     mcp__samurai__skill_search: "samurai.skill.search",
     collection_search: "samurai.collection.search",
     mcp__samurai__collection_search: "samurai.collection.search",
+    "collection.manage": "samurai.collection.manage",
+    manage_collection: "samurai.collection.manage",
+    collection_manage: "samurai.collection.manage",
+    mcp__samurai__collection_manage: "samurai.collection.manage",
     "collection.schema.save": "samurai.collection.schema.save",
     save_collection_schema: "samurai.collection.schema.save",
     collection_schema_save: "samurai.collection.schema.save",
     mcp__samurai__collection_schema_save: "samurai.collection.schema.save",
+    "collection.record.create": "samurai.collection.record.create",
+    create_collection_record: "samurai.collection.record.create",
+    collection_record_create: "samurai.collection.record.create",
+    mcp__samurai__collection_record_create: "samurai.collection.record.create",
     "collection.view.present": "samurai.collection.view.present",
     present_collection: "samurai.collection.view.present",
     collection_view_present: "samurai.collection.view.present",
@@ -11439,6 +13033,15 @@ function artifactKindPayload(value: JsonValue | undefined): ArtifactKind | undef
 
 const artifactKindValues: ArtifactKind[] = ["markdown", "document", "table", "chart", "image", "pdf", "structured_draft", "generated_report", "note"];
 
+function resourceRefLookupKeys(ref: ResourceRef): string[] {
+  return [
+    ref.id,
+    ref.uri,
+    ref.id ? `${ref.kind}:${ref.id}` : undefined,
+    ref.uri ? `${ref.kind}:${ref.uri}` : undefined
+  ].filter((key): key is string => Boolean(key));
+}
+
 function isSamuraiToolBridgeObservedProviderTool(providerToolName: string, payload: Record<string, JsonValue>): boolean {
   if (payload.already_executed === true && payload.tool_origin === "samurai_tool_bridge") {
     return true;
@@ -11446,6 +13049,7 @@ function isSamuraiToolBridgeObservedProviderTool(providerToolName: string, paylo
   return (
     providerToolName === "mcp__samurai__artifact_create"
     || providerToolName === "mcp__samurai__collection_schema_save"
+    || providerToolName === "mcp__samurai__collection_record_create"
     || providerToolName === "mcp__samurai__collection_view_present"
   ) && payload.tool_origin === "samurai_tool_bridge";
 }
@@ -12699,6 +14303,96 @@ function collectionActionRecord(value: JsonValue | undefined): Record<string, Js
   return value;
 }
 
+function isInstructionCollectionActionKind(kind: string): boolean {
+  return ["custom_instruction", "instruction", "backend_instruction", "chat"].includes(kind);
+}
+
+function collectionActionInstruction(action: Record<string, JsonValue>, payload: Record<string, JsonValue>): string | undefined {
+  return collectionActionString(action, "instruction")
+    ?? collectionActionString(action, "target_instruction")
+    ?? collectionActionString(action, "prompt")
+    ?? (typeof payload.instruction === "string" && payload.instruction.trim() ? payload.instruction : undefined);
+}
+
+function collectionActionOutputSurface(action: Record<string, JsonValue>, payload: Record<string, JsonValue>): string | undefined {
+  return collectionActionString(action, "output_surface")
+    ?? collectionActionString(action, "surface")
+    ?? (typeof payload.output_surface === "string" && payload.output_surface.trim() ? payload.output_surface.trim() : undefined);
+}
+
+function collectionActionCustomViewOutput(chat: RunChatTurnResult): Record<string, JsonValue> | undefined {
+  const content = [...chat.messages].reverse().find((message) => message.role === "agent")?.content ?? "";
+  const parsed = parseJsonObjectFromText(content);
+  if (!parsed) {
+    return undefined;
+  }
+  const nested = recordPayload(parsed.custom_view);
+  const output = Object.keys(nested).length > 0 ? nested : parsed;
+  const html = stringPayload(output.html) || stringPayload(output.srcdoc);
+  if (!html.trim()) {
+    return undefined;
+  }
+  return {
+    ...output,
+    html
+  };
+}
+
+function parseJsonObjectFromText(text: string): Record<string, JsonValue> | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const body = fenced?.[1]?.trim() ?? trimmed;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const record = unknownRecord(parsed);
+    return Object.keys(record).length > 0 ? jsonRecord(record) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function collectionActionInstructionPrompt(input: {
+  collectionId: string;
+  actionId: string;
+  instruction: string;
+  record?: CollectionRecordWithFilePath;
+  resolvedRecordData?: Record<string, JsonValue>;
+  payload: Record<string, JsonValue>;
+  outputSurface?: string;
+}): string {
+  return [
+    `Run Collection action ${input.collectionId}/${input.actionId}.`,
+    `Instruction:\n${input.instruction}`,
+    input.outputSurface === "custom_view"
+      ? "Return a JSON object with custom_view.html for the generated Workspace UI. Example: {\"custom_view\":{\"title\":\"...\",\"html\":\"<main>...</main>\",\"actions\":[]}}"
+      : "",
+    input.record ? `Record:\n${JSON.stringify({
+      id: input.record.id,
+      collection_id: input.record.collection_id,
+      data: input.resolvedRecordData ?? input.record.data
+    }, null, 2)}` : "",
+    Object.keys(input.payload).length > 0 ? `Payload:\n${JSON.stringify(input.payload, null, 2)}` : ""
+  ].filter(Boolean).join("\n\n");
+}
+
+function collectionActionScope(action: Record<string, JsonValue>, kind: string): "collection" | "record" {
+  const declared = collectionActionString(action, "scope");
+  if (declared === "collection" || declared === "record") {
+    return declared;
+  }
+  if (["patch_record", "patch"].includes(kind) || collectionActionString(action, "record_id")) {
+    return "record";
+  }
+  const resourceKinds = collectionActionStringArray(action.resource_kinds) ?? [];
+  if (resourceKinds.includes("collection_record") && !resourceKinds.includes("collection_schema") && !resourceKinds.includes("collection_index")) {
+    return "record";
+  }
+  return "collection";
+}
+
 function collectionActionDescriptor(collectionId: string, action: Record<string, JsonValue>, pluginRegistry: PluginRuntimeRegistry): CollectionActionDescriptor {
   const actionId = collectionActionString(action, "id")
     ?? collectionActionString(action, "name")
@@ -12735,7 +14429,8 @@ function collectionActionDescriptor(collectionId: string, action: Record<string,
 }
 
 function isBuiltInCollectionActionKind(kind: string): boolean {
-  return ["patch_record", "patch", "create_record", "create", "reindex", "reindex_collection"].includes(kind);
+  return ["patch_record", "patch", "create_record", "create", "reindex", "reindex_collection"].includes(kind)
+    || isInstructionCollectionActionKind(kind);
 }
 
 function isPluginCollectionAction(action: Record<string, JsonValue>, kind: string): boolean {
@@ -12892,6 +14587,12 @@ function fileRef(relativePath: string) {
     uri: relativePath,
     label: relativePath
   };
+}
+
+function isManagedCollectionWorkspacePath(relativePath: string): boolean {
+  const normalized = relativePath.replaceAll("\\", "/").replace(/^\/+/, "");
+  return /^collections\/[^/]+\/schema\.json$/.test(normalized)
+    || /^collections\/[^/]+\/records\/[^/]+\.json$/.test(normalized);
 }
 
 function externalSendRef(send: ExternalSendRecord) {

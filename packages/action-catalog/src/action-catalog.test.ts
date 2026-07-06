@@ -51,6 +51,7 @@ describe("action catalog", () => {
     }
     expect(getDomainCommandForSurfaceOperationKind("message.submit")?.id).toBe("chat.turn.run");
     expect(getDomainCommandForSurfaceOperationKind("collection.record.patch")?.id).toBe("collection.patch.apply");
+    expect(getDomainCommandForSurfaceOperationKind("collection.action.run")?.id).toBe("collection.action.run");
     expect(getDomainCommandForSurfaceOperationKind("chart.request")?.id).toBe("artifact.create");
     expect(getDomainCommandForSurfaceOperationKind("chart.request")?.output_render_kinds).toContain("chart");
     expect(getDomainCommandForProviderToolName("create_artifact")?.id).toBe("artifact.create");
@@ -59,6 +60,10 @@ describe("action catalog", () => {
     expect(getDomainCommandForProviderToolName("remember_topic")?.output_render_kinds).toEqual(["memory"]);
     expect(getDomainCommandForProviderToolName("request_external_send")?.id).toBe("external.send.prepare");
     expect(getDomainCommandForProviderToolName("request_external_send")?.output_render_kinds).toEqual(["status_timeline"]);
+    expect(getDomainCommandForProviderToolName("mcp__samurai__collection_schema_save")?.id).toBe("collection.schema.save");
+    expect(getDomainCommandForProviderToolName("mcp__samurai__collection_record_create")?.id).toBe("collection.record.create");
+    expect(getDomainCommandForProviderToolName("mcp__samurai__collection_view_present")?.id).toBe("collection.view.present");
+    expect(getDomainCommandForProviderToolName("samurai.collection.view.present")?.output_render_kinds).toEqual(["collection", "custom_view"]);
     expect(listDomainCommandEntries("gateway_inbound").map((entry) => entry.id)).toContain("gateway.inbound.route");
     expect(listDomainCommandEntries("automation").map((entry) => entry.id)).toEqual(expect.arrayContaining([
       "chat.turn.run",
