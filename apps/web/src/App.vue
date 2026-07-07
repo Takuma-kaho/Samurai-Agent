@@ -13,8 +13,7 @@ import Eye from "lucide-vue-next/dist/esm/icons/eye.js";
 import FileInput from "lucide-vue-next/dist/esm/icons/file-input.js";
 import FileText from "lucide-vue-next/dist/esm/icons/file-text.js";
 import Maximize2 from "lucide-vue-next/dist/esm/icons/maximize-2.js";
-import PanelLeftClose from "lucide-vue-next/dist/esm/icons/panel-left-close.js";
-import PanelLeftOpen from "lucide-vue-next/dist/esm/icons/panel-left-open.js";
+import PanelLeft from "lucide-vue-next/dist/esm/icons/panel-left.js";
 import PanelRightOpen from "lucide-vue-next/dist/esm/icons/panel-right-open.js";
 import PanelsTopLeft from "lucide-vue-next/dist/esm/icons/panels-top-left.js";
 import Pencil from "lucide-vue-next/dist/esm/icons/pencil.js";
@@ -265,9 +264,14 @@ const memoryContent = ref<Record<string, string>>({});
 const settingsStorageKey = "samurai-agent.settings";
 const backendStorageKey = "samurai-agent.selected-backend-id";
 const workspaceSplitStorageKey = "samurai-agent.workspace-split-percent";
+const sidebarWidthStorageKey = "samurai-agent.sidebar-width";
 const workspaceSplitMin = 32;
 const workspaceSplitMax = 68;
 const workspaceSplitDefault = 50;
+const sidebarWidthMin = 204;
+const sidebarWidthMax = 340;
+const sidebarWidthDefault = 244;
+const sidebarCollapseDragThreshold = 84;
 const frontendSurfaceKinds = ["chat", "status_timeline", "form", "table", "chart", "artifact", "memory", "run_history", "custom_view"] as const satisfies readonly SurfaceRenderKind[];
 const preferredExternalBackendIds = ["codex", "claude-code"] as const;
 let chatScrollResizeObserver: ResizeObserver | undefined;
@@ -456,9 +460,14 @@ const firstMemory = computed(() => memory.value[0]);
 const hasWorkspaceCanvas = computed(() => Boolean(activeArtifact.value || activeMemory.value || activeSurfaceSpec.value));
 const workspaceSplitPercent = ref(readWorkspaceSplitPercent());
 const isResizingWorkspace = ref(false);
+const sidebarWidth = ref(readSidebarWidth());
+const isResizingSidebar = ref(false);
 const workspaceSplitStyle = computed<Record<string, string>>(() => ({
   "--workspace-chat-percent": `${workspaceSplitPercent.value}%`,
   "--workspace-canvas-percent": `${100 - workspaceSplitPercent.value}%`
+}));
+const appShellStyle = computed<Record<string, string>>(() => ({
+  "--sidebar-width": `${sidebarWidth.value}px`
 }));
 const isDraftChat = computed(() => !activeSession.value && currentMessages.value.length === 0 && viewMode.value === "chat");
 const chatScrollFrameClass = computed(() => ({
@@ -482,6 +491,7 @@ onUnmounted(() => {
   stopPendingAgentTyping();
   chatScrollResizeObserver?.disconnect();
   finishWorkspaceResize();
+  finishSidebarResize();
   clearAttachments();
 });
 
@@ -518,18 +528,12 @@ watch(activeSurfaceSpec, (spec) => {
 
 async function loadSessions() {
   sessions.value = await api.listSessions();
-  if (sessions.value.length === 0) {
-    startDraftChat();
-    return;
-  }
   const currentSession = activeSession.value ? sessions.value.find((session) => session.id === activeSession.value?.id) : undefined;
   if (currentSession) {
     await openSession(currentSession.id);
     return;
   }
-  if (sessions.value[0]) {
-    await openSession(sessions.value[0].id);
-  }
+  startDraftChat();
 }
 
 async function loadSessionsWithRetry() {
@@ -3760,6 +3764,123 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
   }
 }
 
+function beginSidebarResize(event: PointerEvent) {
+  if (sidebarCollapsed.value) {
+    return;
+  }
+  event.preventDefault();
+  isResizingSidebar.value = true;
+  previousBodyCursor = document.body.style.cursor;
+  previousBodyUserSelect = document.body.style.userSelect;
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  updateSidebarWidthFromPointer(event);
+  if (!isResizingSidebar.value) {
+    return;
+  }
+  window.addEventListener("pointermove", handleSidebarResizeMove);
+  window.addEventListener("pointerup", finishSidebarResize);
+  window.addEventListener("pointercancel", finishSidebarResize);
+}
+
+function handleSidebarResizeMove(event: PointerEvent) {
+  if (!isResizingSidebar.value) {
+    return;
+  }
+  event.preventDefault();
+  updateSidebarWidthFromPointer(event);
+}
+
+function updateSidebarWidthFromPointer(event: PointerEvent) {
+  if (event.clientX <= sidebarCollapseDragThreshold) {
+    sidebarCollapsed.value = true;
+    finishSidebarResize();
+    return;
+  }
+  setSidebarWidth(event.clientX);
+}
+
+function finishSidebarResize() {
+  if (!isResizingSidebar.value) {
+    return;
+  }
+  isResizingSidebar.value = false;
+  document.body.style.cursor = previousBodyCursor;
+  document.body.style.userSelect = previousBodyUserSelect;
+  window.removeEventListener("pointermove", handleSidebarResizeMove);
+  window.removeEventListener("pointerup", finishSidebarResize);
+  window.removeEventListener("pointercancel", finishSidebarResize);
+  persistSidebarWidth(sidebarWidth.value);
+}
+
+function handleSidebarResizerKeydown(event: KeyboardEvent) {
+  if (sidebarCollapsed.value) {
+    return;
+  }
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    setSidebarWidth(sidebarWidth.value - 12, true);
+    return;
+  }
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    setSidebarWidth(sidebarWidth.value + 12, true);
+    return;
+  }
+  if (event.key === "Home") {
+    event.preventDefault();
+    setSidebarWidth(sidebarWidthMin, true);
+    return;
+  }
+  if (event.key === "End") {
+    event.preventDefault();
+    setSidebarWidth(sidebarWidthMax, true);
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    setSidebarWidth(sidebarWidthDefault, true);
+  }
+}
+
+function setSidebarWidth(value: number, persist = false) {
+  sidebarWidth.value = normalizeSidebarWidth(value);
+  if (persist) {
+    persistSidebarWidth(sidebarWidth.value);
+  }
+}
+
+function readSidebarWidth(): number {
+  if (typeof window === "undefined") {
+    return sidebarWidthDefault;
+  }
+  try {
+    const stored = window.localStorage.getItem(sidebarWidthStorageKey);
+    if (!stored) {
+      return sidebarWidthDefault;
+    }
+    return normalizeSidebarWidth(Number(stored));
+  } catch {
+    return sidebarWidthDefault;
+  }
+}
+
+function normalizeSidebarWidth(value: number): number {
+  const normalized = Number.isFinite(value) ? value : sidebarWidthDefault;
+  return Math.min(sidebarWidthMax, Math.max(sidebarWidthMin, Math.round(normalized)));
+}
+
+function persistSidebarWidth(value: number) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(sidebarWidthStorageKey, String(value));
+  } catch {
+    // localStorage can be unavailable in private/restricted contexts.
+  }
+}
+
 function beginWorkspaceResize(event: PointerEvent) {
   if (!hasWorkspaceCanvas.value || !chatLayoutRef.value) {
     return;
@@ -3900,11 +4021,9 @@ function persistCanvasMode(mode: CanvasMode) {
 </script>
 
 <template>
-  <main class="app-shell" :class="{ 'has-drawer': drawerOpen, 'sidebar-collapsed': sidebarCollapsed }">
+  <main class="app-shell" :class="{ 'has-drawer': drawerOpen, 'sidebar-collapsed': sidebarCollapsed, 'is-resizing-sidebar': isResizingSidebar }" :style="appShellStyle">
     <aside class="sidebar">
       <div class="brand-row">
-        <div class="brand-symbol">S</div>
-        <div class="brand-name">{{ label("app.name") }}</div>
         <button
           class="sidebar-toggle icon-button"
           type="button"
@@ -3912,8 +4031,7 @@ function persistCanvasMode(mode: CanvasMode) {
           :aria-label="sidebarCollapsed ? label('nav.expand_sidebar') : label('nav.collapse_sidebar')"
           @click="sidebarCollapsed = !sidebarCollapsed"
         >
-          <PanelLeftOpen v-if="sidebarCollapsed" :size="16" />
-          <PanelLeftClose v-else :size="16" />
+          <PanelLeft :size="16" />
         </button>
       </div>
 
@@ -3978,6 +4096,22 @@ function persistCanvasMode(mode: CanvasMode) {
           <span>{{ label("nav.settings") }}</span>
         </button>
       </div>
+
+      <button
+        class="sidebar-resizer"
+        type="button"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-label="label('nav.resize_sidebar')"
+        :aria-valuemin="sidebarWidthMin"
+        :aria-valuemax="sidebarWidthMax"
+        :aria-valuenow="sidebarWidth"
+        :aria-hidden="sidebarCollapsed"
+        :disabled="sidebarCollapsed"
+        :tabindex="sidebarCollapsed ? -1 : 0"
+        @pointerdown="beginSidebarResize"
+        @keydown="handleSidebarResizerKeydown"
+      />
     </aside>
 
     <section class="main-stage">

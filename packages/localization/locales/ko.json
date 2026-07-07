@@ -106,6 +106,7 @@
   "nav.settings": "Settings",
   "nav.collapse_sidebar": "사이드바 접기",
   "nav.expand_sidebar": "사이드바 펼치기",
+  "nav.resize_sidebar": "사이드바 너비 조정",
   "search.placeholder": "Search",
   "search.title": "Search",
   "search.empty": "아직 검색 결과가 없습니다",

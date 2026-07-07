@@ -106,6 +106,7 @@
   "nav.settings": "Settings",
   "nav.collapse_sidebar": "Contraer barra lateral",
   "nav.expand_sidebar": "Expandir barra lateral",
+  "nav.resize_sidebar": "Ajustar ancho de barra lateral",
   "search.placeholder": "Search",
   "search.title": "Search",
   "search.empty": "Aún no hay resultados",
