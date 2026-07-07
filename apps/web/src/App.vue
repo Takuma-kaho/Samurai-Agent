@@ -271,6 +271,7 @@ const workspaceSplitDefault = 50;
 const sidebarWidthMin = 204;
 const sidebarWidthMax = 340;
 const sidebarWidthDefault = 244;
+const sidebarCollapseDragThreshold = 84;
 const frontendSurfaceKinds = ["chat", "status_timeline", "form", "table", "chart", "artifact", "memory", "run_history", "custom_view"] as const satisfies readonly SurfaceRenderKind[];
 const preferredExternalBackendIds = ["codex", "claude-code"] as const;
 let chatScrollResizeObserver: ResizeObserver | undefined;
@@ -3774,6 +3775,9 @@ function beginSidebarResize(event: PointerEvent) {
   document.body.style.cursor = "col-resize";
   document.body.style.userSelect = "none";
   updateSidebarWidthFromPointer(event);
+  if (!isResizingSidebar.value) {
+    return;
+  }
   window.addEventListener("pointermove", handleSidebarResizeMove);
   window.addEventListener("pointerup", finishSidebarResize);
   window.addEventListener("pointercancel", finishSidebarResize);
@@ -3788,6 +3792,11 @@ function handleSidebarResizeMove(event: PointerEvent) {
 }
 
 function updateSidebarWidthFromPointer(event: PointerEvent) {
+  if (event.clientX <= sidebarCollapseDragThreshold) {
+    sidebarCollapsed.value = true;
+    finishSidebarResize();
+    return;
+  }
   setSidebarWidth(event.clientX);
 }
 
@@ -4015,8 +4024,6 @@ function persistCanvasMode(mode: CanvasMode) {
   <main class="app-shell" :class="{ 'has-drawer': drawerOpen, 'sidebar-collapsed': sidebarCollapsed, 'is-resizing-sidebar': isResizingSidebar }" :style="appShellStyle">
     <aside class="sidebar">
       <div class="brand-row">
-        <div class="brand-symbol">S</div>
-        <div class="brand-name">{{ label("app.name") }}</div>
         <button
           class="sidebar-toggle icon-button"
           type="button"

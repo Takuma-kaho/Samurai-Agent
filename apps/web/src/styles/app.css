@@ -158,7 +158,7 @@ button {
   background:
     linear-gradient(180deg, rgba(6, 8, 10, 0.7), rgba(2, 3, 4, 0.78)),
     var(--rail);
-  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  border-right: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -192,9 +192,7 @@ button {
   background:
     radial-gradient(ellipse 180px 320px at 18% 70%, rgba(190, 57, 42, 0.2), transparent 72%),
     linear-gradient(180deg, rgba(8, 12, 15, 0.68), rgba(5, 6, 8, 0.82));
-  box-shadow:
-    inset -1px 0 0 rgba(255, 255, 255, 0.07),
-    inset 1px 0 0 rgba(255, 255, 255, 0.035);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.055);
   z-index: 1;
 }
 
@@ -206,35 +204,14 @@ button {
 .brand-row {
   align-items: center;
   display: grid;
-  gap: 10px;
-  grid-template-columns: 32px minmax(0, 1fr) 34px;
+  grid-template-columns: 34px;
+  justify-content: start;
   margin-bottom: 18px;
   min-height: 40px;
 }
 
-.brand-symbol {
-  align-items: center;
-  background: rgba(244, 245, 241, 0.92);
-  border-radius: 8px;
-  color: var(--stage);
-  display: grid;
-  font-weight: 700;
-  height: 32px;
-  justify-items: center;
-  width: 32px;
-}
-
-.brand-name {
-  font-size: 15px;
-  font-weight: 700;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .sidebar-toggle {
-  justify-self: end;
+  justify-self: start;
   height: 34px;
   padding: 0;
   width: 34px;
@@ -391,10 +368,10 @@ button {
 }
 
 .sidebar-resizer::before {
-  background: rgba(255, 255, 255, 0.11);
+  background: rgba(255, 255, 255, 0.16);
   bottom: 0;
   content: "";
-  opacity: 0.34;
+  opacity: 0;
   position: absolute;
   right: 5px;
   top: 0;
@@ -405,34 +382,14 @@ button {
 }
 
 .sidebar-resizer::after {
-  background: rgba(255, 255, 255, 0.14);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-  content: "";
-  height: 22px;
-  opacity: 0;
-  position: absolute;
-  right: 2px;
-  top: 50%;
-  transform: translateY(-50%);
-  transition:
-    opacity 140ms ease,
-    transform 140ms ease;
-  width: 5px;
+  display: none;
 }
 
 .sidebar-resizer:hover::before,
 .sidebar-resizer:focus-visible::before,
 .app-shell.is-resizing-sidebar .sidebar-resizer::before {
-  background: rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.28);
   opacity: 1;
-}
-
-.sidebar-resizer:hover::after,
-.sidebar-resizer:focus-visible::after,
-.app-shell.is-resizing-sidebar .sidebar-resizer::after {
-  opacity: 1;
-  transform: translateY(-50%) scale(1.08);
 }
 
 .sidebar-resizer:focus-visible {
@@ -448,20 +405,16 @@ button {
 }
 
 .app-shell.sidebar-collapsed .brand-row {
-  gap: 0;
-  grid-template-columns: 1fr;
-  justify-items: center;
+  grid-template-columns: 34px;
+  justify-content: start;
 }
 
-.app-shell.sidebar-collapsed .brand-symbol,
-.app-shell.sidebar-collapsed .brand-name,
 .app-shell.sidebar-collapsed .nav-item span,
 .app-shell.sidebar-collapsed .section-label,
 .app-shell.sidebar-collapsed .session-list {
   display: none;
 }
 
-.app-shell.sidebar-collapsed .sidebar-toggle,
 .app-shell.sidebar-collapsed .nav-item,
 .app-shell.sidebar-collapsed .footer-button {
   border-radius: var(--radius-pill);
@@ -471,6 +424,16 @@ button {
   min-height: 36px;
   padding: 0;
   width: 36px;
+}
+
+.app-shell.sidebar-collapsed .sidebar-toggle {
+  border-radius: var(--radius-pill);
+  height: 34px;
+  justify-content: center;
+  justify-self: start;
+  min-height: 34px;
+  padding: 0;
+  width: 34px;
 }
 
 .main-stage {
@@ -3545,16 +3508,10 @@ button {
   }
 
   .app-shell.sidebar-collapsed .brand-row {
-    gap: 10px;
-    grid-template-columns: 32px minmax(0, 1fr) 34px;
-    justify-items: stretch;
+    grid-template-columns: 34px;
+    justify-content: start;
   }
 
-  .app-shell.sidebar-collapsed .brand-symbol {
-    display: grid;
-  }
-
-  .app-shell.sidebar-collapsed .brand-name,
   .app-shell.sidebar-collapsed .nav-item span,
   .app-shell.sidebar-collapsed .section-label {
     display: initial;
@@ -3563,7 +3520,7 @@ button {
   .app-shell.sidebar-collapsed .sidebar-toggle {
     border-radius: var(--radius-pill);
     height: 34px;
-    justify-self: end;
+    justify-self: start;
     margin-inline: 0;
     min-height: 34px;
     width: 34px;
