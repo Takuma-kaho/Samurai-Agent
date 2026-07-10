@@ -1483,7 +1483,8 @@ export function createGatewayEnvelope(
   userIntent: string,
   inputLocale: SupportedLocale = "ja",
   outputLocale: SupportedLocale = "ja",
-  metadata: Record<string, unknown> = {}
+  metadata: Record<string, unknown> = {},
+  attachments: MessageEnvelope["attachments"] = []
 ): MessageEnvelope {
   return {
     id: createId("envelope"),
@@ -1491,7 +1492,7 @@ export function createGatewayEnvelope(
     actor_identity: context.actor_identity,
     session_key: context.session_key,
     user_intent: userIntent,
-    attachments: [],
+    attachments,
     input_locale: inputLocale,
     output_locale: outputLocale,
     metadata: envelopeMetadata(context, metadata),

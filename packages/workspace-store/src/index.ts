@@ -11,6 +11,7 @@ import {
   type BackendEventRecord,
   type BackendRunRecord,
   type ChangeHistoryEntry,
+  type ClientEventRecord,
   CollectionRecordSchema,
   CollectionSchemaSchema,
   type CollectionPatch,
@@ -599,6 +600,21 @@ interface BackendEventsTable {
   created_at: string;
 }
 
+interface ClientEventsTable {
+  id: string;
+  target_client_kind: string;
+  target_client_id: string | null;
+  event_type: string;
+  status: string;
+  payload_json: JsonColumn;
+  resource_refs_json: JsonColumn;
+  created_at: string;
+  delivered_at: string | null;
+  acked_at: string | null;
+  expires_at: string | null;
+  error_code: string | null;
+}
+
 interface WorkspaceChangesTable {
   id: string;
   run_id: string;
@@ -659,6 +675,7 @@ interface WorkspaceDb {
   grants: GrantsTable;
   backend_runs: BackendRunsTable;
   backend_events: BackendEventsTable;
+  client_events: ClientEventsTable;
   workspace_changes: WorkspaceChangesTable;
   resource_translations: ResourceTranslationsTable;
   migration_journal: MigrationJournalTable;
@@ -1583,6 +1600,22 @@ export class WorkspaceStore {
         FOREIGN KEY (run_id) REFERENCES backend_runs(id),
         FOREIGN KEY (session_id) REFERENCES sessions(id)
       )`,
+      `CREATE TABLE IF NOT EXISTS client_events (
+        id TEXT PRIMARY KEY,
+        target_client_kind TEXT NOT NULL,
+        target_client_id TEXT,
+        event_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        resource_refs_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        delivered_at TEXT,
+        acked_at TEXT,
+        expires_at TEXT,
+        error_code TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_client_events_delivery ON client_events(target_client_kind, status, created_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_client_events_expiry ON client_events(status, expires_at)`,
       `CREATE TABLE IF NOT EXISTS workspace_changes (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL,
@@ -1956,6 +1989,113 @@ export class WorkspaceStore {
     }
     const rows = await query.orderBy("run_id").orderBy("sequence").execute();
     return rows.map(backendEventFromRow);
+  }
+
+  async saveClientEvent(event: ClientEventRecord): Promise<ClientEventRecord> {
+    await this.db
+      .insertInto("client_events")
+      .values(clientEventToRow(event))
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    return event;
+  }
+
+  async getClientEvent(eventId: string): Promise<ClientEventRecord | undefined> {
+    const row = await this.db.selectFrom("client_events").selectAll().where("id", "=", eventId).executeTakeFirst();
+    return row ? clientEventFromRow(row) : undefined;
+  }
+
+  async listClientEvents(input: {
+    targetClientKind?: ClientEventRecord["target_client_kind"];
+    targetClientId?: string;
+    status?: ClientEventRecord["status"];
+    limit?: number;
+  } = {}): Promise<ClientEventRecord[]> {
+    let query = this.db.selectFrom("client_events").selectAll();
+    if (input.targetClientKind) {
+      const targetClientKind = input.targetClientKind;
+      query = query.where((eb) => eb.or([
+        eb("target_client_kind", "=", targetClientKind),
+        eb("target_client_kind", "=", "any")
+      ]));
+    }
+    if (input.targetClientId) {
+      const targetClientId = input.targetClientId;
+      query = query.where((eb) => eb.or([
+        eb("target_client_id", "is", null),
+        eb("target_client_id", "=", targetClientId)
+      ]));
+    } else if (input.targetClientKind) {
+      query = query.where("target_client_id", "is", null);
+    }
+    if (input.status) {
+      query = query.where("status", "=", input.status);
+    }
+    const rows = await query.orderBy("created_at", "asc").limit(input.limit ?? 50).execute();
+    return rows.map(clientEventFromRow);
+  }
+
+  async markClientEventDelivered(eventId: string, deliveredAt = nowIso()): Promise<ClientEventRecord | undefined> {
+    await this.db
+      .updateTable("client_events")
+      .set({
+        status: "delivered",
+        delivered_at: deliveredAt,
+        error_code: null
+      })
+      .where("id", "=", eventId)
+      .where("status", "=", "pending")
+      .execute();
+    return this.getClientEvent(eventId);
+  }
+
+  async ackClientEvent(eventId: string, ackedAt = nowIso()): Promise<ClientEventRecord | undefined> {
+    await this.db
+      .updateTable("client_events")
+      .set({
+        status: "acked",
+        delivered_at: ackedAt,
+        acked_at: ackedAt,
+        error_code: null
+      })
+      .where("id", "=", eventId)
+      .where("status", "in", ["pending", "delivered"])
+      .execute();
+    return this.getClientEvent(eventId);
+  }
+
+  async failClientEvent(eventId: string, errorCode: string, failedAt = nowIso()): Promise<ClientEventRecord | undefined> {
+    await this.db
+      .updateTable("client_events")
+      .set({
+        status: "failed",
+        delivered_at: failedAt,
+        error_code: errorCode
+      })
+      .where("id", "=", eventId)
+      .where("status", "in", ["pending", "delivered"])
+      .execute();
+    return this.getClientEvent(eventId);
+  }
+
+  async expireClientEvents(input: { now?: string } = {}): Promise<ClientEventRecord[]> {
+    const now = input.now ?? nowIso();
+    const rows = await this.db
+      .selectFrom("client_events")
+      .selectAll()
+      .where("status", "in", ["pending", "delivered"])
+      .where("expires_at", "<=", now)
+      .execute();
+    if (rows.length === 0) {
+      return [];
+    }
+    const ids = rows.map((row) => row.id);
+    await this.db
+      .updateTable("client_events")
+      .set({ status: "expired" })
+      .where("id", "in", ids)
+      .execute();
+    return rows.map((row) => clientEventFromRow({ ...row, status: "expired" }));
   }
 
   async saveResourceTranslation(record: ResourceTranslationRecord): Promise<ResourceTranslationRecord> {
@@ -5289,6 +5429,14 @@ function workspaceResourceBoundaries(): WorkspaceResourceBoundary[] {
       note: "Gateway and scheduler state are operational queues/control-plane records, not workspace prose."
     },
     {
+      resource: "client_event_queue",
+      source_of_truth: "sqlite",
+      file_roots: [],
+      sqlite_tables: ["client_events"],
+      sqlite_role: "queue",
+      note: "Client events are queued OS/UI requests for Web, Desktop, or future clients; Runtime and Desktop stay decoupled through this table."
+    },
+    {
       resource: "localized_derivatives",
       source_of_truth: "derived",
       file_roots: [],
@@ -6185,6 +6333,40 @@ function backendEventFromRow(row: BackendEventsTable): BackendEventRecord {
     payload: parse(row.payload_json),
     resource_refs: parse(row.resource_refs_json),
     created_at: row.created_at
+  };
+}
+
+function clientEventToRow(event: ClientEventRecord): ClientEventsTable {
+  return {
+    id: event.id,
+    target_client_kind: event.target_client_kind,
+    target_client_id: event.target_client_id ?? null,
+    event_type: event.event_type,
+    status: event.status,
+    payload_json: stringify(event.payload),
+    resource_refs_json: stringify(event.resource_refs),
+    created_at: event.created_at,
+    delivered_at: event.delivered_at ?? null,
+    acked_at: event.acked_at ?? null,
+    expires_at: event.expires_at ?? null,
+    error_code: event.error_code ?? null
+  };
+}
+
+function clientEventFromRow(row: ClientEventsTable): ClientEventRecord {
+  return {
+    id: row.id,
+    target_client_kind: row.target_client_kind as ClientEventRecord["target_client_kind"],
+    target_client_id: row.target_client_id ?? undefined,
+    event_type: row.event_type as ClientEventRecord["event_type"],
+    status: row.status as ClientEventRecord["status"],
+    payload: parse(row.payload_json),
+    resource_refs: parse(row.resource_refs_json),
+    created_at: row.created_at,
+    delivered_at: row.delivered_at ?? undefined,
+    acked_at: row.acked_at ?? undefined,
+    expires_at: row.expires_at ?? undefined,
+    error_code: row.error_code ?? undefined
   };
 }
 

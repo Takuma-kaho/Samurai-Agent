@@ -18,6 +18,7 @@ import type {
   SettingsRecord,
   SurfaceRendererRegistryEntry,
   SupportedLocale,
+  ResourceRef,
   WikiFrontmatter,
   WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
@@ -234,8 +235,21 @@ export class ApiError extends Error {
   }
 }
 
+declare global {
+  interface Window {
+    samuraiDesktop?: {
+      apiBaseUrl?: string;
+    };
+  }
+}
+
+export function getApiBaseUrl(): string | undefined {
+  const value = typeof window === "undefined" ? undefined : window.samuraiDesktop?.apiBaseUrl;
+  return value ? value.replace(/\/$/, "") : undefined;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(apiEndpoint(path), {
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {})
@@ -249,6 +263,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(response.status, response.statusText, body);
   }
   return body as T;
+}
+
+function apiEndpoint(path: string): string {
+  if (/^https?:\/\//.test(path)) {
+    return path;
+  }
+  const baseUrl = getApiBaseUrl();
+  return baseUrl ? `${baseUrl}${path.startsWith("/") ? path : `/${path}`}` : path;
 }
 
 export const api = {
@@ -298,6 +320,7 @@ export const api = {
     backendId?: string;
     rendererCapabilities?: SurfaceRendererCapabilities;
     metadata?: Record<string, JsonValue>;
+    attachments?: ResourceRef[];
   }) {
     return request<ChatSurfaceOperationResult>("/api/surface/operations", {
       method: "POST",
@@ -310,6 +333,7 @@ export const api = {
         output_locale: input.outputLocale,
         renderer_capabilities: input.rendererCapabilities,
         metadata: input.metadata,
+        attachments: input.attachments ?? [],
         ...(input.backendId ? { backend_id: input.backendId } : {})
       })
     });
@@ -349,6 +373,9 @@ export const api = {
   },
   listBackendRuns(sessionId?: string) {
     return request<BackendRunRecord[]>(sessionId ? `/api/backend-runs?session_id=${encodeURIComponent(sessionId)}` : "/api/backend-runs");
+  },
+  getBackendRun(runId: string) {
+    return request<BackendRunRecord>(`/api/backend-runs/${encodeURIComponent(runId)}`);
   },
   listBackendEvents(runId: string) {
     return request<BackendEventRecord[]>(`/api/backend-runs/${runId}/events`);

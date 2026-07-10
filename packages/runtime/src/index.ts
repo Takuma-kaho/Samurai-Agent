@@ -22,7 +22,8 @@ import {
   type AgentBackendStatus,
   type BackendOutputEvent,
   type BackendToolBridge,
-  type BackendRunInput
+  type BackendRunInput,
+  type TemporaryContextAttachment
 } from "@samurai-agent/agent-backends";
 import {
   type ActivityInboxItem,
@@ -195,6 +196,8 @@ export interface RunChatTurnInput {
   backend_id?: string;
   input_locale?: SupportedLocale;
   output_locale?: SupportedLocale;
+  attachments?: ResourceRef[];
+  temporary_context?: TemporaryContextAttachment[];
   metadata?: Record<string, unknown>;
   gateway_context?: GatewayContext;
   gateway_boundary_policy?: GatewayBoundaryPolicy;
@@ -518,6 +521,7 @@ interface OperationPlan {
 interface AgentRuntimeWorkspaceOptions {
   backendWorkingDirectoryMode?: "workspace" | "repo";
   repoRoot?: string;
+  resolveTemporaryContextRef?: (ref: ResourceRef) => Promise<TemporaryContextAttachment | undefined> | TemporaryContextAttachment | undefined;
 }
 
 export function createDefaultAgentBackendRegistry(
@@ -1636,7 +1640,7 @@ export class AgentRuntime {
     const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
     const outputLocale = input.output_locale ?? session.output_locale ?? settings.output_locale;
     const context = input.gateway_context ?? webGatewayContext;
-    const envelope = createGatewayEnvelope(context, input.content, inputLocale, outputLocale, input.metadata);
+    const envelope = createGatewayEnvelope(context, input.content, inputLocale, outputLocale, input.metadata, input.attachments);
     const userMessage = await this.saveMessage({
       id: createId("message"),
       session_id: session.id,
@@ -1663,6 +1667,7 @@ export class AgentRuntime {
     const workspaceRoot = this.store.rootDir;
     const backendWorkingDirectoryMode = this.backendWorkingDirectoryMode();
     const workingDirectory = this.backendWorkingDirectory();
+    const temporaryContext = await this.resolveTemporaryContext(envelope.attachments, input.temporary_context);
     const activeToolBridge = createBackendToolBridge({
       backendKind: backend.kind,
       runId: backendRunId,
@@ -1686,6 +1691,12 @@ export class AgentRuntime {
         workspace_root: workspaceRoot,
         working_directory: workingDirectory,
         backend_working_directory_mode: backendWorkingDirectoryMode,
+        ...(temporaryContext.length > 0
+          ? {
+              temporary_context_count: temporaryContext.length,
+              temporary_context_ref_ids: temporaryContext.map((item) => item.id)
+            }
+          : {}),
         ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {}),
         context_handoff_status: "preparing"
       }
@@ -1762,6 +1773,12 @@ export class AgentRuntime {
       workspace_root: workspaceRoot,
       working_directory: workingDirectory,
       backend_working_directory_mode: backendWorkingDirectoryMode,
+      ...(temporaryContext.length > 0
+        ? {
+            temporary_context_count: temporaryContext.length,
+            temporary_context_ref_ids: temporaryContext.map((item) => item.id)
+          }
+        : {}),
       ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {}),
       context_handoff_status: "ready",
       ...boundaryMetadata,
@@ -1837,6 +1854,7 @@ export class AgentRuntime {
       tool_bridge: activeToolBridge,
       available_tools: availableTools,
       recent_messages: recentMessages,
+      temporary_context: temporaryContext,
       metadata: backendRun.metadata,
       context_intent: contextIntent,
       expected_outputs: expectedOutputs
@@ -2403,6 +2421,7 @@ export class AgentRuntime {
         backend_id: input.backend_id,
         input_locale: input.input_locale,
         output_locale: input.output_locale,
+        attachments: input.attachments,
         metadata: {
           ...(input.metadata ?? {}),
           surface_operation_id: input.id,
@@ -6408,6 +6427,33 @@ export class AgentRuntime {
         working_directory: workingDirectory
       }
     };
+  }
+
+  private async resolveTemporaryContext(
+    attachments: ResourceRef[] = [],
+    explicitItems: TemporaryContextAttachment[] = []
+  ): Promise<TemporaryContextAttachment[]> {
+    const explicitById = new Map(explicitItems.map((item) => [item.id, item]));
+    const refs = attachments.filter((ref) => ref.kind === "temporary_context");
+    if (refs.length === 0) {
+      return explicitItems;
+    }
+    const resolved: TemporaryContextAttachment[] = [];
+    for (const ref of refs) {
+      const explicit = explicitById.get(ref.id);
+      if (explicit) {
+        resolved.push(explicit);
+        continue;
+      }
+      const item = await this.workspaceOptions.resolveTemporaryContextRef?.(ref);
+      if (item) {
+        resolved.push(item);
+      }
+    }
+    if (resolved.length !== refs.length) {
+      throw new RuntimeRequestError("conflict", "temporary_context_unavailable");
+    }
+    return resolved;
   }
 
   private async handleBackendToolStartedEvent(input: {

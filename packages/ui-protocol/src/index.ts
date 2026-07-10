@@ -124,6 +124,7 @@ export interface MessageSubmitOperation extends SurfaceOperationBase {
   kind: "message.submit";
   content: string;
   backend_id?: string;
+  attachments?: ResourceRef[];
 }
 
 export interface FormSubmitOperation extends SurfaceOperationBase {
@@ -901,7 +902,8 @@ const RawSurfaceOperationSchema = z.discriminatedUnion("kind", [
     ...SurfaceOperationBaseShape,
     kind: z.literal("message.submit"),
     content: z.string().trim().min(1),
-    backend_id: z.string().min(1).optional()
+    backend_id: z.string().min(1).optional(),
+    attachments: z.array(ResourceRefSchema).optional().default([])
   }),
   z.object({
     ...SurfaceOperationBaseShape,

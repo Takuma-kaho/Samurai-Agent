@@ -487,6 +487,44 @@ describe("backend run API", () => {
     expect(cancel.status).toBe("completed");
   });
 
+  it("queues client events through API and backend run updates", async () => {
+    const { baseUrl } = await startTestServer();
+    const manual = await postJson<{
+      id: string;
+      status: string;
+      event_type: string;
+    }>(`${baseUrl}/api/client-events`, {
+      event_type: "client.workspace.open_requested",
+      payload: { deep_link: "samurai://workspace" },
+      resource_refs: []
+    }, 201);
+    const delivered = await postJson<{ status: string }>(`${baseUrl}/api/client-events/${manual.id}/deliver`, {});
+    const acked = await postJson<{ status: string }>(`${baseUrl}/api/client-events/${manual.id}/ack`, {});
+
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+    const turn = await postJson<{ backendRun: { id: string; status: string } }>(`${baseUrl}/api/chat/sessions/${session.id}/messages`, {
+      content: "短くメモを書いて",
+      output_locale: "ja"
+    }, 201);
+    const queued = await getJson<Array<{
+      id: string;
+      event_type: string;
+      status: string;
+      payload: Record<string, unknown>;
+    }>>(`${baseUrl}/api/client-events?target_client_kind=desktop&status=pending`);
+
+    const automatic = queued.find((event) => event.payload.run_id === turn.backendRun.id);
+    expect(manual).toMatchObject({ event_type: "client.workspace.open_requested", status: "pending" });
+    expect(delivered.status).toBe("delivered");
+    expect(acked.status).toBe("acked");
+    expect(turn.backendRun.status).toBe("completed");
+    expect(automatic).toMatchObject({
+      event_type: "client.notification.requested",
+      status: "pending"
+    });
+    expect(automatic?.payload.deep_link).toBe(`samurai://run/${turn.backendRun.id}`);
+  });
+
   it("exposes ignored provider tool diagnostics", async () => {
     const provider = new FakeProviderAdapter("fake/test", {
       content: "Done.",
@@ -2272,6 +2310,7 @@ describe("backend run API", () => {
       "slack",
       "line",
       "email",
+      "mobile",
       "webhook",
       "local_cli",
       "cron"
@@ -2281,6 +2320,7 @@ describe("backend run API", () => {
       "slack",
       "line",
       "email",
+      "mobile",
       "webhook",
       "local_cli",
       "cron"
@@ -3084,6 +3124,126 @@ describe("backend run API", () => {
     expect(routed.chat.messages).toContainEqual(expect.objectContaining({
       role: "user",
       content: "Subject: 提案書メール\n\nEmailから提案書を作って"
+    }));
+    expect(JSON.stringify(routed)).not.toContain("raw-secret-token");
+  });
+
+  it("routes Mobile message payloads through Gateway inbound", async () => {
+    const { baseUrl } = await startTestServer();
+    const mobileUrl = `${baseUrl}/api/gateway/mobile/messages`;
+    const invalid = await postJson<{ error: string }>(mobileUrl, {
+      user_id: "user-1",
+      metadata: { request_id: "mobile_missing_body" }
+    }, 400);
+    const blocked = await postJson<{
+      adapter: { channel: string; source_identity: string; body_field: string; user_id?: string; device_id?: string; conversation_id?: string; platform?: string };
+      inbound: { id: string; status: string; trusted: boolean; metadata: Record<string, unknown> };
+      pairing: { id: string; status: string; pairing_code?: string; session_key: string };
+    }>(mobileUrl, {
+      token: "raw-secret-token",
+      user_id: "user-1",
+      device_id: "device-1",
+      conversation_id: "conv-1",
+      platform: "ios",
+      text: "Mobile初回です",
+      metadata: {
+        request_id: "mobile_req_1",
+        authorization: "Bearer raw-secret-token"
+      }
+    }, 202);
+    await postJson<{ id: string; status: string }>(
+      `${baseUrl}/api/gateway/pairings/${blocked.pairing.id}/approve`,
+      {}
+    );
+    const routed = await postJson<{
+      adapter: { channel: string; source_identity: string; body_field: string; user_id?: string; device_id?: string; conversation_id?: string; platform?: string };
+      inbound: { id: string; status: string; trusted: boolean; body: string; metadata: Record<string, unknown>; session_key?: string };
+      session: { session_key: string };
+      chat: {
+        backendRun: { status: string; metadata: Record<string, unknown> };
+        messages: Array<{ role: string; content: string }>;
+      };
+    }>(mobileUrl, {
+      token: "raw-secret-token",
+      user_id: "user-1",
+      device_id: "device-1",
+      conversation_id: "conv-1",
+      platform: "ios",
+      text: "Mobileから提案書を作って",
+      metadata: {
+        request_id: "mobile_req_2",
+        cookie: "raw-secret-token"
+      },
+      output_locale: "ja"
+    }, 201);
+
+    const expectedSessionKey = "mobile:mobile-user~3Auser-1:conversation~3Aconv-1";
+    expect(invalid).toEqual({ error: "invalid_gateway_mobile_message" });
+    expect(blocked.adapter).toEqual({
+      channel: "mobile",
+      source_identity: "mobile:user:user-1",
+      body_field: "text",
+      user_id: "user-1",
+      device_id: "device-1",
+      conversation_id: "conv-1",
+      platform: "ios"
+    });
+    expect(blocked.inbound).toMatchObject({
+      status: "blocked",
+      trusted: false,
+      metadata: {
+        request_id: "mobile_req_1",
+        authorization: "[redacted]",
+        gateway_mobile_adapter: true,
+        gateway_mobile_body_field: "text",
+        gateway_mobile_user_id: "user-1",
+        gateway_mobile_device_id: "device-1",
+        gateway_mobile_conversation_id: "conv-1",
+        gateway_mobile_platform: "ios"
+      }
+    });
+    expect(blocked.inbound.metadata.gateway_mobile_payload_keys).toEqual(["user_id", "device_id", "conversation_id", "platform", "text"]);
+    expect(blocked.pairing).toMatchObject({
+      status: "pending",
+      session_key: expectedSessionKey
+    });
+    expect(blocked.pairing.pairing_code).toBeTruthy();
+    expect(JSON.stringify(blocked)).not.toContain("raw-secret-token");
+    expect(routed.adapter).toEqual({
+      channel: "mobile",
+      source_identity: "mobile:user:user-1",
+      body_field: "text",
+      user_id: "user-1",
+      device_id: "device-1",
+      conversation_id: "conv-1",
+      platform: "ios"
+    });
+    expect(routed.inbound).toMatchObject({
+      status: "processed",
+      trusted: true,
+      body: "Mobileから提案書を作って",
+      session_key: expectedSessionKey,
+      metadata: {
+        request_id: "mobile_req_2",
+        cookie: "[redacted]",
+        gateway_mobile_adapter: true,
+        gateway_mobile_body_field: "text",
+        gateway_mobile_user_id: "user-1",
+        gateway_mobile_device_id: "device-1",
+        gateway_mobile_conversation_id: "conv-1",
+        gateway_mobile_platform: "ios"
+      }
+    });
+    expect(routed.session.session_key).toBe(expectedSessionKey);
+    expect(routed.chat.backendRun.status).toBe("completed");
+    expect(routed.chat.backendRun.metadata).toMatchObject({
+      gateway_inbound_id: routed.inbound.id,
+      gateway_channel: "mobile",
+      gateway_source_identity: "mobile:user:user-1"
+    });
+    expect(routed.chat.messages).toContainEqual(expect.objectContaining({
+      role: "user",
+      content: "Mobileから提案書を作って"
     }));
     expect(JSON.stringify(routed)).not.toContain("raw-secret-token");
   });

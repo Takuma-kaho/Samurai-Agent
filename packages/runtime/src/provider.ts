@@ -1,5 +1,6 @@
 import type { MemoryCandidate } from "@samurai-agent/memory";
 import type { ExternalAssistContext, FreezeSnapshot, GatewayBoundaryRuntimeSnapshot, HostContextAssembly, MessageEnvelope, MessageRecord, SupportedLocale } from "@samurai-agent/core-schemas";
+import type { TemporaryContextAttachment } from "@samurai-agent/agent-backends";
 import { defaultModelForProvider, providerProfiles, type ProviderCredential, type ProviderProfile } from "./provider-profiles";
 
 export type ProviderId = "openai" | "gemini" | "anthropic" | "openrouter" | "openai-compatible";
@@ -79,6 +80,7 @@ export interface ProviderInput {
   contextAssembly?: HostContextAssembly;
   availableTools: string[];
   recentMessages: MessageRecord[];
+  temporaryContext: TemporaryContextAttachment[];
 }
 
 export interface ProviderAdapter {
