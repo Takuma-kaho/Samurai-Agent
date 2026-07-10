@@ -39,6 +39,9 @@ Samurai Agent の Web UI は、以下を基本にする。
 Chat-first は、初期表示だけではなくUI全体の主軸である。
 Backend進行状況、失敗、Memory/Skill候補、自律実行の見える化も、別のダッシュボードに逃がさず、Chat Shellに付随する補助表示として扱う。
 
+Generative UIは独立アプリを増やす機能ではない。会話の文脈に応じて、文章、Artifact、一時的な操作UI、追加表示なしのいずれを選ぶかという返答形式である。
+Workspace CanvasはWorkspace状態の正本ではなく、必要な時だけ開く一時的な投影面として扱う。
+
 ただし、以下の面や導線を消す意味ではない。
 
 - Memory View
@@ -427,7 +430,7 @@ UI内の文字は増やしすぎない。
 
 ## 8. 実装へ進む時のチェックリスト
 
-- `PRINCIPLES.md` の GUI-first / Workspace-first と矛盾していないか
+- `PRINCIPLES.md` の Chat-first / Workspace-backed, UI on demand と矛盾していないか
 - `ARCHITECTURE.md` の責務分解を UI 側で混ぜていないか
 - `PUBLIC_NAMING.md` に反していないか
 - `Chat Empty` / `With Artifact` / `Workspace Peek` / `Context Drawer` の4状態を説明できるか

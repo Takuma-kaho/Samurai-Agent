@@ -18,7 +18,7 @@
 
 ## 1. Samurai Agent が作るもの
 Samurai Agentは、
-> 人間とAIが同じ作業机を触る、GUI-first な Personal Agent Workspace。
+> 会話を中心に、人間とAIが同じ仕事状態を育てる Personal Agent Interface。
 
 その上に「自分専用に育つAI秘書」という体験を載せる。
 
@@ -37,6 +37,7 @@ Samurai Agent は、以下を目指さない。
 
 - 単なるチャットボット。
 - CLI Agent の薄いGUIラッパー。
+- 従来アプリ固有の複雑なUIを、Workspace内へ再現して並べ直す仕組み。
 - 独自の安全制御を主役にしたAgent基盤。
 - すべての会話、文章生成、思考をDSL化する仕組み。
 - 最初から多チャネルGateway、音声秘書、plugin marketplaceを全部載せた大きなシステム。
@@ -49,29 +50,33 @@ Samurai Agent は、以下を目指さない。
 
 ---
 
-## 3. GUI-first
+## 3. Chat-first / UI on demand
 
-本体は Workspace である。
+Chatは、初回命令だけを送る入口ではない。ユーザーとAIが意図をすり合わせ、作業を継続する主要インターフェースである。
 
-GUI-first である理由。
+Generative UIは独立アプリではなく、会話の文脈に応じて選ばれる返答・確認・操作の表現形式である。
 
-- 成果物、表、グラフ、顧客情報、記憶、スキルは画面で見えた方が強い。
-- 人間が「何が起きたか」「何が保存されたか」「何が候補になったか」を確認できる必要がある。
-- Agent の行動は、見えない裏側ではなく、画面上の作業として理解できるべき。
+- 文章やMarkdownで十分なら、UIを増やさない。
+- 成果物を確認したい時はArtifactを見せる。
+- 比較、選択、直接修正が速い時だけ、表、フォーム、グラフ、プレビューなどのUIを出す。
+- 必要がなくなったUIは閉じてよい。仕事状態はWorkspaceに残る。
 
 実装判断。
 
-- 迷ったら、チャット欄だけで完結させない。
-- Artifact、Memory、Skill、Collection、Run History、Backend event が見える導線を優先する。
-- 画面で扱うべきものを、ログやプロンプト内だけに閉じ込めない。
+- 話した方が速ければ会話を使う。
+- 見た方が速ければUIを出す。
+- 触った方が速ければ操作可能にする。
+- 不要ならUIを出さない。
+- Artifact、Memory、Skill、Collection、Run History、Backend eventは、必要時に理解・確認できる導線を持つ。
+- UIをログやプロンプト内だけに閉じ込めないが、常設ダッシュボードの主役にも置かない。
 
 ---
 
-## 4. Workspace-first
+## 4. Workspace-backed state
 
-Workspace は、Samurai Agent の土台である。
+Workspace は、Samurai Agent の永続状態の正本である。表示上の主画面やアプリ一覧を意味しない。
 
-AIも人間も同じWorkspaceを触る。
+AIも人間も同じWorkspace状態を読み書きする。
 
 Workspaceに置くもの。
 
@@ -94,6 +99,8 @@ Workspaceに置くもの。
 - ユーザーが直接見たいものは filesystem に置く。
 - 整合性、検索、履歴、queue が必要なものは SQLite に置く。
 - Agent の価値は、Workspace に記憶、スキル、成果物、履歴が蓄積されることで育つ。
+- Collectionは、AIと人間が共有する構造化データであり、独立アプリではない。
+- Artifactは、会話やBackend実行から生まれる成果物であり、独立アプリではない。
 
 ---
 
@@ -103,7 +110,7 @@ Samurai Agent の中核は、実行部を固定しない Host 構造である。
 
 ```text
 Samurai Agent Host
-  GUI / Workspace / Memory / Skill / Gateway
+  Chat / Surface / Workspace / Memory / Skill / Gateway
   AgentBackend cassette
     ClaudeCodeBackend
     CodexBackend
@@ -256,7 +263,7 @@ MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象では
 
 役割分担。
 
-- MulmoClaude: GUI、Host、Workspace、Artifact、Collection、Plugin composition の参照元。
+- MulmoClaude: Host、Workspace状態、Artifact、Collection、Renderer、Plugin composition の参照元。アプリ中心UXは完成形にしない。
 - Hermes Agent: Memory、Skill、Reflection、Self-improvement loop の参照元。
 - OpenClaw: Gateway、Session routing、Pairing、Sandbox、External boundary の参照元。
 - Claude Code / Codex: 差し替え可能な Agent Backend cassette の候補。
@@ -265,12 +272,13 @@ MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象では
 
 ## 11. 責務分離
 
-GUI / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / Collection の責務を混ぜない。
+Chat / Surface / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / Collection の責務を混ぜない。
 
 基本の役割。
 
-- GUI: 人間が見る、直す、理解する場所。
-- Host: GUI、Workspace、Memory、Skill、Gatewayを束ね、どのAgent Backendに流すかを決める場所。
+- Chat: ユーザーとAIが意図をすり合わせ、作業を継続する主要インターフェース。
+- Surface: 必要時だけ現れ、状態を見せたり直接操作したりする表現面。
+- Host: Chat、Surface、Workspace、Memory、Skill、Gatewayを束ね、どのAgent Backendに流すかを決める場所。
 - Agent Backend: Hostから渡された作業を実行する、差し替え可能な実行部。
 - Gateway: Web UI以外の入口や外部チャネルを受ける境界。
 - Memory: 長期的に残す事実、好み、作業手順、文脈。
@@ -292,13 +300,14 @@ GUI / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / C
 
 迷ったら、以下の順に優先する。
 
-1. ユーザーが作業を理解できる。
+1. ユーザーが会話の流れで作業を理解・修正できる。
 2. Workspace、Memory、Skillに価値が戻る。
-3. Agent Backendを固定しない。
-4. MulmoClaude型Hostの強みを活かす。
-5. Hermes的な改善ループを殺さない。
-6. 外部接続の境界は守るが、独自安全設計を主役にしない。
-7. 一気に広げず、縦切りで価値を通す。
-8. 仕様を増やす時は、後から読む人が迷わない粒度で残す。
+3. UIは必要な時だけ現れ、状態そのものを正本にしない。
+4. Agent Backendを固定しない。
+5. MulmoClaude型HostとSurfaceの強みを活かす。
+6. Hermes的な改善ループを殺さない。
+7. 外部接続の境界は守るが、独自安全設計を主役にしない。
+8. 一気に広げず、縦切りで価値を通す。
+9. 仕様を増やす時は、後から読む人が迷わない粒度で残す。
 
 この優先順位に反する変更は、先に設計意図を確認する。

@@ -1,6 +1,6 @@
 # Samurai Agent
 
-Samurai Agent is a local-first, GUI-first Personal Agent Workspace.
+Samurai Agent is a local-first personal AI assistant with chat-first interaction, on-demand UI, and a durable workspace-backed core.
 
 The backend treats the workspace filesystem as the durable source of truth for
 Artifacts, Memory, Knowledge Wiki pages, Skills, and support files. SQLite is
@@ -9,7 +9,7 @@ diagnostics.
 
 ## What Is In Scope
 
-- Chat-centered local agent runtime
+- Chat-first local agent runtime with text, Artifact, and on-demand UI responses
 - Agent Backend cassette selection
 - Memory, Knowledge Wiki, Skill, and Skill support-file retrieval
 - Context preview for reusable workspace context

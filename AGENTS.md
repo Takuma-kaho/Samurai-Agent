@@ -10,7 +10,7 @@
 ## このリポジトリの位置づけ
 
 - このリポジトリは、Samurai Agent の設計・検討・実装準備を置く場所。
-- 中核テーマは `GUI-first Personal Agent Workspace`。
+- 中核テーマは `Chat-first Personal Agent Interface / Workspace-backed, UI on demand`。
 - `PRINCIPLES.md` を設計思想・判断基準の最重要 source of truth として扱う。
 - `ARCHITECTURE.md` を実装前アーキテクチャ仕様の source of truth として扱う。
 - `PUBLIC_NAMING.md` を公開面の命名ルールとして扱う。
@@ -41,7 +41,10 @@ Samurai Agentで設計、実装、UI、命名に関わる作業を始める前�
 - 基本方針は `MulmoClaude型Host + Agent Backend cassette + Hermes的Memory/Skill改善ループ`。
 - Claude Code / Codex / SamuraiNativeBackend などの実行部は、Hostから差し替えられるBackend cassetteとして扱う。
 - 独自性は安全制御ではなく、Memory、Skill、Artifact、Collection、Workspace UX、外部連携の拡張で出す。
-- 実装を考える時は、GUI / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / Collection の責務を混ぜない。
+- Chatは継続的な主要インターフェース、Workspaceは永続状態の正本、Generative UIは必要時だけ現れる返答・操作Surfaceとして扱う。
+- MulmoClaudeはHost、Artifact、Collection、Rendererの仕組みを参照する対象であり、アプリ中心のWorkspace UXを完成形として模倣しない。
+- Collectionは独立アプリではなく構造化データ、Artifactはアプリではなく成果物として扱う。
+- 実装を考える時は、Chat / Surface / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / Collection の責務を混ぜない。
 
 ## 公開命名ルール
 

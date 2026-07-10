@@ -1,6 +1,8 @@
-# Samurai Agent Architecture v0.7
+# Samurai Agent Architecture v0.8
 
-## GUI-first Personal Agent Workspace
+## Chat-first Personal Agent Interface
+
+### Workspace-backed, UI on demand
 
 ### MulmoClaude型Host、Agent Backend cassette、Hermes的Memory/Skill改善ループ、OpenClaw中心のGatewayを参照して再構成する
 
@@ -29,7 +31,7 @@
 | --- | --- | --- |
 | OpenClaw | `https://github.com/openclaw/openclaw.git` | Gateway / Session / Pairing / Sandbox / External boundary の参照元 |
 | Hermes Agent | `https://github.com/NousResearch/hermes-agent.git` | Memory / Skill / Reflection / Self-improvement loop の参照元 |
-| MulmoClaude | `https://github.com/receptron/mulmoclaude.git` | GUI / Host / Workspace / Artifact / Collection / Plugin composition の参照元 |
+| MulmoClaude | `https://github.com/receptron/mulmoclaude.git` | Host / Workspace state / Artifact / Collection / Renderer / Plugin composition の参照元 |
 | Hermes Agent 解説 | `Hermes_Agent_解説.md` | Hermes Agent理解のローカル補助資料 |
 | MulmoClaude記事 | `https://singularitysociety.org/articles/blog/2026-04-10-mulmoclaude/` | MulmoClaude理解の補助資料 |
 | OpenClaw記事 | `https://unicornee.ai/articles/openclaw-ai-agent/` | OpenClaw理解の補助資料 |
@@ -37,7 +39,7 @@
 
 | 参照元 | 役割 | Samurai Agentでの位置づけ |
 | --- | --- | --- |
-| MulmoClaude | GUI / Host / Workspace / Artifact / Collection / Plugin composition | 体験とWorkspace構造の中心 |
+| MulmoClaude | Host / Workspace / Artifact / Collection / Plugin composition | 仕組みと状態構造の参照元。アプリ中心UXは完成形にしない |
 | Hermes Agent | Memory / Skills / Reflection / Self-improvement loop | 育つAgent体験の中心 |
 | OpenClaw | Gateway / Session routing / Pairing / Sandbox / External entry | 外部連携と運用境界の中心 |
 | Claude Code / Codex | Agent Backend cassette | 実行部を固定しないための差し替え候補 |
@@ -48,13 +50,13 @@
 
 Samurai Agent は、以下を目指す。
 
-> **外部Agentや自前Agentを差し替えながら、個人のWorkspace、Memory、Skill、Artifactを育てるGUI-first Personal Agent Workspace。**
+> **会話を中心に、外部Agentや自前Agentを差し替えながら、個人のWorkspace、Memory、Skill、Artifactを育てるPersonal Agent Interface。**
 
 中核となる構造。
 
 ```text
 Samurai Agent Host
-  GUI / Workspace / Memory / Skill / Gateway
+  Chat / Surface / Workspace / Memory / Skill / Gateway
   AgentBackend cassette
     ClaudeCodeBackend
     CodexBackend
@@ -66,7 +68,7 @@ Samurai Agent Host
 
 主語は、以下である。
 
-> **人間とAIが同じ作業机を触る、個人用Agent Workspace。**
+> **人間とAIが同じ仕事状態を扱い、必要な操作面だけが会話から現れる個人用Agent Interface。**
 
 ---
 
@@ -75,8 +77,9 @@ Samurai Agent Host
 思想の詳細は `PRINCIPLES.md` を正本にする。
 この文書では、アーキテクチャ上の不変条件だけを扱う。
 
-- GUIが主画面であり、Chatは入口、Workspaceが本体。
-- Workspaceは、人間とAIが共有する状態である。
+- Chatが継続的な主要インターフェースであり、UIは必要時だけ会話から現れる。
+- Workspaceは、人間とAIが共有する永続状態の正本であり、常設の主画面ではない。
+- Surface Protocolは、共通操作を受け取り、状態を端末に合う表現へ投影する双方向契約である。
 - Agent Backendは固定せず、cassetteとして差し替え可能にする。
 - MemoryとSkillは、外部Backendの中ではなくWorkspace側に残す。
 - Backend eventは、UIや保存層へ出す前に正規化する。
@@ -90,70 +93,56 @@ Samurai Agent Host
 全体構造。
 
 ```text
-[GUI Shell]
-Chat / Workspace / Artifacts / Collections / Memory / Skills / Run History
-
-        ↓
-
-[Surface Protocol]
-message / form / table / chart / artifact / collection / custom-view
+[Chat / Gateway / Surface Input]
+Web Chat / Desktop / Future Mobile / Slack / LINE / Email / Webhook / Cron / on-demand UI operation
 
         ↓
 
 [Samurai Agent Host]
-Session / Context / Active Memory / Skill Selection / Backend Routing
+Session / Intent / Context / Active Memory / Skill Selection / Backend Routing
 
         ↓
 
-[AgentBackendRegistry]
-backend selection / config / run lifecycle
-
-        ↓
-
-[AgentBackend Cassette]
+[AgentBackend Registry + Cassette]
 ClaudeCodeBackend / CodexBackend / SamuraiNativeBackend / future external backends
 
         ↓
 
-[BackendEventBridge]
-stream normalization / event persistence / UI updates
+[Common Domain Operation]
+Human surface operation / Agent tool call / Gateway input / Automation
 
         ↓
 
-[Workspace Feedback Layer]
-Artifact / Collection / Memory suggestion / Skill candidate / Workspace change
+[Workspace-backed State]
+Artifact / Collection / Memory / Skill / Session / Workspace change / History
 
         ↓
 
-[Personalization Layer]
-SOUL.md / Profile / Memory / Active Memory / Skills / Curator / Session Search
+[Presentation Selection + Surface Protocol]
+text / markdown / artifact / form / table / chart / custom view / no additional UI
 
         ↓
 
-[Gateway Control Plane]
-Web / Future Telegram / Slack / LINE / Email / Webhook / Cron / Bridges
+[On-demand Surface]
+Chat inline result / Artifact Card / Workspace Peek / Context Drawer / device fallback
 ```
 
 主要なデータ流れ。
 
 ```text
-User asks
+User asks through Chat / Gateway
 ↓
-Chat Shell / GUI operation
-↓
-Surface Protocol
-↓
-Host builds session context
+Host builds intent and session context
 ↓
 Active Memory retrieval + Skill selection
 ↓
 AgentBackendRegistry selects backend
 ↓
-Backend cassette runs
+Backend cassette runs and events are normalized
 ↓
-BackendEventBridge normalizes events
+Common Domain Operation updates Workspace state
 ↓
-Workspace updates Artifact / Collection / Memory / Skill
+Presentation Selection chooses text / Artifact / on-demand UI / no additional UI
 ↓
 Reflection and Curator improve future runs
 ```
@@ -162,8 +151,8 @@ Reflection and Curator improve future runs
 
 | 境界 | 役割 | 混ぜないもの |
 | --- | --- | --- |
-| GUI Shell | 人間が見る、直す、理解する場所 | Backend固有の実行詳細 |
-| Surface Protocol | GUIからHostへ渡す操作や表示を表現する入口 | Agentの自由な思考 |
+| Interaction Shell | 会話を中心に、人間が見る、直す、理解する場所 | Backend固有の実行詳細 |
+| Surface Protocol | 人間・AIの共通操作と、状態を端末別Surfaceへ投影する契約 | Agentの自由な思考、Workspace正本 |
 | Host | Workspace文脈を組み、Backendへ渡し、結果を戻す | 個別モデル呼び出し |
 | AgentBackendRegistry | Backend選択とrun lifecycleを扱う | MemoryやSkillの正本 |
 | AgentBackend Cassette | Claude Code / Codex / Nativeなどの実行部 | Workspace正本、公開命名 |
@@ -175,25 +164,26 @@ Reflection and Curator improve future runs
 
 ## 5. Core Components
 
-### 5.1 GUI Shell
+### 5.1 Interaction Shell
 
-人間が操作する中心UI surface。
+Chatを中心に、人間が必要な時だけ操作面を開くUI surface。
 
 | UI surface | 役割 |
 | --- | --- |
-| Chat Shell | AIへの依頼、Backend進行状況、結果表示の入口 |
+| Chat Shell | AIへの依頼、Backend進行状況、結果表示を継続する主要面 |
 | Artifact Card | 文書、表、グラフ、画像、PDFなどの成果物を見る |
-| Workspace Peek | 成果物や業務データを必要時だけ軽く開く |
+| Workspace Peek | 成果物や業務データを必要時だけ開く一時的な投影面 |
 | Context Drawer | Backend event、Tool log、Memory suggestion、Skill candidate を作業中に見る |
 | Memory View | AIが覚えていること、provisional/active/sensitiveの管理 |
 | Run History | Backend run、event、エラー、再開に必要な履歴を見る |
 
-GUI Shellは、Agentの行動を説明文で飾る場所ではない。
+Interaction Shellは、Agentの行動を説明文で飾る場所ではない。
 作業状態、成果物、記憶候補、Skill候補を、人間が理解できる粒度で見せる場所である。
+常設のアプリ一覧としてWorkspaceを見せるのではなく、会話から必要なSurfaceを選んで出す。
 
 ### 5.2 Samurai Agent Host
 
-Hostは、GUI、Workspace、Memory、Skill、Gateway、Backendを束ねる中核である。
+Hostは、Chat、Surface、Workspace、Memory、Skill、Gateway、Backendを束ねる中核である。
 
 Hostの責務。
 
@@ -716,7 +706,7 @@ Artifact本文はfilesystemを正本にする。
 
 ### 9.2 Collection
 
-Collectionは、小さな業務データを扱う仕組みである。
+Collectionは、AIと人間が共有する小さな業務データを扱う仕組みである。独立アプリそのものではない。
 
 扱うもの。
 
@@ -865,25 +855,26 @@ de
 このプロダクトは、
 
 ```text
-MulmoClaude的に画面で使える
-Hermes的に自律的に育つ
+Chat-firstに意図を伝えられる
+必要なSurfaceだけが会話から現れる
+Workspace-backedに状態と学習が育つ
+Hermes的に自律的に改善する
 OpenClaw的に外部入口と運用境界を持てる
 Agent Backendをcassetteとして差し替えられる
-GUI-first Personal Agent Workspace
 ```
 
 である。
 
 より正確には、
 
-> **MulmoClaude型のHost / Workspace体験を中心にしつつ、Claude Codeだけに固定しない。**
+> **MulmoClaude型のHost、Artifact、Collection、Rendererの仕組みを参照しつつ、アプリ中心のWorkspace UXを完成形にしない。**
 > **Agent BackendはClaudeCodeBackend / CodexBackend / SamuraiNativeBackendとして差し替え可能にする。**
-> **HermesのMemory / Skill / Reflection / Curator / Automationを、GUI上で見える形に変換して採用する。**
+> **HermesのMemory / Skill / Reflection / Curator / Automationを、Chatと必要時のSurfaceで理解できる形に変換して採用する。**
 > **OpenClawのGateway / Session / Pairing / Sandbox / SecretRef思想は、外部入口と運用境界として取り込む。**
 
 借りるのは、実装そのものよりも以下の勝ち筋である。
 
-- MulmoClaude: HostとWorkspaceをAgent体験の中心にすること。
+- MulmoClaude: Host、Workspace状態、Artifact、Collection、Rendererの仕組みを参照すること。
 - Hermes: Memory / Skill / Reflection / CuratorでAgentが育つこと。
 - OpenClaw: GatewayとSessionで外部入口を束ねること。
 - Claude Code / Codex: Agent Backendとして差し替え可能に扱うこと。
@@ -892,6 +883,6 @@ GUI-first Personal Agent Workspace
 
 最終的に作るべきものは、
 
-> **外部Agentや自前Agentの力をWorkspace、Memory、Skill、Artifactへ戻せるPersonal Agent Workspace**
+> **外部Agentや自前Agentの力をWorkspace、Memory、Skill、Artifactへ戻し、会話から必要な操作面だけを現せるPersonal Agent Interface**
 
 である。

@@ -119,7 +119,22 @@
 External Providerは、UIでは `External memory assist` のように補助役であることが伝わる名前にする。
 API keyやsecretの保存導線はSettings UIに置かない。
 
-### 6.1 Knowledge Wiki
+### 6.1 Chat-first / Workspace-backed / UI on demand
+
+以下はSamurai Agentの公開説明で使ってよい。
+
+| 表現 | Samurai Agentでの意味 |
+| --- | --- |
+| `Chat-first` | Chatを初回入力だけでなく、継続的な主要インターフェースとして扱うこと |
+| `Workspace-backed` | Workspaceをデータ、成果物、記憶、履歴の永続状態の正本として扱うこと |
+| `UI on demand` | 必要な時だけ、会話から表、フォーム、プレビューなどの操作面を出すこと |
+
+`Workspace`を、常設のアプリ一覧や固定ダッシュボードと誤解させる説明は避ける。
+日本語では「会話から必要な画面が開く」「裏側のWorkspaceに仕事の状態が残る」と説明する。
+
+`Chat summons GUIs`は参照元に近い表現として公開面では使わない。
+
+### 6.2 Knowledge Wiki
 
 MulmoClaudeでいう `LLM Wiki` は、Samurai Agentでは `Knowledge Wiki` と呼ぶ。
 
