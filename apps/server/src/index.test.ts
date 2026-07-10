@@ -2310,6 +2310,7 @@ describe("backend run API", () => {
       "slack",
       "line",
       "email",
+      "mobile",
       "webhook",
       "local_cli",
       "cron"
@@ -2319,6 +2320,7 @@ describe("backend run API", () => {
       "slack",
       "line",
       "email",
+      "mobile",
       "webhook",
       "local_cli",
       "cron"
