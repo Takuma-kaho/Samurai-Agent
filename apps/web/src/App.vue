@@ -56,6 +56,7 @@ import { io } from "socket.io-client";
 import {
   api,
   ApiError,
+  getApiBaseUrl,
   type AgentBackendStatus,
   type ApprovalLifecyclePayload,
   type ArchiveMemoryPayload,
@@ -477,6 +478,9 @@ const chatScrollFrameClass = computed(() => ({
 let previousBodyCursor = "";
 let previousBodyUserSelect = "";
 let pendingAgentTypingTimer: number | undefined;
+const desktopDeepLinkHashHandler = () => {
+  void applyDesktopDeepLinkHash();
+};
 
 onMounted(async () => {
   const storedSettings = readStoredSettings();
@@ -485,9 +489,12 @@ onMounted(async () => {
   }
   connectSocket();
   await Promise.all([loadSettings(), loadAgentBackends(), loadSurfaceContract(), loadSessionsWithRetry()]);
+  window.addEventListener("hashchange", desktopDeepLinkHashHandler);
+  await applyDesktopDeepLinkHash();
 });
 
 onUnmounted(() => {
+  window.removeEventListener("hashchange", desktopDeepLinkHashHandler);
   stopPendingAgentTyping();
   chatScrollResizeObserver?.disconnect();
   finishWorkspaceResize();
@@ -785,6 +792,54 @@ async function openSession(sessionId: string) {
   await applySessionDetail(detail);
   await refreshAuditContext();
   viewMode.value = "chat";
+}
+
+async function applyDesktopDeepLinkHash() {
+  const target = parseDesktopDeepLinkHash(window.location.hash);
+  if (!target) {
+    return;
+  }
+  try {
+    if (target.kind === "workspace") {
+      viewMode.value = "chat";
+      return;
+    }
+    if (target.kind === "session" && target.id) {
+      await openSession(target.id);
+      return;
+    }
+    if (target.kind === "artifact" && target.id) {
+      await openArtifact(target.id);
+      viewMode.value = "chat";
+      return;
+    }
+    if (target.kind === "run" && target.id) {
+      await openBackendRunDeepLink(target.id);
+      return;
+    }
+    if (target.kind === "run") {
+      await loadRuns();
+    }
+  } catch {
+    viewMode.value = "chat";
+  }
+}
+
+async function openBackendRunDeepLink(runId: string) {
+  const run = await api.getBackendRun(runId);
+  await openSession(run.session_id);
+  await loadRuns();
+  openBackendRunIds.value = new Set([...openBackendRunIds.value, run.id]);
+}
+
+function parseDesktopDeepLinkHash(hash: string): { kind: "workspace" | "session" | "artifact" | "run"; id?: string } | null {
+  const match = hash.match(/^#\/(workspace|session|artifact|run)(?:\/([^/?#]+))?/);
+  if (!match) {
+    return null;
+  }
+  const kind = match[1] as "workspace" | "session" | "artifact" | "run";
+  const id = match[2] ? decodeURIComponent(match[2]) : undefined;
+  return { kind, id };
 }
 
 async function sendMessage() {
@@ -3578,7 +3633,7 @@ function draftSessionTitle(content: string): string {
 }
 
 function connectSocket() {
-  const socket = io();
+  const socket = io(getApiBaseUrl());
   socket.on("session.created", (session: SessionRecord) => {
     if (isInternalSessionTitle(session.title)) {
       return;

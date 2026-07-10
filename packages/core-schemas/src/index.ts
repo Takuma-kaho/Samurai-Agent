@@ -93,6 +93,16 @@ export const backendEventTypes = [
   "run_completed",
   "run_failed"
 ] as const;
+export const clientTargetKinds = ["desktop", "web", "any"] as const;
+export const clientEventStatuses = ["pending", "delivered", "acked", "expired", "failed"] as const;
+export const clientEventTypes = [
+  "client.notification.requested",
+  "client.workspace.open_requested",
+  "client.session.open_requested",
+  "client.artifact.open_requested",
+  "client.run.open_requested",
+  "client.status.refresh_requested"
+] as const;
 export const workspaceChangeTypes = ["artifact_created", "memory_suggested", "skill_candidate_created", "collection_changed", "settings_changed", "other"] as const;
 export const reflectionRunKinds = ["chat_turn", "manual", "scheduled", "curator", "evaluation"] as const;
 export const reflectionRunStatuses = ["started", "completed", "failed"] as const;
@@ -109,8 +119,8 @@ export const gatewayPairingTrustModes = ["pairing_required", "auto_approve", "bl
 export const gatewayRoutingPolicyStatuses = ["enabled", "disabled"] as const;
 export const gatewayRoutingSessionKeyStrategies = ["account_thread", "account_main", "channel_main"] as const;
 export const gatewayInboundStatuses = ["blocked", "routed", "processed", "failed"] as const;
-export const gatewayChannels = ["telegram", "slack", "line", "email", "webhook", "local_cli", "cron"] as const;
-export const gatewayBoundarySources = ["web", "telegram", "slack", "line", "email", "webhook", "local_cli", "cron"] as const;
+export const gatewayChannels = ["telegram", "slack", "line", "email", "mobile", "webhook", "local_cli", "cron"] as const;
+export const gatewayBoundarySources = ["web", "telegram", "slack", "line", "email", "mobile", "webhook", "local_cli", "cron"] as const;
 export const secretRefSources = ["env", "file", "keychain", "external_vault"] as const;
 export const sandboxModes = ["off", "non_main", "all"] as const;
 export const sandboxScopes = ["agent", "session", "shared"] as const;
@@ -144,6 +154,9 @@ export const ActivitySeveritySchema = z.enum(activitySeverities);
 export const AgentBackendKindSchema = z.enum(agentBackendKinds);
 export const BackendRunStatusSchema = z.enum(backendRunStatuses);
 export const BackendEventTypeSchema = z.enum(backendEventTypes);
+export const ClientTargetKindSchema = z.enum(clientTargetKinds);
+export const ClientEventStatusSchema = z.enum(clientEventStatuses);
+export const ClientEventTypeSchema = z.enum(clientEventTypes);
 export const WorkspaceChangeTypeSchema = z.enum(workspaceChangeTypes);
 export const ReflectionRunKindSchema = z.enum(reflectionRunKinds);
 export const ReflectionRunStatusSchema = z.enum(reflectionRunStatuses);
@@ -195,6 +208,9 @@ export type ActivitySeverity = z.infer<typeof ActivitySeveritySchema>;
 export type AgentBackendKind = z.infer<typeof AgentBackendKindSchema>;
 export type BackendRunStatus = z.infer<typeof BackendRunStatusSchema>;
 export type BackendEventType = z.infer<typeof BackendEventTypeSchema>;
+export type ClientTargetKind = z.infer<typeof ClientTargetKindSchema>;
+export type ClientEventStatus = z.infer<typeof ClientEventStatusSchema>;
+export type ClientEventType = z.infer<typeof ClientEventTypeSchema>;
 export type WorkspaceChangeType = z.infer<typeof WorkspaceChangeTypeSchema>;
 export type ReflectionRunKind = z.infer<typeof ReflectionRunKindSchema>;
 export type ReflectionRunStatus = z.infer<typeof ReflectionRunStatusSchema>;
@@ -275,7 +291,7 @@ export type ResourceTranslationRecord = z.infer<typeof ResourceTranslationRecord
 
 export const MessageEnvelopeSchema = z.object({
   id: z.string().min(1),
-  source: z.enum(["web", "telegram", "slack", "line", "email", "webhook", "local_cli", "cron"]),
+  source: z.enum(["web", "telegram", "slack", "line", "email", "mobile", "webhook", "local_cli", "cron"]),
   actor_identity: ActorIdentitySchema,
   session_key: z.string().min(1),
   user_intent: z.string().min(1),
@@ -324,6 +340,22 @@ export const BackendEventRecordSchema = z.object({
   created_at: z.string().datetime()
 });
 export type BackendEventRecord = z.infer<typeof BackendEventRecordSchema>;
+
+export const ClientEventRecordSchema = z.object({
+  id: z.string().min(1),
+  target_client_kind: ClientTargetKindSchema,
+  target_client_id: z.string().min(1).optional(),
+  event_type: ClientEventTypeSchema,
+  status: ClientEventStatusSchema,
+  payload: z.record(jsonValueSchema),
+  resource_refs: z.array(ResourceRefSchema),
+  created_at: z.string().datetime(),
+  delivered_at: z.string().datetime().optional(),
+  acked_at: z.string().datetime().optional(),
+  expires_at: z.string().datetime().optional(),
+  error_code: z.string().optional()
+});
+export type ClientEventRecord = z.infer<typeof ClientEventRecordSchema>;
 
 export const WorkspaceChangeRecordSchema = z.object({
   id: z.string().min(1),

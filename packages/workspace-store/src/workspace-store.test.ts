@@ -11,6 +11,7 @@ import {
   type BackendEventRecord,
   type BackendRunRecord,
   type CollectionSchema,
+  type ClientEventRecord,
   type ExternalAssistRecord,
   type GatewayBoundaryPolicy,
   type GatewayInboundMessageRecord,
@@ -166,6 +167,56 @@ describe("workspace store", () => {
       updated_at: "2026-07-05T00:00:00.000Z"
     });
     expect(presentations[0]?.view_state).toEqual(updated?.view_state);
+  });
+
+  it("persists client event queue lifecycle", async () => {
+    const store = await createTempStore();
+    const now = "2026-07-08T00:00:00.000Z";
+    const event: ClientEventRecord = {
+      id: createId("client_event"),
+      target_client_kind: "desktop",
+      event_type: "client.notification.requested",
+      status: "pending",
+      payload: {
+        title: "Runが完了しました",
+        deep_link: "samurai://run/run_queue_test"
+      },
+      resource_refs: [{
+        kind: "backend_run",
+        id: "run_queue_test",
+        uri: "backend-runs/run_queue_test"
+      }],
+      created_at: now,
+      expires_at: "2026-07-09T00:00:00.000Z"
+    };
+
+    await store.saveClientEvent(event);
+    const pending = await store.listClientEvents({ targetClientKind: "desktop", status: "pending" });
+    const delivered = await store.markClientEventDelivered(event.id, "2026-07-08T00:01:00.000Z");
+    const acked = await store.ackClientEvent(event.id, "2026-07-08T00:02:00.000Z");
+    const expiredEvent: ClientEventRecord = {
+      ...event,
+      id: createId("client_event"),
+      status: "pending",
+      created_at: "2026-07-07T00:00:00.000Z",
+      expires_at: "2026-07-07T01:00:00.000Z"
+    };
+    await store.saveClientEvent(expiredEvent);
+    const root = store.rootDir;
+    const expired = await store.expireClientEvents({ now });
+    await store.close();
+
+    const reopened = await WorkspaceStore.create({ rootDir: root });
+    const persisted = await reopened.getClientEvent(event.id);
+    const expiredPersisted = await reopened.getClientEvent(expiredEvent.id);
+    await reopened.close();
+
+    expect(pending.map((item) => item.id)).toEqual([event.id]);
+    expect(delivered).toMatchObject({ id: event.id, status: "delivered", delivered_at: "2026-07-08T00:01:00.000Z" });
+    expect(acked).toMatchObject({ id: event.id, status: "acked", acked_at: "2026-07-08T00:02:00.000Z" });
+    expect(expired.map((item) => item.id)).toEqual([expiredEvent.id]);
+    expect(persisted?.status).toBe("acked");
+    expect(expiredPersisted?.status).toBe("expired");
   });
 
   it("writes artifact content to filesystem", async () => {

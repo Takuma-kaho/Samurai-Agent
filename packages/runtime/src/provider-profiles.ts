@@ -35,7 +35,7 @@ export const providerProfiles: Record<ProviderId, ProviderProfile> = {
         model,
         input: [
           { role: "system", content: stablePrompt(input.envelope.output_locale) },
-          { role: "user", content: contextPrompt(input) }
+          { role: "user", content: openAiResponsesUserContent(input, contextPrompt(input)) }
         ],
         tools: providerTools("openai")
       }
@@ -52,7 +52,7 @@ export const providerProfiles: Record<ProviderId, ProviderProfile> = {
       headers: { "Content-Type": "application/json" },
       body: {
         systemInstruction: { parts: [{ text: stablePrompt(input.envelope.output_locale) }] },
-        contents: [{ role: "user", parts: [{ text: contextPrompt(input) }] }],
+        contents: [{ role: "user", parts: geminiUserParts(input, contextPrompt(input)) }],
         tools: providerTools("gemini")
       }
     }),
@@ -74,7 +74,7 @@ export const providerProfiles: Record<ProviderId, ProviderProfile> = {
         model,
         max_tokens: 1800,
         system: stablePrompt(input.envelope.output_locale),
-        messages: [{ role: "user", content: contextPrompt(input) }],
+        messages: [{ role: "user", content: anthropicUserContent(input, contextPrompt(input)) }],
         tools: providerTools("anthropic")
       }
     }),
@@ -151,7 +151,7 @@ function buildOpenAICompatibleRequest(model: string, credential: ProviderCredent
       model,
       messages: [
         { role: "system", content: stablePrompt(input.envelope.output_locale) },
-        { role: "user", content: contextPrompt(input) }
+        { role: "user", content: openAiChatUserContent(input, contextPrompt(input)) }
       ],
       tools: providerTools("openai-compatible")
     }
@@ -189,6 +189,7 @@ function contextPrompt(input: ProviderInput): string {
   const selectedSkillsInput = input.selectedSkills ?? [];
   const sessionSearchInput = input.sessionSearch ?? [];
   const availableToolsInput = input.availableTools ?? [];
+  const temporaryContext = temporaryContextSummary(input);
   const recentMessages = recentMessagesInput.slice(-10).map((message) => `${message.role}: ${message.content}`).join("\n");
   const contextAssembly = contextAssemblySummary(input.contextAssembly);
   const sessionSummary = input.sessionSummary
@@ -269,6 +270,9 @@ function contextPrompt(input: ProviderInput): string {
     "External assist:",
     externalAssist || "(none)",
     "",
+    "Temporary context:",
+    temporaryContext,
+    "",
     "Recent messages:",
     recentMessages || "(none)",
     "",
@@ -293,6 +297,114 @@ function contextPrompt(input: ProviderInput): string {
     "Current user input:",
     input.envelope.user_intent
   ].join("\n");
+}
+
+function openAiResponsesUserContent(input: ProviderInput, text: string): unknown {
+  const images = temporaryContextImages(input);
+  if (images.length === 0) {
+    return text;
+  }
+  return [
+    { type: "input_text", text },
+    ...images.map((image) => ({
+      type: "input_image",
+      image_url: image.dataUrl
+    }))
+  ];
+}
+
+function openAiChatUserContent(input: ProviderInput, text: string): unknown {
+  const images = temporaryContextImages(input);
+  if (images.length === 0) {
+    return text;
+  }
+  return [
+    { type: "text", text },
+    ...images.map((image) => ({
+      type: "image_url",
+      image_url: { url: image.dataUrl }
+    }))
+  ];
+}
+
+function anthropicUserContent(input: ProviderInput, text: string): unknown {
+  const images = temporaryContextImages(input);
+  if (images.length === 0) {
+    return text;
+  }
+  return [
+    { type: "text", text },
+    ...images.map((image) => ({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: image.mimeType,
+        data: image.base64
+      }
+    }))
+  ];
+}
+
+function geminiUserParts(input: ProviderInput, text: string): unknown[] {
+  return [
+    { text },
+    ...temporaryContextImages(input).map((image) => ({
+      inline_data: {
+        mime_type: image.mimeType,
+        data: image.base64
+      }
+    }))
+  ];
+}
+
+function temporaryContextSummary(input: ProviderInput): string {
+  const items = input.temporaryContext ?? [];
+  if (items.length === 0) {
+    return "(none)";
+  }
+  return [
+    "These items are temporary context for this turn only. Do not save them to Memory, Artifact, or workspace files unless the user explicitly asks.",
+    ...items.slice(0, 5).map((item, index) => [
+      `${index + 1}. ${item.label ?? item.source_name ?? item.id}`,
+      `   kind: ${item.kind}`,
+      `   mime_type: ${item.mime_type}`,
+      `   expires_at: ${item.expires_at}`,
+      item.source_name ? `   source: ${item.source_name}` : "",
+      item.file_path ? `   file_path: ${item.file_path}` : "",
+      item.data_url ? "   image: attached to this model request when supported" : ""
+    ].filter(Boolean).join("\n"))
+  ].join("\n");
+}
+
+interface TemporaryContextImage {
+  dataUrl: string;
+  mimeType: string;
+  base64: string;
+}
+
+function temporaryContextImages(input: ProviderInput): TemporaryContextImage[] {
+  return (input.temporaryContext ?? [])
+    .map((item) => parseTemporaryContextImage(item.data_url, item.mime_type))
+    .filter((item): item is TemporaryContextImage => Boolean(item));
+}
+
+function parseTemporaryContextImage(dataUrl: string | undefined, fallbackMimeType: string): TemporaryContextImage | undefined {
+  if (!dataUrl) {
+    return undefined;
+  }
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl.trim());
+  if (!match) {
+    return undefined;
+  }
+  const base64 = match[2];
+  if (!base64) {
+    return undefined;
+  }
+  return {
+    dataUrl: dataUrl.trim(),
+    mimeType: (match[1] ?? fallbackMimeType) || "image/png",
+    base64
+  };
 }
 
 function contextAssemblySummary(assembly: ProviderInput["contextAssembly"]): string {

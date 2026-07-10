@@ -3,10 +3,11 @@ import express from "express";
 import type { Express, NextFunction, Request, Response } from "express";
 import { createHmac, createPublicKey, createVerify, timingSafeEqual } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Server as HttpServer } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
@@ -52,7 +53,11 @@ import {
   ProvenanceSchema,
   ResourceRefSchema,
   SkillDiagnosticsReportSchema,
+  ClientEventRecordSchema,
   createId,
+  clientEventStatuses,
+  clientEventTypes,
+  clientTargetKinds,
   externalSendChannels,
   gatewayChannels,
   nowIso,
@@ -63,6 +68,10 @@ import {
   PolicyEvaluationInputSchema,
   type BackendEventRecord,
   type BackendRunRecord,
+  type ClientEventRecord,
+  type ClientEventStatus,
+  type ClientEventType,
+  type ClientTargetKind,
   type EvaluationDiagnosticsReport,
   type FileBrowserActionDiagnosticsReport,
   type ExternalSendRecord,
@@ -119,6 +128,8 @@ const defaultWorkspaceHealthReadinessTimeoutMs = 2_000;
 const defaultEnvPath = fileURLToPath(new URL("../../../.env", import.meta.url));
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const loadedEnvPaths = new Set<string>();
+const temporaryContextTtlMs = 15 * 60 * 1000;
+const temporaryContextMaxBytes = 8 * 1024 * 1024;
 
 export interface CreateApiServerOptions {
   workspaceDataDir?: string;
@@ -139,10 +150,34 @@ export interface ApiServer {
   store: WorkspaceStore;
   runtime: AgentRuntime;
   lifecycle: ApiServerLifecycleState;
+  temporaryContexts: ReturnType<typeof createTemporaryContextStore>;
   pluginRegistry: PluginRuntimeRegistry;
   pluginCatalogIssues: PluginManifestLoadIssue[];
   pluginEntrypointLoad: PluginEntrypointLoadResult;
   scheduler?: AutomationScheduler;
+}
+
+interface TemporaryContextRecord {
+  id: string;
+  kind: "desktop_screenshot";
+  label: string;
+  source_name?: string;
+  mime_type: "image/png";
+  data_url: string;
+  file_path: string;
+  created_at: string;
+  expires_at: string;
+  metadata: Record<string, JsonValue>;
+}
+
+interface TemporaryContextResponse {
+  id: string;
+  kind: "temporary_context";
+  uri: string;
+  label: string;
+  mime_type: "image/png";
+  created_at: string;
+  expires_at: string;
 }
 
 export interface ApiServerLifecycleState {
@@ -315,6 +350,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
   const emit: RuntimeEventSink = async (name, payload) => {
     io.emit(name, payload);
+    try {
+      await maybeCreateClientEventFromRuntimeEvent(store, name, payload);
+    } catch (error) {
+      console.warn("client_event_creation_failed", redactSecretLikeString(error instanceof Error ? error.message : String(error)));
+    }
   };
   const provider = options.provider ?? createProviderRegistryFromEnv();
   const pluginRootDir = options.pluginRootDir ?? process.env.SAMURAI_PLUGIN_ROOT_DIR ?? workspaceRoot;
@@ -353,9 +393,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     : createExternalAssistProvidersFromEnv();
   const backendWorkingDirectoryMode = resolveBackendWorkingDirectoryMode();
   const backendRegistry = options.backendRegistry ?? createDefaultAgentBackendRegistry(provider, process.env, { repoRoot });
+  const temporaryContexts = createTemporaryContextStore();
   const runtime = new AgentRuntime(store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, undefined, {
     backendWorkingDirectoryMode,
-    repoRoot
+    repoRoot,
+    resolveTemporaryContextRef: (ref) => temporaryContexts.resolve(ref)
   });
   const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
   const lifecycle: ApiServerLifecycleState = {
@@ -700,6 +742,20 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         }))
       );
       res.json(activeSessions.filter((item) => item.messageCount > 0).map((item) => item.session));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/temporary-context", async (req, res, next) => {
+    try {
+      const input = temporaryContextInput(req.body);
+      if (!input) {
+        res.status(400).json({ error: "invalid_temporary_context" });
+        return;
+      }
+      const record = await temporaryContexts.save(input);
+      res.status(201).json(temporaryContextResponse(record));
     } catch (error) {
       next(error);
     }
@@ -1998,6 +2054,23 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.post("/api/gateway/mobile/messages", async (req, res, next) => {
+      try {
+        const routed = await routeGatewayMobilePayload(runtime, req.body, req.query as Record<string, unknown>);
+        if (!routed) {
+          res.status(400).json({ error: "invalid_gateway_mobile_message" });
+          return;
+        }
+        const result = routed.result;
+        res.status(result.chat ? 201 : 202).json({
+          ...result,
+          adapter: gatewayMobileAdapterSummary(routed.extraction)
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.post("/api/gateway/email/provider-webhooks/:provider", async (req, res, next) => {
       try {
         const provider = gatewayEmailWebhookProvider(req.params.provider);
@@ -2405,6 +2478,98 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : undefined;
         res.json(await store.listBackendRuns(sessionId));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/backend-runs/:runId", async (req, res, next) => {
+      try {
+        const run = await store.getBackendRun(req.params.runId);
+        if (!run) {
+          res.status(404).json({ error: "backend_run_not_found" });
+          return;
+        }
+        res.json(run);
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/client-events", async (req, res, next) => {
+      try {
+        const targetClientKind = parseClientTargetKind(req.query.target_client_kind);
+        const status = parseClientEventStatus(req.query.status);
+        if (req.query.target_client_kind !== undefined && !targetClientKind) {
+          res.status(400).json({ error: "invalid_client_target_kind" });
+          return;
+        }
+        if (req.query.status !== undefined && !status) {
+          res.status(400).json({ error: "invalid_client_event_status" });
+          return;
+        }
+        await store.expireClientEvents();
+        res.json(await store.listClientEvents({
+          targetClientKind,
+          targetClientId: typeof req.query.target_client_id === "string" ? req.query.target_client_id : undefined,
+          status,
+          limit: numberQuery(req.query.limit)
+        }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/client-events", async (req, res, next) => {
+      try {
+        const event = clientEventFromRequestBody(req.body);
+        if (!event) {
+          res.status(400).json({ error: "invalid_client_event" });
+          return;
+        }
+        res.status(201).json(await store.saveClientEvent(event));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/client-events/:eventId/deliver", async (req, res, next) => {
+      try {
+        const event = await store.markClientEventDelivered(req.params.eventId);
+        if (!event) {
+          res.status(404).json({ error: "client_event_not_found" });
+          return;
+        }
+        res.json(event);
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/client-events/:eventId/ack", async (req, res, next) => {
+      try {
+        const event = await store.ackClientEvent(req.params.eventId);
+        if (!event) {
+          res.status(404).json({ error: "client_event_not_found" });
+          return;
+        }
+        res.json(event);
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/client-events/:eventId/fail", async (req, res, next) => {
+      try {
+        const errorCode = typeof req.body?.error_code === "string" && req.body.error_code.trim()
+          ? req.body.error_code.trim()
+          : "client_event_failed";
+        const event = await store.failClientEvent(req.params.eventId, errorCode);
+        if (!event) {
+          res.status(404).json({ error: "client_event_not_found" });
+          return;
+        }
+        res.json(event);
       } catch (error) {
         next(error);
       }
@@ -3190,6 +3355,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     if (scheduler) {
       clearInterval(scheduler.timer);
     }
+    void temporaryContexts.close().catch(() => undefined);
     lifecycle.closed_at = nowIso();
     lifecycle.closing = false;
   });
@@ -3201,6 +3367,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     store,
     runtime,
     lifecycle,
+    temporaryContexts,
     pluginRegistry,
     pluginCatalogIssues: pluginCatalog.issues,
     pluginEntrypointLoad,
@@ -3247,6 +3414,7 @@ export async function closeApiServer(server: ApiServer): Promise<void> {
   });
   server.lifecycle.closed_at = server.lifecycle.closed_at ?? nowIso();
   server.lifecycle.closing = false;
+  await server.temporaryContexts.close();
   await server.runtime.shutdownMcpProcessPool();
   await server.store.close();
 }
@@ -3264,6 +3432,24 @@ function parseDomainCommandInputSource(value: unknown): DomainCommandInputSource
 function asToolRunStatus(value: unknown): ToolRunStatus | undefined {
   return typeof value === "string" && toolRunStatuses.includes(value as ToolRunStatus)
     ? value as ToolRunStatus
+    : undefined;
+}
+
+function parseClientTargetKind(value: unknown): ClientTargetKind | undefined {
+  return typeof value === "string" && clientTargetKinds.includes(value as ClientTargetKind)
+    ? value as ClientTargetKind
+    : undefined;
+}
+
+function parseClientEventStatus(value: unknown): ClientEventStatus | undefined {
+  return typeof value === "string" && clientEventStatuses.includes(value as ClientEventStatus)
+    ? value as ClientEventStatus
+    : undefined;
+}
+
+function parseClientEventType(value: unknown): ClientEventType | undefined {
+  return typeof value === "string" && clientEventTypes.includes(value as ClientEventType)
+    ? value as ClientEventType
     : undefined;
 }
 
@@ -3918,6 +4104,19 @@ interface GatewayEmailMessageExtraction {
   in_reply_to?: string;
 }
 
+interface GatewayMobileMessageExtraction {
+  body: string;
+  body_field: string;
+  source_identity: string;
+  source_label?: string;
+  account_id?: string;
+  thread_id?: string;
+  device_id?: string;
+  user_id?: string;
+  conversation_id?: string;
+  platform?: string;
+}
+
 function gatewayEmailMessageExtraction(input: unknown, query: Record<string, unknown>): GatewayEmailMessageExtraction | undefined {
   const body = isRecord(input) ? input : {};
   const content = firstStringField(body, ["body", "text", "plain_text", "text_body", "message", "content", "html", "html_body"]);
@@ -3948,6 +4147,63 @@ function gatewayEmailMessageExtraction(input: unknown, query: Record<string, unk
   };
 }
 
+function gatewayMobileMessageExtraction(input: unknown, query: Record<string, unknown>): GatewayMobileMessageExtraction | undefined {
+  const body = isRecord(input) ? input : {};
+  const content = firstStringField(body, ["body", "text", "message", "content"]);
+  if (!content?.body) {
+    return undefined;
+  }
+  const deviceId = stringFromRequest(body, query, "device_id") ?? stringFromRequest(body, query, "deviceId");
+  const userId = stringFromRequest(body, query, "user_id") ?? stringFromRequest(body, query, "userId");
+  const conversationId = stringFromRequest(body, query, "conversation_id")
+    ?? stringFromRequest(body, query, "conversationId")
+    ?? stringFromRequest(body, query, "thread_id");
+  const platform = stringFromRequest(body, query, "platform");
+  const sourceIdentity = stringFromRequest(body, query, "source_identity")
+    ?? mobileSourceIdentity({ userId, deviceId, conversationId });
+  if (!sourceIdentity) {
+    return undefined;
+  }
+  return {
+    body: content.body,
+    body_field: content.field,
+    source_identity: sourceIdentity,
+    source_label: stringFromRequest(body, query, "source_label") ?? mobileSourceLabel({ userId, deviceId, platform }),
+    account_id: stringFromRequest(body, query, "account_id") ?? (userId ? `mobile-user:${userId}` : undefined),
+    thread_id: conversationId ? `conversation:${conversationId}` : undefined,
+    device_id: deviceId,
+    user_id: userId,
+    conversation_id: conversationId,
+    platform
+  };
+}
+
+function mobileSourceIdentity(input: {
+  userId?: string;
+  deviceId?: string;
+  conversationId?: string;
+}): string | undefined {
+  if (input.userId) {
+    return `mobile:user:${input.userId}`;
+  }
+  if (input.deviceId) {
+    return `mobile:device:${input.deviceId}`;
+  }
+  return input.conversationId ? `mobile:conversation:${input.conversationId}` : undefined;
+}
+
+function mobileSourceLabel(input: {
+  userId?: string;
+  deviceId?: string;
+  platform?: string;
+}): string | undefined {
+  const subject = input.userId ?? input.deviceId;
+  if (!subject) {
+    return undefined;
+  }
+  return `${input.platform ? `${input.platform} ` : ""}Mobile ${subject}`;
+}
+
 function emailGatewayBody(subject: string | undefined, content: string | undefined): string {
   if (subject && content) {
     return `Subject: ${subject}\n\n${content}`;
@@ -3975,6 +4231,66 @@ function emailThreadId(messageId: string | undefined, inReplyTo: string | undefi
     return `reply:${inReplyTo}`;
   }
   return subject ? `subject:${stableHash(subject)}` : undefined;
+}
+
+function gatewayMobileMetadata(input: unknown, extraction: GatewayMobileMessageExtraction): Record<string, JsonValue> {
+  const body = isRecord(input) ? input : {};
+  const safeMetadata = isRecord(body.metadata)
+    ? redactApiObject(jsonRecord(body.metadata)) as Record<string, JsonValue>
+    : {};
+  return {
+    ...safeMetadata,
+    gateway_mobile_adapter: true,
+    gateway_mobile_body_field: extraction.body_field,
+    gateway_mobile_payload_keys: Object.keys(body)
+      .filter((key) => key !== "metadata" && !isSecretLikeApiKey(key))
+      .slice(0, 20),
+    ...(extraction.device_id ? { gateway_mobile_device_id: extraction.device_id } : {}),
+    ...(extraction.user_id ? { gateway_mobile_user_id: extraction.user_id } : {}),
+    ...(extraction.conversation_id ? { gateway_mobile_conversation_id: extraction.conversation_id } : {}),
+    ...(extraction.platform ? { gateway_mobile_platform: extraction.platform } : {})
+  };
+}
+
+async function routeGatewayMobilePayload(
+  runtime: AgentRuntime,
+  payload: unknown,
+  query: Record<string, unknown>
+): Promise<{ extraction: GatewayMobileMessageExtraction; result: GatewayInboundRuntimeResult } | undefined> {
+  const extraction = gatewayMobileMessageExtraction(payload, query);
+  if (!extraction) {
+    return undefined;
+  }
+  const domainResult = await runtime.runDomainCommand({
+    command_id: "gateway.inbound.route",
+    input_source: "gateway_inbound",
+    payload: {
+      channel: "mobile",
+      source_identity: extraction.source_identity,
+      source_label: extraction.source_label,
+      body: extraction.body,
+      route: stringFromRequest(payload, query, "route"),
+      account_id: extraction.account_id,
+      thread_id: extraction.thread_id,
+      metadata: gatewayMobileMetadata(payload, extraction),
+      backend_id: stringFromRequest(payload, query, "backend_id"),
+      input_locale: asSupportedLocale(stringFromRequest(payload, query, "input_locale")),
+      output_locale: asSupportedLocale(stringFromRequest(payload, query, "output_locale"))
+    }
+  });
+  return { extraction, result: domainResult.result as GatewayInboundRuntimeResult };
+}
+
+function gatewayMobileAdapterSummary(extraction: GatewayMobileMessageExtraction) {
+  return {
+    channel: "mobile",
+    source_identity: extraction.source_identity,
+    body_field: extraction.body_field,
+    ...(extraction.user_id ? { user_id: extraction.user_id } : {}),
+    ...(extraction.device_id ? { device_id: extraction.device_id } : {}),
+    ...(extraction.conversation_id ? { conversation_id: extraction.conversation_id } : {}),
+    ...(extraction.platform ? { platform: extraction.platform } : {})
+  };
 }
 
 function gatewayEmailMetadata(input: unknown, extraction: GatewayEmailMessageExtraction): Record<string, JsonValue> {
@@ -4840,8 +5156,8 @@ function isGatewayInboundStatus(value: unknown): value is "blocked" | "routed" |
   return value === "blocked" || value === "routed" || value === "processed" || value === "failed";
 }
 
-function isGatewayBoundarySource(value: unknown): value is "web" | "telegram" | "slack" | "line" | "email" | "webhook" | "local_cli" | "cron" {
-  return value === "web" || value === "telegram" || value === "slack" || value === "line" || value === "email" || value === "webhook" || value === "local_cli" || value === "cron";
+function isGatewayBoundarySource(value: unknown): value is "web" | "telegram" | "slack" | "line" | "email" | "mobile" | "webhook" | "local_cli" | "cron" {
+  return value === "web" || value === "telegram" || value === "slack" || value === "line" || value === "email" || value === "mobile" || value === "webhook" || value === "local_cli" || value === "cron";
 }
 
 function isGatewayConcurrencyLockStatus(value: unknown): value is "acquired" | "released" | "expired" {
@@ -6308,6 +6624,176 @@ function startAutomationScheduler(runtime: AgentRuntime): AutomationScheduler | 
   return { timer, state, tick };
 }
 
+function createTemporaryContextStore() {
+  const items = new Map<string, TemporaryContextRecord>();
+  const rootDir = path.join(tmpdir(), "samurai-agent", "temporary-context");
+  let closed = false;
+  let closePromise: Promise<void> | undefined;
+  const cleanupTimer = setInterval(() => {
+    void cleanupExpired().catch(() => undefined);
+  }, Math.max(60_000, Math.floor(temporaryContextTtlMs / 2)));
+  cleanupTimer.unref?.();
+
+  const cleanupExpired = async (now = Date.now()) => {
+    const removals: Promise<void>[] = [];
+    for (const [id, item] of items) {
+      if (Date.parse(item.expires_at) > now) {
+        continue;
+      }
+      items.delete(id);
+      removals.push(rm(item.file_path, { force: true }).catch(() => {}));
+    }
+    await Promise.all(removals);
+  };
+
+  return {
+    async save(input: TemporaryContextCreateInput): Promise<TemporaryContextRecord> {
+      if (closed) {
+        throw new Error("temporary_context_store_closed");
+      }
+      await cleanupExpired();
+      const id = createId("temporary_context");
+      const createdAt = nowIso();
+      const expiresAt = new Date(Date.parse(createdAt) + temporaryContextTtlMs).toISOString();
+      await mkdir(rootDir, { recursive: true });
+      const filePath = path.join(rootDir, `${id}.png`);
+      await writeFile(filePath, input.image_bytes, { flag: "wx" });
+      const record: TemporaryContextRecord = {
+        id,
+        kind: "desktop_screenshot",
+        label: input.label,
+        ...(input.source_name ? { source_name: input.source_name } : {}),
+        mime_type: "image/png",
+        data_url: input.data_url,
+        file_path: filePath,
+        created_at: createdAt,
+        expires_at: expiresAt,
+        metadata: input.metadata
+      };
+      items.set(id, record);
+      return record;
+    },
+
+    async resolve(ref: ResourceRef): Promise<TemporaryContextRecord | undefined> {
+      if (closed) {
+        return undefined;
+      }
+      await cleanupExpired();
+      const id = temporaryContextIdFromRef(ref);
+      if (!id) {
+        return undefined;
+      }
+      const item = items.get(id);
+      if (!item || Date.parse(item.expires_at) <= Date.now()) {
+        if (item) {
+          items.delete(id);
+          void rm(item.file_path, { force: true }).catch(() => undefined);
+        }
+        return undefined;
+      }
+      return item;
+    },
+
+    async close(): Promise<void> {
+      if (closePromise) {
+        return closePromise;
+      }
+      closed = true;
+      clearInterval(cleanupTimer);
+      const removals = Array.from(items.values()).map((item) => rm(item.file_path, { force: true }).catch(() => {}));
+      items.clear();
+      closePromise = Promise.all(removals).then(() => undefined);
+      return closePromise;
+    }
+  };
+}
+
+interface TemporaryContextCreateInput {
+  label: string;
+  source_name?: string;
+  data_url: string;
+  image_bytes: Buffer;
+  metadata: Record<string, JsonValue>;
+}
+
+function temporaryContextInput(value: unknown): TemporaryContextCreateInput | undefined {
+  const body = isRecord(value) ? value : {};
+  if (body.kind !== undefined && body.kind !== "desktop_screenshot") {
+    return undefined;
+  }
+  const dataUrl = typeof body.data_url === "string" ? body.data_url.trim() : "";
+  const imageBytes = parseTemporaryContextPngDataUrl(dataUrl);
+  if (!imageBytes) {
+    return undefined;
+  }
+  const sourceName = typeof body.source_name === "string" ? body.source_name.trim().slice(0, 160) : "";
+  const label = safeTemporaryContextLabel(
+    typeof body.label === "string" ? body.label : sourceName || "Desktop screenshot"
+  );
+  return {
+    label,
+    ...(sourceName ? { source_name: sourceName } : {}),
+    data_url: `data:image/png;base64,${imageBytes.toString("base64")}`,
+    image_bytes: imageBytes,
+    metadata: jsonRecord(body.metadata)
+  };
+}
+
+function parseTemporaryContextPngDataUrl(dataUrl: string): Buffer | undefined {
+  const prefix = "data:image/png;base64,";
+  if (!dataUrl.startsWith(prefix)) {
+    return undefined;
+  }
+  const base64 = dataUrl.slice(prefix.length);
+  if (!base64 || !/^[A-Za-z0-9+/=]+$/.test(base64)) {
+    return undefined;
+  }
+  const bytes = Buffer.from(base64, "base64");
+  if (bytes.length === 0 || bytes.length > temporaryContextMaxBytes) {
+    return undefined;
+  }
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47];
+  if (!pngSignature.every((byte, index) => bytes[index] === byte)) {
+    return undefined;
+  }
+  return bytes;
+}
+
+function temporaryContextResponse(record: TemporaryContextRecord): TemporaryContextResponse {
+  return {
+    id: record.id,
+    kind: "temporary_context",
+    uri: `samurai://temporary-context/${encodeURIComponent(record.id)}`,
+    label: record.label,
+    mime_type: record.mime_type,
+    created_at: record.created_at,
+    expires_at: record.expires_at
+  };
+}
+
+function temporaryContextIdFromRef(ref: ResourceRef): string | undefined {
+  if (ref.kind !== "temporary_context") {
+    return undefined;
+  }
+  if (ref.id) {
+    return ref.id;
+  }
+  try {
+    const parsed = new URL(ref.uri);
+    if (parsed.protocol === "samurai:" && parsed.hostname === "temporary-context") {
+      return parsed.pathname.split("/").filter(Boolean)[0];
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function safeTemporaryContextLabel(value: string): string {
+  const label = value.replace(/\s+/g, " ").trim().slice(0, 160);
+  return label || "Desktop screenshot";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -6317,6 +6803,105 @@ function jsonRecord(value: unknown): Record<string, JsonValue> {
     return {};
   }
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jsonSafe(item)]));
+}
+
+function clientEventFromRequestBody(input: unknown): ClientEventRecord | undefined {
+  const body = isRecord(input) ? input : {};
+  const targetClientKind = body.target_client_kind === undefined ? "desktop" : parseClientTargetKind(body.target_client_kind);
+  const eventType = parseClientEventType(body.event_type);
+  const status = body.status === undefined ? "pending" : parseClientEventStatus(body.status);
+  if (!targetClientKind || !eventType || !status) {
+    return undefined;
+  }
+  const targetClientId = typeof body.target_client_id === "string" && body.target_client_id.trim()
+    ? body.target_client_id.trim()
+    : undefined;
+  const event = {
+    id: typeof body.id === "string" && body.id.trim() ? body.id.trim() : createId("client_event"),
+    target_client_kind: targetClientKind,
+    ...(targetClientId ? { target_client_id: targetClientId } : {}),
+    event_type: eventType,
+    status,
+    payload: jsonRecord(body.payload),
+    resource_refs: resourceRefs(body.resource_refs),
+    created_at: typeof body.created_at === "string" ? body.created_at : nowIso(),
+    ...(typeof body.delivered_at === "string" ? { delivered_at: body.delivered_at } : {}),
+    ...(typeof body.acked_at === "string" ? { acked_at: body.acked_at } : {}),
+    ...(typeof body.expires_at === "string" ? { expires_at: body.expires_at } : {}),
+    ...(typeof body.error_code === "string" ? { error_code: body.error_code } : {})
+  };
+  const parsed = ClientEventRecordSchema.safeParse(event);
+  return parsed.success ? parsed.data : undefined;
+}
+
+async function maybeCreateClientEventFromRuntimeEvent(store: WorkspaceStore, name: string, payload: unknown): Promise<void> {
+  if (name !== "backend.run.updated" || !isRecord(payload)) {
+    return;
+  }
+  const event = clientEventForBackendRun(payload as BackendRunRecord);
+  if (!event) {
+    return;
+  }
+  await store.saveClientEvent(event);
+}
+
+function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | undefined {
+  if (run.status !== "completed" && run.status !== "failed" && run.status !== "waiting_for_backend_input") {
+    return undefined;
+  }
+  const createdAt = nowIso();
+  const statusLabel = run.status === "completed" ? "完了" : run.status === "failed" ? "失敗" : "確認待ち";
+  const notificationKind = run.status === "completed"
+    ? "backend_run_completed"
+    : run.status === "failed"
+      ? "backend_run_failed"
+      : "backend_run_waiting_for_input";
+  return {
+    id: `client_event_${stableHash({
+      kind: "backend_run_status_notification",
+      run_id: run.id,
+      status: run.status
+    }).slice(0, 24)}`,
+    target_client_kind: "desktop",
+    event_type: "client.notification.requested",
+    status: "pending",
+    payload: {
+      title: `Runが${statusLabel}しました`,
+      body: summarizeClientNotificationBody(run),
+      deep_link: `samurai://run/${encodeURIComponent(run.id)}`,
+      notification_kind: notificationKind,
+      run_id: run.id,
+      session_id: run.session_id,
+      backend_id: run.backend_id,
+      backend_status: run.status
+    },
+    resource_refs: [
+      {
+        kind: "backend_run",
+        id: run.id,
+        uri: `backend-runs/${run.id}`,
+        label: run.input_summary
+      },
+      {
+        kind: "session",
+        id: run.session_id,
+        uri: `sessions/${run.session_id}`,
+        label: "Session"
+      }
+    ],
+    created_at: createdAt,
+    expires_at: new Date(Date.parse(createdAt) + 7 * 24 * 60 * 60 * 1000).toISOString()
+  };
+}
+
+function summarizeClientNotificationBody(run: BackendRunRecord): string {
+  const raw = run.status === "failed"
+    ? run.error_code ?? run.output_summary ?? run.input_summary
+    : run.status === "waiting_for_backend_input"
+      ? run.output_summary ?? "続行するには入力が必要です。"
+      : run.output_summary ?? run.input_summary;
+  const normalized = raw.replace(/\s+/g, " ").trim();
+  return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
 }
 
 function jsonSafe(value: unknown): JsonValue {

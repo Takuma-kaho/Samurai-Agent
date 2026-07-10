@@ -3,6 +3,7 @@ import {
   BackendEventRecordSchema,
   BackendReleaseReadinessHealthSchema,
   ChangeHistoryEntrySchema,
+  ClientEventRecordSchema,
   ContextFreezeResponseSchema,
   ContextPreviewSchema,
   CuratorLifecycleReportSchema,
@@ -59,6 +60,21 @@ describe("core schemas", () => {
 
     expect(envelope.input_locale).toBe("ja");
     expect(envelope.output_locale).toBe("en");
+
+    const mobileEnvelope = MessageEnvelopeSchema.parse({
+      id: createId("envelope"),
+      source: "mobile",
+      actor_identity: "paired_contact",
+      session_key: "mobile:mobile-user~3Auser-1:conversation~3Aconv-1",
+      user_intent: "外出先から依頼する",
+      attachments: [],
+      input_locale: "ja",
+      output_locale: "ja",
+      metadata: {},
+      received_at: nowIso()
+    });
+
+    expect(mobileEnvelope.source).toBe("mobile");
   });
 
   it("parses backend stream lifecycle events", () => {
@@ -78,6 +94,29 @@ describe("core schemas", () => {
     });
 
     expect(event.event_type).toBe("backend_stream_synced");
+  });
+
+  it("parses client event queue records", () => {
+    const event = ClientEventRecordSchema.parse({
+      id: createId("client_event"),
+      target_client_kind: "desktop",
+      event_type: "client.notification.requested",
+      status: "pending",
+      payload: {
+        title: "Runが完了しました",
+        deep_link: "samurai://run/run_test"
+      },
+      resource_refs: [{
+        kind: "backend_run",
+        id: "run_test",
+        uri: "backend-runs/run_test"
+      }],
+      created_at: nowIso(),
+      expires_at: nowIso()
+    });
+
+    expect(event.status).toBe("pending");
+    expect(event.resource_refs[0]?.kind).toBe("backend_run");
   });
 
   it("keeps resource translations as derived records", () => {

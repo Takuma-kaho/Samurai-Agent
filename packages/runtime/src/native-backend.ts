@@ -93,7 +93,8 @@ export class NativeContextBuilder {
       externalAssist: input.external_assist,
       contextAssembly: input.context_assembly,
       availableTools: input.available_tools ?? [],
-      recentMessages: input.recent_messages
+      recentMessages: input.recent_messages,
+      temporaryContext: input.temporary_context ?? []
     };
   }
 }

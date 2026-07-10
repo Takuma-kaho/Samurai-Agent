@@ -29,6 +29,19 @@ export interface MemoryCandidateLike {
   conflicts_with?: string[];
 }
 
+export interface TemporaryContextAttachment {
+  id: string;
+  kind: "desktop_screenshot";
+  label?: string;
+  source_name?: string;
+  mime_type: string;
+  data_url?: string;
+  file_path?: string;
+  created_at: string;
+  expires_at: string;
+  metadata?: Record<string, JsonValue>;
+}
+
 export interface SessionSummaryLike {
   session_key: string;
   title: string;
@@ -98,6 +111,7 @@ export interface BackendRunInput {
   context_assembly?: HostContextAssembly;
   context_handoff?: ContextHandoff;
   recent_messages: MessageRecord[];
+  temporary_context?: TemporaryContextAttachment[];
   metadata: Record<string, JsonValue>;
   context_intent?: "light_chat" | "contextual_chat" | "workspace_task";
   expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view">;
@@ -686,6 +700,7 @@ export function buildExternalBackendPrompt(input: BackendRunInput): string {
   const contextHandoff = formatContextHandoffForPrompt(input.context_handoff);
   const outputContract = formatExpectedOutputsForPrompt(input);
   const toolBridge = formatToolBridgeForPrompt(input.tool_bridge);
+  const temporaryContext = formatTemporaryContextForPrompt(input.temporary_context);
   const sessionSummary = input.session_summary
     ? [
         `session_key: ${input.session_summary.session_key}`,
@@ -732,6 +747,9 @@ export function buildExternalBackendPrompt(input: BackendRunInput): string {
     "Samurai tool bridge:",
     toolBridge,
     "",
+    "Temporary context:",
+    temporaryContext,
+    "",
     "Active memory refs:",
     activeMemory || "(none)",
     "",
@@ -753,6 +771,24 @@ export function buildExternalBackendPrompt(input: BackendRunInput): string {
   return [
     "Reference context for this turn:",
     ...referenceSections
+  ].join("\n");
+}
+
+function formatTemporaryContextForPrompt(items: TemporaryContextAttachment[] | undefined): string {
+  if (!items?.length) {
+    return "(none)";
+  }
+  return [
+    "The following items are short-lived context for this turn only. Do not save them to Memory, Artifact, or workspace files unless the user explicitly asks.",
+    ...items.slice(0, 5).map((item, index) => [
+      `${index + 1}. ${item.label ?? item.source_name ?? item.id}`,
+      `   kind: ${item.kind}`,
+      `   mime_type: ${item.mime_type}`,
+      `   expires_at: ${item.expires_at}`,
+      item.source_name ? `   source: ${item.source_name}` : "",
+      item.file_path ? `   file_path: ${item.file_path}` : "",
+      item.data_url && !item.file_path ? "   image_data: attached to provider input when supported" : ""
+    ].filter(Boolean).join("\n"))
   ].join("\n");
 }
 
