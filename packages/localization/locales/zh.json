@@ -121,7 +121,7 @@
   "settings.language": "语言",
   "settings.capture.manual": "Manual",
   "settings.capture.off": "Off",
-  "settings.capture.suggest": "Suggest",
+  "settings.capture.auto": "Auto",
   "settings.external_provider.assistive": "Assist",
   "settings.external_provider.disabled": "Disabled",
   "settings.external_provider_policy": "External memory assist",

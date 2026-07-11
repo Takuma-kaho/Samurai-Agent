@@ -47,7 +47,7 @@ export async function handleBackendToolCall(input: {
 
   if (providerToolName === "remember_topic") {
     const settings = await input.store.getSettings();
-    if (settings.memory_capture_mode !== "suggest") {
+    if (settings.memory_capture_mode === "off") {
       return ignoredToolOutput(input.run, toolCallId, providerToolName, `memory_capture_${settings.memory_capture_mode}`, input.store, input.boundary, memoryTopicCreateCommand.id);
     }
     return ignoredToolOutput(input.run, toolCallId, providerToolName, "provider_tool_requires_domain_command", input.store, input.boundary, memoryTopicCreateCommand.id);

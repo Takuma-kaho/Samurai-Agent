@@ -78,6 +78,9 @@ import {
   type ContextFreezeResponse,
   type ContextPreview,
   type KnowledgeWikiGraph,
+  type LearningResourceUseRecord,
+  type LearningEvaluationRecord,
+  type LearningJobReportRecord,
   type ReflectionRunRecord,
   type ReflectionSuggestionRecord,
   type ResourceRef,
@@ -104,6 +107,26 @@ import {
   nowIso,
   stableHash
 } from "@samurai-agent/core-schemas";
+import {
+  actualLearningResourceUses,
+  backgroundReviewPrompt,
+  defaultBackgroundReviewPolicy,
+  parseBackgroundReviewResult,
+  restrictBackgroundReviewResult,
+  evaluateLearningEffect,
+  curateSkills,
+  curateMemory,
+  skillConsolidationPrompt,
+  parseSkillConsolidationResult,
+  buildSkillConsolidationGroups,
+  type SkillConsolidationRunner,
+  standardLearningJobDefinitions,
+  learningRetryDelayMs,
+  type BackgroundReviewMutation,
+  type BackgroundReviewResult,
+  type BackgroundReviewRunner,
+  type ReviewSnapshot
+} from "@samurai-agent/learning";
 import {
   createDefaultGatewayBoundaryPolicy,
   createGatewayEnvelope,
@@ -285,6 +308,13 @@ export interface RuntimeWriteResult<TResource> {
 
 export type SkillRuntimeResult = RuntimeWriteResult<SkillWithFilePath>;
 export type SkillSupportRuntimeResult = RuntimeWriteResult<SkillSupportFile>;
+export interface SkillViewRuntimeResult {
+  skill: SkillWithFilePath;
+  content: string;
+  file_refs: Array<{ path: string; file_path: string }>;
+  disclosure_level: "body" | "support";
+  use_record: LearningResourceUseRecord;
+}
 export type WikiRuntimeResult = RuntimeWriteResult<WikiWithFilePath>;
 export type CollectionSchemaRuntimeResult = RuntimeWriteResult<CollectionSchemaWithFilePath>;
 export type CollectionRecordRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
@@ -434,6 +464,7 @@ export interface AutomationRunRuntimeResult {
 export interface ReflectionRuntimeResult {
   reflectionRun: ReflectionRunRecord;
   suggestions: ReflectionSuggestionRecord[];
+  learningEvaluations?: LearningEvaluationRecord[];
   curatorReport?: CuratorLifecycleReport;
   curatorReviewReport?: CuratorReviewReport;
   evaluationReport?: EvaluationTraceReport;
@@ -522,6 +553,10 @@ interface AgentRuntimeWorkspaceOptions {
   backendWorkingDirectoryMode?: "workspace" | "repo";
   repoRoot?: string;
   resolveTemporaryContextRef?: (ref: ResourceRef) => Promise<TemporaryContextAttachment | undefined> | TemporaryContextAttachment | undefined;
+  backgroundReviewRunner?: BackgroundReviewRunner;
+  enableBackendBackgroundReview?: boolean;
+  detachBackgroundReview?: boolean;
+  skillConsolidationRunner?: SkillConsolidationRunner;
 }
 
 export function createDefaultAgentBackendRegistry(
@@ -862,19 +897,38 @@ export class AgentRuntime {
 
   async runCuratorJob(input: { respectIdleGate?: boolean } = {}): Promise<ReflectionRuntimeResult> {
     const session = await this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled curator");
-    const [curatorState, memories, skills, skillUsage, wikiPages, backendRuns] = await Promise.all([
+    const [curatorState, memories, skills, skillUsage, wikiPages, backendRuns, learningEvaluations, reflectionRuns] = await Promise.all([
       this.store.getCuratorState(),
       this.store.listMemory(),
       this.store.listSkills(),
       this.store.listSkillUsage(),
       this.store.listWiki({ activeOnly: false }),
-      this.store.listBackendRuns()
+      this.store.listBackendRuns(),
+      this.store.listLearningEvaluations(),
+      this.store.listReflectionRuns()
     ]);
     const now = nowIso();
     const nowMs = Date.parse(now);
     const staleCutoffMs = nowMs - curatorState.stale_after_days * 24 * 60 * 60 * 1000;
     const archiveCutoffMs = nowMs - curatorState.archive_after_days * 24 * 60 * 60 * 1000;
     const usageBySkill = new Map(skillUsage.map((usage) => [usage.skill_id, usage]));
+    const latestEvaluationRun = reflectionRuns.find((run) => run.kind === "evaluation");
+    const evaluationFailed = latestEvaluationRun?.status === "failed";
+    const skillLifecycleDecisions = new Map(curateSkills(skills.map((skill) => {
+      const usage = usageBySkill.get(skill.id);
+      return {
+        id: skill.id,
+        state: skill.state,
+        owner_pinned: skill.state === "pinned" || skill.frontmatter.owner_pinned,
+        usage_count: usage?.use_count ?? 0,
+        last_activity_at: usage?.last_used_at ?? skill.frontmatter.last_reviewed_at,
+        evaluations: learningEvaluations.filter((evaluation) => evaluation.learning_resource_ref.id === skill.id || evaluation.learning_resource_ref.id.startsWith(`${skill.id}:`))
+      };
+    }), {
+      now,
+      stale_after_days: curatorState.stale_after_days,
+      archive_after_days: curatorState.archive_after_days
+    }).map((decision) => [decision.skill_id, decision]));
     let reflectionRun: ReflectionRunRecord = {
       id: createId("reflection"),
       kind: "curator",
@@ -884,6 +938,7 @@ export class AgentRuntime {
       started_at: now
     };
     reflectionRun = await this.store.createReflectionRun(reflectionRun);
+    const snapshot = await this.store.createLearningSnapshot(reflectionRun.id);
     const suggestions: ReflectionSuggestionRecord[] = [];
     const skillActions: CuratorLifecycleReport["skill_actions"] = [];
     const protectedSkills: CuratorLifecycleReport["protected_skills"] = [];
@@ -975,46 +1030,32 @@ export class AgentRuntime {
         })
       };
     }
-    const memoryByTopic = new Map<string, typeof memories>();
-    for (const memory of memories.filter((item) => item.state !== "archived")) {
-      const key = memory.topic.trim().toLowerCase();
-      memoryByTopic.set(key, [...(memoryByTopic.get(key) ?? []), memory]);
-      if (memory.confidence < 0.5 || memory.state === "topic") {
-        suggestions.push({
-          id: createId("suggestion"),
-          reflection_run_id: reflectionRun.id,
-          suggestion_type: "memory_patch",
-          status: "proposed",
-          title: `Review memory: ${memory.topic}`,
-          content: `Review whether this memory should be promoted, merged, or archived.\n\n${(await this.store.readMemoryContent(memory.id)) ?? ""}`,
-          target_ref: memoryRef(memory),
-          source_refs: [memoryRef(memory)],
-          confidence: 0.62,
-          created_at: now,
-          updated_at: now
-        });
-      }
-    }
-    for (const relatedMemories of memoryByTopic.values()) {
-      if (relatedMemories.length < 2) {
-        continue;
-      }
+    const memoryInputs = await Promise.all(memories.map(async (memory) => ({
+      id: memory.id,
+      topic: memory.topic,
+      state: memory.state,
+      confidence: memory.confidence,
+      updated_at: memory.updated_at,
+      content: (await this.store.readMemoryContent(memory.id)) ?? ""
+    })));
+    const memoryDecisions = curateMemory(memoryInputs, { now, archive_after_days: curatorState.archive_after_days });
+    for (const decision of memoryDecisions) {
+      const relatedMemories = decision.resource_ids.map((id) => memories.find((memory) => memory.id === id)).filter((memory): memory is MemoryFrontmatter & { file_path: string } => Boolean(memory));
+      if (!relatedMemories.length) continue;
       const suggestionId = createId("suggestion");
-      memoryMergeGroups.push({
-        topic: relatedMemories[0]!.topic,
-        memory_ids: relatedMemories.map((memory) => memory.id),
-        reason: "Multiple active Memory entries share the same normalized topic.",
-        suggestion_id: suggestionId
-      });
+      if (decision.kind === "merge") {
+        memoryMergeGroups.push({ topic: relatedMemories[0]!.topic, memory_ids: decision.resource_ids, reason: decision.reason, suggestion_id: suggestionId });
+      }
       suggestions.push({
         id: suggestionId,
         reflection_run_id: reflectionRun.id,
-        suggestion_type: "conflict",
+        suggestion_type: decision.kind === "merge" ? "conflict" : "memory_patch",
         status: "proposed",
-        title: `Merge or resolve memory topic: ${relatedMemories[0]!.topic}`,
-        content: `Multiple Memory entries share this topic. Review whether they should be merged, promoted, or archived.\n\n${relatedMemories.map((memory) => `- ${memory.id}: ${memory.state} / confidence ${memory.confidence}`).join("\n")}`,
+        title: decision.kind === "merge" ? `Merge or resolve memory topic: ${relatedMemories[0]!.topic}` : `Review memory: ${relatedMemories[0]!.topic}`,
+        content: `${decision.reason}\n\n${relatedMemories.map((memory) => `- ${memory.id}: ${memory.state} / confidence ${memory.confidence}`).join("\n")}`,
+        target_ref: decision.kind === "merge" ? undefined : memoryRef(relatedMemories[0]!),
         source_refs: relatedMemories.map(memoryRef),
-        confidence: 0.68,
+        confidence: decision.kind === "merge" ? 0.68 : 0.62,
         created_at: now,
         updated_at: now
       });
@@ -1063,14 +1104,17 @@ export class AgentRuntime {
         });
         continue;
       }
-      if (usage?.last_used_at && Date.parse(usage.last_used_at) > staleCutoffMs && skill.state === "stale") {
-        curatorAction = "reactivate";
-      } else if (!Number.isFinite(lastActivityMs) || lastActivityMs <= archiveCutoffMs) {
-        curatorAction = "archive";
-      } else if (lastActivityMs <= staleCutoffMs && (skill.state === "active" || skill.state === "project" || skill.state === "candidate")) {
-        curatorAction = "mark_stale";
-      } else if (skill.state === "candidate" || skill.state === "project") {
+      const lifecycleDecision = skillLifecycleDecisions.get(skill.id) ?? { decision: "keep" as const, reason: "no_curator_decision" };
+      if (evaluationFailed) {
+        keepCandidates.push({ kind: "skill", id: skill.id, title: skill.title, reason: "Latest Evaluation failed; lifecycle decision is on hold." });
+        continue;
+      }
+      if (lifecycleDecision.decision === "reactivate" || lifecycleDecision.decision === "archive" || lifecycleDecision.decision === "mark_stale" || lifecycleDecision.decision === "review") {
+        curatorAction = lifecycleDecision.decision;
+      } else if (lifecycleDecision.decision === "patch") {
         curatorAction = "review";
+      } else {
+        keepCandidates.push({ kind: "skill", id: skill.id, title: skill.title, reason: lifecycleDecision.reason });
       }
       if (!curatorAction) {
         if (usage?.last_used_at && Date.parse(usage.last_used_at) > staleCutoffMs) {
@@ -1131,7 +1175,7 @@ export class AgentRuntime {
           `Stale threshold days: ${curatorState.stale_after_days}`,
           `Archive threshold days: ${curatorState.archive_after_days}`,
           "",
-          "This is a human-visible proposal. Do not delete or move the Skill automatically.",
+          "This lifecycle decision is applied automatically after the pre-run snapshot.",
           "",
           (await this.store.readSkillMarkdown(skill.id)) ?? ""
         ].join("\n"),
@@ -1166,7 +1210,7 @@ export class AgentRuntime {
           "Candidate Skills:",
           ...group.skills.map((skill) => `- ${skill.id}: ${skill.title} (${skill.state})`),
           "",
-          "This is a human-visible proposal. Do not merge or archive automatically."
+          "This narrowed candidate is consolidated automatically only when a configured consolidator returns a complete Skill-package mutation."
         ].join("\n"),
         source_refs: group.skills.map(skillRef),
         confidence: 0.68,
@@ -1174,13 +1218,82 @@ export class AgentRuntime {
         updated_at: now
       });
     }
+    let appliedMutationCount = 0;
+    try {
+      for (const group of memoryMergeGroups) {
+        const [primaryId, ...duplicateIds] = group.memory_ids;
+        if (!primaryId || duplicateIds.length === 0) continue;
+        const contents = await Promise.all(group.memory_ids.map((id) => this.store.readMemoryContent(id)));
+        const mergedContent = [...new Set(contents.map((content) => content?.trim()).filter((content): content is string => Boolean(content)))].join("\n\n");
+        await this.store.replaceMemoryContent(primaryId, mergedContent);
+        for (const duplicateId of duplicateIds) await this.store.archiveMemory(duplicateId);
+        const suggestion = suggestions.find((item) => item.id === group.suggestion_id);
+        if (suggestion) suggestion.status = "applied";
+        appliedMutationCount += 1;
+      }
+      for (const decision of memoryDecisions.filter((item) => item.kind === "stale")) {
+        for (const memoryId of decision.resource_ids) await this.store.archiveMemory(memoryId);
+        const suggestion = suggestions.find((item) => item.target_ref?.id === decision.resource_ids[0] && item.content.startsWith(decision.reason));
+        if (suggestion) suggestion.status = "applied";
+        appliedMutationCount += decision.resource_ids.length;
+      }
+      for (const group of skillConsolidationGroups) {
+        const groupSkills = group.skill_ids.map((id) => skills.find((skill) => skill.id === id)).filter((skill): skill is SkillWithFilePath => Boolean(skill));
+        const packages = await Promise.all(groupSkills.map(async (skill) => ({
+          id: skill.id,
+          title: skill.title,
+          description: skill.description,
+          markdown: (await this.store.readSkillMarkdown(skill.id)) ?? "",
+          support_files: (await this.store.listSkillSupportFiles(skill.id)).map((file) => ({ path: file.path, content: file.content }))
+        })));
+        const consolidation = this.workspaceOptions.skillConsolidationRunner
+          ? await this.workspaceOptions.skillConsolidationRunner.consolidate({ group_key: group.group_key, packages })
+          : this.workspaceOptions.enableBackendBackgroundReview
+            ? await this.runSkillConsolidationWithBackend({ group_key: group.group_key, packages }, session)
+            : undefined;
+        if (!consolidation || !group.skill_ids.includes(consolidation.primary_skill_id)) continue;
+        await this.store.replaceSkillContent(consolidation.primary_skill_id, consolidation.markdown);
+        for (const file of consolidation.support_files) {
+          await this.store.writeSkillSupportFile({ skillId: consolidation.primary_skill_id, path: file.path, content: file.content });
+        }
+        for (const archiveId of consolidation.archive_skill_ids.filter((id) => id !== consolidation.primary_skill_id && group.skill_ids.includes(id))) {
+          await this.store.updateSkillState(archiveId, "archived");
+        }
+        const suggestion = suggestions.find((item) => item.id === group.suggestion_id);
+        if (suggestion) suggestion.status = "applied";
+        appliedMutationCount += 1;
+      }
+      for (const action of skillActions) {
+        if (action.action === "review") continue;
+        await this.applyCuratorSkillAction({ skillId: action.skill_id, action: action.action });
+        const suggestion = suggestions.find((item) => item.id === action.suggestion_id);
+        if (suggestion) suggestion.status = "applied";
+        appliedMutationCount += 1;
+      }
+    } catch (error) {
+      await this.store.restoreLearningSnapshot(snapshot.id);
+      await this.store.updateReflectionRun({
+        ...reflectionRun,
+        status: "failed",
+        error: `Curator restored ${snapshot.id}: ${errorMessage(error)}`,
+        completed_at: nowIso()
+      });
+      await this.store.saveLearningJobReport({
+        id: createId("learning_job_report"), job_kind: "curator", run_id: reflectionRun.id,
+        target_resource_count: memories.length + skills.length, mutation_count: appliedMutationCount,
+        archive_count: 0, restore_count: 1, patch_count: 0, merge_count: 0,
+        skipped_reasons: {}, evaluation_count: learningEvaluations.length, snapshot_id: snapshot.id,
+        duration_ms: Math.max(0, Date.now() - nowMs), failure: errorMessage(error), created_at: nowIso()
+      });
+      throw error;
+    }
     for (const suggestion of suggestions) {
       await this.store.saveReflectionSuggestion(suggestion);
     }
     reflectionRun = await this.store.updateReflectionRun({
       ...reflectionRun,
       status: "completed",
-      output_summary: `Curator created ${suggestions.length} suggestion(s).`,
+      output_summary: `Curator evaluated ${suggestions.length} decision(s), applied ${appliedMutationCount}, snapshot ${snapshot.id}.`,
       completed_at: nowIso()
     });
     await this.store.saveCuratorState({
@@ -1188,12 +1301,28 @@ export class AgentRuntime {
       last_run_summary: reflectionRun.output_summary,
       run_count: curatorState.run_count + 1
     });
+    const appliedSuggestionIds = new Set(suggestions.filter((suggestion) => suggestion.status === "applied").map((suggestion) => suggestion.id));
+    await this.store.saveLearningJobReport({
+      id: createId("learning_job_report"), job_kind: "curator", run_id: reflectionRun.id,
+      target_resource_count: memories.length + skills.length,
+      mutation_count: appliedMutationCount,
+      archive_count: skillActions.filter((action) => action.action === "archive").length + memoryDecisions.filter((decision) => decision.kind === "stale").reduce((sum, decision) => sum + decision.resource_ids.length, 0),
+      restore_count: 0,
+      patch_count: skillActions.filter((action) => action.action === "review").length,
+      merge_count: [...memoryMergeGroups, ...skillConsolidationGroups].filter((group) => appliedSuggestionIds.has(group.suggestion_id ?? "")).length,
+      skipped_reasons: evaluationFailed ? { evaluation_failed_hold: skills.length } : {},
+      evaluation_count: learningEvaluations.length,
+      snapshot_id: snapshot.id,
+      duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(now)),
+      next_run_at: nextRunFromSchedule("weekly", Date.parse(now)),
+      created_at: nowIso()
+    });
     return {
       reflectionRun,
       suggestions,
       curatorReport: buildCuratorLifecycleReport({
         now,
-        dryRun: true,
+        dryRun: false,
         paused: false,
         curatorState,
         memories,
@@ -1202,7 +1331,10 @@ export class AgentRuntime {
         skillUsage,
         suggestions,
         skillActions,
-        protectedSkills
+        protectedSkills,
+        snapshotId: snapshot.id,
+        evaluationCount: learningEvaluations.length,
+        appliedMutationCount
       }),
       curatorReviewReport: buildCuratorReviewReport({
         now,
@@ -1262,13 +1394,15 @@ export class AgentRuntime {
 
   async runEvaluationJob(): Promise<ReflectionRuntimeResult> {
     const session = await this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled evaluation");
-    const [skills, backendRuns, backendEvents, workspaceChanges, toolRuns, auditRecords] = await Promise.all([
+    const [skills, backendRuns, backendEvents, workspaceChanges, toolRuns, auditRecords, learningUses, existingLearningEvaluations] = await Promise.all([
       this.store.listSkills(),
       this.store.listBackendRuns(),
       this.store.listBackendEvents(),
       this.store.listWorkspaceChanges(),
       this.store.listToolRuns(),
-      this.store.listAuditRecords()
+      this.store.listAuditRecords(),
+      this.store.listLearningResourceUses(),
+      this.store.listLearningEvaluations()
     ]);
     const now = nowIso();
     let reflectionRun: ReflectionRunRecord = {
@@ -1297,6 +1431,47 @@ export class AgentRuntime {
       auditRecords,
       now
     });
+    const learningEvaluations: LearningEvaluationRecord[] = [];
+    for (const use of actualLearningResourceUses(learningUses)) {
+      const version = use.resource_version ?? use.content_hash;
+      if (existingLearningEvaluations.some((evaluation) => evaluation.learning_resource_ref.id === use.resource_id && evaluation.learning_resource_version === version && evaluation.compared_run_ids.includes(use.run_id))) continue;
+      const usedRun = backendRuns.find((run) => run.id === use.run_id);
+      if (!usedRun) continue;
+      const earlierRuns = backendRuns
+        .filter((run) => run.id !== usedRun.id && run.backend_kind === usedRun.backend_kind && Date.parse(run.started_at) < Date.parse(usedRun.started_at))
+        .slice(0, 5);
+      const signals = (run: BackendRunRecord) => {
+        const runTools = toolRuns.filter((tool) => tool.run_id === run.id);
+        const runEvents = backendEvents.filter((event) => event.run_id === run.id);
+        return {
+          run_id: run.id,
+          completed: run.status === "completed" ? 1 : 0,
+          tool_failure_rate: runTools.length ? runTools.filter((tool) => tool.status === "failed").length / runTools.length : 0,
+          waiting_or_retry_rate: runEvents.length ? runEvents.filter((event) => event.event_type === "backend_waiting_for_native_input" || event.event_type === "run_failed").length / runEvents.length : 0,
+          workspace_change_count: workspaceChanges.filter((change) => change.run_id === run.id).length,
+          artifact_regeneration_count: Math.max(0, workspaceChanges.filter((change) => change.run_id === run.id && change.change_type === "artifact_created").length - 1),
+          correction_count: 0
+        };
+      };
+      const resourceRef: ResourceRef = {
+        kind: use.resource_kind,
+        id: use.resource_id,
+        uri: `learning/${use.resource_kind}/${encodeURIComponent(use.resource_id)}`,
+        version
+      };
+      const evaluation = evaluateLearningEffect({
+        id: createId("learning_evaluation"),
+        resource_ref: resourceRef,
+        resource_version: version,
+        task_class: usedRun.backend_kind,
+        before: earlierRuns.map(signals),
+        after: [signals(usedRun)],
+        evidence_refs: [resourceRef, ...[usedRun, ...earlierRuns].map(backendRunRef)],
+        created_at: now
+      });
+      await this.store.saveLearningEvaluation(evaluation);
+      learningEvaluations.push(evaluation);
+    }
     if (!suggestions.length && skills.length) {
       suggestions.push({
         id: createId("suggestion"),
@@ -1320,7 +1495,17 @@ export class AgentRuntime {
       output_summary: `Evaluation created ${suggestions.length} suggestion(s) and ${evaluationReport.run_scores.length} run score(s).`,
       completed_at: nowIso()
     });
-    return { reflectionRun, suggestions, evaluationReport };
+    await this.store.saveLearningJobReport({
+      id: createId("learning_job_report"), job_kind: "evaluation", run_id: reflectionRun.id,
+      target_resource_count: actualLearningResourceUses(learningUses).length,
+      mutation_count: learningEvaluations.length, archive_count: 0, restore_count: 0, patch_count: 0, merge_count: 0,
+      skipped_reasons: learningEvaluations.length === 0 ? { no_new_evaluable_usage: 1 } : {},
+      evaluation_count: learningEvaluations.length,
+      duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(now)),
+      next_run_at: nextRunFromSchedule("daily", Date.parse(reflectionRun.completed_at ?? nowIso())),
+      created_at: nowIso()
+    });
+    return { reflectionRun, suggestions, evaluationReport, learningEvaluations };
   }
 
   private async createEvaluationTraceReport(input: {
@@ -1463,7 +1648,7 @@ export class AgentRuntime {
       };
     }
     if (providerToolName !== "samurai.artifact.create") {
-      const output = await this.runReadOnlyBackendTool(providerToolName, input.toolInput);
+      const output = await this.runReadOnlyBackendTool(providerToolName, { ...input.toolInput, run_id: input.runId });
       await recordEvent({
         event_type: "tool_call_output",
         tool_call_id: toolCallId,
@@ -1530,6 +1715,21 @@ export class AgentRuntime {
         tags: item.tags,
         file_path: item.file_path
       }));
+    }
+    if (toolName === "samurai.skill.view") {
+      const runId = stringPayload(input.run_id);
+      if (!runId) throw new RuntimeRequestError("conflict", "skill_view_run_id_required");
+      const view = await this.viewSkill({
+        skillId: stringPayload(input.skill_id),
+        runId,
+        path: stringPayload(input.path) || undefined
+      });
+      return {
+        skill_id: view.skill.id,
+        content: view.content,
+        file_refs: view.file_refs,
+        disclosure_level: view.disclosure_level
+      };
     }
     if (toolName === "samurai.collection.search") {
       const collectionId = typeof input.collection_id === "string" && input.collection_id.trim() ? input.collection_id.trim() : "";
@@ -1861,7 +2061,38 @@ export class AgentRuntime {
     };
 
     for (const skill of contextPreview.selected_skills) {
-      await this.store.recordSkillUsage({ skillId: skill.id, runId: backendRun.id });
+      await this.store.recordLearningResourceUse({
+        id: createId("learning_use"),
+        run_id: backendRun.id,
+        session_id: session.id,
+        resource_kind: "skill",
+        resource_id: skill.id,
+        content_hash: stableHash({ id: skill.id, title: skill.title, description: skill.description }),
+        stage: "selected",
+        metadata: { disclosure_level: skill.disclosure_level },
+        created_at: nowIso()
+      });
+    }
+    for (const memory of contextPreview.active_memory) {
+      await this.store.recordLearningResourceUse({
+        id: createId("learning_use"), run_id: backendRun.id, session_id: session.id,
+        resource_kind: "memory", resource_id: memory.id, content_hash: stableHash(memory.content), stage: "body_loaded",
+        metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
+      });
+    }
+    for (const wiki of contextPreview.knowledge_wiki) {
+      await this.store.recordLearningResourceUse({
+        id: createId("learning_use"), run_id: backendRun.id, session_id: session.id,
+        resource_kind: "wiki", resource_id: wiki.id, content_hash: stableHash(wiki.content), stage: "body_loaded",
+        metadata: { slug: wiki.slug }, created_at: nowIso()
+      });
+    }
+    for (const result of contextPreview.session_search) {
+      await this.store.recordLearningResourceUse({
+        id: createId("learning_use"), run_id: backendRun.id, session_id: session.id,
+        resource_kind: "session_result", resource_id: `${result.kind}:${result.id}`, content_hash: stableHash(result.summary), stage: "selected",
+        metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
+      });
     }
 
     let failedEvent: BackendEventRecord | undefined;
@@ -2042,7 +2273,7 @@ export class AgentRuntime {
       await this.store.updateBackendRun(backendRun);
       await this.emit("backend.run.updated", backendRun);
     }
-    const reflection = await this.runReflectionForCompletedTurn({
+    const runBackgroundReview = async () => this.runReflectionForCompletedTurn({
       kind: "chat_turn",
       session,
       backendRun,
@@ -2052,12 +2283,13 @@ export class AgentRuntime {
       workspaceChanges,
       toolRuns,
       transcriptMessages: await this.store.listMessages(session.id),
-      artifacts: await this.loadReflectionArtifacts({
-        sessionId: session.id,
-        sourceRunId: backendRun.id,
-        workspaceChanges
-      })
+      artifacts: await this.loadReflectionArtifacts({ sessionId: session.id, sourceRunId: backendRun.id, workspaceChanges })
     });
+    const autoLearningEnabled = settings.memory_capture_mode === "auto" || settings.skill_capture_mode === "auto";
+    const reflection = autoLearningEnabled && !this.workspaceOptions.detachBackgroundReview ? await runBackgroundReview() : undefined;
+    if (autoLearningEnabled && this.workspaceOptions.detachBackgroundReview) {
+      void runBackgroundReview().catch(() => undefined);
+    }
 
     return {
       session,
@@ -2074,8 +2306,8 @@ export class AgentRuntime {
       auditRecords: [],
       rollbackPoints: [],
       activity: [],
-      reflectionRuns: [reflection.reflectionRun],
-      reflectionSuggestions: reflection.suggestions,
+      reflectionRuns: reflection ? [reflection.reflectionRun] : [],
+      reflectionSuggestions: reflection?.suggestions ?? [],
       toolRuns
     };
   }
@@ -3380,6 +3612,13 @@ export class AgentRuntime {
       }
       return this.applyCuratorSkillAction({ skillId: requiredPayloadId(payload, "skill_id"), action });
     }
+    if (command.id === "skill.view") {
+      return this.viewSkill({
+        skillId: requiredPayloadId(payload, "skill_id"),
+        runId: requiredPayloadId(payload, "run_id"),
+        path: stringPayload(payload.path) || undefined
+      });
+    }
 
     if (command.id === "file.read" || command.id === "file.list" || command.id === "file.write" || command.id === "file.patch") {
       return this.runFileAction({
@@ -3454,6 +3693,26 @@ export class AgentRuntime {
     }
     if (command.id === "automation.memory_review.run") {
       return this.runMemoryReviewAutomation();
+    }
+    if (command.id === "curator.run") {
+      return this.runCuratorJob();
+    }
+    if (command.id === "curator.snapshot.create") {
+      return this.store.createLearningSnapshot(stringPayload(payload.run_id) || createId("curator_manual"));
+    }
+    if (command.id === "curator.snapshot.list") {
+      return this.store.listLearningSnapshots();
+    }
+    if (command.id === "curator.restore") {
+      const restored = await this.store.restoreLearningSnapshot(requiredPayloadId(payload, "snapshot_id"));
+      if (!restored) throw new RuntimeRequestError("not_found", "curator_snapshot_not_found");
+      return restored;
+    }
+    if (command.id === "curator.pause") {
+      return this.store.saveCuratorState({ paused: true });
+    }
+    if (command.id === "curator.resume") {
+      return this.store.saveCuratorState({ paused: false });
     }
 
     if (command.id === "reflection.suggestion.apply") {
@@ -3866,6 +4125,60 @@ export class AgentRuntime {
       activity,
       changed: archive.changed,
       warning: archive.warning
+    };
+  }
+
+  async viewSkill(input: { skillId: string; runId: string; path?: string }): Promise<SkillViewRuntimeResult> {
+    const [skill, run] = await Promise.all([
+      this.store.getSkill(input.skillId),
+      this.store.getBackendRun(input.runId)
+    ]);
+    if (!skill) {
+      throw new RuntimeRequestError("not_found", `Skill not found: ${input.skillId}`);
+    }
+    if (!run) {
+      throw new RuntimeRequestError("not_found", `Backend run not found: ${input.runId}`);
+    }
+    if (skill.state === "archived" || skill.state === "candidate") {
+      throw new RuntimeRequestError("conflict", "skill_not_readable_in_current_state");
+    }
+
+    const support = input.path ? await this.store.readSkillSupportFile({ skillId: skill.id, path: input.path }) : undefined;
+    if (input.path && !support) {
+      throw new RuntimeRequestError("not_found", `Skill support file not found: ${input.path}`);
+    }
+    const markdown = support ? undefined : await this.store.readSkillMarkdown(skill.id);
+    if (!support && markdown === undefined) {
+      throw new RuntimeRequestError("not_found", `Skill body not found: ${skill.id}`);
+    }
+    const content = support ? support.content : stripSkillFrontmatter(markdown ?? "");
+    const stage = support ? "support_loaded" as const : "body_loaded" as const;
+    const resourceId = support ? `${skill.id}:${support.path}` : skill.id;
+    const existingUse = (await this.store.listLearningResourceUses({ runId: run.id, resourceId }))
+      .find((record) => record.stage === stage);
+    const useRecord = await this.store.recordLearningResourceUse({
+      id: createId("learning_use"),
+      run_id: run.id,
+      session_id: run.session_id,
+      resource_kind: support ? "skill_support" : "skill",
+      resource_id: resourceId,
+      content_hash: stableHash(content),
+      stage,
+      metadata: support ? { skill_id: skill.id, path: support.path } : { skill_id: skill.id },
+      created_at: nowIso()
+    });
+    if (!existingUse) {
+      await this.store.recordSkillUsage({ skillId: skill.id, runId: run.id });
+    }
+    const supportFiles = await this.store.listSkillSupportFiles(skill.id);
+    return {
+      skill,
+      content,
+      file_refs: support
+        ? [{ path: support.path, file_path: support.file_path }]
+        : supportFiles.map((file) => ({ path: file.path, file_path: file.file_path })),
+      disclosure_level: support ? "support" : "body",
+      use_record: useRecord
     };
   }
 
@@ -4917,6 +5230,32 @@ export class AgentRuntime {
     };
   }
 
+  async ensureStandardLearningJobs(now = nowIso()): Promise<AutomationJobRecord[]> {
+    const existing = await this.store.listAutomationJobs();
+    const definitions: Array<Pick<AutomationJobRecord, "id" | "title" | "kind" | "schedule" | "target_instruction">> = standardLearningJobDefinitions;
+    const records: AutomationJobRecord[] = [];
+    for (const definition of definitions) {
+      const found = existing.find((job) => job.id === definition.id || job.kind === definition.kind && job.title === definition.title);
+      if (found) {
+        records.push(found);
+        continue;
+      }
+      const record: AutomationJobRecord = {
+        ...definition,
+        status: "enabled",
+        delivery_target: { channel: "activity", timezone: "UTC", clock_basis: "absolute_iso" },
+        next_run_at: nextRunFromSchedule(definition.schedule, Date.parse(now)),
+        failure_count: 0,
+        max_attempts: 3,
+        created_at: now,
+        updated_at: now
+      };
+      await this.store.saveAutomationJob(record);
+      records.push(record);
+    }
+    return records;
+  }
+
   async runDueAutomationJobs(now = nowIso()): Promise<AutomationRunRuntimeResult[]> {
     const jobs = await this.store.listAutomationJobs({ dueAt: now, enabledOnly: true });
     const results: AutomationRunRuntimeResult[] = [];
@@ -5961,7 +6300,6 @@ export class AgentRuntime {
 
     const envelope = createCronMemoryReviewEnvelope();
     let traceResult: ReflectionRuntimeResult | undefined;
-    let curatorResult: ReflectionRuntimeResult | undefined;
     try {
       const result = await this.runAllowedWrite({
         session,
@@ -5977,7 +6315,6 @@ export class AgentRuntime {
         proposedEffects: ["Run scheduled memory review and deterministic curator without external effects."],
         execute: async (operation) => {
           traceResult = await this.runMemoryReviewTraceReflection(session);
-          curatorResult = await this.runCuratorJob({ respectIdleGate: true });
           const ref = {
             kind: "automation_run",
             id: automationRun.id,
@@ -5987,7 +6324,7 @@ export class AgentRuntime {
           return {
             resource: automationRun,
             ref,
-            summary: `Memory review automation read recent transcript/events, produced ${traceResult.suggestions.length} trace suggestion(s), and ran deterministic curator with ${curatorResult.suggestions.length} curator suggestion(s).`
+            summary: `Memory review automation ran Background Review and applied ${traceResult.suggestions.length} learning change(s).`
           };
         }
       });
@@ -5997,7 +6334,7 @@ export class AgentRuntime {
         operation_id: result.operation.id,
         completed_at: nowIso()
       });
-      return { ...result, automationRun, memoryReviewTrace: traceResult, curatorResult };
+      return { ...result, automationRun, memoryReviewTrace: traceResult };
     } catch (error) {
       automationRun = await this.store.updateAutomationRun({
         ...automationRun,
@@ -6043,10 +6380,13 @@ export class AgentRuntime {
             summary = `Reindexed Knowledge Wiki pages: ${reindex.active}/${reindex.total} active.`;
           } else if (job.kind === "skill_curator") {
             const curator = await this.runCuratorJob();
-            summary = `Skill curator created ${curator.suggestions.length} review suggestion(s).`;
+            summary = `Skill curator evaluated ${curator.suggestions.length} learning decision(s).`;
           } else if (job.kind === "memory_review") {
-            const curator = await this.runCuratorJob();
-            summary = `Memory review created ${curator.suggestions.length} curator suggestion(s).`;
+            const review = await this.runMemoryReviewTraceReflection(session);
+            summary = `Background Review applied ${review.suggestions.length} learning change(s).`;
+          } else if (job.kind === "learning_evaluation") {
+            const evaluation = await this.runEvaluationJob();
+            summary = `Learning Evaluation stored ${evaluation.learningEvaluations?.length ?? 0} effect record(s).`;
           } else if (job.kind === "resource_translation") {
             const translation = await this.runResourceTranslationJob(job, session, context);
             automationRun = { ...automationRun, backend_run_id: translation.backendRunId };
@@ -6635,6 +6975,47 @@ export class AgentRuntime {
       | RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath | CollectionSchemaWithFilePath | CollectionRecordWithFilePath | Record<string, JsonValue>>
       | undefined;
 
+    if (toolName === "skill.view" || toolName === "samurai.skill.view" || normalizeSamuraiToolBridgeName(toolName) === "samurai.skill.view") {
+      const view = await this.viewSkill({
+        skillId: stringPayload(args.skill_id),
+        runId: run.id,
+        path: stringPayload(args.path) || undefined
+      });
+      const session = await this.store.getSession(run.session_id);
+      if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
+      const operation = await this.createOperation(session, runInput.envelope, "skill.view", ["Read a selected Skill on demand."], {
+        targetResourceRefs: [skillRef(view.skill)]
+      });
+      operation.status = "completed";
+      operation.result_ref = skillRef(view.skill);
+      operation.updated_at = nowIso();
+      await this.store.updateOperation(operation);
+      const toolRun = await this.store.saveToolRun({
+        id: createId("toolrun"),
+        run_id: run.id,
+        session_id: run.session_id,
+        tool_call_id: event.tool_call_id,
+        provider_tool_name: providerToolName || toolName,
+        action_id: "skill.view",
+        status: "completed",
+        input_summary: summarize(JSON.stringify(args), 220),
+        output_summary: `Loaded ${view.disclosure_level} for Skill ${view.skill.id}.`,
+        resource_refs: [skillRef(view.skill)],
+        created_at: nowIso()
+      });
+      return {
+        operation,
+        toolRun,
+        outputPayload: {
+          status: "completed",
+          skill_id: view.skill.id,
+          content: view.content,
+          file_refs: view.file_refs,
+          disclosure_level: view.disclosure_level
+        },
+        resourceRefs: [skillRef(view.skill)]
+      };
+    }
     if (toolName === "file.read" || toolName === "file.list" || toolName === "file.write" || toolName === "file.patch") {
       result = await this.runFileAction({
         operation: toolName,
@@ -6796,7 +7177,7 @@ export class AgentRuntime {
 
     if (commandId === "memory.topic.create") {
       const settings = await this.store.getSettings();
-      if (settings.memory_capture_mode !== "suggest") {
+      if (settings.memory_capture_mode === "off") {
         return undefined;
       }
       const topic = stringPayload(args.topic).trim() || stringPayload(args.topic_kind).trim() || "preference";
@@ -7595,7 +7976,7 @@ export class AgentRuntime {
     const startedAt = nowIso();
     let reflectionRun: ReflectionRunRecord = {
       id: createId("reflection"),
-      kind: input.kind,
+      kind: input.kind === "chat_turn" ? "background_review" : input.kind,
       source_run_id: input.sourceRunId ?? input.backendRun?.id,
       session_id: input.session.id,
       status: "started",
@@ -7603,18 +7984,247 @@ export class AgentRuntime {
       started_at: startedAt
     };
     reflectionRun = await this.store.createReflectionRun(reflectionRun);
-    const suggestions = this.createReflectionSuggestions(reflectionRun, input);
-    for (const suggestion of suggestions) {
-      await this.store.saveReflectionSuggestion(suggestion);
+    const prior = (await this.store.listReflectionRuns(input.session.id))
+      .find((run) => run.id !== reflectionRun.id && run.kind === "background_review" && run.source_run_id === reflectionRun.source_run_id && run.status === "completed");
+    if (prior) {
+      reflectionRun = await this.store.updateReflectionRun({
+        ...reflectionRun,
+        status: "completed",
+        output_summary: `Skipped duplicate Background Review; source was reviewed by ${prior.id}.`,
+        completed_at: nowIso()
+      });
+      await this.store.saveLearningJobReport({
+        id: createId("learning_job_report"), job_kind: "background_review", run_id: reflectionRun.id,
+        target_resource_count: 0, mutation_count: 0, archive_count: 0, restore_count: 0, patch_count: 0, merge_count: 0,
+        skipped_reasons: { duplicate_source_run: 1 }, evaluation_count: 0,
+        duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(startedAt)), created_at: nowIso()
+      });
+      return { reflectionRun, suggestions: [] };
     }
-    reflectionRun = {
-      ...reflectionRun,
-      status: "completed",
-      output_summary: suggestions.length ? `Created ${suggestions.length} reflection suggestion(s).` : "No reflection suggestions.",
-      completed_at: nowIso()
+    try {
+      const snapshot = await this.buildReviewSnapshot(input);
+      const runner = this.workspaceOptions.backgroundReviewRunner;
+      const rawResult = runner
+        ? await runner.run(snapshot, defaultBackgroundReviewPolicy)
+        : this.workspaceOptions.enableBackendBackgroundReview
+          ? await this.runBackgroundReviewWithBackend(snapshot, input.backendRun)
+          : { reviewer: "background-review-unconfigured", summary: "Background Review runner is not configured.", mutations: [] };
+      const settings = await this.store.getSettings();
+      const restricted = restrictBackgroundReviewResult(rawResult, defaultBackgroundReviewPolicy);
+      const result = {
+        ...restricted,
+        mutations: restricted.mutations.filter((mutation) => mutation.kind.startsWith("memory")
+          ? settings.memory_capture_mode === "auto"
+          : settings.skill_capture_mode === "auto")
+      };
+      const suggestions = await this.applyBackgroundReviewMutations(reflectionRun, input.session, result.mutations);
+      reflectionRun = await this.store.updateReflectionRun({
+        ...reflectionRun,
+        status: "completed",
+        output_summary: result.summary || (suggestions.length ? `Applied ${suggestions.length} learning mutation(s).` : "No learning changes."),
+        completed_at: nowIso()
+      });
+      await this.store.saveLearningJobReport({
+        id: createId("learning_job_report"), job_kind: "background_review", run_id: reflectionRun.id,
+        target_resource_count: snapshot.existing_memory_catalog.length + snapshot.existing_skill_catalog.length,
+        mutation_count: suggestions.length,
+        archive_count: result.mutations.filter((mutation) => mutation.kind === "memory_remove").length,
+        restore_count: 0,
+        patch_count: result.mutations.filter((mutation) => mutation.kind === "memory_replace" || mutation.kind === "skill_patch" || mutation.kind === "skill_support_write").length,
+        merge_count: 0,
+        skipped_reasons: result.mutations.length === 0 ? { no_learning_change: 1 } : {},
+        evaluation_count: 0,
+        duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(startedAt)),
+        next_run_at: nextRunFromSchedule("every 4 hours", Date.parse(reflectionRun.completed_at ?? nowIso())),
+        created_at: nowIso()
+      });
+      return { reflectionRun, suggestions };
+    } catch (error) {
+      reflectionRun = await this.store.updateReflectionRun({
+        ...reflectionRun,
+        status: "failed",
+        error: errorMessage(error),
+        completed_at: nowIso()
+      });
+      await this.store.saveLearningJobReport({
+        id: createId("learning_job_report"), job_kind: "background_review", run_id: reflectionRun.id,
+        target_resource_count: 0, mutation_count: 0, archive_count: 0, restore_count: 0, patch_count: 0, merge_count: 0,
+        skipped_reasons: {}, evaluation_count: 0,
+        duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(startedAt)),
+        failure: errorMessage(error), created_at: nowIso()
+      });
+      return { reflectionRun, suggestions: [] };
+    }
+  }
+
+  private async buildReviewSnapshot(input: {
+    session: SessionRecord;
+    sourceRunId?: string;
+    backendRun?: BackendRunRecord;
+    backendEvents: BackendEventRecord[];
+    workspaceChanges: WorkspaceChangeRecord[];
+    toolRuns: ToolRunRecord[];
+    transcriptMessages?: MessageRecord[];
+    artifacts?: ReflectionArtifactSnapshot[];
+  }): Promise<ReviewSnapshot> {
+    const [memories, skills, learningUses] = await Promise.all([
+      this.store.listMemory({ includeArchived: true }),
+      this.store.listSkills(),
+      input.sourceRunId || input.backendRun?.id
+        ? this.store.listLearningResourceUses({ runId: input.sourceRunId ?? input.backendRun?.id })
+        : Promise.resolve([])
+    ]);
+    return {
+      source_session_id: input.session.id,
+      source_run_id: input.sourceRunId ?? input.backendRun?.id ?? "unknown",
+      messages: input.transcriptMessages ?? await this.store.listMessages(input.session.id),
+      artifacts: (input.artifacts ?? []).map((artifact) => ({ record: artifact.artifact, content: artifact.content })),
+      backend_run: input.backendRun,
+      backend_events: input.backendEvents,
+      tool_runs: input.toolRuns,
+      workspace_changes: input.workspaceChanges,
+      used_learning_resources: actualLearningResourceUses(learningUses),
+      existing_memory_catalog: memories.map((memory) => ({ id: memory.id, title: memory.topic, state: memory.state, version: memory.updated_at })),
+      existing_skill_catalog: skills.map((skill) => ({ id: skill.id, title: skill.title, state: skill.state, version: skill.frontmatter.last_reviewed_at, summary: skill.description }))
     };
-    reflectionRun = await this.store.updateReflectionRun(reflectionRun);
-    return { reflectionRun, suggestions };
+  }
+
+  private async runBackgroundReviewWithBackend(snapshot: ReviewSnapshot, sourceRun?: BackendRunRecord): Promise<BackgroundReviewResult> {
+    const backend = sourceRun ? this.backendRegistry.get(sourceRun.backend_id) : undefined;
+    if (!backend) return { reviewer: "background-review-unavailable", summary: "No review Backend was available.", mutations: [] };
+    const prompt = backgroundReviewPrompt(snapshot, defaultBackgroundReviewPolicy);
+    const envelope = createGatewayEnvelope(webGatewayContext, prompt);
+    const textParts: string[] = [];
+    for await (const event of backend.runTurn({
+      run_id: createId("review_run"),
+      session_id: snapshot.source_session_id,
+      input_message_id: createId("review_message"),
+      workspace_root: this.store.rootDir,
+      working_directory: this.backendWorkingDirectory(),
+      envelope,
+      user_input: prompt,
+      input_locale: "en",
+      output_locale: "en",
+      active_memory: [],
+      recent_messages: [],
+      available_tools: [],
+      metadata: { background_review: true, source_run_id: snapshot.source_run_id },
+      context_intent: "workspace_task"
+    })) {
+      if (event.event_type === "text_delta" && typeof event.payload.text === "string") textParts.push(event.payload.text);
+    }
+    const text = textParts.join("").trim();
+    return text ? parseBackgroundReviewResult(text) : { reviewer: backend.id, summary: "Review Backend returned no mutations.", mutations: [] };
+  }
+
+  private async runSkillConsolidationWithBackend(input: { group_key: string; packages: Array<{ id: string; title: string; description: string; markdown: string; support_files: Array<{ path: string; content: string }> }> }, session: SessionRecord) {
+    const backend = this.backendRegistry.get(this.defaultBackendIdForRun());
+    if (!backend) return undefined;
+    const prompt = skillConsolidationPrompt(input);
+    const envelope = createGatewayEnvelope(cronMemoryReviewGatewayContext, prompt, "en", "en");
+    const textParts: string[] = [];
+    for await (const event of backend.runTurn({
+      run_id: createId("consolidation_run"),
+      session_id: session.id,
+      input_message_id: createId("consolidation_message"),
+      workspace_root: this.store.rootDir,
+      working_directory: this.backendWorkingDirectory(),
+      envelope,
+      user_input: prompt,
+      input_locale: "en",
+      output_locale: "en",
+      active_memory: [],
+      recent_messages: [],
+      available_tools: [],
+      metadata: { skill_consolidation: true, group_key: input.group_key },
+      context_intent: "workspace_task"
+    })) {
+      if (event.event_type === "text_delta" && typeof event.payload.text === "string") textParts.push(event.payload.text);
+    }
+    const text = textParts.join("").trim();
+    return text ? parseSkillConsolidationResult(text) : undefined;
+  }
+
+  private async applyBackgroundReviewMutations(reflectionRun: ReflectionRunRecord, session: SessionRecord, mutations: BackgroundReviewMutation[]): Promise<ReflectionSuggestionRecord[]> {
+    const suggestions: ReflectionSuggestionRecord[] = [];
+    for (const mutation of mutations) {
+      let targetRef: ResourceRef | undefined;
+      let beforeVersion: string | undefined;
+      if ("resource_id" in mutation) {
+        const beforeContent = mutation.kind.startsWith("memory")
+          ? await this.store.readMemoryContent(mutation.resource_id)
+          : await this.store.readSkillMarkdown(mutation.resource_id);
+        if (beforeContent !== undefined) beforeVersion = stableHash(beforeContent);
+      }
+      if (mutation.kind === "memory_add") {
+        const memory = await createTopicMemory(this.store, createGatewayEnvelope(webGatewayContext, mutation.reason), mutation.topic, mutation.content);
+        targetRef = memoryRef(memory);
+      } else if (mutation.kind === "memory_replace") {
+        const memory = await this.store.replaceMemoryContent(mutation.resource_id, mutation.content);
+        if (memory) targetRef = memoryRef(memory);
+      } else if (mutation.kind === "memory_remove") {
+        const archived = await this.store.archiveMemory(mutation.resource_id);
+        if (archived) targetRef = memoryRef({ ...archived.after.frontmatter, file_path: archived.after.file_path });
+      } else if (mutation.kind === "skill_create") {
+        const created = await this.createSkillCandidate({
+          title: mutation.title,
+          description: mutation.description,
+          content: mutation.content,
+          tags: ["background-review"],
+          source_refs: mutation.evidence_refs,
+          provenance_detail: { kind: "generated_local", summary: `Background Review ${reflectionRun.id}: ${mutation.reason}`, verified: false }
+        });
+        const promoted = await this.store.updateSkillState(created.resource.id, "project");
+        if (promoted) targetRef = skillRef(promoted);
+      } else if (mutation.kind === "skill_patch") {
+        const skill = await this.store.replaceSkillContent(mutation.resource_id, mutation.content);
+        if (skill) targetRef = skillRef(skill);
+      } else if (mutation.kind === "skill_support_write") {
+        const support = await this.store.writeSkillSupportFile({ skillId: mutation.resource_id, path: mutation.path, content: mutation.content });
+        targetRef = { kind: "skill_support_file", id: `${support.skill_id}:${support.path}`, uri: support.file_path, label: support.path };
+      }
+      if (!targetRef) continue;
+      const now = nowIso();
+      const suggestion: ReflectionSuggestionRecord = {
+        id: createId("reflection_suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: mutation.kind.startsWith("memory") ? (mutation.kind === "memory_add" ? "memory" : "memory_patch") : (mutation.kind === "skill_create" ? "skill" : "skill_patch"),
+        status: "applied",
+        title: mutation.kind,
+        content: mutation.reason,
+        target_ref: targetRef,
+        source_refs: mutation.evidence_refs,
+        confidence: 0.75,
+        created_at: now,
+        updated_at: now
+      };
+      await this.store.saveReflectionSuggestion(suggestion);
+      suggestions.push(suggestion);
+      await this.store.saveBackgroundReviewChange({
+        id: createId("background_review_change"),
+        origin: "background_review",
+        source_run_id: reflectionRun.source_run_id ?? reflectionRun.id,
+        source_session_id: session.id,
+        review_run_id: reflectionRun.id,
+        mutation_kind: mutation.kind,
+        resource_ref: targetRef,
+        before_version: beforeVersion,
+        after_version: stableHash({ targetRef, content: "content" in mutation ? mutation.content : mutation.reason }),
+        reason_summary: mutation.reason,
+        evidence_refs: mutation.evidence_refs,
+        created_at: now
+      });
+      await this.store.saveWorkspaceChange({
+        id: createId("change"),
+        run_id: reflectionRun.source_run_id ?? reflectionRun.id,
+        session_id: session.id,
+        resource_ref: targetRef,
+        change_type: mutation.kind.startsWith("memory") ? "memory_suggested" : "skill_candidate_created",
+        summary: `Background Review ${reflectionRun.id} applied ${mutation.kind}: ${mutation.reason}`,
+        created_at: now
+      });
+    }
+    return suggestions;
   }
 
   private async loadReflectionArtifacts(input: {
@@ -7645,127 +8255,6 @@ export class AgentRuntime {
       });
     }
     return snapshots;
-  }
-
-  private createReflectionSuggestions(
-    reflectionRun: ReflectionRunRecord,
-    input: {
-      userMessage?: MessageRecord;
-      agentMessage?: MessageRecord;
-      backendRun?: BackendRunRecord;
-      backendEvents: BackendEventRecord[];
-      workspaceChanges: WorkspaceChangeRecord[];
-      toolRuns: ToolRunRecord[];
-      transcriptMessages?: MessageRecord[];
-      artifacts?: ReflectionArtifactSnapshot[];
-    }
-  ): ReflectionSuggestionRecord[] {
-    const now = nowIso();
-    const backendEventRefs: ResourceRef[] = input.backendEvents.slice(0, 10).map((event) => ({
-      kind: "backend_event",
-      id: event.id,
-      uri: `backend-events/${event.id}`,
-      label: event.event_type
-    }));
-    const artifactRefs = (input.artifacts ?? []).map((snapshot) => snapshot.artifact.file_ref);
-    const sourceRefs: ReflectionSuggestionRecord["source_refs"] = [
-      ...(input.backendRun
-        ? [{
-            kind: "backend_run",
-            id: input.backendRun.id,
-            uri: `backend-runs/${input.backendRun.id}`,
-            label: input.backendRun.input_summary
-          }]
-        : []),
-      ...(input.userMessage
-        ? [{
-            kind: "message",
-            id: input.userMessage.id,
-            uri: `messages/${input.userMessage.id}`,
-            label: "User message"
-          }]
-        : []),
-      ...backendEventRefs,
-      ...artifactRefs
-    ];
-    const suggestions: ReflectionSuggestionRecord[] = [];
-    const userContent = input.userMessage?.content ?? "";
-    const agentContent = input.agentMessage?.content ?? "";
-    const transcriptSummary = renderReflectionTranscriptExcerpt(input.transcriptMessages ?? []);
-    const artifactContext = renderReflectionArtifactContext(input.artifacts ?? []);
-    const backendEventSummary = input.backendEvents.slice(0, 20)
-      .map((event) => `${event.event_type}: ${summarize(JSON.stringify(event.payload), 160)}`)
-      .join("\n");
-    const toolRunRefs: ResourceRef[] = input.toolRuns.slice(0, 10).map((toolRun) => ({
-      kind: "tool_run",
-      id: toolRun.id,
-      uri: `tool-runs/${toolRun.id}`,
-      label: `${toolRun.provider_tool_name}:${toolRun.status}`
-    }));
-    if (/覚えて|今後|preference|remember|好み|文体/i.test(userContent)) {
-      suggestions.push({
-        id: createId("suggestion"),
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: "memory",
-        status: "proposed",
-        title: "Memory candidate",
-        content: userContent,
-        source_refs: sourceRefs,
-        confidence: 0.72,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    if (input.workspaceChanges.some((change) => change.change_type === "artifact_created") || /設計|調査|仕様|wiki|knowledge/i.test(userContent)) {
-      suggestions.push({
-        id: createId("suggestion"),
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: "knowledge_wiki",
-        status: "proposed",
-        title: "Knowledge Wiki proposal",
-        content: summarize(renderReflectionKnowledgeWikiProposal({
-          userContent,
-          agentContent,
-          transcriptSummary,
-          artifactContext,
-          backendEventSummary
-        }), 1400),
-        source_refs: uniqueResourceRefs(sourceRefs),
-        confidence: 0.6,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    const skillSignals = analyzeSkillCandidateSignals(userContent, agentContent, input.toolRuns);
-    if (/手順|毎回|次回|次から|今後|skill|workflow|やり方/i.test(userContent) || skillSignals.shouldSuggest) {
-      suggestions.push({
-        id: createId("suggestion"),
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: "skill",
-        status: "proposed",
-        title: skillSignals.title,
-        content: skillCandidateContentFromTrace(userContent, input.toolRuns, skillSignals),
-        source_refs: uniqueResourceRefs([...sourceRefs, ...toolRunRefs]),
-        confidence: skillSignals.confidence,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    if (input.toolRuns.some((toolRun) => toolRun.status === "ignored" || toolRun.status === "failed")) {
-      suggestions.push({
-        id: createId("suggestion"),
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: "conflict",
-        status: "proposed",
-        title: "Tool boundary review",
-        content: input.toolRuns.filter((toolRun) => toolRun.status !== "completed").map((toolRun) => `${toolRun.provider_tool_name}: ${toolRun.output_summary}`).join("\n"),
-        source_refs: sourceRefs,
-        confidence: 0.58,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    return suggestions;
   }
 
   private createEvaluationTraceSuggestions(
@@ -8569,12 +9058,18 @@ function buildCuratorLifecycleReport(input: {
   suggestions: ReflectionSuggestionRecord[];
   skillActions: CuratorLifecycleReport["skill_actions"];
   protectedSkills: CuratorLifecycleReport["protected_skills"];
+  snapshotId?: string;
+  evaluationCount?: number;
+  appliedMutationCount?: number;
 }): CuratorLifecycleReport {
   return CuratorLifecycleReportSchema.parse({
     id: `curator_report_${input.now.replace(/[^0-9A-Za-z]/g, "")}`,
     checked_at: input.now,
     dry_run: input.dryRun,
     paused: input.paused,
+    ...(input.snapshotId ? { snapshot_id: input.snapshotId } : {}),
+    evaluation_count: input.evaluationCount ?? 0,
+    applied_mutation_count: input.appliedMutationCount ?? 0,
     ...(input.skippedReason ? { skipped_reason: input.skippedReason } : {}),
     thresholds: {
       stale_after_days: input.curatorState.stale_after_days,
@@ -8620,37 +9115,6 @@ function buildCuratorReviewReport(input: {
   });
 }
 
-function buildSkillConsolidationGroups(skills: SkillWithFilePath[]): Array<{
-  groupKey: string;
-  suggestedTitle: string;
-  reason: string;
-  skills: SkillWithFilePath[];
-}> {
-  const groups = new Map<string, SkillWithFilePath[]>();
-  for (const skill of skills) {
-    if (skill.state === "archived" || skill.state === "pinned" || skill.frontmatter.owner_pinned) {
-      continue;
-    }
-    const capability = skill.required_capabilities[0];
-    const tag = skill.tags[0];
-    const titleTerm = skillQueryTerms(`${skill.title} ${skill.description}`)[0];
-    const key = normalizeSkillSearchText(capability ?? tag ?? titleTerm ?? "");
-    if (!key || key.length < 3) {
-      continue;
-    }
-    groups.set(key, [...(groups.get(key) ?? []), skill]);
-  }
-  return [...groups.entries()]
-    .map(([groupKey, groupSkills]) => ({ groupKey, groupSkills }))
-    .filter((entry) => entry.groupSkills.length >= 2)
-    .map(({ groupKey, groupSkills }) => ({
-      groupKey,
-      suggestedTitle: `${groupSkills[0]!.title} umbrella`,
-      reason: "Similar Skills share a capability, tag, or title term; review whether they should be consolidated under one reusable workflow.",
-      skills: groupSkills.slice(0, 5)
-    }));
-}
-
 function proposedSkillStateForCuratorAction(action: CuratorLifecycleAction): SkillState | undefined {
   if (action === "mark_stale") {
     return "stale";
@@ -8681,151 +9145,6 @@ function curatorActionReason(input: {
     return `Recent usage detected (${input.usageCount} run(s)); restore from stale to project state.`;
   }
   return "Needs human review before lifecycle transition.";
-}
-
-interface SkillCandidateSignals {
-  repeated_tools: Array<{ name: string; count: number }>;
-  failed_or_ignored_tools: ToolRunRecord[];
-  correction_signals: string[];
-  trace_looks_reusable: boolean;
-  trace_needs_recovery: boolean;
-  correction_needs_skill: boolean;
-  shouldSuggest: boolean;
-  title: string;
-  confidence: number;
-}
-
-function analyzeSkillCandidateSignals(userContent: string, agentContent: string, toolRuns: ToolRunRecord[]): SkillCandidateSignals {
-  const combinedText = `${userContent}\n${agentContent}`;
-  const toolCounts = new Map<string, number>();
-  for (const toolRun of toolRuns) {
-    toolCounts.set(toolRun.provider_tool_name, (toolCounts.get(toolRun.provider_tool_name) ?? 0) + 1);
-  }
-  const repeatedTools = [...toolCounts.entries()]
-    .filter(([, count]) => count > 1)
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  const failedOrIgnoredTools = toolRuns.filter((toolRun) => toolRun.status === "failed" || toolRun.status === "ignored");
-  const correctionSignals = extractUserCorrectionSignals(combinedText);
-  const traceLooksReusable = toolRuns.length >= 5 || (toolRuns.length >= 3 && repeatedTools.length > 0);
-  const traceNeedsRecovery = failedOrIgnoredTools.length > 0 && (correctionSignals.length > 0 || /修正|直|もう一度|失敗|error|failed|retry|again/i.test(combinedText));
-  const correctionNeedsSkill = correctionSignals.length > 0 && /次から|次回|今後|毎回|手順|ルール|忘れず|always|from now|next time|instead/i.test(combinedText);
-  const shouldSuggest = traceLooksReusable || traceNeedsRecovery || correctionNeedsSkill;
-  return {
-    repeated_tools: repeatedTools,
-    failed_or_ignored_tools: failedOrIgnoredTools,
-    correction_signals: correctionSignals,
-    trace_looks_reusable: traceLooksReusable,
-    trace_needs_recovery: traceNeedsRecovery,
-    correction_needs_skill: correctionNeedsSkill,
-    shouldSuggest,
-    title: traceNeedsRecovery
-      ? "Skill candidate from corrected execution trace"
-      : traceLooksReusable
-        ? "Skill candidate from execution trace"
-        : correctionNeedsSkill
-          ? "Skill candidate from user correction"
-          : "Skill candidate",
-    confidence: traceNeedsRecovery ? 0.74 : traceLooksReusable ? 0.7 : correctionNeedsSkill ? 0.68 : 0.64
-  };
-}
-
-function extractUserCorrectionSignals(text: string): string[] {
-  const signals: string[] = [];
-  const patterns = [
-    /次から[^。.\n]*/gi,
-    /次回[^。.\n]*/gi,
-    /今後[^。.\n]*/gi,
-    /毎回[^。.\n]*/gi,
-    /修正[^。.\n]*/gi,
-    /直し[^。.\n]*/gi,
-    /instead[^.\n]*/gi,
-    /from now[^.\n]*/gi,
-    /next time[^.\n]*/gi
-  ];
-  for (const pattern of patterns) {
-    const matches = text.match(pattern) ?? [];
-    for (const match of matches) {
-      const normalized = summarize(match, 120);
-      if (normalized && !signals.includes(normalized)) {
-        signals.push(normalized);
-      }
-    }
-  }
-  return signals.slice(0, 5);
-}
-
-function skillCandidateContentFromTrace(userContent: string, toolRuns: ToolRunRecord[], signals: SkillCandidateSignals): string {
-  const toolSummary = toolRuns.slice(0, 8).map((toolRun, index) =>
-    `${index + 1}. ${toolRun.provider_tool_name} -> ${toolRun.status}: ${toolRun.output_summary}`
-  ).join("\n");
-  const repeatedSummary = signals.repeated_tools.length
-    ? signals.repeated_tools.map((tool) => `- ${tool.name}: ${tool.count} time(s)`).join("\n")
-    : "- No repeated tool pattern detected.";
-  const correctionSummary = signals.correction_signals.length
-    ? signals.correction_signals.map((signal) => `- ${signal}`).join("\n")
-    : "- No explicit user correction detected.";
-  const recoverySummary = signals.failed_or_ignored_tools.length
-    ? `\n\n## Recovery notes\n${signals.failed_or_ignored_tools.map((toolRun) => `- ${toolRun.provider_tool_name}: ${toolRun.output_summary}`).join("\n")}`
-    : "";
-  return [
-    "# Candidate workflow",
-    "",
-    "## Trigger",
-    summarize(userContent, 400) || "Reusable workflow detected from execution trace.",
-    "",
-    "## Reusable signals",
-    repeatedSummary,
-    "",
-    "## User correction signals",
-    correctionSummary,
-    "",
-    "## Observed tool sequence",
-    toolSummary || "(no tool runs)",
-    recoverySummary,
-    "",
-    "## Next-run checklist",
-    "- Reuse the observed successful steps before inventing a new flow.",
-    "- Apply the user correction before repeating the same workflow.",
-    "- If a tool is ignored or failed, check the allowed scope or fallback route before retrying."
-  ].filter(Boolean).join("\n");
-}
-
-function renderReflectionTranscriptExcerpt(messages: MessageRecord[]): string {
-  const excerpt = messages.slice(-12)
-    .map((message) => `${message.role}: ${summarize(message.content, 220)}`)
-    .join("\n");
-  return excerpt ? `Transcript excerpt:\n${excerpt}` : "";
-}
-
-function renderReflectionArtifactContext(artifacts: ReflectionArtifactSnapshot[]): string {
-  if (!artifacts.length) {
-    return "";
-  }
-  return [
-    "Artifact context:",
-    ...artifacts.map((snapshot) => [
-      `Artifact: ${snapshot.artifact.title} (${snapshot.artifact.kind})`,
-      `URI: ${snapshot.artifact.file_ref.uri}`,
-      snapshot.content ? `Content:\n${snapshot.content}${snapshot.content_truncated ? "\n[truncated]" : ""}` : "Content: (unavailable or binary)"
-    ].join("\n"))
-  ].join("\n\n");
-}
-
-function renderReflectionKnowledgeWikiProposal(input: {
-  userContent: string;
-  agentContent: string;
-  transcriptSummary: string;
-  artifactContext: string;
-  backendEventSummary: string;
-}): string {
-  return [
-    input.userContent ? `User request:\n${input.userContent}` : "",
-    input.agentContent ? `Agent response:\n${input.agentContent}` : "",
-    input.transcriptSummary,
-    input.artifactContext,
-    input.backendEventSummary ? `Backend events:\n${input.backendEventSummary}` : ""
-  ].filter(Boolean).join("\n\n");
 }
 
 function surfaceOperationPrompt(operation: SurfaceOperation): string {
@@ -11976,6 +12295,10 @@ function normalizeGatewaySourceIdentity(value: string): string {
   return normalized;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function normalizeGatewayRoute(value: string | undefined): string {
   const normalized = value?.trim() || "main";
   if (!normalized || normalized.length > 80 || /[\u0000-\u001F\u007F]/.test(normalized)) {
@@ -12812,6 +13135,19 @@ const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
     properties: {
       query: { type: "string" },
       limit: { type: "number" }
+    }
+  }
+}, {
+  name: "samurai.skill.view",
+  provider_tool_name: "mcp__samurai__skill_view",
+  title: "View Samurai Skill",
+  description: "Read the body of a selected Skill or an allowed support file only when needed for the current run.",
+  input_schema: {
+    type: "object",
+    required: ["skill_id"],
+    properties: {
+      skill_id: { type: "string" },
+      path: { type: "string" }
     }
   }
 }, {
@@ -14849,6 +15185,10 @@ function nextRunFromSchedule(schedule: string, fromMs = Date.now()): string {
   if (normalized.includes("hourly")) {
     return new Date(fromMs + 60 * 60 * 1000).toISOString();
   }
+  const everyHours = normalized.match(/every\s+(\d+(?:\.\d+)?)\s+hours?/);
+  if (everyHours) {
+    return new Date(fromMs + Number(everyHours[1]) * 60 * 60 * 1000).toISOString();
+  }
   return new Date(fromMs + 24 * 60 * 60 * 1000).toISOString();
 }
 
@@ -14857,8 +15197,7 @@ function isOneShotSchedule(schedule: string): boolean {
 }
 
 function nextRetryAt(failureCount: number): string {
-  const clamped = Math.max(1, Math.min(failureCount, 6));
-  return new Date(Date.now() + 5 * 60 * 1000 * clamped).toISOString();
+  return new Date(Date.now() + learningRetryDelayMs(failureCount)).toISOString();
 }
 
 type ExternalSendDispatchAdapterResult = { dispatched: boolean; adapter: string; transport?: string; status?: number; dry_run: boolean; message: string };

@@ -62,7 +62,7 @@ export const approvalStatuses = ["pending", "approved", "denied", "expired", "ca
 export const memoryStates = ["session", "provisional", "active", "sensitive", "archived", "topic"] as const;
 export const skillStates = ["candidate", "project", "active", "stale", "archived", "pinned"] as const;
 export const wikiStates = ["proposed", "active", "archived", "rejected"] as const;
-export const captureModes = ["manual", "suggest", "off"] as const;
+export const captureModes = ["auto", "manual", "off"] as const;
 export const externalProviderRoles = ["assistive", "disabled"] as const;
 export const activityTypes = [
   "auto_run",
@@ -104,11 +104,14 @@ export const clientEventTypes = [
   "client.status.refresh_requested"
 ] as const;
 export const workspaceChangeTypes = ["artifact_created", "memory_suggested", "skill_candidate_created", "collection_changed", "settings_changed", "other"] as const;
-export const reflectionRunKinds = ["chat_turn", "manual", "scheduled", "curator", "evaluation"] as const;
+export const reflectionRunKinds = ["chat_turn", "background_review", "manual", "scheduled", "curator", "evaluation"] as const;
 export const reflectionRunStatuses = ["started", "completed", "failed"] as const;
 export const reflectionSuggestionTypes = ["memory", "knowledge_wiki", "skill", "memory_patch", "skill_patch", "conflict"] as const;
 export const reflectionSuggestionStatuses = ["proposed", "applied", "rejected", "archived"] as const;
 export const toolRunStatuses = ["completed", "ignored", "failed"] as const;
+export const learningResourceKinds = ["memory", "wiki", "skill", "skill_support", "session_result"] as const;
+export const learningResourceUseStages = ["selected", "body_loaded", "support_loaded"] as const;
+export const learningAssessments = ["helpful", "neutral", "harmful", "insufficient_evidence"] as const;
 export const automationJobStatuses = ["enabled", "disabled", "archived"] as const;
 export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed"] as const;
 export const externalSendChannels = ["webhook", "email", "slack", "telegram", "line"] as const;
@@ -163,6 +166,9 @@ export const ReflectionRunStatusSchema = z.enum(reflectionRunStatuses);
 export const ReflectionSuggestionTypeSchema = z.enum(reflectionSuggestionTypes);
 export const ReflectionSuggestionStatusSchema = z.enum(reflectionSuggestionStatuses);
 export const ToolRunStatusSchema = z.enum(toolRunStatuses);
+export const LearningResourceKindSchema = z.enum(learningResourceKinds);
+export const LearningResourceUseStageSchema = z.enum(learningResourceUseStages);
+export const LearningAssessmentSchema = z.enum(learningAssessments);
 export const AutomationJobStatusSchema = z.enum(automationJobStatuses);
 export const ExternalSendStatusSchema = z.enum(externalSendStatuses);
 export const ExternalSendChannelSchema = z.enum(externalSendChannels);
@@ -1004,6 +1010,95 @@ export const SkillUsageRecordSchema = z.object({
 });
 export type SkillUsageRecord = z.infer<typeof SkillUsageRecordSchema>;
 
+export const LearningResourceUseRecordSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  session_id: z.string().min(1),
+  resource_kind: LearningResourceKindSchema,
+  resource_id: z.string().min(1),
+  resource_version: z.string().min(1).optional(),
+  content_hash: z.string().min(1).optional(),
+  stage: LearningResourceUseStageSchema,
+  source_operation_id: z.string().min(1).optional(),
+  metadata: z.record(z.string(), z.unknown()),
+  created_at: z.string().datetime()
+});
+export type LearningResourceUseRecord = z.infer<typeof LearningResourceUseRecordSchema>;
+
+export const LearningEvaluationRecordSchema = z.object({
+  id: z.string().min(1),
+  learning_resource_ref: ResourceRefSchema,
+  learning_resource_version: z.string().min(1).optional(),
+  task_class: z.string().min(1),
+  compared_run_ids: z.array(z.string().min(1)),
+  before_metrics: z.record(z.string(), z.number()),
+  after_metrics: z.record(z.string(), z.number()),
+  effect_estimate: z.number(),
+  confidence: z.number().min(0).max(1),
+  assessment: LearningAssessmentSchema,
+  evidence_refs: z.array(ResourceRefSchema),
+  evaluator: z.string().min(1),
+  created_at: z.string().datetime()
+});
+export type LearningEvaluationRecord = z.infer<typeof LearningEvaluationRecordSchema>;
+
+export const BackgroundReviewProvenanceSchema = z.object({
+  origin: z.literal("background_review"),
+  source_run_id: z.string().min(1),
+  source_session_id: z.string().min(1),
+  review_run_id: z.string().min(1),
+  before_version: z.string().optional(),
+  after_version: z.string().min(1),
+  reason_summary: z.string(),
+  evidence_refs: z.array(ResourceRefSchema)
+});
+export type BackgroundReviewProvenance = z.infer<typeof BackgroundReviewProvenanceSchema>;
+
+export const BackgroundReviewChangeRecordSchema = BackgroundReviewProvenanceSchema.extend({
+  id: z.string().min(1),
+  mutation_kind: z.enum(["memory_add", "memory_replace", "memory_remove", "skill_create", "skill_patch", "skill_support_write"]),
+  resource_ref: ResourceRefSchema,
+  created_at: z.string().datetime()
+});
+export type BackgroundReviewChangeRecord = z.infer<typeof BackgroundReviewChangeRecordSchema>;
+
+export const LearningSnapshotRecordSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  path: z.string().min(1),
+  resource_counts: z.object({ memory: z.number().int().nonnegative(), skills: z.number().int().nonnegative(), support_files: z.number().int().nonnegative() }),
+  created_at: z.string().datetime(),
+  restored_at: z.string().datetime().optional()
+});
+export type LearningSnapshotRecord = z.infer<typeof LearningSnapshotRecordSchema>;
+
+export const LearningJobReportRecordSchema = z.object({
+  id: z.string().min(1),
+  job_kind: z.enum(["background_review", "evaluation", "curator"]),
+  run_id: z.string().min(1),
+  target_resource_count: z.number().int().nonnegative(),
+  mutation_count: z.number().int().nonnegative(),
+  archive_count: z.number().int().nonnegative(),
+  restore_count: z.number().int().nonnegative(),
+  patch_count: z.number().int().nonnegative(),
+  merge_count: z.number().int().nonnegative(),
+  skipped_reasons: z.record(z.string(), z.number().int().nonnegative()),
+  evaluation_count: z.number().int().nonnegative(),
+  snapshot_id: z.string().optional(),
+  duration_ms: z.number().int().nonnegative(),
+  failure: z.string().optional(),
+  next_run_at: z.string().datetime().optional(),
+  created_at: z.string().datetime()
+});
+export type LearningJobReportRecord = z.infer<typeof LearningJobReportRecordSchema>;
+
+export const SkillViewInputSchema = z.object({
+  skill_id: z.string().min(1),
+  path: z.string().min(1).optional(),
+  run_id: z.string().min(1)
+});
+export type SkillViewInput = z.infer<typeof SkillViewInputSchema>;
+
 export const SkillDiagnosticsIssueSchema = z.object({
   code: z.enum([
     "selectable_skill_empty_markdown",
@@ -1032,6 +1127,10 @@ export const SkillDiagnosticsReportSchema = z.object({
   selectable_with_source_refs: z.number().int().nonnegative(),
   selectable_with_support_files: z.number().int().nonnegative(),
   selectable_with_usage: z.number().int().nonnegative(),
+  selected_resource_uses: z.number().int().nonnegative().optional(),
+  body_loaded_resource_uses: z.number().int().nonnegative().optional(),
+  support_loaded_resource_uses: z.number().int().nonnegative().optional(),
+  session_search_mode: z.enum(["fts5_trigram", "fts5", "like"]).optional(),
   empty_support_files: z.number().int().nonnegative(),
   issues: z.array(SkillDiagnosticsIssueSchema),
   recommendation: z.string()
@@ -1060,6 +1159,9 @@ export const CuratorLifecycleReportSchema = z.object({
   checked_at: z.string().datetime(),
   dry_run: z.boolean(),
   paused: z.boolean(),
+  snapshot_id: z.string().min(1).optional(),
+  evaluation_count: z.number().int().nonnegative().optional(),
+  applied_mutation_count: z.number().int().nonnegative().optional(),
   skipped_reason: z.string().optional(),
   thresholds: z.object({
     stale_after_days: z.number().int().positive(),
@@ -1301,7 +1403,7 @@ export type ToolRunDiagnosticsReport = z.infer<typeof ToolRunDiagnosticsReportSc
 export const AutomationJobRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
-  kind: z.enum(["memory_review", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"]),
+  kind: z.enum(["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"]),
   status: AutomationJobStatusSchema,
   schedule: z.string().min(1),
   target_instruction: z.string().min(1),
@@ -2287,9 +2389,9 @@ function createRandomId(): string {
 export const defaultSettings = (): SettingsRecord => ({
   ui_locale: "ja",
   output_locale: "ja",
-  memory_capture_mode: "suggest",
-  knowledge_wiki_capture_mode: "suggest",
-  skill_capture_mode: "suggest",
+  memory_capture_mode: "auto",
+  knowledge_wiki_capture_mode: "auto",
+  skill_capture_mode: "auto",
   external_provider_role: "assistive",
   updated_at: nowIso()
 });

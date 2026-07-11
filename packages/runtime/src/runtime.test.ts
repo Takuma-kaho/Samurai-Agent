@@ -436,6 +436,7 @@ describe("agent runtime", () => {
         expect(input.expected_outputs).toContain("collection_schema");
         expect(input.tool_bridge?.enabled).toBe(true);
         const schemaTool = input.tool_bridge?.tools.find((tool) => tool.name === "samurai.collection.schema.save");
+        expect(input.tool_bridge?.tools).toContainEqual(expect.objectContaining({ name: "samurai.skill.view", provider_tool_name: "mcp__samurai__skill_view" }));
         expect(schemaTool?.description).toContain("collection_gallery");
         expect(schemaTool?.description).toContain("calendar_view");
         expect(schemaTool?.description).toContain("collection_kanban");
@@ -2953,7 +2954,7 @@ describe("agent runtime", () => {
       }
     });
     const session = await runtime.createSession();
-    await runtime.runChatTurn({
+    const chat = await runtime.runChatTurn({
       sessionId: session.id,
       content: "調査メモ references を使って",
       output_locale: "ja"
@@ -2962,6 +2963,14 @@ describe("agent runtime", () => {
       sessionId: session.id,
       query: "調査メモ references"
     });
+    const selectedUses = await store.listLearningResourceUses({ runId: chat.backendRun.id });
+    const usageBeforeView = await store.listSkillUsage();
+    const view = await runtime.viewSkill({
+      skillId: projectResult.resource.id,
+      runId: chat.backendRun.id,
+      path: "references/style.md"
+    });
+    await runtime.viewSkill({ skillId: projectResult.resource.id, runId: chat.backendRun.id, path: "references/style.md" });
     const usage = await store.listSkillUsage();
     await store.close();
 
@@ -2986,7 +2995,13 @@ describe("agent runtime", () => {
     }));
     expect(context.selected_skills.find((item) => item.id === projectResult.resource.id)?.support_files?.[0]?.file_path)
       .toBeUndefined();
-    expect(usage.some((row) => row.skill_id === projectResult.resource.id && row.use_count > 0)).toBe(true);
+    expect(selectedUses).toContainEqual(expect.objectContaining({
+      resource_id: projectResult.resource.id,
+      stage: "selected"
+    }));
+    expect(usageBeforeView.some((row) => row.skill_id === projectResult.resource.id)).toBe(false);
+    expect(view).toMatchObject({ disclosure_level: "support", content: "補助資料: 調査メモは箇条書きで短くする。" });
+    expect(usage).toContainEqual(expect.objectContaining({ skill_id: projectResult.resource.id, use_count: 1 }));
   });
 
   it("turns reflection Skill suggestions into supported project Skills with usage", async () => {
@@ -3012,12 +3027,17 @@ describe("agent runtime", () => {
       created_at: now
     });
 
-    const reflection = await runtime.runReflection({ sessionId: session.id });
-    const suggestion = reflection.suggestions.find((item) => item.suggestion_type === "skill");
-    expect(suggestion).toBeDefined();
+    const reflectionRun = await store.createReflectionRun({
+      id: createId("reflection"), kind: "manual", session_id: session.id, status: "completed",
+      input_summary: "legacy compatibility", output_summary: "legacy suggestion", started_at: now, completed_at: now
+    });
+    const suggestion = await store.saveReflectionSuggestion({
+      id: createId("suggestion"), reflection_run_id: reflectionRun.id, suggestion_type: "skill", status: "proposed",
+      title: "差分確認", content: "保存前に差分確認する", source_refs: [], confidence: 0.8, created_at: now, updated_at: now
+    });
     const applied = await runtime.runDomainCommand({
       command_id: "reflection.suggestion.apply",
-      payload: { suggestion_id: suggestion!.id }
+      payload: { suggestion_id: suggestion.id }
     });
     const appliedResult = applied.result as Awaited<ReturnType<AgentRuntime["applyReflectionSuggestion"]>>;
     const appliedSkill = appliedResult.resource as {
@@ -3048,7 +3068,7 @@ describe("agent runtime", () => {
       sessionId: session.id,
       query: "差分確認 references"
     });
-    const refreshedSuggestion = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion!.id);
+    const refreshedSuggestion = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion.id);
     const usage = await store.getSkillUsage(projectResult.resource.id);
     await store.close();
 
@@ -3058,7 +3078,7 @@ describe("agent runtime", () => {
     });
     expect(appliedResult.operation.operation).toBe("reflection.suggestion.apply");
     expect(appliedSkill.state).toBe("candidate");
-    expect(appliedSkill.frontmatter?.source_refs?.some((ref) => ref.kind === "message")).toBe(true);
+    expect(appliedSkill.frontmatter?.source_refs ?? []).toEqual([]);
     expect(appliedSkill.frontmatter?.provenance_detail).toMatchObject({ kind: "generated_local", verified: false });
     expect(refreshedSuggestion).toMatchObject({
       status: "applied",
@@ -3076,10 +3096,10 @@ describe("agent runtime", () => {
       })],
       support_files: undefined,
       content: undefined,
-      usage: expect.objectContaining({ use_count: 1 })
+      usage: undefined
     });
     expect(selectedSkill?.selection_reason).toContain("Catalog match only");
-    expect(usage).toMatchObject({ skill_id: projectResult.resource.id, use_count: 1 });
+    expect(usage).toBeUndefined();
   });
 
   it("keeps plain chat as content without creating artifacts", async () => {
@@ -3132,8 +3152,7 @@ describe("agent runtime", () => {
     expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
     expect(result.artifacts[0]?.title).toBe("作業メモ");
     expect(result.reflectionRuns.some((run) => run.status === "completed")).toBe(true);
-    expect(result.reflectionSuggestions.some((suggestion) => suggestion.suggestion_type === "knowledge_wiki")).toBe(true);
-    expect(result.reflectionSuggestions.some((suggestion) => suggestion.source_refs.some((ref) => ref.kind === "backend_event"))).toBe(true);
+    expect(result.reflectionSuggestions).toEqual([]);
     expect(reflectionRuns.some((run) => run.status === "completed")).toBe(true);
   });
 
@@ -4686,12 +4705,12 @@ rl.on("line", (line) => {
     expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
     expect(result.toolRuns.some((toolRun) => toolRun.action_id === "artifact.create" && toolRun.status === "completed")).toBe(true);
     expect(result.reflectionRuns[0]?.status).toBe("completed");
-    expect(result.reflectionSuggestions.some((suggestion) => suggestion.suggestion_type === "knowledge_wiki")).toBe(true);
+    expect(result.reflectionSuggestions).toEqual([]);
     expect(result.policyDecisions).toEqual([]);
     expect(result.auditRecords).toEqual([]);
   });
 
-  it("includes transcript and artifact content in post-run reflection proposals", async () => {
+  it("keeps Background Review separate from the source Session", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const result = await runtime.runChatTurn({
@@ -4701,13 +4720,8 @@ rl.on("line", (line) => {
     });
     await store.close();
 
-    const wikiSuggestion = result.reflectionSuggestions.find((suggestion) => suggestion.suggestion_type === "knowledge_wiki");
-    expect(wikiSuggestion?.content).toContain("Transcript excerpt");
-    expect(wikiSuggestion?.content).toContain("Artifact context");
-    expect(wikiSuggestion?.content).toContain("# 作業メモ");
-    expect(wikiSuggestion?.content).toContain("Backend events");
-    expect(wikiSuggestion?.source_refs.some((ref) => ref.kind === "artifact")).toBe(true);
-    expect(wikiSuggestion?.source_refs.some((ref) => ref.kind === "backend_event")).toBe(true);
+    expect(result.reflectionRuns[0]).toMatchObject({ kind: "background_review", source_run_id: result.backendRun.id, status: "completed" });
+    expect(result.reflectionSuggestions).toEqual([]);
   });
 
   it("ignores malformed artifact tool calls without failing the chat turn", async () => {
@@ -5646,11 +5660,10 @@ rl.on("line", (line) => {
       uri: `automation-runs/${result.automationRun.id}`
     });
     expect(result.memoryReviewTrace?.reflectionRun.kind).toBe("scheduled");
-    expect(result.memoryReviewTrace?.suggestions.some((suggestion) => suggestion.suggestion_type === "memory")).toBe(true);
-    expect(result.auditRecord.outputs_summary).toContain("read recent transcript/events");
-    expect(result.auditRecord.outputs_summary).toContain("deterministic curator");
+    expect(result.memoryReviewTrace?.suggestions).toEqual([]);
+    expect(result.auditRecord.outputs_summary).toContain("Background Review");
     expect(result.auditRecord.actor_identity).toBe("owner_scheduled");
-    expect(reflectionRuns.some((run) => run.kind === "curator")).toBe(true);
+    expect(reflectionRuns.some((run) => run.kind === "curator")).toBe(false);
   });
 
   it("ignores unknown and invalid tool calls without external effects", async () => {
@@ -5853,6 +5866,7 @@ rl.on("line", (line) => {
       kind: "available_tools",
       status: "included"
     }));
+    expect(providerInput?.availableTools).toContain("skill.view");
     expect(result.backendRun.metadata.context_assembly_sources).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "recent_messages" }),
       expect.objectContaining({ kind: "available_tools" })
@@ -5914,6 +5928,7 @@ rl.on("line", (line) => {
       output_locale: "ja"
     });
     const usage = await store.listSkillUsage();
+    const learningUses = await store.listLearningResourceUses({ runId: result.backendRun.id });
     await store.close();
 
     expect(providerInput?.activeMemory).toContainEqual(expect.objectContaining({
@@ -5949,7 +5964,12 @@ rl.on("line", (line) => {
     expect(metadataSources.find((source) => source.kind === "selected_skills")?.included_count).toBeGreaterThanOrEqual(1);
     expect(result.backendRun.metadata.context_assembly_quality_warnings).toEqual([]);
     expect(result.backendRun.metadata.freeze_snapshot_hash).toEqual(expect.any(String));
-    expect(usage.some((row) => row.skill_id === "skill_context_bridge" && row.use_count > 0)).toBe(true);
+    expect(usage.some((row) => row.skill_id === "skill_context_bridge" && row.use_count > 0)).toBe(false);
+    expect(learningUses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource_kind: "memory", resource_id: "memory_context_bridge", stage: "body_loaded" }),
+      expect.objectContaining({ resource_kind: "wiki", resource_id: wiki.resource.id, stage: "body_loaded" }),
+      expect.objectContaining({ resource_kind: "skill", resource_id: "skill_context_bridge", stage: "selected" })
+    ]));
   });
 
   it("isolates external assist failures and records sync diagnostics", async () => {
@@ -6104,7 +6124,7 @@ rl.on("line", (line) => {
     expect(auditRecords.some((audit) => audit.affected_resources.some((ref) => ref.id === activeProposal.resource.id))).toBe(true);
   });
 
-  it("suggests Skill candidates from repeated tool execution traces", async () => {
+  it("does not use fixed tool-count rules for Background Review", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const result = await runtime.runChatTurn({
@@ -6132,19 +6152,10 @@ rl.on("line", (line) => {
     const reflection = await runtime.runReflection({ sessionId: session.id, sourceRunId: result.backendRun.id });
     await store.close();
 
-    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
-    expect(skillSuggestion).toMatchObject({
-      title: "Skill candidate from execution trace",
-      confidence: 0.7
-    });
-    expect(skillSuggestion?.content).toContain("Observed tool sequence");
-    expect(skillSuggestion?.content).toContain("Reusable signals");
-    expect(skillSuggestion?.content).toContain("file.read: 3 time(s)");
-    expect(skillSuggestion?.content).toContain("Recovery notes");
-    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "tool_run")).toBe(true);
+    expect(reflection.suggestions).toEqual([]);
   });
 
-  it("suggests Skill candidates from user correction signals", async () => {
+  it("does not use fixed correction keywords for Background Review", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const now = nowIso();
@@ -6170,18 +6181,51 @@ rl.on("line", (line) => {
     const reflection = await runtime.runReflection({ sessionId: session.id });
     await store.close();
 
-    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
-    expect(skillSuggestion).toMatchObject({
-      title: "Skill candidate from user correction",
-      confidence: 0.68
-    });
-    expect(skillSuggestion?.content).toContain("User correction signals");
-    expect(skillSuggestion?.content).toContain("次からこの作業は保存前に差分確認して");
-    expect(skillSuggestion?.content).toContain("Next-run checklist");
-    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "message")).toBe(true);
+    expect(reflection.suggestions).toEqual([]);
   });
 
-  it("suggests Skill candidates from workspace-wide repeated tool traces", async () => {
+  it("applies Background Review Memory changes without persisting review prompts to the source Session", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/test", fakeProviderOutput),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        backgroundReviewRunner: {
+          run: async (snapshot) => ({
+            reviewer: "test-reviewer",
+            summary: "Stored a durable preference.",
+            mutations: [{
+              kind: "memory_add" as const,
+              topic: "response-style",
+              content: "回答は短い箇条書きを優先する。",
+              reason: "The user stated a durable response preference.",
+              evidence_refs: [{ kind: "backend_run", id: snapshot.source_run_id, uri: `backend-runs/${snapshot.source_run_id}` }]
+            }]
+          })
+        }
+      }
+    );
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({ sessionId: session.id, content: "回答は短い箇条書きにして", output_locale: "ja" });
+    const [messages, memories, changes, reports] = await Promise.all([store.listMessages(session.id), store.listMemory(), store.listBackgroundReviewChanges({ sourceRunId: result.backendRun.id }), store.listLearningJobReports({ jobKind: "background_review" })]);
+    await store.close();
+
+    expect(result.reflectionRuns[0]).toMatchObject({ kind: "background_review", status: "completed" });
+    expect(result.reflectionSuggestions).toContainEqual(expect.objectContaining({ status: "applied", suggestion_type: "memory" }));
+    expect(memories).toContainEqual(expect.objectContaining({ topic: "response-style" }));
+    expect(changes).toContainEqual(expect.objectContaining({ origin: "background_review", review_run_id: result.reflectionRuns[0]?.id, after_version: expect.any(String) }));
+    expect(reports).toContainEqual(expect.objectContaining({ job_kind: "background_review", mutation_count: 1 }));
+    expect(messages).toHaveLength(2);
+  });
+
+  it("does not convert workspace-wide tool counts into fixed Skill suggestions", async () => {
     const { store, runtime } = await createRuntime();
     const firstSession = await runtime.createSession();
     const firstRun = await runtime.runChatTurn({
@@ -6222,14 +6266,7 @@ rl.on("line", (line) => {
     const reflection = await runtime.runReflection({ sessionId: firstSession.id });
     await store.close();
 
-    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
-    expect(skillSuggestion).toMatchObject({
-      title: "Skill candidate from execution trace",
-      confidence: 0.7
-    });
-    expect(skillSuggestion?.content).toContain("file.read: 3 time(s)");
-    expect(skillSuggestion?.content).toContain("artifact.write: 2 time(s)");
-    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "tool_run" && ref.id === "workspace_tool_trace_2")).toBe(true);
+    expect(reflection.suggestions).toEqual([]);
   });
 
   it("filters provisional memory and redacts high sensitive active memory", async () => {
@@ -7306,6 +7343,17 @@ rl.on("line", (line) => {
     expect(refreshedJob?.failure_count).toBe(0);
   });
 
+  it("initializes Background Review, Evaluation, and Curator as separate scheduled jobs", async () => {
+    const { store, runtime } = await createRuntime();
+    const jobs = await runtime.ensureStandardLearningJobs("2026-07-10T00:00:00.000Z");
+    const repeated = await runtime.ensureStandardLearningJobs("2026-07-10T01:00:00.000Z");
+    await store.close();
+
+    expect(jobs.map((job) => job.kind)).toEqual(expect.arrayContaining(["memory_review", "learning_evaluation", "skill_curator"]));
+    expect(new Set(jobs.map((job) => job.id)).size).toBe(3);
+    expect(repeated.map((job) => job.id).sort()).toEqual(jobs.map((job) => job.id).sort());
+  });
+
   it("runs scheduled natural language jobs through backend chat turns", async () => {
     const { store, runtime } = await createRuntime();
 
@@ -7392,6 +7440,7 @@ rl.on("line", (line) => {
 
     const curator = await runtime.runCuratorJob();
     const evaluation = await runtime.runEvaluationJob();
+    const learningReports = await store.listLearningJobReports();
     await store.close();
 
     expect(curator.reflectionRun.kind).toBe("curator");
@@ -7418,6 +7467,10 @@ rl.on("line", (line) => {
     });
     expect(evaluation.evaluationReport?.run_scores.length).toBeGreaterThan(0);
     expect(evaluation.suggestions.some((suggestion) => suggestion.suggestion_type === "skill_patch")).toBe(true);
+    expect(learningReports).toEqual(expect.arrayContaining([
+      expect.objectContaining({ job_kind: "curator", snapshot_id: expect.any(String) }),
+      expect.objectContaining({ job_kind: "evaluation", evaluation_count: expect.any(Number) })
+    ]));
   });
 
   it("can apply an external evaluation judge to trace scores without changing workspace state", async () => {
@@ -7564,9 +7617,9 @@ rl.on("line", (line) => {
     const pinnedSkill = await store.getSkill("skill_pinned");
     await store.close();
 
-    expect(usage).toMatchObject({ skill_id: "skill_used", use_count: 1 });
+    expect(usage).toBeUndefined();
     expect(curator.curatorReport).toMatchObject({
-      dry_run: true,
+      dry_run: false,
       counts: expect.objectContaining({
         skill_items: expect.any(Number),
         suggestions: curator.suggestions.length
@@ -7613,12 +7666,37 @@ rl.on("line", (line) => {
       suggestion.title.includes("Ancient routine") && suggestion.content.includes("Curator action: archive")
     )).toBe(true);
     expect(curator.suggestions.some((suggestion) => suggestion.title.includes("Consolidate skills"))).toBe(true);
-    expect(oldSkillBeforeApply?.state).toBe("project");
+    expect(oldSkillBeforeApply?.state).toBe("archived");
     expect(applied.operation.operation).toBe("skill.lifecycle.apply");
     expect(applied.rollbackPoint).toBeDefined();
     expect(oldSkillAfterApply?.state).toBe("archived");
     expect(oldSkillAfterApply?.file_path).toBe(path.join("skills", "archived", "skill_old.md"));
     expect(pinnedSkill?.state).toBe("project");
+  });
+
+  it("protects an old low-frequency Skill when Evaluation shows a positive effect", async () => {
+    const { store, runtime } = await createRuntime();
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_helpful_old",
+      markdown: skillMarkdown({ id: "skill_helpful_old", state: "project", title: "Helpful old Skill", createdAt: "2025-01-01T00:00:00.000Z" })
+    });
+    await store.saveLearningEvaluation({
+      id: "evaluation_helpful_old",
+      learning_resource_ref: { kind: "skill", id: "skill_helpful_old", uri: "skills/skill_helpful_old" },
+      learning_resource_version: "v1",
+      task_class: "workspace_task",
+      compared_run_ids: ["run_before", "run_after"],
+      before_metrics: { quality_score: 0 }, after_metrics: { quality_score: 1 }, effect_estimate: 1,
+      confidence: 0.8, assessment: "helpful", evidence_refs: [], evaluator: "test", created_at: nowIso()
+    });
+
+    const curator = await runtime.runCuratorJob();
+    const skill = await store.getSkill("skill_helpful_old");
+    await store.close();
+
+    expect(skill?.state).toBe("project");
+    expect(curator.curatorReviewReport?.keep_candidates).toContainEqual(expect.objectContaining({ id: "skill_helpful_old", reason: "positive_effect_protected" }));
   });
 
   it("downloads browser content into the workspace fallback adapter", async () => {
@@ -7638,12 +7716,15 @@ rl.on("line", (line) => {
   it("applies reflection suggestions into reusable workspace resources", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
-    await runtime.runChatTurn({
-      sessionId: session.id,
-      content: "今後、議事録は短くまとめる手順を覚えて",
-      output_locale: "ja"
+    const now = nowIso();
+    const reflection = await store.createReflectionRun({
+      id: createId("reflection"), kind: "manual", session_id: session.id, status: "completed",
+      input_summary: "legacy compatibility", output_summary: "legacy suggestion", started_at: now, completed_at: now
     });
-    const suggestion = (await store.listReflectionSuggestions()).find((item) => item.suggestion_type === "memory")!;
+    const suggestion = await store.saveReflectionSuggestion({
+      id: createId("suggestion"), reflection_run_id: reflection.id, suggestion_type: "memory", status: "proposed",
+      title: "議事録", content: "議事録は短くまとめる", source_refs: [], confidence: 0.8, created_at: now, updated_at: now
+    });
 
     const applied = await runtime.applyReflectionSuggestion({ suggestionId: suggestion.id });
     const updated = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion.id);

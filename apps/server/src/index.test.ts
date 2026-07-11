@@ -2419,7 +2419,7 @@ describe("backend run API", () => {
       })
     }));
     expect(routed.chat.backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
-    expect(routed.chat.reflectionRuns.some((run) => run.status === "completed")).toBe(true);
+    expect(routed.chat.reflectionRuns).toEqual([]);
     expect(processedInbound.map((inbound) => inbound.id)).toContain(routed.inbound.id);
     expect(boundaryPolicies.map((policy) => policy.id)).toContain(routed.boundaryPolicy.id);
     expect(releasedLocks.map((lock) => lock.lock_key)).toContain("webhook:external-api-1:main");
@@ -3929,7 +3929,7 @@ describe("backend run API", () => {
     });
     const priorityPatched = await patchJson<{ knowledge_wiki_capture_mode: string }>(`${baseUrl}/api/settings`, {
       llm_wiki_capture_mode: "off",
-      knowledge_wiki_capture_mode: "suggest"
+      knowledge_wiki_capture_mode: "auto"
     });
     const persisted = await getJson<{
       ui_locale: string;
@@ -3949,7 +3949,7 @@ describe("backend run API", () => {
       400
     );
 
-    expect(initial).toMatchObject({ ui_locale: "ja", output_locale: "ja", memory_capture_mode: "suggest", knowledge_wiki_capture_mode: "suggest" });
+    expect(initial).toMatchObject({ ui_locale: "ja", output_locale: "ja", memory_capture_mode: "auto", knowledge_wiki_capture_mode: "auto" });
     expect(initial.external_assist_config).toMatchObject({
       configured: false,
       source: "none",
@@ -3968,12 +3968,12 @@ describe("backend run API", () => {
       source: "none"
     });
     expect(legacyPatched).toMatchObject({ knowledge_wiki_capture_mode: "off" });
-    expect(priorityPatched).toMatchObject({ knowledge_wiki_capture_mode: "suggest" });
+    expect(priorityPatched).toMatchObject({ knowledge_wiki_capture_mode: "auto" });
     expect(persisted).toMatchObject({
       ui_locale: "en",
       output_locale: "fr",
       memory_capture_mode: "manual",
-      knowledge_wiki_capture_mode: "suggest",
+      knowledge_wiki_capture_mode: "auto",
       external_provider_role: "disabled"
     });
     expect(invalidPatch).toMatchObject({ ui_locale: "en", output_locale: "fr" });
@@ -4482,7 +4482,7 @@ describe("backend run API", () => {
       severity: "warning"
     }));
     expect(beforeDiagnostics.recommendation).toContain("Run Reflection / Curator jobs");
-    expect(curator.curatorReport).toMatchObject({ dry_run: true });
+    expect(curator.curatorReport).toMatchObject({ dry_run: false });
     expect(curator.curatorReviewReport).toMatchObject({ dry_run: true });
     expect(curator.curatorReport.skill_actions).toContainEqual(expect.objectContaining({
       skill_id: project.resource.id,

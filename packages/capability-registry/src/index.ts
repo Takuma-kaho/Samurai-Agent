@@ -241,6 +241,19 @@ export const proposalCapabilityManifest: CapabilityManifest = {
       default_decision: "allow_with_audit"
     },
     {
+      operation: "skill.view",
+      description: "Read a selected Skill body or declared support file on demand.",
+      input_schema_ref: "skill.view.input",
+      output_schema_ref: "skill.view.output",
+      risk: "low",
+      scope: "skill",
+      reversibility: true,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "agent_reasoning"],
+      default_decision: "allow_auto"
+    },
+    {
       operation: "skill.candidate.create",
       description: "Create a local skill candidate markdown file.",
       input_schema_ref: "skill.candidate.create.input",
@@ -544,6 +557,7 @@ export const proposalCapabilityManifest: CapabilityManifest = {
     "memory.session.create",
     "memory.topic.create",
     "memory.archive",
+    "skill.view",
     "skill.candidate.create",
     "skill.project.save",
     "skill.support_file.save",

@@ -397,8 +397,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   const runtime = new AgentRuntime(store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, undefined, {
     backendWorkingDirectoryMode,
     repoRoot,
+    enableBackendBackgroundReview: options.automationScheduler !== false,
+    detachBackgroundReview: true,
     resolveTemporaryContextRef: (ref) => temporaryContexts.resolve(ref)
   });
+  await runtime.ensureStandardLearningJobs();
   const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
   const lifecycle: ApiServerLifecycleState = {
     started_at: nowIso(),
@@ -1121,6 +1124,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.post("/api/search/reindex", async (_req, res, next) => {
+      try {
+        res.json(await store.reindexSessionSearch());
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.get("/api/context/preview", async (req, res, next) => {
       try {
         const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
@@ -1242,6 +1253,52 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.get("/api/curator/snapshots", async (_req, res, next) => {
+      try {
+        res.json(await store.listLearningSnapshots());
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/curator/snapshots/prune", async (req, res, next) => {
+      try {
+        const retain = typeof req.body?.retain === "number" ? req.body.retain : 20;
+        res.json(await store.pruneLearningSnapshots(retain));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/curator/snapshots/:id/restore", async (req, res, next) => {
+      try {
+        const restored = await store.restoreLearningSnapshot(req.params.id);
+        if (!restored) {
+          res.status(404).json({ error: "curator_snapshot_not_found" });
+          return;
+        }
+        res.json(restored);
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/curator/pause", async (_req, res, next) => {
+      try {
+        res.json(await store.saveCuratorState({ paused: true }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/curator/resume", async (_req, res, next) => {
+      try {
+        res.json(await store.saveCuratorState({ paused: false }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.post("/api/curator/skill-actions/apply", async (req, res, next) => {
       try {
         const skillId = typeof req.body?.skill_id === "string" ? req.body.skill_id : "";
@@ -1263,6 +1320,28 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.post("/api/evaluation/run", async (_req, res, next) => {
       try {
         res.status(201).json(await runtime.runEvaluationJob());
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/evaluation/learning", async (req, res, next) => {
+      try {
+        res.json(await store.listLearningEvaluations({
+          resourceId: typeof req.query.resource_id === "string" ? req.query.resource_id : undefined,
+          taskClass: typeof req.query.task_class === "string" ? req.query.task_class : undefined
+        }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/learning/reports", async (req, res, next) => {
+      try {
+        const jobKind = typeof req.query.job_kind === "string" && ["background_review", "evaluation", "curator"].includes(req.query.job_kind)
+          ? req.query.job_kind as "background_review" | "evaluation" | "curator"
+          : undefined;
+        res.json(await store.listLearningJobReports({ jobKind, limit: numberQuery(req.query.limit) }));
       } catch (error) {
         next(error);
       }
@@ -2244,13 +2323,13 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const kind = typeof req.body?.kind === "string" ? req.body.kind : "custom_instruction";
         const schedule = typeof req.body?.schedule === "string" ? req.body.schedule : "daily";
         const targetInstruction = typeof req.body?.target_instruction === "string" ? req.body.target_instruction : title;
-        if (!title || !["memory_review", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"].includes(kind)) {
+        if (!title || !["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"].includes(kind)) {
           res.status(400).json({ error: "invalid_automation_job" });
           return;
         }
         res.status(201).json(runtimeWritePayload(await runtime.saveAutomationJob({
           title,
-          kind: kind as "memory_review" | "skill_curator" | "wiki_reindex" | "daily_digest" | "custom_instruction" | "resource_translation",
+          kind: kind as "memory_review" | "learning_evaluation" | "skill_curator" | "wiki_reindex" | "daily_digest" | "custom_instruction" | "resource_translation",
           schedule,
           target_instruction: targetInstruction,
           delivery_target: isRecord(req.body?.delivery_target) ? req.body.delivery_target : undefined,
@@ -6388,7 +6467,11 @@ async function knowledgeWikiDiagnosticsPayload(store: WorkspaceStore): Promise<K
 async function skillDiagnosticsPayload(store: WorkspaceStore): Promise<SkillDiagnosticsReport> {
   const skills = await store.listSkills();
   const selectableSkills = skills.filter((skill) => isSelectableSkillState(skill.state));
-  const usageBySkillId = new Map((await store.listSkillUsage()).map((usage) => [usage.skill_id, usage]));
+  const [skillUsage, learningUses] = await Promise.all([
+    store.listSkillUsage(),
+    store.listLearningResourceUses()
+  ]);
+  const usageBySkillId = new Map(skillUsage.map((usage) => [usage.skill_id, usage]));
   const supportedScopes = supportedSkillScopeSet();
   const issues: SkillDiagnosticsReport["issues"] = [];
   let selectableWithVerifiedProvenance = 0;
@@ -6521,6 +6604,10 @@ async function skillDiagnosticsPayload(store: WorkspaceStore): Promise<SkillDiag
     selectable_with_source_refs: selectableWithSourceRefs,
     selectable_with_support_files: selectableWithSupportFiles,
     selectable_with_usage: selectableWithUsage,
+    selected_resource_uses: learningUses.filter((use) => use.stage === "selected").length,
+    body_loaded_resource_uses: learningUses.filter((use) => use.stage === "body_loaded").length,
+    support_loaded_resource_uses: learningUses.filter((use) => use.stage === "support_loaded").length,
+    session_search_mode: store.getSessionSearchMode(),
     empty_support_files: emptySupportFiles,
     issues,
     recommendation

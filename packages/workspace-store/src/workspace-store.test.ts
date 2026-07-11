@@ -64,9 +64,9 @@ describe("workspace store", () => {
     await store.close();
 
     expect(settings).toMatchObject({
-      memory_capture_mode: "suggest",
-      knowledge_wiki_capture_mode: "suggest",
-      skill_capture_mode: "suggest",
+      memory_capture_mode: "auto",
+      knowledge_wiki_capture_mode: "auto",
+      skill_capture_mode: "auto",
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
@@ -435,6 +435,19 @@ describe("workspace store", () => {
     expect(auditResults).toContainEqual(expect.objectContaining({ kind: "audit", id: audit.id, session_id: session.id, operation_id: operation.id }));
   });
 
+  it("indexes Japanese session text with FTS when SQLite supports it", async () => {
+    const store = await createTempStore();
+    const session = await createSessionRecord(store, "設計レビュー");
+    await saveUserMessage(store, session, "Workspaceの責務を整理してから実装する");
+
+    const reindex = await store.reindexSessionSearch();
+    const results = await store.search("責務を整理");
+    await store.close();
+
+    expect(["fts5_trigram", "fts5", "like"]).toContain(reindex.mode);
+    expect(results).toContainEqual(expect.objectContaining({ kind: "message", session_id: session.id }));
+  });
+
   it("does not overwrite a settled session title with later user messages", async () => {
     const store = await createTempStore();
     const session = await createSessionRecord(store, "New chat");
@@ -499,6 +512,27 @@ describe("workspace store", () => {
     expect(staleMarkdown).toContain('"state": "stale"');
     expect(listed[0]?.last_used_at).toBe("2026-01-02T00:00:00.000Z");
     expect(curatorState).toMatchObject({ id: "default", run_count: 1, stale_after_days: 14 });
+  });
+
+  it("restores Skill body, support files, and lifecycle state from a learning snapshot", async () => {
+    const store = await createTempStore();
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_snapshot",
+      markdown: skillMarkdown({ id: "skill_snapshot", state: "project", title: "Snapshot skill" })
+    });
+    await store.writeSkillSupportFile({ skillId: "skill_snapshot", path: "references/check.md", content: "before" });
+    const snapshot = await store.createLearningSnapshot("curator_run_1");
+    await store.updateSkillState("skill_snapshot", "archived");
+    await store.writeSkillSupportFile({ skillId: "skill_snapshot", path: "references/check.md", content: "after" });
+
+    const restored = await store.restoreLearningSnapshot(snapshot.id);
+    const [skill, support] = await Promise.all([store.getSkill("skill_snapshot"), store.readSkillSupportFile({ skillId: "skill_snapshot", path: "references/check.md" })]);
+    await store.close();
+
+    expect(restored?.restored_at).toBeDefined();
+    expect(skill?.state).toBe("project");
+    expect(support?.content).toBe("before");
   });
 
   it("builds workspace read models from indexes and history tables", async () => {

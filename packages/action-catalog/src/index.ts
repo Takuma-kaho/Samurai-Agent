@@ -413,6 +413,19 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     proposed_effects: ["Refresh Collection SQLite indexes from schema and record files."]
   }),
   command({
+    id: "skill.view",
+    title: "View Skill",
+    description: "Read a selected Skill body or one declared support file on demand.",
+    runtime_method: "viewSkill",
+    ui_display_category: "memory",
+    input_sources: ["provider_tool_call", "runtime_api"],
+    provider_tool_names: ["skill.view", "samurai.skill.view", "mcp__samurai__skill_view"],
+    writes_workspace: false,
+    output_resource_kind: "skill",
+    resource_kinds: ["skill", "skill_support_file"],
+    proposed_effects: ["Read a Skill only when the current run needs its procedure or support file."]
+  }),
+  command({
     id: "file.read",
     title: "Read workspace file",
     description: "Read a file inside the local workspace.",
@@ -653,6 +666,78 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     output_resource_kind: "reflection_run",
     resource_kinds: ["automation_run", "reflection_run", "memory"],
     proposed_effects: ["Run the scheduled memory review automation."]
+  }),
+  command({
+    id: "curator.run",
+    title: "Run Curator",
+    description: "Run evaluation-aware Memory and Skill curation after creating a snapshot.",
+    runtime_method: "runCuratorJob",
+    ui_display_category: "memory",
+    input_sources: ["runtime_api", "scheduled_context"],
+    writes_workspace: true,
+    output_resource_kind: "reflection_run",
+    resource_kinds: ["reflection_run", "memory", "skill", "learning_snapshot"],
+    proposed_effects: ["Curate learning resources after a restorable snapshot."]
+  }),
+  command({
+    id: "curator.snapshot.create",
+    title: "Create Curator Snapshot",
+    description: "Create a restorable snapshot of Memory and Skill resources.",
+    runtime_method: "createLearningSnapshot",
+    ui_display_category: "memory",
+    input_sources: ["runtime_api", "scheduled_context"],
+    writes_workspace: true,
+    output_resource_kind: "learning_snapshot",
+    resource_kinds: ["learning_snapshot", "memory", "skill"],
+    proposed_effects: ["Create a restorable learning-resource snapshot."]
+  }),
+  command({
+    id: "curator.snapshot.list",
+    title: "List Curator Snapshots",
+    description: "List restorable learning-resource snapshots.",
+    runtime_method: "listLearningSnapshots",
+    ui_display_category: "memory",
+    input_sources: ["runtime_api"],
+    writes_workspace: false,
+    output_resource_kind: "learning_snapshot",
+    resource_kinds: ["learning_snapshot"],
+    proposed_effects: ["List learning-resource snapshots."]
+  }),
+  command({
+    id: "curator.restore",
+    title: "Restore Curator Snapshot",
+    description: "Restore Memory and Skill resources from a Curator snapshot.",
+    runtime_method: "restoreLearningSnapshot",
+    ui_display_category: "memory",
+    input_sources: ["runtime_api"],
+    writes_workspace: true,
+    output_resource_kind: "learning_snapshot",
+    resource_kinds: ["learning_snapshot", "memory", "skill"],
+    proposed_effects: ["Restore learning resources from a snapshot."]
+  }),
+  command({
+    id: "curator.pause",
+    title: "Pause Curator",
+    description: "Pause scheduled Curator runs.",
+    runtime_method: "pauseCurator",
+    ui_display_category: "memory",
+    input_sources: ["runtime_api"],
+    writes_workspace: true,
+    output_resource_kind: "curator_state",
+    resource_kinds: ["curator_state"],
+    proposed_effects: ["Pause scheduled Curator runs."]
+  }),
+  command({
+    id: "curator.resume",
+    title: "Resume Curator",
+    description: "Resume scheduled Curator runs.",
+    runtime_method: "resumeCurator",
+    ui_display_category: "memory",
+    input_sources: ["runtime_api"],
+    writes_workspace: true,
+    output_resource_kind: "curator_state",
+    resource_kinds: ["curator_state"],
+    proposed_effects: ["Resume scheduled Curator runs."]
   }),
   command({
     id: "reflection.suggestion.apply",

@@ -175,9 +175,9 @@ type PendingApprovalChoice = "allow" | "allow_prefix" | "deny";
 const settings = ref<SettingsRecord>({
   ui_locale: "ja",
   output_locale: "ja",
-  memory_capture_mode: "suggest",
-  knowledge_wiki_capture_mode: "suggest",
-  skill_capture_mode: "suggest",
+  memory_capture_mode: "auto",
+  knowledge_wiki_capture_mode: "auto",
+  skill_capture_mode: "auto",
   external_provider_role: "assistive",
   updated_at: new Date().toISOString()
 });
@@ -289,7 +289,7 @@ const fallbackBackends: AgentBackendStatus[] = [
 ];
 
 const label = (key: LocaleKey) => t(settings.value.ui_locale, key);
-const captureModes: SettingsRecord["memory_capture_mode"][] = ["manual", "suggest", "off"];
+const captureModes: SettingsRecord["memory_capture_mode"][] = ["auto", "manual", "off"];
 const externalProviderRoles: SettingsRecord["external_provider_role"][] = ["assistive", "disabled"];
 const backendOptions = computed(() => (agentBackends.value.length > 0 ? agentBackends.value : fallbackBackends));
 const selectedBackendLabel = computed(() => {
@@ -3715,9 +3715,9 @@ function isSettingsRecord(value: unknown): value is SettingsRecord {
     supportedLocales.includes(value.ui_locale as SupportedLocale) &&
     typeof value.output_locale === "string" &&
     supportedLocales.includes(value.output_locale as SupportedLocale) &&
-    (value.memory_capture_mode === "manual" || value.memory_capture_mode === "suggest" || value.memory_capture_mode === "off") &&
-    (value.knowledge_wiki_capture_mode === "manual" || value.knowledge_wiki_capture_mode === "suggest" || value.knowledge_wiki_capture_mode === "off") &&
-    (value.skill_capture_mode === "manual" || value.skill_capture_mode === "suggest" || value.skill_capture_mode === "off") &&
+    (value.memory_capture_mode === "auto" || value.memory_capture_mode === "manual" || value.memory_capture_mode === "off") &&
+    (value.knowledge_wiki_capture_mode === "auto" || value.knowledge_wiki_capture_mode === "manual" || value.knowledge_wiki_capture_mode === "off") &&
+    (value.skill_capture_mode === "auto" || value.skill_capture_mode === "manual" || value.skill_capture_mode === "off") &&
     (value.external_provider_role === "assistive" || value.external_provider_role === "disabled") &&
     typeof value.updated_at === "string"
   );

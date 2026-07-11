@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { access, copyFile, cp, mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, cp, mkdir, readdir, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
@@ -25,6 +25,11 @@ import {
   type ExternalAssistRecord,
   type ExternalAssistStatus,
   type GrantRecord,
+  type LearningResourceUseRecord,
+  type LearningEvaluationRecord,
+  type LearningSnapshotRecord,
+  type BackgroundReviewChangeRecord,
+  type LearningJobReportRecord,
   type JsonValue,
   type MemoryFrontmatter,
   MemoryFrontmatterSchema,
@@ -234,6 +239,68 @@ interface SkillUsageTable {
   last_run_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface LearningResourceUseTable {
+  id: string;
+  run_id: string;
+  session_id: string;
+  resource_kind: string;
+  resource_id: string;
+  resource_version: string | null;
+  content_hash: string | null;
+  stage: string;
+  source_operation_id: string | null;
+  metadata_json: JsonColumn;
+  created_at: string;
+}
+
+interface LearningEvaluationTable {
+  id: string;
+  learning_resource_ref_json: JsonColumn;
+  learning_resource_version: string | null;
+  task_class: string;
+  compared_run_ids_json: JsonColumn;
+  before_metrics_json: JsonColumn;
+  after_metrics_json: JsonColumn;
+  effect_estimate: number;
+  confidence: number;
+  assessment: string;
+  evidence_refs_json: JsonColumn;
+  evaluator: string;
+  created_at: string;
+}
+
+interface LearningSnapshotTable {
+  id: string;
+  run_id: string;
+  path: string;
+  resource_counts_json: JsonColumn;
+  created_at: string;
+  restored_at: string | null;
+}
+
+interface BackgroundReviewChangeTable {
+  id: string;
+  origin: string;
+  source_run_id: string;
+  source_session_id: string;
+  review_run_id: string;
+  mutation_kind: string;
+  resource_ref_json: JsonColumn;
+  before_version: string | null;
+  after_version: string;
+  reason_summary: string;
+  evidence_refs_json: JsonColumn;
+  created_at: string;
+}
+
+interface LearningJobReportTable {
+  id: string;
+  job_kind: string;
+  run_id: string;
+  report_json: JsonColumn;
+  created_at: string;
 }
 
 interface CuratorStateTable {
@@ -651,6 +718,11 @@ interface WorkspaceDb {
   artifacts: ArtifactsTable;
   memory_index: MemoryIndexTable;
   skill_index: SkillIndexTable;
+  learning_resource_uses: LearningResourceUseTable;
+  learning_evaluations: LearningEvaluationTable;
+  learning_snapshots: LearningSnapshotTable;
+  background_review_changes: BackgroundReviewChangeTable;
+  learning_job_reports: LearningJobReportTable;
   wiki_index: WikiIndexTable;
   collection_schemas: CollectionSchemasTable;
   collection_records: CollectionRecordsTable;
@@ -916,6 +988,13 @@ export interface WorkspaceHealthReport {
   };
   resource_boundaries: WorkspaceResourceBoundary[];
   indexes: {
+    search: {
+      ok: boolean;
+      mode: "fts5_trigram" | "fts5" | "like";
+      indexed: number;
+      source_records: number;
+      stale: boolean;
+    };
     wiki: {
       ok: boolean;
       files: number;
@@ -1064,6 +1143,7 @@ export class WorkspaceStore {
   readonly rootDir: string;
   readonly dbPath: string;
   db: Kysely<WorkspaceDb>;
+  private sessionSearchIndexMode: "fts5_trigram" | "fts5" | "like" = "like";
 
   constructor(options: WorkspaceStoreOptions) {
     this.rootDir = options.rootDir;
@@ -1258,6 +1338,71 @@ export class WorkspaceStore {
         updated_at TEXT NOT NULL,
         FOREIGN KEY (skill_id) REFERENCES skill_index(id)
       )`,
+      `CREATE TABLE IF NOT EXISTS learning_resource_uses (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        resource_kind TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        resource_version TEXT,
+        content_hash TEXT,
+        stage TEXT NOT NULL,
+        source_operation_id TEXT,
+        metadata_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(run_id, resource_kind, resource_id, stage, source_operation_id),
+        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS learning_resource_uses_run_idx ON learning_resource_uses(run_id, created_at DESC)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS learning_resource_uses_dedupe_idx ON learning_resource_uses(run_id, resource_kind, resource_id, stage, COALESCE(source_operation_id, ''))`,
+      `CREATE TABLE IF NOT EXISTS learning_evaluations (
+        id TEXT PRIMARY KEY,
+        learning_resource_ref_json TEXT NOT NULL,
+        learning_resource_version TEXT,
+        task_class TEXT NOT NULL,
+        compared_run_ids_json TEXT NOT NULL,
+        before_metrics_json TEXT NOT NULL,
+        after_metrics_json TEXT NOT NULL,
+        effect_estimate REAL NOT NULL,
+        confidence REAL NOT NULL,
+        assessment TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        evaluator TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS learning_evaluations_resource_idx ON learning_evaluations(learning_resource_version, created_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS learning_snapshots (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        resource_counts_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        restored_at TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS background_review_changes (
+        id TEXT PRIMARY KEY,
+        origin TEXT NOT NULL,
+        source_run_id TEXT NOT NULL,
+        source_session_id TEXT NOT NULL,
+        review_run_id TEXT NOT NULL,
+        mutation_kind TEXT NOT NULL,
+        resource_ref_json TEXT NOT NULL,
+        before_version TEXT,
+        after_version TEXT NOT NULL,
+        reason_summary TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(source_run_id, mutation_kind, after_version)
+      )`,
+      `CREATE TABLE IF NOT EXISTS learning_job_reports (
+        id TEXT PRIMARY KEY,
+        job_kind TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        report_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS learning_job_reports_kind_idx ON learning_job_reports(job_kind, created_at DESC)`,
       `CREATE TABLE IF NOT EXISTS curator_state (
         id TEXT PRIMARY KEY,
         paused INTEGER NOT NULL,
@@ -1547,9 +1692,9 @@ export class WorkspaceStore {
         id TEXT PRIMARY KEY,
         ui_locale TEXT NOT NULL,
         output_locale TEXT NOT NULL,
-        memory_capture_mode TEXT NOT NULL DEFAULT 'suggest',
-        knowledge_wiki_capture_mode TEXT NOT NULL DEFAULT 'suggest',
-        skill_capture_mode TEXT NOT NULL DEFAULT 'suggest',
+        memory_capture_mode TEXT NOT NULL DEFAULT 'auto',
+        knowledge_wiki_capture_mode TEXT NOT NULL DEFAULT 'auto',
+        skill_capture_mode TEXT NOT NULL DEFAULT 'auto',
         external_provider_role TEXT NOT NULL DEFAULT 'assistive',
         updated_at TEXT NOT NULL
       )`,
@@ -1650,6 +1795,7 @@ export class WorkspaceStore {
       await this.ensureSettingsColumns();
       await this.ensureAutomationJobColumns();
       await this.ensureAutomationRunColumns();
+      await this.ensureSessionSearchIndexes();
       await this.recordMigrationJournal("schema.ensure", "completed", { statement_count: statements.length });
     } catch (error) {
       await this.recordMigrationJournal("schema.ensure", "failed", {
@@ -1660,13 +1806,30 @@ export class WorkspaceStore {
     }
   }
 
+  private async ensureSessionSearchIndexes(): Promise<void> {
+    try {
+      await sql.raw("DROP TABLE IF EXISTS session_search_fts").execute(this.db);
+      await sql.raw("DROP TABLE IF EXISTS session_search_trigram").execute(this.db);
+      await sql.raw("CREATE VIRTUAL TABLE session_search_fts USING fts5(kind UNINDEXED, id UNINDEXED, session_id UNINDEXED, operation_id UNINDEXED, title, body, tokenize='unicode61')").execute(this.db);
+      try {
+        await sql.raw("CREATE VIRTUAL TABLE session_search_trigram USING fts5(kind UNINDEXED, id UNINDEXED, session_id UNINDEXED, operation_id UNINDEXED, title, body, tokenize='trigram')").execute(this.db);
+        this.sessionSearchIndexMode = "fts5_trigram";
+      } catch {
+        this.sessionSearchIndexMode = "fts5";
+      }
+      await this.reindexSessionSearch();
+    } catch {
+      this.sessionSearchIndexMode = "like";
+    }
+  }
+
   private async ensureSettingsColumns(): Promise<void> {
     const hadKnowledgeWikiCaptureMode = await this.hasTableColumn("settings", "knowledge_wiki_capture_mode");
     const hadLegacyLlmWikiCaptureMode = await this.hasTableColumn("settings", "llm_wiki_capture_mode");
     const columns = [
-      ["memory_capture_mode", "TEXT NOT NULL DEFAULT 'suggest'"],
-      ["knowledge_wiki_capture_mode", "TEXT NOT NULL DEFAULT 'suggest'"],
-      ["skill_capture_mode", "TEXT NOT NULL DEFAULT 'suggest'"],
+      ["memory_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
+      ["knowledge_wiki_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
+      ["skill_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
       ["external_provider_role", "TEXT NOT NULL DEFAULT 'assistive'"]
     ] as const;
 
@@ -1682,9 +1845,12 @@ export class WorkspaceStore {
 
     if (!hadKnowledgeWikiCaptureMode && hadLegacyLlmWikiCaptureMode) {
       await sql.raw(
-        "UPDATE settings SET knowledge_wiki_capture_mode = llm_wiki_capture_mode WHERE knowledge_wiki_capture_mode = 'suggest' AND llm_wiki_capture_mode IS NOT NULL"
+        "UPDATE settings SET knowledge_wiki_capture_mode = llm_wiki_capture_mode WHERE llm_wiki_capture_mode IS NOT NULL"
       ).execute(this.db);
     }
+    await sql.raw("UPDATE settings SET memory_capture_mode = 'auto' WHERE memory_capture_mode = 'suggest'").execute(this.db);
+    await sql.raw("UPDATE settings SET knowledge_wiki_capture_mode = 'auto' WHERE knowledge_wiki_capture_mode = 'suggest'").execute(this.db);
+    await sql.raw("UPDATE settings SET skill_capture_mode = 'auto' WHERE skill_capture_mode = 'suggest'").execute(this.db);
   }
 
   private async ensureAutomationJobColumns(): Promise<void> {
@@ -1752,6 +1918,7 @@ export class WorkspaceStore {
 
   async createSession(session: SessionRecord): Promise<SessionRecord> {
     await this.db.insertInto("sessions").values(session).execute();
+    await this.reindexSessionSearch();
     return session;
   }
 
@@ -1832,6 +1999,7 @@ export class WorkspaceStore {
     const session = await this.getSession(message.session_id);
     const nextTitle = message.role === "user" && session && isInitialSessionTitle(session.title) ? titleFromContent(message.content) : undefined;
     await this.touchSession(message.session_id, nextTitle);
+    await this.reindexSessionSearch();
     return message;
   }
 
@@ -2384,6 +2552,7 @@ export class WorkspaceStore {
     const relativePath = path.join("artifacts", `${id}.${extension}`);
     const absolutePath = path.join(this.rootDir, relativePath);
     await writeFile(absolutePath, content);
+    await this.reindexSessionSearch();
     return relativePath;
   }
 
@@ -2410,6 +2579,18 @@ export class WorkspaceStore {
       })
       .execute();
     return frontmatter;
+  }
+
+  async replaceMemoryContent(id: string, content: string): Promise<MemoryWithFilePath | undefined> {
+    const memory = await this.getMemory(id);
+    if (!memory) return undefined;
+    const next = { ...memory, updated_at: nowIso() };
+    await writeFile(path.join(this.rootDir, memory.file_path), `${renderFrontmatter(next)}\n${content.trim()}\n`);
+    await this.db.updateTable("memory_index").set({
+      frontmatter_json: stringify(next),
+      updated_at: next.updated_at
+    }).where("id", "=", id).execute();
+    return next;
   }
 
   async listMemory(options: { includeArchived?: boolean } = {}): Promise<MemoryWithFilePath[]> {
@@ -2671,6 +2852,18 @@ export class WorkspaceStore {
     return { ...buildSkillIndexEntry(nextFrontmatter), file_path: nextPath };
   }
 
+  async replaceSkillContent(id: string, content: string): Promise<SkillWithFilePath | undefined> {
+    const skill = await this.getSkill(id);
+    if (!skill) return undefined;
+    const frontmatter = { ...skill.frontmatter, last_reviewed_at: nowIso() };
+    await writeFile(path.join(this.rootDir, skill.file_path), `${renderFrontmatter(frontmatter)}\n${content.trim()}\n`);
+    await this.db.updateTable("skill_index").set({
+      frontmatter_json: stringify(frontmatter),
+      updated_at: frontmatter.last_reviewed_at ?? nowIso()
+    }).where("id", "=", id).execute();
+    return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
+  }
+
   async recordSkillUsage(input: { skillId: string; runId?: string; usedAt?: string }): Promise<SkillUsageRecord> {
     const skill = await this.getSkill(input.skillId);
     if (!skill) {
@@ -2729,6 +2922,169 @@ export class WorkspaceStore {
       ORDER BY updated_at DESC
     `.execute(this.db);
     return result.rows.map(skillUsageFromRow);
+  }
+
+  async recordLearningResourceUse(record: LearningResourceUseRecord): Promise<LearningResourceUseRecord> {
+    const existing = await sql<LearningResourceUseTable>`
+      SELECT * FROM learning_resource_uses
+      WHERE run_id = ${record.run_id}
+        AND resource_kind = ${record.resource_kind}
+        AND resource_id = ${record.resource_id}
+        AND stage = ${record.stage}
+        AND COALESCE(source_operation_id, '') = COALESCE(${record.source_operation_id ?? null}, '')
+      LIMIT 1
+    `.execute(this.db);
+    const row = existing.rows[0];
+    if (row) {
+      return learningResourceUseFromRow(row);
+    }
+    await sql`
+      INSERT INTO learning_resource_uses (
+        id, run_id, session_id, resource_kind, resource_id, resource_version,
+        content_hash, stage, source_operation_id, metadata_json, created_at
+      ) VALUES (
+        ${record.id}, ${record.run_id}, ${record.session_id}, ${record.resource_kind}, ${record.resource_id}, ${record.resource_version ?? null},
+        ${record.content_hash ?? null}, ${record.stage}, ${record.source_operation_id ?? null}, ${stringify(record.metadata)}, ${record.created_at}
+      )
+    `.execute(this.db);
+    return record;
+  }
+
+  async listLearningResourceUses(input: { runId?: string; sessionId?: string; resourceId?: string } = {}): Promise<LearningResourceUseRecord[]> {
+    let query = this.db.selectFrom("learning_resource_uses").selectAll().orderBy("created_at", "desc");
+    if (input.runId) query = query.where("run_id", "=", input.runId);
+    if (input.sessionId) query = query.where("session_id", "=", input.sessionId);
+    if (input.resourceId) query = query.where("resource_id", "=", input.resourceId);
+    return (await query.execute()).map(learningResourceUseFromRow);
+  }
+
+  async saveLearningEvaluation(record: LearningEvaluationRecord): Promise<LearningEvaluationRecord> {
+    await this.db.insertInto("learning_evaluations").values({
+      id: record.id,
+      learning_resource_ref_json: stringify(record.learning_resource_ref),
+      learning_resource_version: record.learning_resource_version ?? null,
+      task_class: record.task_class,
+      compared_run_ids_json: stringify(record.compared_run_ids),
+      before_metrics_json: stringify(record.before_metrics),
+      after_metrics_json: stringify(record.after_metrics),
+      effect_estimate: record.effect_estimate,
+      confidence: record.confidence,
+      assessment: record.assessment,
+      evidence_refs_json: stringify(record.evidence_refs),
+      evaluator: record.evaluator,
+      created_at: record.created_at
+    }).execute();
+    return record;
+  }
+
+  async listLearningEvaluations(input: { resourceId?: string; taskClass?: string } = {}): Promise<LearningEvaluationRecord[]> {
+    let query = this.db.selectFrom("learning_evaluations").selectAll().orderBy("created_at", "desc");
+    if (input.taskClass) query = query.where("task_class", "=", input.taskClass);
+    const records = (await query.execute()).map(learningEvaluationFromRow);
+    return input.resourceId ? records.filter((record) => record.learning_resource_ref.id === input.resourceId) : records;
+  }
+
+  async createLearningSnapshot(runId: string): Promise<LearningSnapshotRecord> {
+    const id = createId("learning_snapshot");
+    const relativePath = path.join("learning-snapshots", id);
+    const snapshotRoot = path.join(this.rootDir, relativePath);
+    await mkdir(snapshotRoot, { recursive: true });
+    for (const rootName of ["memory", "skills"]) {
+      const source = path.join(this.rootDir, rootName);
+      if (await pathExists(source)) await cp(source, path.join(snapshotRoot, rootName), { recursive: true, force: true });
+    }
+    const [memories, skills, skillUsage, evaluations, resourceUses] = await Promise.all([
+      this.listMemory({ includeArchived: true }), this.listSkills(), this.listSkillUsage(), this.listLearningEvaluations(), this.listLearningResourceUses()
+    ]);
+    const supportFiles = (await Promise.all(skills.map((skill) => this.listSkillSupportFiles(skill.id)))).flat();
+    const record: LearningSnapshotRecord = {
+      id,
+      run_id: runId,
+      path: relativePath,
+      resource_counts: { memory: memories.length, skills: skills.length, support_files: supportFiles.length },
+      created_at: nowIso()
+    };
+    await writeFile(path.join(snapshotRoot, "manifest.json"), `${JSON.stringify(record, null, 2)}\n`);
+    await writeFile(path.join(snapshotRoot, "metadata.json"), `${JSON.stringify({ skill_usage: skillUsage, evaluations, resource_uses: resourceUses }, null, 2)}\n`);
+    await this.db.insertInto("learning_snapshots").values({
+      id: record.id,
+      run_id: record.run_id,
+      path: record.path,
+      resource_counts_json: stringify(record.resource_counts),
+      created_at: record.created_at,
+      restored_at: null
+    }).execute();
+    await this.pruneLearningSnapshots(20);
+    return record;
+  }
+
+  async listLearningSnapshots(): Promise<LearningSnapshotRecord[]> {
+    return (await this.db.selectFrom("learning_snapshots").selectAll().orderBy("created_at", "desc").execute()).map(learningSnapshotFromRow);
+  }
+
+  async pruneLearningSnapshots(retain = 20): Promise<{ retained: number; removed: string[] }> {
+    const keep = Math.max(1, Math.min(Math.floor(retain), 200));
+    const snapshots = await this.listLearningSnapshots();
+    const removed: string[] = [];
+    for (const snapshot of snapshots.slice(keep)) {
+      await rm(path.join(this.rootDir, snapshot.path), { recursive: true, force: true });
+      await this.db.deleteFrom("learning_snapshots").where("id", "=", snapshot.id).execute();
+      removed.push(snapshot.id);
+    }
+    return { retained: Math.min(snapshots.length, keep), removed };
+  }
+
+  async restoreLearningSnapshot(id: string): Promise<LearningSnapshotRecord | undefined> {
+    const row = await this.db.selectFrom("learning_snapshots").selectAll().where("id", "=", id).executeTakeFirst();
+    if (!row) return undefined;
+    const snapshotRoot = path.join(this.rootDir, row.path);
+    for (const rootName of ["memory", "skills"]) {
+      const snapshotSource = path.join(snapshotRoot, rootName);
+      if (!await pathExists(snapshotSource)) continue;
+      await rm(path.join(this.rootDir, rootName), { recursive: true, force: true });
+      await cp(snapshotSource, path.join(this.rootDir, rootName), { recursive: true, force: true });
+    }
+    await Promise.all([this.reindexMemory(), this.reindexSkills()]);
+    const restoredAt = nowIso();
+    await this.db.updateTable("learning_snapshots").set({ restored_at: restoredAt }).where("id", "=", id).execute();
+    return learningSnapshotFromRow({ ...row, restored_at: restoredAt });
+  }
+
+  async saveBackgroundReviewChange(record: BackgroundReviewChangeRecord): Promise<BackgroundReviewChangeRecord> {
+    await this.db.insertInto("background_review_changes").values({
+      id: record.id,
+      origin: record.origin,
+      source_run_id: record.source_run_id,
+      source_session_id: record.source_session_id,
+      review_run_id: record.review_run_id,
+      mutation_kind: record.mutation_kind,
+      resource_ref_json: stringify(record.resource_ref),
+      before_version: record.before_version ?? null,
+      after_version: record.after_version,
+      reason_summary: record.reason_summary,
+      evidence_refs_json: stringify(record.evidence_refs),
+      created_at: record.created_at
+    }).execute();
+    return record;
+  }
+
+  async listBackgroundReviewChanges(input: { sourceRunId?: string; reviewRunId?: string } = {}): Promise<BackgroundReviewChangeRecord[]> {
+    let query = this.db.selectFrom("background_review_changes").selectAll().orderBy("created_at", "desc");
+    if (input.sourceRunId) query = query.where("source_run_id", "=", input.sourceRunId);
+    if (input.reviewRunId) query = query.where("review_run_id", "=", input.reviewRunId);
+    return (await query.execute()).map(backgroundReviewChangeFromRow);
+  }
+
+  async saveLearningJobReport(record: LearningJobReportRecord): Promise<LearningJobReportRecord> {
+    await this.db.insertInto("learning_job_reports").values({ id: record.id, job_kind: record.job_kind, run_id: record.run_id, report_json: stringify(record), created_at: record.created_at }).execute();
+    return record;
+  }
+
+  async listLearningJobReports(input: { jobKind?: LearningJobReportRecord["job_kind"]; limit?: number } = {}): Promise<LearningJobReportRecord[]> {
+    let query = this.db.selectFrom("learning_job_reports").selectAll().orderBy("created_at", "desc");
+    if (input.jobKind) query = query.where("job_kind", "=", input.jobKind);
+    if (input.limit) query = query.limit(input.limit);
+    return (await query.execute()).map((row) => parse(row.report_json));
   }
 
   async getCuratorState(): Promise<CuratorStateRecord> {
@@ -2805,6 +3161,26 @@ export class WorkspaceStore {
       file_path: filePath,
       content: input.content
     };
+  }
+
+  async readSkillSupportFile(input: { skillId: string; path: string }): Promise<SkillSupportFile | undefined> {
+    const skill = await this.getSkill(input.skillId);
+    if (!skill) return undefined;
+    const supportPath = normalizeSkillSupportPath(input.path);
+    const filePath = path.join("skills", "support", input.skillId, supportPath);
+    try {
+      const supportRoot = path.join(this.rootDir, "skills", "support", input.skillId);
+      const [resolvedRoot, resolvedTarget] = await Promise.all([realpath(supportRoot), realpath(path.join(this.rootDir, filePath))]);
+      if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) return undefined;
+      return {
+        skill_id: input.skillId,
+        path: supportPath,
+        file_path: filePath,
+        content: await readFile(path.join(this.rootDir, filePath), "utf8")
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   async listSkillSupportFiles(skillId: string): Promise<SkillSupportFile[]> {
@@ -3178,11 +3554,12 @@ export class WorkspaceStore {
     const missingLayout = layoutChecks.filter((check) => !check.exists).map((check) => check.path);
     const wikiFiles = await listWikiMarkdownFiles(this.rootDir);
     const wikiPages = await this.listWiki();
-    const [artifactHealth, memoryHealth, skillHealth, collectionHealth] = await Promise.all([
+    const [artifactHealth, memoryHealth, skillHealth, collectionHealth, searchHealth] = await Promise.all([
       this.inspectArtifactIndexes(),
       this.inspectMemoryIndex(),
       this.inspectSkillIndex(),
-      this.inspectCollectionIndexes()
+      this.inspectCollectionIndexes(),
+      this.inspectSessionSearchIndex()
     ]);
     const wikiFileSet = new Set(wikiFiles);
     const indexedIds = new Set(wikiPages.map((page) => page.id));
@@ -3451,11 +3828,15 @@ export class WorkspaceStore {
         effect: "Fix invalid or duplicated frontmatter, then run skill.reindex again."
       });
     }
+    if (searchHealth.stale) {
+      issues.push({ code: "session_search_index_stale", severity: "warning", message: "Session Search index does not match source records." });
+      repairPlan.push({ operation: "session_search.reindex", reason: "Session Search index is stale.", effect: "Rebuild FTS read models from Session, Message, and Artifact sources." });
+    }
 
     const wikiOk = missingFiles.length === 0 && unindexedFiles.length === 0 && invalidFiles.length === 0 && duplicateIds.length === 0;
     const layoutOk = missingLayout.length === 0;
     return {
-      ok: layoutOk && wikiOk && artifactHealth.ok && memoryHealth.ok && skillHealth.ok && collectionHealth.ok,
+      ok: layoutOk && wikiOk && artifactHealth.ok && memoryHealth.ok && skillHealth.ok && collectionHealth.ok && searchHealth.ok,
       checked_at: checkedAt,
       root_dir: this.rootDir,
       db_path: this.dbPath,
@@ -3466,6 +3847,7 @@ export class WorkspaceStore {
       },
       resource_boundaries: workspaceResourceBoundaries(),
       indexes: {
+        search: searchHealth,
         wiki: {
           ok: wikiOk,
           files: wikiFiles.length,
@@ -3484,6 +3866,20 @@ export class WorkspaceStore {
       issues,
       repair_plan: repairPlan
     };
+  }
+
+  private async inspectSessionSearchIndex(): Promise<WorkspaceHealthReport["indexes"]["search"]> {
+    const [sessions, messages, artifacts] = await Promise.all([
+      this.db.selectFrom("sessions").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirst(),
+      this.db.selectFrom("messages").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirst(),
+      this.db.selectFrom("artifacts").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirst()
+    ]);
+    const sourceRecords = Number(sessions?.count ?? 0) + Number(messages?.count ?? 0) + Number(artifacts?.count ?? 0);
+    if (this.sessionSearchIndexMode === "like") return { ok: true, mode: "like", indexed: 0, source_records: sourceRecords, stale: false };
+    const table = this.sessionSearchIndexMode === "fts5_trigram" ? "session_search_trigram" : "session_search_fts";
+    const result = await sql<{ count: number }>`SELECT COUNT(*) as count FROM ${sql.raw(table)}`.execute(this.db).catch(() => ({ rows: [{ count: 0 }] }));
+    const indexed = Number(result.rows[0]?.count ?? 0);
+    return { ok: indexed === sourceRecords, mode: this.sessionSearchIndexMode, indexed, source_records: sourceRecords, stale: indexed !== sourceRecords };
   }
 
   private async inspectArtifactIndexes(): Promise<WorkspaceHealthReport["indexes"]["artifacts"]> {
@@ -3749,6 +4145,11 @@ export class WorkspaceStore {
       }
       if (step.operation === "collection.reindex") {
         result.collection_reindex = await this.reindexCollections();
+        result.applied.push(step.operation);
+        continue;
+      }
+      if (step.operation === "session_search.reindex") {
+        await this.reindexSessionSearch();
         result.applied.push(step.operation);
         continue;
       }
@@ -5234,10 +5635,104 @@ export class WorkspaceStore {
     return this.getGrant(id);
   }
 
+  async reindexSessionSearch(): Promise<{ mode: "fts5_trigram" | "fts5" | "like"; indexed: number }> {
+    if (this.sessionSearchIndexMode === "like") return { mode: "like", indexed: 0 };
+    try {
+      await sql.raw("DELETE FROM session_search_fts").execute(this.db);
+      if (this.sessionSearchIndexMode === "fts5_trigram") {
+        await sql.raw("DELETE FROM session_search_trigram").execute(this.db);
+      }
+      const [sessions, messages, artifacts] = await Promise.all([
+        this.db.selectFrom("sessions").selectAll().execute(),
+        this.db.selectFrom("messages").selectAll().execute(),
+        this.db.selectFrom("artifacts").leftJoin("operations", "operations.id", "artifacts.source_operation_id").selectAll("artifacts").select(["operations.session_id as session_id"]).execute()
+      ]);
+      const artifactEntries = await Promise.all(artifacts.map(async (row) => ({
+        kind: "artifact" as const,
+        id: row.id,
+        sessionId: row.session_id ?? undefined,
+        operationId: row.source_operation_id,
+        title: row.title,
+        body: (await this.readArtifactContent(row.id).catch(() => "")) ?? ""
+      })));
+      const entries: Array<{ kind: "session" | "message" | "artifact"; id: string; sessionId?: string; operationId?: string; title: string; body: string }> = [
+        ...sessions.map((row) => ({ kind: "session" as const, id: row.id, title: row.title, body: row.session_key })),
+        ...messages.map((row) => ({ kind: "message" as const, id: row.id, sessionId: row.session_id, title: row.role, body: row.content })),
+        ...artifactEntries
+      ];
+      for (const entry of entries) {
+        await sql`INSERT INTO session_search_fts (kind, id, session_id, operation_id, title, body) VALUES (${entry.kind}, ${entry.id}, ${entry.sessionId ?? null}, ${entry.operationId ?? null}, ${entry.title}, ${entry.body})`.execute(this.db);
+        if (this.sessionSearchIndexMode === "fts5_trigram") {
+          await sql`INSERT INTO session_search_trigram (kind, id, session_id, operation_id, title, body) VALUES (${entry.kind}, ${entry.id}, ${entry.sessionId ?? null}, ${entry.operationId ?? null}, ${entry.title}, ${entry.body})`.execute(this.db);
+        }
+      }
+      return { mode: this.sessionSearchIndexMode, indexed: entries.length };
+    } catch {
+      this.sessionSearchIndexMode = "like";
+      return { mode: "like", indexed: 0 };
+    }
+  }
+
+  getSessionSearchMode(): "fts5_trigram" | "fts5" | "like" {
+    return this.sessionSearchIndexMode;
+  }
+
+  private async searchSessionIndex(query: string): Promise<SearchResult[]> {
+    if (this.sessionSearchIndexMode === "like") return [];
+    const table = this.sessionSearchIndexMode === "fts5_trigram" && containsJapanese(query)
+      ? "session_search_trigram"
+      : "session_search_fts";
+    const matchQuery = `"${query.replaceAll('"', '""')}"`;
+    try {
+      const rows = containsJapanese(query) && [...query].length < 3
+        ? await sql<{ kind: SearchResult["kind"]; id: string; session_id: string | null; operation_id: string | null; title: string; body: string }>`
+            SELECT kind, id, session_id, operation_id, title, body FROM ${sql.raw(table)}
+            WHERE title LIKE ${`%${query}%`} OR body LIKE ${`%${query}%`} LIMIT 30
+          `.execute(this.db)
+        : await sql<{ kind: SearchResult["kind"]; id: string; session_id: string | null; operation_id: string | null; title: string; body: string }>`
+            SELECT kind, id, session_id, operation_id, title, body FROM ${sql.raw(table)}
+            WHERE ${sql.raw(table)} MATCH ${matchQuery} LIMIT 30
+          `.execute(this.db);
+      return rows.rows.map((row) => ({
+        kind: row.kind,
+        id: row.id,
+        title: row.title,
+        summary: row.body.slice(0, 120),
+        session_id: row.session_id ?? undefined,
+        operation_id: row.operation_id ?? undefined
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   async search(query: string): Promise<SearchResult[]> {
     const trimmed = query.trim();
     if (!trimmed) {
       return [];
+    }
+
+    let indexedResults: SearchResult[] = [];
+    if (this.sessionSearchIndexMode !== "like") {
+      await this.reindexSessionSearch();
+      indexedResults = await this.searchSessionIndex(trimmed);
+      const needle = `%${trimmed}%`;
+      const audits = await this.db
+        .selectFrom("audit_records")
+        .leftJoin("operations", "operations.id", "audit_records.operation_id")
+        .selectAll("audit_records")
+        .select(["operations.session_id as session_id"])
+        .where((eb) => eb.or([eb("inputs_summary", "like", needle), eb("outputs_summary", "like", needle)]))
+        .limit(10)
+        .execute();
+      return [...indexedResults, ...audits.map((row) => ({
+        kind: "audit" as const,
+        id: row.id,
+        title: row.operation_id,
+        summary: `${row.inputs_summary} -> ${row.outputs_summary}`.slice(0, 140),
+        session_id: row.session_id ?? undefined,
+        operation_id: row.operation_id
+      }))];
     }
 
     const needle = `%${trimmed}%`;
@@ -5278,7 +5773,7 @@ export class WorkspaceStore {
       }
     }
 
-    return [
+    const fallbackResults: SearchResult[] = [
       ...sessions.map((row) => ({ kind: "session" as const, id: row.id, title: row.title, summary: row.session_key })),
       ...messages.map((row) => ({
         kind: "message" as const,
@@ -5297,6 +5792,7 @@ export class WorkspaceStore {
         operation_id: row.operation_id
       }))
     ];
+    return fallbackResults;
   }
 
   async readActivityInputs(): Promise<{
@@ -5411,6 +5907,14 @@ function workspaceResourceBoundaries(): WorkspaceResourceBoundary[] {
       sqlite_tables: ["sessions", "messages", "operations", "backend_runs", "backend_events", "tool_runs", "workspace_changes"],
       sqlite_role: "history",
       note: "Session and run history are structured append-oriented records used for resume, search, and audit views."
+    },
+    {
+      resource: "learning_core",
+      source_of_truth: "derived",
+      file_roots: ["learning-snapshots"],
+      sqlite_tables: ["learning_resource_uses", "learning_evaluations", "background_review_changes", "learning_snapshots", "learning_job_reports", "session_search_fts", "session_search_trigram"],
+      sqlite_role: "history",
+      note: "Learning usage, evaluation, provenance, snapshots, and Session Search are derived or restorable records; Memory and Skill markdown remain the durable source."
     },
     {
       resource: "policy_audit_rollback",
@@ -6550,6 +7054,72 @@ function skillUsageFromRow(row: SkillUsageTable): SkillUsageRecord {
     last_run_id: row.last_run_id ?? undefined,
     created_at: row.created_at,
     updated_at: row.updated_at
+  };
+}
+
+function containsJapanese(value: string): boolean {
+  return /[\u3040-\u30ff\u3400-\u9fff]/.test(value);
+}
+
+function learningResourceUseFromRow(row: LearningResourceUseTable): LearningResourceUseRecord {
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    session_id: row.session_id,
+    resource_kind: row.resource_kind as LearningResourceUseRecord["resource_kind"],
+    resource_id: row.resource_id,
+    resource_version: row.resource_version ?? undefined,
+    content_hash: row.content_hash ?? undefined,
+    stage: row.stage as LearningResourceUseRecord["stage"],
+    source_operation_id: row.source_operation_id ?? undefined,
+    metadata: parse(row.metadata_json),
+    created_at: row.created_at
+  };
+}
+
+function learningEvaluationFromRow(row: LearningEvaluationTable): LearningEvaluationRecord {
+  return {
+    id: row.id,
+    learning_resource_ref: parse(row.learning_resource_ref_json),
+    learning_resource_version: row.learning_resource_version ?? undefined,
+    task_class: row.task_class,
+    compared_run_ids: parse(row.compared_run_ids_json),
+    before_metrics: parse(row.before_metrics_json),
+    after_metrics: parse(row.after_metrics_json),
+    effect_estimate: row.effect_estimate,
+    confidence: row.confidence,
+    assessment: row.assessment as LearningEvaluationRecord["assessment"],
+    evidence_refs: parse(row.evidence_refs_json),
+    evaluator: row.evaluator,
+    created_at: row.created_at
+  };
+}
+
+function learningSnapshotFromRow(row: LearningSnapshotTable): LearningSnapshotRecord {
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    path: row.path,
+    resource_counts: parse(row.resource_counts_json),
+    created_at: row.created_at,
+    restored_at: row.restored_at ?? undefined
+  };
+}
+
+function backgroundReviewChangeFromRow(row: BackgroundReviewChangeTable): BackgroundReviewChangeRecord {
+  return {
+    id: row.id,
+    origin: "background_review",
+    source_run_id: row.source_run_id,
+    source_session_id: row.source_session_id,
+    review_run_id: row.review_run_id,
+    mutation_kind: row.mutation_kind as BackgroundReviewChangeRecord["mutation_kind"],
+    resource_ref: parse(row.resource_ref_json),
+    before_version: row.before_version ?? undefined,
+    after_version: row.after_version,
+    reason_summary: row.reason_summary,
+    evidence_refs: parse(row.evidence_refs_json),
+    created_at: row.created_at
   };
 }
 

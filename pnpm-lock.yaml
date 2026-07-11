@@ -194,6 +194,12 @@ importers:
         specifier: workspace:*
         version: link:../core-schemas
 
+  packages/learning:
+    dependencies:
+      '@samurai-agent/core-schemas':
+        specifier: workspace:*
+        version: link:../core-schemas
+
   packages/localization:
     dependencies:
       '@samurai-agent/core-schemas':
@@ -238,6 +244,9 @@ importers:
       '@samurai-agent/gateway':
         specifier: workspace:*
         version: link:../gateway
+      '@samurai-agent/learning':
+        specifier: workspace:*
+        version: link:../learning
       '@samurai-agent/localization':
         specifier: workspace:*
         version: link:../localization
