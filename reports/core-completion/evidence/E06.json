@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "test_id": "E06",
+  "command": "pnpm core:test:background-review",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "d4fa69e208b94eb131a6c257e64530c996303c824dbd61eab08e2a03276aad2b",
+  "source_files": [
+    "packages/learning/src/background-review.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/background-review-atomicity.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-background-review-atomicity.mjs"
+  ],
+  "started_at": "2026-07-11T09:52:17.523Z",
+  "completed_at": "2026-07-11T09:52:17.698Z",
+  "assertions": [
+    {
+      "name": "Malformed and prohibited mutations are rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Version conflict changes nothing",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Injected mid-write failure rolls back all resources and metadata",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Valid mutation applies exactly once",
+      "actual": {
+        "valid": 1,
+        "duplicate": 0
+      },
+      "expected": {
+        "valid": 1,
+        "duplicate": 0
+      }
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "malformed_rejected": true,
+    "prohibited_shell_removed": true,
+    "version_conflict_rolled_back": true,
+    "mid_write_failure_rolled_back": true,
+    "partial_metadata": 0,
+    "valid_mutations": 1,
+    "duplicate_mutations": 0
+  }
+}

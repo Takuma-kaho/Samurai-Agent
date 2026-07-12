@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "test_id": "C02",
+  "command": "pnpm core:test:sqlite-race",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "071dbf3bfd6c8be3078d986096332520a834c3eb70674704a29b48a832e5a4e5",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/index.ts",
+    "packages/ui-protocol/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/domain-command-version.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-domain-command-version.mjs"
+  ],
+  "started_at": "2026-07-11T08:08:34.491Z",
+  "completed_at": "2026-07-11T08:09:03.112Z",
+  "assertions": [
+    {
+      "name": "SQLite foreign keys enabled",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "SQLite WAL enabled",
+      "actual": "wal",
+      "expected": "wal"
+    },
+    {
+      "name": "SQLite busy timeout",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "100 parallel updates",
+      "actual": 100,
+      "expected": 100
+    },
+    {
+      "name": "No lost update",
+      "actual": 3,
+      "expected": 3
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "stale_update_rejected": true,
+    "latest_resource_returned": true,
+    "retry_version_returned": true,
+    "parallel_updates": 100,
+    "successful_updates": 1,
+    "rejected_updates": 99,
+    "final_version": 3,
+    "sqlite_settings": {
+      "foreign_keys": 1,
+      "journal_mode": "wal",
+      "busy_timeout": 5000,
+      "synchronous": 1
+    }
+  }
+}

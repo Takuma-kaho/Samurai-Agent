@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "test_id": "A03",
+  "command": "pnpm core:test:command-parity",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "e4e28148adb5dfa9acd5bda79dca57640dd996932a7dfb5de925c671850cb591",
+  "source_files": [
+    "packages/action-catalog/src/index.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/commands/domain-command-bus.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/domain-command-parity.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-domain-command-parity.mjs"
+  ],
+  "started_at": "2026-07-11T13:01:58.697Z",
+  "completed_at": "2026-07-11T13:02:22.696Z",
+  "assertions": [
+    {
+      "name": "Representative operations",
+      "actual": 10,
+      "expected": 10
+    },
+    {
+      "name": "Mutation entrances",
+      "actual": 5,
+      "expected": 5
+    },
+    {
+      "name": "Equivalent executions",
+      "actual": 50,
+      "expected": 50
+    },
+    {
+      "name": "Validation, change, audit and render parity",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "representative_operations": 10,
+    "entrances": 5,
+    "executions": 50,
+    "validation_equal": true,
+    "change_equal": true,
+    "audit_equal": true,
+    "render_equal": true
+  }
+}

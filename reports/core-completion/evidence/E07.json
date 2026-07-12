@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "test_id": "E07",
+  "command": "pnpm core:test:wiki-learning-loop",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "d97ddebdf8893198fe3ed10a3f284f39cc84df658297e5ab4840b251e6976e16",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/learning/src/background-review.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/wiki-learning-loop.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-wiki-learning-loop.mjs"
+  ],
+  "started_at": "2026-07-11T13:23:22.202Z",
+  "completed_at": "2026-07-11T13:23:47.955Z",
+  "assertions": [
+    {
+      "name": "Active Wiki retrieval and purpose-specific usage trace work",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Background Review supports create, patch, merge, archive",
+      "actual": [
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_patch",
+        "wiki_archive",
+        "wiki_merge",
+        "wiki_create",
+        "wiki_patch"
+      ],
+      "expected": [
+        "wiki_patch",
+        "wiki_create",
+        "wiki_merge",
+        "wiki_archive"
+      ]
+    },
+    {
+      "name": "Curator completes after Wiki mutations",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Updated Wiki is reused and snapshot rollback restores it",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "benchmark_tasks": 20,
+    "closed_loop_evidence_complete": true,
+    "adopted_corrections": 20,
+    "correction_reflection_rate": 1,
+    "unrelated_misapplications": 0,
+    "active_retrieval": true,
+    "use_purposes": [
+      "context",
+      "surface_generation"
+    ],
+    "patched": true,
+    "created": true,
+    "merged": true,
+    "archived": true,
+    "curator_completed": true,
+    "reused_updated_version": true,
+    "rollback_restored": true,
+    "change_kinds": [
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_archive",
+      "wiki_merge",
+      "wiki_create",
+      "wiki_patch"
+    ]
+  }
+}

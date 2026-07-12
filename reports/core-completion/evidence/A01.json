@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "test_id": "A01",
+  "command": "pnpm core:test:physical-boundaries",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "cb170ea652475ef008ce405055f291d658d65faa90f9b8b052da561eca92482c",
+  "source_files": [
+    "apps/server/src/api-server.ts",
+    "apps/server/src/composition/index.ts",
+    "apps/server/src/index.ts",
+    "apps/server/src/middleware/security.ts",
+    "apps/server/src/routes/backend-events.ts",
+    "apps/server/src/streams/backend-events.ts",
+    "apps/server/src/workers/automation-scheduler.ts",
+    "apps/web/src/App.vue",
+    "apps/web/src/AppWorkspace.vue",
+    "apps/web/src/components/AppSidebar.vue",
+    "apps/web/src/components/CollectionWorkspaceView.vue",
+    "apps/web/src/components/ContextDrawer.vue",
+    "apps/web/src/components/CustomViewFrame.vue",
+    "apps/web/src/components/WorkspaceCanvas.vue",
+    "apps/web/src/components/WorkspacePanels.vue",
+    "apps/web/src/lib/api.ts",
+    "apps/web/src/lib/app-view-helpers.ts",
+    "apps/web/src/lib/array-state.ts",
+    "apps/web/src/lib/collection-list-state.ts",
+    "apps/web/src/lib/collection-view-state.ts",
+    "apps/web/src/lib/connect-app-socket.ts",
+    "apps/web/src/lib/settings-storage.ts",
+    "apps/web/src/lib/surface-view-helpers.ts",
+    "apps/web/src/lib/use-agent-stream.ts",
+    "apps/web/src/lib/use-approval-workflow.ts",
+    "apps/web/src/lib/use-chat-attachments.ts",
+    "apps/web/src/lib/use-chat-scroll.ts",
+    "apps/web/src/lib/use-collection-workspace.ts",
+    "apps/web/src/lib/use-disclosure-state.ts",
+    "apps/web/src/lib/use-message-actions.ts",
+    "apps/web/src/lib/use-resizable-layout.ts",
+    "apps/web/src/lib/use-surface-workspace.ts",
+    "apps/web/src/lib/use-work-summary.ts",
+    "apps/web/src/main.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/attachments/ingestion.ts",
+    "packages/runtime/src/automation/schedule-policy.ts",
+    "packages/runtime/src/backend-event-bridge.ts",
+    "packages/runtime/src/backend-feedback.ts",
+    "packages/runtime/src/backend/event-bridge.ts",
+    "packages/runtime/src/backend/external-assist-provider.ts",
+    "packages/runtime/src/backend/feedback.ts",
+    "packages/runtime/src/backend/native-backend.ts",
+    "packages/runtime/src/backend/provider.ts",
+    "packages/runtime/src/collections/safe-collection.ts",
+    "packages/runtime/src/commands/domain-command-bus.ts",
+    "packages/runtime/src/context/federated-retrieval.ts",
+    "packages/runtime/src/context/progressive-skills.ts",
+    "packages/runtime/src/context/session-compaction.ts",
+    "packages/runtime/src/context/user-model.ts",
+    "packages/runtime/src/execution/durable-work-coordinator.ts",
+    "packages/runtime/src/execution/work-state-machine.ts",
+    "packages/runtime/src/external-assist-provider.ts",
+    "packages/runtime/src/host/index.ts",
+    "packages/runtime/src/index.ts",
+    "packages/runtime/src/learning/task-evaluation.ts",
+    "packages/runtime/src/legacy-operation-compat.ts",
+    "packages/runtime/src/native-backend.ts",
+    "packages/runtime/src/presentation/generated-surface.ts",
+    "packages/runtime/src/presentation/planner.ts",
+    "packages/runtime/src/provider-profiles.ts",
+    "packages/runtime/src/provider.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/profile-registry.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-physical-module-boundaries.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-12T03:47:28.194Z",
+  "completed_at": "2026-07-12T03:47:28.194Z",
+  "assertions": [
+    {
+      "name": "Entrypoints remain composition/export focused",
+      "actual": [],
+      "expected": []
+    },
+    {
+      "name": "Required responsibility directories",
+      "actual": [],
+      "expected": []
+    }
+  ],
+  "advisories": [
+    {
+      "name": "Large modules recorded for follow-up",
+      "actual": [
+        {
+          "file": "packages/runtime/src/agent-runtime.ts",
+          "lines": 16245
+        },
+        {
+          "file": "packages/workspace-store/src/workspace-store.ts",
+          "lines": 9314
+        },
+        {
+          "file": "apps/server/src/api-server.ts",
+          "lines": 7609
+        },
+        {
+          "file": "apps/web/src/AppWorkspace.vue",
+          "lines": 1727
+        }
+      ]
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "entrypoint_limit": 500,
+    "module_line_warning": 1200,
+    "entrypoints": [
+      {
+        "file": "packages/runtime/src/index.ts",
+        "lines": 9
+      },
+      {
+        "file": "packages/workspace-store/src/index.ts",
+        "lines": 3
+      },
+      {
+        "file": "apps/server/src/index.ts",
+        "lines": 15
+      },
+      {
+        "file": "apps/web/src/App.vue",
+        "lines": 8
+      }
+    ],
+    "oversized_entrypoints": [],
+    "large_modules_advisory": [
+      {
+        "file": "packages/runtime/src/agent-runtime.ts",
+        "lines": 16245
+      },
+      {
+        "file": "packages/workspace-store/src/workspace-store.ts",
+        "lines": 9314
+      },
+      {
+        "file": "apps/server/src/api-server.ts",
+        "lines": 7609
+      },
+      {
+        "file": "apps/web/src/AppWorkspace.vue",
+        "lines": 1727
+      }
+    ],
+    "missing_directories": []
+  }
+}

@@ -941,6 +941,7 @@ describe("backend run API", () => {
         collection_id: "movies",
         record_id: "movie_1",
         patch_id: "movie_api_patch_1",
+        expected_version: 1,
         changes: { status: "視聴中" },
         renderer_capabilities: capabilities
       },

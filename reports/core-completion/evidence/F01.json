@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "test_id": "F01",
+  "command": "pnpm core:test:automation-schedule",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "525aa3f20b877d4ae77f28e11a9c9a99cc1c959975d31f684f7573404323b252",
+  "source_files": [
+    "packages/runtime/src/automation/schedule-policy.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/automation-schedule.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-automation-schedule.mjs"
+  ],
+  "started_at": "2026-07-11T09:57:51.221Z",
+  "completed_at": "2026-07-11T09:57:52.122Z",
+  "assertions": [
+    {
+      "name": "Timezone and spring/fall DST schedules are deterministic without duplicate fall run",
+      "actual": {
+        "spring": "2025-03-09T07:00:00.000Z",
+        "fall_first": "2025-11-02T05:30:00.000Z",
+        "fall_next": "2025-11-03T06:30:00.000Z"
+      },
+      "expected": {
+        "spring": "2025-03-09T07:00:00.000Z",
+        "fall_first": "2025-11-02T05:30:00.000Z",
+        "fall_next": "2025-11-03T06:30:00.000Z"
+      }
+    },
+    {
+      "name": "Missed runs catch up and pause/resume works",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "One-shot executes once and no-agent mode is explicit",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Schedule survives Store restart",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "spring_forward": "2025-03-09T07:00:00.000Z",
+    "fall_first": "2025-11-02T05:30:00.000Z",
+    "fall_next": "2025-11-03T06:30:00.000Z",
+    "missed_runs": 3,
+    "pause_skipped": true,
+    "resume_catch_up": true,
+    "one_shot_once": true,
+    "no_agent_mode": true,
+    "restart_preserved": true
+  }
+}

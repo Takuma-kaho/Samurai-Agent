@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "test_id": "C06",
+  "command": "pnpm core:test:search-index",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "cf302c6d2c68c5d156f58f62fe50e6169647d0b1d4c2a82931e3f9182d062feb",
+  "source_files": [
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/session-search-index.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-session-search-index.mjs"
+  ],
+  "started_at": "2026-07-11T08:25:46.935Z",
+  "completed_at": "2026-07-11T08:25:47.045Z",
+  "assertions": [
+    {
+      "name": "Create updates index immediately",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Update replaces index immediately",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Delete removes index immediately",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Rebuild restores deterministic rank",
+      "actual": [
+        "rank-a",
+        "rank-b",
+        "rank-c"
+      ],
+      "expected": [
+        "rank-a",
+        "rank-b",
+        "rank-c"
+      ]
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "mode": "fts5_trigram",
+    "create_immediate": true,
+    "update_immediate": true,
+    "delete_immediate": true,
+    "corrupt_detected": true,
+    "rank_before": [
+      "rank-a",
+      "rank-b",
+      "rank-c"
+    ],
+    "rank_after": [
+      "rank-a",
+      "rank-b",
+      "rank-c"
+    ],
+    "deterministic_rebuild": true
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "test_id": "A04",
+  "command": "pnpm core:test:command-race",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "a05ebab15d0a3e474608a4e2579a521622b7e869af603a875cfe1e8126aee71f",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/commands/domain-command-bus.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/domain-command-idempotency.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-domain-command-idempotency.mjs"
+  ],
+  "started_at": "2026-07-11T08:23:15.279Z",
+  "completed_at": "2026-07-11T08:23:36.538Z",
+  "assertions": [
+    {
+      "name": "100 parallel requests",
+      "actual": 100,
+      "expected": 100
+    },
+    {
+      "name": "one side effect",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "one result id",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "durable replay",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "payload mismatch rejected",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "parallel_requests": 100,
+    "workers": 10,
+    "side_effects": 1,
+    "result_ids": [
+      "result-1"
+    ],
+    "durable_replay": true,
+    "mismatched_payload_rejected": true
+  }
+}

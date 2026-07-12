@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "test_id": "E08",
+  "command": "pnpm core:test:task-evaluation",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "4419a6298be64ab8dcba0f2e88ea0a508417411215ef2ae618103a606fb10968",
+  "source_files": [
+    "packages/runtime/src/index.ts",
+    "packages/runtime/src/learning/task-evaluation.ts",
+    "scripts/fixtures/task-evaluation.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-task-evaluation.mjs"
+  ],
+  "started_at": "2026-07-11T09:38:30.900Z",
+  "completed_at": "2026-07-11T09:38:30.974Z",
+  "assertions": [
+    {
+      "name": "Comparable work shares fingerprint, incompatible output differs",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Correction and UI/resource signals attach to cohort",
+      "actual": [
+        "correction",
+        "undo",
+        "rerun",
+        "artifact_revision",
+        "surface_revision",
+        "dismiss",
+        "pin",
+        "explicit_feedback"
+      ],
+      "expected": [
+        "correction",
+        "undo",
+        "rerun",
+        "artifact_revision",
+        "surface_revision",
+        "dismiss",
+        "pin",
+        "explicit_feedback"
+      ]
+    },
+    {
+      "name": "Insufficient samples are inconclusive",
+      "actual": "inconclusive",
+      "expected": "inconclusive"
+    },
+    {
+      "name": "Comparable sufficient cohort can be assessed",
+      "actual": "helpful",
+      "expected": "helpful"
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "same_work_same_fingerprint": true,
+    "different_output_different_fingerprint": true,
+    "signal_kinds": [
+      "correction",
+      "undo",
+      "rerun",
+      "artifact_revision",
+      "surface_revision",
+      "dismiss",
+      "pin",
+      "explicit_feedback"
+    ],
+    "insufficient_assessment": "inconclusive",
+    "comparable_assessment": "helpful",
+    "effect": 42,
+    "confidence": 0.83
+  }
+}

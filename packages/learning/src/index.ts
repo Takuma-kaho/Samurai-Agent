@@ -7,6 +7,8 @@ export * from "./curator/memory-curator";
 export * from "./curator/reports";
 export * from "./curator/consolidation";
 export * from "./curator/skill-curator";
+export * from "./curator/resource-graph";
 export * from "./scheduler-policy";
+export * from "./guardrail-evaluation";
 export * from "./ports";
 export * from "./types";

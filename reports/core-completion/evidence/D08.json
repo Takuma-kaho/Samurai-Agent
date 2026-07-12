@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "test_id": "D08",
+  "command": "pnpm core:test:plugin-isolation",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "44d6259029837794ce84a00f3c8c24b0ecb00364052224539d2714d6221bb309",
+  "source_files": [
+    "packages/action-catalog/src/index.ts",
+    "packages/action-catalog/src/plugin-worker.mjs",
+    "packages/core-schemas/src/index.ts",
+    "scripts/fixtures/plugin-isolation.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-plugin-isolation.mjs"
+  ],
+  "started_at": "2026-07-11T09:06:24.163Z",
+  "completed_at": "2026-07-11T09:06:24.576Z",
+  "assertions": [
+    {
+      "name": "Plugin runs outside Host process",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Crash, timeout, and memory excess fail locally",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Host continues after every plugin failure",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Invalid signature and incompatible API rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "No Core mutation before successful handler output",
+      "actual": 0,
+      "expected": 0
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "process_isolation": true,
+    "crash_failed": true,
+    "timeout_failed": true,
+    "memory_limit_failed": true,
+    "host_continued": true,
+    "signature_invalid_rejected": true,
+    "version_incompatible_rejected": true,
+    "unsigned_entrypoint_rejected": true,
+    "core_mutations_before_success": 0
+  }
+}

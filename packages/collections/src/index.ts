@@ -15,6 +15,7 @@ export function applyCollectionPatch(record: CollectionRecord, patch: Collection
 
   return {
     ...parsedRecord,
+    version: parsedRecord.version + 1,
     data: {
       ...parsedRecord.data,
       ...parsedPatch.changes
@@ -29,7 +30,7 @@ export function parseCollectionSchema(value: unknown): CollectionSchema {
   return schema;
 }
 
-export function parseCollectionRecord(value: unknown, schema: CollectionSchema): CollectionRecord {
+export function parseCollectionRecord(value: unknown, schema: CollectionSchema) {
   const record = CollectionRecordSchema.parse(value);
   if (record.collection_id !== schema.id) {
     throw new Error("collection_record_collection_id_mismatch");

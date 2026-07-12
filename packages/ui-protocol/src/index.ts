@@ -175,6 +175,7 @@ export interface CollectionRecordPatchOperation extends SurfaceOperationBase {
   collection_id: string;
   record_id: string;
   patch_id: string;
+  expected_version?: number;
   changes: Record<string, JsonValue>;
 }
 
@@ -954,6 +955,7 @@ const RawSurfaceOperationSchema = z.discriminatedUnion("kind", [
     collection_id: z.string().min(1),
     record_id: z.string().min(1),
     patch_id: z.string().min(1).optional(),
+    expected_version: z.number().int().positive().optional(),
     changes: z.record(jsonValueSchema)
   }),
   z.object({

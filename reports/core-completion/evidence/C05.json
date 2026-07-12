@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "test_id": "C05",
+  "command": "pnpm core:test:portability",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "9b88947b8fa8766d70d2431ab0a582e40de29b8c37c05e8341b741638c0649a5",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/workspace-portability.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-workspace-portability.mjs"
+  ],
+  "started_at": "2026-07-11T08:20:56.495Z",
+  "completed_at": "2026-07-11T08:20:56.691Z",
+  "assertions": [
+    {
+      "name": "Portable resource hash",
+      "actual": "e63810a5",
+      "expected": "e63810a5"
+    },
+    {
+      "name": "Cross-resource refs preserved",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Required resource kinds",
+      "actual": [
+        "session",
+        "artifact",
+        "collection",
+        "memory",
+        "skill"
+      ],
+      "expected": [
+        "session",
+        "artifact",
+        "collection",
+        "memory",
+        "skill"
+      ]
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "source_hash": "e63810a5",
+    "target_hash": "e63810a5",
+    "refs_preserved": true,
+    "resources": [
+      "session",
+      "artifact",
+      "collection",
+      "memory",
+      "skill"
+    ]
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "test_id": "D06",
+  "command": "pnpm core:test:attachment",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "59e5dfc1d2edb86912f52efd67d8140930c25b480ca0d708eda060e6854ffa51",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/attachments/ingestion.ts",
+    "scripts/fixtures/attachment-ingestion.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-attachment-ingestion.mjs"
+  ],
+  "started_at": "2026-07-11T12:47:32.474Z",
+  "completed_at": "2026-07-11T12:47:32.529Z",
+  "assertions": [
+    {
+      "name": "Six required formats",
+      "actual": [
+        "docx",
+        "image",
+        "pdf",
+        "pptx",
+        "text",
+        "xlsx"
+      ],
+      "expected": [
+        "docx",
+        "image",
+        "pdf",
+        "pptx",
+        "text",
+        "xlsx"
+      ]
+    },
+    {
+      "name": "Source trace and hash",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Source and extraction limits",
+      "actual": {
+        "source_rejected": true,
+        "all_formats_oversize_rejected": true,
+        "text_truncated": true
+      },
+      "expected": {
+        "source_rejected": true,
+        "all_formats_oversize_rejected": true,
+        "text_truncated": true
+      }
+    },
+    {
+      "name": "All six corrupt formats rejected",
+      "actual": 6,
+      "expected": 6
+    },
+    {
+      "name": "Transient read retry",
+      "actual": 3,
+      "expected": 3
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "formats": [
+      "docx",
+      "image",
+      "pdf",
+      "pptx",
+      "text",
+      "xlsx"
+    ],
+    "extraction": {
+      "pdf": "PDF attachment text",
+      "docx": "DOCX attachment text",
+      "xlsx": "XLSX shared text\t42",
+      "pptx": "PPTX first slide\nPPTX second slide"
+    },
+    "limits": {
+      "source_rejected": true,
+      "all_formats_oversize_rejected": true,
+      "text_truncated": true
+    },
+    "corrupt_formats_rejected": 6,
+    "source_trace": true,
+    "retry_attempts": 3
+  }
+}

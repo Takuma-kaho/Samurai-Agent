@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "test_id": "E04",
+  "command": "pnpm core:test:federated-retrieval",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "36944fffce6f7a368bccb4175a9c1e77e8232bab901451356f7a4629af214893",
+  "source_files": [
+    "packages/runtime/src/context/federated-retrieval.ts",
+    "scripts/fixtures/federated-retrieval.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-federated-retrieval.mjs"
+  ],
+  "started_at": "2026-07-11T13:15:10.848Z",
+  "completed_at": "2026-07-11T13:15:10.944Z",
+  "assertions": [
+    {
+      "name": "100-query Recall@5",
+      "actual": 1,
+      "expected": ">=0.90"
+    },
+    {
+      "name": "MRR@10",
+      "actual": 1,
+      "expected": ">=0.80"
+    },
+    {
+      "name": "Japanese Recall@5",
+      "actual": 1,
+      "expected": ">=0.85"
+    },
+    {
+      "name": "Ranking is deterministic across input order",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Every result explains score and source",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Search spans Session, Memory, Wiki, Artifact, Collection",
+      "actual": [
+        "memory",
+        "wiki",
+        "session",
+        "artifact",
+        "collection"
+      ],
+      "expected": [
+        "memory",
+        "wiki",
+        "session",
+        "artifact",
+        "collection"
+      ]
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "benchmark_cases": 100,
+    "hits": 100,
+    "recall": 1,
+    "recall_at_5": 1,
+    "mrr_at_10": 1,
+    "threshold": 0.9,
+    "japanese_cases": 50,
+    "japanese_recall_at_5": 1,
+    "japanese_threshold": 0.85,
+    "deterministic": true,
+    "reasons_present": true,
+    "sources_present": true,
+    "resource_kinds": [
+      "memory",
+      "wiki",
+      "session",
+      "artifact",
+      "collection"
+    ]
+  }
+}

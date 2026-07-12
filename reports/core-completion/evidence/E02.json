@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "test_id": "E02",
+  "command": "pnpm core:test:profile-isolation",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "19f4007eafde958f7f408ff81bc13e290ff63939bd5f2889b27ef12d49d5c3bb",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/profile-registry.ts",
+    "scripts/fixtures/profile-isolation.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-profile-isolation.mjs"
+  ],
+  "started_at": "2026-07-11T09:38:37.782Z",
+  "completed_at": "2026-07-11T09:38:37.948Z",
+  "assertions": [
+    {
+      "name": "Two profile workspaces have zero cross-profile leaks",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "Profile switch changes active isolated root",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Export excludes secret material and preserves refs",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Import restores Session, Memory, Skill, Automation",
+      "actual": [
+        "session",
+        "memory",
+        "skill",
+        "automation"
+      ],
+      "expected": [
+        "session",
+        "memory",
+        "skill",
+        "automation"
+      ]
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "profile_count": 3,
+    "cross_profile_leaks": 0,
+    "switch_isolated": true,
+    "secret_material_exported": false,
+    "secret_refs_preserved": true,
+    "imported_resources": [
+      "session",
+      "memory",
+      "skill",
+      "automation"
+    ]
+  }
+}

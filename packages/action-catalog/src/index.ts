@@ -10,6 +10,7 @@ import {
   type SurfaceRendererRegistryEntry
 } from "@samurai-agent/core-schemas";
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
+import { spawn } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,6 +21,7 @@ export const domainCommandInputSources = [
   "runtime_api",
   "gateway_inbound",
   "automation",
+  "generated_surface",
   "scheduled_context"
 ] as const;
 
@@ -60,19 +62,57 @@ export interface DomainCommandEntry {
   output_render_kinds: DomainCommandOutputRenderKind[];
   resource_kinds: string[];
   proposed_effects: string[];
+  input_schema: Record<string, JsonValue>;
 }
 
-function command(input: Omit<DomainCommandEntry, "handler_id" | "implementation_target" | "output_render_kinds"> & {
+function command(input: Omit<DomainCommandEntry, "handler_id" | "implementation_target" | "output_render_kinds" | "input_schema"> & {
   handler_id?: string;
   implementation_target?: string;
   output_render_kinds?: DomainCommandOutputRenderKind[];
+  input_schema?: Record<string, JsonValue>;
 }): DomainCommandEntry {
   return {
     ...input,
     handler_id: input.handler_id ?? `runtime.${input.id}`,
     implementation_target: input.implementation_target ?? (input.id === "chat.turn.run" ? "host" : "runtime"),
-    output_render_kinds: input.output_render_kinds ?? defaultOutputRenderKinds(input)
+    output_render_kinds: input.output_render_kinds ?? defaultOutputRenderKinds(input),
+    input_schema: input.input_schema ?? defaultDomainCommandInputSchema(input.id)
   };
+}
+
+function defaultDomainCommandInputSchema(commandId: string): Record<string, JsonValue> {
+  const object = (properties: Record<string, JsonValue>, required: string[] = []): Record<string, JsonValue> => ({
+    type: "object",
+    additionalProperties: false,
+    properties,
+    ...(required.length ? { required } : {})
+  });
+  switch (commandId) {
+    case "chat.turn.run":
+      return object({ session_id: { type: "string" }, content: { type: "string" }, backend_id: { type: "string" }, input_locale: { type: "string" }, output_locale: { type: "string" } }, ["content"]);
+    case "artifact.create":
+      return object({ title: { type: "string" }, content: { type: "string" }, instruction: { type: "string" }, kind: { type: "string" }, metadata: { type: "object" } }, ["title", "content"]);
+    case "memory.topic.create":
+      return object({ topic: { type: "string" }, topic_kind: { type: "string" }, content: { type: "string" }, metadata: { type: "object" } }, ["content"]);
+    case "external.send.prepare":
+      return object({ channel: { type: "string" }, target: { type: "object" }, title: { type: "string" }, body: { type: "string" }, content: { type: "string" }, summary: { type: "string" } });
+    case "workspace.delete":
+      return object({ target: { type: "string" }, reason: { type: "string" } });
+    case "skill.view":
+      return object({ skill_id: { type: "string" }, path: { type: "string" } }, ["skill_id"]);
+    case "collection.schema.save":
+      return object({ id: { type: "string" }, version: { type: "string" }, labels: { type: "object" }, descriptions: { type: "object" }, fields: { type: "array" }, refs: { type: "array" }, embeds: { type: "array" }, derived_fields: { type: "array" }, triggers: { type: "array" }, actions: { type: "array" }, views: { type: "array" }, permissions: { type: "object" } }, ["id", "version", "fields", "permissions"]);
+    case "collection.record.create":
+      return object({ collection_id: { type: "string" }, id: { type: "string" }, record_id: { type: "string" }, data: { type: "object" }, resource_refs: { type: "array" } }, ["collection_id", "data"]);
+    case "collection.patch.apply":
+      return object({ collection_id: { type: "string" }, record_id: { type: "string" }, patch_id: { type: "string" }, expected_version: { type: "integer", minimum: 1 }, changes: { type: "object" } }, ["collection_id", "record_id", "expected_version", "changes"]);
+    case "collection.view.present":
+      return object({ collection_id: { type: "string" }, query: { type: "string" }, view_id: { type: "string" }, record_id: { type: "string" } }, ["collection_id"]);
+    case "collection.manage":
+      return object({ action: { type: "string", enum: ["getItems", "putItems", "schemaDocs", "getSchema", "putSchema", "patchSchema"] }, collection_id: { type: "string" }, slug: { type: "string" }, ids: { type: "array", items: { type: "string" } }, fields: { type: "array", items: { type: "string" } }, items: { type: "array", items: { type: "object" } }, mode: { type: "string", enum: ["create", "upsert", "merge"] }, schema: { type: "object" }, patches: { type: "array" }, view_id: { type: "string" } }, ["action"]);
+    default:
+      return { type: "object", additionalProperties: true };
+  }
 }
 
 function defaultOutputRenderKinds(input: Pick<DomainCommandEntry, "id" | "ui_display_category" | "output_resource_kind">): DomainCommandOutputRenderKind[] {
@@ -104,6 +144,7 @@ function defaultOutputRenderKinds(input: Pick<DomainCommandEntry, "id" | "ui_dis
 }
 
 export const domainCommandEntries: DomainCommandEntry[] = [
+  command({ id: "session.create", title: "Create session", description: "Create a persistent Chat session.", runtime_method: "createSession", ui_display_category: "chat", input_sources: ["runtime_api", "surface_operation", "gateway_inbound", "automation"], writes_workspace: true, output_resource_kind: "session", resource_kinds: ["session"], proposed_effects: ["Create a persistent Chat session."] }),
   command({
     id: "chat.turn.run",
     title: "Run chat turn",
@@ -125,7 +166,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     ui_display_category: "artifact",
     input_sources: ["surface_operation", "provider_tool_call", "runtime_api"],
     surface_operation_kinds: ["form.submit", "table.patch", "chart.request", "artifact.request", "custom_view.action"],
-    provider_tool_names: ["create_artifact"],
+    provider_tool_names: ["create_artifact", "samurai.artifact.create", "mcp__samurai__artifact_create"],
     writes_workspace: true,
     output_resource_kind: "artifact",
     output_render_kinds: ["artifact", "form", "table", "chart", "custom_view"],
@@ -323,7 +364,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     description: "Create a schema-validated Collection record.",
     runtime_method: "createCollectionRecord",
     ui_display_category: "collection",
-    input_sources: ["surface_operation", "runtime_api", "provider_tool_call", "scheduled_context"],
+    input_sources: ["surface_operation", "runtime_api", "provider_tool_call", "scheduled_context", "generated_surface"],
     provider_tool_names: ["samurai.collection.record.create", "collection.record.create", "create_collection_record", "mcp__samurai__collection_record_create"],
     surface_operation_kinds: ["collection.record.create"],
     writes_workspace: true,
@@ -337,7 +378,8 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     description: "Patch a schema-validated Collection record.",
     runtime_method: "applyCollectionPatch",
     ui_display_category: "collection",
-    input_sources: ["surface_operation", "runtime_api", "scheduled_context"],
+    input_sources: ["surface_operation", "runtime_api", "provider_tool_call", "scheduled_context", "generated_surface"],
+    provider_tool_names: ["collection.record.patch", "patch_collection_record", "mcp__samurai__collection_record_patch"],
     surface_operation_kinds: ["collection.record.patch"],
     writes_workspace: true,
     output_resource_kind: "collection_record",
@@ -350,7 +392,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     description: "Delete a Collection record through Runtime permission checks.",
     runtime_method: "deleteCollectionRecord",
     ui_display_category: "collection",
-    input_sources: ["surface_operation", "runtime_api"],
+    input_sources: ["surface_operation", "runtime_api", "generated_surface"],
     surface_operation_kinds: ["collection.record.delete"],
     writes_workspace: true,
     output_resource_kind: "collection_record",
@@ -368,7 +410,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     provider_tool_names: ["samurai.collection.manage", "collection.manage", "manage_collection", "collection_manage", "mcp__samurai__collection_manage"],
     writes_workspace: true,
     output_resource_kind: "collection",
-    output_render_kinds: ["collection", "collection_record", "custom_view"],
+    output_render_kinds: ["collection", "collection_record", "custom_view", "status_timeline"],
     resource_kinds: ["collection_schema", "collection_record", "collection_index"],
     proposed_effects: ["Run a Collection management action through the shared Collection surface."]
   }),
@@ -392,7 +434,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     description: "Run a schema-defined Collection action such as patch, create, or reindex.",
     runtime_method: "runCollectionAction",
     ui_display_category: "collection",
-    input_sources: ["surface_operation", "runtime_api", "scheduled_context"],
+    input_sources: ["surface_operation", "runtime_api", "scheduled_context", "generated_surface"],
     surface_operation_kinds: ["collection.action.run"],
     writes_workspace: true,
     output_resource_kind: "collection_record",
@@ -752,6 +794,50 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     resource_kinds: ["reflection_suggestion", "memory", "wiki", "skill"],
     proposed_effects: ["Apply a visible reflection suggestion to a reusable workspace resource."]
   }),
+  command({ id: "workspace.repair", title: "Repair workspace", description: "Inspect and repair recoverable Workspace integrity issues.", runtime_method: "repairWorkspace", ui_display_category: "settings", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "workspace_health", resource_kinds: ["workspace"], proposed_effects: ["Repair recoverable Workspace integrity issues."] }),
+  command({ id: "workspace.backup.create", title: "Create workspace backup", description: "Create an atomic Workspace backup.", runtime_method: "createWorkspaceBackup", ui_display_category: "settings", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "workspace_backup", resource_kinds: ["workspace_backup"], proposed_effects: ["Create an atomic Workspace backup."] }),
+  command({ id: "workspace.backup.restore", title: "Restore workspace backup", description: "Restore a verified Workspace backup.", runtime_method: "restoreWorkspaceBackup", ui_display_category: "settings", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "workspace_backup", resource_kinds: ["workspace_backup", "workspace"], proposed_effects: ["Restore a verified Workspace backup."] }),
+  command({ id: "gateway.mcp_config.save", title: "Save Gateway MCP config", description: "Save a validated Gateway MCP server configuration.", runtime_method: "saveGatewayMcpConfig", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "gateway_mcp_config", resource_kinds: ["gateway_mcp_config"], proposed_effects: ["Save a Gateway MCP server configuration."] }),
+  command({ id: "gateway.concurrency_lock.expire", title: "Expire Gateway locks", description: "Expire stale Gateway concurrency locks.", runtime_method: "expireGatewayConcurrencyLocks", ui_display_category: "gateway", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "gateway_lock", resource_kinds: ["gateway_lock"], proposed_effects: ["Expire stale Gateway concurrency locks."] }),
+  command({ id: "automation.job.requeue", title: "Requeue automation job", description: "Requeue an Automation job after an operational failure.", runtime_method: "requeueAutomationJob", ui_display_category: "automation", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "automation_job", resource_kinds: ["automation_job"], proposed_effects: ["Requeue an Automation job."] }),
+  command({ id: "automation.job.release_lock", title: "Release automation lock", description: "Release a stale Automation job lock.", runtime_method: "releaseAutomationJobLock", ui_display_category: "automation", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "automation_job", resource_kinds: ["automation_job"], proposed_effects: ["Release an Automation job lock."] }),
+  command({ id: "client.event.save", title: "Save client event", description: "Save a durable client delivery event.", runtime_method: "saveClientEvent", ui_display_category: "gateway", input_sources: ["runtime_api", "gateway_inbound", "automation"], writes_workspace: true, output_resource_kind: "client_event", resource_kinds: ["client_event"], proposed_effects: ["Save a durable client delivery event."] }),
+  command({ id: "client.event.deliver", title: "Mark client event delivered", description: "Mark a client event as delivered.", runtime_method: "markClientEventDelivered", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "client_event", resource_kinds: ["client_event"], proposed_effects: ["Mark a client event as delivered."] }),
+  command({ id: "client.event.ack", title: "Acknowledge client event", description: "Acknowledge a delivered client event.", runtime_method: "ackClientEvent", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "client_event", resource_kinds: ["client_event"], proposed_effects: ["Acknowledge a client event."] }),
+  command({ id: "client.event.fail", title: "Fail client event", description: "Mark a client event delivery as failed.", runtime_method: "failClientEvent", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "client_event", resource_kinds: ["client_event"], proposed_effects: ["Mark a client event as failed."] }),
+  command({ id: "settings.patch", title: "Update settings", description: "Update validated owner Workspace settings.", runtime_method: "patchSettings", ui_display_category: "settings", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "settings", resource_kinds: ["settings"], proposed_effects: ["Update owner Workspace settings."] }),
+  command({ id: "resource.translation.save", title: "Save resource translation", description: "Save a derived translation with source provenance.", runtime_method: "saveResourceTranslation", ui_display_category: "artifact", input_sources: ["runtime_api", "automation"], writes_workspace: true, output_resource_kind: "resource_translation", resource_kinds: ["resource_translation"], proposed_effects: ["Save a derived resource translation."] }),
+  command({ id: "resource.translation_job.save", title: "Save resource translation job", description: "Save a scheduled resource translation job.", runtime_method: "saveResourceTranslationJob", ui_display_category: "automation", input_sources: ["runtime_api", "automation"], writes_workspace: true, output_resource_kind: "automation_job", resource_kinds: ["automation_job", "resource_translation"], proposed_effects: ["Save a scheduled resource translation job."] }),
+  command({ id: "approval.approve", title: "Approve request", description: "Approve a pending owner decision request.", runtime_method: "approveRequest", ui_display_category: "activity", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "approval", resource_kinds: ["approval", "operation"], proposed_effects: ["Approve a pending request and continue its authorized lifecycle."] }),
+  command({ id: "approval.deny", title: "Deny request", description: "Deny a pending owner decision request.", runtime_method: "denyRequest", ui_display_category: "activity", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "approval", resource_kinds: ["approval", "operation"], proposed_effects: ["Deny a pending request and stop its lifecycle."] }),
+  command({ id: "session.search.reindex", title: "Reindex session search", description: "Rebuild the Session search read model.", runtime_method: "reindexSessionSearch", ui_display_category: "chat", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "search_index", resource_kinds: ["search_index"], proposed_effects: ["Rebuild the Session search index."] }),
+  command({ id: "learning.snapshot.prune", title: "Prune learning snapshots", description: "Apply the configured retention limit to Learning snapshots.", runtime_method: "pruneLearningSnapshots", ui_display_category: "memory", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "learning_snapshot", resource_kinds: ["learning_snapshot"], proposed_effects: ["Prune old Learning snapshots according to retention."] }),
+  command({ id: "client.event.expire", title: "Expire client events", description: "Expire client events after their delivery deadline.", runtime_method: "expireClientEvents", ui_display_category: "gateway", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "client_event", resource_kinds: ["client_event"], proposed_effects: ["Expire client events after their deadline."] }),
+  command({ id: "reflection.run", title: "Run background review", description: "Run scoped Background Review for a completed Session or Backend run.", runtime_method: "runReflection", ui_display_category: "memory", input_sources: ["runtime_api", "automation", "scheduled_context"], writes_workspace: true, output_resource_kind: "reflection_run", resource_kinds: ["reflection_run", "memory", "wiki", "skill"], proposed_effects: ["Review completed work and record scoped Learning changes."] }),
+  command({ id: "evaluation.run", title: "Run learning evaluation", description: "Evaluate comparable Learning runs and guardrails.", runtime_method: "runEvaluationJob", ui_display_category: "memory", input_sources: ["runtime_api", "automation", "scheduled_context"], writes_workspace: true, output_resource_kind: "learning_evaluation", resource_kinds: ["learning_evaluation"], proposed_effects: ["Evaluate Learning outcomes and guardrails."] }),
+  command({ id: "gateway.pairing_policy.save", title: "Save Gateway pairing policy", description: "Save an owner Gateway pairing policy.", runtime_method: "saveGatewayPairingPolicy", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "gateway_policy", resource_kinds: ["gateway_policy"], proposed_effects: ["Save a Gateway pairing policy."] }),
+  command({ id: "gateway.routing_policy.save", title: "Save Gateway routing policy", description: "Save an owner Gateway routing policy.", runtime_method: "saveGatewayRoutingPolicy", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "gateway_policy", resource_kinds: ["gateway_policy"], proposed_effects: ["Save a Gateway routing policy."] }),
+  command({ id: "gateway.pairing.expire", title: "Expire Gateway pairings", description: "Expire stale Gateway pairing requests.", runtime_method: "expireGatewayPairings", ui_display_category: "gateway", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "gateway_pairing", resource_kinds: ["gateway_pairing"], proposed_effects: ["Expire stale Gateway pairings."] }),
+  command({ id: "gateway.state.repair", title: "Repair Gateway state", description: "Repair recoverable Gateway state inconsistencies.", runtime_method: "repairGatewayState", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "gateway_state", resource_kinds: ["gateway_state"], proposed_effects: ["Repair recoverable Gateway state."] }),
+  command({ id: "gateway.pairing.approve", title: "Approve Gateway pairing", description: "Approve a pending Gateway pairing.", runtime_method: "approveGatewayPairing", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "gateway_pairing", resource_kinds: ["gateway_pairing"], proposed_effects: ["Approve a Gateway pairing."] }),
+  command({ id: "gateway.pairing.reject", title: "Reject Gateway pairing", description: "Reject a pending Gateway pairing.", runtime_method: "rejectGatewayPairing", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "gateway_pairing", resource_kinds: ["gateway_pairing"], proposed_effects: ["Reject a Gateway pairing."] }),
+  command({ id: "gateway.pairing.rotate", title: "Rotate Gateway pairing", description: "Rotate a Gateway pairing code.", runtime_method: "rotateGatewayPairing", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "gateway_pairing", resource_kinds: ["gateway_pairing"], proposed_effects: ["Rotate a Gateway pairing code."] }),
+  command({ id: "gateway.pairing.revoke", title: "Revoke Gateway pairing", description: "Revoke an approved Gateway pairing.", runtime_method: "revokeGatewayPairing", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "gateway_pairing", resource_kinds: ["gateway_pairing"], proposed_effects: ["Revoke a Gateway pairing."] }),
+  command({ id: "gateway.sandbox.recreate", title: "Recreate Gateway sandbox", description: "Recreate a Gateway sandbox instance.", runtime_method: "recreateGatewaySandboxInstance", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "sandbox_instance", resource_kinds: ["sandbox_instance"], proposed_effects: ["Recreate a Gateway sandbox instance."] }),
+  command({ id: "gateway.sandbox.delete", title: "Delete Gateway sandbox", description: "Delete a Gateway sandbox instance.", runtime_method: "deleteGatewaySandboxInstance", ui_display_category: "gateway", input_sources: ["runtime_api"], writes_workspace: true, output_resource_kind: "sandbox_instance", resource_kinds: ["sandbox_instance"], proposed_effects: ["Delete a Gateway sandbox instance."] }),
+  command({ id: "gateway.sandbox.sync", title: "Sync Gateway sandbox", description: "Synchronize Workspace data with a Gateway sandbox.", runtime_method: "syncGatewaySandboxWorkspace", ui_display_category: "gateway", input_sources: ["runtime_api", "automation"], writes_workspace: true, output_resource_kind: "sandbox_sync", resource_kinds: ["sandbox_instance", "sandbox_sync"], proposed_effects: ["Synchronize Workspace data with a Gateway sandbox."] }),
+  command({ id: "objective.create", title: "Create objective", description: "Create a durable objective with explicit completion criteria.", runtime_method: "createObjective", ui_display_category: "activity", input_sources: ["runtime_api", "gateway_inbound", "automation"], writes_workspace: true, output_resource_kind: "objective", resource_kinds: ["objective"], proposed_effects: ["Create a durable objective and explicit completion criteria."] }),
+  command({ id: "work_item.create", title: "Create work item", description: "Create a durable work item under an objective.", runtime_method: "createWorkItem", ui_display_category: "activity", input_sources: ["runtime_api", "gateway_inbound", "automation"], writes_workspace: true, output_resource_kind: "work_item", resource_kinds: ["objective", "work_item"], proposed_effects: ["Create a durable work item under an objective."] }),
+  command({ id: "objective.transition", title: "Transition objective", description: "Pause, resume, or cancel an objective and propagate the transition.", runtime_method: "transitionObjective", ui_display_category: "activity", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "objective", resource_kinds: ["objective", "work_item", "backend_run"], proposed_effects: ["Transition an objective and propagate it to active work and Backend runs."] }),
+  command({ id: "work_item.steer", title: "Steer work item", description: "Persist a steering instruction on the current work item.", runtime_method: "steerWorkItem", ui_display_category: "activity", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "work_item", resource_kinds: ["work_item"], proposed_effects: ["Add a steering instruction to the current work item."] }),
+  command({ id: "work_item.follow_up", title: "Create follow-up work", description: "Create a dependent follow-up work item.", runtime_method: "createFollowUpWorkItem", ui_display_category: "activity", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "work_item", resource_kinds: ["objective", "work_item"], proposed_effects: ["Create a dependent follow-up work item."] }),
+  command({ id: "generated_surface.create", title: "Create generated surface", description: "Validate and persist a versioned Generated Surface bundle.", runtime_method: "createGeneratedSurface", ui_display_category: "generated_surface", input_sources: ["runtime_api", "provider_tool_call"], writes_workspace: true, output_resource_kind: "generated_surface", output_render_kinds: ["custom_view"], resource_kinds: ["generated_surface"], proposed_effects: ["Validate and persist a versioned Generated Surface bundle."] }),
+  command({ id: "generated_surface.revise", title: "Revise generated surface", description: "Create a new immutable revision of a Generated Surface.", runtime_method: "reviseGeneratedSurface", ui_display_category: "generated_surface", input_sources: ["runtime_api", "provider_tool_call"], writes_workspace: true, output_resource_kind: "generated_surface", output_render_kinds: ["custom_view"], resource_kinds: ["generated_surface"], proposed_effects: ["Create a new immutable Generated Surface revision."] }),
+  command({ id: "generated_surface.state", title: "Change generated surface state", description: "Pin, unpin, or archive a Generated Surface.", runtime_method: "updateGeneratedSurfaceState", ui_display_category: "generated_surface", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "generated_surface", resource_kinds: ["generated_surface"], proposed_effects: ["Change Generated Surface lifecycle state."] }),
+  command({ id: "generated_surface.interaction.record", title: "Record surface interaction", description: "Record a Generated Surface open, dismiss, correction, or regeneration signal.", runtime_method: "recordGeneratedSurfaceInteraction", ui_display_category: "generated_surface", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "surface_interaction", resource_kinds: ["generated_surface", "surface_interaction"], proposed_effects: ["Record a Generated Surface interaction for audit and learning."] }),
+  command({ id: "generated_surface.action.run", title: "Run generated surface action", description: "Execute a declared Generated Surface action through its Domain Command.", runtime_method: "runGeneratedSurfaceAction", ui_display_category: "generated_surface", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "domain_command_result", resource_kinds: ["generated_surface", "operation"], proposed_effects: ["Execute a declared Generated Surface action through the Domain Command Bus."] }),
+  command({ id: "artifact.revise", title: "Revise artifact", description: "Create an immutable Artifact revision with content hash and lineage.", runtime_method: "reviseArtifact", ui_display_category: "artifact", input_sources: ["runtime_api", "provider_tool_call", "surface_operation"], writes_workspace: true, output_resource_kind: "artifact", output_render_kinds: ["artifact"], resource_kinds: ["artifact", "artifact_revision"], proposed_effects: ["Create an immutable Artifact revision and update its current pointer."] }),
+  command({ id: "artifact.repair", title: "Repair artifact source", description: "Repair a missing current Artifact file from its verified content blob.", runtime_method: "repairArtifact", ui_display_category: "artifact", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "artifact", resource_kinds: ["artifact", "artifact_revision"], proposed_effects: ["Restore a missing Artifact revision file from its verified content blob."] }),
   command({
     id: "grant.create",
     title: "Create grant",
@@ -783,7 +869,7 @@ export const actionCatalogEntries: ActionCatalogEntry[] = domainCommandEntries.m
   title: entry.title,
   display_name: entry.title,
   description: entry.description,
-  input_schema: { type: "object" },
+  input_schema: entry.input_schema,
   output_schema: {
     type: "object",
     properties: {
@@ -1009,7 +1095,8 @@ export interface PluginManifestLoadIssue {
     | "signature_invalid"
     | "signature_untrusted"
     | "entrypoint_load_failed"
-    | "invalid_entrypoint_module";
+    | "invalid_entrypoint_module"
+    | "version_incompatible";
   message: string;
 }
 
@@ -1097,6 +1184,8 @@ export interface PluginRuntimeStatus {
 export interface PluginEntrypointLoadOptions {
   allowUnsigned?: boolean;
   importModule?: (specifier: string) => Promise<unknown>;
+  timeoutMs?: number;
+  memoryLimitMb?: number;
 }
 
 export interface PluginEntrypointLoadResult {
@@ -1203,7 +1292,7 @@ export class PluginRuntimeRegistry {
   async loadEntrypoints(options: PluginEntrypointLoadOptions = {}): Promise<PluginEntrypointLoadResult> {
     const issues: PluginManifestLoadIssue[] = [];
     const loaded: PluginEntrypointLoadResult["loaded"] = [];
-    const importModule = options.importModule ?? nativeDynamicImport;
+    const importModule = options.importModule;
 
     for (const binding of this.runtimeBindings.values()) {
       if (!binding.entrypoint || !binding.entrypoint_path || binding.entrypoint_status !== "ready") {
@@ -1219,6 +1308,35 @@ export class PluginRuntimeRegistry {
       }
       const manifest = this.manifests.get(binding.manifest_id);
       if (!manifest) {
+        continue;
+      }
+      const apiVersion = typeof manifest.metadata.plugin_api_version === "string" ? manifest.metadata.plugin_api_version : "1";
+      if (apiVersion !== "1") {
+        issues.push({ file_path: binding.manifest_file_path, code: "version_incompatible", message: `plugin API version ${apiVersion} is incompatible with Host API version 1` });
+        continue;
+      }
+      if (!importModule) {
+        const listed = await runPluginWorker({ mode: "list", entrypoint: binding.entrypoint_path, timeoutMs: options.timeoutMs ?? 5_000, memoryLimitMb: options.memoryLimitMb ?? 64 }).catch((error) => {
+          issues.push({ file_path: binding.manifest_file_path, code: "entrypoint_load_failed", message: error instanceof Error ? error.message : String(error) });
+          return undefined;
+        });
+        if (!listed) continue;
+        const handlerIds = Array.isArray((listed as { handlers?: unknown }).handlers) ? (listed as { handlers: unknown[] }).handlers.filter((id): id is string => typeof id === "string") : [];
+        const registeredHandlerIds = binding.handler_ids.filter((handlerId) => handlerIds.includes(handlerId));
+        for (const handlerId of registeredHandlerIds) {
+          this.registerHandler(handlerId, async (handlerInput) => {
+            try {
+              return await runPluginWorker({ mode: "execute", entrypoint: binding.entrypoint_path!, handlerId, input: handlerInput, timeoutMs: options.timeoutMs ?? 5_000, memoryLimitMb: options.memoryLimitMb ?? 64 }) as PluginActionHandlerOutput;
+            } catch (error) {
+              return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+            }
+          });
+        }
+        if (registeredHandlerIds.length === 0) {
+          issues.push({ file_path: binding.manifest_file_path, code: "invalid_entrypoint_module", message: `plugin entrypoint did not export handlers for manifest ${binding.manifest_id}` });
+          continue;
+        }
+        loaded.push({ manifest_id: binding.manifest_id, entrypoint_path: binding.entrypoint_path, registered_handler_ids: registeredHandlerIds });
         continue;
       }
       let moduleExports: unknown;
@@ -1276,9 +1394,51 @@ export class PluginRuntimeRegistry {
   }
 }
 
-const nativeDynamicImport = (specifier: string): Promise<unknown> => {
-  return import(/* @vite-ignore */ specifier);
-};
+async function runPluginWorker(input: {
+  mode: "list" | "execute";
+  entrypoint: string;
+  handlerId?: string;
+  input?: unknown;
+  timeoutMs: number;
+  memoryLimitMb: number;
+}): Promise<unknown> {
+  const workerPath = path.resolve(process.cwd(), "packages/action-catalog/src/plugin-worker.mjs");
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [`--max-old-space-size=${Math.max(16, input.memoryLimitMb)}`, workerPath, input.mode, pathToFileURL(input.entrypoint).href, input.handlerId ?? ""], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { PATH: process.env.PATH ?? "", NODE_NO_WARNINGS: "1" }
+    });
+    let stdout = "";
+    let stderr = "";
+    const maxOutput = 1_000_000;
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`plugin_timeout:${input.timeoutMs}`));
+    }, input.timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if (stdout.length > maxOutput) {
+        child.kill("SIGKILL");
+        reject(new Error("plugin_output_limit_exceeded"));
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-8_000); });
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`plugin_process_failed:${code ?? signal ?? "unknown"}:${stderr.trim()}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout.trim() || "null"));
+      } catch {
+        reject(new Error("plugin_output_invalid_json"));
+      }
+    });
+    child.stdin.end(JSON.stringify(input.input ?? {}));
+  });
+}
 
 export async function loadPluginManifests(rootDir: string, options: PluginManifestLoadOptions = {}): Promise<PluginManifestLoadResult> {
   const manifestPaths = await findPluginManifestFiles(rootDir);

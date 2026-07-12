@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "test_id": "D05",
+  "command": "pnpm core:test:collection-safety",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "a58098ce2afc14e45ac4c08e2be8fa0b5ed78835383bc3e7b6480420cbc4b1db",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/collections/safe-collection.ts",
+    "scripts/fixtures/collection-safety.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-collection-safety.mjs"
+  ],
+  "started_at": "2026-07-11T12:45:37.523Z",
+  "completed_at": "2026-07-11T12:45:37.830Z",
+  "assertions": [
+    {
+      "name": "Schema migration has parity across Human, Agent, and Generated Surface",
+      "actual": [
+        "human",
+        "agent",
+        "generated_surface"
+      ],
+      "expected": [
+        "human",
+        "agent",
+        "generated_surface"
+      ]
+    },
+    {
+      "name": "10,000 record migration",
+      "actual": 10000,
+      "expected": 10000
+    },
+    {
+      "name": "No missing records or broken refs",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "Rollback snapshot hash",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Failed migration leaves input snapshot unchanged",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Action cycles and duplicate actions are rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Duplicate trigger runs one side effect",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "Runtime trigger recursion is rejected",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "migrated_records": 10000,
+    "missing_records": 0,
+    "broken_refs": 0,
+    "rollback_hash_equal": true,
+    "migration_sources": [
+      "human",
+      "agent",
+      "generated_surface"
+    ],
+    "rollback_preserved": true,
+    "action_cycle_rejected": true,
+    "duplicate_action_rejected": true,
+    "duplicate_trigger_side_effects": 1,
+    "runtime_cycle_rejected": true
+  }
+}

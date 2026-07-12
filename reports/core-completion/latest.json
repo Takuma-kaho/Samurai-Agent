@@ -1,0 +1,669 @@
+{
+  "schema_version": 1,
+  "scorecard_sha256": "820015afcf61d1bc9a8ecae055778bfbe246d12afc4a3a457027919a773490e7",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "generated_at": "2026-07-12T04:43:46.823Z",
+  "category": null,
+  "score": 10,
+  "maximum_score": 100,
+  "all_gates_passed": false,
+  "complete": false,
+  "tests": [
+    {
+      "id": "A01",
+      "category": "architecture",
+      "command": "pnpm core:test:physical-boundaries",
+      "evidence": "reports/core-completion/evidence/A01.json",
+      "score": 2,
+      "status": "passed",
+      "failures": []
+    },
+    {
+      "id": "A02",
+      "category": "architecture",
+      "command": "pnpm core:test:command-ingress",
+      "evidence": "reports/core-completion/evidence/A02.json",
+      "score": 2,
+      "status": "passed",
+      "failures": []
+    },
+    {
+      "id": "A03",
+      "category": "architecture",
+      "command": "pnpm core:test:command-parity",
+      "evidence": "reports/core-completion/evidence/A03.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "A04",
+      "category": "architecture",
+      "command": "pnpm core:test:command-race",
+      "evidence": "reports/core-completion/evidence/A04.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "A05",
+      "category": "architecture",
+      "command": "pnpm core:test:command-version",
+      "evidence": "reports/core-completion/evidence/A05.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "A06",
+      "category": "architecture",
+      "command": "pnpm core:test:command-contract",
+      "evidence": "reports/core-completion/evidence/A06.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "A07",
+      "category": "architecture",
+      "command": "pnpm core:test:boundaries",
+      "evidence": "reports/core-completion/evidence/A07.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "B01",
+      "category": "durable-execution",
+      "command": "pnpm core:test:durable-work",
+      "evidence": "reports/core-completion/evidence/B01.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "B02",
+      "category": "durable-execution",
+      "command": "pnpm core:test:durable-work",
+      "evidence": "reports/core-completion/evidence/B02.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "B03",
+      "category": "durable-execution",
+      "command": "pnpm core:test:durable-work",
+      "evidence": "reports/core-completion/evidence/B03.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "B04",
+      "category": "durable-execution",
+      "command": "pnpm core:test:durable-work",
+      "evidence": "reports/core-completion/evidence/B04.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "B05",
+      "category": "durable-execution",
+      "command": "pnpm core:test:durable-work",
+      "evidence": "reports/core-completion/evidence/B05.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "B06",
+      "category": "durable-execution",
+      "command": "pnpm core:test:execution-model",
+      "evidence": "reports/core-completion/evidence/B06.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "B07",
+      "category": "durable-execution",
+      "command": "pnpm core:test:event-replay",
+      "evidence": "reports/core-completion/evidence/B07.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source verification failed: ENOENT: no such file or directory, open '/Users/kahotakuma/Desktop/Samurai Agent/apps/server/src/backend-event-routes.ts'"
+      ]
+    },
+    {
+      "id": "B08",
+      "category": "durable-execution",
+      "command": "pnpm backend:external:verify",
+      "evidence": "reports/core-completion/evidence/B08.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "C01",
+      "category": "workspace",
+      "command": "pnpm core:test:migration",
+      "evidence": "reports/core-completion/evidence/C01.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "C02",
+      "category": "workspace",
+      "command": "pnpm core:test:sqlite-race",
+      "evidence": "reports/core-completion/evidence/C02.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "C03",
+      "category": "workspace",
+      "command": "pnpm core:test:file-transaction",
+      "evidence": "reports/core-completion/evidence/C03.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "C04",
+      "category": "workspace",
+      "command": "pnpm core:test:restore",
+      "evidence": "reports/core-completion/evidence/C04.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "C05",
+      "category": "workspace",
+      "command": "pnpm core:test:portability",
+      "evidence": "reports/core-completion/evidence/C05.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "C06",
+      "category": "workspace",
+      "command": "pnpm core:test:search-index",
+      "evidence": "reports/core-completion/evidence/C06.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "C07",
+      "category": "workspace",
+      "command": "pnpm core:test:doctor",
+      "evidence": "reports/core-completion/evidence/C07.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "D01",
+      "category": "surface",
+      "command": "pnpm core:test:presentation",
+      "evidence": "reports/core-completion/evidence/D01.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "D02",
+      "category": "surface",
+      "command": "pnpm core:test:generated-surface",
+      "evidence": "reports/core-completion/evidence/D02.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "D03",
+      "category": "surface",
+      "command": "pnpm core:test:generated-surface",
+      "evidence": "reports/core-completion/evidence/D03.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "command mismatch",
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "D04",
+      "category": "surface",
+      "command": "pnpm core:test:surface-lifecycle",
+      "evidence": "reports/core-completion/evidence/D04.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "D05",
+      "category": "surface",
+      "command": "pnpm core:test:collection-safety",
+      "evidence": "reports/core-completion/evidence/D05.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "D06",
+      "category": "surface",
+      "command": "pnpm core:test:attachment",
+      "evidence": "reports/core-completion/evidence/D06.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "D07",
+      "category": "surface",
+      "command": "pnpm core:test:artifact",
+      "evidence": "reports/core-completion/evidence/D07.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "D08",
+      "category": "surface",
+      "command": "pnpm core:test:plugin-isolation",
+      "evidence": "reports/core-completion/evidence/D08.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E01",
+      "category": "learning",
+      "command": "pnpm core:test:user-model",
+      "evidence": "reports/core-completion/evidence/E01.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E02",
+      "category": "learning",
+      "command": "pnpm core:test:profile-isolation",
+      "evidence": "reports/core-completion/evidence/E02.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E03",
+      "category": "learning",
+      "command": "pnpm core:test:session-compaction",
+      "evidence": "reports/core-completion/evidence/E03.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E04",
+      "category": "learning",
+      "command": "pnpm core:test:federated-retrieval",
+      "evidence": "reports/core-completion/evidence/E04.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E05",
+      "category": "learning",
+      "command": "pnpm core:test:progressive-skills",
+      "evidence": "reports/core-completion/evidence/E05.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E06",
+      "category": "learning",
+      "command": "pnpm core:test:background-review",
+      "evidence": "reports/core-completion/evidence/E06.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E07",
+      "category": "learning",
+      "command": "pnpm core:test:wiki-learning-loop",
+      "evidence": "reports/core-completion/evidence/E07.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E08",
+      "category": "learning",
+      "command": "pnpm core:test:task-evaluation",
+      "evidence": "reports/core-completion/evidence/E08.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E09",
+      "category": "learning",
+      "command": "pnpm core:test:curator-graph",
+      "evidence": "reports/core-completion/evidence/E09.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "E10",
+      "category": "learning",
+      "command": "pnpm core:test:learning-guardrails",
+      "evidence": "reports/core-completion/evidence/E10.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "F01",
+      "category": "gateway",
+      "command": "pnpm core:test:automation-schedule",
+      "evidence": "reports/core-completion/evidence/F01.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "F02",
+      "category": "gateway",
+      "command": "pnpm core:test:automation-race",
+      "evidence": "reports/core-completion/evidence/F02.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "F03",
+      "category": "gateway",
+      "command": "pnpm core:test:gateway-restart",
+      "evidence": "reports/core-completion/evidence/F03.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "F04",
+      "category": "gateway",
+      "command": "pnpm core:test:owner-security",
+      "evidence": "reports/core-completion/evidence/F04.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "F05",
+      "category": "gateway",
+      "command": "pnpm core:test:signed-gateway-sandbox",
+      "evidence": "reports/core-completion/evidence/F05.json",
+      "score": 2,
+      "status": "passed",
+      "failures": []
+    },
+    {
+      "id": "G01",
+      "category": "operations",
+      "command": "pnpm core:test:correlation",
+      "evidence": "reports/core-completion/evidence/G01.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "G02",
+      "category": "operations",
+      "command": "pnpm core:test:retention",
+      "evidence": "reports/core-completion/evidence/G02.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "G03",
+      "category": "operations",
+      "command": "pnpm core:test:privacy",
+      "evidence": "reports/core-completion/evidence/G03.json",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "G04",
+      "category": "operations",
+      "command": "pnpm core:soak",
+      "evidence": "reports/core-completion/evidence/G04.json",
+      "score": 2,
+      "status": "passed",
+      "failures": []
+    },
+    {
+      "id": "G05",
+      "category": "operations",
+      "command": "pnpm core:test:release-hygiene",
+      "evidence": "reports/core-completion/evidence/G05.json",
+      "score": 2,
+      "status": "passed",
+      "failures": []
+    }
+  ],
+  "gates": [
+    {
+      "id": "gate-typecheck",
+      "command": "pnpm typecheck",
+      "evidence": "reports/core-completion/evidence/gate-typecheck.json",
+      "score": 0,
+      "status": "missing",
+      "failures": [
+        "evidence missing"
+      ]
+    },
+    {
+      "id": "gate-tests",
+      "command": "pnpm test",
+      "evidence": "reports/core-completion/evidence/gate-tests.json",
+      "score": 0,
+      "status": "missing",
+      "failures": [
+        "evidence missing"
+      ]
+    },
+    {
+      "id": "gate-migration",
+      "command": "pnpm core:test:migration",
+      "evidence": "reports/core-completion/evidence/C01.json",
+      "evidence_test_id": "C01",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "gate-restart",
+      "command": "pnpm core:test:durable-work",
+      "evidence": "reports/core-completion/evidence/B01.json",
+      "evidence_test_id": "B01",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "gate-race",
+      "command": "pnpm core:test:automation-race",
+      "evidence": "reports/core-completion/evidence/F02.json",
+      "evidence_test_id": "F02",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "gate-soak",
+      "command": "pnpm core:soak",
+      "evidence": "reports/core-completion/evidence/G04.json",
+      "evidence_test_id": "G04",
+      "score": 2,
+      "status": "passed",
+      "failures": []
+    },
+    {
+      "id": "gate-real-backend",
+      "command": "pnpm backend:external:verify",
+      "evidence": "reports/core-completion/evidence/B08.json",
+      "evidence_test_id": "B08",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "gate-gateway",
+      "command": "pnpm core:test:signed-gateway-sandbox",
+      "evidence": "reports/core-completion/evidence/F05.json",
+      "evidence_test_id": "F05",
+      "score": 2,
+      "status": "passed",
+      "failures": []
+    },
+    {
+      "id": "gate-release-hygiene",
+      "command": "pnpm core:test:release-hygiene",
+      "evidence": "reports/core-completion/evidence/G05.json",
+      "evidence_test_id": "G05",
+      "score": 2,
+      "status": "passed",
+      "failures": []
+    },
+    {
+      "id": "gate-generated-surface",
+      "command": "pnpm core:test:generated-surface",
+      "evidence": "reports/core-completion/evidence/D02.json",
+      "evidence_test_id": "D02",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    },
+    {
+      "id": "gate-wiki-loop",
+      "command": "pnpm core:test:wiki-learning-loop",
+      "evidence": "reports/core-completion/evidence/E07.json",
+      "evidence_test_id": "E07",
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "test_id": "E09",
+  "command": "pnpm core:test:curator-graph",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "bb72777007d3c66941c1bf0a2737a252048aafae18e773fb4f160c97622d6333",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/learning/src/curator/resource-graph.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/curator-resource-graph.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-curator-resource-graph.mjs"
+  ],
+  "started_at": "2026-07-11T09:50:11.845Z",
+  "completed_at": "2026-07-11T09:50:11.978Z",
+  "assertions": [
+    {
+      "name": "Duplicate, overlap, conflict, supersede and derivation edges persist",
+      "actual": [
+        "conflicts",
+        "derived_from",
+        "duplicate",
+        "overlaps",
+        "supersedes"
+      ],
+      "expected": [
+        "conflicts",
+        "derived_from",
+        "duplicate",
+        "overlaps",
+        "supersedes"
+      ]
+    },
+    {
+      "name": "Pin, stale, archive and correction/usage lifecycle rules work",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Memory, Wiki, Skill and Surface pattern participate",
+      "actual": [
+        "memory",
+        "wiki",
+        "skill",
+        "surface_pattern"
+      ],
+      "expected": [
+        "memory",
+        "wiki",
+        "skill",
+        "surface_pattern"
+      ]
+    },
+    {
+      "name": "Curator graph restores exactly from snapshot",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "relations": [
+      "conflicts",
+      "derived_from",
+      "duplicate",
+      "overlaps",
+      "supersedes"
+    ],
+    "edge_count": 8,
+    "pinned_protected": true,
+    "stale_detected": true,
+    "archive_detected": true,
+    "correction_review": true,
+    "snapshot_rollback_exact": true,
+    "resource_kinds": [
+      "memory",
+      "wiki",
+      "skill",
+      "surface_pattern"
+    ]
+  }
+}

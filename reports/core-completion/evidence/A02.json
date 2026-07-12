@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "test_id": "A02",
+  "command": "pnpm core:test:command-ingress",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "cc391b989ab5d8beed409bbd89a1fcb4f8272e267b830253c6347c47ddc333ce",
+  "source_files": [
+    "apps/desktop/src/main.ts",
+    "apps/server/src/api-server.ts",
+    "apps/server/src/index.ts",
+    "apps/server/src/middleware/security.ts",
+    "apps/server/src/routes/backend-events.ts",
+    "apps/server/src/streams/backend-events.ts",
+    "apps/server/src/workers/automation-scheduler.ts",
+    "apps/web/src/lib/api.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/commands/domain-command-bus.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/domain-command-ingress.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-domain-command-ingress.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-12T03:48:38.695Z",
+  "completed_at": "2026-07-12T03:49:05.367Z",
+  "assertions": [
+    {
+      "name": "Five logical mutation entrances use Domain Command Bus",
+      "actual": 5,
+      "expected": 5
+    },
+    {
+      "name": "Web mutation boundary uses Server API",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Desktop mutation boundary uses Server API",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Direct Server mutations",
+      "actual": 0,
+      "expected": 0
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "real_ingresses": [
+      {
+        "input_source": "runtime_api",
+        "command_id": "session.create"
+      },
+      {
+        "input_source": "surface_operation",
+        "command_id": "artifact.create"
+      },
+      {
+        "input_source": "gateway_inbound",
+        "command_id": "gateway.inbound.route"
+      },
+      {
+        "input_source": "automation",
+        "command_id": "automation.job.run"
+      },
+      {
+        "input_source": "provider_tool_call",
+        "command_id": "artifact.create"
+      }
+    ],
+    "web_api_boundary": true,
+    "desktop_api_boundary": true,
+    "direct_server_mutations": 0
+  }
+}

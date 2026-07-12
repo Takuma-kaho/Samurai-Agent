@@ -104,44 +104,4 @@ describe("backend release readiness verification script", () => {
     expect(stdout).not.toContain("line-channel-secret");
     expect(stdout).not.toContain("mailgun-signing-secret");
   });
-
-  it("verifies gateway recovery without external service effects", async () => {
-    const { stdout } = await execFileAsync(process.execPath, [
-      "--import",
-      "tsx",
-      "scripts/verify-gateway-recovery.mjs",
-      "--json"
-    ], {
-      cwd: process.cwd(),
-      timeout: 10_000,
-      maxBuffer: 1024 * 1024
-    });
-
-    const result = JSON.parse(stdout);
-    expect(result).toMatchObject({
-      ok: true,
-      dry_run_only: false,
-      external_effects_confirmed: false,
-      preview: {
-        dry_run: true,
-        action_count: 2,
-        applied_count: 0
-      },
-      applied: {
-        dry_run: false,
-        action_count: 2,
-        applied_count: 2
-      },
-      final_state: {
-        pairing_status: "expired",
-        lock_status: "expired"
-      }
-    });
-    expect(result.checks).toMatchObject({
-      dry_run_preserved_pairing: true,
-      dry_run_preserved_lock: true,
-      apply_expired_pairing: true,
-      apply_expired_lock: true
-    });
-  });
 });

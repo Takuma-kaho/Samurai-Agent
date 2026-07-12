@@ -520,6 +520,7 @@ describe("agent runtime", () => {
       collection_id: "movies",
       record_id: "movie_1",
       patch_id: "movie_patch_1",
+      expected_version: 1,
       changes: { rating: 4 },
       renderer_capabilities: capabilities
     });
@@ -871,6 +872,7 @@ describe("agent runtime", () => {
       collection_id: "movies",
       record_id: "movie_1",
       patch_id: "movie_kanban_patch_1",
+      expected_version: 1,
       changes: { status: "視聴中" },
       view_id: "movies_kanban",
       renderer_capabilities: capabilities

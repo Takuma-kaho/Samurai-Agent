@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "test_id": "C03",
+  "command": "pnpm core:test:file-transaction",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "4506c6dda11591b8daa45c25167c34b950ded66b7dfc133cf6487df1bd860516",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/workspace-file-transaction-recovery.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-workspace-file-transaction-recovery.mjs"
+  ],
+  "started_at": "2026-07-11T13:37:58.979Z",
+  "completed_at": "2026-07-11T13:37:59.141Z",
+  "assertions": [
+    {
+      "name": "Failure injection points",
+      "actual": [
+        "planned",
+        "staged",
+        "db_committed",
+        "renamed"
+      ],
+      "expected": [
+        "planned",
+        "staged",
+        "db_committed",
+        "renamed"
+      ]
+    },
+    {
+      "name": "Every crash completes or rolls back",
+      "actual": 4,
+      "expected": 4
+    },
+    {
+      "name": "No pending file transaction remains",
+      "actual": 0,
+      "expected": 0
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "failure_points": [
+      {
+        "phase": "planned",
+        "version": 1,
+        "action": "rollback"
+      },
+      {
+        "phase": "staged",
+        "version": 1,
+        "action": "rollback"
+      },
+      {
+        "phase": "db_committed",
+        "version": 2,
+        "action": "complete"
+      },
+      {
+        "phase": "renamed",
+        "version": 2,
+        "action": "complete"
+      }
+    ],
+    "consistent_outcomes": 4,
+    "pending_transactions": 0
+  }
+}

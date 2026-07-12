@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "test_id": "G02",
+  "command": "pnpm core:test:retention",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "2be8910664ecd73b44b854cdf41f0db2fb7d38c3034746a4954fe9f5101c4a74",
+  "source_files": [
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/resource-retention.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-resource-retention.mjs"
+  ],
+  "started_at": "2026-07-11T13:35:33.481Z",
+  "completed_at": "2026-07-11T13:35:51.182Z",
+  "assertions": [
+    {
+      "name": "Queue limit rejects overflow and trims completed delivery history",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Expired concurrency locks are reclaimed",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "Context token and Workspace file limits are reported",
+      "actual": {
+        "tokens": 4000,
+        "file_bytes": 2596044
+      },
+      "expected": {
+        "tokens": 4000,
+        "file_bytes": "<=104857600"
+      }
+    },
+    {
+      "name": "Event, backup, snapshot and index retention applies",
+      "actual": {
+        "events": 2,
+        "backups": 2,
+        "snapshots": 2,
+        "index": true
+      },
+      "expected": {
+        "events": 2,
+        "backups": 2,
+        "snapshots": 2,
+        "index": true
+      }
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "queue_active": 2,
+    "queue_overflow_rejected": true,
+    "concurrency_reclaimed": 1,
+    "context_token_limit": 4000,
+    "file_bytes": 2596044,
+    "event_retained": 2,
+    "backup_retained": 2,
+    "snapshot_retained": 2,
+    "index_rebuilt": true
+  }
+}

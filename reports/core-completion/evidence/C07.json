@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "test_id": "C07",
+  "command": "pnpm core:test:doctor",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "f7a1cb33170c48363df81d39bce42f0d1d8465be361ddae596e2e71239f71d17",
+  "source_files": [
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/workspace-doctor.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-workspace-doctor.mjs"
+  ],
+  "started_at": "2026-07-11T08:31:24.696Z",
+  "completed_at": "2026-07-11T08:31:24.831Z",
+  "assertions": [
+    {
+      "name": "Doctor detects all corruption fixtures",
+      "actual": 5,
+      "expected": 5
+    },
+    {
+      "name": "Automatic repair leaves healthy Workspace",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Automatic repair leaves zero issues",
+      "actual": 0,
+      "expected": 0
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "detected_codes": [
+      "collection_record_broken_ref",
+      "memory_file_unindexed",
+      "session_search_index_stale",
+      "skill_file_unindexed",
+      "workspace_layout_missing"
+    ],
+    "required_detected": 5,
+    "applied": [
+      "ensure_workspace_layout",
+      "collection.remove_broken_refs",
+      "memory.reindex",
+      "skill.reindex",
+      "session_search.reindex"
+    ],
+    "final_health_ok": true,
+    "final_issue_count": 0
+  }
+}

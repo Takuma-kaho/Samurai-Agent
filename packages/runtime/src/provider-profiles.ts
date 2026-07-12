@@ -2,6 +2,7 @@ import type { SupportedLocale } from "@samurai-agent/core-schemas";
 import type { MemoryCandidate } from "@samurai-agent/memory";
 import type { MessageRecord } from "@samurai-agent/core-schemas";
 import type { ProviderDiagnostics, ProviderId, ProviderInput, ProviderOutput, ProviderToolCall } from "./provider";
+import { requireDomainCommandEntry } from "@samurai-agent/action-catalog";
 
 export interface ProviderCredential {
   apiKey: string;
@@ -448,42 +449,10 @@ function gatewayBoundarySummary(input: ProviderInput): string {
   ].join("\n");
 }
 
-const artifactParameters = {
-  type: "object",
-  additionalProperties: false,
-  required: ["title", "content"],
-  properties: {
-    title: { type: "string" },
-    content: { type: "string" },
-    preview: { type: "string" }
-  }
-} as const;
-
-const externalSendParameters = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    summary: { type: "string" }
-  }
-} as const;
-
-const deleteParameters = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    target: { type: "string" },
-    reason: { type: "string" }
-  }
-} as const;
-
-const rememberTopicParameters = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    topic: { type: "string" },
-    content: { type: "string" }
-  }
-} as const;
+const artifactParameters = requireDomainCommandEntry("artifact.create").input_schema;
+const externalSendParameters = requireDomainCommandEntry("external.send.prepare").input_schema;
+const deleteParameters = requireDomainCommandEntry("workspace.delete").input_schema;
+const rememberTopicParameters = requireDomainCommandEntry("memory.topic.create").input_schema;
 
 function toolDefinitions() {
   return [

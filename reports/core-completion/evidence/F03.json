@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "test_id": "F03",
+  "command": "pnpm core:test:gateway-restart",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "a693ac6cadfb5af5b3eeee6cbb04bf45459529a4e55a9de7767bd92921a7e147",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/gateway-delivery-restart.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-gateway-delivery-restart.mjs"
+  ],
+  "started_at": "2026-07-11T10:02:34.786Z",
+  "completed_at": "2026-07-11T10:02:58.501Z",
+  "assertions": [
+    {
+      "name": "Inbound idempotency produces one delivery side effect",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "Gateway session mapping survives restart",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Outbound retry due time and attempt survive restart",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Provider receipt survives second restart",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "inbound_dedup_side_effects": 1,
+    "session_mapping_restored": true,
+    "outbound_retry_restored": true,
+    "retry_attempts": 2,
+    "receipt_restored": true,
+    "delivery_status": "delivered"
+  }
+}

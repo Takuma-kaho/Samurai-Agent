@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "test_id": "D07",
+  "command": "pnpm core:test:artifact",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "ad7743301a75002c1bba35b5d475ba15fdb680d5b4b7e19fdc7382ee27b31a96",
+  "source_files": [
+    "packages/action-catalog/src/index.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/artifact-revisions.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-artifact-revisions.mjs"
+  ],
+  "started_at": "2026-07-11T09:00:30.670Z",
+  "completed_at": "2026-07-11T09:00:30.937Z",
+  "assertions": [
+    {
+      "name": "Immutable revision lineage",
+      "actual": 2,
+      "expected": 2
+    },
+    {
+      "name": "Revision hashes differ and old revision redisplays",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Missing source repaired from verified blob",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Every revision and repair audited",
+      "actual": 3,
+      "expected": 3
+    },
+    {
+      "name": "Export/import preserves hashes",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "revisions": 2,
+    "lineage": [
+      "artifact_revision_bbb1ca6b2fbf479d",
+      "artifact_revision_bbb1ca6b2fbf479d"
+    ],
+    "hashes_unique": true,
+    "old_revision_redisplay": true,
+    "missing_source_repaired": true,
+    "audit_records": 3,
+    "export_import_hash_equal": true
+  }
+}

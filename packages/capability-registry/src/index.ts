@@ -202,6 +202,32 @@ export const proposalCapabilityManifest: CapabilityManifest = {
       default_decision: "allow_auto"
     },
     {
+      operation: "artifact.revise",
+      description: "Create an immutable revision of a local Artifact.",
+      input_schema_ref: "artifact.revise.input",
+      output_schema_ref: "artifact.revise.output",
+      risk: "low",
+      scope: "artifact",
+      reversibility: true,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "owner_approved_policy", "agent_reasoning"],
+      default_decision: "allow_with_audit"
+    },
+    {
+      operation: "artifact.repair",
+      description: "Restore a missing Artifact revision file from its verified local blob.",
+      input_schema_ref: "artifact.repair.input",
+      output_schema_ref: "artifact.repair.output",
+      risk: "low",
+      scope: "artifact",
+      reversibility: true,
+      external_impact: false,
+      secret_requirement: "none",
+      allowed_instruction_sources: ["owner_instruction", "scheduled_context"],
+      default_decision: "allow_with_audit"
+    },
+    {
       operation: "memory.session.create",
       description: "Keep a session-scoped memory note.",
       input_schema_ref: "memory.session.create.input",
@@ -545,6 +571,8 @@ export const proposalCapabilityManifest: CapabilityManifest = {
   ui_surfaces: ["chat", "artifact", "context_drawer", "audit"],
   agent_tools: [
     "artifact.create",
+    "artifact.revise",
+    "artifact.repair",
     "file.read",
     "file.list",
     "file.write",

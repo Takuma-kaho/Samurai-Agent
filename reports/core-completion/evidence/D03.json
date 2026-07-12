@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "test_id": "D03",
+  "command": "pnpm core:test:surface-lifecycle",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "7835d9dd43bef4f3508e6e28780fb3748708c67ff4b068cdcba8250157f6e0f5",
+  "source_files": [
+    "apps/server/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/index.ts",
+    "packages/runtime/src/presentation/generated-surface.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/generated-surface-lifecycle.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-generated-surface-lifecycle.mjs"
+  ],
+  "started_at": "2026-07-11T08:48:34.356Z",
+  "completed_at": "2026-07-11T08:48:34.655Z",
+  "assertions": [
+    {
+      "name": "Generated, Human, and Agent command parity",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "Generated action is audited",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Generated action uses normal version validation",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "command_parity": [
+      {
+        "operation": "collection.patch.apply",
+        "status": "completed",
+        "decision": "allow_with_audit",
+        "version": 2,
+        "data": {
+          "name": "done"
+        },
+        "audited": true
+      },
+      {
+        "operation": "collection.patch.apply",
+        "status": "completed",
+        "decision": "allow_with_audit",
+        "version": 2,
+        "data": {
+          "name": "done"
+        },
+        "audited": true
+      },
+      {
+        "operation": "collection.patch.apply",
+        "status": "completed",
+        "decision": "allow_with_audit",
+        "version": 2,
+        "data": {
+          "name": "done"
+        },
+        "audited": true
+      }
+    ],
+    "generated_action_audited": true,
+    "stale_validation_rejected": true,
+    "reload_same_hash": true,
+    "same_surface_id": true,
+    "revisions": 2,
+    "parent_lineage": true,
+    "pinned": true,
+    "cross_client_resource_state": {
+      "name": "done"
+    },
+    "export_import_hash_equal": true,
+    "interactions": [
+      "action",
+      "pinned"
+    ]
+  }
+}

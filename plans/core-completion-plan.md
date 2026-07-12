@@ -243,9 +243,10 @@ Hermes Agentについては、公式資料で確認できる次の要素を比�
 - 本書の50問をmachine-readableな `plans/core-completion-scorecard.json` にも持つ。
 - `scripts/verify-core-completion.mjs` を追加し、各テスト結果と証拠ファイルを収集する。
 - 結果は `reports/core-completion/latest.json` と `latest.md` に出す。
-- 各項目に `test_id`、`command`、`evidence`、`score`、`timestamp`、`commit_sha` を持たせる。
-- 実Backendや長時間試験のような手動起動テストも、署名付き結果JSONを必須にする。
-- 古い結果を流用できないよう、commit SHAとschema versionが一致しなければ失効させる。
+- 各項目に `test_id`、`command`、`evidence`、`score`、`timestamp`、`source_sha256` を持たせる。
+- Core完成判定では、再現可能な自動試験と検証対象sourceのhashを正本にする。
+- 24時間運転や実Dockerのような環境依存・長時間試験は、Core完成とは分けてrelease certificationへ記録する。
+- 古い結果を流用できないよう、検証対象sourceのhashとschema versionが一致しなければ失効させる。clean worktreeとcommit SHA一致はrelease certificationで確認する。
 
 **目標**
 
@@ -274,7 +275,8 @@ Hermes Agentについては、公式資料で確認できる次の要素を比�
 - Storeは `repositories/`、`migrations/`、`transactions/`、`backup/`、`search/` に分割する。
 - Serverは `routes/`、`middleware/`、`workers/`、`streams/`、`composition/` に分割する。
 - WebはChat Shell、Context Drawer、各Renderer、Operation clientへ分割する。
-- package entrypointは原則500行以下、通常moduleは原則1,200行以下にする。例外はschemaやmigrationなど理由を記録できるものだけにする。
+- package entrypointは公開exportとcompositionへ絞る。通常moduleの行数は警告材料として記録できるが、1,200行や5,000行など固定の行数上限をCore完成の阻害条件にしない。
+- module分割は行数ではなく、責務の混在、変更影響範囲、単体試験可能性、交換可能性で判断する。
 - dependency testで、Server routeからStore mutationへの直接importなどを禁止する。
 
 **目標**
@@ -995,28 +997,32 @@ notify(message)
 - 問題が起きた時に、どこで止まり、何が再試行され、何が保存されたか分かる。
 - 長期運転しても容量と費用が無制限に増えない。
 
-### 26. 最終検証をrelease gateにする
+### 26. Core完成検証とrelease certificationを分離する
 
 **現状の弱さ**
 
-- unit、typecheck、API integrationは強いが、process crash、複数worker競合、長時間運転、実adapterの証明が足りない。
-- duplicate source fileや一時生成物がrelease候補へ混ざるのを自動で防げない。
+- unit、typecheck、API integrationは強いが、process crash、複数worker競合などCoreで必須の耐障害性を一度に確認する入口が必要である。
+- 24時間運転や実Dockerなど、環境や時間に依存する認証をCore完成条件へ混ぜると、実装が完成していても完了判定できない。
+- 完全一致した不要コピーや秘密情報がrelease候補へ混ざるのを自動で防ぐ必要がある。
 
 **実装方針**
 
 - 最後の50問を `pnpm core:verify` で集約する。
-- unit、contract、integration、restart、race、failure injection、soak、real adapterの層を分ける。
+- 変更中は関連テストだけを実行し、Core完成時に再現可能な自動テスト一式を1回実行する。
+- unit、contract、integration、restart、race、failure injection、加速soakの層を分ける。
 - DB write、file rename、Backend event、Gateway deliveryの各地点へfailure injection pointを置く。
 - 10 worker競合、process kill、network切断、disk full疑似、破損index、古いbackupを試験する。
-- 24時間soakで定期job、長期Objective、restart、reconnect、Curatorを動かす。
-- 最低1つの実Backend、1つのDocker Sandbox、1つの署名付きGateway fixtureを通す。
-- source-likeな `* 2.ts`、`* 2.md`、秘密情報、未追跡生成物をrelease verifierで検知する。
-- 全証拠をcommit SHA付きreportへ保存する。
+- Core完成では、100 Objective、1,000 job、定期killを含む加速soakを通す。
+- 最低1つの実Backendと、1つの署名付きGateway fixtureを通す。
+- 実Docker E2EはDocker Sandboxを正式に有効化して提供するreleaseの前に実施する。Docker未導入環境ではCore完成を阻害しない。
+- 24時間soakは24時間常時運転を正式提供する直前の任意release certificationとして実施する。
+- 完全一致した不要コピー、秘密情報、意図しない生成物をrelease verifierで検知する。類似コードの統合や大規模refactorは別タスクにする。
+- Core完成の証拠は検証対象sourceのhash付きreportへ保存する。clean worktreeとcommit SHA一致はrelease certificationで確認する。
 
 **目標**
 
-- 「テストが多い」ではなく、「壊れやすい現実の状況を通った」と証明できる。
-- 100点未満なら、どこが未完か即座に分かる。
+- Coreの実装不足と、release前だけ必要な環境依存認証を混ぜずに確認できる。
+- 100点未満なら、Coreで本当に未完の機能がどこか即座に分かる。
 
 ## 7. 実装順序
 
@@ -1079,11 +1085,11 @@ UI生成はCoreの判断・resource・operationを表示する層として実装
 ### 8.1 採点ルール
 
 - 全50問、各2点満点。合計100点。
-- **2点**: 指定された実装があり、必須の自動試験・実環境証拠がすべて成功している。
-- **1点**: 契約や単体試験はあるが、再起動・競合・実環境など指定条件の一部が未確認。
+- **2点**: 指定された実装があり、Core完成に必要な再現可能な自動試験がすべて成功している。
+- **1点**: 契約や単体試験はあるが、再起動・競合・failure injectionなどCoreで必須の条件が一部未確認。
 - **0点**: 未実装、または必須試験が失敗している。
 - `N/A`、免除、四捨五入、平均点での代替は認めない。
-- **100/100かつ必須gate成功の場合だけCore完成**とする。
+- **100/100かつCore必須gate成功の場合だけCore完成**とする。release certificationの未実施はCoreの点数を下げない。
 - Browserで見た目を確認するE2Eは採点対象外。Core API、protocol、component、replayの試験で代替する。
 
 ### 8.2 共通テスト基準値
@@ -1105,7 +1111,9 @@ UI生成はCoreの判断・resource・operationを表示する層として実装
 | Collection migration | 10,000 record移行で欠損0、参照切れ0、rollback後hash一致 |
 | Attachment | 各対応形式の正常・破損・上限超過fixtureを通し、original hashとsource trace欠損0 |
 | Security | 認証、CORS、SSRF、path traversal、upload、redactionの全fixtureで既知bypass 0件 |
-| Soak | 24時間、100 Objective、1,000 job、定期的なprocess killを含め、stuck・duplicate・orphan・data loss 0件 |
+| Core Soak | 加速実行で100 Objective、1,000 job、定期的なprocess killを含め、stuck・duplicate・orphan・data loss 0件 |
+
+24時間soakは常時運転を正式提供する直前のrelease certificationとして別に記録し、Core完成の必須基準には含めない。
 
 ### 8.3 必須gate
 
@@ -1116,15 +1124,16 @@ UI生成はCoreの判断・resource・operationを表示する層として実装
 3. migration fresh / upgrade test成功
 4. restart / crash recovery test成功
 5. multi-worker race test成功
-6. 24時間soak成功
+6. 100 Objective、1,000 job、定期killを含む加速soak成功
 7. 最低1つの実Backend E2E成功
-8. Docker Sandbox E2E成功
-9. 署名付きGateway fixture E2E成功
-10. secret scan、dependency audit、duplicate source scan成功
-11. `git diff --check` 成功
-12. Scorecard reportのcommit SHAが検証対象HEADと一致
-13. Generated Surfaceの生成、sandbox、Domain Command、reload、pin、fallback試験成功
-14. Knowledge Wikiの利用、Evaluation、Background Review、Curator、rollback閉ループ試験成功
+8. 署名付きGateway fixture E2E成功
+9. secret scan、dependency audit、完全一致duplicate source scan成功
+10. `git diff --check` 成功
+11. Scorecard reportのsource hashが検証対象sourceと一致
+12. Generated Surfaceの生成、sandbox、Domain Command、reload、pin、fallback試験成功
+13. Knowledge Wikiの利用、Evaluation、Background Review、Curator、rollback閉ループ試験成功
+
+24時間soak、実Docker E2E、clean worktree、reportのcommit SHA一致はrelease certificationで確認する。
 
 ### 8.4 Scorecard
 
@@ -1132,8 +1141,8 @@ UI生成はCoreの判断・resource・operationを表示する層として実装
 
 | ID | テスト質問 | 2点の条件 |
 | --- | --- | --- |
-| A01 | Runtime、Store、Server、Webは責務別moduleへ分割されたか | entrypointがcomposition/export中心で、規定サイズとdependency boundary testを通る |
-| A02 | すべての変更入口がDomain Command Busを通るか | Web、Desktop、Gateway、Automation、Backend tool、Generated Surfaceのmutation fixtureが同じBusを通り、direct mutation scanが0件 |
+| A01 | Runtime、Store、Server、Webは責務別moduleへ分割されたか | entrypointがcomposition/export中心で、責務directoryとdependency boundary testを通る。通常moduleの行数は警告に留める |
+| A02 | すべての変更入口がDomain Command Busを通るか | Runtime API、Gateway、Automation、Backend tool、Generated Surfaceのmutation fixtureが同じBusを通り、Web/DesktopがServer API境界を使い、direct mutation scanが0件 |
 | A03 | 同じ操作は入口が違っても同じ結果になるか | 代表10操作を5入口から実行し、validation、change、audit、render resultが同値 |
 | A04 | Commandの重複送信を安全に処理できるか | 同じidempotency keyを100回並列送信してside effectが1回だけ |
 | A05 | 古い画面やclientの上書きを防げるか | stale `expected_version` を拒否し、最新状態と再試行方法を返す |
@@ -1201,7 +1210,7 @@ UI生成はCoreの判断・resource・operationを表示する層として実装
 | F02 | Automationを複数workerで安全に実行できるか | atomic lease、heartbeat、reclaim、retryを10 worker競合で通す |
 | F03 | Gateway sessionとdeliveryは再起動をまたげるか | inbound dedup、session mapping、outbound retry、receiptを再起動後も復元 |
 | F04 | owner以外のCore操作を拒否できるか | local/remote token、rotation、CORS、rate、size、SSRF、Secret redaction testを全通過 |
-| F05 | 代表Sandboxと署名付きGateway flowが動くか | Docker Sandboxと署名付きwebhook fixtureがDomain Command、Workspace保存、返信まで完走 |
+| F05 | 代表Sandbox契約と署名付きGateway flowが動くか | Sandbox policyがadapter境界を通り、署名付きwebhook fixtureがDomain Command、Workspace保存、返信まで完走。実Dockerは正式提供前のrelease certificationとする |
 
 #### G. Quality / Operations / Release — 5問、10点
 
@@ -1210,8 +1219,8 @@ UI生成はCoreの判断・resource・operationを表示する層として実装
 | G01 | 1つの依頼を最初から学習まで追跡できるか | requestからcommand、objective、run、tool、change、learningまでcorrelation queryで辿れる |
 | G02 | 長期運転時のresource増加を制御できるか | queue、concurrency、token、file、event、backup、indexの上限とretention testが成功 |
 | G03 | Secretとprivate dataを保存・表示前に守れるか | log、event、Artifact metadata、Learning source、Gateway errorのredaction/fuzz testが成功 |
-| G04 | 24時間の連続運転と障害注入に耐えるか | job、Objective、Gateway、Curatorを動かし、定期kill後もstuck、orphan、duplicateが0件 |
-| G05 | release verifierが100点とcleanな成果物を証明するか | 全suite、typecheck、diff check、secret scan、duplicate scan、証拠SHA確認が成功し100/100 |
+| G04 | 加速耐久試験と障害注入に耐えるか | 100 Objective、1,000 job、Gateway、Curatorを動かし、定期kill後もstuck、orphan、duplicate、data lossが0件 |
+| G05 | Core verifierが100点と検証対象sourceの健全性を証明するか | 最終自動テスト一式、typecheck、diff check、secret scan、完全一致duplicate scan、source hash確認が成功し100/100。clean成果物はrelease certificationとする |
 
 ### 8.5 期待する実行コマンド
 

@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "test_id": "C04",
+  "command": "pnpm core:test:restore",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "7c255f40db0ba57c00c5d5e470d0eb0a2735e2b98742173f4bdf046902069bc9",
+  "source_files": [
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/workspace-restore-atomicity.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-workspace-restore-atomicity.mjs"
+  ],
+  "started_at": "2026-07-11T08:17:28.098Z",
+  "completed_at": "2026-07-11T08:17:28.345Z",
+  "assertions": [
+    {
+      "name": "Restore failure points",
+      "actual": [
+        "extract",
+        "hash_verify",
+        "swap"
+      ],
+      "expected": [
+        "extract",
+        "hash_verify",
+        "swap"
+      ]
+    },
+    {
+      "name": "Current Workspace preserved after every failure",
+      "actual": 3,
+      "expected": 3
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "failure_points": [
+      "extract",
+      "hash_verify",
+      "swap"
+    ],
+    "outcomes": [
+      {
+        "phase": "extract",
+        "current_preserved": true
+      },
+      {
+        "phase": "hash_verify",
+        "current_preserved": true
+      },
+      {
+        "phase": "swap",
+        "current_preserved": true
+      }
+    ],
+    "preserved_count": 3
+  }
+}

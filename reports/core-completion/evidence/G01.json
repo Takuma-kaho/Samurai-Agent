@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "test_id": "G01",
+  "command": "pnpm core:test:correlation",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "26b66f29f538f85da38af3518b5d5f7c67b6e420cf0e5f96552352d1dfc8f0c4",
+  "source_files": [
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/correlation-trace.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-correlation-trace.mjs"
+  ],
+  "started_at": "2026-07-11T10:24:45.975Z",
+  "completed_at": "2026-07-11T10:25:14.809Z",
+  "assertions": [
+    {
+      "name": "Request traces through command, objective, run, tool, change and learning",
+      "actual": {
+        "commands": 1,
+        "messages": 2,
+        "operations": 1,
+        "objectives": 1,
+        "work_items": 1,
+        "backend_runs": 1,
+        "tool_runs": 1,
+        "workspace_changes": 1,
+        "learning_uses": 1,
+        "reflections": 1
+      },
+      "expected": {
+        "commands": 1,
+        "messages": 2,
+        "operations": 1,
+        "objectives": 1,
+        "work_items": 1,
+        "backend_runs": 1,
+        "tool_runs": 1,
+        "workspace_changes": 1,
+        "learning_uses": 1,
+        "reflections": 1
+      }
+    },
+    {
+      "name": "Correlation graph has all lifecycle relations",
+      "actual": [
+        "calls",
+        "changes",
+        "contains",
+        "decomposes",
+        "dispatches",
+        "executes",
+        "learns_from",
+        "owns",
+        "requested",
+        "reviews",
+        "runs"
+      ],
+      "expected": [
+        "calls",
+        "changes",
+        "contains",
+        "decomposes",
+        "dispatches",
+        "executes",
+        "learns_from",
+        "owns",
+        "requested",
+        "reviews",
+        "runs"
+      ]
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "request_id": "request",
+    "node_counts": {
+      "commands": 1,
+      "messages": 2,
+      "operations": 1,
+      "objectives": 1,
+      "work_items": 1,
+      "backend_runs": 1,
+      "tool_runs": 1,
+      "workspace_changes": 1,
+      "learning_uses": 1,
+      "reflections": 1
+    },
+    "relations": [
+      "calls",
+      "changes",
+      "contains",
+      "decomposes",
+      "dispatches",
+      "executes",
+      "learns_from",
+      "owns",
+      "requested",
+      "reviews",
+      "runs"
+    ],
+    "edge_count": 12
+  }
+}
