@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "test_id": "E08",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-regression.mjs",
+  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "source_sha256": "6569e750e14fbb64e5fcef8c0f8f9728d2e83fa12d67c9bee6f957a4ab4dfb78",
+  "source_files": [
+    "scripts/fixtures/core-additions-learning-gateway.ts",
+    "scripts/fixtures/core-additions-workspace-plugin.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "apps/server/src/api-server.ts",
+    "apps/web/src/components/ManagementSurfaces.vue",
+    "apps/web/src/AppWorkspace.vue"
+  ],
+  "assertions": [
+    {
+      "name": "Plugin failures stay isolated",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "process_isolation": true,
+    "crash_failed": true,
+    "timeout_failed": true,
+    "memory_limit_failed": true,
+    "host_continued": true,
+    "signature_invalid_rejected": true,
+    "version_incompatible_rejected": true,
+    "unsigned_entrypoint_rejected": true,
+    "core_mutations_before_success": 0,
+    "tool_surface_same_manifest": true,
+    "version_exposed": true,
+    "disable_blocks": true,
+    "enable_restores": true,
+    "state_persisted": true
+  }
+}

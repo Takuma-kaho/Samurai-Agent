@@ -11,10 +11,12 @@ try {
   execFileSync(esbuild, [path.join(root, "scripts/fixtures/artifact-revisions.ts"), "--bundle", "--platform=node", "--format=esm", "--external:better-sqlite3", `--outfile=${output}`], { cwd: root, stdio: "inherit" });
   const startedAt = new Date().toISOString(); const rawResult = execFileSync(process.execPath, [output], { cwd: root, encoding: "utf8" }).trim(); const result = JSON.parse(rawResult); const completedAt = new Date().toISOString(); const evidenceDir = path.join(root, "reports/core-completion/evidence"); mkdirSync(evidenceDir, { recursive: true });
   writeFileSync(path.join(evidenceDir, "D07.json"), `${JSON.stringify({ schema_version: 1, test_id: "D07", command: "pnpm core:test:artifact", status: "passed", ...committedSourceEvidence(root, sourceFiles), started_at: startedAt, completed_at: completedAt, assertions: [
-    { name: "Immutable revision lineage", actual: result.revisions, expected: 2 },
+    { name: "Immutable revision lineage", actual: result.revisions, expected: 3 },
+    { name: "Stale base revision is rejected", actual: result.conflict_rejected, expected: true },
+    { name: "Earlier revision restores as a new revision", actual: result.restored_revision, expected: true },
     { name: "Revision hashes differ and old revision redisplays", actual: result.hashes_unique && result.old_revision_redisplay, expected: true },
     { name: "Missing source repaired from verified blob", actual: result.missing_source_repaired, expected: true },
-    { name: "Every revision and repair audited", actual: result.audit_records, expected: 3 },
+    { name: "Every revision and repair audited", actual: result.audit_records, expected: 4 },
     { name: "Export/import preserves hashes", actual: result.export_import_hash_equal, expected: true }
   ], result }, null, 2)}\n`); process.stdout.write(`${rawResult}\n`);
 } finally { rmSync(temporaryRoot, { recursive: true, force: true }); }

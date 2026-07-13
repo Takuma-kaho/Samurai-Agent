@@ -771,6 +771,14 @@ interface SettingsTable {
   llm_wiki_capture_mode?: string;
   skill_capture_mode: string;
   external_provider_role: string;
+  default_backend_id: string | null;
+  updated_at: string;
+}
+
+interface PluginStatesTable {
+  manifest_id: string;
+  enabled: number;
+  version: string;
   updated_at: string;
 }
 
@@ -905,6 +913,7 @@ interface WorkspaceDb {
   tool_runs: ToolRunsTable;
   external_assist_records: ExternalAssistRecordsTable;
   settings: SettingsTable;
+  plugin_states: PluginStatesTable;
   grants: GrantsTable;
   backend_runs: BackendRunsTable;
   backend_events: BackendEventsTable;
@@ -2043,6 +2052,13 @@ export class WorkspaceStore {
         knowledge_wiki_capture_mode TEXT NOT NULL DEFAULT 'auto',
         skill_capture_mode TEXT NOT NULL DEFAULT 'auto',
         external_provider_role TEXT NOT NULL DEFAULT 'assistive',
+        default_backend_id TEXT,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS plugin_states (
+        manifest_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL,
+        version TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )`,
       `CREATE TABLE IF NOT EXISTS grants (
@@ -2214,7 +2230,8 @@ export class WorkspaceStore {
       ["memory_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
       ["knowledge_wiki_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
       ["skill_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
-      ["external_provider_role", "TEXT NOT NULL DEFAULT 'assistive'"]
+      ["external_provider_role", "TEXT NOT NULL DEFAULT 'assistive'"],
+      ["default_backend_id", "TEXT"]
     ] as const;
 
     for (const [name, definition] of columns) {
@@ -2305,6 +2322,7 @@ export class WorkspaceStore {
         knowledge_wiki_capture_mode: settings.knowledge_wiki_capture_mode,
         skill_capture_mode: settings.skill_capture_mode,
         external_provider_role: settings.external_provider_role,
+        default_backend_id: settings.default_backend_id ?? null,
         updated_at: settings.updated_at
       })
       .execute();
@@ -3263,10 +3281,23 @@ export class WorkspaceStore {
     return rows.map(artifactFromRow);
   }
 
-  async createArtifactRevision(input: { artifactId: string; content: string | Uint8Array; producerRunId?: string; extension?: string }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }> {
+  async createArtifactRevision(input: {
+    artifactId: string;
+    content: string | Uint8Array;
+    producerRunId?: string;
+    extension?: string;
+    baseRevisionId?: string;
+    editorSource?: ArtifactRevisionRecord["editor_source"];
+    changeSummary?: string;
+    provenance?: Record<string, JsonValue>;
+  }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }> {
     const artifact = await this.getArtifact(input.artifactId);
     if (!artifact) throw new Error(`artifact_not_found:${input.artifactId}`);
     const revisions = await this.listArtifactRevisions(artifact.id);
+    const currentRevisionId = revisions.at(-1)?.id;
+    if (input.baseRevisionId && input.baseRevisionId !== currentRevisionId) {
+      throw new Error(`artifact_revision_conflict:${currentRevisionId ?? "none"}`);
+    }
     const revisionNumber = (revisions.at(-1)?.revision ?? 0) + 1;
     const extension = safeArtifactExtension((input.extension ?? path.extname(artifact.file_ref.uri).slice(1)) || "bin");
     const content = typeof input.content === "string" ? Buffer.from(input.content) : Buffer.from(input.content);
@@ -3285,6 +3316,10 @@ export class WorkspaceStore {
       revision: revisionNumber,
       parent_revision_id: revisions.at(-1)?.id,
       producer_run_id: input.producerRunId,
+      base_revision_id: input.baseRevisionId,
+      editor_source: input.editorSource,
+      change_summary: input.changeSummary,
+      provenance: input.provenance ?? {},
       source_ref: artifact.file_ref,
       file_ref: { kind: "artifact_revision", id: revisionId, uri: revisionPath, label: `${artifact.title} r${revisionNumber}` },
       blob_ref: { kind: "artifact_blob", id: contentHash, uri: blobPath, label: contentHash },
@@ -3616,6 +3651,41 @@ export class WorkspaceStore {
       return undefined;
     }
     return readFile(path.join(this.rootDir, skill.file_path), "utf8");
+  }
+
+  async patchSkill(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string }): Promise<SkillWithFilePath | undefined> {
+    const current = await this.getSkill(input.id);
+    const raw = await this.readSkillMarkdown(input.id);
+    if (!current || !raw) return undefined;
+    const parsed = parseSkillMarkdownLocal(raw);
+    const now = nowIso();
+    const frontmatter: SkillFrontmatter = SkillFrontmatterSchema.parse({
+      ...parsed.frontmatter,
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.tags !== undefined ? { tags: input.tags } : {}),
+      last_reviewed_at: now
+    });
+    const markdown = ["---", JSON.stringify(frontmatter, null, 2), "---", (input.content ?? parsed.content).trim(), ""].join("\n");
+    const absolutePath = path.join(this.rootDir, current.file_path);
+    const temporaryPath = `${absolutePath}.tmp-${randomUUID()}`;
+    await writeFile(temporaryPath, markdown, { flag: "wx" });
+    try {
+      await rename(temporaryPath, absolutePath);
+      await this.db.updateTable("skill_index").set({
+        title: frontmatter.title,
+        description: frontmatter.description,
+        tags_json: stringify(frontmatter.tags),
+        required_capabilities_json: stringify(frontmatter.required_capabilities),
+        frontmatter_json: stringify(frontmatter),
+        updated_at: now
+      }).where("id", "=", input.id).execute();
+    } catch (error) {
+      await rm(temporaryPath, { force: true });
+      await writeFile(absolutePath, raw).catch(() => undefined);
+      throw error;
+    }
+    return { ...buildSkillIndexEntry(frontmatter), file_path: current.file_path };
   }
 
   async updateSkillState(id: string, state: SkillFrontmatter["state"]): Promise<SkillWithFilePath | undefined> {
@@ -6511,6 +6581,11 @@ export class WorkspaceStore {
     return row ? automationRunFromRow(row) : undefined;
   }
 
+  async listAutomationRuns(limit = 100): Promise<AutomationRunRecord[]> {
+    const rows = await this.db.selectFrom("automation_runs").selectAll().orderBy("started_at", "desc").limit(Math.max(1, Math.min(500, limit))).execute();
+    return rows.map(automationRunFromRow);
+  }
+
   async createReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord> {
     await this.db.insertInto("reflection_runs").values(reflectionRunToRow(run)).execute();
     return run;
@@ -6691,6 +6766,7 @@ export class WorkspaceStore {
       knowledge_wiki_capture_mode: row.knowledge_wiki_capture_mode as SettingsRecord["knowledge_wiki_capture_mode"],
       skill_capture_mode: row.skill_capture_mode as SettingsRecord["skill_capture_mode"],
       external_provider_role: row.external_provider_role as SettingsRecord["external_provider_role"],
+      default_backend_id: row.default_backend_id ?? undefined,
       updated_at: row.updated_at
     };
   }
@@ -6711,11 +6787,22 @@ export class WorkspaceStore {
         knowledge_wiki_capture_mode: next.knowledge_wiki_capture_mode,
         skill_capture_mode: next.skill_capture_mode,
         external_provider_role: next.external_provider_role,
+        default_backend_id: next.default_backend_id ?? null,
         updated_at: next.updated_at
       })
       .where("id", "=", "default")
       .execute();
     return next;
+  }
+
+  async savePluginState(input: { manifestId: string; enabled: boolean; version: string }): Promise<{ manifest_id: string; enabled: boolean; version: string; updated_at: string }> {
+    const updatedAt = nowIso();
+    await this.db.insertInto("plugin_states").values({ manifest_id: input.manifestId, enabled: input.enabled ? 1 : 0, version: input.version, updated_at: updatedAt }).onConflict((oc) => oc.column("manifest_id").doUpdateSet({ enabled: input.enabled ? 1 : 0, version: input.version, updated_at: updatedAt })).execute();
+    return { manifest_id: input.manifestId, enabled: input.enabled, version: input.version, updated_at: updatedAt };
+  }
+
+  async listPluginStates(): Promise<Array<{ manifest_id: string; enabled: boolean; version: string; updated_at: string }>> {
+    return (await this.db.selectFrom("plugin_states").selectAll().orderBy("manifest_id").execute()).map((row) => ({ manifest_id: row.manifest_id, enabled: row.enabled === 1, version: row.version, updated_at: row.updated_at }));
   }
 
   async listGrants(): Promise<GrantRecord[]> {

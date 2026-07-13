@@ -7713,6 +7713,23 @@ rl.on("line", (line) => {
     expect(result.operation.operation).toBe("browser.download_to_workspace");
     expect(result.resource.file_path).toBe("browser/test.txt");
     expect(result.resource.text).toContain("Hello browser");
+    expect(result.resource.snapshot_kind).toBe("html_snapshot");
+  });
+
+  it("does not report an HTML snapshot as a browser screenshot", async () => {
+    const { store, runtime } = await createRuntime();
+
+    await expect(runtime.runBrowserAction({
+      operation: "browser.screenshot",
+      url: "data:text/html,<main>Hello browser</main>",
+      output_path: "browser/test.png"
+    })).rejects.toThrow("browser_screenshot_adapter_unavailable");
+
+    expect(await store.listOperations()).toContainEqual(expect.objectContaining({
+      operation: "browser.screenshot",
+      status: "failed"
+    }));
+    await store.close();
   });
 
   it("applies reflection suggestions into reusable workspace resources", async () => {

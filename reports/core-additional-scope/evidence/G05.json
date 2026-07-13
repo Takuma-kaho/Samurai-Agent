@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "test_id": "G05",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-regression.mjs",
+  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "source_sha256": "6569e750e14fbb64e5fcef8c0f8f9728d2e83fa12d67c9bee6f957a4ab4dfb78",
+  "source_files": [
+    "scripts/fixtures/core-additions-learning-gateway.ts",
+    "scripts/fixtures/core-additions-workspace-plugin.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "apps/server/src/api-server.ts",
+    "apps/web/src/components/ManagementSurfaces.vue",
+    "apps/web/src/AppWorkspace.vue"
+  ],
+  "assertions": [
+    {
+      "name": "Current HEAD fixtures regenerate evidence",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "learning": 10,
+    "workspace": 8,
+    "correlation": {
+      "status": "passed",
+      "request_id": "request",
+      "node_counts": {
+        "commands": 1,
+        "messages": 2,
+        "operations": 1,
+        "objectives": 1,
+        "work_items": 1,
+        "backend_runs": 1,
+        "tool_runs": 1,
+        "workspace_changes": 1,
+        "learning_uses": 1,
+        "reflections": 1
+      },
+      "relations": [
+        "calls",
+        "changes",
+        "contains",
+        "decomposes",
+        "dispatches",
+        "executes",
+        "learns_from",
+        "owns",
+        "requested",
+        "reviews",
+        "runs"
+      ],
+      "edge_count": 12
+    },
+    "doctor": {
+      "status": "passed",
+      "detected_codes": [
+        "collection_record_broken_ref",
+        "memory_file_unindexed",
+        "session_search_index_stale",
+        "skill_file_unindexed",
+        "workspace_layout_missing"
+      ],
+      "required_detected": 5,
+      "applied": [
+        "ensure_workspace_layout",
+        "collection.remove_broken_refs",
+        "memory.reindex",
+        "skill.reindex",
+        "session_search.reindex"
+      ],
+      "final_health_ok": true,
+      "final_issue_count": 0
+    },
+    "parity": {
+      "status": "passed",
+      "representative_operations": 10,
+      "entrances": 5,
+      "executions": 50,
+      "validation_equal": true,
+      "change_equal": true,
+      "audit_equal": true,
+      "render_equal": true
+    },
+    "surface": {
+      "status": "passed",
+      "command_parity": [
+        {
+          "operation": "collection.patch.apply",
+          "status": "completed",
+          "decision": "allow_with_audit",
+          "version": 2,
+          "data": {
+            "name": "done"
+          },
+          "audited": true
+        },
+        {
+          "operation": "collection.patch.apply",
+          "status": "completed",
+          "decision": "allow_with_audit",
+          "version": 2,
+          "data": {
+            "name": "done"
+          },
+          "audited": true
+        },
+        {
+          "operation": "collection.patch.apply",
+          "status": "completed",
+          "decision": "allow_with_audit",
+          "version": 2,
+          "data": {
+            "name": "done"
+          },
+          "audited": true
+        }
+      ],
+      "generated_action_audited": true,
+      "stale_validation_rejected": true,
+      "reload_same_hash": true,
+      "same_surface_id": true,
+      "revisions": 2,
+      "parent_lineage": true,
+      "pinned": true,
+      "cross_client_resource_state": {
+        "name": "done"
+      },
+      "export_import_hash_equal": true,
+      "interactions": [
+        "action",
+        "pinned"
+      ]
+    }
+  }
+}

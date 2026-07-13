@@ -229,6 +229,7 @@ export const surfaceRenderKinds = [
   "form",
   "table",
   "chart",
+  "graph_view",
   "artifact",
   "collection",
   "collection_record",
@@ -261,6 +262,17 @@ export const builtinSurfaceRendererRegistryEntries: SurfaceRendererRegistryEntry
     description: "Render ordered status and event items.",
     props_schema: { type: "object" },
     category: "run_history"
+  },
+  {
+    id: "surface.graph_view",
+    kind: "graph_view",
+    version: "1",
+    title: "Graph",
+    description: "Render and edit a node and edge graph backed by an Artifact revision.",
+    props_schema: { type: "object" },
+    actions_schema: { type: "array" },
+    fallback_kind: "artifact",
+    category: "artifact"
   },
   {
     id: "surface.form",

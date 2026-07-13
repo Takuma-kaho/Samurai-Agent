@@ -33,6 +33,7 @@ export const domainCommandOutputRenderKinds = [
   "form",
   "table",
   "chart",
+  "graph_view",
   "artifact",
   "collection",
   "collection_record",
@@ -258,6 +259,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     resource_kinds: ["skill"],
     proposed_effects: ["Apply a curator lifecycle transition to a local Skill."]
   }),
+  command({ id: "skill.patch", title: "Edit Skill", description: "Edit a Skill body and metadata through the Runtime boundary.", runtime_method: "patchSkill", ui_display_category: "skill", input_sources: ["runtime_api", "provider_tool_call", "surface_operation"], writes_workspace: true, output_resource_kind: "skill", output_render_kinds: ["skill"], resource_kinds: ["skill"], proposed_effects: ["Update a Skill body and metadata with history and rollback evidence."] }),
   command({
     id: "wiki.proposal.create",
     title: "Create Knowledge Wiki proposal",
@@ -480,6 +482,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     resource_kinds: ["file"],
     proposed_effects: ["Read a file inside the local workspace."]
   }),
+  command({ id: "file.inspect", title: "Inspect workspace file", description: "Inspect file metadata, content hash, and related Workspace provenance.", runtime_method: "runFileAction", ui_display_category: "workspace", input_sources: ["provider_tool_call", "runtime_api", "surface_operation"], provider_tool_names: ["file.inspect"], writes_workspace: false, output_resource_kind: "file", resource_kinds: ["file", "artifact", "workspace_change"], proposed_effects: ["Inspect file metadata and provenance without changing the Workspace."] }),
   command({
     id: "file.list",
     title: "List workspace files",
@@ -559,8 +562,8 @@ export const domainCommandEntries: DomainCommandEntry[] = [
   }),
   command({
     id: "browser.screenshot",
-    title: "Capture browser snapshot",
-    description: "Capture browser-readable content into the workspace fallback adapter.",
+    title: "Capture browser screenshot",
+    description: "Capture a real viewport image through a configured screenshot-capable adapter.",
     runtime_method: "runBrowserAction",
     ui_display_category: "browser",
     input_sources: ["provider_tool_call", "runtime_api"],
@@ -568,7 +571,20 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     writes_workspace: true,
     output_resource_kind: "file",
     resource_kinds: ["browser_page", "file"],
-    proposed_effects: ["Capture browser-readable content into the workspace."]
+    proposed_effects: ["Capture a real browser viewport image into the workspace."]
+  }),
+  command({
+    id: "browser.interact",
+    title: "Interact with browser",
+    description: "Navigate, click, or input through a configured real browser adapter.",
+    runtime_method: "runBrowserAction",
+    ui_display_category: "browser",
+    input_sources: ["provider_tool_call", "runtime_api"],
+    provider_tool_names: ["browser.interact"],
+    writes_workspace: false,
+    output_resource_kind: "browser_page",
+    resource_kinds: ["browser_page"],
+    proposed_effects: ["Interact with a real browser page through the configured adapter."]
   }),
   command({
     id: "browser.download_to_workspace",
@@ -685,6 +701,7 @@ export const domainCommandEntries: DomainCommandEntry[] = [
     resource_kinds: ["automation_job"],
     proposed_effects: ["Save an automation job definition."]
   }),
+  command({ id: "automation.job.set_status", title: "Pause or resume automation", description: "Enable or disable an Automation job through the Runtime boundary.", runtime_method: "setAutomationJobStatus", ui_display_category: "automation", input_sources: ["runtime_api", "provider_tool_call", "surface_operation"], writes_workspace: true, output_resource_kind: "automation_job", output_render_kinds: ["status_timeline"], resource_kinds: ["automation_job"], proposed_effects: ["Change an Automation job between enabled and disabled."] }),
   command({
     id: "automation.job.run",
     title: "Run automation job",
@@ -837,6 +854,12 @@ export const domainCommandEntries: DomainCommandEntry[] = [
   command({ id: "generated_surface.interaction.record", title: "Record surface interaction", description: "Record a Generated Surface open, dismiss, correction, or regeneration signal.", runtime_method: "recordGeneratedSurfaceInteraction", ui_display_category: "generated_surface", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "surface_interaction", resource_kinds: ["generated_surface", "surface_interaction"], proposed_effects: ["Record a Generated Surface interaction for audit and learning."] }),
   command({ id: "generated_surface.action.run", title: "Run generated surface action", description: "Execute a declared Generated Surface action through its Domain Command.", runtime_method: "runGeneratedSurfaceAction", ui_display_category: "generated_surface", input_sources: ["runtime_api", "surface_operation"], writes_workspace: true, output_resource_kind: "domain_command_result", resource_kinds: ["generated_surface", "operation"], proposed_effects: ["Execute a declared Generated Surface action through the Domain Command Bus."] }),
   command({ id: "artifact.revise", title: "Revise artifact", description: "Create an immutable Artifact revision with content hash and lineage.", runtime_method: "reviseArtifact", ui_display_category: "artifact", input_sources: ["runtime_api", "provider_tool_call", "surface_operation"], writes_workspace: true, output_resource_kind: "artifact", output_render_kinds: ["artifact"], resource_kinds: ["artifact", "artifact_revision"], proposed_effects: ["Create an immutable Artifact revision and update its current pointer."] }),
+  command({ id: "artifact.restore_revision", title: "Restore artifact revision", description: "Restore an earlier immutable revision by creating a new revision from it.", runtime_method: "restoreArtifactRevision", ui_display_category: "artifact", input_sources: ["runtime_api", "provider_tool_call", "surface_operation"], writes_workspace: true, output_resource_kind: "artifact", output_render_kinds: ["artifact"], resource_kinds: ["artifact", "artifact_revision"], proposed_effects: ["Create a new current Artifact revision from an earlier revision."] }),
+  command({ id: "graph.create", title: "Create graph", description: "Create a validated node and edge graph as a revision-backed Artifact.", runtime_method: "createGraph", ui_display_category: "artifact", input_sources: ["runtime_api", "provider_tool_call", "surface_operation"], provider_tool_names: ["graph.create", "samurai.graph.create"], writes_workspace: true, output_resource_kind: "artifact", output_render_kinds: ["graph_view", "artifact"], resource_kinds: ["artifact", "artifact_revision"], proposed_effects: ["Create a validated graph Artifact in the Workspace."] }),
+  command({ id: "graph.patch", title: "Edit graph", description: "Apply node and edge edits to a graph through a new immutable Artifact revision.", runtime_method: "patchGraph", ui_display_category: "artifact", input_sources: ["runtime_api", "provider_tool_call", "surface_operation"], provider_tool_names: ["graph.patch", "samurai.graph.patch"], writes_workspace: true, output_resource_kind: "artifact", output_render_kinds: ["graph_view", "artifact"], resource_kinds: ["artifact", "artifact_revision"], proposed_effects: ["Create a new graph Artifact revision from validated node and edge edits."] }),
+  command({ id: "image.generate", title: "Save generated image", description: "Save an image provider result as a provenance-backed Artifact.", runtime_method: "saveGeneratedImage", ui_display_category: "artifact", input_sources: ["provider_tool_call", "runtime_api"], provider_tool_names: ["image.generate.result", "samurai.image.generate.result"], writes_workspace: true, output_resource_kind: "artifact", output_render_kinds: ["artifact"], resource_kinds: ["artifact"], proposed_effects: ["Save a generated image provider result as an Artifact."] }),
+  command({ id: "image.edit", title: "Save edited image", description: "Save an edited image provider result as a new immutable Artifact revision.", runtime_method: "saveEditedImage", ui_display_category: "artifact", input_sources: ["provider_tool_call", "runtime_api"], provider_tool_names: ["image.edit.result", "samurai.image.edit.result"], writes_workspace: true, output_resource_kind: "artifact", output_render_kinds: ["artifact"], resource_kinds: ["artifact", "artifact_revision"], proposed_effects: ["Save an edited image result as a new Artifact revision while preserving the original asset."] }),
+  command({ id: "artifact.export_pdf", title: "Export PDF", description: "Export a text Artifact through a configured PDF adapter while preserving source revision provenance.", runtime_method: "exportArtifactPdf", ui_display_category: "artifact", input_sources: ["runtime_api", "provider_tool_call", "surface_operation"], provider_tool_names: ["artifact.export_pdf", "samurai.artifact.export_pdf"], writes_workspace: true, output_resource_kind: "artifact", output_render_kinds: ["artifact"], resource_kinds: ["artifact"], proposed_effects: ["Create a PDF Artifact from the selected source Artifact."] }),
   command({ id: "artifact.repair", title: "Repair artifact source", description: "Repair a missing current Artifact file from its verified content blob.", runtime_method: "repairArtifact", ui_display_category: "artifact", input_sources: ["runtime_api", "scheduled_context"], writes_workspace: true, output_resource_kind: "artifact", resource_kinds: ["artifact", "artifact_revision"], proposed_effects: ["Restore a missing Artifact revision file from its verified content blob."] }),
   command({
     id: "grant.create",
@@ -1179,6 +1202,7 @@ export interface PluginRuntimeStatus {
   handler_ids: string[];
   registered_handler_ids: string[];
   missing_handler_ids: string[];
+  enabled: boolean;
 }
 
 export interface PluginEntrypointLoadOptions {
@@ -1204,6 +1228,7 @@ export class PluginRuntimeRegistry {
   private readonly manifestsByAction = new Map<string, PluginManifest>();
   private readonly runtimeBindings = new Map<string, PluginRuntimeBinding>();
   private readonly handlers = new Map<string, PluginActionHandler>();
+  private readonly disabledManifestIds = new Set<string>();
 
   constructor(catalog: PluginManifestLoadResult | { manifests: PluginManifest[]; actions: ActionCatalogEntry[]; renderers?: SurfaceRendererRegistryEntry[]; bindings?: PluginRuntimeBinding[] } = { manifests: pluginManifests, actions: actionCatalogEntries }) {
     for (const action of catalog.actions) {
@@ -1232,12 +1257,24 @@ export class PluginRuntimeRegistry {
   }
 
   listActions(category?: string): ActionCatalogEntry[] {
-    const actions = [...this.actions.values()];
+    const actions = [...this.actions.values()].filter((action) => {
+      const manifest = this.manifestsByAction.get(action.id);
+      return !manifest || !this.disabledManifestIds.has(manifest.id);
+    });
     return category ? actions.filter((action) => action.ui_display_category === category) : actions;
   }
 
   listRenderers(): SurfaceRendererRegistryEntry[] {
-    return [...this.renderers.values()];
+    return [...this.renderers.values()].filter((renderer) => {
+      const manifest = [...this.manifests.values()].find((item) => item.renderers?.some((entry) => entry.id === renderer.id));
+      return !manifest || !this.disabledManifestIds.has(manifest.id);
+    });
+  }
+
+  setPluginEnabled(manifestId: string, enabled: boolean): boolean {
+    if (!this.manifests.has(manifestId)) return false;
+    if (enabled) this.disabledManifestIds.delete(manifestId); else this.disabledManifestIds.add(manifestId);
+    return true;
   }
 
   listPluginStatuses(): PluginRuntimeStatus[] {
@@ -1261,7 +1298,8 @@ export class PluginRuntimeRegistry {
         renderer_ids: manifest.renderers?.map((renderer) => renderer.id) ?? [],
         handler_ids: handlerIds,
         registered_handler_ids: registeredHandlerIds,
-        missing_handler_ids: handlerIds.filter((handlerId) => !this.handlers.has(handlerId))
+        missing_handler_ids: handlerIds.filter((handlerId) => !this.handlers.has(handlerId)),
+        enabled: !this.disabledManifestIds.has(manifest.id)
       };
     });
   }
@@ -1276,13 +1314,17 @@ export class PluginRuntimeRegistry {
     if (!action) {
       return { action_id: actionId, status: "failed", error: "action_not_found" };
     }
+    const manifest = this.manifestsByAction.get(action.id);
+    if (manifest && this.disabledManifestIds.has(manifest.id)) {
+      return { action_id: actionId, handler_id: action.handler_id, status: "failed", error: "plugin_disabled" };
+    }
     const handler = this.handlers.get(action.handler_id);
     if (!handler) {
       return { action_id: actionId, handler_id: action.handler_id, status: "failed", error: "handler_not_registered" };
     }
     const result = await handler({
       action,
-      manifest: this.manifestsByAction.get(action.id),
+      manifest,
       input,
       context
     });
@@ -1295,6 +1337,9 @@ export class PluginRuntimeRegistry {
     const importModule = options.importModule;
 
     for (const binding of this.runtimeBindings.values()) {
+      if (this.disabledManifestIds.has(binding.manifest_id)) {
+        continue;
+      }
       if (!binding.entrypoint || !binding.entrypoint_path || binding.entrypoint_status !== "ready") {
         continue;
       }

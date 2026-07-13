@@ -355,6 +355,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     requireSignature: process.env.SAMURAI_REQUIRE_PLUGIN_SIGNATURE === "1"
   });
   const pluginRegistry = new PluginRuntimeRegistry(pluginCatalog);
+  for (const state of await store.listPluginStates()) {
+    pluginRegistry.setPluginEnabled(state.manifest_id, state.enabled);
+  }
   const pluginEntrypointLoad = (options.loadPluginEntrypoints ?? process.env.SAMURAI_LOAD_PLUGIN_ENTRYPOINTS !== "0")
     ? await pluginRegistry.loadEntrypoints({
       allowUnsigned: options.allowUnsignedPluginEntrypoints ?? process.env.SAMURAI_ALLOW_UNSIGNED_PLUGIN_ENTRYPOINTS === "1"
@@ -954,6 +957,25 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     }
   });
 
+  app.post("/api/plugins/:id/status", async (req, res, next) => {
+    try {
+      const enabled = req.body?.enabled;
+      if (typeof enabled !== "boolean") {
+        res.status(400).json({ error: "enabled must be a boolean" });
+        return;
+      }
+      const plugin = pluginRegistry.listPluginStatuses().find((entry) => entry.manifest_id === req.params.id);
+      if (!plugin || !pluginRegistry.setPluginEnabled(plugin.manifest_id, enabled)) {
+        res.status(404).json({ error: "plugin_not_found" });
+        return;
+      }
+      const state = await store.savePluginState({ manifestId: plugin.manifest_id, enabled, version: plugin.version });
+      res.json({ plugin: pluginRegistry.listPluginStatuses().find((entry) => entry.manifest_id === plugin.manifest_id), state });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/plugins/diagnostics", async (_req, res, next) => {
     try {
       res.json(pluginDiagnosticsPayload({
@@ -1427,7 +1449,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.post("/api/tools/file", async (req, res, next) => {
       try {
         const operation = typeof req.body?.operation === "string" ? req.body.operation : "";
-        if (!["file.read", "file.list", "file.write", "file.patch"].includes(operation)) {
+        if (!["file.read", "file.inspect", "file.list", "file.write", "file.patch"].includes(operation)) {
           res.status(400).json({ error: "invalid_file_operation" });
           return;
         }
@@ -1450,7 +1472,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.post("/api/tools/browser", async (req, res, next) => {
       try {
         const operation = typeof req.body?.operation === "string" ? req.body.operation : "";
-        if (!["browser.navigate", "browser.extract", "browser.screenshot", "browser.download_to_workspace"].includes(operation)) {
+        if (!["browser.navigate", "browser.extract", "browser.interact", "browser.screenshot", "browser.download_to_workspace"].includes(operation)) {
           res.status(400).json({ error: "invalid_browser_operation" });
           return;
         }
@@ -1461,7 +1483,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         }
         res.json(await runRuntimeApiWriteCommand(runtime, req, operation, {
           url,
-          ...(typeof req.body?.output_path === "string" ? { output_path: req.body.output_path } : {})
+          ...(typeof req.body?.output_path === "string" ? { output_path: req.body.output_path } : {}),
+          ...(typeof req.body?.action === "string" ? { action: req.body.action } : {}),
+          ...(typeof req.body?.selector === "string" ? { selector: req.body.selector } : {}),
+          ...(typeof req.body?.value === "string" ? { value: req.body.value } : {})
         }));
       } catch (error) {
         next(error);
@@ -2342,6 +2367,28 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.get("/api/automation/runs", async (req, res, next) => {
+      try {
+        const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : 100;
+        res.json(await store.listAutomationRuns(Number.isFinite(limit) ? limit : 100));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/automation/jobs/:id/status", async (req, res, next) => {
+      try {
+        const status = req.body?.status;
+        if (status !== "enabled" && status !== "disabled") {
+          res.status(400).json({ error: "invalid_automation_status" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "automation.job.set_status", { job_id: req.params.id, status }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.get("/api/automation/jobs/:id", async (req, res, next) => {
       try {
         const job = await store.getAutomationJob(req.params.id);
@@ -2865,6 +2912,36 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
+    app.patch("/api/skills/:id", async (req, res, next) => {
+      try {
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "skill.patch", {
+          skill_id: req.params.id,
+          ...(typeof req.body?.title === "string" ? { title: req.body.title } : {}),
+          ...(typeof req.body?.description === "string" ? { description: req.body.description } : {}),
+          ...(typeof req.body?.content === "string" ? { content: req.body.content } : {}),
+          ...(Array.isArray(req.body?.tags) ? { tags: stringArray(req.body.tags) } : {})
+        }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/api/skills/:id/state", async (req, res, next) => {
+      try {
+        const state = req.body?.state;
+        if (state !== "active" && state !== "disabled") {
+          res.status(400).json({ error: "invalid_skill_state" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "skill.lifecycle.apply", {
+          skill_id: req.params.id,
+          action: state === "active" ? "reactivate" : "archive"
+        }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.post("/api/skills/candidates", async (req, res, next) => {
       try {
         const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
@@ -2950,6 +3027,23 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.get("/api/wiki/diagnostics", async (_req, res, next) => {
       try {
         res.json(await knowledgeWikiDiagnosticsPayload(store));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/wiki/lint", async (_req, res, next) => {
+      try {
+        res.json(await runtime.inspectKnowledgeWikiQuality());
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/wiki/:id/backlinks", async (req, res, next) => {
+      try {
+        const report = await runtime.inspectKnowledgeWikiQuality();
+        res.json(report.backlinks[req.params.id] ?? []);
       } catch (error) {
         next(error);
       }
@@ -5835,8 +5929,8 @@ function evaluationDiagnosticsRecommendation(issues: EvaluationDiagnosticsReport
   return "Evaluation diagnostics are healthy for the selected scope.";
 }
 
-const fileToolOperations = new Set(["file.read", "file.list", "file.write", "file.patch"]);
-const browserToolOperations = new Set(["browser.navigate", "browser.extract", "browser.screenshot", "browser.download_to_workspace"]);
+const fileToolOperations = new Set(["file.read", "file.inspect", "file.list", "file.write", "file.patch"]);
+const browserToolOperations = new Set(["browser.navigate", "browser.extract", "browser.interact", "browser.screenshot", "browser.download_to_workspace"]);
 
 async function fileBrowserActionDiagnosticsPayload(
   store: WorkspaceStore,
@@ -5961,7 +6055,7 @@ function fileBrowserActionKind(operation: string): "file" | "browser" | undefine
 
 function isBrowserWorkspaceFallback(operation: OperationRecord): boolean {
   return operation.status === "completed"
-    && (operation.operation === "browser.screenshot" || operation.operation === "browser.download_to_workspace")
+    && operation.operation === "browser.download_to_workspace"
     && operation.result_ref?.kind === "file";
 }
 

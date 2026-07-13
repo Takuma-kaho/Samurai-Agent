@@ -318,6 +318,38 @@ export const AgentBackendConfigSchema = z.object({
 });
 export type AgentBackendConfig = z.infer<typeof AgentBackendConfigSchema>;
 
+export const BackendCapabilityIdSchema = z.enum([
+  "web_search",
+  "web_fetch",
+  "browser_read",
+  "browser_interact",
+  "browser_screenshot",
+  "subagent_delegate",
+  "mcp_tools"
+]);
+export type BackendCapabilityId = z.infer<typeof BackendCapabilityIdSchema>;
+
+export const BackendCapabilityStateSchema = z.enum([
+  "available",
+  "unavailable",
+  "misconfigured",
+  "unverified"
+]);
+export type BackendCapabilityState = z.infer<typeof BackendCapabilityStateSchema>;
+
+export const BackendCapabilityStatusSchema = z.object({
+  backend_id: z.string().min(1),
+  capability_id: BackendCapabilityIdSchema,
+  state: BackendCapabilityStateSchema,
+  source: z.enum(["backend_native", "mcp_adapter", "samurai_adapter"]),
+  mode: z.string().min(1).optional(),
+  reason: z.string().min(1).optional(),
+  checked_at: z.string().datetime(),
+  probe_version: z.string().min(1),
+  evidence_summary: z.string().min(1)
+});
+export type BackendCapabilityStatus = z.infer<typeof BackendCapabilityStatusSchema>;
+
 export const BackendRunRecordSchema = z.object({
   id: z.string().min(1),
   session_id: z.string().min(1),
@@ -674,6 +706,16 @@ export const KnowledgeWikiGraphSchema = z.object({
   }))
 });
 export type KnowledgeWikiGraph = z.infer<typeof KnowledgeWikiGraphSchema>;
+
+export const KnowledgeWikiLintReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  active_pages: z.number().int().nonnegative(),
+  broken_links: z.array(z.object({ from_wiki_id: z.string(), target: z.string() })),
+  duplicate_groups: z.array(z.object({ key: z.string(), wiki_ids: z.array(z.string()).min(2) })),
+  orphan_wiki_ids: z.array(z.string()),
+  backlinks: z.record(z.string(), z.array(z.object({ from_wiki_id: z.string(), label: z.string() })))
+});
+export type KnowledgeWikiLintReport = z.infer<typeof KnowledgeWikiLintReportSchema>;
 
 export const KnowledgeWikiDiagnosticsIssueSchema = z.object({
   code: z.enum([
@@ -2144,7 +2186,7 @@ export type WikiFrontmatter = z.infer<typeof WikiFrontmatterSchema>;
 export const ArtifactRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
-  kind: z.enum(["markdown", "document", "table", "chart", "image", "pdf", "structured_draft", "generated_report", "note"]),
+  kind: z.enum(["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"]),
   locale: SupportedLocaleSchema,
   source_locales: z.array(SupportedLocaleSchema),
   file_ref: ResourceRefSchema,
@@ -2155,6 +2197,40 @@ export const ArtifactRecordSchema = z.object({
   updated_at: z.string().datetime()
 });
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
+
+export const GraphNodeSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  body: z.string().optional(),
+  position: z.object({ x: z.number(), y: z.number() }).optional(),
+  metadata: z.record(jsonValueSchema).optional()
+});
+export type GraphNode = z.infer<typeof GraphNodeSchema>;
+
+export const GraphEdgeSchema = z.object({
+  id: z.string().min(1),
+  source: z.string().min(1),
+  target: z.string().min(1),
+  label: z.string().optional(),
+  metadata: z.record(jsonValueSchema).optional()
+});
+export type GraphEdge = z.infer<typeof GraphEdgeSchema>;
+
+export const GraphDocumentSchema = z.object({
+  version: z.literal("1"),
+  nodes: z.array(GraphNodeSchema),
+  edges: z.array(GraphEdgeSchema)
+}).superRefine((graph, context) => {
+  const nodeIds = new Set(graph.nodes.map((node) => node.id));
+  if (nodeIds.size !== graph.nodes.length) context.addIssue({ code: "custom", message: "graph_duplicate_node_id" });
+  const edgeIds = new Set<string>();
+  for (const edge of graph.edges) {
+    if (edgeIds.has(edge.id)) context.addIssue({ code: "custom", message: "graph_duplicate_edge_id" });
+    edgeIds.add(edge.id);
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) context.addIssue({ code: "custom", message: "graph_edge_node_missing" });
+  }
+});
+export type GraphDocument = z.infer<typeof GraphDocumentSchema>;
 
 export const CollectionSchemaSchema = z.object({
   id: z.string().min(1),
@@ -2448,6 +2524,10 @@ export const ArtifactRevisionRecordSchema = z.object({
   revision: z.number().int().positive(),
   parent_revision_id: z.string().min(1).optional(),
   producer_run_id: z.string().min(1).optional(),
+  base_revision_id: z.string().min(1).optional(),
+  editor_source: z.enum(["chat", "surface", "provider", "image_provider", "restore", "system"]).optional(),
+  change_summary: z.string().optional(),
+  provenance: z.record(jsonValueSchema).default({}),
   source_ref: ResourceRefSchema.optional(),
   file_ref: ResourceRefSchema,
   blob_ref: ResourceRefSchema,
@@ -2583,6 +2663,7 @@ export interface SettingsRecord {
   knowledge_wiki_capture_mode: CaptureMode;
   skill_capture_mode: CaptureMode;
   external_provider_role: ExternalProviderRole;
+  default_backend_id?: string;
   updated_at: string;
 }
 

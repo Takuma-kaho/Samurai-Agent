@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "test_id": "D06",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-new-contracts.mjs",
+  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "source_sha256": "1eceefd16acff969a9e197d87d18a255751d849fe2c7a2cf5443af8ba84d273f",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/capability-registry/src/index.ts",
+    "packages/artifacts/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/ui-protocol/src/index.ts",
+    "scripts/fixtures/artifact-revisions.ts",
+    "scripts/fixtures/artifact-pdf-export.ts",
+    "scripts/fixtures/backend-delegated-capabilities.ts",
+    "scripts/fixtures/browser-capability-boundary.ts",
+    "scripts/fixtures/image-artifact.ts",
+    "scripts/fixtures/graph-artifact.ts",
+    "scripts/fixtures/management-surfaces-core.ts"
+  ],
+  "assertions": [
+    {
+      "name": "Surface and chat edits share revision lineage",
+      "actual": 3,
+      "expected": 3
+    },
+    {
+      "name": "Stale base revision is rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Revision restore creates new revision",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "revisions": 3,
+    "lineage": [
+      "artifact_revision_477ab9329703472a",
+      "artifact_revision_477ab9329703472a",
+      "artifact_revision_9c9934a0af7f4c3d"
+    ],
+    "hashes_unique": true,
+    "conflict_rejected": true,
+    "restored_revision": true,
+    "old_revision_redisplay": true,
+    "missing_source_repaired": true,
+    "audit_records": 4,
+    "export_import_hash_equal": true
+  }
+}

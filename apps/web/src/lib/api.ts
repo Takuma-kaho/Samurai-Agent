@@ -1,6 +1,7 @@
 import type {
   ActivityInboxItem,
   ApprovalRequest,
+  AutomationJobRecord,
   ArtifactRecord,
   AuditRecord,
   BackendEventRecord,
@@ -194,6 +195,18 @@ export interface SkillIndexEntry {
   state: "candidate" | "project" | "active" | "stale" | "archived" | "pinned";
   required_capabilities: string[];
   file_path: string;
+}
+
+export interface AutomationRunSummary {
+  id: string;
+  kind: string;
+  source: string;
+  status: "started" | "completed" | "failed";
+  session_id?: string;
+  backend_run_id?: string;
+  started_at: string;
+  completed_at?: string;
+  error?: string;
 }
 
 export interface RuntimeWritePayload<TResource> {
@@ -401,6 +414,12 @@ export const api = {
   getSkill(id: string) {
     return request<{ skill: SkillIndexEntry; markdown: string }>(`/api/skills/${id}`);
   },
+  patchSkill(id: string, input: { title?: string; description?: string; content?: string; tags?: string[] }) {
+    return request<RuntimeWritePayload<SkillIndexEntry>>(`/api/skills/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+  },
+  setSkillActive(id: string, active: boolean) {
+    return request<RuntimeWritePayload<SkillIndexEntry>>(`/api/skills/${id}/state`, { method: "POST", body: JSON.stringify({ state: active ? "active" : "disabled" }) });
+  },
   listWiki() {
     return request<Array<WikiFrontmatter & { file_path: string }>>("/api/wiki");
   },
@@ -442,6 +461,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({})
     });
+  },
+  getWikiGraph(query?: string) {
+    return request<Record<string, unknown>>(`/api/wiki/graph${query ? `?query=${encodeURIComponent(query)}` : ""}`);
+  },
+  getWikiDiagnostics() {
+    return request<Record<string, unknown>>("/api/wiki/lint");
+  },
+  getWikiBacklinks(id: string) {
+    return request<Array<{ from_wiki_id: string; label: string }>>(`/api/wiki/${id}/backlinks`);
   },
   createSkillCandidate(input: { title: string; description: string; content?: string; tags?: string[]; required_capabilities?: string[] }) {
     return request<RuntimeWritePayload<SkillIndexEntry>>("/api/skills/candidates", {
@@ -498,6 +526,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({})
     });
+  },
+  listAutomationJobs() {
+    return request<AutomationJobRecord[]>("/api/automation/jobs");
+  },
+  listAutomationRuns() {
+    return request<AutomationRunSummary[]>("/api/automation/runs");
+  },
+  setAutomationStatus(id: string, status: "enabled" | "disabled") {
+    return request<RuntimeWritePayload<AutomationJobRecord>>(`/api/automation/jobs/${id}/status`, { method: "POST", body: JSON.stringify({ status }) });
   },
   getSettings() {
     return request<SettingsRecord>("/api/settings");

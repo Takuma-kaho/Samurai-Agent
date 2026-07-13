@@ -5,6 +5,8 @@ import ArrowDown from "lucide-vue-next/dist/esm/icons/arrow-down.js";
 import ArrowLeft from "lucide-vue-next/dist/esm/icons/arrow-left.js";
 import ArrowUp from "lucide-vue-next/dist/esm/icons/arrow-up.js";
 import Brain from "lucide-vue-next/dist/esm/icons/brain.js";
+import BookOpen from "lucide-vue-next/dist/esm/icons/book-open.js";
+import CalendarClock from "lucide-vue-next/dist/esm/icons/calendar-clock.js";
 import ChevronRight from "lucide-vue-next/dist/esm/icons/chevron-right.js";
 import Clock3 from "lucide-vue-next/dist/esm/icons/clock-3.js";
 import Copy from "lucide-vue-next/dist/esm/icons/copy.js";
@@ -21,6 +23,7 @@ import Save from "lucide-vue-next/dist/esm/icons/save.js";
 import Search from "lucide-vue-next/dist/esm/icons/search.js";
 import Settings from "lucide-vue-next/dist/esm/icons/settings.js";
 import Table2 from "lucide-vue-next/dist/esm/icons/table-2.js";
+import WandSparkles from "lucide-vue-next/dist/esm/icons/wand-sparkles.js";
 import ThumbsDown from "lucide-vue-next/dist/esm/icons/thumbs-down.js";
 import ThumbsUp from "lucide-vue-next/dist/esm/icons/thumbs-up.js";
 import Trash2 from "lucide-vue-next/dist/esm/icons/trash-2.js";
@@ -28,6 +31,7 @@ import X from "lucide-vue-next/dist/esm/icons/x.js";
 import type {
   ActivityInboxItem,
   ApprovalRequest,
+  AutomationJobRecord,
   ArtifactRecord,
   AuditRecord,
   BackendEventRecord,
@@ -44,6 +48,7 @@ import type {
   SessionRecord,
   SettingsRecord,
   SupportedLocale,
+  WikiFrontmatter,
   WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
 import { supportedLocales } from "@samurai-agent/core-schemas";
@@ -56,6 +61,9 @@ import {
   type ApprovalLifecyclePayload,
   type ArchiveMemoryPayload,
   type MemoryDetail,
+  type AutomationRunSummary,
+  type SkillIndexEntry,
+  type WikiDetail,
   type ProviderErrorPayload,
   type SearchResult,
   type SessionDetail,
@@ -114,7 +122,7 @@ import {
   withPresentationViewState
 } from "./lib/collection-view-state";
 
-type ViewMode = "chat" | "search" | "settings" | "runs" | "memory" | "collections";
+type ViewMode = "chat" | "search" | "settings" | "runs" | "memory" | "collections" | "wiki" | "skills" | "automations";
 type ChatDisplayMessage = {
   id: string;
   role: MessageRecord["role"];
@@ -158,6 +166,16 @@ const searchResults = ref<SearchResult[]>([]);
 const collectionSchemas = ref<Array<CollectionSchema & { file_path: string }>>([]);
 const collectionListLoading = ref(false);
 const collectionListError = ref<string | null>(null);
+const wikiPages = ref<Array<WikiFrontmatter & { file_path: string }>>([]);
+const wikiDetail = ref<WikiDetail | null>(null);
+const wikiDiagnostics = ref<Record<string, unknown> | null>(null);
+const skills = ref<SkillIndexEntry[]>([]);
+const skillDetail = ref<{ skill: SkillIndexEntry; markdown: string } | null>(null);
+const automationJobs = ref<AutomationJobRecord[]>([]);
+const automationRuns = ref<AutomationRunSummary[]>([]);
+const managementLoading = ref(false);
+const managementError = ref<string | null>(null);
+const selectedManagementContext = ref<{ kind: "wiki" | "skill" | "automation"; id: string; title: string } | null>(null);
 const prompt = ref("");
 const promptInput = ref<HTMLInputElement | null>(null);
 const { attachmentInput, selectedAttachments, openAttachmentPicker, handleAttachmentSelection, removeAttachment, clearAttachments, formatFileSize } = useChatAttachments();
@@ -696,7 +714,9 @@ async function sendMessage() {
 function activeAppContext(): Record<string, JsonValue> | undefined {
   const spec = activeSurfaceSpec.value;
   if (!spec || (!isTaskListSurfaceSpec(spec) && !isCollectionTableSurfaceSpec(spec))) {
-    return undefined;
+    return selectedManagementContext.value
+      ? { resource_kind: selectedManagementContext.value.kind, resource_id: selectedManagementContext.value.id, title: selectedManagementContext.value.title }
+      : undefined;
   }
   const data = appCollectionData(spec);
   return {
@@ -760,7 +780,7 @@ async function ensureTaskSurfaceContract(extraKinds: string[] = []): Promise<voi
 }
 
 function chooseInitialBackend() {
-  const stored = readStoredBackendId();
+  const stored = settings.value.default_backend_id || readStoredBackendId();
   const storedBackend = backendOptions.value.find((backend) => backend.id === stored);
   const preferredBackend = preferredExternalBackendIds
     .map((id) => backendOptions.value.find((backend) => backend.id === id && isRunnableBackend(backend)))
@@ -782,9 +802,11 @@ function isRunnableBackend(backend: AgentBackendStatus): boolean {
   return backend.configured && backend.enabled !== false;
 }
 
-function setSelectedBackend(id: string) {
+async function setSelectedBackend(id: string) {
   selectedBackendId.value = id;
   backendPickerOpen.value = false;
+  settings.value = await api.patchSettings({ default_backend_id: id });
+  persistSettings(settings.value);
   try {
     window.localStorage.setItem(backendStorageKey, id);
   } catch {
@@ -958,6 +980,62 @@ async function loadCollections() {
   } finally {
     collectionListLoading.value = false;
   }
+}
+
+async function loadWiki() {
+  managementLoading.value = true;
+  managementError.value = null;
+  try {
+    [wikiPages.value, wikiDiagnostics.value] = await Promise.all([api.listWiki(), api.getWikiDiagnostics()]);
+    viewMode.value = "wiki";
+    if (!wikiDetail.value && wikiPages.value[0]) await openWiki(wikiPages.value[0].id);
+  } catch (error) {
+    managementError.value = error instanceof Error ? error.message : "Knowledge Wikiを読み込めませんでした";
+    viewMode.value = "wiki";
+  } finally { managementLoading.value = false; }
+}
+
+async function openWiki(id: string) { wikiDetail.value = await api.getWiki(id); }
+async function saveWiki(id: string, input: { title: string; content: string }) { await api.patchWiki(id, input); wikiPages.value = await api.listWiki(); await openWiki(id); }
+async function archiveWiki(id: string) { await api.archiveWiki(id); wikiDetail.value = null; wikiPages.value = await api.listWiki(); }
+async function reindexWiki() { await api.reindexWiki(); [wikiPages.value, wikiDiagnostics.value] = await Promise.all([api.listWiki(), api.getWikiDiagnostics()]); }
+
+async function loadSkills() {
+  managementLoading.value = true;
+  managementError.value = null;
+  try {
+    skills.value = await api.listSkills();
+    viewMode.value = "skills";
+    if (!skillDetail.value && skills.value[0]) await openSkill(skills.value[0].id);
+  } catch (error) {
+    managementError.value = error instanceof Error ? error.message : "Skillを読み込めませんでした";
+    viewMode.value = "skills";
+  } finally { managementLoading.value = false; }
+}
+
+async function openSkill(id: string) { skillDetail.value = await api.getSkill(id); }
+async function saveSkill(id: string, input: { title: string; description: string; content: string }) { await api.patchSkill(id, input); skills.value = await api.listSkills(); await openSkill(id); }
+async function setSkillActive(id: string, active: boolean) { await api.setSkillActive(id, active); skills.value = await api.listSkills(); await openSkill(id); }
+
+async function loadAutomations() {
+  managementLoading.value = true;
+  managementError.value = null;
+  try {
+    [automationJobs.value, automationRuns.value] = await Promise.all([api.listAutomationJobs(), api.listAutomationRuns()]);
+    viewMode.value = "automations";
+  } catch (error) {
+    managementError.value = error instanceof Error ? error.message : "Automationを読み込めませんでした";
+    viewMode.value = "automations";
+  } finally { managementLoading.value = false; }
+}
+
+async function setAutomationStatus(id: string, status: "enabled" | "disabled") { await api.setAutomationStatus(id, status); [automationJobs.value, automationRuns.value] = await Promise.all([api.listAutomationJobs(), api.listAutomationRuns()]); }
+
+function useManagementResourceInChat(kind: "wiki" | "skill" | "automation", id: string, title: string) {
+  selectedManagementContext.value = { kind, id, title };
+  prompt.value = `${title}を文脈にして、`;
+  viewMode.value = "chat";
+  schedulePromptFocus();
 }
 
 async function openCollectionApp(schema: CollectionSchema & { file_path: string }) {
@@ -1226,6 +1304,9 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
             <span v-else-if="viewMode === 'settings'">{{ label("settings.title") }}</span>
             <span v-else-if="viewMode === 'runs'">{{ label("run_history.title") }}</span>
             <span v-else-if="viewMode === 'collections'">Collections</span>
+            <span v-else-if="viewMode === 'wiki'">Knowledge Wiki</span>
+            <span v-else-if="viewMode === 'skills'">Skills</span>
+            <span v-else-if="viewMode === 'automations'">Automations</span>
             <span v-else>{{ label("memory.title") }}</span>
           </div>
           <div v-else class="backend-picker">
@@ -1265,6 +1346,15 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
           </button>
           <button class="icon-button" type="button" title="Collections" aria-label="Collections" @click="loadCollections">
             <Table2 :size="17" />
+          </button>
+          <button class="icon-button" type="button" title="Knowledge Wiki" aria-label="Knowledge Wiki" @click="loadWiki">
+            <BookOpen :size="17" />
+          </button>
+          <button class="icon-button" type="button" title="Skills" aria-label="Skills" @click="loadSkills">
+            <WandSparkles :size="17" />
+          </button>
+          <button class="icon-button" type="button" title="Automations" aria-label="Automations" @click="loadAutomations">
+            <CalendarClock :size="17" />
           </button>
           <button class="icon-button" :class="{ 'has-badge': hasActivity }" type="button" :title="label('context.title')" :aria-label="label('context.title')" @click="drawerOpen = !drawerOpen">
             <PanelRightOpen :size="17" />
@@ -1700,6 +1790,24 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
         :memory-excerpt="memoryExcerpt"
         :open-memory="openMemory"
         :archive-memory-item="archiveMemoryItem"
+        :management-loading="managementLoading"
+        :management-error="managementError"
+        :wiki-pages="wikiPages"
+        :wiki-detail="wikiDetail"
+        :wiki-diagnostics="wikiDiagnostics"
+        :skills="skills"
+        :skill-detail="skillDetail"
+        :automation-jobs="automationJobs"
+        :automation-runs="automationRuns"
+        :open-wiki="openWiki"
+        :save-wiki="saveWiki"
+        :archive-wiki="archiveWiki"
+        :reindex-wiki="reindexWiki"
+        :open-skill="openSkill"
+        :save-skill="saveSkill"
+        :set-skill-active="setSkillActive"
+        :set-automation-status="setAutomationStatus"
+        :use-management-resource-in-chat="useManagementResourceInChat"
       />
     </section>
 

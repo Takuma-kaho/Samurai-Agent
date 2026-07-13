@@ -6,7 +6,7 @@ import Settings from "lucide-vue-next/dist/esm/icons/settings.js";
 import type { SessionRecord } from "@samurai-agent/core-schemas";
 import type { LocaleKey } from "@samurai-agent/localization";
 
-type ViewMode = "chat" | "search" | "settings" | "runs" | "memory" | "collections";
+type ViewMode = "chat" | "search" | "settings" | "runs" | "memory" | "collections" | "wiki" | "skills" | "automations";
 
 const props = defineProps<{
   collapsed: boolean;

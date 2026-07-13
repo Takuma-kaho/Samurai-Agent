@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "test_id": "D07",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-new-contracts.mjs",
+  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "source_sha256": "1eceefd16acff969a9e197d87d18a255751d849fe2c7a2cf5443af8ba84d273f",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/capability-registry/src/index.ts",
+    "packages/artifacts/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/ui-protocol/src/index.ts",
+    "scripts/fixtures/artifact-revisions.ts",
+    "scripts/fixtures/artifact-pdf-export.ts",
+    "scripts/fixtures/backend-delegated-capabilities.ts",
+    "scripts/fixtures/browser-capability-boundary.ts",
+    "scripts/fixtures/image-artifact.ts",
+    "scripts/fixtures/graph-artifact.ts",
+    "scripts/fixtures/management-surfaces-core.ts"
+  ],
+  "assertions": [
+    {
+      "name": "Image generation creates revision",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Image generation stores provenance",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Missing provider is rejected",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "generated_revision": true,
+    "edited_revision": true,
+    "provenance": true,
+    "restored_revision": true,
+    "missing_provider_rejected": true
+  }
+}

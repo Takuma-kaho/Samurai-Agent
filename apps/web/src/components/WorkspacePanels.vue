@@ -14,9 +14,12 @@ import type {
   SupportedLocale
 } from "@samurai-agent/core-schemas";
 import type { MemoryDetail, SearchResult } from "../lib/api";
+import type { AutomationRunSummary, SkillIndexEntry, WikiDetail } from "../lib/api";
+import ManagementSurfaces from "./ManagementSurfaces.vue";
+import type { AutomationJobRecord, WikiFrontmatter } from "@samurai-agent/core-schemas";
 import type { LocaleKey } from "@samurai-agent/localization";
 
-type ViewMode = "chat" | "search" | "settings" | "runs" | "collections" | "memory";
+type ViewMode = "chat" | "search" | "settings" | "runs" | "collections" | "memory" | "wiki" | "skills" | "automations";
 type Label = (key: LocaleKey) => string;
 type CaptureMode = SettingsRecord["memory_capture_mode"];
 type ExternalProviderRole = SettingsRecord["external_provider_role"];
@@ -57,6 +60,24 @@ const props = defineProps<{
   memoryExcerpt: (id: string) => string;
   openMemory: (id: string) => void | Promise<void>;
   archiveMemoryItem: (id: string) => void | Promise<void>;
+  managementLoading: boolean;
+  managementError: string | null;
+  wikiPages: Array<WikiFrontmatter & { file_path: string }>;
+  wikiDetail: WikiDetail | null;
+  wikiDiagnostics: Record<string, unknown> | null;
+  skills: SkillIndexEntry[];
+  skillDetail: { skill: SkillIndexEntry; markdown: string } | null;
+  automationJobs: AutomationJobRecord[];
+  automationRuns: AutomationRunSummary[];
+  openWiki: (id: string) => void | Promise<void>;
+  saveWiki: (id: string, input: { title: string; content: string }) => void | Promise<void>;
+  archiveWiki: (id: string) => void | Promise<void>;
+  reindexWiki: () => void | Promise<void>;
+  openSkill: (id: string) => void | Promise<void>;
+  saveSkill: (id: string, input: { title: string; description: string; content: string }) => void | Promise<void>;
+  setSkillActive: (id: string, active: boolean) => void | Promise<void>;
+  setAutomationStatus: (id: string, status: "enabled" | "disabled") => void | Promise<void>;
+  useManagementResourceInChat: (kind: "wiki" | "skill" | "automation", id: string, title: string) => void;
 }>();
 
 const emit = defineEmits<{ "update:searchQuery": [value: string] }>();
@@ -171,6 +192,29 @@ const emit = defineEmits<{ "update:searchQuery": [value: string] }>();
       </button>
     </div>
   </section>
+
+  <ManagementSurfaces
+    v-else-if="props.viewMode === 'wiki' || props.viewMode === 'skills' || props.viewMode === 'automations'"
+    :mode="props.viewMode"
+    :loading="props.managementLoading"
+    :error="props.managementError"
+    :wiki-pages="props.wikiPages"
+    :wiki-detail="props.wikiDetail"
+    :wiki-diagnostics="props.wikiDiagnostics"
+    :skills="props.skills"
+    :skill-detail="props.skillDetail"
+    :automation-jobs="props.automationJobs"
+    :automation-runs="props.automationRuns"
+    :open-wiki="props.openWiki"
+    :save-wiki="props.saveWiki"
+    :archive-wiki="props.archiveWiki"
+    :reindex-wiki="props.reindexWiki"
+    :open-skill="props.openSkill"
+    :save-skill="props.saveSkill"
+    :set-skill-active="props.setSkillActive"
+    :set-automation-status="props.setAutomationStatus"
+    :use-in-chat="props.useManagementResourceInChat"
+  />
 
   <section v-else class="panel-stage">
     <div v-if="props.memory.length === 0" class="empty-note">{{ props.label("memory.empty") }}</div>

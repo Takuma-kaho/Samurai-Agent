@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "test_id": "B02",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-regression.mjs",
+  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "source_sha256": "6569e750e14fbb64e5fcef8c0f8f9728d2e83fa12d67c9bee6f957a4ab4dfb78",
+  "source_files": [
+    "scripts/fixtures/core-additions-learning-gateway.ts",
+    "scripts/fixtures/core-additions-workspace-plugin.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "apps/server/src/api-server.ts",
+    "apps/web/src/components/ManagementSurfaces.vue",
+    "apps/web/src/AppWorkspace.vue"
+  ],
+  "assertions": [
+    {
+      "name": "Skill outcome is evaluated",
+      "actual": "helpful",
+      "expected": "helpful"
+    },
+    {
+      "name": "Safe revision is promoted",
+      "actual": "promote",
+      "expected": "promote"
+    }
+  ],
+  "result": {
+    "task": {
+      "status": "passed",
+      "same_work_same_fingerprint": true,
+      "different_output_different_fingerprint": true,
+      "signal_kinds": [
+        "correction",
+        "undo",
+        "rerun",
+        "artifact_revision",
+        "surface_revision",
+        "dismiss",
+        "pin",
+        "explicit_feedback"
+      ],
+      "insufficient_assessment": "inconclusive",
+      "comparable_assessment": "helpful",
+      "effect": 42,
+      "confidence": 0.83
+    },
+    "guardrails": {
+      "status": "passed",
+      "samples": 30,
+      "decision": "promote",
+      "quality_delta": 12,
+      "ui_success_delta": 0.25,
+      "guardrails": {
+        "safety": {
+          "baseline": 0,
+          "candidate": 0,
+          "passed": true
+        },
+        "correction": {
+          "baseline": 0.2000000000000001,
+          "candidate": 0.10000000000000005,
+          "passed": true
+        },
+        "misapplication": {
+          "baseline": 0.050000000000000024,
+          "candidate": 0.03000000000000002,
+          "passed": true
+        },
+        "cost": {
+          "baseline": 1,
+          "candidate": 1.1000000000000005,
+          "passed": true
+        },
+        "latency": {
+          "baseline": 1000,
+          "candidate": 1050,
+          "passed": true
+        }
+      },
+      "unsafe_rejected": true,
+      "cost_regression_rejected": true,
+      "incompatible_rejected": true,
+      "insufficient_held": true,
+      "evaluation_persisted": true
+    }
+  }
+}

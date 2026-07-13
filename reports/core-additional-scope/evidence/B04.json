@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "test_id": "B04",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-regression.mjs",
+  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "source_sha256": "6569e750e14fbb64e5fcef8c0f8f9728d2e83fa12d67c9bee6f957a4ab4dfb78",
+  "source_files": [
+    "scripts/fixtures/core-additions-learning-gateway.ts",
+    "scripts/fixtures/core-additions-workspace-plugin.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "apps/server/src/api-server.ts",
+    "apps/web/src/components/ManagementSurfaces.vue",
+    "apps/web/src/AppWorkspace.vue"
+  ],
+  "assertions": [
+    {
+      "name": "Automation side effect runs once",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "Schedule survives restart",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "race": {
+      "status": "passed",
+      "workers": 10,
+      "claim_attempts": 100,
+      "successful_claims": 1,
+      "side_effects": 1,
+      "heartbeat_extended": true,
+      "early_reclaim_rejected": true,
+      "restart_reclaim": true,
+      "retry_before_due_rejected": true,
+      "retry_at_due_claimed": true
+    },
+    "schedule": {
+      "status": "passed",
+      "spring_forward": "2025-03-09T07:00:00.000Z",
+      "fall_first": "2025-11-02T05:30:00.000Z",
+      "fall_next": "2025-11-03T06:30:00.000Z",
+      "missed_runs": 3,
+      "pause_skipped": true,
+      "resume_catch_up": true,
+      "one_shot_once": true,
+      "no_agent_mode": true,
+      "restart_preserved": true
+    }
+  }
+}

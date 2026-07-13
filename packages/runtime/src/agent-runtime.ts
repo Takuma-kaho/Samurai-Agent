@@ -20,7 +20,7 @@ import {
   type DomainCommandOutputRenderKind
 } from "@samurai-agent/action-catalog";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { connect as netConnect, type Socket } from "node:net";
 import path from "node:path";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
@@ -88,6 +88,7 @@ import {
   WorkItemRecordSchema,
   type ExternalSendRecord,
   type GatewayInboundMessageRecord,
+  type GatewayDeliveryRecord,
   type GatewayPairingPolicyRecord,
   GatewayPairingPolicyRecordSchema,
   type GatewayPairingRecord,
@@ -99,6 +100,8 @@ import {
   type ContextFreezeResponse,
   type ContextPreview,
   type KnowledgeWikiGraph,
+  type KnowledgeWikiLintReport,
+  KnowledgeWikiLintReportSchema,
   type LearningResourceUseRecord,
   type LearningEvaluationRecord,
   type LearningJobReportRecord,
@@ -121,6 +124,10 @@ import {
   type ToolRunRecord,
   SkillFrontmatterSchema,
   GatewayRepairResultSchema,
+  GraphDocumentSchema,
+  type GraphDocument,
+  GraphNodeSchema,
+  GraphEdgeSchema,
   GatewaySandboxWorkspaceSyncDirectionSchema,
   GatewaySandboxWorkspaceSyncResultSchema,
   externalSendChannels,
@@ -415,12 +422,15 @@ export interface GatewayInboundRuntimeResult {
   concurrencyLock?: GatewayConcurrencyLockRecord;
   session?: SessionRecord;
   chat?: RunChatTurnResult;
+  deliveries?: GatewayDeliveryRecord[];
 }
 
 export interface FileActionRuntimeResult extends RuntimeWriteResult<{
   path: string;
   content?: string;
   entries?: Array<{ path: string; kind: "file" | "directory"; size?: number }>;
+  metadata?: { size: number; modified_at: string; content_hash: string };
+  provenance?: { artifact_ids: string[]; workspace_change_ids: string[] };
 }> {}
 
 export interface RollbackRestoreRuntimeResult extends RuntimeWriteResult<{
@@ -433,8 +443,13 @@ export interface BrowserActionRuntimeResult extends RuntimeWriteResult<{
   url: string;
   title?: string;
   text?: string;
+  snapshot_kind?: "html_snapshot";
   screenshot_ref?: string;
   file_path?: string;
+  adapter_id?: string;
+  mime_type?: string;
+  width?: number;
+  height?: number;
 }> {}
 
 type StructuredSurfaceOperation = Extract<SurfaceOperation, {
@@ -599,6 +614,19 @@ interface AgentRuntimeWorkspaceOptions {
   detachBackgroundReview?: boolean;
   skillConsolidationRunner?: SkillConsolidationRunner;
   backgroundReviewMutationFailureInjector?: (index: number, stage: "before" | "after_resource") => void;
+  browserAdapter?: BrowserAdapter;
+  pdfExportAdapter?: PdfExportAdapter;
+}
+
+export interface BrowserAdapter {
+  readonly id: string;
+  interact(input: { url: string; action: "navigate" | "click" | "input"; selector?: string; value?: string }): Promise<{ url: string; title?: string; text?: string }>;
+  screenshot(input: { url: string }): Promise<{ bytes: Uint8Array; mime_type: "image/png" | "image/jpeg"; width?: number; height?: number }>;
+}
+
+export interface PdfExportAdapter {
+  readonly id: string;
+  export(input: { title: string; content: string; source_artifact: ArtifactRecord }): Promise<Uint8Array>;
 }
 
 export function createDefaultAgentBackendRegistry(
@@ -846,6 +874,14 @@ export class AgentRuntime {
     return defaultBackendIdFromStatuses(this.backendRegistry.statuses());
   }
 
+  private selectedBackendIdForRun(preferred?: string): string {
+    if (preferred) {
+      const status = this.backendRegistry.statuses().find((item) => item.id === preferred);
+      if (status?.configured && status.enabled) return preferred;
+    }
+    return this.defaultBackendIdForRun();
+  }
+
   private backendWorkingDirectory(): string {
     return this.backendWorkingDirectoryMode() === "repo"
       ? path.resolve(this.workspaceOptions.repoRoot ?? process.cwd())
@@ -911,6 +947,43 @@ export class AgentRuntime {
   async previewKnowledgeWikiGraph(input: { activeOnly?: boolean } = {}): Promise<KnowledgeWikiGraph> {
     const pages = await this.store.listWiki({ activeOnly: input.activeOnly ?? true });
     return knowledgeWikiGraph(pages, input.activeOnly ?? true);
+  }
+
+  async inspectKnowledgeWikiQuality(): Promise<KnowledgeWikiLintReport> {
+    const pages = await this.store.listWiki({ activeOnly: true });
+    const aliases = new Map<string, string>();
+    const duplicateIndex = new Map<string, string[]>();
+    for (const page of pages) {
+      aliases.set(page.slug.toLowerCase(), page.id);
+      aliases.set(page.title.trim().toLowerCase(), page.id);
+      const key = page.title.trim().toLowerCase();
+      duplicateIndex.set(key, [...(duplicateIndex.get(key) ?? []), page.id]);
+    }
+    const brokenLinks: Array<{ from_wiki_id: string; target: string }> = [];
+    const backlinks: Record<string, Array<{ from_wiki_id: string; label: string }>> = {};
+    const connected = new Set<string>();
+    for (const page of pages) {
+      const content = await this.store.readWikiContent(page.id) ?? "";
+      for (const match of content.matchAll(/\[\[([^\]]+)\]\]/g)) {
+        const label = match[1]?.trim() ?? "";
+        const targetId = aliases.get(label.toLowerCase());
+        if (!targetId) {
+          brokenLinks.push({ from_wiki_id: page.id, target: label });
+          continue;
+        }
+        connected.add(page.id);
+        connected.add(targetId);
+        backlinks[targetId] = [...(backlinks[targetId] ?? []), { from_wiki_id: page.id, label }];
+      }
+    }
+    return KnowledgeWikiLintReportSchema.parse({
+      generated_at: nowIso(),
+      active_pages: pages.length,
+      broken_links: brokenLinks,
+      duplicate_groups: [...duplicateIndex.entries()].filter(([, ids]) => ids.length > 1).map(([key, wiki_ids]) => ({ key, wiki_ids })),
+      orphan_wiki_ids: pages.length > 1 ? pages.filter((page) => !connected.has(page.id)).map((page) => page.id) : [],
+      backlinks
+    });
   }
 
   async runReflection(input: { sessionId: string; sourceRunId?: string }): Promise<ReflectionRuntimeResult> {
@@ -1898,7 +1971,7 @@ export class AgentRuntime {
       created_at: envelope.received_at
     });
 
-    const backendId = input.backend_id?.trim() || this.defaultBackendIdForRun();
+    const backendId = this.selectedBackendIdForRun(input.backend_id?.trim() || settings.default_backend_id);
     const backend = this.backendRegistry.get(backendId);
     if (!backend) {
       throw new RuntimeRequestError("conflict", `backend_not_registered:${backendId}`);
@@ -3281,7 +3354,7 @@ export class AgentRuntime {
         inputSource,
         payload,
         idempotencyKey: input.idempotency_key
-      }, () => this.executeDomainCommand(command, payload));
+      }, () => this.executeDomainCommand(command, payload, inputSource));
     } catch (error) {
       if (error instanceof DomainCommandConflictError) {
         throw new RuntimeRequestError("conflict", error.message);
@@ -3322,7 +3395,7 @@ export class AgentRuntime {
     return resourceSpec ? [resourceSpec] : [];
   }
 
-  private async executeDomainCommand(command: DomainCommandEntry, payload: Record<string, JsonValue>): Promise<unknown> {
+  private async executeDomainCommand(command: DomainCommandEntry, payload: Record<string, JsonValue>, inputSource: DomainCommandInputSource): Promise<unknown> {
     if (command.id === "session.create") {
       return this.createSession({
         title: stringPayload(payload.title) || undefined,
@@ -3374,7 +3447,8 @@ export class AgentRuntime {
       });
     }
 
-    if (command.id === "artifact.create") {
+    if (command.id === "artifact.create" || command.id === "graph.create") {
+      const graphCreate = command.id === "graph.create";
       const sessionId = stringPayload(payload.session_id) || (await this.createSession({
         title: stringPayload(payload.title) || "Artifact command",
         ui_locale: supportedLocalePayload(payload.ui_locale),
@@ -3385,7 +3459,14 @@ export class AgentRuntime {
       if (!instruction) {
         throw new RuntimeRequestError("conflict", "domain_command_artifact_instruction_required");
       }
-      if (payload.provider_tool_call === true) {
+      if (graphCreate || payload.kind === "graph") {
+        try {
+          GraphDocumentSchema.parse(JSON.parse(instruction));
+        } catch {
+          throw new RuntimeRequestError("conflict", "graph_document_invalid");
+        }
+      }
+      if (graphCreate || payload.provider_tool_call === true) {
         const session = await this.store.getSession(sessionId);
         if (!session) {
           throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
@@ -3411,7 +3492,7 @@ export class AgentRuntime {
               operation,
               title,
               content: instruction,
-              kind: artifactKindPayload(payload.kind),
+              kind: graphCreate ? "graph" : artifactKindPayload(payload.kind),
               locale: outputLocale,
               sourceLocales: [inputLocale],
               createdBy: "backend"
@@ -3439,12 +3520,133 @@ export class AgentRuntime {
       });
     }
 
+    if (command.id === "graph.patch") {
+      const artifactId = requiredPayloadId(payload, "artifact_id");
+      const artifact = await this.store.getArtifact(artifactId);
+      if (!artifact || artifact.kind !== "graph") throw new RuntimeRequestError("not_found", "graph_artifact_not_found");
+      const currentContent = await this.store.readArtifactContent(artifactId);
+      if (!currentContent) throw new RuntimeRequestError("not_found", "graph_document_content_not_found");
+      let current: GraphDocument;
+      try {
+        current = GraphDocumentSchema.parse(JSON.parse(currentContent));
+      } catch {
+        throw new RuntimeRequestError("conflict", "graph_document_invalid");
+      }
+      const next = applyGraphDocumentPatch(current, payload);
+      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+      const envelope = createGatewayEnvelope(webGatewayContext, `Edit graph: ${artifact.title}`);
+      return this.runAllowedWrite<ArtifactRecord, { revision: Awaited<ReturnType<WorkspaceStore["createArtifactRevision"]>>["revision"] }>({
+        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [artifact.file_ref],
+        execute: async (operation) => {
+          const created = await this.store.createArtifactRevision({
+            artifactId,
+            content: `${JSON.stringify(next, null, 2)}\n`,
+            extension: "json",
+            baseRevisionId: stringPayload(payload.base_revision_id) || (typeof artifact.metadata.current_revision_id === "string" ? artifact.metadata.current_revision_id : undefined),
+            editorSource: artifactEditorSourcePayload(payload.editor_source, inputSource),
+            changeSummary: stringPayload(payload.change_summary) || "Updated graph nodes and edges.",
+            provenance: recordPayload(payload.provenance)
+          });
+          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
+          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Updated graph ${artifact.title}.` };
+        }
+      });
+    }
+
+    if (command.id === "image.generate") {
+      const image = imageProviderResultPayload(payload);
+      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+      const envelope = createGatewayEnvelope(webGatewayContext, `Save generated image: ${stringPayload(payload.title) || "Generated image"}`);
+      return this.runAllowedWrite<ArtifactRecord, Record<string, unknown>>({
+        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects,
+        execute: async (operation) => {
+          const artifact = await createArtifactDraft({
+            store: this.store,
+            operation,
+            title: stringPayload(payload.title) || "Generated image",
+            content: { bytes: image.bytes, mime_type: image.mimeType, extension: image.extension, preview: stringPayload(payload.preview) || undefined },
+            kind: "image",
+            locale: supportedLocalePayload(payload.output_locale) ?? session.output_locale,
+            sourceLocales: [supportedLocalePayload(payload.input_locale) ?? session.ui_locale],
+            createdBy: "image_provider",
+            metadata: { image_operation: "generate", prompt: image.prompt, provider: image.provider, source_run_id: image.sourceRunId, mime_type: image.mimeType, width: image.width, height: image.height, provenance: image.provenance }
+          });
+          const created = await this.store.createArtifactRevision({
+            artifactId: artifact.id,
+            content: image.bytes,
+            extension: image.extension,
+            producerRunId: image.sourceRunId,
+            editorSource: "image_provider",
+            changeSummary: "Saved generated image provider result.",
+            provenance: { operation: "generate", prompt: image.prompt, provider: image.provider, source_run_id: image.sourceRunId, mime_type: image.mimeType, width: image.width, height: image.height, ...image.provenance }
+          });
+          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], {}, { artifact_id: artifact.id });
+          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Saved generated image ${artifact.title}.` };
+        }
+      });
+    }
+
+    if (command.id === "image.edit") {
+      const artifactId = requiredPayloadId(payload, "artifact_id");
+      const artifact = await this.store.getArtifact(artifactId);
+      if (!artifact || artifact.kind !== "image") throw new RuntimeRequestError("not_found", "image_artifact_not_found");
+      const image = imageProviderResultPayload(payload);
+      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+      const envelope = createGatewayEnvelope(webGatewayContext, `Save edited image: ${artifact.title}`);
+      return this.runAllowedWrite<ArtifactRecord, { revision: Awaited<ReturnType<WorkspaceStore["createArtifactRevision"]>>["revision"] }>({
+        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [artifact.file_ref],
+        execute: async (operation) => {
+          const created = await this.store.createArtifactRevision({
+            artifactId,
+            content: image.bytes,
+            extension: image.extension,
+            baseRevisionId: stringPayload(payload.base_revision_id) || (typeof artifact.metadata.current_revision_id === "string" ? artifact.metadata.current_revision_id : undefined),
+            producerRunId: image.sourceRunId,
+            editorSource: "image_provider",
+            changeSummary: stringPayload(payload.change_summary) || "Saved image provider edit.",
+            provenance: { operation: "edit", prompt: image.prompt, provider: image.provider, source_asset_id: artifact.id, source_run_id: image.sourceRunId, mime_type: image.mimeType, width: image.width, height: image.height, ...image.provenance }
+          });
+          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
+          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Saved edited image ${artifact.title}.` };
+        }
+      });
+    }
+
+    if (command.id === "artifact.export_pdf") {
+      const artifactId = requiredPayloadId(payload, "artifact_id");
+      const source = await this.store.getArtifact(artifactId);
+      if (!source) throw new RuntimeRequestError("not_found", "artifact_not_found");
+      const content = await this.store.readArtifactContent(artifactId);
+      if (content === undefined) throw new RuntimeRequestError("conflict", "artifact_pdf_source_not_text");
+      const adapter = this.workspaceOptions.pdfExportAdapter;
+      if (!adapter) throw new RuntimeRequestError("provider_not_configured", "pdf_export_adapter_unavailable");
+      const bytes = await adapter.export({ title: source.title, content, source_artifact: source });
+      if (bytes.byteLength < 8 || Buffer.from(bytes.subarray(0, 5)).toString("ascii") !== "%PDF-") throw new RuntimeRequestError("provider_failed", "pdf_export_invalid_result");
+      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+      const envelope = createGatewayEnvelope(webGatewayContext, `Export PDF: ${source.title}`);
+      return this.runAllowedWrite<ArtifactRecord, Record<string, unknown>>({
+        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [source.file_ref],
+        execute: async (operation) => {
+          const pdf = await createArtifactDraft({ store: this.store, operation, title: `${source.title}.pdf`, content: { bytes, mime_type: "application/pdf", extension: "pdf", preview: source.title }, kind: "pdf", locale: source.locale, sourceLocales: source.source_locales, createdBy: "pdf_export_adapter", metadata: { source_artifact_id: source.id, source_revision_id: typeof source.metadata.current_revision_id === "string" ? source.metadata.current_revision_id : null, export_adapter_id: adapter.id } });
+          const rollbackPoint = await this.createRollbackPoint(operation, [source.file_ref, pdf.file_ref], {}, { artifact_id: pdf.id, source_artifact_id: source.id });
+          return { resource: pdf, ref: pdf.file_ref, rollbackPoint, summary: `Exported ${source.title} as PDF.` };
+        }
+      });
+    }
+
     if (command.id === "artifact.revise") {
       const artifactId = requiredPayloadId(payload, "artifact_id");
       const content = stringPayload(payload.content);
       if (!content) throw new RuntimeRequestError("conflict", "artifact_revision_content_required");
       const artifact = await this.store.getArtifact(artifactId);
       if (!artifact) throw new RuntimeRequestError("not_found", "artifact_not_found");
+      if (artifact.kind === "graph") {
+        try {
+          GraphDocumentSchema.parse(JSON.parse(content));
+        } catch {
+          throw new RuntimeRequestError("conflict", "graph_document_invalid");
+        }
+      }
       const session = stringPayload(payload.session_id) ? await this.store.getSession(stringPayload(payload.session_id)) : await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
       if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
       const envelope = createGatewayEnvelope(webGatewayContext, `Revise artifact: ${artifact.title}`);
@@ -3456,9 +3658,45 @@ export class AgentRuntime {
         proposedEffects: command.proposed_effects,
         targetResourceRefs: [artifact.file_ref],
         execute: async (operation) => {
-          const created = await this.store.createArtifactRevision({ artifactId, content, producerRunId: stringPayload(payload.producer_run_id) || undefined, extension: stringPayload(payload.extension) || undefined });
+          const editorSource = artifactEditorSourcePayload(payload.editor_source, inputSource);
+          const created = await this.store.createArtifactRevision({
+            artifactId,
+            content,
+            producerRunId: stringPayload(payload.producer_run_id) || undefined,
+            extension: stringPayload(payload.extension) || undefined,
+            baseRevisionId: stringPayload(payload.base_revision_id) || undefined,
+            editorSource,
+            changeSummary: stringPayload(payload.change_summary) || undefined,
+            provenance: recordPayload(payload.provenance)
+          });
           const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
           return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Created revision ${created.revision.revision} of ${artifact.title}.` };
+        }
+      });
+    }
+    if (command.id === "artifact.restore_revision") {
+      const artifactId = requiredPayloadId(payload, "artifact_id");
+      const revisionId = requiredPayloadId(payload, "revision_id");
+      const artifact = await this.store.getArtifact(artifactId);
+      const sourceRevision = await this.store.getArtifactRevision(revisionId);
+      if (!artifact || !sourceRevision || sourceRevision.artifact_id !== artifactId) throw new RuntimeRequestError("not_found", "artifact_revision_not_found");
+      const content = await this.store.readArtifactRevisionContent(revisionId);
+      if (!content) throw new RuntimeRequestError("not_found", "artifact_revision_content_not_found");
+      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+      const envelope = createGatewayEnvelope(webGatewayContext, `Restore artifact revision: ${artifact.title}`);
+      return this.runAllowedWrite<ArtifactRecord, { revision: Awaited<ReturnType<WorkspaceStore["createArtifactRevision"]>>["revision"] }>({
+        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [artifact.file_ref, sourceRevision.file_ref],
+        execute: async (operation) => {
+          const created = await this.store.createArtifactRevision({
+            artifactId,
+            content,
+            baseRevisionId: stringPayload(payload.base_revision_id) || (typeof artifact.metadata.current_revision_id === "string" ? artifact.metadata.current_revision_id : undefined),
+            editorSource: "restore",
+            changeSummary: stringPayload(payload.change_summary) || `Restored revision ${sourceRevision.revision}.`,
+            provenance: { restored_from_revision_id: sourceRevision.id }
+          });
+          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
+          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Restored revision ${sourceRevision.revision} of ${artifact.title}.` };
         }
       });
     }
@@ -3749,6 +3987,24 @@ export class AgentRuntime {
       }
       return this.applyCuratorSkillAction({ skillId: requiredPayloadId(payload, "skill_id"), action });
     }
+    if (command.id === "skill.patch") {
+      const skillId = requiredPayloadId(payload, "skill_id");
+      const current = await this.store.getSkill(skillId);
+      if (!current) throw new RuntimeRequestError("not_found", "skill_not_found");
+      const beforeMarkdown = await this.store.readSkillMarkdown(skillId);
+      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+      const envelope = createGatewayEnvelope(webGatewayContext, `Edit Skill: ${current.title}`);
+      return this.runAllowedWrite({
+        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [skillRef(current)],
+        execute: async (operation) => {
+          const saved = await this.store.patchSkill({ id: skillId, title: optionalStringPayload(payload.title), description: optionalStringPayload(payload.description), tags: domainStringArrayPayload(payload.tags), content: optionalStringPayload(payload.content) });
+          if (!saved) throw new RuntimeRequestError("not_found", "skill_not_found");
+          const ref = skillRef(saved);
+          const rollbackPoint = await this.createRollbackPoint(operation, [ref], { skill: current as unknown as JsonValue, markdown: beforeMarkdown ?? "" }, { skill: saved as unknown as JsonValue });
+          return { resource: saved, ref, rollbackPoint, summary: `Updated Skill ${saved.title}.` };
+        }
+      });
+    }
     if (command.id === "skill.view") {
       return this.viewSkill({
         skillId: requiredPayloadId(payload, "skill_id"),
@@ -3757,7 +4013,7 @@ export class AgentRuntime {
       });
     }
 
-    if (command.id === "file.read" || command.id === "file.list" || command.id === "file.write" || command.id === "file.patch") {
+    if (command.id === "file.read" || command.id === "file.inspect" || command.id === "file.list" || command.id === "file.write" || command.id === "file.patch") {
       return this.runFileAction({
         operation: command.id,
         path: stringPayload(payload.path),
@@ -3767,11 +4023,14 @@ export class AgentRuntime {
       });
     }
 
-    if (command.id === "browser.navigate" || command.id === "browser.extract" || command.id === "browser.screenshot" || command.id === "browser.download_to_workspace") {
+    if (command.id === "browser.navigate" || command.id === "browser.extract" || command.id === "browser.interact" || command.id === "browser.screenshot" || command.id === "browser.download_to_workspace") {
       return this.runBrowserAction({
         operation: command.id,
         url: stringPayload(payload.url),
-        output_path: stringPayload(payload.output_path) || undefined
+        output_path: stringPayload(payload.output_path) || undefined,
+        action: browserInteractionActionPayload(payload.action),
+        selector: stringPayload(payload.selector) || undefined,
+        value: stringPayload(payload.value) || undefined
       });
     }
 
@@ -3810,6 +4069,24 @@ export class AgentRuntime {
         enabled: booleanPayload(payload.enabled),
         next_run_at: stringPayload(payload.next_run_at) || undefined,
         max_attempts: numberPayload(payload.max_attempts)
+      });
+    }
+    if (command.id === "automation.job.set_status") {
+      const jobId = requiredPayloadId(payload, "job_id");
+      const status = payload.status === "enabled" || payload.status === "disabled" ? payload.status : undefined;
+      if (!status) throw new RuntimeRequestError("conflict", "automation_job_status_invalid");
+      const current = await this.store.getAutomationJob(jobId);
+      if (!current) throw new RuntimeRequestError("not_found", "automation_job_not_found");
+      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
+      const envelope = createGatewayEnvelope(webGatewayContext, `${status === "enabled" ? "Resume" : "Pause"} automation: ${current.title}`);
+      return this.runAllowedWrite({
+        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [automationJobRef(current)],
+        execute: async (operation) => {
+          const saved = await this.store.saveAutomationJob({ ...current, status, locked_until: status === "disabled" ? undefined : current.locked_until, updated_at: nowIso() });
+          const ref = automationJobRef(saved);
+          const rollbackPoint = await this.createRollbackPoint(operation, [ref], { automation_job: current as unknown as JsonValue }, { automation_job: saved as unknown as JsonValue });
+          return { resource: saved, ref, rollbackPoint, summary: `${status === "enabled" ? "Resumed" : "Paused"} automation ${saved.title}.` };
+        }
       });
     }
     if (command.id === "automation.job.run") {
@@ -4574,7 +4851,7 @@ export class AgentRuntime {
   }
 
   async runFileAction(input: {
-    operation: "file.read" | "file.list" | "file.write" | "file.patch";
+    operation: "file.read" | "file.inspect" | "file.list" | "file.write" | "file.patch";
     path: string;
     content?: string;
     search?: string;
@@ -4598,6 +4875,21 @@ export class AgentRuntime {
             resource: { path: workspacePath.relativePath, content },
             ref,
             summary: `Read workspace file ${workspacePath.relativePath}.`
+          };
+        }
+        if (input.operation === "file.inspect") {
+          const [bytes, info, artifacts, changes] = await Promise.all([readFile(workspacePath.absolutePath), stat(workspacePath.absolutePath), this.store.listArtifacts(), this.store.listWorkspaceChanges()]);
+          return {
+            resource: {
+              path: workspacePath.relativePath,
+              metadata: { size: info.size, modified_at: info.mtime.toISOString(), content_hash: createHash("sha256").update(bytes).digest("hex") },
+              provenance: {
+                artifact_ids: artifacts.filter((artifact) => artifact.file_ref.uri === workspacePath.relativePath).map((artifact) => artifact.id),
+                workspace_change_ids: changes.filter((change) => change.resource_ref.uri === workspacePath.relativePath).map((change) => change.id)
+              }
+            },
+            ref,
+            summary: `Inspected workspace file ${workspacePath.relativePath}.`
           };
         }
         if (input.operation === "file.list") {
@@ -4699,9 +4991,12 @@ export class AgentRuntime {
   }
 
   async runBrowserAction(input: {
-    operation: "browser.navigate" | "browser.extract" | "browser.screenshot" | "browser.download_to_workspace";
+    operation: "browser.navigate" | "browser.extract" | "browser.interact" | "browser.screenshot" | "browser.download_to_workspace";
     url: string;
     output_path?: string;
+    action?: "navigate" | "click" | "input";
+    selector?: string;
+    value?: string;
   }): Promise<BrowserActionRuntimeResult> {
     const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
     const envelope = createGatewayEnvelope(webGatewayContext, `${input.operation}: ${input.url}`);
@@ -4712,6 +5007,26 @@ export class AgentRuntime {
       operationName: input.operation,
       proposedEffects: [`${input.operation} ${input.url} without mutating external state.`],
       execute: async (operation) => {
+        if (input.operation === "browser.screenshot") {
+          const adapter = this.workspaceOptions.browserAdapter;
+          if (!adapter) throw new Error("browser_screenshot_adapter_unavailable");
+          const capture = await adapter.screenshot({ url: input.url });
+          const extension = capture.mime_type === "image/jpeg" ? "jpg" : "png";
+          const outputPath = input.output_path || path.posix.join("browser", `${stableHash(input.url)}.${extension}`);
+          const workspacePath = this.resolveWorkspacePath(outputPath);
+          await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
+          const before = await readFile(workspacePath.absolutePath).catch(() => undefined);
+          await writeFile(workspacePath.absolutePath, capture.bytes);
+          const fileResourceRef = fileRef(workspacePath.relativePath);
+          const rollbackPoint = await this.createRollbackPoint(operation, [fileResourceRef], { path: workspacePath.relativePath, content: before ? Buffer.from(before).toString("base64") : null }, { path: workspacePath.relativePath, content_hash: stableHash(capture.bytes) });
+          return { resource: { url: input.url, file_path: workspacePath.relativePath, screenshot_ref: workspacePath.relativePath, adapter_id: adapter.id, mime_type: capture.mime_type, width: capture.width, height: capture.height }, ref: fileResourceRef, rollbackPoint, summary: `Captured a real browser screenshot from ${input.url}.` };
+        }
+        if (input.operation === "browser.interact") {
+          const adapter = this.workspaceOptions.browserAdapter;
+          if (!adapter) throw new Error("browser_interact_adapter_unavailable");
+          const result = await adapter.interact({ url: input.url, action: input.action ?? "navigate", selector: input.selector, value: input.value });
+          return { resource: { ...result, adapter_id: adapter.id }, ref: { kind: "browser_page", id: stableHash(result.url), uri: result.url, label: result.title || result.url }, summary: `Completed browser ${input.action ?? "navigate"} through ${adapter.id}.` };
+        }
         const page = await readBrowserPage(input.url);
         const ref = {
           kind: "browser_page",
@@ -4719,13 +5034,11 @@ export class AgentRuntime {
           uri: input.url,
           label: page.title || input.url
         };
-        if (input.operation === "browser.download_to_workspace" || input.operation === "browser.screenshot") {
-          const outputPath = input.output_path || path.posix.join("browser", `${stableHash(input.url)}.${input.operation === "browser.screenshot" ? "html" : "txt"}`);
+        if (input.operation === "browser.download_to_workspace") {
+          const outputPath = input.output_path || path.posix.join("browser", `${stableHash(input.url)}.txt`);
           const workspacePath = this.resolveWorkspacePath(outputPath);
           await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
-          const content = input.operation === "browser.screenshot"
-            ? renderBrowserSnapshotHtml(page)
-            : page.text;
+          const content = page.text;
           const before = await readFile(workspacePath.absolutePath, "utf8").catch(() => undefined);
           await writeFile(workspacePath.absolutePath, content);
           const fileResourceRef = fileRef(workspacePath.relativePath);
@@ -4741,13 +5054,11 @@ export class AgentRuntime {
               title: page.title,
               text: page.text,
               file_path: workspacePath.relativePath,
-              ...(input.operation === "browser.screenshot" ? { screenshot_ref: workspacePath.relativePath } : {})
+              snapshot_kind: "html_snapshot"
             },
             ref: fileResourceRef,
             rollbackPoint,
-            summary: input.operation === "browser.screenshot"
-              ? `Saved browser snapshot fallback for ${input.url}.`
-              : `Downloaded browser content from ${input.url} into workspace.`
+            summary: `Saved an HTML/text snapshot from ${input.url} into the workspace.`
           };
         }
         return {
@@ -5456,8 +5767,9 @@ export class AgentRuntime {
         message_id: chat.messages.find((message) => message.role === "user")?.id,
         updated_at: nowIso()
       });
+      const deliveries = await this.enqueueGatewayReplyDeliveries({ channel: input.channel, inbound: processed, sessionKey: pairing.session_key, chat });
       await this.emit("gateway.inbound.processed", processed);
-      return { inbound: processed, pairing, boundaryPolicy, concurrencyLock: concurrencyLock.lock, session, chat };
+      return { inbound: processed, pairing, boundaryPolicy, concurrencyLock: concurrencyLock.lock, session, chat, deliveries };
     } catch (error) {
       const failed = await this.store.saveGatewayInboundMessage({
         ...inbound,
@@ -5470,6 +5782,25 @@ export class AgentRuntime {
     } finally {
       await this.store.releaseGatewayConcurrencyLock(concurrencyLock.lock.lock_key);
     }
+  }
+
+  private async enqueueGatewayReplyDeliveries(input: { channel: GatewayChannel; inbound: GatewayInboundMessageRecord; sessionKey: string; chat: RunChatTurnResult }): Promise<GatewayDeliveryRecord[]> {
+    const text = [...input.chat.messages].reverse().find((message) => message.role === "agent")?.content ?? "";
+    const payloads = buildGatewayReplyPayloads(text, input.chat.artifacts, input.channel);
+    const now = nowIso();
+    return Promise.all(payloads.map((payload, index) => this.store.enqueueGatewayDelivery({
+      id: createId("gateway_delivery"),
+      inbound_id: input.inbound.id,
+      session_key: input.sessionKey,
+      channel: input.channel,
+      status: "pending",
+      idempotency_key: `gateway-reply:${input.inbound.id}:${index + 1}`,
+      payload,
+      attempt: 0,
+      max_attempts: 3,
+      created_at: now,
+      updated_at: now
+    })));
   }
 
   private async acquireGatewayConcurrencyLock(
@@ -8506,7 +8837,7 @@ export class AgentRuntime {
   }
 
   private async runSkillConsolidationWithBackend(input: { group_key: string; packages: Array<{ id: string; title: string; description: string; markdown: string; support_files: Array<{ path: string; content: string }> }> }, session: SessionRecord) {
-    const backend = this.backendRegistry.get(this.defaultBackendIdForRun());
+    const backend = this.backendRegistry.get(this.selectedBackendIdForRun((await this.store.getSettings()).default_backend_id));
     if (!backend) return undefined;
     const prompt = skillConsolidationPrompt(input);
     const envelope = createGatewayEnvelope(cronMemoryReviewGatewayContext, prompt, "en", "en");
@@ -12469,8 +12800,132 @@ function stringPayload(value: JsonValue | undefined): string {
   return typeof value === "string" ? value : "";
 }
 
+function optionalStringPayload(value: JsonValue | undefined): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
 function recordPayload(value: JsonValue | undefined): Record<string, JsonValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+}
+
+function artifactEditorSourcePayload(
+  value: JsonValue | undefined,
+  inputSource: DomainCommandInputSource
+): "chat" | "surface" | "provider" | "image_provider" | "restore" | "system" {
+  if (value === "chat" || value === "surface" || value === "provider" || value === "image_provider" || value === "restore" || value === "system") {
+    return value;
+  }
+  if (inputSource === "surface_operation" || inputSource === "generated_surface") return "surface";
+  if (inputSource === "provider_tool_call") return "provider";
+  return "system";
+}
+
+function applyGraphDocumentPatch(current: GraphDocument, payload: Record<string, JsonValue>): GraphDocument {
+  if (payload.document && typeof payload.document === "object" && !Array.isArray(payload.document)) {
+    return GraphDocumentSchema.parse(payload.document);
+  }
+  const nodes = new Map(current.nodes.map((node) => [node.id, node]));
+  const edges = new Map(current.edges.map((edge) => [edge.id, edge]));
+  for (const id of domainStringArrayPayload(payload.delete_node_ids) ?? []) nodes.delete(id);
+  for (const id of domainStringArrayPayload(payload.delete_edge_ids) ?? []) edges.delete(id);
+  for (const value of Array.isArray(payload.nodes) ? payload.nodes : []) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RuntimeRequestError("conflict", "graph_node_invalid");
+    const id = typeof value.id === "string" ? value.id : "";
+    const previous = nodes.get(id);
+    nodes.set(id, GraphNodeSchema.parse({ ...previous, ...value }));
+  }
+  for (const value of Array.isArray(payload.edges) ? payload.edges : []) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RuntimeRequestError("conflict", "graph_edge_invalid");
+    const id = typeof value.id === "string" ? value.id : "";
+    const previous = edges.get(id);
+    edges.set(id, GraphEdgeSchema.parse({ ...previous, ...value }));
+  }
+  return GraphDocumentSchema.parse({ version: "1", nodes: [...nodes.values()], edges: [...edges.values()] });
+}
+
+function imageProviderResultPayload(payload: Record<string, JsonValue>): {
+  bytes: Uint8Array;
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
+  extension: "png" | "jpg" | "webp" | "svg";
+  provider: string;
+  prompt: string;
+  sourceRunId: string;
+  width: number;
+  height: number;
+  provenance: Record<string, JsonValue>;
+} {
+  const provider = stringPayload(payload.provider);
+  const prompt = stringPayload(payload.prompt);
+  const sourceRunId = stringPayload(payload.source_run_id);
+  const encoded = stringPayload(payload.data_base64);
+  const mimeType = stringPayload(payload.mime_type);
+  const width = typeof payload.width === "number" ? payload.width : 0;
+  const height = typeof payload.height === "number" ? payload.height : 0;
+  if (!provider || !prompt || !sourceRunId || !encoded || !Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+    throw new RuntimeRequestError("conflict", "image_provider_result_incomplete");
+  }
+  const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/svg+xml": "svg" } as const;
+  if (!(mimeType in extensions)) throw new RuntimeRequestError("conflict", "image_mime_type_unsupported");
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 !== 0) throw new RuntimeRequestError("conflict", "image_data_invalid");
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.byteLength === 0) throw new RuntimeRequestError("conflict", "image_data_invalid");
+  return {
+    bytes,
+    mimeType: mimeType as keyof typeof extensions,
+    extension: extensions[mimeType as keyof typeof extensions],
+    provider,
+    prompt,
+    sourceRunId,
+    width,
+    height,
+    provenance: recordPayload(payload.provenance)
+  };
+}
+
+function browserInteractionActionPayload(value: JsonValue | undefined): "navigate" | "click" | "input" | undefined {
+  return value === "navigate" || value === "click" || value === "input" ? value : undefined;
+}
+
+export function gatewayMessageLimit(channel: GatewayChannel): number {
+  if (channel === "slack") return 4_000;
+  if (channel === "telegram") return 4_096;
+  if (channel === "line") return 5_000;
+  return 20_000;
+}
+
+export function splitGatewayMessage(text: string, limit: number): string[] {
+  const characters = [...text];
+  if (characters.length === 0) return [""];
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("gateway_message_limit_invalid");
+  const parts: string[] = [];
+  let offset = 0;
+  while (offset < characters.length) {
+    let end = Math.min(offset + limit, characters.length);
+    if (end < characters.length) {
+      const window = characters.slice(offset, end).join("");
+      const newline = window.lastIndexOf("\n");
+      const space = window.lastIndexOf(" ");
+      const boundary = Math.max(newline, space);
+      if (boundary >= Math.floor(limit * 0.6)) end = offset + [...window.slice(0, boundary + 1)].length;
+    }
+    const part = characters.slice(offset, end).join("");
+    if (part) parts.push(part);
+    offset = end;
+  }
+  return parts.length > 0 ? parts : [""];
+}
+
+export function buildGatewayReplyPayloads(text: string, artifacts: ArtifactRecord[], channel: GatewayChannel): Array<Record<string, JsonValue>> {
+  const parts = splitGatewayMessage(text, gatewayMessageLimit(channel));
+  const deliverableArtifacts = artifacts
+    .filter((artifact) => artifact.kind === "pdf" || artifact.kind === "image")
+    .map((artifact) => ({ id: artifact.id, kind: artifact.kind, title: artifact.title, resource_ref: artifact.file_ref }));
+  return parts.map((part, index) => ({
+    text: part,
+    sequence: index + 1,
+    total: parts.length,
+    ...(index === parts.length - 1 && deliverableArtifacts.length > 0 ? { artifacts: deliverableArtifacts } : {})
+  }));
 }
 
 function requiredPayloadId(payload: Record<string, JsonValue>, key: string): string {
@@ -13820,7 +14275,7 @@ function artifactKindPayload(value: JsonValue | undefined): ArtifactKind | undef
   return typeof value === "string" && artifactKindValues.includes(value as ArtifactKind) ? value as ArtifactKind : undefined;
 }
 
-const artifactKindValues: ArtifactKind[] = ["markdown", "document", "table", "chart", "image", "pdf", "structured_draft", "generated_report", "note"];
+const artifactKindValues: ArtifactKind[] = ["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"];
 
 function resourceRefLookupKeys(ref: ResourceRef): string[] {
   return [
@@ -15543,26 +15998,6 @@ async function readBrowserPageWithPlaywright(url: string): Promise<{ url: string
   } finally {
     await browser.close();
   }
-}
-
-function renderBrowserSnapshotHtml(page: { url: string; title?: string; html: string; text: string; adapter: string }): string {
-  return [
-    "<!doctype html>",
-    "<meta charset=\"utf-8\">",
-    `<title>${escapeHtml(page.title || page.url)}</title>`,
-    `<meta name=\"samurai-source-url\" content=\"${escapeHtml(page.url)}\">`,
-    `<meta name=\"samurai-browser-adapter\" content=\"${escapeHtml(page.adapter)}\">`,
-    page.html || `<pre>${escapeHtml(page.text)}</pre>`,
-    ""
-  ].join("\n");
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll("\"", "&quot;");
 }
 
 async function listWorkspaceDirectory(absolutePath: string, relativePath: string) {
