@@ -3,19 +3,21 @@
   "test_id": "A06",
   "command": "pnpm core:test:command-contract",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
   "worktree_clean": false,
-  "source_sha256": "5b4069c6500dc8bcda9696dbe99f7df995d47e583c7ee07a9c01319e64576f85",
+  "source_sha256": "524b3b43c08169652cf31eb0a514c694991d9e61cd835b9ea441993f66405b1b",
   "source_files": [
     "packages/action-catalog/src/index.ts",
+    "packages/runtime/src/agent-runtime.ts",
     "packages/runtime/src/index.ts",
     "packages/runtime/src/provider-profiles.ts",
     "scripts/fixtures/domain-command-contract.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-domain-command-contract.mjs"
   ],
-  "started_at": "2026-07-11T09:13:12.483Z",
-  "completed_at": "2026-07-11T09:13:31.326Z",
+  "source_read_errors": [],
+  "started_at": "2026-07-13T15:15:13.532Z",
+  "completed_at": "2026-07-13T15:15:13.625Z",
   "assertions": [
     {
       "name": "Action Catalog generated from command schema",
@@ -45,12 +47,12 @@
   ],
   "result": {
     "status": "passed",
-    "commands": 98,
+    "commands": 115,
     "action_catalog_matches": true,
-    "bridge_mappings": 6,
+    "bridge_mappings": 13,
     "provider_mappings": 4,
     "surface_mappings": 6,
     "expected_version_in_patch_schema": true,
-    "schema_fingerprint": "54a22ca0"
+    "schema_fingerprint": "d8890f20"
   }
 }

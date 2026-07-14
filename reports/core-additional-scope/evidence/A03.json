@@ -3,7 +3,7 @@
   "test_id": "A03",
   "status": "passed",
   "command": "node scripts/verify-core-additions-ledger.mjs",
-  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
   "source_sha256": "29b3ce393cb74a4c9cf49e9bc041f3572e310586f49f6534cba2d4fe092a35e3",
   "source_files": [
     "plans/core-reference-integration-plan.md"

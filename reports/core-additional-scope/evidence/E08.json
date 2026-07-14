@@ -3,7 +3,7 @@
   "test_id": "E08",
   "status": "passed",
   "command": "node scripts/verify-core-additions-regression.mjs",
-  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
   "source_sha256": "6569e750e14fbb64e5fcef8c0f8f9728d2e83fa12d67c9bee6f957a4ab4dfb78",
   "source_files": [
     "scripts/fixtures/core-additions-learning-gateway.ts",

@@ -116,7 +116,7 @@ export interface BackendRunInput {
   temporary_context?: TemporaryContextAttachment[];
   metadata: Record<string, JsonValue>;
   context_intent?: "light_chat" | "contextual_chat" | "workspace_task";
-  expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view">;
+  expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view" | "generated_surface">;
   tool_bridge?: BackendToolBridge;
 }
 

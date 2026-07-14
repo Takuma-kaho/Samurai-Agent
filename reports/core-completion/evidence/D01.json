@@ -3,17 +3,18 @@
   "test_id": "D01",
   "command": "pnpm core:test:presentation",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
-  "worktree_clean": false,
-  "source_sha256": "b7dd2d9fcdea603ab63d3458f6aa4a9a7c9b3785303932c39de043204baf6b85",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "worktree_clean": true,
+  "source_sha256": "9b64a17605a9f268c7f7cd47833fc4124d3d1c7e40c387fe81ef471684bde7a0",
   "source_files": [
     "packages/runtime/src/presentation/planner.ts",
     "scripts/fixtures/presentation-planner.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-presentation-planner.mjs"
   ],
-  "started_at": "2026-07-11T12:44:18.918Z",
-  "completed_at": "2026-07-11T12:44:18.956Z",
+  "source_read_errors": [],
+  "started_at": "2026-07-13T08:14:11.553Z",
+  "completed_at": "2026-07-13T08:14:11.582Z",
   "assertions": [
     {
       "name": "Fixed benchmark prompt count",

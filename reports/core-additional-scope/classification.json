@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_from": "plans/core-reference-integration-plan.md",
-  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
   "counts": {
     "core_candidates": 39,
     "contracts": 4

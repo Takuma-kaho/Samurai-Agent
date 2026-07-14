@@ -1,12 +1,14 @@
 # Core Completion Report
 
-- Commit: `1d8370ea7192a556d35597bda566b1be3a515f75`
-- Score: **10/100**
-- Required gates: **3/11**
+- Commit: `77d409cbfa9fc6d7591e144878a5c0aee735fc10`
+- Score: **2/100**
+- Required gates: **0/11**
 - Complete: **no**
 
 ## Incomplete tests
 
+- A01: source_sha256 mismatch
+- A02: source_sha256 mismatch
 - A03: source_sha256 mismatch
 - A04: source_sha256 mismatch
 - A05: source_sha256 mismatch
@@ -33,7 +35,6 @@
 - D04: source_sha256 mismatch
 - D05: source_sha256 mismatch
 - D06: source_sha256 mismatch
-- D07: source_sha256 mismatch
 - D08: source_sha256 mismatch
 - E01: source_sha256 mismatch
 - E02: source_sha256 mismatch
@@ -49,9 +50,12 @@
 - F02: source_sha256 mismatch
 - F03: source_sha256 mismatch
 - F04: source_sha256 mismatch
+- F05: source_sha256 mismatch
 - G01: source_sha256 mismatch
 - G02: source_sha256 mismatch
 - G03: source_sha256 mismatch
+- G04: source_sha256 mismatch
+- G05: source_sha256 mismatch
 
 ## Failed gates
 
@@ -60,6 +64,9 @@
 - gate-migration: source_sha256 mismatch
 - gate-restart: source_sha256 mismatch
 - gate-race: source_sha256 mismatch
+- gate-soak: source_sha256 mismatch
 - gate-real-backend: source_sha256 mismatch
+- gate-gateway: source_sha256 mismatch
+- gate-release-hygiene: source_sha256 mismatch
 - gate-generated-surface: source_sha256 mismatch
 - gate-wiki-loop: source_sha256 mismatch

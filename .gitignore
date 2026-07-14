@@ -30,6 +30,7 @@ workspace-data/
 .idea/
 .vscode/
 *.swp
+/awesome-design-skills/
 
 # Python cache
 __pycache__/

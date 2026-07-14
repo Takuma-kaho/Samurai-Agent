@@ -13,6 +13,7 @@ import type { ArtifactDetail, MemoryDetail } from "../lib/api";
 import type { CanvasMode } from "../lib/surface-view-helpers";
 import CollectionWorkspaceView from "./CollectionWorkspaceView.vue";
 import CustomViewFrame from "./CustomViewFrame.vue";
+import GeneratedSurfaceFrame from "./GeneratedSurfaceFrame.vue";
 
 type SurfaceField = { name: string; label: string; type: string; value: unknown };
 type TableColumn = { key: string; label: string };
@@ -47,6 +48,10 @@ const props = defineProps<{
   collectionNewDraft: Record<string, string>;
   collectionController: any;
   runCustomViewAction: (spec: SurfaceRenderSpec, action: CustomAction, payload?: Record<string, JsonValue>) => void | Promise<void>;
+  runGeneratedSurfaceAction: (spec: SurfaceRenderSpec, action: CustomAction, payload?: Record<string, JsonValue>) => void | Promise<void>;
+  pinGeneratedSurface: (spec: SurfaceRenderSpec) => void | Promise<void>;
+  reviseGeneratedSurface: (spec: SurfaceRenderSpec) => void | Promise<void>;
+  exportGeneratedSurface: (spec: SurfaceRenderSpec, format: "html" | "zip") => void | Promise<void>;
   isPdfArtifact: (artifact: ArtifactRecord) => boolean;
   isImageArtifact: (artifact: ArtifactRecord) => boolean;
   isArtifactPreviewable: (artifact: ArtifactRecord) => boolean;
@@ -114,6 +119,7 @@ const emit = defineEmits<{ close: [] }>();
           <div class="surface-render-head"><span class="surface-chip is-compact">{{ props.surfaceRendererLabel(props.activeSurfaceSpec.kind) }}</span><strong>{{ props.activeSurfaceSpec.title || props.activeArtifact?.artifact.title || props.surfaceRendererLabel(props.activeSurfaceSpec.kind) }}</strong></div>
           <div v-if="props.activeSurfaceSpec.kind === 'chart'" class="surface-chart"><BarChart3 :size="18" /><div><strong>{{ props.activeSurfaceSpec.title }}</strong><span>{{ props.surfaceChartRefs(props.activeSurfaceSpec).join(" / ") }}</span></div></div>
           <CollectionWorkspaceView v-else-if="props.activeSurfaceSpec.kind === 'custom_view' && props.isCollectionSurface(props.activeSurfaceSpec)" :spec="props.activeSurfaceSpec" :saving="props.collectionSaving" :error="props.collectionError" :new-draft="props.collectionNewDraft" :controller="props.collectionController" />
+          <GeneratedSurfaceFrame v-else-if="props.activeSurfaceSpec.kind === 'custom_view' && props.activeSurfaceSpec.props.renderer === 'generated_surface'" :spec="props.activeSurfaceSpec" :saving="props.loading" :run-action="props.runGeneratedSurfaceAction" :pin-surface="props.pinGeneratedSurface" :revise-surface="props.reviseGeneratedSurface" :export-surface="props.exportGeneratedSurface" />
           <CustomViewFrame v-else-if="props.activeSurfaceSpec.kind === 'custom_view'" :spec="props.activeSurfaceSpec" :saving="props.loading" :run-action="props.runCustomViewAction" />
           <pre v-else class="surface-json">{{ props.surfaceCustomViewPayload(props.activeSurfaceSpec) }}</pre>
         </section>

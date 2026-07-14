@@ -57,6 +57,7 @@ import type { SurfaceRenderKind, SurfaceRendererCapabilities, SurfaceRenderSpec 
 import {
   api,
   ApiError,
+  getApiBaseUrl,
   type AgentBackendStatus,
   type ApprovalLifecyclePayload,
   type ArchiveMemoryPayload,
@@ -70,6 +71,8 @@ import {
   type SurfaceContractPayload
 } from "./lib/api";
 import CollectionWorkspaceView from "./components/CollectionWorkspaceView.vue";
+import GeneratedSurfaceCard from "./components/GeneratedSurfaceCard.vue";
+import SkillOptimizationCard from "./components/SkillOptimizationCard.vue";
 import WorkspacePanels from "./components/WorkspacePanels.vue";
 import ContextDrawer from "./components/ContextDrawer.vue";
 import WorkspaceCanvas from "./components/WorkspaceCanvas.vue";
@@ -713,6 +716,12 @@ async function sendMessage() {
 
 function activeAppContext(): Record<string, JsonValue> | undefined {
   const spec = activeSurfaceSpec.value;
+  if (spec?.props.renderer === "generated_surface") {
+    return {
+      generated_surface_id: typeof spec.props.surface_id === "string" ? spec.props.surface_id : "",
+      generated_surface_revision_id: typeof spec.props.revision_id === "string" ? spec.props.revision_id : ""
+    };
+  }
   if (!spec || (!isTaskListSurfaceSpec(spec) && !isCollectionTableSurfaceSpec(spec))) {
     return selectedManagementContext.value
       ? { resource_kind: selectedManagementContext.value.kind, resource_id: selectedManagementContext.value.id, title: selectedManagementContext.value.title }
@@ -1064,6 +1073,15 @@ async function openCollectionApp(schema: CollectionSchema & { file_path: string 
 async function openMessagePresentation(presentation: MessagePresentationRecord) {
   collectionAppError.value = null;
   try {
+    if (presentation.kind === "generated_surface" && presentation.surface_id) {
+      const detail = await api.getGeneratedSurface(presentation.surface_id);
+      const revisionId = presentation.revision_id ?? detail.surface.current_revision_id;
+      const spec = generatedSurfaceRenderSpec(detail.surface, revisionId);
+      openSurfaceSpec(spec);
+      activeMessagePresentationId.value = presentation.id;
+      viewMode.value = "chat";
+      return;
+    }
     const operation = collectionPresentationOpenOperation(presentation, `surface_presentation_open_${presentation.collection_id}_${Date.now()}`);
     const envelope = await api.runSurfaceOperation({
       ...operation,
@@ -1080,6 +1098,68 @@ async function openMessagePresentation(presentation: MessagePresentationRecord) 
   } catch (error) {
     collectionAppError.value = collectionSurfaceErrorMessage(error);
   }
+}
+
+function generatedSurfaceRenderSpec(surface: NonNullable<Awaited<ReturnType<typeof api.getGeneratedSurface>>>["surface"], revisionId: string): SurfaceRenderSpec {
+  const revision = surface.current_revision_id === revisionId ? surface.current_revision_id : revisionId;
+  const apiBase = getApiBaseUrl() ?? "";
+  return {
+    id: `generated_surface_${surface.id}_${revision}`,
+    kind: "custom_view",
+    title: surface.title,
+    props: {
+      renderer: "generated_surface",
+      renderer_version: "1",
+      surface_id: surface.id,
+      revision_id: revision,
+      preview_url: `${apiBase}/api/generated-surfaces/${encodeURIComponent(surface.id)}/revisions/${encodeURIComponent(revision)}/preview`,
+      actions: surface.actions,
+      input_data_schema: surface.input_data_schema,
+      data: {}
+    },
+    priority: "primary",
+    resource_refs: surface.source_refs
+  };
+}
+
+async function pinGeneratedSurface(presentationOrSpec: MessagePresentationRecord | SurfaceRenderSpec) {
+  const surfaceId = "surface_id" in presentationOrSpec ? presentationOrSpec.surface_id : presentationOrSpec.props.surface_id;
+  if (typeof surfaceId !== "string" || !surfaceId) return;
+  await api.runDomainCommand("generated_surface.state", { surface_id: surfaceId, action: "pin" });
+  await reloadActiveSession();
+}
+
+async function reviseGeneratedSurface(spec: SurfaceRenderSpec) {
+  const surfaceId = typeof spec.props.surface_id === "string" ? spec.props.surface_id : "";
+  if (!surfaceId) return;
+  selectedManagementContext.value = null;
+  prompt.value = `この独自UIを修正して（surface_id: ${surfaceId}）：`;
+  activeSurfaceSpec.value = spec;
+  viewMode.value = "chat";
+  schedulePromptFocus();
+}
+
+async function exportGeneratedSurface(spec: SurfaceRenderSpec, format: "html" | "zip") {
+  const surfaceId = typeof spec.props.surface_id === "string" ? spec.props.surface_id : "";
+  const revisionId = typeof spec.props.revision_id === "string" ? spec.props.revision_id : "";
+  if (!surfaceId || !revisionId) return;
+  const base = getApiBaseUrl() ?? "";
+  const url = `${base}/api/generated-surfaces/${encodeURIComponent(surfaceId)}/export?revision_id=${encodeURIComponent(revisionId)}&format=${format}`;
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function runGeneratedSurfaceAction(spec: SurfaceRenderSpec, action: { id: string; label: string }, payload: Record<string, JsonValue> = {}) {
+  const surfaceId = typeof spec.props.surface_id === "string" ? spec.props.surface_id : "";
+  const revisionId = typeof spec.props.revision_id === "string" ? spec.props.revision_id : "";
+  if (!surfaceId || !revisionId) return;
+  await api.runDomainCommand("generated_surface.action.run", {
+    surface_id: surfaceId,
+    revision_id: revisionId,
+    interaction_id: `surface_interaction_${Date.now()}`,
+    action_id: action.id,
+    action_payload: payload
+  });
+  await reloadActiveSession();
 }
 
 function openSettings() {
@@ -1490,19 +1570,32 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
                               </div>
 
                               <div v-if="message.presentations.length > 0" class="work-card-stack">
-                                <CollectionWorkspaceView
-                                  v-for="presentation in message.presentations"
-                                  :key="presentation.id"
-                                  mode="card"
-                                  :spec="collectionPresentationPreviewSpec(presentation)"
-                                  :presentation="presentation"
-                                  :saving="collectionSaving"
-                                  :error="collectionAppError"
-                                  :new-draft="collectionNewDraft"
-                                  :controller="collectionWorkspaceController"
-                                  :open-label="label('artifact.open_in_workspace')"
-                                  @open="openMessagePresentation(presentation)"
-                                />
+                                <template v-for="presentation in message.presentations" :key="presentation.id">
+                                  <GeneratedSurfaceCard
+                                    v-if="presentation.kind === 'generated_surface'"
+                                    :presentation="presentation"
+                                    :open-label="label('artifact.open_in_workspace')"
+                                    :pin-surface="pinGeneratedSurface"
+                                    @open="openMessagePresentation(presentation)"
+                                  />
+                                  <SkillOptimizationCard
+                                    v-else-if="presentation.kind === 'skill_optimization'"
+                                    :presentation="presentation"
+                                    @changed="reloadActiveSession"
+                                  />
+                                  <CollectionWorkspaceView
+                                    v-else
+                                    mode="card"
+                                    :spec="collectionPresentationPreviewSpec(presentation)"
+                                    :presentation="presentation"
+                                    :saving="collectionSaving"
+                                    :error="collectionAppError"
+                                    :new-draft="collectionNewDraft"
+                                    :controller="collectionWorkspaceController"
+                                    :open-label="label('artifact.open_in_workspace')"
+                                    @open="openMessagePresentation(presentation)"
+                                  />
+                                </template>
                               </div>
 
                               <section v-if="workSummaryBlock.changes.length > 0" class="codex-change-card">
@@ -1580,19 +1673,32 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
                         <template v-else>
                           <p class="message-body">{{ message.content }}</p>
                           <div v-if="message.role === 'agent' && message.presentations.length > 0" class="work-card-stack">
-                            <CollectionWorkspaceView
-                              v-for="presentation in message.presentations"
-                              :key="presentation.id"
-                              mode="card"
-                              :spec="collectionPresentationPreviewSpec(presentation)"
-                              :presentation="presentation"
-                              :saving="collectionSaving"
-                              :error="collectionAppError"
-                              :new-draft="collectionNewDraft"
-                              :controller="collectionWorkspaceController"
-                              :open-label="label('artifact.open_in_workspace')"
-                              @open="openMessagePresentation(presentation)"
-                            />
+                            <template v-for="presentation in message.presentations" :key="presentation.id">
+                              <GeneratedSurfaceCard
+                                v-if="presentation.kind === 'generated_surface'"
+                                :presentation="presentation"
+                                :open-label="label('artifact.open_in_workspace')"
+                                :pin-surface="pinGeneratedSurface"
+                                @open="openMessagePresentation(presentation)"
+                              />
+                              <SkillOptimizationCard
+                                v-else-if="presentation.kind === 'skill_optimization'"
+                                :presentation="presentation"
+                                @changed="reloadActiveSession"
+                              />
+                              <CollectionWorkspaceView
+                                v-else
+                                mode="card"
+                                :spec="collectionPresentationPreviewSpec(presentation)"
+                                :presentation="presentation"
+                                :saving="collectionSaving"
+                                :error="collectionAppError"
+                                :new-draft="collectionNewDraft"
+                                :controller="collectionWorkspaceController"
+                                :open-label="label('artifact.open_in_workspace')"
+                                @open="openMessagePresentation(presentation)"
+                              />
+                            </template>
                           </div>
                           <footer v-if="message.role === 'agent'" class="message-footer">
                             <button type="button" :title="label('message.copy')" :aria-label="label('message.copy')" @click="copyMessage(message)">
@@ -1742,6 +1848,10 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
             :collection-new-draft="collectionNewDraft"
             :collection-controller="collectionWorkspaceController"
             :run-custom-view-action="runCustomViewAction"
+            :run-generated-surface-action="runGeneratedSurfaceAction"
+            :pin-generated-surface="pinGeneratedSurface"
+            :revise-generated-surface="reviseGeneratedSurface"
+            :export-generated-surface="exportGeneratedSurface"
             :is-pdf-artifact="isPdfArtifact"
             :is-image-artifact="isImageArtifact"
             :is-artifact-previewable="isArtifactPreviewable"

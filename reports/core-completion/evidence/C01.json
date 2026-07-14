@@ -3,19 +3,24 @@
   "test_id": "C01",
   "command": "pnpm core:test:migration",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
   "worktree_clean": false,
-  "source_sha256": "9877ea69a995bc99c9cf8727c3f436173b4955c467c518ff9f1f52272d6288bc",
+  "source_sha256": "12039746ac45e70b77cb5560f211aa8af8ac543fd5624f334e6f66b3b61495e8",
   "source_files": [
+    "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
     "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/workspace-migration.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-workspace-migration.mjs"
   ],
-  "started_at": "2026-07-11T13:06:35.040Z",
-  "completed_at": "2026-07-11T13:06:35.173Z",
+  "source_read_errors": [],
+  "started_at": "2026-07-13T15:15:14.089Z",
+  "completed_at": "2026-07-13T15:15:14.235Z",
   "assertions": [
     {
       "name": "Fresh install reaches latest schema",
@@ -48,10 +53,11 @@
     "upgraded_versions": 2,
     "checksum_equal": true,
     "checksum_tamper_rejected": true,
-    "latest_version": 2,
+    "latest_version": 3,
     "checksums": [
-      "8f2bb5ae4bfde0d625b3d11d61f6f132635a0703cc7e7bf44e67a2a4123471a8",
-      "9ca7054dfb37369ebafa0ce3452918e6048f2629c3f71602a8e3f3812f9713d1"
+      "66ae2c8877e02d61acb47b77131149f5152c392c7434bc005c14fbe8d2b1b505",
+      "9ca7054dfb37369ebafa0ce3452918e6048f2629c3f71602a8e3f3812f9713d1",
+      "106ed93c492c08b93dfb60f7aaf3256f961fb5c9905efdb3dfd1d6cbeb274110"
     ]
   }
 }

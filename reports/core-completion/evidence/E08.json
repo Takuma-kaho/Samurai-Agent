@@ -3,18 +3,20 @@
   "test_id": "E08",
   "command": "pnpm core:test:task-evaluation",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
-  "worktree_clean": false,
-  "source_sha256": "4419a6298be64ab8dcba0f2e88ea0a508417411215ef2ae618103a606fb10968",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "worktree_clean": true,
+  "source_sha256": "a904b14f015ed83e0bbd07427e34947d2a4d03e0a9b3a80250621ddf3eb6c64d",
   "source_files": [
+    "packages/runtime/src/agent-runtime.ts",
     "packages/runtime/src/index.ts",
     "packages/runtime/src/learning/task-evaluation.ts",
     "scripts/fixtures/task-evaluation.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-task-evaluation.mjs"
   ],
-  "started_at": "2026-07-11T09:38:30.900Z",
-  "completed_at": "2026-07-11T09:38:30.974Z",
+  "source_read_errors": [],
+  "started_at": "2026-07-13T08:14:13.393Z",
+  "completed_at": "2026-07-13T08:14:13.437Z",
   "assertions": [
     {
       "name": "Comparable work shares fingerprint, incompatible output differs",

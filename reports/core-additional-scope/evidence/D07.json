@@ -3,7 +3,7 @@
   "test_id": "D07",
   "status": "passed",
   "command": "node scripts/verify-core-additions-new-contracts.mjs",
-  "commit_sha": "3ec9abc73ef6d5271ed03c87eb82cba3599e3340",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
   "source_sha256": "1eceefd16acff969a9e197d87d18a255751d849fe2c7a2cf5443af8ba84d273f",
   "source_files": [
     "packages/core-schemas/src/index.ts",

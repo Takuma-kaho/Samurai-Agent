@@ -188,13 +188,13 @@ function operationBase(input: Parameters<typeof useSurfaceWorkspace>[0], action:
 
 export function surfaceFields(spec: SurfaceRenderSpec): SurfaceField[] {
   const fields = Array.isArray(spec.props.fields) ? spec.props.fields : [];
-  return fields.filter(isRecord).map((field) => ({ name: typeof field.name === "string" ? field.name : "field", label: typeof field.label === "string" ? field.label : typeof field.name === "string" ? field.name : "Field", type: typeof field.type === "string" ? field.type : "text", value: field.default_value }));
+  return fields.filter((value): value is Record<string, JsonValue> => isRecord(value)).map((field) => ({ name: typeof field.name === "string" ? field.name : "field", label: typeof field.label === "string" ? field.label : typeof field.name === "string" ? field.name : "Field", type: typeof field.type === "string" ? field.type : "text", value: field.default_value }));
 }
 export function surfaceTableColumns(spec: SurfaceRenderSpec): Array<{ key: string; label: string }> {
   const columns = Array.isArray(spec.props.columns) ? spec.props.columns : [];
-  return columns.filter(isRecord).map((column) => ({ key: typeof column.key === "string" ? column.key : "value", label: typeof column.label === "string" ? column.label : typeof column.key === "string" ? column.key : "Value" }));
+  return columns.filter((value): value is Record<string, JsonValue> => isRecord(value)).map((column) => ({ key: typeof column.key === "string" ? column.key : "value", label: typeof column.label === "string" ? column.label : typeof column.key === "string" ? column.key : "Value" }));
 }
-export function surfaceTableRows(spec: SurfaceRenderSpec): Record<string, unknown>[] { return Array.isArray(spec.props.rows) ? spec.props.rows.filter(isRecord) : []; }
+export function surfaceTableRows(spec: SurfaceRenderSpec): Record<string, unknown>[] { return Array.isArray(spec.props.rows) ? spec.props.rows.filter((value): value is Record<string, JsonValue> => isRecord(value)) : []; }
 export function surfaceChartRefs(spec: SurfaceRenderSpec): string[] { return Array.isArray(spec.props.data_refs) ? spec.props.data_refs.filter((item): item is string => typeof item === "string") : []; }
 export function surfaceCustomViewPayload(spec: SurfaceRenderSpec): string { return JSON.stringify(spec.props.data ?? spec.props, null, 2); }
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }

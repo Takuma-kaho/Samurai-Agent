@@ -256,12 +256,21 @@ importers:
       '@samurai-agent/policy-engine':
         specifier: workspace:*
         version: link:../policy-engine
+      '@samurai-agent/skill-optimization':
+        specifier: workspace:*
+        version: link:../skill-optimization
       '@samurai-agent/ui-protocol':
         specifier: workspace:*
         version: link:../ui-protocol
       '@samurai-agent/workspace-store':
         specifier: workspace:*
         version: link:../workspace-store
+
+  packages/skill-optimization:
+    dependencies:
+      '@samurai-agent/core-schemas':
+        specifier: workspace:*
+        version: link:../core-schemas
 
   packages/skills:
     dependencies:

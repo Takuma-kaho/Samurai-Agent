@@ -2066,6 +2066,164 @@ button {
   width: 100%;
 }
 
+.generated-surface-frame {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.generated-surface-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.generated-surface-toolbar button,
+.generated-surface-actions button {
+  background: var(--panel-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 5px 9px;
+}
+
+.generated-surface-toolbar button:hover,
+.generated-surface-actions button:hover {
+  background: var(--icon-hover);
+  color: var(--ink);
+}
+
+.generated-surface-toolbar button:disabled,
+.generated-surface-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.generated-surface-toolbar-spacer {
+  flex: 1;
+}
+
+.generated-surface-revision {
+  color: var(--soft);
+  font-size: 11px;
+}
+
+.generated-surface-iframe {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  min-height: 520px;
+  width: 100%;
+}
+
+.generated-surface-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.generated-surface-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-card);
+  color: var(--soft);
+  padding: 24px;
+  text-align: center;
+}
+
+.generated-surface-card {
+  align-items: stretch;
+  background: #252525;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.generated-surface-card-open {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  cursor: pointer;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 14px 16px;
+  text-align: left;
+}
+
+.generated-surface-card-open:hover,
+.generated-surface-card-pin:hover {
+  background: #2d2d2d;
+}
+
+.generated-surface-card-open em {
+  color: var(--soft);
+  font-size: 13px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.generated-surface-card-pin {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--line);
+  color: var(--soft);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  padding: 0 13px;
+}
+
+.skill-optimization-card {
+  background: #252525;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  border-radius: var(--radius-card);
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.skill-optimization-card-head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.skill-optimization-score {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+}
+
+.skill-optimization-score span,
+.skill-optimization-card-note,
+.skill-optimization-feedback {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.skill-optimization-score strong { color: var(--ink); font-size: 16px; }
+.skill-optimization-score em { color: var(--accent); font-size: 12px; font-style: normal; }
+.skill-optimization-card-note { line-height: 1.55; margin: 0; }
+.skill-optimization-feedback { display: grid; gap: 4px; margin: 0; padding-left: 18px; }
+.skill-optimization-body { border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; padding-top: 8px; }
+.skill-optimization-body pre { color: var(--ink); max-height: 220px; margin: 8px 0 0; overflow: auto; white-space: pre-wrap; }
+.skill-optimization-actions { display: flex; gap: 8px; }
+.skill-optimization-actions button { align-items: center; background: var(--panel-subtle); border: 1px solid var(--line); border-radius: var(--radius-pill); color: var(--ink); cursor: pointer; display: inline-flex; font-size: 12px; gap: 6px; padding: 6px 10px; }
+.skill-optimization-actions button:first-child { background: var(--ink); border-color: var(--ink); color: var(--stage); }
+.skill-optimization-actions button:disabled { cursor: not-allowed; opacity: 0.5; }
+.skill-optimization-error { color: #f49a9a; font-size: 12px; margin: 0; }
+
 .collection-table-app {
   display: grid;
   gap: 12px;

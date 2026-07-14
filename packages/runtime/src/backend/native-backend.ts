@@ -210,6 +210,9 @@ function nativeToolActionId(toolName: string): string {
   if (toolName === "create_artifact") {
     return "artifact.create";
   }
+  if (toolName === "create_generated_surface") {
+    return "generated_surface.create";
+  }
   if (toolName === "remember_topic") {
     return "memory.topic.create";
   }

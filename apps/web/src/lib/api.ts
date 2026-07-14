@@ -8,6 +8,14 @@ import type {
   BackendRunRecord,
   CollectionRecord,
   CollectionSchema,
+  GeneratedSurfaceDefinition,
+  GeneratedSurfaceRevisionRecord,
+  OptimizationCandidate,
+  OptimizationEvaluation,
+  OptimizationPromotion,
+  SkillOptimizationDataset,
+  SkillOptimizationRun,
+  SkillOptimizationSnapshot,
   JsonValue,
   MemoryFrontmatter,
   MessageRecord,
@@ -78,6 +86,21 @@ export interface ChatTurnResult {
   activity: ActivityInboxItem[];
 }
 
+export interface GeneratedSurfaceDetail {
+  surface: GeneratedSurfaceDefinition;
+  revisions: GeneratedSurfaceRevisionRecord[];
+  interactions: Array<Record<string, JsonValue>>;
+}
+
+export interface SkillOptimizationDetail {
+  run: SkillOptimizationRun;
+  dataset?: SkillOptimizationDataset;
+  candidates: OptimizationCandidate[];
+  evaluations: OptimizationEvaluation[];
+  promotions: OptimizationPromotion[];
+  snapshots: SkillOptimizationSnapshot[];
+}
+
 export interface AgentBackendStatus {
   id: string;
   kind: "mock" | "samurai_native" | "claude_code" | "codex" | "external";
@@ -92,6 +115,7 @@ export type DomainCommandInputSource =
   | "runtime_api"
   | "gateway_inbound"
   | "automation"
+  | "generated_surface"
   | "scheduled_context";
 
 export interface SurfaceCommandEntry {
@@ -307,6 +331,24 @@ export const api = {
   },
   getSurfaceContract(source?: DomainCommandInputSource) {
     return request<SurfaceContractPayload>(source ? `/api/surface/contract?source=${encodeURIComponent(source)}` : "/api/surface/contract");
+  },
+  runDomainCommand<T = unknown>(commandId: string, payload: Record<string, JsonValue>, inputSource: DomainCommandInputSource = "runtime_api") {
+    return request<{ command: SurfaceCommandEntry; result: T; render_spec?: unknown; render_specs?: unknown[] }>(`/api/domain/commands/${encodeURIComponent(commandId)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ input_source: inputSource, payload })
+    });
+  },
+  getGeneratedSurface(surfaceId: string) {
+    return request<GeneratedSurfaceDetail>(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}`);
+  },
+  getGeneratedSurfaceBundle(surfaceId: string, revisionId: string) {
+    return request<{ revision: GeneratedSurfaceRevisionRecord; bundle: { html: string; css?: string; script?: string }; csp: string }>(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}/revisions/${encodeURIComponent(revisionId)}/bundle`);
+  },
+  listSkillOptimizationRuns(skillId?: string) {
+    return request<SkillOptimizationRun[]>(skillId ? `/api/skill-optimizations?skill_id=${encodeURIComponent(skillId)}` : "/api/skill-optimizations");
+  },
+  getSkillOptimization(runId: string) {
+    return request<SkillOptimizationDetail>(`/api/skill-optimizations/${encodeURIComponent(runId)}`);
   },
   runSurfaceOperation<T>(operation: SurfaceOperation) {
     return request<SurfaceOperationResultEnvelope<T>>("/api/surface/operations", {

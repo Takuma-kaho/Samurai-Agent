@@ -11,9 +11,10 @@ const versionOneRoot = await mkdtemp(path.join(tmpdir(), "samurai-migration-v1-"
 try {
   const fresh = await WorkspaceStore.create({ rootDir: freshRoot });
   const freshMigrations = await fresh.listSchemaMigrations();
-  assert.equal(freshMigrations.length, 2);
+  assert.equal(freshMigrations.length, 3);
   assert.equal(freshMigrations[0].version, 1);
   assert.equal(freshMigrations[1].version, 2);
+  assert.equal(freshMigrations[2].version, 3);
   await fresh.close();
 
   const legacySeed = await WorkspaceStore.create({ rootDir: legacyRoot });
@@ -24,14 +25,14 @@ try {
 
   const upgraded = await WorkspaceStore.create({ rootDir: legacyRoot });
   const upgradedMigrations = await upgraded.listSchemaMigrations();
-  assert.equal(upgradedMigrations.length, 2);
+  assert.equal(upgradedMigrations.length, 3);
   assert.deepEqual(upgradedMigrations.map((item) => item.checksum), freshMigrations.map((item) => item.checksum));
   await upgraded.close();
 
   const versionOneSeed = await WorkspaceStore.create({ rootDir: versionOneRoot });
   await versionOneSeed.close();
   const versionOneDb = new Database(path.join(versionOneRoot, "workspace.sqlite"));
-  versionOneDb.exec("DROP TABLE gateway_deliveries; DELETE FROM schema_migrations WHERE version = 2");
+  versionOneDb.exec("DROP TABLE gateway_deliveries; DELETE FROM schema_migrations WHERE version IN (2, 3)");
   versionOneDb.close();
   const versionOneUpgraded = await WorkspaceStore.create({ rootDir: versionOneRoot });
   const versionOneMigrations = await versionOneUpgraded.listSchemaMigrations();

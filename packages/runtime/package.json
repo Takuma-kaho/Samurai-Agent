@@ -22,6 +22,7 @@
     "@samurai-agent/gateway": "workspace:*",
     "@samurai-agent/localization": "workspace:*",
     "@samurai-agent/learning": "workspace:*",
+    "@samurai-agent/skill-optimization": "workspace:*",
     "@samurai-agent/memory": "workspace:*",
     "@samurai-agent/policy-engine": "workspace:*",
     "@samurai-agent/ui-protocol": "workspace:*",

@@ -610,6 +610,8 @@ export const proposalCapabilityManifest: CapabilityManifest = {
   ui_surfaces: ["chat", "artifact", "context_drawer", "audit"],
   agent_tools: [
     "artifact.create",
+    "generated_surface.create",
+    "generated_surface.revise",
     "artifact.revise",
     "artifact.repair",
     "artifact.restore_revision",

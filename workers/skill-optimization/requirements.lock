@@ -1,0 +1,2 @@
+# Generated from pyproject.toml. Keep the GEPA runtime version fixed.
+dspy==3.2.1

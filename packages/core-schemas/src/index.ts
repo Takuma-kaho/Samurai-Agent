@@ -112,6 +112,10 @@ export const toolRunStatuses = ["completed", "ignored", "failed"] as const;
 export const learningResourceKinds = ["memory", "wiki", "skill", "skill_support", "session_result"] as const;
 export const learningResourceUseStages = ["selected", "body_loaded", "support_loaded"] as const;
 export const learningAssessments = ["helpful", "neutral", "harmful", "insufficient_evidence"] as const;
+export const skillOptimizationRunStatuses = ["queued", "running", "completed", "failed", "cancelled"] as const;
+export const skillOptimizationCandidateStatuses = ["proposed", "passed", "rejected", "promoted", "rolled_back"] as const;
+export const skillOptimizationDatasetSources = ["real", "golden", "synthetic"] as const;
+export const skillOptimizationDatasetSplits = ["train", "validation", "holdout"] as const;
 export const automationJobStatuses = ["enabled", "disabled", "archived"] as const;
 export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed"] as const;
 export const externalSendChannels = ["webhook", "email", "slack", "telegram", "line"] as const;
@@ -1083,6 +1087,132 @@ export const LearningEvaluationRecordSchema = z.object({
   created_at: z.string().datetime()
 });
 export type LearningEvaluationRecord = z.infer<typeof LearningEvaluationRecordSchema>;
+
+export const SkillOptimizationExampleSchema = z.object({
+  id: z.string().min(1),
+  skill_id: z.string().min(1),
+  prompt: z.string().min(1),
+  expected_behavior: z.string().min(1),
+  feedback: z.string().min(1),
+  source: z.enum(skillOptimizationDatasetSources),
+  split: z.enum(skillOptimizationDatasetSplits),
+  skill_body_read_run_id: z.string().min(1).optional(),
+  trace_refs: z.array(ResourceRefSchema),
+  metadata: z.record(jsonValueSchema),
+  created_at: z.string().datetime()
+}).superRefine((value, ctx) => {
+  if (value.source !== "synthetic" && !value.skill_body_read_run_id) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["skill_body_read_run_id"], message: "real_or_golden_example_requires_skill_body_read_run" });
+  }
+});
+export type SkillOptimizationExample = z.infer<typeof SkillOptimizationExampleSchema>;
+
+export const SkillOptimizationDatasetSchema = z.object({
+  id: z.string().min(1),
+  skill_id: z.string().min(1),
+  examples: z.array(SkillOptimizationExampleSchema).min(20),
+  split_counts: z.object({ train: z.number().int().nonnegative(), validation: z.number().int().nonnegative(), holdout: z.number().int().nonnegative() }),
+  holdout_non_synthetic_count: z.number().int().nonnegative(),
+  created_at: z.string().datetime()
+}).superRefine((value, ctx) => {
+  const total = value.split_counts.train + value.split_counts.validation + value.split_counts.holdout;
+  if (total !== value.examples.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["split_counts"], message: "dataset_split_counts_mismatch" });
+  }
+  if (value.split_counts.train < 12 || value.split_counts.validation < 4 || value.split_counts.holdout < 4) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["split_counts"], message: "dataset_split_minimum_not_met" });
+  }
+  if (value.holdout_non_synthetic_count < 1 || !value.examples.some((example) => example.split === "holdout" && example.source !== "synthetic")) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["holdout_non_synthetic_count"], message: "holdout_must_include_real_or_golden_example" });
+  }
+});
+export type SkillOptimizationDataset = z.infer<typeof SkillOptimizationDatasetSchema>;
+
+export const SkillOptimizationRunSchema = z.object({
+  id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  target_skill_id: z.string().min(1),
+  baseline_content_hash: z.string().min(1),
+  baseline_version: z.string().min(1),
+  dataset_id: z.string().min(1),
+  objective_id: z.string().min(1),
+  work_item_id: z.string().min(1),
+  optimizer: z.literal("gepa"),
+  optimizer_version: z.string().min(1),
+  status: z.enum(skillOptimizationRunStatuses),
+  phase: z.enum(["dataset", "optimizing", "evaluating", "awaiting_confirmation", "promoting", "completed", "failed", "cancelled"]),
+  progress: z.number().min(0).max(1),
+  candidate_ids: z.array(z.string().min(1)),
+  trace_refs: z.array(ResourceRefSchema),
+  provenance: z.record(jsonValueSchema),
+  error: z.string().optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  started_at: z.string().datetime().optional(),
+  completed_at: z.string().datetime().optional()
+});
+export type SkillOptimizationRun = z.infer<typeof SkillOptimizationRunSchema>;
+
+export const OptimizationCandidateSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  skill_id: z.string().min(1),
+  parent_candidate_id: z.string().min(1).optional(),
+  body: z.string().min(1),
+  content_hash: z.string().min(1),
+  baseline_holdout_score: z.number().min(0).max(100),
+  holdout_score: z.number().min(0).max(100),
+  holdout_delta: z.number(),
+  feedback: z.array(z.string().min(1)),
+  dataset_id: z.string().min(1),
+  trace_refs: z.array(ResourceRefSchema),
+  safety: z.object({ related_tests_passed: z.boolean(), safety_checks_passed: z.boolean(), important_regression: z.boolean() }),
+  status: z.enum(skillOptimizationCandidateStatuses),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type OptimizationCandidate = z.infer<typeof OptimizationCandidateSchema>;
+
+export const OptimizationEvaluationSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  candidate_id: z.string().min(1),
+  split: z.enum(skillOptimizationDatasetSplits),
+  score: z.number().min(0).max(100),
+  feedback: z.array(z.string().min(1)),
+  important_regression: z.boolean(),
+  related_tests_passed: z.boolean(),
+  safety_checks_passed: z.boolean(),
+  trace_refs: z.array(ResourceRefSchema),
+  created_at: z.string().datetime()
+});
+export type OptimizationEvaluation = z.infer<typeof OptimizationEvaluationSchema>;
+
+export const SkillOptimizationSnapshotSchema = z.object({
+  id: z.string().min(1),
+  skill_id: z.string().min(1),
+  run_id: z.string().min(1),
+  candidate_id: z.string().min(1),
+  content_hash: z.string().min(1),
+  markdown: z.string().min(1),
+  created_at: z.string().datetime(),
+  restored_at: z.string().datetime().optional()
+});
+export type SkillOptimizationSnapshot = z.infer<typeof SkillOptimizationSnapshotSchema>;
+
+export const OptimizationPromotionSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  candidate_id: z.string().min(1),
+  skill_id: z.string().min(1),
+  snapshot_id: z.string().min(1),
+  expected_content_hash: z.string().min(1),
+  promoted_content_hash: z.string().min(1),
+  status: z.enum(["promoted", "rejected", "rolled_back", "conflict"]),
+  provenance: z.record(jsonValueSchema),
+  created_at: z.string().datetime()
+});
+export type OptimizationPromotion = z.infer<typeof OptimizationPromotionSchema>;
 
 export const BackgroundReviewProvenanceSchema = z.object({
   origin: z.literal("background_review"),
@@ -2477,6 +2607,7 @@ export const GeneratedSurfaceRevisionRecordSchema = z.object({
   html_ref: ResourceRefSchema,
   css_ref: ResourceRefSchema.optional(),
   script_ref: ResourceRefSchema.optional(),
+  asset_refs: z.array(ResourceRefSchema).default([]),
   bundle_hash: z.string().min(1),
   validation_report: GeneratedSurfaceValidationReportSchema,
   created_at: z.string().datetime()
@@ -2708,13 +2839,16 @@ export interface MessagePresentationRecord {
   id: string;
   session_id: string;
   message_id: string;
-  kind: "collection_app";
+  kind: "collection_app" | "generated_surface" | "skill_optimization";
   title: string;
   subtitle: string;
   collection_id: string;
   view_id: string;
   renderer: string;
   view_state?: Record<string, JsonValue>;
+  surface_id?: string;
+  revision_id?: string;
+  preview_url?: string;
   created_at: string;
   updated_at: string;
 }

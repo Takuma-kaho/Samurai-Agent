@@ -916,17 +916,106 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
-    app.get("/api/generated-surfaces/:surfaceId/revisions/:revisionId/preview", async (req, res, next) => {
+    app.get("/api/generated-surfaces/:surfaceId/revisions/:revisionId/assets/{*assetPath}", async (req, res, next) => {
       try {
         const revision = await store.getGeneratedSurfaceRevision(req.params.revisionId);
+        if (!revision || revision.surface_id !== req.params.surfaceId) {
+          res.status(404).type("text").send("Generated Surface asset not found.");
+          return;
+        }
+        const requestedPath = String(req.params.assetPath ?? "").replace(/^\/+/, "");
+        const asset = (await store.readGeneratedSurfaceAssets(revision.id)).find((candidate) => candidate.path === requestedPath);
+        if (!asset) {
+          res.status(404).type("text").send("Generated Surface asset not found.");
+          return;
+        }
+        res.set("Cache-Control", "private, no-store");
+        res.set("X-Content-Type-Options", "nosniff");
+        res.type(generatedSurfaceAssetContentType(requestedPath)).send(asset.content);
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/generated-surfaces/:surfaceId/revisions/:revisionId/preview", async (req, res, next) => {
+      try {
+        const surface = await store.getGeneratedSurface(req.params.surfaceId);
+        const revision = await store.getGeneratedSurfaceRevision(req.params.revisionId);
         const bundle = revision && revision.surface_id === req.params.surfaceId ? await store.readGeneratedSurfaceBundle(revision.id) : undefined;
-        if (!revision || !bundle) {
+        if (!surface || !revision || !bundle) {
           res.status(404).type("text").send("Generated Surface revision not found.");
           return;
         }
         res.set("Content-Security-Policy", generatedSurfaceCsp);
         res.set("Cache-Control", "private, no-store");
-        res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${generatedSurfaceCsp}"><style>${bundle.css ?? ""}</style></head><body>${bundle.html}<script>${bundle.script ?? ""}</script></body></html>`);
+        res.set("X-Content-Type-Options", "nosniff");
+        res.type("html").send(generatedSurfaceDocument(bundle, surface.actions));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/generated-surfaces/:surfaceId/export", async (req, res, next) => {
+      try {
+        const surface = await store.getGeneratedSurface(req.params.surfaceId);
+        if (!surface) {
+          res.status(404).json({ error: "generated_surface_not_found" });
+          return;
+        }
+        const requestedRevision = typeof req.query.revision_id === "string" ? req.query.revision_id : surface.current_revision_id;
+        const revision = await store.getGeneratedSurfaceRevision(requestedRevision);
+        const bundle = revision && revision.surface_id === surface.id ? await store.readGeneratedSurfaceBundle(revision.id) : undefined;
+        if (!revision || !bundle) {
+          res.status(404).json({ error: "generated_surface_revision_not_found" });
+          return;
+        }
+        const html = generatedSurfaceDocument(bundle);
+        const assets = await store.readGeneratedSurfaceAssets(revision.id);
+        const format = req.query.format === "zip" ? "zip" : "html";
+        const fileName = `${surface.id}-revision-${revision.revision}.${format}`;
+        if (format === "zip") {
+          const zip = createStoredZip([
+            { name: "index.html", content: html },
+            ...(bundle.css ? [{ name: "styles.css", content: bundle.css }] : []),
+            ...(bundle.script ? [{ name: "script.js", content: bundle.script }] : []),
+            ...assets.map((asset) => ({ name: asset.path, content: asset.content }))
+          ]);
+          res.set("Content-Disposition", `attachment; filename="${fileName}"`);
+          res.type("application/zip").send(zip);
+          return;
+        }
+        res.set("Content-Disposition", `attachment; filename="${fileName}"`);
+        res.type("html").send(html);
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/skill-optimizations", async (req, res, next) => {
+      try {
+        const skillId = typeof req.query.skill_id === "string" ? req.query.skill_id : undefined;
+        res.json(await store.listSkillOptimizationRuns({ skillId }));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/api/skill-optimizations/:runId", async (req, res, next) => {
+      try {
+        const run = await store.getSkillOptimizationRun(req.params.runId);
+        if (!run) {
+          res.status(404).json({ error: "skill_optimization_run_not_found" });
+          return;
+        }
+        const [dataset, candidates] = await Promise.all([
+          store.getSkillOptimizationDataset(run.dataset_id),
+          store.listOptimizationCandidates(run.id)
+        ]);
+        const evaluations = (await Promise.all(candidates.map((candidate) => store.listOptimizationEvaluations(candidate.id)))).flat();
+        const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+        const promotions = (await store.listOptimizationPromotions()).filter((promotion) => promotion.run_id === run.id && candidateIds.has(promotion.candidate_id));
+        const snapshots = await Promise.all(promotions.map((promotion) => store.getSkillOptimizationSnapshot(promotion.snapshot_id)));
+        res.json({ run, dataset, candidates, evaluations, promotions, snapshots: snapshots.filter(Boolean) });
       } catch (error) {
         next(error);
       }
@@ -7690,6 +7779,93 @@ async function workspaceReadinessSnapshot(store: WorkspaceStore): Promise<Worksp
       }
     }
   };
+}
+
+function generatedSurfaceAssetContentType(assetPath: string): string {
+  const extension = assetPath.toLowerCase().split(".").pop();
+  return extension === "png" ? "image/png"
+    : extension === "jpg" || extension === "jpeg" ? "image/jpeg"
+      : extension === "gif" ? "image/gif"
+        : extension === "webp" ? "image/webp"
+          : extension === "svg" ? "image/svg+xml"
+            : extension === "css" ? "text/css"
+              : "application/octet-stream";
+}
+
+function generatedSurfaceDocument(bundle: { html: string; css?: string; script?: string }, actions: Array<{ id: string }> = []): string {
+  const bridge = JSON.stringify({ actions: actions.map((action) => action.id) }).replace(/</g, "\\u003c");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${generatedSurfaceCsp}"><style>${bundle.css ?? ""}</style></head><body>${bundle.html}<script>${bundle.script ?? ""}</script><script>window.samuraiGeneratedSurface=${bridge};window.dispatchSamuraiAction=function(actionId,payload){window.parent.postMessage({type:"samurai.generated_surface.action",action_id:actionId,payload:payload||{}},"*")};</script></body></html>`;
+}
+
+function createStoredZip(entries: Array<{ name: string; content: string | Buffer }>): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const content = Buffer.isBuffer(entry.content) ? entry.content : Buffer.from(entry.content, "utf8");
+    const checksum = crc32(content);
+    const local = Buffer.alloc(30 + name.length + content.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(0, 12);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(content.length, 18);
+    local.writeUInt32LE(content.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    name.copy(local, 30);
+    content.copy(local, 30 + name.length);
+    localParts.push(local);
+
+    const central = Buffer.alloc(46 + name.length);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(0, 12);
+    central.writeUInt16LE(0, 14);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(content.length, 20);
+    central.writeUInt32LE(content.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    name.copy(central, 46);
+    centralParts.push(central);
+    offset += local.length;
+  }
+  const localData = Buffer.concat(localParts);
+  const centralData = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralData.length, 12);
+  end.writeUInt32LE(localData.length, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([localData, centralData, end]);
+}
+
+function crc32(value: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of value) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";

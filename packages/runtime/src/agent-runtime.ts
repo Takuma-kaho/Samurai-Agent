@@ -70,6 +70,9 @@ import {
   type GatewaySandboxWorkspaceSyncRecord,
   type GatewaySandboxWorkspaceSyncResult,
   type GrantRecord,
+  type GeneratedSurfaceDefinition,
+  type GeneratedSurfaceActionDeclaration,
+  type SurfaceGenerationRequest,
   SurfaceGenerationRequestSchema,
   SurfaceInteractionRecordSchema,
   type GatewayChannel,
@@ -104,6 +107,12 @@ import {
   KnowledgeWikiLintReportSchema,
   type LearningResourceUseRecord,
   type LearningEvaluationRecord,
+  type SkillOptimizationRun,
+  type SkillOptimizationDataset,
+  type OptimizationCandidate,
+  type OptimizationEvaluation,
+  type SkillOptimizationSnapshot,
+  type OptimizationPromotion,
   type LearningJobReportRecord,
   type ReflectionRunRecord,
   type ReflectionSuggestionRecord,
@@ -191,6 +200,15 @@ import {
   type SandboxCommandExecutionInput,
   type SandboxWorkspaceSyncExecutionResult
 } from "@samurai-agent/gateway";
+import {
+  buildSkillOptimizationDataset,
+  evaluateOptimizationGates,
+  evaluateSkillOptimizationSafety,
+  startPythonSkillOptimization,
+  type OptimizationExampleInput,
+  type PythonSkillOptimizationCandidate,
+  type PythonSkillOptimizationResult
+} from "@samurai-agent/skill-optimization";
 import { isSupportedLocale } from "@samurai-agent/localization";
 import { createSessionMemory, createTopicMemory, loadFreezeSnapshot, retrieveActiveMemoryWithReport, type MemoryCandidate } from "@samurai-agent/memory";
 import { evaluatePolicy } from "@samurai-agent/policy-engine";
@@ -821,6 +839,7 @@ export class AgentRuntime {
   private readonly externalAssistProviders: ExternalAssistProvider[];
   private readonly backendToolBridgeTokens = new Map<string, string>();
   private readonly backendEventSequences = new Map<string, number>();
+  private readonly skillOptimizationWorkers = new Map<string, { cancel: () => void }>();
   private readonly domainCommandBus: DurableDomainCommandBus;
   private readonly durableWorkCoordinator: DurableWorkCoordinator;
 
@@ -1949,6 +1968,102 @@ export class AgentRuntime {
       .sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.created_at.localeCompare(left.created_at))[0];
   }
 
+  private async saveGeneratedSurfacePresentations(input: {
+    sessionId: string;
+    messageId: string;
+    runId: string;
+  }): Promise<MessagePresentationRecord[]> {
+    const surfaces = (await this.store.listGeneratedSurfaces(input.sessionId))
+      .filter((surface) => surface.generation_run_id === input.runId && surface.state !== "archived");
+    const now = nowIso();
+    const presentations: MessagePresentationRecord[] = [];
+    for (const surface of surfaces) {
+      const presentation: MessagePresentationRecord = {
+        id: createId("presentation"),
+        session_id: input.sessionId,
+        message_id: input.messageId,
+        kind: "generated_surface",
+        title: surface.title,
+        subtitle: `独自UI ・ revision ${surface.current_revision}`,
+        collection_id: "",
+        view_id: surface.id,
+        renderer: "generated_surface",
+        surface_id: surface.id,
+        revision_id: surface.current_revision_id,
+        preview_url: surface.preview_url,
+        view_state: {
+          surface_id: surface.id,
+          revision_id: surface.current_revision_id,
+          preview_url: surface.preview_url,
+          renderer: "generated_surface"
+        },
+        created_at: now,
+        updated_at: now
+      };
+      await this.store.saveMessagePresentation(presentation);
+      await this.store.saveSurfaceInteraction(SurfaceInteractionRecordSchema.parse({
+        id: createId("surface_interaction"),
+        kind: "opened",
+        session_id: input.sessionId,
+        message_id: input.messageId,
+        surface_id: surface.id,
+        revision_id: surface.current_revision_id,
+        created_at: now
+      }));
+      presentations.push(presentation);
+    }
+    return presentations;
+  }
+
+  private async saveSkillOptimizationPresentations(input: {
+    sessionId: string;
+    run: SkillOptimizationRun;
+    candidates: OptimizationCandidate[];
+  }): Promise<void> {
+    const session = await this.store.getSession(input.sessionId);
+    if (!session) return;
+    const now = nowIso();
+    const hasPassedCandidate = input.candidates.some((candidate) => candidate.status === "passed");
+    const message: MessageRecord = {
+      id: createId("message"),
+      session_id: session.id,
+      role: "agent",
+      content: hasPassedCandidate
+        ? "Skill改善候補ができた。内容を確認して、反映するか選べるよ。"
+        : "Skill改善候補を作ったけど、完了条件を満たさなかった。元のSkillは変えていないよ。",
+      input_locale: session.ui_locale,
+      output_locale: session.output_locale,
+      created_at: now
+    };
+    await this.store.saveMessage(message);
+    for (const candidate of input.candidates) {
+      await this.store.saveMessagePresentation({
+        id: createId("presentation"),
+        session_id: session.id,
+        message_id: message.id,
+        kind: "skill_optimization",
+        title: "Skill改善候補",
+        subtitle: `${candidate.status === "passed" ? "確認待ち" : "不合格"} ・ holdout ${candidate.holdout_delta >= 0 ? "+" : ""}${candidate.holdout_delta.toFixed(1)}点`,
+        collection_id: "",
+        view_id: input.run.id,
+        renderer: "skill_optimization",
+        view_state: {
+          optimization_run_id: input.run.id,
+          candidate_id: candidate.id,
+          skill_id: candidate.skill_id,
+          candidate_status: candidate.status,
+          baseline_holdout_score: candidate.baseline_holdout_score,
+          holdout_score: candidate.holdout_score,
+          holdout_delta: candidate.holdout_delta,
+          feedback: candidate.feedback
+        },
+        created_at: now,
+        updated_at: now
+      });
+    }
+    await this.emit("message.created", message);
+  }
+
   async runChatTurn(input: RunChatTurnInput): Promise<RunChatTurnResult> {
     const session = await this.store.getSession(input.sessionId);
     if (!session) {
@@ -1971,7 +2086,8 @@ export class AgentRuntime {
       created_at: envelope.received_at
     });
 
-    const backendId = this.selectedBackendIdForRun(input.backend_id?.trim() || settings.default_backend_id);
+    const requestedBackendId = input.backend_id?.trim();
+    const backendId = requestedBackendId || this.selectedBackendIdForRun(settings.default_backend_id);
     const backend = this.backendRegistry.get(backendId);
     if (!backend) {
       throw new RuntimeRequestError("conflict", `backend_not_registered:${backendId}`);
@@ -2324,11 +2440,16 @@ export class AgentRuntime {
     mergeUniqueById(toolRuns, persistedRunState.toolRuns);
 
     const agentContent = textParts.join("\n").trim();
-    if (agentContent && expectedOutputs.includes("artifact") && !gatewayBoundary && !hasCreatedArtifact(artifacts, workspaceChanges)) {
+    const generatedSurfaceForRun = expectedOutputs.includes("generated_surface")
+      ? (await this.store.listGeneratedSurfaces(session.id)).some((surface) => surface.generation_run_id === backendRun.id && surface.state !== "archived")
+      : false;
+    const shouldFallbackToArtifact = expectedOutputs.includes("artifact")
+      || (expectedOutputs.includes("generated_surface") && !generatedSurfaceForRun);
+    if (agentContent && shouldFallbackToArtifact && !gatewayBoundary && !hasCreatedArtifact(artifacts, workspaceChanges)) {
       const fallbackArtifact = await this.createBackendArtifactFromText({
         run: backendRun,
         runInput,
-        title: artifactTitleFromUserInput(input.content),
+        title: expectedOutputs.includes("generated_surface") && !generatedSurfaceForRun ? "独自UI生成結果" : artifactTitleFromUserInput(input.content),
         content: agentContent,
         recordEvent
       });
@@ -2410,10 +2531,16 @@ export class AgentRuntime {
       void runBackgroundReview().catch(() => undefined);
     }
 
+    const messagePresentations = await this.saveGeneratedSurfacePresentations({
+      sessionId: session.id,
+      messageId: agentMessage.id,
+      runId: backendRun.id
+    });
+
     return {
       session,
       messages: [userMessage, agentMessage],
-      messagePresentations: [],
+      messagePresentations,
       backendRun,
       backendEvents,
       workspaceChanges,
@@ -3395,6 +3522,522 @@ export class AgentRuntime {
     return resourceSpec ? [resourceSpec] : [];
   }
 
+  private async startSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
+    const skillId = requiredPayloadId(payload, "skill_id");
+    const skill = await this.store.getSkill(skillId);
+    const markdown = await this.store.readSkillMarkdown(skillId);
+    if (!skill || markdown === undefined) {
+      throw new RuntimeRequestError("not_found", "skill_not_found");
+    }
+    if (skill.state === "archived" || skill.state === "candidate") {
+      throw new RuntimeRequestError("conflict", "skill_not_optimizable_in_current_state");
+    }
+    const sessionId = stringPayload(payload.session_id) || undefined;
+    if (sessionId && !await this.store.getSession(sessionId)) {
+      throw new RuntimeRequestError("not_found", "skill_optimization_session_not_found");
+    }
+    const skillBody = stripSkillFrontmatter(markdown);
+    const baselineContentHash = stableHash(skillBody);
+    const real = await this.skillOptimizationRealExamples(skill, baselineContentHash);
+    const golden = optimizationExamplesFromPayload(payload.golden_examples, "golden");
+    const synthetic = optimizationExamplesFromPayload(payload.synthetic_examples, "synthetic");
+    let dataset: SkillOptimizationDataset;
+    try {
+      dataset = buildSkillOptimizationDataset({
+        skill_id: skill.id,
+        real,
+        golden,
+        synthetic
+      });
+    } catch (error) {
+      throw new RuntimeRequestError("conflict", safeRuntimeErrorMessage(error, "skill_optimization_dataset_invalid"));
+    }
+
+    const now = nowIso();
+    const runId = createId("skill_optimization_run");
+    const objectiveId = createId("objective");
+    const workItemId = createId("work");
+    const objective: ObjectiveRecord = ObjectiveRecordSchema.parse({
+      id: objectiveId,
+      ...(sessionId ? { session_id: sessionId } : {}),
+      title: `Skill改善: ${skill.title}`,
+      objective: stringPayload(payload.objective) || `Skill「${skill.title}」の本文をGEPAで改善候補化する`,
+      completion_criteria: ["GEPA候補を生成する", "holdout評価と安全検証を記録する", "ユーザー確認後にのみ反映する"],
+      status: "active",
+      max_attempts: 1,
+      created_at: now,
+      updated_at: now
+    });
+    const workItem: WorkItemRecord = WorkItemRecordSchema.parse({
+      id: workItemId,
+      objective_id: objectiveId,
+      instruction: `GEPAでSkill ${skill.id} の改善候補を生成・評価する`,
+      status: "ready",
+      priority: 5,
+      attempt: 0,
+      max_attempts: 1,
+      idempotency_key: `skill-optimization:${runId}`,
+      created_at: now,
+      updated_at: now
+    });
+    const run: SkillOptimizationRun = {
+      id: runId,
+      ...(sessionId ? { session_id: sessionId } : {}),
+      target_skill_id: skill.id,
+      baseline_content_hash: baselineContentHash,
+      baseline_version: stableHash({ skill_id: skill.id, content_hash: baselineContentHash, reviewed_at: skill.frontmatter.last_reviewed_at ?? "" }),
+      dataset_id: dataset.id,
+      objective_id: objective.id,
+      work_item_id: workItem.id,
+      optimizer: "gepa",
+      optimizer_version: "dspy==3.2.1",
+      status: "queued",
+      phase: "dataset",
+      progress: 0.05,
+      candidate_ids: [],
+      trace_refs: [skillRef(skill)],
+      provenance: {
+        optimizer: "gepa",
+        worker: "workers/skill-optimization/worker.py",
+        dataset_id: dataset.id,
+        baseline_content_hash: baselineContentHash,
+        selected_real_examples: real.length,
+        selected_golden_examples: golden.length,
+        selected_synthetic_examples: synthetic.length
+      },
+      created_at: now,
+      updated_at: now,
+      started_at: now
+    };
+    if (!await this.store.acquireSkillOptimizationLock({ skillId: skill.id, runId, acquiredAt: now })) {
+      throw new RuntimeRequestError("conflict", "skill_optimization_already_running");
+    }
+    try {
+      await this.store.saveSkillOptimizationDataset(dataset);
+      await this.store.saveObjective(objective);
+      await this.store.saveWorkItem(workItem);
+      const claimed = await this.store.claimWorkItem({
+        workerId: `skill-optimization:${runId}`,
+        leaseMs: 24 * 60 * 60 * 1000,
+        now
+      });
+      if (!claimed || claimed.id !== workItem.id) {
+        throw new Error("skill_optimization_work_item_claim_failed");
+      }
+      const runningRun: SkillOptimizationRun = {
+        ...run,
+        status: "running",
+        phase: "optimizing",
+        progress: 0.1,
+        updated_at: now
+      };
+      await this.store.saveSkillOptimizationRun(runningRun);
+      void this.runSkillOptimizationWorker({
+        run: runningRun,
+        dataset,
+        skillBody,
+        skillId: skill.id,
+        sessionId,
+        workerId: `skill-optimization:${runId}`
+      });
+      return { run: runningRun, dataset, objective, work_item: claimed };
+    } catch (error) {
+      await this.store.releaseSkillOptimizationLock({ skillId: skill.id, runId });
+      throw error;
+    }
+  }
+
+  private async skillOptimizationRealExamples(skill: SkillWithFilePath, baselineContentHash: string): Promise<OptimizationExampleInput[]> {
+    const uses = (await this.store.listLearningResourceUses({ resourceId: skill.id }))
+      .filter((use) => use.resource_kind === "skill" && use.stage === "body_loaded" && use.content_hash === baselineContentHash);
+    const examples: OptimizationExampleInput[] = [];
+    const seenPrompts = new Set<string>();
+    for (const use of uses) {
+      const run = await this.store.getBackendRun(use.run_id);
+      if (!run || run.status !== "completed" || !run.input_summary.trim() || !run.output_summary?.trim()) continue;
+      const prompt = run.input_summary.trim();
+      if (seenPrompts.has(prompt)) continue;
+      seenPrompts.add(prompt);
+      const feedback = typeof use.metadata.feedback === "string" && use.metadata.feedback.trim()
+        ? use.metadata.feedback
+        : `実行結果: ${run.output_summary.trim()}`;
+      examples.push({
+        prompt,
+        expected_behavior: run.output_summary.trim(),
+        feedback,
+        source: "real",
+        skill_body_read_run_id: run.id,
+        trace_refs: [backendRunRef(run), skillRef(skill)],
+        metadata: { run_status: run.status, source_stage: use.stage }
+      });
+    }
+    return examples;
+  }
+
+  private async runSkillOptimizationWorker(input: {
+    run: SkillOptimizationRun;
+    dataset: SkillOptimizationDataset;
+    skillBody: string;
+    skillId: string;
+    sessionId?: string;
+    workerId: string;
+  }): Promise<void> {
+    const repoRoot = path.resolve(this.workspaceOptions.repoRoot ?? process.cwd());
+    const worker = startPythonSkillOptimization({
+      run_id: input.run.id,
+      skill_id: input.skillId,
+      skill_body: input.skillBody,
+      dataset: input.dataset,
+      worker_script: path.resolve(repoRoot, "workers/skill-optimization/worker.py"),
+      cwd: repoRoot,
+      host_complete: async (messages) => {
+        if (!this.provider) {
+          throw new RuntimeRequestError("provider_not_configured", "GEPAのHost LLMが未設定です。");
+        }
+        const session = input.sessionId ? await this.store.getSession(input.sessionId) : undefined;
+        const content = messages.map((message) => `${message.role}: ${message.content}`).join("\n\n").trim();
+        const output = await this.generateProviderOutput({
+          envelope: createGatewayEnvelope(webGatewayContext, content || "GEPA候補を改善してください。", session?.ui_locale ?? "ja", session?.output_locale ?? "ja"),
+          activeMemory: [],
+          knowledgeWiki: [],
+          collectionNotes: [],
+          selectedSkills: [],
+          sessionSearch: [],
+          availableTools: [],
+          recentMessages: [],
+          temporaryContext: []
+        });
+        if (!output.content.trim()) throw new Error("gepa_host_empty_response");
+        return { content: output.content };
+      },
+      on_progress: (progress) => {
+        void this.updateSkillOptimizationRun(input.run.id, {
+          phase: progress.phase === "evaluating" ? "evaluating" : "optimizing",
+          progress: Math.max(0.1, Math.min(0.95, progress.value)),
+          provenance: {
+            ...input.run.provenance,
+            last_progress_message: progress.message ?? "",
+            worker_phase: progress.phase
+          }
+        }).catch(() => undefined);
+      }
+    });
+    this.skillOptimizationWorkers.set(input.run.id, { cancel: worker.cancel });
+    let result: PythonSkillOptimizationResult;
+    try {
+      result = await worker.promise;
+    } catch (error) {
+      result = { status: "failed", feedback: [], trace: [], optimizer_version: "dspy==3.2.1", error: safeRuntimeErrorMessage(error) };
+    } finally {
+      this.skillOptimizationWorkers.delete(input.run.id);
+    }
+    await this.finishSkillOptimization({ ...input, result });
+  }
+
+  private async updateSkillOptimizationRun(id: string, patch: Partial<SkillOptimizationRun>): Promise<SkillOptimizationRun | undefined> {
+    const current = await this.store.getSkillOptimizationRun(id);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, updated_at: nowIso() };
+    return this.store.saveSkillOptimizationRun(next);
+  }
+
+  private async finishSkillOptimization(input: {
+    run: SkillOptimizationRun;
+    dataset: SkillOptimizationDataset;
+    skillBody: string;
+    skillId: string;
+    sessionId?: string;
+    workerId: string;
+    result: PythonSkillOptimizationResult;
+  }): Promise<void> {
+    const current = await this.store.getSkillOptimizationRun(input.run.id) ?? input.run;
+    const settleWork = async (kind: "complete" | "failed" | "cancelled", error?: string) => {
+      if (kind === "complete") {
+        await this.store.completeWorkItem({ workItemId: current.work_item_id, workerId: input.workerId }).catch(() => undefined);
+      } else {
+        await this.store.failWorkItem({ workItemId: current.work_item_id, workerId: input.workerId, failureKind: kind === "cancelled" ? "cancelled" : "non_retryable", error: error ?? kind }).catch(() => undefined);
+      }
+    };
+    const settleObjective = async (status: ObjectiveRecord["status"]) => {
+      const objective = await this.store.getObjective(current.objective_id);
+      if (objective && objective.status === "active") {
+        await this.store.updateObjective({ ...objective, status, updated_at: nowIso(), ...(status === "completed" || status === "cancelled" || status === "failed" ? { completed_at: nowIso() } : {}) });
+      }
+    };
+    const candidateInputs: PythonSkillOptimizationCandidate[] = (input.result.candidates ?? [])
+      .filter((candidate) => candidate.body.trim().length > 0);
+    if (candidateInputs.length === 0 && input.result.candidate_body?.trim()) {
+      candidateInputs.push({
+        index: 0,
+        body: input.result.candidate_body.trim(),
+        ...(typeof input.result.baseline_holdout_score === "number" ? { baseline_holdout_score: input.result.baseline_holdout_score } : {}),
+        ...(typeof input.result.holdout_score === "number" ? { holdout_score: input.result.holdout_score } : {}),
+        ...(typeof input.result.important_regression === "boolean" ? { important_regression: input.result.important_regression } : {}),
+        evaluations: input.result.evaluations ?? [],
+        feedback: input.result.feedback
+      });
+    }
+    if (input.result.status !== "completed" || candidateInputs.length === 0) {
+      const status = input.result.status === "cancelled" ? "cancelled" : "failed";
+      const error = input.result.error || "gepa_candidate_not_created";
+      await this.store.saveSkillOptimizationRun({ ...current, status, phase: status, progress: 1, error, updated_at: nowIso(), completed_at: nowIso() });
+      await settleWork(status === "cancelled" ? "cancelled" : "failed", error);
+      await settleObjective(status === "cancelled" ? "cancelled" : "failed");
+      await this.store.releaseSkillOptimizationLock({ skillId: input.skillId, runId: current.id });
+      return;
+    }
+    if (current.status === "cancelled" || current.status === "failed") {
+      await settleWork(current.status === "cancelled" ? "cancelled" : "failed", current.error);
+      return;
+    }
+
+    const relatedTestsPassed = input.result.related_tests_passed === true;
+    const now = nowIso();
+    const candidateIdsBySourceIndex = new Map<number, string>();
+    candidateInputs.forEach((candidateInput, position) => {
+      const sourceIndex = Number.isInteger(candidateInput.index) ? candidateInput.index : position;
+      candidateIdsBySourceIndex.set(sourceIndex, createId("optimization_candidate"));
+    });
+    const candidates: OptimizationCandidate[] = [];
+    for (const [position, candidateInput] of candidateInputs.entries()) {
+      const sourceIndex = Number.isInteger(candidateInput.index) ? candidateInput.index : position;
+      const candidateId = candidateIdsBySourceIndex.get(sourceIndex) ?? createId("optimization_candidate");
+      const body = candidateInput.body.trim();
+      const safety = evaluateSkillOptimizationSafety(body);
+      const safetyChecksPassed = safety.passed && input.result.safety_checks_passed === true;
+      const evaluations = candidateInput.evaluations.length > 0
+        ? candidateInput.evaluations
+        : (position === 0 ? input.result.evaluations ?? [] : []);
+      const baselineHoldoutScore = clampOptimizationScore(candidateInput.baseline_holdout_score ?? input.result.baseline_holdout_score);
+      const holdoutScore = clampOptimizationScore(candidateInput.holdout_score ?? input.result.holdout_score);
+      const importantRegression = candidateInput.important_regression === true
+        || (position === 0 && input.result.important_regression === true)
+        || evaluations.some((evaluation) => evaluation.important_regression);
+      const gates = evaluateOptimizationGates({
+        baseline_holdout_score: baselineHoldoutScore,
+        holdout_score: holdoutScore,
+        related_tests_passed: relatedTestsPassed,
+        safety_checks_passed: safetyChecksPassed,
+        important_regression: importantRegression
+      });
+      const traceRef: ResourceRef = { kind: "skill_optimization_trace", id: candidateId, uri: `skill-optimization/${current.id}/trace/${candidateId}`, label: "GEPA execution trace" };
+      const parentCandidateId = typeof candidateInput.parent_index === "number"
+        ? candidateIdsBySourceIndex.get(candidateInput.parent_index)
+        : undefined;
+      const candidate: OptimizationCandidate = {
+        id: candidateId,
+        run_id: current.id,
+        skill_id: input.skillId,
+        ...(parentCandidateId ? { parent_candidate_id: parentCandidateId } : {}),
+        body,
+        content_hash: stableHash(body),
+        baseline_holdout_score: baselineHoldoutScore,
+        holdout_score: holdoutScore,
+        holdout_delta: gates.holdout_delta,
+        feedback: [...new Set([...(candidateInput.feedback ?? []), ...input.result.feedback, ...safety.reasons, gates.reason].filter(Boolean))],
+        dataset_id: input.dataset.id,
+        trace_refs: [traceRef, ...input.result.trace.flatMap((item) => {
+          const id = typeof item.id === "string" ? item.id : "";
+          return id ? [{ kind: "skill_optimization_trace", id, uri: `skill-optimization/${current.id}/trace/${id}`, label: "GEPA trace" } satisfies ResourceRef] : [];
+        })],
+        safety: {
+          related_tests_passed: relatedTestsPassed,
+          safety_checks_passed: safetyChecksPassed,
+          important_regression: importantRegression
+        },
+        status: gates.passed ? "passed" : "rejected",
+        created_at: now,
+        updated_at: now
+      };
+      candidates.push(candidate);
+      await this.store.saveOptimizationCandidate(candidate);
+      for (const evaluation of evaluations) {
+        const evaluationRecord: OptimizationEvaluation = {
+          id: createId("optimization_evaluation"),
+          run_id: current.id,
+          candidate_id: candidate.id,
+          split: evaluation.split,
+          score: clampOptimizationScore(evaluation.score),
+          feedback: evaluation.feedback.length > 0 ? evaluation.feedback : ["GEPA evaluation completed."],
+          important_regression: evaluation.important_regression,
+          related_tests_passed: relatedTestsPassed,
+          safety_checks_passed: safetyChecksPassed,
+          trace_refs: [traceRef],
+          created_at: now
+        };
+        await this.store.saveOptimizationEvaluation(evaluationRecord);
+      }
+    }
+    const passedCandidates = candidates.filter((candidate) => candidate.status === "passed");
+    const firstCandidate = candidates[0];
+    const nextRun: SkillOptimizationRun = {
+      ...current,
+      status: "completed",
+      phase: passedCandidates.length > 0 ? "awaiting_confirmation" : "completed",
+      progress: 1,
+      candidate_ids: [...current.candidate_ids, ...candidates.map((candidate) => candidate.id)],
+      trace_refs: [...current.trace_refs, ...candidates.flatMap((candidate) => candidate.trace_refs)],
+      provenance: {
+        ...current.provenance,
+        candidate_count: candidates.length,
+        passed_candidate_count: passedCandidates.length,
+        candidate_summaries: candidates.map((candidate) => ({
+          id: candidate.id,
+          parent_candidate_id: candidate.parent_candidate_id ?? null,
+          holdout_score: candidate.holdout_score,
+          holdout_delta: candidate.holdout_delta,
+          status: candidate.status
+        })),
+        ...(firstCandidate ? {
+          baseline_holdout_score: firstCandidate.baseline_holdout_score,
+          holdout_score: firstCandidate.holdout_score,
+          holdout_delta: firstCandidate.holdout_delta
+        } : {})
+      },
+      updated_at: now,
+      completed_at: now
+    };
+    await this.store.saveSkillOptimizationRun(nextRun);
+    if (input.sessionId) {
+      await this.saveSkillOptimizationPresentations({ sessionId: input.sessionId, run: nextRun, candidates }).catch(() => undefined);
+    }
+    await settleWork("complete");
+    if (passedCandidates.length === 0) {
+      await settleObjective("completed");
+      await this.store.releaseSkillOptimizationLock({ skillId: input.skillId, runId: current.id });
+    }
+  }
+
+  private async cancelSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
+    const runId = requiredPayloadId(payload, "run_id");
+    const run = await this.store.getSkillOptimizationRun(runId);
+    if (!run) throw new RuntimeRequestError("not_found", "skill_optimization_run_not_found");
+    if (["completed", "failed", "cancelled"].includes(run.status) && run.phase !== "awaiting_confirmation") return run;
+    this.skillOptimizationWorkers.get(runId)?.cancel();
+    const now = nowIso();
+    const cancelled = await this.store.saveSkillOptimizationRun({ ...run, status: "cancelled", phase: "cancelled", progress: 1, error: "cancelled_by_user", updated_at: now, completed_at: now });
+    const work = await this.store.getWorkItem(run.work_item_id);
+    if (work?.status === "running") {
+      await this.store.failWorkItem({ workItemId: work.id, workerId: `skill-optimization:${run.id}`, failureKind: "cancelled", error: "cancelled_by_user" });
+    }
+    const objective = await this.store.getObjective(run.objective_id);
+    if (objective && objective.status === "active") await this.store.updateObjective({ ...objective, status: "cancelled", updated_at: now, completed_at: now });
+    await this.store.releaseSkillOptimizationLock({ skillId: run.target_skill_id, runId });
+    return cancelled;
+  }
+
+  private async promoteSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
+    const runId = requiredPayloadId(payload, "run_id");
+    const candidateId = requiredPayloadId(payload, "candidate_id");
+    const [run, candidate] = await Promise.all([
+      this.store.getSkillOptimizationRun(runId),
+      this.store.getOptimizationCandidate(candidateId)
+    ]);
+    if (!run || !candidate) throw new RuntimeRequestError("not_found", "skill_optimization_candidate_not_found");
+    if (candidate.run_id !== run.id || candidate.status !== "passed") throw new RuntimeRequestError("conflict", "skill_optimization_candidate_not_promotable");
+    const targetSkill = await this.store.getSkill(run.target_skill_id);
+    const raw = targetSkill ? await this.store.readSkillMarkdown(targetSkill.id) : undefined;
+    if (!targetSkill || !raw) throw new RuntimeRequestError("not_found", "skill_not_found");
+    const lock = await this.store.getSkillOptimizationLock(targetSkill.id);
+    if (!lock || lock.run_id !== run.id) throw new RuntimeRequestError("conflict", "skill_optimization_lock_missing");
+    const now = nowIso();
+    const snapshot: SkillOptimizationSnapshot = {
+      id: createId("skill_optimization_snapshot"),
+      skill_id: targetSkill.id,
+      run_id: run.id,
+      candidate_id: candidate.id,
+      content_hash: stableHash(stripSkillFrontmatter(raw)),
+      markdown: raw,
+      created_at: now
+    };
+    await this.store.saveSkillOptimizationSnapshot(snapshot);
+    await this.updateSkillOptimizationRun(run.id, { phase: "promoting", progress: 1 });
+    let promoted: SkillWithFilePath | undefined;
+    try {
+      promoted = await this.store.replaceSkillContentIfUnchanged({ id: targetSkill.id, expectedContentHash: run.baseline_content_hash, content: candidate.body, lockRunId: run.id });
+    } catch (error) {
+      const conflict: OptimizationPromotion = {
+        id: createId("optimization_promotion"),
+        run_id: run.id,
+        candidate_id: candidate.id,
+        skill_id: targetSkill.id,
+        snapshot_id: snapshot.id,
+        expected_content_hash: run.baseline_content_hash,
+        promoted_content_hash: candidate.content_hash,
+        status: "conflict",
+        provenance: { error: safeRuntimeErrorMessage(error) },
+        created_at: now
+      };
+      await this.store.saveOptimizationPromotion(conflict);
+      await this.store.releaseSkillOptimizationLock({ skillId: targetSkill.id, runId: run.id });
+      await this.store.saveSkillOptimizationRun({ ...(await this.store.getSkillOptimizationRun(run.id) ?? run), status: "failed", phase: "failed", error: "skill_content_conflict", updated_at: now, completed_at: now });
+      throw new RuntimeRequestError("conflict", "skill_content_conflict");
+    }
+    if (!promoted) throw new RuntimeRequestError("not_found", "skill_not_found");
+    const promotion: OptimizationPromotion = {
+      id: createId("optimization_promotion"),
+      run_id: run.id,
+      candidate_id: candidate.id,
+      skill_id: targetSkill.id,
+      snapshot_id: snapshot.id,
+      expected_content_hash: run.baseline_content_hash,
+      promoted_content_hash: candidate.content_hash,
+      status: "promoted",
+      provenance: { confirmed_by: "owner", confirmation_command: "skill.optimization.promote" },
+      created_at: now
+    };
+    await this.store.saveOptimizationPromotion(promotion);
+    await this.store.saveOptimizationCandidate({ ...candidate, status: "promoted", updated_at: now });
+    const completedRun = await this.store.saveSkillOptimizationRun({ ...(await this.store.getSkillOptimizationRun(run.id) ?? run), status: "completed", phase: "completed", progress: 1, updated_at: now, completed_at: now });
+    await this.store.releaseSkillOptimizationLock({ skillId: targetSkill.id, runId: run.id });
+    const objective = await this.store.getObjective(run.objective_id);
+    if (objective && objective.status === "active") await this.store.updateObjective({ ...objective, status: "completed", updated_at: now, completed_at: now });
+    return { run: completedRun, skill: promoted, candidate: { ...candidate, status: "promoted" }, snapshot, promotion };
+  }
+
+  private async rejectSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
+    const runId = requiredPayloadId(payload, "run_id");
+    const candidateId = requiredPayloadId(payload, "candidate_id");
+    const run = await this.store.getSkillOptimizationRun(runId);
+    const candidate = await this.store.getOptimizationCandidate(candidateId);
+    if (!run || !candidate || candidate.run_id !== run.id) throw new RuntimeRequestError("not_found", "skill_optimization_candidate_not_found");
+    const now = nowIso();
+    const rejected = await this.store.saveOptimizationCandidate({ ...candidate, status: "rejected", updated_at: now });
+    const nextRun = await this.store.saveSkillOptimizationRun({ ...run, status: "completed", phase: "completed", updated_at: now, completed_at: now });
+    await this.store.releaseSkillOptimizationLock({ skillId: run.target_skill_id, runId: run.id });
+    const objective = await this.store.getObjective(run.objective_id);
+    if (objective && objective.status === "active") await this.store.updateObjective({ ...objective, status: "completed", updated_at: now, completed_at: now });
+    return { run: nextRun, candidate: rejected };
+  }
+
+  private async rollbackSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
+    const promotionId = stringPayload(payload.promotion_id);
+    const snapshotId = stringPayload(payload.snapshot_id);
+    const promotion = promotionId ? (await this.store.listOptimizationPromotions()).find((item) => item.id === promotionId) : undefined;
+    const snapshot = await this.store.getSkillOptimizationSnapshot(snapshotId || promotion?.snapshot_id || "");
+    if (!snapshot) throw new RuntimeRequestError("not_found", "skill_optimization_snapshot_not_found");
+    const current = await this.store.getSkill(snapshot.skill_id);
+    const raw = current ? await this.store.readSkillMarkdown(current.id) : undefined;
+    if (!current || !raw) throw new RuntimeRequestError("not_found", "skill_not_found");
+    if (promotion && stableHash(stripSkillFrontmatter(raw)) !== promotion.promoted_content_hash) {
+      throw new RuntimeRequestError("conflict", "skill_rollback_content_conflict");
+    }
+    const now = nowIso();
+    let restored: SkillWithFilePath | undefined;
+    try {
+      restored = await this.store.replaceSkillContentIfUnchanged({ id: current.id, expectedContentHash: stableHash(stripSkillFrontmatter(raw)), content: stripSkillFrontmatter(snapshot.markdown) });
+    } catch {
+      throw new RuntimeRequestError("conflict", "skill_rollback_content_conflict");
+    }
+    const restoredSnapshot = await this.store.saveSkillOptimizationSnapshot({ ...snapshot, restored_at: now });
+    const restoredPromotion = promotion
+      ? await this.store.saveOptimizationPromotion({ ...promotion, status: "rolled_back", provenance: { ...promotion.provenance, rolled_back_at: now } })
+      : undefined;
+    const candidate = await this.store.getOptimizationCandidate(snapshot.candidate_id);
+    if (candidate) await this.store.saveOptimizationCandidate({ ...candidate, status: "rolled_back", updated_at: now });
+    return { skill: restored, snapshot: restoredSnapshot, promotion: restoredPromotion };
+  }
+
   private async executeDomainCommand(command: DomainCommandEntry, payload: Record<string, JsonValue>, inputSource: DomainCommandInputSource): Promise<unknown> {
     if (command.id === "session.create") {
       return this.createSession({
@@ -4321,6 +4964,15 @@ export class AgentRuntime {
     if (command.id === "work_item.follow_up") {
       return this.durableWorkCoordinator.followUp(requiredPayloadId(payload, "work_item_id"), stringPayload(payload.instruction));
     }
+    if (command.id === "presentation.plan") {
+      const requested = stringPayload(payload.requested_kind) || "built_in_surface";
+      return {
+        requested_kind: requested,
+        selected_kind: requested === "generated_surface" ? "generated_surface" : "built_in_surface",
+        reason: requested === "generated_surface" ? "User explicitly requested an independent UI." : "A built-in Workspace renderer is preferred when it can represent the result.",
+        fallback_chain: ["built_in_surface", "artifact", "text"]
+      };
+    }
     if (command.id === "generated_surface.create" || command.id === "generated_surface.revise") {
       const request = SurfaceGenerationRequestSchema.parse(recordPayload(payload.request));
       const bundle = parseGeneratedSurfaceOutput(recordPayload(payload.bundle));
@@ -4336,7 +4988,7 @@ export class AgentRuntime {
         producerRunId: stringPayload(payload.producer_run_id) || undefined,
         promptFingerprint: stringPayload(payload.prompt_fingerprint) || undefined
       });
-      return this.store.saveGeneratedSurfaceRevision({ definition: built.definition, revision: built.revision, html: bundle.html, css: bundle.css, script: bundle.script });
+      return this.store.saveGeneratedSurfaceRevision({ definition: built.definition, revision: built.revision, html: bundle.html, css: bundle.css, script: bundle.script, assets: bundle.assets });
     }
     if (command.id === "generated_surface.state") {
       const action = stringPayload(payload.action);
@@ -4381,6 +5033,31 @@ export class AgentRuntime {
         surface_id: surface.id, revision_id: revisionId, command_id: action.command_id, command_result: jsonSafe(domainResult.result), created_at: nowIso()
       }));
       return { surface, action, command: domainResult };
+    }
+    if (command.id === "generated_surface.export") {
+      const surface = await this.store.getGeneratedSurface(requiredPayloadId(payload, "surface_id"));
+      if (!surface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
+      const revisionId = stringPayload(payload.revision_id) || surface.current_revision_id;
+      const revision = await this.store.getGeneratedSurfaceRevision(revisionId);
+      const bundle = revision ? await this.store.readGeneratedSurfaceBundle(revision.id) : undefined;
+      if (!revision || revision.surface_id !== surface.id || !bundle) throw new RuntimeRequestError("not_found", "generated_surface_revision_not_found");
+      const format = stringPayload(payload.format) === "zip" ? "zip" : "html";
+      return { surface, revision, bundle, format, file_name: `${surface.id}-revision-${revision.revision}.${format}` };
+    }
+    if (command.id === "skill.optimization.start") {
+      return this.startSkillOptimization(payload);
+    }
+    if (command.id === "skill.optimization.cancel") {
+      return this.cancelSkillOptimization(payload);
+    }
+    if (command.id === "skill.optimization.promote") {
+      return this.promoteSkillOptimization(payload);
+    }
+    if (command.id === "skill.optimization.reject") {
+      return this.rejectSkillOptimization(payload);
+    }
+    if (command.id === "skill.optimization.rollback") {
+      return this.rollbackSkillOptimization(payload);
     }
 
     if (command.id === "reflection.suggestion.apply") {
@@ -7642,6 +8319,23 @@ export class AgentRuntime {
     }
 
     const runtimeTool = await this.handleRuntimeToolCall(input.run, input.runInput, input.event, boundaryFeedback, input.gatewayBoundaryPolicy).catch(async (error) => {
+      const generatedSurfaceFailure = /generated[._]surface/i.test(`${providerToolName} ${requestedActionId} ${boundaryDecision.action_id}`);
+      const retryCount = typeof input.run.metadata.generated_surface_retry_count === "number"
+        ? input.run.metadata.generated_surface_retry_count
+        : 0;
+      const retryable = generatedSurfaceFailure && retryCount < 1;
+      if (retryable) {
+        const updatedRun = {
+          ...input.run,
+          metadata: {
+            ...input.run.metadata,
+            generated_surface_retry_count: retryCount + 1
+          }
+        };
+        Object.assign(input.run, updatedRun);
+        await this.store.updateBackendRun(updatedRun);
+        await this.emit("backend.run.updated", updatedRun);
+      }
       await input.recordEvent({
         event_type: "tool_call_output",
         payload: {
@@ -7649,6 +8343,8 @@ export class AgentRuntime {
           provider_tool_name: providerToolName,
           action_id: boundaryDecision.action_id,
           reason: safeRuntimeErrorMessage(error, "runtime_tool_failed"),
+          retryable,
+          retry_count: retryCount,
           gateway_boundary: boundaryFeedback.payload
         },
         resource_refs: boundaryFeedback.resourceRefs,
@@ -7775,24 +8471,115 @@ export class AgentRuntime {
       ?? getDomainCommandForProviderToolName(toolName)
       ?? getDomainCommandForProviderToolName(normalizedToolName);
     if (mappedCommand && mappedCommand.input_sources.includes("provider_tool_call")) {
+      const activeSurfaceId = stringRecordValue(runInput.metadata.active_app_context, "generated_surface_id");
+      const effectiveCommandId = mappedCommand.id === "generated_surface.create" && activeSurfaceId && shouldReviseGeneratedSurfaceOutput(runInput.user_input)
+        ? "generated_surface.revise"
+        : mappedCommand.id;
+      const commandArgs = effectiveCommandId === "generated_surface.create" || effectiveCommandId === "generated_surface.revise"
+        ? normalizeGeneratedSurfaceCommandPayload(effectiveCommandId, args, run, runInput)
+        : args;
       const domainResult = await this.runDomainCommand({
-        command_id: mappedCommand.id,
+        command_id: effectiveCommandId,
         input_source: "provider_tool_call",
-        idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, mappedCommand.id, args),
+        idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, effectiveCommandId, commandArgs),
         payload: {
-          ...args,
+          ...commandArgs,
           session_id: run.session_id,
           envelope_id: runInput.input_message_id,
           input_locale: runInput.input_locale,
           output_locale: runInput.output_locale,
           metadata: {
-            ...recordPayload(args.metadata),
+            ...recordPayload(commandArgs.metadata),
             backend_run_id: run.id,
             provider_tool_name: providerToolName || toolName,
             ...(toolCallId ? { tool_call_id: toolCallId } : {})
           }
         }
       });
+      const generatedSurface = unknownRecord(unknownRecord(domainResult.result).definition);
+      if (typeof generatedSurface.id === "string" && typeof generatedSurface.preview_url === "string") {
+        const session = await this.store.getSession(run.session_id);
+        if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
+        const generatedRef: ResourceRef = {
+          kind: "generated_surface",
+          id: generatedSurface.id,
+          uri: `surfaces/${generatedSurface.id}`,
+          label: typeof generatedSurface.title === "string" ? generatedSurface.title : "Generated Surface"
+        };
+        const operation = await this.createOperation(session, runInput.envelope, effectiveCommandId, [
+          effectiveCommandId === "generated_surface.revise" ? "Create a new Generated Surface revision." : "Create a Generated Surface revision."
+        ], { targetResourceRefs: [generatedRef] });
+        const completedOperation = { ...operation, status: "completed" as const, result_ref: generatedRef, updated_at: nowIso() };
+        await this.store.updateOperation(completedOperation);
+        const toolRun = await this.store.saveToolRun({
+          id: createId("toolrun"),
+          run_id: run.id,
+          session_id: run.session_id,
+          tool_call_id: toolCallId,
+          provider_tool_name: providerToolName || toolName,
+          action_id: effectiveCommandId,
+          status: "completed",
+          input_summary: summarize(JSON.stringify(args), 220),
+          output_summary: `Saved Generated Surface ${generatedSurface.id}.`,
+          resource_refs: [generatedRef],
+          created_at: nowIso()
+        });
+        return {
+          operation: completedOperation,
+          toolRun,
+          resourceRefs: [generatedRef],
+          outputPayload: {
+            status: "completed",
+            action_id: effectiveCommandId,
+            surface_id: generatedSurface.id,
+            revision_id: typeof generatedSurface.current_revision_id === "string" ? generatedSurface.current_revision_id : "",
+            preview_url: generatedSurface.preview_url
+          }
+        };
+      }
+      const optimizationRecord = unknownRecord(domainResult.result);
+      const optimizationRun = unknownRecord(optimizationRecord.run);
+      const optimizationCandidate = unknownRecord(optimizationRecord.candidate);
+      const optimizationSkill = unknownRecord(optimizationRecord.skill);
+      const optimizationResource: ResourceRef | undefined = typeof optimizationRun.id === "string"
+        ? { kind: "skill_optimization_run", id: optimizationRun.id, uri: `skill-optimizations/${optimizationRun.id}`, label: "Skill改善" }
+        : typeof optimizationSkill.id === "string"
+          ? { kind: "skill", id: optimizationSkill.id, uri: `skills/${optimizationSkill.id}.md`, label: "Skill" }
+          : undefined;
+      if (effectiveCommandId.startsWith("skill.optimization.") && optimizationResource) {
+        const session = await this.store.getSession(run.session_id);
+        if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
+        const operation = await this.createOperation(session, runInput.envelope, effectiveCommandId, ["Save Skill改善の実行結果をWorkspaceへ記録する。"], {
+          targetResourceRefs: [optimizationResource]
+        });
+        const completedOperation = { ...operation, status: "completed" as const, result_ref: optimizationResource, updated_at: nowIso() };
+        await this.store.updateOperation(completedOperation);
+        const toolRun = await this.store.saveToolRun({
+          id: createId("toolrun"),
+          run_id: run.id,
+          session_id: run.session_id,
+          tool_call_id: toolCallId,
+          provider_tool_name: providerToolName || toolName,
+          action_id: effectiveCommandId,
+          status: "completed",
+          input_summary: summarize(JSON.stringify(args), 220),
+          output_summary: "Skill改善結果を記録しました。",
+          resource_refs: [optimizationResource],
+          created_at: nowIso()
+        });
+        return {
+          operation: completedOperation,
+          toolRun,
+          resourceRefs: [optimizationResource],
+          outputPayload: {
+            status: "completed",
+            action_id: effectiveCommandId,
+            run_id: typeof optimizationRun.id === "string" ? optimizationRun.id : "",
+            candidate_id: typeof optimizationCandidate.id === "string" ? optimizationCandidate.id : "",
+            skill_id: typeof optimizationSkill.id === "string" ? optimizationSkill.id : ""
+          }
+        };
+      }
       const writeResult = operationAuditRuntimeResult(domainResult.result);
       if (!writeResult) {
         return undefined;
@@ -12327,6 +13114,7 @@ function resourceRenderSpec(command: DomainCommandEntry, result: unknown): Surfa
         surface_id: generatedSurface.id,
         revision_id: generatedSurface.current_revision_id,
         preview_url: generatedSurface.preview_url,
+        actions: jsonSafe(generatedSurface.actions ?? []),
         sandbox: {
           mode: "iframe",
           allow_scripts: true,
@@ -12983,6 +13771,32 @@ function resourceRefsPayload(value: JsonValue | undefined): ResourceRef[] {
   return value.map(resourceRefFromJson).filter((ref): ref is ResourceRef => Boolean(ref));
 }
 
+function optimizationExamplesFromPayload(value: JsonValue | undefined, source: "golden" | "synthetic"): OptimizationExampleInput[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    const record = entry as Record<string, JsonValue>;
+    const prompt = stringPayload(record.prompt) || stringPayload(record.input);
+    const expectedBehavior = stringPayload(record.expected_behavior) || stringPayload(record.expected) || stringPayload(record.output);
+    const feedback = stringPayload(record.feedback) || "User-provided evaluation example.";
+    if (!prompt || !expectedBehavior) return [];
+    return [{
+      id: stringPayload(record.id) || undefined,
+      prompt,
+      expected_behavior: expectedBehavior,
+      feedback,
+      source,
+      ...(stringPayload(record.skill_body_read_run_id) ? { skill_body_read_run_id: stringPayload(record.skill_body_read_run_id) } : {}),
+      trace_refs: resourceRefsPayload(record.trace_refs),
+      metadata: recordPayload(record.metadata)
+    } satisfies OptimizationExampleInput];
+  });
+}
+
+function clampOptimizationScore(value: number | undefined): number {
+  return Math.max(0, Math.min(100, typeof value === "number" && Number.isFinite(value) ? value : 0));
+}
+
 function wikiSourceRefsPayload(value: JsonValue | undefined): WikiFrontmatter["source_refs"] | undefined {
   return Array.isArray(value) ? resourceRefsPayload(value) : undefined;
 }
@@ -13565,6 +14379,9 @@ function gatewayBoundaryActionId(providerToolName: string): string {
   if (providerToolName === "create_artifact") {
     return "artifact.create";
   }
+  if (providerToolName === "create_generated_surface" || providerToolName === "mcp__samurai__generated_surface_create") {
+    return "generated_surface.create";
+  }
   if (providerToolName === "remember_topic") {
     return "memory.topic.create";
   }
@@ -13988,10 +14805,13 @@ function classifyBackendContextIntent(query: string): BackendContextIntent {
   return trimmed.length >= 24 ? "workspace_task" : "contextual_chat";
 }
 
-type BackendExpectedOutput = "artifact" | "collection_schema" | "collection_view";
+type BackendExpectedOutput = "artifact" | "collection_schema" | "collection_view" | "generated_surface";
 
 function expectedBackendOutputs(query: string): BackendExpectedOutput[] {
   const outputs: BackendExpectedOutput[] = [];
+  if (shouldCreateGeneratedSurfaceOutput(query)) {
+    outputs.push("generated_surface");
+  }
   if (shouldCreateArtifactOutput(query)) {
     outputs.push("artifact");
   }
@@ -13999,6 +14819,80 @@ function expectedBackendOutputs(query: string): BackendExpectedOutput[] {
     outputs.push("collection_schema");
   }
   return outputs;
+}
+
+function shouldCreateGeneratedSurfaceOutput(query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) return false;
+  return /独自\s*UI|独自画面|カスタム\s*UI|HTML(?:\s*表示|(?:を|で)?\s*生成)|generated\s*UI|custom\s*UI|custom\s*html|renders?\s+(?:this|it)\s+as\s+(?:custom|html)/i.test(trimmed);
+}
+
+function shouldReviseGeneratedSurfaceOutput(query: string): boolean {
+  return /修正|直して|変更|更新|改良|revise|edit|change|update|fix/i.test(query.trim());
+}
+
+function normalizeGeneratedSurfaceCommandPayload(
+  commandId: "generated_surface.create" | "generated_surface.revise",
+  args: Record<string, JsonValue>,
+  run: BackendRunRecord,
+  runInput: BackendRunInput
+): Record<string, JsonValue> {
+  const actions = Array.isArray(args.actions)
+    ? args.actions.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
+  const suppliedRequest = recordPayload(args.request);
+  const parsedRequest = SurfaceGenerationRequestSchema.safeParse(suppliedRequest);
+  const selectedSkillRefs: ResourceRef[] = (runInput.selected_skills ?? []).map((skill) => ({
+    kind: "skill",
+    id: skill.id,
+    uri: `skills/${skill.id}.md`,
+    label: skill.title
+  }));
+  const request: SurfaceGenerationRequest = parsedRequest.success
+    ? parsedRequest.data
+    : SurfaceGenerationRequestSchema.parse({
+        id: createId("surface_request"),
+        session_id: run.session_id,
+        user_intent: runInput.user_input,
+        source_resource_refs: resourceRefsPayload(args.source_resource_refs),
+        allowed_domain_commands: actions
+          .map((action) => typeof action.command_id === "string" ? action.command_id : "")
+          .filter(Boolean),
+        selected_knowledge_refs: resourceRefsPayload(args.selected_knowledge_refs),
+        selected_skill_refs: selectedSkillRefs,
+        client_capabilities: { generated_surface: true, iframe: true },
+        expected_lifetime: args.expected_lifetime === "pinned" ? "pinned" : args.expected_lifetime === "message" ? "message" : "session",
+        fallback_chain: ["built_in_surface", "artifact", "text"],
+        created_at: nowIso()
+      });
+  const suppliedBundle = recordPayload(args.bundle);
+  const bundle: Record<string, JsonValue> = Object.keys(suppliedBundle).length > 0
+    ? suppliedBundle
+    : {
+        title: stringPayload(args.title),
+        html: stringPayload(args.html),
+        ...(typeof args.css === "string" ? { css: args.css } : {}),
+        ...(typeof args.script === "string" ? { script: args.script } : {}),
+        actions: actions as unknown as JsonValue,
+        ...(Array.isArray(args.assets) ? { assets: args.assets } : {}),
+        ...(args.input_data_schema && typeof args.input_data_schema === "object" && !Array.isArray(args.input_data_schema)
+          ? { input_data_schema: args.input_data_schema }
+          : {})
+      };
+  return {
+    ...args,
+    ...(commandId === "generated_surface.revise"
+      ? {
+          surface_id: typeof args.surface_id === "string"
+            ? args.surface_id
+            : stringRecordValue(runInput.metadata.active_app_context, "generated_surface_id") ?? ""
+        }
+      : {}),
+    request: request as unknown as JsonValue,
+    bundle: bundle as unknown as JsonValue,
+    producer_run_id: run.id,
+    prompt_fingerprint: stableHash(runInput.user_input)
+  };
 }
 
 function createBackendToolBridge(input: {
@@ -14034,6 +14928,48 @@ export const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
   title: "Create Samurai Artifact",
   description: "Create a Samurai workspace Artifact from generated user-facing content.",
   input_schema: requireDomainCommandEntry("artifact.create").input_schema
+}, {
+  name: "samurai.generated_surface.create",
+  provider_tool_name: "mcp__samurai__generated_surface_create",
+  title: "Create Samurai Generated Surface",
+  description: "Generate a saved HTML Surface for the Workspace Canvas. Use only when the user asks for an independent or custom UI.",
+  input_schema: requireDomainCommandEntry("generated_surface.create").input_schema
+}, {
+  name: "samurai.generated_surface.revise",
+  provider_tool_name: "mcp__samurai__generated_surface_revise",
+  title: "Revise Samurai Generated Surface",
+  description: "Create a new immutable HTML revision for the selected Generated Surface after a chat correction.",
+  input_schema: requireDomainCommandEntry("generated_surface.revise").input_schema
+}, {
+  name: "samurai.skill.optimization.start",
+  provider_tool_name: "mcp__samurai__skill_optimization_start",
+  title: "Start Samurai Skill improvement",
+  description: "Start an independent GEPA improvement run for a selected Skill. The original Skill is not changed.",
+  input_schema: requireDomainCommandEntry("skill.optimization.start").input_schema
+}, {
+  name: "samurai.skill.optimization.cancel",
+  provider_tool_name: "mcp__samurai__skill_optimization_cancel",
+  title: "Cancel Samurai Skill improvement",
+  description: "Cancel a running Skill improvement and keep the original Skill unchanged.",
+  input_schema: requireDomainCommandEntry("skill.optimization.cancel").input_schema
+}, {
+  name: "samurai.skill.optimization.promote",
+  provider_tool_name: "mcp__samurai__skill_optimization_promote",
+  title: "Promote Samurai Skill improvement",
+  description: "Apply a reviewed Skill improvement candidate after the user confirms it.",
+  input_schema: requireDomainCommandEntry("skill.optimization.promote").input_schema
+}, {
+  name: "samurai.skill.optimization.reject",
+  provider_tool_name: "mcp__samurai__skill_optimization_reject",
+  title: "Reject Samurai Skill improvement",
+  description: "Reject a Skill improvement candidate without changing the original Skill.",
+  input_schema: requireDomainCommandEntry("skill.optimization.reject").input_schema
+}, {
+  name: "samurai.skill.optimization.rollback",
+  provider_tool_name: "mcp__samurai__skill_optimization_rollback",
+  title: "Rollback Samurai Skill improvement",
+  description: "Restore a promoted Skill from its saved pre-promotion snapshot.",
+  input_schema: requireDomainCommandEntry("skill.optimization.rollback").input_schema
 }, {
   name: "samurai.session.search",
   provider_tool_name: "mcp__samurai__session_search",
@@ -14135,12 +15071,40 @@ const samuraiToolBridgeTools = new Set(samuraiToolBridgeDescriptors.map((tool) =
 const samuraiToolBridgeWriteTools = new Set([
   "samurai.collection.manage",
   "samurai.collection.schema.save",
-  "samurai.collection.record.create"
+  "samurai.collection.record.create",
+  "samurai.generated_surface.create",
+  "samurai.generated_surface.revise",
+  "samurai.skill.optimization.start",
+  "samurai.skill.optimization.cancel",
+  "samurai.skill.optimization.promote",
+  "samurai.skill.optimization.reject",
+  "samurai.skill.optimization.rollback"
 ]);
 
 function samuraiToolBridgeActionId(toolName: string): string {
   if (toolName === "samurai.artifact.create") {
     return "artifact.create";
+  }
+  if (toolName === "samurai.generated_surface.create") {
+    return "generated_surface.create";
+  }
+  if (toolName === "samurai.generated_surface.revise") {
+    return "generated_surface.revise";
+  }
+  if (toolName === "samurai.skill.optimization.start") {
+    return "skill.optimization.start";
+  }
+  if (toolName === "samurai.skill.optimization.cancel") {
+    return "skill.optimization.cancel";
+  }
+  if (toolName === "samurai.skill.optimization.promote") {
+    return "skill.optimization.promote";
+  }
+  if (toolName === "samurai.skill.optimization.reject") {
+    return "skill.optimization.reject";
+  }
+  if (toolName === "samurai.skill.optimization.rollback") {
+    return "skill.optimization.rollback";
   }
   if (toolName === "samurai.collection.schema.save") {
     return "collection.schema.save";
@@ -14237,6 +15201,29 @@ function normalizeSamuraiToolBridgeName(name: string): string {
     create_artifact: "samurai.artifact.create",
     artifact_create: "samurai.artifact.create",
     mcp__samurai__artifact_create: "samurai.artifact.create",
+    "generated_surface.create": "samurai.generated_surface.create",
+    create_generated_surface: "samurai.generated_surface.create",
+    generated_surface_create: "samurai.generated_surface.create",
+    mcp__samurai__generated_surface_create: "samurai.generated_surface.create",
+    "generated_surface.revise": "samurai.generated_surface.revise",
+    revise_generated_surface: "samurai.generated_surface.revise",
+    generated_surface_revise: "samurai.generated_surface.revise",
+    mcp__samurai__generated_surface_revise: "samurai.generated_surface.revise",
+    "skill.optimization.start": "samurai.skill.optimization.start",
+    start_skill_optimization: "samurai.skill.optimization.start",
+    mcp__samurai__skill_optimization_start: "samurai.skill.optimization.start",
+    "skill.optimization.cancel": "samurai.skill.optimization.cancel",
+    cancel_skill_optimization: "samurai.skill.optimization.cancel",
+    mcp__samurai__skill_optimization_cancel: "samurai.skill.optimization.cancel",
+    "skill.optimization.promote": "samurai.skill.optimization.promote",
+    promote_skill_optimization: "samurai.skill.optimization.promote",
+    mcp__samurai__skill_optimization_promote: "samurai.skill.optimization.promote",
+    "skill.optimization.reject": "samurai.skill.optimization.reject",
+    reject_skill_optimization: "samurai.skill.optimization.reject",
+    mcp__samurai__skill_optimization_reject: "samurai.skill.optimization.reject",
+    "skill.optimization.rollback": "samurai.skill.optimization.rollback",
+    rollback_skill_optimization: "samurai.skill.optimization.rollback",
+    mcp__samurai__skill_optimization_rollback: "samurai.skill.optimization.rollback",
     session_search: "samurai.session.search",
     mcp__samurai__session_search: "samurai.session.search",
     memory_search: "samurai.memory.search",
@@ -14292,6 +15279,8 @@ function isSamuraiToolBridgeObservedProviderTool(providerToolName: string, paylo
   }
   return (
     providerToolName === "mcp__samurai__artifact_create"
+    || providerToolName === "mcp__samurai__generated_surface_create"
+    || providerToolName === "mcp__samurai__generated_surface_revise"
     || providerToolName === "mcp__samurai__collection_schema_save"
     || providerToolName === "mcp__samurai__collection_record_create"
     || providerToolName === "mcp__samurai__collection_view_present"

@@ -15,7 +15,7 @@ import {
   type SurfaceGenerationRequest
 } from "@samurai-agent/core-schemas";
 
-export const generatedSurfaceCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
+export const generatedSurfaceCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 export interface GeneratedSurfaceBundleInput {
   title: string;
@@ -24,6 +24,7 @@ export interface GeneratedSurfaceBundleInput {
   script?: string;
   actions: GeneratedSurfaceActionDeclaration[];
   input_data_schema?: Record<string, unknown>;
+  assets?: Array<{ path: string; content: string; encoding?: "utf8" | "base64"; mime_type?: string }>;
 }
 
 export function validateGeneratedSurfaceBundle(request: SurfaceGenerationRequest, bundle: GeneratedSurfaceBundleInput): GeneratedSurfaceValidationReport {
@@ -36,6 +37,18 @@ export function validateGeneratedSurfaceBundle(request: SurfaceGenerationRequest
   if (cssBytes > 100_000) issues.push({ code: "surface_css_too_large", message: "CSS exceeds 100 KB." });
   if (scriptBytes > 50_000) issues.push({ code: "surface_script_too_large", message: "Script exceeds 50 KB." });
   if (bundle.actions.length > 20) issues.push({ code: "surface_too_many_actions", message: "A surface can declare at most 20 actions." });
+  if ((bundle.assets?.length ?? 0) > 50) issues.push({ code: "surface_too_many_assets", message: "A surface can include at most 50 relative assets." });
+  const assetPaths = new Set<string>();
+  let assetBytes = 0;
+  for (const asset of bundle.assets ?? []) {
+    const path = safeGeneratedSurfaceAssetPath(asset.path);
+    if (!path) issues.push({ code: "surface_asset_path_invalid", message: `Invalid relative asset path: ${asset.path}` });
+    if (path && assetPaths.has(path)) issues.push({ code: "surface_asset_duplicate", message: `Duplicate asset path: ${path}` });
+    if (path) assetPaths.add(path);
+    const bytes = asset.encoding === "base64" ? Buffer.byteLength(asset.content, "base64") : Buffer.byteLength(asset.content, "utf8");
+    assetBytes += bytes;
+  }
+  if (assetBytes > 2_000_000) issues.push({ code: "surface_assets_too_large", message: "Relative assets exceed 2 MB." });
   if (/<(?:script|iframe|object|embed|base|form)\b/i.test(bundle.html)) issues.push({ code: "surface_html_forbidden_element", message: "HTML contains a forbidden element." });
   if (/\son[a-z]+\s*=/i.test(bundle.html)) issues.push({ code: "surface_html_inline_handler", message: "Inline event handlers are forbidden." });
   if (/(?:javascript:|https?:\/\/|\/\/[^\s"'])/i.test(`${bundle.html}\n${bundle.css ?? ""}`)) issues.push({ code: "surface_external_url", message: "External URLs are forbidden." });
@@ -73,12 +86,17 @@ export function buildGeneratedSurfaceRevision(input: {
   const htmlRef: ResourceRef = { kind: "generated_surface_html", id: revisionId, uri: `${root}.html`, label: input.bundle.title };
   const cssRef: ResourceRef | undefined = input.bundle.css !== undefined ? { kind: "generated_surface_css", id: revisionId, uri: `${root}.css`, label: input.bundle.title } : undefined;
   const scriptRef: ResourceRef | undefined = input.bundle.script !== undefined ? { kind: "generated_surface_script", id: revisionId, uri: `${root}.js`, label: input.bundle.title } : undefined;
-  const bundleHash = sha256(`${input.bundle.html}\0${input.bundle.css ?? ""}\0${input.bundle.script ?? ""}\0${JSON.stringify(input.bundle.actions)}`);
+  const assetRefs: ResourceRef[] = (input.bundle.assets ?? []).map((asset) => {
+    const assetPath = safeGeneratedSurfaceAssetPath(asset.path);
+    if (!assetPath) throw new Error("generated_surface_asset_path_invalid");
+    return { kind: "generated_surface_asset", id: `${revisionId}:${assetPath}`, uri: `${root}/assets/${assetPath}`, label: assetPath };
+  });
+  const bundleHash = sha256(`${input.bundle.html}\0${input.bundle.css ?? ""}\0${input.bundle.script ?? ""}\0${JSON.stringify(input.bundle.actions)}\0${JSON.stringify(input.bundle.assets ?? [])}`);
   const revision = GeneratedSurfaceRevisionRecordSchema.parse({
     id: revisionId, surface_id: surfaceId, revision: revisionNumber, parent_revision_id: input.existing?.current_revision_id,
     producer_run_id: input.producerRunId, prompt_fingerprint: input.promptFingerprint ?? stableHash(input.request.user_intent),
     knowledge_refs: input.request.selected_knowledge_refs, skill_refs: input.request.selected_skill_refs,
-    html_ref: htmlRef, css_ref: cssRef, script_ref: scriptRef, bundle_hash: bundleHash, validation_report: validation, created_at: now
+    html_ref: htmlRef, css_ref: cssRef, script_ref: scriptRef, asset_refs: assetRefs, bundle_hash: bundleHash, validation_report: validation, created_at: now
   });
   const definition = GeneratedSurfaceDefinitionSchema.parse({
     id: surfaceId,
@@ -111,8 +129,29 @@ export function parseGeneratedSurfaceOutput(value: unknown): GeneratedSurfaceBun
     ...(typeof surface.css === "string" ? { css: surface.css } : {}),
     ...(typeof surface.script === "string" ? { script: surface.script } : {}),
     actions: surface.actions as GeneratedSurfaceActionDeclaration[],
+    ...(Array.isArray(surface.assets) ? {
+      assets: surface.assets.flatMap((asset) => {
+        if (!asset || typeof asset !== "object" || Array.isArray(asset)) return [];
+        const entry = asset as Record<string, unknown>;
+        if (typeof entry.path !== "string" || typeof entry.content !== "string") return [];
+        return [{
+          path: entry.path,
+          content: entry.content,
+          ...(entry.encoding === "base64" ? { encoding: "base64" as const } : {}),
+          ...(typeof entry.mime_type === "string" ? { mime_type: entry.mime_type } : {})
+        }];
+      })
+    } : {}),
     ...(surface.input_data_schema && typeof surface.input_data_schema === "object" && !Array.isArray(surface.input_data_schema) ? { input_data_schema: surface.input_data_schema as Record<string, unknown> } : {})
   };
+}
+
+export function safeGeneratedSurfaceAssetPath(value: string): string | undefined {
+  const normalized = value.trim().replaceAll("\\", "/");
+  if (!normalized || normalized.startsWith("/") || normalized.includes("//")) return undefined;
+  const parts = normalized.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) return undefined;
+  return /^[A-Za-z0-9._~/-]+$/.test(normalized) ? normalized : undefined;
 }
 
 function sha256(value: string): string {

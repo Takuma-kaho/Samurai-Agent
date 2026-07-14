@@ -4,6 +4,7 @@ import { access, copyFile, cp, mkdir, readdir, readFile, realpath, rename, rm, s
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { gatewayDeliveryMigration } from "./migrations/gateway-delivery";
+import { skillOptimizationMigration } from "./migrations/skill-optimization";
 import { compareScoredSearch, scoreSearchFields, searchTerms, stateSearchBoost } from "./search/scoring";
 import { normalizeBackupId } from "./backup/backup-id";
 import { backendEventFromRow, backendEventToRow, type BackendEventsTable } from "./repositories/backend-events";
@@ -36,6 +37,18 @@ import {
   type GeneratedSurfaceDefinition,
   type GeneratedSurfaceRevisionRecord,
   type SurfaceInteractionRecord,
+  type SkillOptimizationRun,
+  SkillOptimizationRunSchema,
+  type SkillOptimizationDataset,
+  SkillOptimizationDatasetSchema,
+  type OptimizationCandidate,
+  OptimizationCandidateSchema,
+  type OptimizationEvaluation,
+  OptimizationEvaluationSchema,
+  type OptimizationPromotion,
+  OptimizationPromotionSchema,
+  type SkillOptimizationSnapshot,
+  SkillOptimizationSnapshotSchema,
   type LearningResourceUseRecord,
   type LearningEvaluationRecord,
   LearningResourceEdgeRecordSchema,
@@ -95,7 +108,8 @@ import {
   type RunHistoryEntry,
   createId,
   defaultSettings,
-  nowIso
+  nowIso,
+  stableHash
 } from "@samurai-agent/core-schemas";
 import { Kysely, SqliteDialect, sql } from "kysely";
 
@@ -133,8 +147,73 @@ interface MessagePresentationsTable {
   view_id: string;
   renderer: string;
   view_state_json: JsonColumn | null;
+  surface_id: string | null;
+  revision_id: string | null;
+  preview_url: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface SkillOptimizationRunsTable {
+  id: string;
+  target_skill_id: string;
+  session_id: string | null;
+  status: string;
+  run_json: JsonColumn;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SkillOptimizationDatasetsTable {
+  id: string;
+  skill_id: string;
+  dataset_json: JsonColumn;
+  created_at: string;
+}
+
+interface OptimizationCandidatesTable {
+  id: string;
+  run_id: string;
+  skill_id: string;
+  content_hash: string;
+  body: string;
+  candidate_json: JsonColumn;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OptimizationEvaluationsTable {
+  id: string;
+  run_id: string;
+  candidate_id: string;
+  evaluation_json: JsonColumn;
+  created_at: string;
+}
+
+interface OptimizationPromotionsTable {
+  id: string;
+  run_id: string;
+  candidate_id: string;
+  skill_id: string;
+  promotion_json: JsonColumn;
+  created_at: string;
+}
+
+interface SkillOptimizationSnapshotsTable {
+  id: string;
+  skill_id: string;
+  candidate_id: string;
+  content_hash: string;
+  markdown: string;
+  snapshot_json: JsonColumn;
+  created_at: string;
+  restored_at: string | null;
+}
+
+interface SkillOptimizationLocksTable {
+  skill_id: string;
+  run_id: string;
+  acquired_at: string;
 }
 
 interface OperationsTable {
@@ -868,6 +947,13 @@ interface WorkspaceDb {
   sessions: SessionsTable;
   messages: MessagesTable;
   message_presentations: MessagePresentationsTable;
+  skill_optimization_runs: SkillOptimizationRunsTable;
+  skill_optimization_datasets: SkillOptimizationDatasetsTable;
+  optimization_candidates: OptimizationCandidatesTable;
+  optimization_evaluations: OptimizationEvaluationsTable;
+  optimization_promotions: OptimizationPromotionsTable;
+  skill_optimization_snapshots: SkillOptimizationSnapshotsTable;
+  skill_optimization_locks: SkillOptimizationLocksTable;
   operations: OperationsTable;
   domain_command_executions: DomainCommandExecutionsTable;
   objectives: ObjectivesTable;
@@ -2176,6 +2262,14 @@ export class WorkspaceStore {
       const deliveryExisting=await sql<{checksum:string}>`SELECT checksum FROM schema_migrations WHERE version = ${deliveryMigration.version}`.execute(this.db);
       if(deliveryExisting.rows[0]?.checksum&&deliveryExisting.rows[0].checksum!==deliveryChecksum)throw new Error(`schema_migration_checksum_mismatch:${deliveryMigration.version}`);
       if(!deliveryExisting.rows[0]){for(const statement of deliveryMigration.statements)await sql.raw(statement).execute(this.db);await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${deliveryMigration.version},${deliveryMigration.name},${deliveryChecksum},${nowIso()})`.execute(this.db)}
+      const optimizationChecksum = createHash("sha256").update(JSON.stringify({ statements: skillOptimizationMigration.statements, migrationName: skillOptimizationMigration.name })).digest("hex");
+      const optimizationExisting = await sql<{ checksum: string }>`SELECT checksum FROM schema_migrations WHERE version = ${skillOptimizationMigration.version}`.execute(this.db);
+      if (optimizationExisting.rows[0]?.checksum && optimizationExisting.rows[0].checksum !== optimizationChecksum) throw new Error(`schema_migration_checksum_mismatch:${skillOptimizationMigration.version}`);
+      if (!optimizationExisting.rows[0]) {
+        for (const statement of skillOptimizationMigration.statements) await sql.raw(statement).execute(this.db);
+        await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${skillOptimizationMigration.version},${skillOptimizationMigration.name},${optimizationChecksum},${nowIso()})`.execute(this.db);
+      }
+      await this.ensureGeneratedSurfacePresentationColumns();
       await this.recordMigrationJournal("schema.ensure", "completed", { statement_count: statements.length });
     } catch (error) {
       await this.recordMigrationJournal("schema.ensure", "failed", {
@@ -2183,6 +2277,16 @@ export class WorkspaceStore {
         error: errorMessage(error)
       }).catch(() => undefined);
       throw error;
+    }
+  }
+
+  private async ensureGeneratedSurfacePresentationColumns(): Promise<void> {
+    const columns = await sql<{ name: string }>`PRAGMA table_info(message_presentations)`.execute(this.db);
+    const existing = new Set(columns.rows.map((row) => row.name));
+    for (const column of ["surface_id", "revision_id", "preview_url"] as const) {
+      if (!existing.has(column)) {
+        await sql.raw(`ALTER TABLE message_presentations ADD COLUMN ${column} TEXT`).execute(this.db);
+      }
     }
   }
 
@@ -2532,6 +2636,11 @@ export class WorkspaceStore {
     return (await query.orderBy("updated_at", "desc").execute()).map(objectiveFromRow);
   }
 
+  async updateObjective(record: ObjectiveRecord): Promise<ObjectiveRecord> {
+    await this.db.updateTable("objectives").set(objectiveToRow(record)).where("id", "=", record.id).execute();
+    return record;
+  }
+
   async saveWorkItem(record: WorkItemRecord): Promise<WorkItemRecord> {
     await this.db.insertInto("work_items").values(workItemToRow(record)).onConflict((conflict) => conflict.column("id").doUpdateSet(workItemToRow(record))).execute();
     return record;
@@ -2696,14 +2805,27 @@ export class WorkspaceStore {
     html: string;
     css?: string;
     script?: string;
+    assets?: Array<{ path: string; content: string; encoding?: "utf8" | "base64" }>;
   }): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord }> {
+    const assetFiles = (input.assets ?? []).map((asset) => {
+      const ref = input.revision.asset_refs.find((candidate) => candidate.label === asset.path);
+      if (!ref) throw new Error(`generated_surface_asset_ref_missing:${asset.path}`);
+      return { ref, content: asset.encoding === "base64" ? Buffer.from(asset.content, "base64") : asset.content };
+    });
     const files = [
       { ref: input.revision.html_ref, content: input.html },
       ...(input.revision.css_ref ? [{ ref: input.revision.css_ref, content: input.css ?? "" }] : []),
-      ...(input.revision.script_ref ? [{ ref: input.revision.script_ref, content: input.script ?? "" }] : [])
+      ...(input.revision.script_ref ? [{ ref: input.revision.script_ref, content: input.script ?? "" }] : []),
+      ...assetFiles
     ];
-    for (const file of files) {
-      const absolute = path.join(this.rootDir, file.ref.uri);
+    const absoluteFiles = files.map((file) => {
+      const absolute = path.resolve(this.rootDir, file.ref.uri);
+      const root = `${path.resolve(this.rootDir)}${path.sep}`;
+      if (!absolute.startsWith(root)) throw new Error("generated_surface_file_path_invalid");
+      return { ...file, absolute };
+    });
+    for (const file of absoluteFiles) {
+      const absolute = file.absolute;
       await mkdir(path.dirname(absolute), { recursive: true });
       await writeFile(absolute, file.content, { flag: "wx" });
     }
@@ -2713,7 +2835,7 @@ export class WorkspaceStore {
         await transaction.insertInto("generated_surface_revisions").values(generatedSurfaceRevisionToRow(input.revision)).execute();
       });
     } catch (error) {
-      await Promise.all(files.map((file) => rm(path.join(this.rootDir, file.ref.uri), { force: true })));
+      await Promise.all(absoluteFiles.map((file) => rm(file.absolute, { force: true })));
       throw error;
     }
     return { definition: input.definition, revision: input.revision };
@@ -2749,6 +2871,25 @@ export class WorkspaceStore {
     };
   }
 
+  async readGeneratedSurfaceAssets(revisionId: string): Promise<Array<{ path: string; content: Buffer }>> {
+    const revision = await this.getGeneratedSurfaceRevision(revisionId);
+    if (!revision) return [];
+    const root = `${path.resolve(this.rootDir)}${path.sep}`;
+    const assets: Array<{ path: string; content: Buffer }> = [];
+    for (const ref of revision.asset_refs ?? []) {
+      const absolute = path.resolve(this.rootDir, ref.uri);
+      if (!absolute.startsWith(root)) continue;
+      const assetPath = ref.label ?? path.basename(ref.uri);
+      if (!assetPath || assetPath.includes("..")) continue;
+      try {
+        assets.push({ path: assetPath, content: await readFile(absolute) });
+      } catch {
+        // A missing optional asset does not make the HTML revision unreadable.
+      }
+    }
+    return assets;
+  }
+
   async updateGeneratedSurfaceState(id: string, state: GeneratedSurfaceDefinition["state"], updatedAt = nowIso()): Promise<GeneratedSurfaceDefinition | undefined> {
     const current = await this.getGeneratedSurface(id);
     if (!current) return undefined;
@@ -2764,6 +2905,157 @@ export class WorkspaceStore {
 
   async listSurfaceInteractions(surfaceId: string): Promise<SurfaceInteractionRecord[]> {
     return (await this.db.selectFrom("surface_interactions").selectAll().where("surface_id", "=", surfaceId).orderBy("created_at", "asc").execute()).map((row) => parse<SurfaceInteractionRecord>(row.interaction_json));
+  }
+
+  async saveSkillOptimizationRun(input: SkillOptimizationRun): Promise<SkillOptimizationRun> {
+    const record = SkillOptimizationRunSchema.parse(input);
+    await this.db.insertInto("skill_optimization_runs").values({
+      id: record.id,
+      target_skill_id: record.target_skill_id,
+      session_id: record.session_id ?? null,
+      status: record.status,
+      run_json: stringify(record),
+      created_at: record.created_at,
+      updated_at: record.updated_at
+    }).onConflict((conflict) => conflict.column("id").doUpdateSet({
+      status: record.status,
+      run_json: stringify(record),
+      updated_at: record.updated_at
+    })).execute();
+    return record;
+  }
+
+  async getSkillOptimizationRun(id: string): Promise<SkillOptimizationRun | undefined> {
+    const row = await this.db.selectFrom("skill_optimization_runs").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? SkillOptimizationRunSchema.parse(parse<SkillOptimizationRun>(row.run_json)) : undefined;
+  }
+
+  async listSkillOptimizationRuns(input: { skillId?: string; status?: SkillOptimizationRun["status"] } = {}): Promise<SkillOptimizationRun[]> {
+    let query = this.db.selectFrom("skill_optimization_runs").selectAll().orderBy("created_at", "desc");
+    if (input.skillId) query = query.where("target_skill_id", "=", input.skillId);
+    if (input.status) query = query.where("status", "=", input.status);
+    return (await query.execute()).map((row) => SkillOptimizationRunSchema.parse(parse<SkillOptimizationRun>(row.run_json)));
+  }
+
+  async saveSkillOptimizationDataset(input: SkillOptimizationDataset): Promise<SkillOptimizationDataset> {
+    const record = SkillOptimizationDatasetSchema.parse(input);
+    await this.db.insertInto("skill_optimization_datasets").values({
+      id: record.id,
+      skill_id: record.skill_id,
+      dataset_json: stringify(record),
+      created_at: record.created_at
+    }).onConflict((conflict) => conflict.column("id").doUpdateSet({ dataset_json: stringify(record) })).execute();
+    return record;
+  }
+
+  async getSkillOptimizationDataset(id: string): Promise<SkillOptimizationDataset | undefined> {
+    const row = await this.db.selectFrom("skill_optimization_datasets").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? SkillOptimizationDatasetSchema.parse(parse<SkillOptimizationDataset>(row.dataset_json)) : undefined;
+  }
+
+  async saveOptimizationCandidate(input: OptimizationCandidate): Promise<OptimizationCandidate> {
+    const record = OptimizationCandidateSchema.parse(input);
+    await this.db.insertInto("optimization_candidates").values({
+      id: record.id,
+      run_id: record.run_id,
+      skill_id: record.skill_id,
+      content_hash: record.content_hash,
+      body: record.body,
+      candidate_json: stringify(record),
+      created_at: record.created_at,
+      updated_at: record.updated_at
+    }).onConflict((conflict) => conflict.column("id").doUpdateSet({
+      content_hash: record.content_hash,
+      body: record.body,
+      candidate_json: stringify(record),
+      updated_at: record.updated_at
+    })).execute();
+    return record;
+  }
+
+  async getOptimizationCandidate(id: string): Promise<OptimizationCandidate | undefined> {
+    const row = await this.db.selectFrom("optimization_candidates").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? OptimizationCandidateSchema.parse(parse<OptimizationCandidate>(row.candidate_json)) : undefined;
+  }
+
+  async listOptimizationCandidates(runId: string): Promise<OptimizationCandidate[]> {
+    return (await this.db.selectFrom("optimization_candidates").selectAll().where("run_id", "=", runId).orderBy("created_at", "asc").execute()).map((row) => OptimizationCandidateSchema.parse(parse<OptimizationCandidate>(row.candidate_json)));
+  }
+
+  async saveOptimizationEvaluation(input: OptimizationEvaluation): Promise<OptimizationEvaluation> {
+    const record = OptimizationEvaluationSchema.parse(input);
+    await this.db.insertInto("optimization_evaluations").values({
+      id: record.id,
+      run_id: record.run_id,
+      candidate_id: record.candidate_id,
+      evaluation_json: stringify(record),
+      created_at: record.created_at
+    }).onConflict((conflict) => conflict.column("id").doUpdateSet({ evaluation_json: stringify(record) })).execute();
+    return record;
+  }
+
+  async listOptimizationEvaluations(candidateId?: string): Promise<OptimizationEvaluation[]> {
+    let query = this.db.selectFrom("optimization_evaluations").selectAll().orderBy("created_at", "asc");
+    if (candidateId) query = query.where("candidate_id", "=", candidateId);
+    return (await query.execute()).map((row) => OptimizationEvaluationSchema.parse(parse<OptimizationEvaluation>(row.evaluation_json)));
+  }
+
+  async saveSkillOptimizationSnapshot(input: SkillOptimizationSnapshot): Promise<SkillOptimizationSnapshot> {
+    const record = SkillOptimizationSnapshotSchema.parse(input);
+    await this.db.insertInto("skill_optimization_snapshots").values({
+      id: record.id,
+      skill_id: record.skill_id,
+      candidate_id: record.candidate_id,
+      content_hash: record.content_hash,
+      markdown: record.markdown,
+      snapshot_json: stringify(record),
+      created_at: record.created_at,
+      restored_at: record.restored_at ?? null
+    }).onConflict((conflict) => conflict.column("id").doUpdateSet({ restored_at: record.restored_at ?? null, snapshot_json: stringify(record) })).execute();
+    return record;
+  }
+
+  async getSkillOptimizationSnapshot(id: string): Promise<SkillOptimizationSnapshot | undefined> {
+    const row = await this.db.selectFrom("skill_optimization_snapshots").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? SkillOptimizationSnapshotSchema.parse(parse<SkillOptimizationSnapshot>(row.snapshot_json)) : undefined;
+  }
+
+  async saveOptimizationPromotion(input: OptimizationPromotion): Promise<OptimizationPromotion> {
+    const record = OptimizationPromotionSchema.parse(input);
+    await this.db.insertInto("optimization_promotions").values({
+      id: record.id,
+      run_id: record.run_id,
+      candidate_id: record.candidate_id,
+      skill_id: record.skill_id,
+      promotion_json: stringify(record),
+      created_at: record.created_at
+    }).onConflict((conflict) => conflict.column("id").doUpdateSet({ promotion_json: stringify(record) })).execute();
+    return record;
+  }
+
+  async listOptimizationPromotions(input: { skillId?: string; candidateId?: string } = {}): Promise<OptimizationPromotion[]> {
+    let query = this.db.selectFrom("optimization_promotions").selectAll().orderBy("created_at", "desc");
+    if (input.skillId) query = query.where("skill_id", "=", input.skillId);
+    if (input.candidateId) query = query.where("candidate_id", "=", input.candidateId);
+    return (await query.execute()).map((row) => OptimizationPromotionSchema.parse(parse<OptimizationPromotion>(row.promotion_json)));
+  }
+
+  async acquireSkillOptimizationLock(input: { skillId: string; runId: string; acquiredAt?: string }): Promise<boolean> {
+    const result = await this.db.insertInto("skill_optimization_locks").values({
+      skill_id: input.skillId,
+      run_id: input.runId,
+      acquired_at: input.acquiredAt ?? nowIso()
+    }).onConflict((conflict) => conflict.column("skill_id").doNothing()).executeTakeFirst();
+    return Number(result.numInsertedOrUpdatedRows ?? 0) === 1;
+  }
+
+  async getSkillOptimizationLock(skillId: string): Promise<{ skill_id: string; run_id: string; acquired_at: string } | undefined> {
+    return this.db.selectFrom("skill_optimization_locks").selectAll().where("skill_id", "=", skillId).executeTakeFirst();
+  }
+
+  async releaseSkillOptimizationLock(input: { skillId: string; runId: string }): Promise<boolean> {
+    const result = await this.db.deleteFrom("skill_optimization_locks").where("skill_id", "=", input.skillId).where("run_id", "=", input.runId).executeTakeFirst();
+    return Number(result.numDeletedRows) === 1;
   }
 
   async listRunCheckpoints(workItemId: string): Promise<RunCheckpointRecord[]> {
@@ -3654,6 +3946,7 @@ export class WorkspaceStore {
   }
 
   async patchSkill(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string }): Promise<SkillWithFilePath | undefined> {
+    await this.assertSkillWriteUnlocked(input.id);
     const current = await this.getSkill(input.id);
     const raw = await this.readSkillMarkdown(input.id);
     if (!current || !raw) return undefined;
@@ -3689,6 +3982,7 @@ export class WorkspaceStore {
   }
 
   async updateSkillState(id: string, state: SkillFrontmatter["state"]): Promise<SkillWithFilePath | undefined> {
+    await this.assertSkillWriteUnlocked(id);
     const current = await this.getSkill(id);
     if (!current) {
       return undefined;
@@ -3742,6 +4036,7 @@ export class WorkspaceStore {
   }
 
   async replaceSkillContent(id: string, content: string): Promise<SkillWithFilePath | undefined> {
+    await this.assertSkillWriteUnlocked(id);
     const skill = await this.getSkill(id);
     if (!skill) return undefined;
     const frontmatter = { ...skill.frontmatter, last_reviewed_at: nowIso() };
@@ -3751,6 +4046,31 @@ export class WorkspaceStore {
       updated_at: frontmatter.last_reviewed_at ?? nowIso()
     }).where("id", "=", id).execute();
     return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
+  }
+
+  async replaceSkillContentIfUnchanged(input: { id: string; expectedContentHash: string; content: string; lockRunId?: string }): Promise<SkillWithFilePath | undefined> {
+    await this.assertSkillWriteUnlocked(input.id, input.lockRunId);
+    const skill = await this.getSkill(input.id);
+    const raw = await this.readSkillMarkdown(input.id);
+    if (!skill || !raw) return undefined;
+    const currentBodyHash = stableHash(stripFrontmatter(raw).trim());
+    if (currentBodyHash !== input.expectedContentHash) {
+      throw new Error(`skill_content_conflict:${input.id}`);
+    }
+    const frontmatter = { ...skill.frontmatter, last_reviewed_at: nowIso() };
+    await writeFile(path.join(this.rootDir, skill.file_path), `${renderFrontmatter(frontmatter)}\n${input.content.trim()}\n`);
+    await this.db.updateTable("skill_index").set({
+      frontmatter_json: stringify(frontmatter),
+      updated_at: frontmatter.last_reviewed_at ?? nowIso()
+    }).where("id", "=", input.id).execute();
+    return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
+  }
+
+  private async assertSkillWriteUnlocked(skillId: string, ownerRunId?: string): Promise<void> {
+    const lock = await this.getSkillOptimizationLock(skillId);
+    if (lock && lock.run_id !== ownerRunId) {
+      throw new Error(`skill_locked_for_optimization:${skillId}`);
+    }
   }
 
   async recordSkillUsage(input: { skillId: string; runId?: string; usedAt?: string }): Promise<SkillUsageRecord> {
@@ -4058,6 +4378,7 @@ export class WorkspaceStore {
   }
 
   async writeSkillSupportFile(input: { skillId: string; path: string; content: string }): Promise<SkillSupportFile> {
+    await this.assertSkillWriteUnlocked(input.skillId);
     const skill = await this.getSkill(input.skillId);
     if (!skill) {
       throw new Error(`skill_not_found:${input.skillId}`);
@@ -9131,6 +9452,9 @@ function messagePresentationToRow(presentation: MessagePresentationRecord): Mess
     view_id: presentation.view_id,
     renderer: presentation.renderer,
     view_state_json: presentation.view_state ? stringify(presentation.view_state) : null,
+    surface_id: presentation.surface_id ?? null,
+    revision_id: presentation.revision_id ?? null,
+    preview_url: presentation.preview_url ?? null,
     created_at: presentation.created_at,
     updated_at: presentation.updated_at
   };
@@ -9141,13 +9465,16 @@ function messagePresentationFromRow(row: MessagePresentationsTable): MessagePres
     id: row.id,
     session_id: row.session_id,
     message_id: row.message_id,
-    kind: "collection_app",
+    kind: row.kind === "generated_surface" ? "generated_surface" : row.kind === "skill_optimization" ? "skill_optimization" : "collection_app",
     title: row.title,
     subtitle: row.subtitle,
     collection_id: row.collection_id,
     view_id: row.view_id,
     renderer: row.renderer,
     view_state: row.view_state_json ? parse<Record<string, JsonValue>>(row.view_state_json) : undefined,
+    ...(row.surface_id ? { surface_id: row.surface_id } : {}),
+    ...(row.revision_id ? { revision_id: row.revision_id } : {}),
+    ...(row.preview_url ? { preview_url: row.preview_url } : {}),
     created_at: row.created_at,
     updated_at: row.updated_at
   };

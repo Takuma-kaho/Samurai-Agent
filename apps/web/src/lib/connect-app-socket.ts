@@ -1,5 +1,5 @@
 import type { Ref } from "vue";
-import { io } from "socket.io-client";
+import { io, type Socket } from "socket.io-client";
 import type { ActivityInboxItem, ApprovalRequest, BackendEventRecord, BackendRunRecord, OperationRecord, PolicyDecisionRecord, SessionRecord, SettingsRecord, WorkspaceChangeRecord } from "@samurai-agent/core-schemas";
 import { getApiBaseUrl } from "./api";
 
@@ -19,9 +19,10 @@ export function connectAppSocket(input: {
   applyStreamingEvent: (event: BackendEventRecord) => void;
   persistSettings: (settings: SettingsRecord) => void;
   reloadActiveSession: () => Promise<void>;
-}) {
+}): Socket {
   const socket = io(getApiBaseUrl());
   socket.on("session.created", (session: SessionRecord) => { if (input.acceptSession(session)) input.promoteSession(session); });
+  socket.on("message.created", (message: { session_id: string }) => { if (input.activeSession.value?.id === message.session_id) void input.reloadActiveSession(); });
   socket.on("activity.updated", (items: ActivityInboxItem[]) => { input.activity.value = items; });
   socket.on("approval.requested", (item: ApprovalRequest) => { input.approvalRequests.value = replaceFirst(input.approvalRequests.value, item); });
   socket.on("operation.created", (item: OperationRecord) => { input.operations.value = replaceFirst(input.operations.value, item); });

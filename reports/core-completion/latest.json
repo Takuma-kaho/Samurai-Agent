@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "scorecard_sha256": "820015afcf61d1bc9a8ecae055778bfbe246d12afc4a3a457027919a773490e7",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
-  "generated_at": "2026-07-12T04:43:46.823Z",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "generated_at": "2026-07-13T07:18:27.286Z",
   "category": null,
-  "score": 10,
+  "score": 2,
   "maximum_score": 100,
   "all_gates_passed": false,
   "complete": false,
@@ -14,18 +14,22 @@
       "category": "architecture",
       "command": "pnpm core:test:physical-boundaries",
       "evidence": "reports/core-completion/evidence/A01.json",
-      "score": 2,
-      "status": "passed",
-      "failures": []
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
     },
     {
       "id": "A02",
       "category": "architecture",
       "command": "pnpm core:test:command-ingress",
       "evidence": "reports/core-completion/evidence/A02.json",
-      "score": 2,
-      "status": "passed",
-      "failures": []
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
     },
     {
       "id": "A03",
@@ -319,11 +323,9 @@
       "category": "surface",
       "command": "pnpm core:test:artifact",
       "evidence": "reports/core-completion/evidence/D07.json",
-      "score": 0,
-      "status": "invalid",
-      "failures": [
-        "source_sha256 mismatch"
-      ]
+      "score": 2,
+      "status": "passed",
+      "failures": []
     },
     {
       "id": "D08",
@@ -495,9 +497,11 @@
       "category": "gateway",
       "command": "pnpm core:test:signed-gateway-sandbox",
       "evidence": "reports/core-completion/evidence/F05.json",
-      "score": 2,
-      "status": "passed",
-      "failures": []
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
     },
     {
       "id": "G01",
@@ -537,18 +541,22 @@
       "category": "operations",
       "command": "pnpm core:soak",
       "evidence": "reports/core-completion/evidence/G04.json",
-      "score": 2,
-      "status": "passed",
-      "failures": []
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
     },
     {
       "id": "G05",
       "category": "operations",
       "command": "pnpm core:test:release-hygiene",
       "evidence": "reports/core-completion/evidence/G05.json",
-      "score": 2,
-      "status": "passed",
-      "failures": []
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
     }
   ],
   "gates": [
@@ -610,9 +618,11 @@
       "command": "pnpm core:soak",
       "evidence": "reports/core-completion/evidence/G04.json",
       "evidence_test_id": "G04",
-      "score": 2,
-      "status": "passed",
-      "failures": []
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
     },
     {
       "id": "gate-real-backend",
@@ -630,18 +640,22 @@
       "command": "pnpm core:test:signed-gateway-sandbox",
       "evidence": "reports/core-completion/evidence/F05.json",
       "evidence_test_id": "F05",
-      "score": 2,
-      "status": "passed",
-      "failures": []
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
     },
     {
       "id": "gate-release-hygiene",
       "command": "pnpm core:test:release-hygiene",
       "evidence": "reports/core-completion/evidence/G05.json",
       "evidence_test_id": "G05",
-      "score": 2,
-      "status": "passed",
-      "failures": []
+      "score": 0,
+      "status": "invalid",
+      "failures": [
+        "source_sha256 mismatch"
+      ]
     },
     {
       "id": "gate-generated-surface",
