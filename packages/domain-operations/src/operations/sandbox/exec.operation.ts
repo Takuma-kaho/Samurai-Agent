@@ -31,7 +31,7 @@ const sandboxExec = defineCommand<SandboxExecPorts>()({
   ...{
   "kind": "command",
   "id": "sandbox.exec",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Execute sandbox command",
   "description": "Execute a sandbox command inside the Gateway boundary.",

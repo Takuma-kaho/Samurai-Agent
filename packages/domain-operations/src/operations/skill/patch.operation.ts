@@ -29,7 +29,7 @@ const skillPatch = defineCommand<SkillPatchPorts>()({
   ...{
   "kind": "command",
   "id": "skill.patch",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Edit Skill",
   "description": "Edit a Skill body and metadata through the Runtime boundary.",

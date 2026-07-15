@@ -30,7 +30,7 @@ const externalSend = defineCommand<ExternalSendPorts>()({
   ...{
   "kind": "command",
   "id": "external.send",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Prepare outbound send",
   "description": "Plan an outbound send request without dispatching it.",

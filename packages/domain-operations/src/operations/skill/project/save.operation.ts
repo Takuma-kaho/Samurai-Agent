@@ -25,7 +25,7 @@ const skillProjectSave = defineCommand<SkillProjectSavePorts>()({
   ...{
   "kind": "command",
   "id": "skill.project.save",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Save project skill",
   "description": "Save a promoted project Skill markdown file.",

@@ -27,7 +27,7 @@ const mcpCall = defineCommand<McpCallPorts>()({
   ...{
   "kind": "command",
   "id": "mcp.call",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Call MCP tool",
   "description": "Call an MCP tool through stored Gateway MCP configuration.",

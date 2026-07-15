@@ -25,7 +25,7 @@ const artifactRepair = defineCommand<ArtifactRepairPorts>()({
   ...{
   "kind": "command",
   "id": "artifact.repair",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Repair artifact source",
   "description": "Repair a missing current Artifact file from its verified content blob.",

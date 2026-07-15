@@ -27,7 +27,7 @@ const memoryTopicCreate = defineCommand<MemoryTopicCreatePorts>()({
   ...{
   "kind": "command",
   "id": "memory.topic.create",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Create topic memory",
   "description": "Create a visible topic memory candidate.",

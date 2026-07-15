@@ -30,7 +30,7 @@ const graphCreate = defineCommand<GraphCreatePorts>()({
   ...{
   "kind": "command",
   "id": "graph.create",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Create graph",
   "description": "Create a validated node and edge graph as a revision-backed Artifact.",

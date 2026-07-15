@@ -290,7 +290,8 @@ for (const [definition, entry] of operationDefinitions.map((definition) => [
 }
 const versionFixture = domainCommandEntries[0]!;
 assert.throws(() => assertContractVersionDiscipline([versionFixture], [{ ...versionFixture, contract_fingerprint: "0".repeat(64) }]), /domain_contract_version_not_bumped/);
-assert.doesNotThrow(() => assertContractVersionDiscipline([versionFixture], [{ ...versionFixture, contract_version: "2.0", contract_fingerprint: "0".repeat(64) }]));
+const nextContractVersion = `${Number(versionFixture.contract_version.split(".")[0]) + 1}.0`;
+assert.doesNotThrow(() => assertContractVersionDiscipline([versionFixture], [{ ...versionFixture, contract_version: nextContractVersion, contract_fingerprint: "0".repeat(64) }]));
 
 const operationsRoot = path.join(root, "packages/domain-operations/src/operations");
 const operationFiles = filesUnder(operationsRoot).filter((file) => file.endsWith(".operation.ts"));

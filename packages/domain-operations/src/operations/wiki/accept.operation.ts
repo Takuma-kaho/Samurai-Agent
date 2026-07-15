@@ -25,7 +25,7 @@ const wikiAccept = defineCommand<WikiAcceptPorts>()({
   ...{
   "kind": "command",
   "id": "wiki.accept",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Accept Knowledge Wiki page",
   "description": "Accept a proposed Knowledge Wiki page for active retrieval.",

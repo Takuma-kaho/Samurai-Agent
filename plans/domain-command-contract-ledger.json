@@ -143,8 +143,8 @@
     {
       "kind": "command",
       "id": "artifact.create",
-      "contract_version": "1.0",
-      "contract_fingerprint": "e0b61d729a69daabc8540c0be4b5a7ca067a7f074b7d57273e33f47f8aa621e6",
+      "contract_version": "2.0",
+      "contract_fingerprint": "aa5edae96a6099b3e81609d90b7c64a90db8b9cae0d9e1bdefdeb84c6080f014",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -548,6 +548,9 @@
                     "$ref": "#/anyOf/0/properties/resource/properties/file_ref"
                   },
                   "error": {
+                    "type": "string"
+                  },
+                  "correlation_id": {
                     "type": "string"
                   },
                   "created_at": {
@@ -1092,6 +1095,9 @@
                       "legacy_operation_id": {
                         "type": "string"
                       },
+                      "correlation_id": {
+                        "type": "string"
+                      },
                       "created_at": {
                         "type": "string",
                         "format": "date-time"
@@ -1183,8 +1189,8 @@
     {
       "kind": "command",
       "id": "artifact.export_pdf",
-      "contract_version": "2.0",
-      "contract_fingerprint": "499eb84cc05b736d19186b5b1bd5c1fff49eb2b9639e9759427f14d0e599feaf",
+      "contract_version": "3.0",
+      "contract_fingerprint": "2da5218d3ad6478e45cf005e4d174568f3b925000a5bf3a782e0893a1a745a24",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1576,6 +1582,9 @@
                 "$ref": "#/properties/resource/properties/file_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -1789,8 +1798,8 @@
     {
       "kind": "command",
       "id": "artifact.repair",
-      "contract_version": "1.0",
-      "contract_fingerprint": "0df0833e2349ba28161d3112f83e81367a9dde0815dc1e3cd22a7d045404683d",
+      "contract_version": "2.0",
+      "contract_fingerprint": "b7cb620a536b3fc44a9b3b5437565c86defe8b7c4e85e01183d0ea2d7cc5d60e",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2182,6 +2191,9 @@
                 "$ref": "#/properties/resource/properties/file_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -2405,8 +2417,8 @@
     {
       "kind": "command",
       "id": "artifact.restore_revision",
-      "contract_version": "1.0",
-      "contract_fingerprint": "d3e4dfc94dcbefc1593a0992840ead8b91e03738f42680f518cc162527a27a2c",
+      "contract_version": "2.0",
+      "contract_fingerprint": "1915c4af323383e10afed100a99f0ba40ba49aa3e1c1c0d4d9b00a9b316fd35b",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2810,6 +2822,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -3102,8 +3117,8 @@
     {
       "kind": "command",
       "id": "artifact.revise",
-      "contract_version": "1.0",
-      "contract_fingerprint": "459a366b75a3980d60a080ec21d25e11104c6f76dd495be94bf6347b089a4f4e",
+      "contract_version": "2.0",
+      "contract_fingerprint": "c493704dd28838bc9a959d4ba3c33de1ba2632952cfaae3394f49f7a1daeae47",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3520,6 +3535,9 @@
                 "$ref": "#/properties/resource/properties/file_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -4483,8 +4501,8 @@
     {
       "kind": "command",
       "id": "automation.job.run",
-      "contract_version": "1.0",
-      "contract_fingerprint": "ff9209c75acffaef54ad2a151ffdfd8e27ab61834346d929b2ea66116d653af5",
+      "contract_version": "2.0",
+      "contract_fingerprint": "498c1fac09d4a1e2001c78475f729d76641b294070e688f349e029ce4f3afd02",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4883,6 +4901,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -5121,8 +5142,8 @@
     {
       "kind": "command",
       "id": "automation.job.save",
-      "contract_version": "1.0",
-      "contract_fingerprint": "d3628eb6567419ad63bf56dcca0d6997807688f627ed3c5e1497e821ed26cc38",
+      "contract_version": "2.0",
+      "contract_fingerprint": "8fe1f09493394703085f4af3aca81fccddb5250fa8fda01b3112491c214c25c9",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -5547,6 +5568,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -5754,8 +5778,8 @@
     {
       "kind": "command",
       "id": "automation.job.set_status",
-      "contract_version": "1.0",
-      "contract_fingerprint": "15a78f820ef96dc6e9e83f8a4920ffaca63abe54405bbf374ee11894cd7e2436",
+      "contract_version": "2.0",
+      "contract_fingerprint": "b206801dc88d20520bcc69803386edd385849fe07a910daaec6b1bd73cd86b91",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -6167,6 +6191,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -6376,8 +6403,8 @@
     {
       "kind": "command",
       "id": "automation.memory_review.run",
-      "contract_version": "1.0",
-      "contract_fingerprint": "80ccd65afeae10711fd9f46a6cecc46b1d2b418c951fbbd7644093d6cae03076",
+      "contract_version": "2.0",
+      "contract_fingerprint": "6b34339184761cfa8a00d5b8708cd5e5db86d74ab65e946da91f8e21c242dcfd",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -6711,6 +6738,9 @@
                 "$ref": "#/properties/operation/properties/input_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -7825,8 +7855,8 @@
     {
       "kind": "command",
       "id": "browser.download_to_workspace",
-      "contract_version": "1.0",
-      "contract_fingerprint": "6336656b25a56b7c7f6b2319738c41369208727d6351734a634066b18143e83b",
+      "contract_version": "2.0",
+      "contract_fingerprint": "f94f2b5f269e35d5d5a9cf730924ec8ceaf3cbc474f7bf6e4988e6b39ca8e006",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -8160,6 +8190,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -8393,8 +8426,8 @@
     {
       "kind": "command",
       "id": "browser.interact",
-      "contract_version": "2.0",
-      "contract_fingerprint": "6b571bdaf89a8e8b84755f0ad7a55bce41b1f00d418e60030a42fb396e8cc225",
+      "contract_version": "3.0",
+      "contract_fingerprint": "89729948cbb3b1e19cd0eaa4c5be7248863e025995a9d2abe817182fa62b455b",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -8710,6 +8743,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -8945,8 +8981,8 @@
     {
       "kind": "command",
       "id": "browser.navigate",
-      "contract_version": "2.0",
-      "contract_fingerprint": "921550c9bb76d6bd38519775cdddd6cd2bdd8cb1a79612c93ec9fd526540cc3c",
+      "contract_version": "3.0",
+      "contract_fingerprint": "98e319c454d143b75f23f663518a7411645d23c647cd24acfc2276e964338e55",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -9270,6 +9306,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -9505,8 +9544,8 @@
     {
       "kind": "command",
       "id": "browser.screenshot",
-      "contract_version": "2.0",
-      "contract_fingerprint": "de053d9c269584a10a0a878fea45ae290376caf87b97aac89049343c11a5c57d",
+      "contract_version": "3.0",
+      "contract_fingerprint": "eed606beaaa337e8cf15b119b49afa9d6f7c5879fd923e32614ef4582e86d2f0",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -9842,6 +9881,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -10077,8 +10119,8 @@
     {
       "kind": "command",
       "id": "chat.turn.run",
-      "contract_version": "2.0",
-      "contract_fingerprint": "ad0f9021742967fb2d6d591a8e8d207b86d5d9c7cdd6dd498855db28334b0234",
+      "contract_version": "3.0",
+      "contract_fingerprint": "a2d8d49d181b10ea7e764a87eede039a6d2b9cc6097efaf0945125d0f8d52ef1",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -10882,6 +10924,9 @@
                 "legacy_operation_id": {
                   "type": "string"
                 },
+                "correlation_id": {
+                  "type": "string"
+                },
                 "created_at": {
                   "type": "string",
                   "format": "date-time"
@@ -10985,6 +11030,9 @@
                   "$ref": "#/properties/messages/items/properties/envelope/properties/attachments/items"
                 },
                 "error": {
+                  "type": "string"
+                },
+                "correlation_id": {
                   "type": "string"
                 },
                 "created_at": {
@@ -13705,8 +13753,8 @@
     {
       "kind": "command",
       "id": "collection.action.run",
-      "contract_version": "1.0",
-      "contract_fingerprint": "5390d65f89949b7d29b8c82cb979cf5adb9d9851cfab9d4cc5c9f01c627e0a33",
+      "contract_version": "2.0",
+      "contract_fingerprint": "98eeca044e6384c855f367236ea8396a76cf0672e70e2ea848fa17bdfd842a83",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -14438,6 +14486,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -15034,6 +15085,9 @@
                       "type": "string"
                     },
                     "legacy_operation_id": {
+                      "type": "string"
+                    },
+                    "correlation_id": {
                       "type": "string"
                     },
                     "created_at": {
@@ -15869,8 +15923,8 @@
     {
       "kind": "command",
       "id": "collection.patch.apply",
-      "contract_version": "1.0",
-      "contract_fingerprint": "731267c335a1e4a1ea655599b9d136b0fc127da1c30fd3822dfe920fd27e2079",
+      "contract_version": "2.0",
+      "contract_fingerprint": "9703ad588db23d1fb935504a8df2622be5d9ca7a4dfa99b51d282b7a0ce90ea9",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -16249,6 +16303,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -16464,8 +16521,8 @@
     {
       "kind": "command",
       "id": "collection.record.create",
-      "contract_version": "1.0",
-      "contract_fingerprint": "19032e9b7d8823601d85b7a8a4ba6b60566d5a08c5c19ef6987e868c669b70dc",
+      "contract_version": "2.0",
+      "contract_fingerprint": "bb3241339a186fb940933108cd3eef4347164b692ae43e8047947bbf5b279fac",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -16844,6 +16901,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -17055,8 +17115,8 @@
     {
       "kind": "command",
       "id": "collection.record.delete",
-      "contract_version": "1.0",
-      "contract_fingerprint": "ee741606f9df4b922bc6b10c1b6699536523c3848aa51ac3dbe2eda826298ae6",
+      "contract_version": "2.0",
+      "contract_fingerprint": "3d51dbeae9a1177463570e8198d6c81eaa19bbaf1755ee41eb2f93ca0396468d",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -17419,6 +17479,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -17630,8 +17693,8 @@
     {
       "kind": "command",
       "id": "collection.reindex",
-      "contract_version": "1.0",
-      "contract_fingerprint": "6194119d6c15786f70984772fbb01413d2bcbd23bd57e592f584c2b1635578e9",
+      "contract_version": "2.0",
+      "contract_fingerprint": "cf617271315450d6f70a6222810881439d342533e3d5b285d0d3d5849efd37cf",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -17979,6 +18042,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -18212,8 +18278,8 @@
     {
       "kind": "command",
       "id": "collection.schema.save",
-      "contract_version": "1.0",
-      "contract_fingerprint": "adf4923a5805656027147516b2536fcf198b86388bd90d63ab4cf59a990cbc42",
+      "contract_version": "2.0",
+      "contract_fingerprint": "4b6f061a0af38da718dc0b191dd080a66fab4b7a8ee15350b1531868c6acc501",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -18722,6 +18788,9 @@
                 "$ref": "#/properties/operation/properties/input_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -21477,8 +21546,8 @@
     {
       "kind": "command",
       "id": "external.send",
-      "contract_version": "1.0",
-      "contract_fingerprint": "f8f1dbda4cab8538d10b9ca7823518e5b49fce265592f86ec11a745fb96212b2",
+      "contract_version": "2.0",
+      "contract_fingerprint": "c073515b006c2e4cb0342790ffb4af0dd00b20942c06950ad98effd0ac727de4",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -21878,6 +21947,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -22086,8 +22158,8 @@
     {
       "kind": "command",
       "id": "external.send.dispatch",
-      "contract_version": "1.0",
-      "contract_fingerprint": "2b7940c5bf63f31b6c9b62be4fb65d825e45b49d8014a191736e18b6b0d534e8",
+      "contract_version": "2.0",
+      "contract_fingerprint": "4c24ffa172a6b1e721aa511b3e7bc1b1997e4d76304f95f02d797e12e0864773",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -22475,6 +22547,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -22683,8 +22758,8 @@
     {
       "kind": "command",
       "id": "external.send.prepare",
-      "contract_version": "1.0",
-      "contract_fingerprint": "d6058973911fe4c37419bad7537a3e55525845d76b3a017db6cf1a2b6a5cdc52",
+      "contract_version": "2.0",
+      "contract_fingerprint": "e3b120dc3366307e7ea8c30f3024face53b02be3c0423efd534ef1b6a763ebc0",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -23084,6 +23159,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -23292,8 +23370,8 @@
     {
       "kind": "command",
       "id": "file.patch",
-      "contract_version": "1.0",
-      "contract_fingerprint": "1474820b5509398d1a2a6586f751a9e0eafa193266b8f60af92386c699e6d019",
+      "contract_version": "2.0",
+      "contract_fingerprint": "4cde10376ba44871c24bf2c28995dabb36ff42a299ec220fd566a6992bb82eb8",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -23751,6 +23829,9 @@
                 "$ref": "#/properties/operation/properties/input_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -23986,8 +24067,8 @@
     {
       "kind": "command",
       "id": "file.write",
-      "contract_version": "1.0",
-      "contract_fingerprint": "8f1c994daf8b63dd9d4162f3f6a6ee5a2344e46247f01c77f491b08b7a23e8cc",
+      "contract_version": "2.0",
+      "contract_fingerprint": "cf93a264278dbbe858b584118d0749c6672112df6cc9307d965562a56628aad0",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -24445,6 +24526,9 @@
                 "$ref": "#/properties/operation/properties/input_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -25021,8 +25105,8 @@
     {
       "kind": "command",
       "id": "gateway.inbound.route",
-      "contract_version": "1.0",
-      "contract_fingerprint": "fb5b2f1c00d7508580954741614e7e296dd78fb86f20130e91e1988064c6d51f",
+      "contract_version": "2.0",
+      "contract_fingerprint": "31cb5522c5a7b9098b33629d8b16ed0898cf308bbd54a140ddbb5ce9ef88c506",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -26419,6 +26503,9 @@
                     "legacy_operation_id": {
                       "type": "string"
                     },
+                    "correlation_id": {
+                      "type": "string"
+                    },
                     "created_at": {
                       "type": "string",
                       "format": "date-time"
@@ -26522,6 +26609,9 @@
                       "$ref": "#/properties/boundaryPolicy/properties/mcp_config_refs/items/properties/config_ref"
                     },
                     "error": {
+                      "type": "string"
+                    },
+                    "correlation_id": {
                       "type": "string"
                     },
                     "created_at": {
@@ -34380,8 +34470,8 @@
     {
       "kind": "command",
       "id": "graph.create",
-      "contract_version": "1.0",
-      "contract_fingerprint": "d8b653b36c3ad50e25c5a0621a6708ca100c4ea4802c6e35ccf190d1f2d4956b",
+      "contract_version": "2.0",
+      "contract_fingerprint": "eea4ac3c75df55f3c39f6463e2802c5a920c6321967921541d8823b0d6f095a4",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -34787,6 +34877,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -34997,8 +35090,8 @@
     {
       "kind": "command",
       "id": "graph.patch",
-      "contract_version": "1.0",
-      "contract_fingerprint": "16c6a79062eedc2911b6d1da2bedd9f6d23c9569b4f9d5fa006a55b69f1fd78b",
+      "contract_version": "2.0",
+      "contract_fingerprint": "e82fc145b8b2d04d6ab2b66bd888e5c6d9d84823b6e33e3c35c7b1c994977203",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -35443,6 +35536,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -35736,8 +35832,8 @@
     {
       "kind": "command",
       "id": "image.edit",
-      "contract_version": "1.0",
-      "contract_fingerprint": "ef9cbd5e28a0ad6dcd4924f7c8e7663ac113b8331c2104fee934c16db1ff8589",
+      "contract_version": "2.0",
+      "contract_fingerprint": "da7a7b40c3b4aa99d41b7f1a2102b1d58c4238a7c11f41d9aa6d9501b8b7a46d",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -36179,6 +36275,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -36470,8 +36569,8 @@
     {
       "kind": "command",
       "id": "image.generate",
-      "contract_version": "1.0",
-      "contract_fingerprint": "49941dea890b383b8ba411da6ea0cf4ef4b9b6b5265486277155704047861c14",
+      "contract_version": "2.0",
+      "contract_fingerprint": "6205058bae89ff30483e86c682da7fa9389fb3f060412872891a5e47c630bf75",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -36907,6 +37006,9 @@
                 "$ref": "#/properties/resource/properties/file_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -37429,8 +37531,8 @@
     {
       "kind": "command",
       "id": "mcp.call",
-      "contract_version": "1.0",
-      "contract_fingerprint": "40f9531bc7ace66cd36dd497339a58306e546e53f2c925be30a7bac765670e37",
+      "contract_version": "2.0",
+      "contract_fingerprint": "6a9516055a5004934297959164996a619f64de6f2eb8f6a57617672c8c83a7b4",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -37721,6 +37823,9 @@
                 "$ref": "#/properties/operation/properties/input_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -38103,8 +38208,8 @@
     {
       "kind": "command",
       "id": "memory.archive",
-      "contract_version": "1.0",
-      "contract_fingerprint": "4160c1f4735d5d2c27dfbaf6a82bf90be1a337febda038067291ae4531731dc8",
+      "contract_version": "2.0",
+      "contract_fingerprint": "c84b958f11a68cea2b7a48879b5c4e1e1b725eb5acaf5dc55b25a8cef94712f2",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -38551,6 +38656,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -38791,8 +38899,8 @@
     {
       "kind": "command",
       "id": "memory.session.create",
-      "contract_version": "1.0",
-      "contract_fingerprint": "1ad6fa9dc60fc5d346b82abccf867898a295f28f32807b603e57c934f6d2434f",
+      "contract_version": "2.0",
+      "contract_fingerprint": "0da782760406822b348cb5a1989f6bd27f83b30e74d121217a1959b8bfcf07fa",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -39240,6 +39348,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -39473,8 +39584,8 @@
     {
       "kind": "command",
       "id": "memory.topic.create",
-      "contract_version": "1.0",
-      "contract_fingerprint": "4233a4937b1396a522e15970284723fb39dc6059cd88993ccfa3f9883e2d6167",
+      "contract_version": "2.0",
+      "contract_fingerprint": "c52a0ed434b0831c3f1cd402e033139b76ee1c1f82914cf3d5b0959e74dea4a1",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -39917,6 +40028,9 @@
                 "$ref": "#/properties/resource/properties/source_refs/items"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -42947,8 +43061,8 @@
     {
       "kind": "command",
       "id": "reflection.suggestion.apply",
-      "contract_version": "1.0",
-      "contract_fingerprint": "113c29c698b33da20539385ddfb7d7fb373130b828fb2f218e2f3d3d7a2f7d42",
+      "contract_version": "2.0",
+      "contract_fingerprint": "a667e6eb00c4e83915f17eeb04cb5c8972af50a82530bead0f277e072aa8d293",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -43656,6 +43770,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -43866,8 +43983,8 @@
     {
       "kind": "command",
       "id": "resource.translation_job.save",
-      "contract_version": "1.0",
-      "contract_fingerprint": "5c5b7d2059ff50b951f7dd1bff293242f9634acba43b32a114a1d1d58efe00ba",
+      "contract_version": "2.0",
+      "contract_fingerprint": "aa4a509b37e9f281e00d022b511e2457df778f908493516ad59fd138f0e95acb",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -44290,6 +44407,9 @@
                 "$ref": "#/properties/operation/properties/input_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -44874,8 +44994,8 @@
     {
       "kind": "command",
       "id": "rollback.restore",
-      "contract_version": "1.0",
-      "contract_fingerprint": "21078afb33acb2b62a20c688533663333d14d6380b4c05a069858e045df7d84c",
+      "contract_version": "2.0",
+      "contract_fingerprint": "b1c51ed7d1edf27a8f287fbb6ee0a3046d280117ed40afde199efe44c8ea8293",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -45184,6 +45304,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -45416,8 +45539,8 @@
     {
       "kind": "command",
       "id": "sandbox.exec",
-      "contract_version": "1.0",
-      "contract_fingerprint": "f35cf646ac74fe198d5509b50918705782141ce646b3462094cd91752e0b33d4",
+      "contract_version": "2.0",
+      "contract_fingerprint": "0acf6a4af658c1d67b114590b04b0ab8b3334cfe10c68cd27dde390bc2915214",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -45726,6 +45849,9 @@
                 "$ref": "#/properties/operation/properties/input_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -46828,8 +46954,8 @@
     {
       "kind": "command",
       "id": "skill.candidate.create",
-      "contract_version": "1.0",
-      "contract_fingerprint": "40ddbaffde70ced66dc3b36395c2570efe7897443fc43648522d48ffc98a0ad9",
+      "contract_version": "2.0",
+      "contract_fingerprint": "7a655b33b70e2ef2344b8a0093b0d364bf5808f23357d70213d7b53df1457ed9",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -47379,6 +47505,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -47587,8 +47716,8 @@
     {
       "kind": "command",
       "id": "skill.lifecycle.apply",
-      "contract_version": "1.0",
-      "contract_fingerprint": "fd7db89e68ce4d44c59efd23961cb226dab0217aed9bea52430bdd778b938908",
+      "contract_version": "2.0",
+      "contract_fingerprint": "fc5924b12e45a01715f2e335fd5008d831fa0e2368a53288def95f37f99cafcc",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -48102,6 +48231,9 @@
                 "$ref": "#/properties/resource/properties/frontmatter/properties/source_refs/items"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -51573,8 +51705,8 @@
     {
       "kind": "command",
       "id": "skill.patch",
-      "contract_version": "1.0",
-      "contract_fingerprint": "71bd7becd2c87f2f3268bba307c7dc6212d421af504660539809ae637cc56eef",
+      "contract_version": "2.0",
+      "contract_fingerprint": "864e1a6d30a8d71c7347d2b75704bbe85e7cb676468c5e94857948792f86603f",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -52102,6 +52234,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -52311,8 +52446,8 @@
     {
       "kind": "command",
       "id": "skill.project.save",
-      "contract_version": "1.0",
-      "contract_fingerprint": "d97d1985114dd0a9f1466bfca890da0d6cc1e5509ad04fa55167b64ba31d3a19",
+      "contract_version": "2.0",
+      "contract_fingerprint": "2818983b607d2a486f4441cb24d808d4bf7728e7639fe4dc0d4b4b62734acb06",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -52825,6 +52960,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -53032,8 +53170,8 @@
     {
       "kind": "command",
       "id": "skill.support_file.save",
-      "contract_version": "1.0",
-      "contract_fingerprint": "bc79c505f0475c428fe46dab947bbab426dc44652d8248736fd9076a76ba46b6",
+      "contract_version": "2.0",
+      "contract_fingerprint": "45286b6ae1440d4f991d893d9d8cf6fd035ddc92137e1f993509d3301b752717",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -53348,6 +53486,9 @@
                 "$ref": "#/properties/operation/properties/input_ref"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -53893,8 +54034,8 @@
     {
       "kind": "command",
       "id": "wiki.accept",
-      "contract_version": "1.0",
-      "contract_fingerprint": "e45ae2455442bbd1f2760f7eae4eae788793a70376ac5fea040907e7da2c5dbc",
+      "contract_version": "2.0",
+      "contract_fingerprint": "af66107a0c375c5073fa3a93ecacbedaf44650c7b829e6aa08632734092f4791",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -54290,6 +54431,9 @@
                 "$ref": "#/properties/resource/properties/source_refs/items"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -54524,8 +54668,8 @@
     {
       "kind": "command",
       "id": "wiki.archive",
-      "contract_version": "1.0",
-      "contract_fingerprint": "18730c1a4429c7f8029d7c549c81f96d2dccb065b6670aa08f2352ff952001d9",
+      "contract_version": "2.0",
+      "contract_fingerprint": "b32170fa4b6c3323c40c39bef89e2acd3ef1d2651ae1b4646c365f49cabc842f",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -54923,6 +55067,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -55155,8 +55302,8 @@
     {
       "kind": "command",
       "id": "wiki.patch",
-      "contract_version": "1.0",
-      "contract_fingerprint": "27d6bd239eed570643daf44198dfdd69d1adba75762c845b930ec187e7bcf7fb",
+      "contract_version": "2.0",
+      "contract_fingerprint": "a65dec3142b800555161d5e34529688a25553131bbc14ce90ef3e02bbfac5032",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -55584,6 +55731,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -55816,8 +55966,8 @@
     {
       "kind": "command",
       "id": "wiki.proposal.create",
-      "contract_version": "1.0",
-      "contract_fingerprint": "ccf06dcd511c0965b959cb074246afd3165560130df4ed781261ea3d77e17858",
+      "contract_version": "2.0",
+      "contract_fingerprint": "b4826910109c7f9ea5e5b4d3a7f467f0dc0bf6925e283b1a6a9c715471c4615f",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -56246,6 +56396,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -56479,8 +56632,8 @@
     {
       "kind": "command",
       "id": "wiki.reindex",
-      "contract_version": "1.0",
-      "contract_fingerprint": "8c829b1361496a7ec18b7f7dc642e59ccd85dd09d1839cb3a462eebba9ab66c5",
+      "contract_version": "2.0",
+      "contract_fingerprint": "63218f95e25ce1ecac1bc301623b81d3eb39cd9d8ad442d3a73d39d738145f08",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -56825,6 +56978,9 @@
               "error": {
                 "type": "string"
               },
+              "correlation_id": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -57058,8 +57214,8 @@
     {
       "kind": "command",
       "id": "wiki.reject",
-      "contract_version": "1.0",
-      "contract_fingerprint": "82a0ffbb1747bae3ac9cb53d841e5ebfbc2431ab82ad3c084b33dc2f3baacbed",
+      "contract_version": "2.0",
+      "contract_fingerprint": "193eb03111a4444f8c8961a8c9bef002198b40086c307c96e233d8893dfcc79b",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -57455,6 +57611,9 @@
                 "$ref": "#/properties/resource/properties/source_refs/items"
               },
               "error": {
+                "type": "string"
+              },
+              "correlation_id": {
                 "type": "string"
               },
               "created_at": {
@@ -65755,7 +65914,7 @@
       ],
       "replacement": {
         "kind": "effective_inventory",
-        "target": "/api/domain/operations"
+        "target": "/api/domain/commands/effective"
       }
     },
     {
@@ -65787,7 +65946,7 @@
       ],
       "replacement": {
         "kind": "effective_inventory",
-        "target": "/api/domain/operations"
+        "target": "/api/domain/commands/effective"
       }
     },
     {
@@ -65819,7 +65978,7 @@
       ],
       "replacement": {
         "kind": "effective_inventory",
-        "target": "/api/domain/operations"
+        "target": "/api/domain/commands/effective"
       }
     },
     {
@@ -65851,7 +66010,7 @@
       ],
       "replacement": {
         "kind": "effective_inventory",
-        "target": "/api/domain/operations"
+        "target": "/api/domain/commands/effective"
       }
     },
     {
@@ -65883,9 +66042,9 @@
       ],
       "replacement": {
         "kind": "effective_inventory",
-        "target": "/api/domain/operations"
+        "target": "/api/domain/commands/effective"
       }
     }
   ],
-  "catalog_hash": "24737f8f792bcb5e1281263fa30f55efaa0e4247300ebaf83f20bc8a6c5153df"
+  "catalog_hash": "d44ac6cf73bacc0177b13f244f5011458238bb91c84fcc14dab78462bd7bd1fc"
 }

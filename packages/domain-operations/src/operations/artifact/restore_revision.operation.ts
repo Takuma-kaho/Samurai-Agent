@@ -28,7 +28,7 @@ const artifactRestoreRevision = defineCommand<ArtifactRestoreRevisionPorts>()({
   ...{
   "kind": "command",
   "id": "artifact.restore_revision",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Restore artifact revision",
   "description": "Restore an earlier immutable revision by creating a new revision from it.",

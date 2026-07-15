@@ -25,7 +25,7 @@ const wikiReject = defineCommand<WikiRejectPorts>()({
   ...{
   "kind": "command",
   "id": "wiki.reject",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Reject Knowledge Wiki page",
   "description": "Reject a proposed Knowledge Wiki page without deleting its markdown.",

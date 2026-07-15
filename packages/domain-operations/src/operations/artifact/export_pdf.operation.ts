@@ -25,7 +25,7 @@ const artifactExportPdf = defineCommand<ArtifactExportPdfPorts>()({
   ...{
   "kind": "command",
   "id": "artifact.export_pdf",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "runtimeRequirements": ["pdf_export"],
   "title": "Export PDF",

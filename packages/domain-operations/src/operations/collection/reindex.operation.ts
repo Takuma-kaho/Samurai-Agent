@@ -24,7 +24,7 @@ const collectionReindex = defineCommand<CollectionReindexPorts>()({
   ...{
   "kind": "command",
   "id": "collection.reindex",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Reindex collections",
   "description": "Refresh Collection SQLite indexes from schema and record files.",

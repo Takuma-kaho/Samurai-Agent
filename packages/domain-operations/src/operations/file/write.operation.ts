@@ -29,7 +29,7 @@ const fileWrite = defineCommand<FileWritePorts>()({
   ...{
   "kind": "command",
   "id": "file.write",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Write workspace file",
   "description": "Write a file inside the local workspace.",

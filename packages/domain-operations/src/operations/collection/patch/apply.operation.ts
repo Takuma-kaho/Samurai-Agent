@@ -29,7 +29,7 @@ const collectionPatchApply = defineCommand<CollectionPatchApplyPorts>()({
   ...{
   "kind": "command",
   "id": "collection.patch.apply",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Apply collection patch",
   "description": "Patch a schema-validated Collection record.",

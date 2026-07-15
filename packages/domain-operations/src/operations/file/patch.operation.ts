@@ -29,7 +29,7 @@ const filePatch = defineCommand<FilePatchPorts>()({
   ...{
   "kind": "command",
   "id": "file.patch",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Patch workspace file",
   "description": "Patch a file inside the local workspace.",

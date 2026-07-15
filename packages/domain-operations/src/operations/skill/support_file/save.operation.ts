@@ -27,7 +27,7 @@ const skillSupportFileSave = defineCommand<SkillSupportFileSavePorts>()({
   ...{
   "kind": "command",
   "id": "skill.support_file.save",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Save skill support file",
   "description": "Save a support file for a local Skill.",

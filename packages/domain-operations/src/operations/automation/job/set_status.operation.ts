@@ -26,7 +26,7 @@ const automationJobSetStatus = defineCommand<AutomationJobSetStatusPorts>()({
   ...{
   "kind": "command",
   "id": "automation.job.set_status",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Pause or resume automation",
   "description": "Enable or disable an Automation job through the Runtime boundary.",

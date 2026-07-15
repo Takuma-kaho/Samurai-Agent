@@ -26,7 +26,7 @@ const skillLifecycleApply = defineCommand<SkillLifecycleApplyPorts>()({
   ...{
   "kind": "command",
   "id": "skill.lifecycle.apply",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Apply skill lifecycle action",
   "description": "Apply a curator lifecycle transition to a local Skill.",

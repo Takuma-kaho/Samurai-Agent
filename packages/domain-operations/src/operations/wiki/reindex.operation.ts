@@ -24,7 +24,7 @@ const wikiReindex = defineCommand<WikiReindexPorts>()({
   ...{
   "kind": "command",
   "id": "wiki.reindex",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Reindex Knowledge Wiki",
   "description": "Refresh the Knowledge Wiki SQLite index from markdown pages.",

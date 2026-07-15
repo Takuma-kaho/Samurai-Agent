@@ -47,7 +47,7 @@ const gatewayInboundRoute = defineCommand<GatewayInboundRoutePorts>()({
   ...{
   "kind": "command",
   "id": "gateway.inbound.route",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Route gateway inbound",
   "description": "Route an approved external inbound message into a Host session.",

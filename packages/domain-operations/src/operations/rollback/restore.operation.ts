@@ -25,7 +25,7 @@ const rollbackRestore = defineCommand<RollbackRestorePorts>()({
   ...{
   "kind": "command",
   "id": "rollback.restore",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Restore rollback point",
   "description": "Restore a reversible local workspace snapshot.",

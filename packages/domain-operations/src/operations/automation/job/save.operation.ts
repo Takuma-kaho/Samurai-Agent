@@ -32,7 +32,7 @@ const automationJobSave = defineCommand<AutomationJobSavePorts>()({
   ...{
   "kind": "command",
   "id": "automation.job.save",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Save automation job",
   "description": "Save an automation job definition.",
