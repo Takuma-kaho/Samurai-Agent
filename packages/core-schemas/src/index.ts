@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 export const supportedLocales = ["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"] as const;
 export const translationStatuses = ["verified", "draft", "missing"] as const;
@@ -259,6 +260,28 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+/**
+ * Contract schemas are authored in Zod and published as strict JSON Schema.
+ * Keeping this conversion at the shared schema boundary prevents each caller
+ * from inventing a different JSON Schema dialect or reference strategy.
+ */
+export function toStrictJsonSchema(schema: z.ZodTypeAny, _name: string): Record<string, JsonValue> {
+  const converted: unknown = JSON.parse(JSON.stringify(zodToJsonSchema(schema, { $refStrategy: "root" })));
+  if (!isJsonRecord(converted)) throw new Error("zod_json_schema_conversion_invalid");
+  return converted;
+}
+
+function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && Object.values(value).every(isJsonValue);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isJsonRecord(value);
+}
+
 export const ResourceRefSchema = z.object({
   kind: z.string().min(1),
   id: z.string().min(1),
@@ -407,6 +430,7 @@ export const WorkspaceChangeRecordSchema = z.object({
   change_type: WorkspaceChangeTypeSchema,
   summary: z.string(),
   legacy_operation_id: z.string().optional(),
+  correlation_id: z.string().optional(),
   created_at: z.string().datetime()
 });
 export type WorkspaceChangeRecord = z.infer<typeof WorkspaceChangeRecordSchema>;
@@ -1779,35 +1803,21 @@ export const GatewayMcpHttpConfigSchema = z.object({
 }).strict();
 export type GatewayMcpHttpConfig = z.infer<typeof GatewayMcpHttpConfigSchema>;
 
-export const GatewayMcpConfigRecordSchema = z.object({
+const GatewayMcpConfigRecordBaseShape = {
   id: z.string().min(1),
   server_name: z.string().min(1),
-  transport: GatewayMcpTransportSchema,
   enabled: z.boolean(),
   allowed_tools: z.array(z.string().min(1)),
   config_ref: ResourceRefSchema.optional(),
   secret_refs: z.array(SecretRefSchema),
-  stdio: GatewayMcpStdioConfigSchema.optional(),
-  http: GatewayMcpHttpConfigSchema.optional(),
   metadata: z.record(jsonValueSchema),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-}).strict().superRefine((record, ctx) => {
-  if (record.transport === "stdio" && !record.stdio) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["stdio"],
-      message: "stdio_config_required"
-    });
-  }
-  if (record.transport === "http" && !record.http) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["http"],
-      message: "http_config_required"
-    });
-  }
-});
+};
+export const GatewayMcpConfigRecordSchema = z.discriminatedUnion("transport", [
+  z.object({ ...GatewayMcpConfigRecordBaseShape, transport: z.literal("stdio"), stdio: GatewayMcpStdioConfigSchema, http: z.never().optional() }).strict(),
+  z.object({ ...GatewayMcpConfigRecordBaseShape, transport: z.literal("http"), http: GatewayMcpHttpConfigSchema, stdio: z.never().optional() }).strict()
+]);
 export type GatewayMcpConfigRecord = z.infer<typeof GatewayMcpConfigRecordSchema>;
 
 export const GatewayMcpConfigSummarySchema = z.object({
@@ -2051,15 +2061,35 @@ export const GatewayRepairResultSchema = z.object({
 }).strict();
 export type GatewayRepairResult = z.infer<typeof GatewayRepairResultSchema>;
 
+export const DomainContractProvenanceSchema = z.object({
+  source: z.enum(["mulmoclaude", "hermes", "openclaw", "samurai"]),
+  commit_sha: z.string().min(1),
+  reference_file: z.string().min(1),
+  decision: z.enum(["adopted", "adapted", "not_adopted"]),
+  reason: z.string().min(1)
+}).strict();
+export type DomainContractProvenance = z.infer<typeof DomainContractProvenanceSchema>;
+
 export const ActionCatalogEntrySchema = z.object({
   id: z.string().min(1),
+  kind: z.enum(["command", "query"]).default("command"),
+  contract_version: z.string().min(1).default("1.0"),
+  contract_fingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  availability: z.enum(["active", "deprecated_command"]).default("active"),
+  runtime_requirements: z.array(z.enum(["agent_backend", "pdf_export", "browser_adapter", "plugin_runtime"])).default([]),
   title: z.string().min(1),
   display_name: z.string().optional(),
   description: z.string(),
   input_schema: z.record(jsonValueSchema),
   output_schema: z.record(jsonValueSchema),
+  allowed_sources: z.array(z.string().min(1)).default([]),
+  effect_kind: z.enum(["workspace_mutation", "external_effect", "runtime_control", "read_only"]).default("runtime_control"),
+  idempotency_policy: z.enum(["required", "optional", "none", "external"]).default("optional"),
+  concurrency_policy: z.enum(["optimistic_version", "state_transition", "append_or_unique", "external_idempotency", "none"]).default("none"),
+  render_kinds: z.array(z.string().min(1)).default([]),
+  provenance: z.array(DomainContractProvenanceSchema).default([]),
   resource_kinds: z.array(z.string()),
-  handler_id: z.string().min(1),
+  handler_id: z.string().min(1).optional(),
   implementation_target: z.string().optional(),
   ui_display_category: z.string().optional()
 });
@@ -2077,7 +2107,10 @@ export const DomainCommandCatalogDiagnosticIssueSchema = z.object({
     "empty_resource_kinds",
     "empty_proposed_effects",
     "missing_provider_tool_mapping",
-    "missing_surface_operation_mapping"
+    "missing_surface_operation_mapping",
+    "missing_handler",
+    "strict_schema_violation",
+    "deprecated_command_executable"
   ]),
   command_id: z.string().min(1).optional(),
   reference: z.string().min(1).optional(),
@@ -2087,11 +2120,15 @@ export type DomainCommandCatalogDiagnosticIssue = z.infer<typeof DomainCommandCa
 
 export const DomainCommandCatalogCoverageSchema = z.object({
   commands: z.number().int().nonnegative(),
+  queries: z.number().int().nonnegative().default(0),
+  legacy_commands: z.number().int().nonnegative().default(0),
   action_catalog_entries: z.number().int().nonnegative(),
   provider_tool_mappings: z.number().int().nonnegative(),
   surface_operation_mappings: z.number().int().nonnegative(),
   render_kinds: z.array(z.string().min(1)),
-  input_sources: z.array(z.string().min(1))
+  input_sources: z.array(z.string().min(1)),
+  strict_schema_rate: z.number().min(0).max(1).default(0),
+  generic_schema_count: z.number().int().nonnegative().default(0)
 }).strict();
 export type DomainCommandCatalogCoverage = z.infer<typeof DomainCommandCatalogCoverageSchema>;
 
@@ -2437,6 +2474,7 @@ export const OperationRecordSchema = z.object({
   approval_request_id: z.string().optional(),
   result_ref: ResourceRefSchema.optional(),
   error: z.string().optional(),
+  correlation_id: z.string().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 });
@@ -2447,10 +2485,18 @@ export const DomainCommandExecutionRecordSchema = z.object({
   idempotency_key: z.string().min(1),
   command_id: z.string().min(1),
   input_source: z.string().min(1),
+  correlation_id: z.string().min(1),
   payload_hash: z.string().min(1),
-  status: z.enum(["running", "completed", "failed"]),
+  phase: z.enum(["claimed", "internal_running", "external_running"]),
+  status: z.enum(["running", "completed", "failed", "outcome_unknown"]),
   result: jsonValueSchema.optional(),
-  error: z.string().optional(),
+  error: z.object({
+    code: z.string().min(1),
+    message: z.string(),
+    retryable: z.boolean(),
+    details: jsonValueSchema.optional()
+  }).optional(),
+  heartbeat_at: z.string().datetime(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 });

@@ -53,7 +53,7 @@ export async function handleBackendToolCall(input: {
     return ignoredToolOutput(input.run, toolCallId, providerToolName, "provider_tool_requires_domain_command", input.store, input.boundary, memoryTopicCreateCommand.id);
   }
 
-  if (providerToolName === "request_external_send" || providerToolName === "request_delete") {
+  if (providerToolName === "request_external_send") {
     return ignoredToolOutput(input.run, toolCallId, providerToolName, "backend_native_boundary", input.store, input.boundary);
   }
 

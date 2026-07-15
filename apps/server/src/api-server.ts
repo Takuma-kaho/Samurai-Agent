@@ -18,6 +18,8 @@ import {
   domainCommandInputSources,
   getDomainCommandForProviderToolName,
   getDomainCommandCatalogDiagnostics,
+  listDomainQueryEntries,
+  getDomainQueryEntry,
   listDomainCommandEntries,
   PluginRuntimeRegistry,
   loadPluginManifests,
@@ -123,6 +125,7 @@ import {
   type ProviderDiagnostics,
   type ProviderRegistry
 } from "@samurai-agent/runtime";
+import { assertTrustedRuntimePayload } from "./domain-ingress";
 import { parseSurfaceOperation, type RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import { WorkspaceStore, type SessionTranscriptExport } from "@samurai-agent/workspace-store";
 import { registerBackendEventRoutes } from "./routes/backend-events";
@@ -810,6 +813,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         renderers,
         render_kinds: [...new Set(renderers.map((renderer) => renderer.kind))],
         commands: listDomainCommandEntries(source),
+        queries: listDomainQueryEntries(source),
         input_sources: domainCommandInputSources
       });
     } catch (error) {
@@ -821,11 +825,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     try {
       const source = parseDomainCommandInputSource(req.query.source);
       if (req.query.source !== undefined && !source) {
-        res.status(400).json({ error: "invalid_domain_command_source" });
+        domainBadRequest(res, "invalid_domain_command_source");
         return;
       }
       res.json({
         commands: listDomainCommandEntries(source),
+        queries: listDomainQueryEntries(source),
         input_sources: domainCommandInputSources
       });
     } catch (error) {
@@ -845,23 +850,29 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     try {
       const commandId = typeof req.body?.command_id === "string" ? req.body.command_id : "";
       if (!commandId) {
-        res.status(400).json({ error: "domain_command_id_required" });
+        domainBadRequest(res, "domain_command_id_required");
         return;
       }
-      const inputSource = parseDomainCommandInputSource(req.body?.input_source);
-      if (req.body?.input_source !== undefined && !inputSource) {
-        res.status(400).json({ error: "invalid_domain_command_source" });
-        return;
-      }
+      warnIgnoredDomainInputSource(req, res);
       if (req.body?.payload !== undefined && !isRecord(req.body.payload)) {
-        res.status(400).json({ error: "invalid_domain_command_payload" });
+        domainBadRequest(res, "invalid_domain_command_payload");
         return;
       }
+      if (getDomainQueryEntry(commandId)) {
+        const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
+        res.status(200).json(await runtime.runDomainQuery({
+          query_id: commandId,
+          input_source: "runtime_api",
+          payload
+        }));
+        return;
+      }
+      const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
       res.status(201).json(await runtime.runDomainCommand({
         command_id: commandId,
-        input_source: inputSource,
+        input_source: "runtime_api",
         idempotency_key: domainCommandIdempotencyKey(req),
-        payload: jsonRecord(req.body?.payload ?? {})
+        payload
       }));
     } catch (error) {
       next(error);
@@ -870,20 +881,85 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
   app.post("/api/domain/commands/:commandId/run", async (req, res, next) => {
     try {
-      const inputSource = parseDomainCommandInputSource(req.body?.input_source);
-      if (req.body?.input_source !== undefined && !inputSource) {
-        res.status(400).json({ error: "invalid_domain_command_source" });
-        return;
-      }
+      warnIgnoredDomainInputSource(req, res);
       if (req.body?.payload !== undefined && !isRecord(req.body.payload)) {
-        res.status(400).json({ error: "invalid_domain_command_payload" });
+        domainBadRequest(res, "invalid_domain_command_payload");
         return;
       }
+      if (getDomainQueryEntry(req.params.commandId)) {
+        const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
+        res.status(200).json(await runtime.runDomainQuery({
+          query_id: req.params.commandId,
+          input_source: "runtime_api",
+          payload
+        }));
+        return;
+      }
+      const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
       res.status(201).json(await runtime.runDomainCommand({
         command_id: req.params.commandId,
-        input_source: inputSource,
+        input_source: "runtime_api",
         idempotency_key: domainCommandIdempotencyKey(req),
-        payload: jsonRecord(req.body?.payload ?? {})
+        payload
+      }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/domain/queries", async (req, res, next) => {
+    try {
+      const source = parseDomainCommandInputSource(req.query.source);
+      if (req.query.source !== undefined && !source) {
+        domainBadRequest(res, "invalid_domain_query_source");
+        return;
+      }
+      res.json({ queries: listDomainQueryEntries(source), input_sources: domainCommandInputSources });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/domain/commands/effective", async (req, res, next) => {
+    try {
+      const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+      if (!sessionId) {
+        domainBadRequest(res, "session_id_required");
+        return;
+      }
+      const effective = await runtime.listEffectiveDomainOperations(sessionId, "runtime_api");
+      res.json({ session_id: sessionId, commands: effective.commands, input_sources: domainCommandInputSources });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/domain/queries/effective", async (req, res, next) => {
+    try {
+      const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+      if (!sessionId) {
+        domainBadRequest(res, "session_id_required");
+        return;
+      }
+      const effective = await runtime.listEffectiveDomainOperations(sessionId, "runtime_api");
+      res.json({ session_id: sessionId, queries: effective.queries, input_sources: domainCommandInputSources });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/domain/queries/:queryId/run", async (req, res, next) => {
+    try {
+      warnIgnoredDomainInputSource(req, res);
+      if (req.body?.payload !== undefined && !isRecord(req.body.payload)) {
+        domainBadRequest(res, "invalid_domain_query_payload");
+        return;
+      }
+      const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
+      res.status(200).json(await runtime.runDomainQuery({
+        query_id: req.params.queryId,
+        input_source: "runtime_api",
+        payload
       }));
     } catch (error) {
       next(error);
@@ -1053,13 +1129,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         res.status(400).json({ error: "enabled must be a boolean" });
         return;
       }
-      const plugin = pluginRegistry.listPluginStatuses().find((entry) => entry.manifest_id === req.params.id);
-      if (!plugin || !pluginRegistry.setPluginEnabled(plugin.manifest_id, enabled)) {
-        res.status(404).json({ error: "plugin_not_found" });
-        return;
-      }
-      const state = await store.savePluginState({ manifestId: plugin.manifest_id, enabled, version: plugin.version });
-      res.json({ plugin: pluginRegistry.listPluginStatuses().find((entry) => entry.manifest_id === plugin.manifest_id), state });
+      res.json(await runRuntimeApiCommand(runtime, req, "plugin.status.set", {
+        plugin_id: req.params.id,
+        status: enabled ? "enabled" : "disabled"
+      }));
     } catch (error) {
       next(error);
     }
@@ -1547,12 +1620,19 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "path_required" });
           return;
         }
-        res.json(await runRuntimeApiWriteCommand(runtime, req, operation, {
+        const payload = {
           path: filePath,
           ...(typeof req.body?.content === "string" ? { content: req.body.content } : {}),
           ...(typeof req.body?.search === "string" ? { search: req.body.search } : {}),
           ...(typeof req.body?.replace === "string" ? { replace: req.body.replace } : {})
-        }));
+        };
+        if (getDomainQueryEntry(operation)) {
+          res.setHeader("Warning", '299 - "Query operation sent to legacy command URL"');
+          const query = await runtime.runDomainQuery({ query_id: operation, input_source: "runtime_api", payload });
+          res.json({ ...(isRecord(query.result) ? query.result : { resource: query.result }), query: query.query, render_spec: query.render_spec, render_specs: query.render_specs });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, operation, payload));
       } catch (error) {
         next(error);
       }
@@ -1570,13 +1650,20 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "url_required" });
           return;
         }
-        res.json(await runRuntimeApiWriteCommand(runtime, req, operation, {
+        const payload = {
           url,
           ...(typeof req.body?.output_path === "string" ? { output_path: req.body.output_path } : {}),
           ...(typeof req.body?.action === "string" ? { action: req.body.action } : {}),
           ...(typeof req.body?.selector === "string" ? { selector: req.body.selector } : {}),
           ...(typeof req.body?.value === "string" ? { value: req.body.value } : {})
-        }));
+        };
+        if (getDomainQueryEntry(operation)) {
+          res.setHeader("Warning", '299 - "Query operation sent to legacy command URL"');
+          const query = await runtime.runDomainQuery({ query_id: operation, input_source: "runtime_api", payload });
+          res.json({ ...(isRecord(query.result) ? query.result : { resource: query.result }), query: query.query, render_spec: query.render_spec, render_specs: query.render_specs });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, operation, payload));
       } catch (error) {
         next(error);
       }
@@ -2049,6 +2136,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const domainResult = await runtime.runDomainCommand({
           command_id: "gateway.inbound.route",
           input_source: "gateway_inbound",
+          idempotency_key: gatewayInboundRequestKey(req),
           payload: {
             channel,
             source_identity: sourceIdentity,
@@ -2082,6 +2170,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const domainResult = await runtime.runDomainCommand({
           command_id: "gateway.inbound.route",
           input_source: "gateway_inbound",
+          idempotency_key: gatewayInboundRequestKey(req),
           payload: {
             channel: "webhook",
             source_identity: sourceIdentity,
@@ -2133,6 +2222,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const domainResult = await runtime.runDomainCommand({
           command_id: "gateway.inbound.route",
           input_source: "gateway_inbound",
+          idempotency_key: gatewayInboundRequestKey(req),
           payload: {
             channel: "slack",
             source_identity: extraction.source_identity,
@@ -2183,6 +2273,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const domainResult = await runtime.runDomainCommand({
           command_id: "gateway.inbound.route",
           input_source: "gateway_inbound",
+          idempotency_key: gatewayInboundRequestKey(req),
           payload: {
             channel: "telegram",
             source_identity: extraction.source_identity,
@@ -2234,6 +2325,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const domainResult = await runtime.runDomainCommand({
           command_id: "gateway.inbound.route",
           input_source: "gateway_inbound",
+          idempotency_key: gatewayInboundRequestKey(req),
           payload: {
             channel: "line",
             source_identity: extraction.source_identity,
@@ -2646,41 +2738,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     });
 
     app.post("/api/grants", async (req, res, next) => {
-      try {
-        const actorIdentity = ActorIdentitySchema.safeParse(req.body?.actor_identity).success
-          ? ActorIdentitySchema.parse(req.body.actor_identity)
-          : undefined;
-        if (typeof req.body?.operation !== "string") {
-          res.status(400).json({ error: "invalid_grant_operation" });
-          return;
-        }
-        const result = await runRuntimeApiWriteCommand(runtime, req, "grant.create", {
-          ...(typeof req.body?.capability_id === "string" ? { capability_id: req.body.capability_id } : {}),
-          operation: req.body.operation,
-          ...(actorIdentity ? { actor_identity: actorIdentity } : {}),
-          ...(typeof req.body?.channel === "string" ? { channel: req.body.channel } : {}),
-          ...(typeof req.body?.resource_scope === "string" ? { resource_scope: req.body.resource_scope } : {}),
-          ...(typeof req.body?.granted_by === "string" ? { granted_by: req.body.granted_by } : {}),
-          ...(typeof req.body?.reason === "string" ? { reason: req.body.reason } : {}),
-          ...(typeof req.body?.expires_at === "string" ? { expires_at: req.body.expires_at } : {})
-        });
-        res.status(201).json(result);
-      } catch (error) {
-        next(error);
-      }
+      res.status(410).json({ error: "deprecated_operation", operation_id: "grant.create", replacement: { kind: "effective_inventory", target: "/api/domain/commands/effective" } });
     });
 
     app.post("/api/grants/:id/revoke", async (req, res, next) => {
-      try {
-        const result = await runRuntimeApiWriteCommand(runtime, req, "grant.revoke", {
-          grant_id: req.params.id,
-          ...(typeof req.body?.revoked_by === "string" ? { revoked_by: req.body.revoked_by } : {}),
-          ...(typeof req.body?.reason === "string" ? { reason: req.body.reason } : {})
-        });
-        res.json(result);
-      } catch (error) {
-        next(error);
-      }
+      res.status(410).json({ error: "deprecated_operation", operation_id: "grant.revoke", replacement: { kind: "effective_inventory", target: "/api/domain/commands/effective" } });
     });
 
     app.get("/api/rollback-points", async (req, res, next) => {
@@ -2757,7 +2819,13 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "invalid_client_event_status" });
           return;
         }
-        await runRuntimeApiCommand(runtime, req, "client.event.expire");
+        const now = nowIso();
+        await runtime.runDomainCommand({
+          command_id: "client.event.expire",
+          input_source: "runtime_api",
+          idempotency_key: `client-event-expire:${stableHash({ now })}`,
+          payload: { now }
+        });
         res.json(await store.listClientEvents({
           targetClientKind,
           targetClientId: typeof req.query.target_client_id === "string" ? req.query.target_client_id : undefined,
@@ -3317,13 +3385,16 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const ids = queryStringList(req.query.ids);
         const fields = queryStringList(req.query.fields);
-        const result = await runRuntimeApiCommand(runtime, req, "collection.manage", {
-          action: "getItems",
-          collection_id: req.params.collectionId,
-          ...(ids.length > 0 ? { ids } : {}),
-          ...(fields.length > 0 ? { fields } : {})
-        }) as { resource: unknown };
-        res.json(result.resource);
+        const result = await runtime.runDomainQuery({
+          query_id: "collection.records.list",
+          input_source: "runtime_api",
+          payload: {
+            collection_id: req.params.collectionId,
+            ...(ids.length > 0 ? { ids } : {}),
+            ...(fields.length > 0 ? { fields } : {})
+          }
+        });
+        res.json(result.result);
       } catch (error) {
         next(error);
       }
@@ -3331,13 +3402,13 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.put("/api/collections/:collectionId/view-data", async (req, res, next) => {
       try {
-        const result = await runRuntimeApiCommand(runtime, req, "collection.manage", {
+        const result = await runtime.runCollectionManageCompatibility({
           action: "putItems",
           collection_id: req.params.collectionId,
           items: Array.isArray(req.body?.items) ? req.body.items.map(jsonSafe) : [],
           mode: typeof req.body?.mode === "string" ? req.body.mode : "merge"
-        }) as { resource: unknown };
-        res.json(result.resource);
+        }, "runtime_api", domainCommandIdempotencyKey(req));
+        res.json(result);
       } catch (error) {
         next(error);
       }
@@ -3582,40 +3653,44 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     });
 
     app.post("/api/approval-requests/:id/approve", async (req, res, next) => {
-      try {
-        const result = await runRuntimeApiCommand<Awaited<ReturnType<AgentRuntime["approveRequest"]>>>(runtime, req, "approval.approve", {
-          approval_id: req.params.id,
-          decided_by: typeof req.body?.decided_by === "string" ? req.body.decided_by : "owner"
-        });
-        res.json(approvalLifecyclePayload(result));
-      } catch (error) {
-        next(error);
-      }
+      res.status(410).json({ error: "deprecated_operation", operation_id: "approval.approve", replacement: { kind: "effective_inventory", target: "/api/domain/commands/effective" } });
     });
 
     app.post("/api/approval-requests/:id/deny", async (req, res, next) => {
-      try {
-        const result = await runRuntimeApiCommand<Awaited<ReturnType<AgentRuntime["denyRequest"]>>>(runtime, req, "approval.deny", {
-          approval_id: req.params.id,
-          decided_by: typeof req.body?.decided_by === "string" ? req.body.decided_by : "owner",
-          reason: typeof req.body?.reason === "string" ? req.body.reason : "Denied by owner."
-        });
-        res.json(approvalLifecyclePayload(result));
-      } catch (error) {
-        next(error);
-      }
+      res.status(410).json({ error: "deprecated_operation", operation_id: "approval.deny", replacement: { kind: "effective_inventory", target: "/api/domain/commands/effective" } });
     });
 
-    app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
+      if (req.path.startsWith("/api/domain/")) {
+        const status = error instanceof RuntimeRequestError
+          ? error.code === "bad_request" ? 400 : error.code === "gone" ? 410 : error.code === "not_found" ? 404 : error.code === "forbidden" ? 403 : error.code === "provider_failed" ? 502 : 409
+          : 500;
+        const code = error instanceof RuntimeRequestError ? error.code : "internal_error";
+        const message = error instanceof Error ? redactSecretLikeString(error.message) : "Unknown error";
+        res.status(status).json({
+          ok: false,
+          error: {
+            code,
+            message,
+            retryable: error instanceof RuntimeRequestError ? error.code === "provider_failed" : false,
+            ...(error instanceof RuntimeRequestError && error.payload ? { details: redactApiObject(runtimeErrorPayload(error.payload)) } : {})
+          }
+        });
+        return;
+      }
       if (error instanceof RuntimeRequestError) {
         const status =
-          error.code === "not_found"
-            ? 404
-            : error.code === "forbidden"
-              ? 403
-              : error.code === "provider_failed"
-                ? 502
-                : 409;
+          error.code === "bad_request"
+            ? 400
+            : error.code === "gone"
+              ? 410
+              : error.code === "not_found"
+                ? 404
+                : error.code === "forbidden"
+                  ? 403
+                  : error.code === "provider_failed"
+                    ? 502
+                    : 409;
         if (error.code === "provider_not_configured" || error.code === "provider_failed") {
           res.status(status).json(providerErrorPayload(error));
           return;
@@ -3713,6 +3788,26 @@ function parseDomainCommandInputSource(value: unknown): DomainCommandInputSource
     : undefined;
 }
 
+function warnIgnoredDomainInputSource(req: Request, res: Response): void {
+  if (req.body?.input_source !== undefined) {
+    res.setHeader("Warning", '299 - "input_source is ignored; the server determines the ingress source"');
+  }
+}
+
+export async function trustedRuntimeApiPayload(
+  store: WorkspaceStore,
+  payload: Record<string, JsonValue>
+): Promise<Record<string, JsonValue>> {
+  return assertTrustedRuntimePayload(store, payload, (code, message) => new RuntimeRequestError(code, message));
+}
+
+function domainBadRequest(res: Response, code: string): void {
+  res.status(400).json({
+    ok: false,
+    error: { code, message: code, retryable: false }
+  });
+}
+
 function domainCommandIdempotencyKey(req: Request): string | undefined {
   const header = req.get("Idempotency-Key");
   const body = typeof req.body?.idempotency_key === "string" ? req.body.idempotency_key : undefined;
@@ -3725,6 +3820,14 @@ function domainCommandIdempotencyKey(req: Request): string | undefined {
     throw new RuntimeRequestError("conflict", "invalid_domain_command_idempotency_key");
   }
   return normalized;
+}
+
+function gatewayInboundRequestKey(req: Request): string {
+  return `gateway:${stableHash({ path: req.path, body: jsonSafe(req.body) })}`;
+}
+
+function gatewayInboundPayloadKey(adapter: string, payload: unknown, query: Record<string, unknown>): string {
+  return `gateway:${stableHash({ adapter, payload: jsonSafe(payload), query: jsonSafe(query) })}`;
 }
 
 async function runRuntimeApiCommand<TResult = unknown>(
@@ -3749,14 +3852,14 @@ async function runRuntimeApiWriteCommand(
   payload: Record<string, JsonValue> = {}
 ) {
   const result = await runRuntimeApiCommand(runtime, req, commandId, payload);
-  if (!isRecord(result) || !("resource" in result) || !("operation" in result) || !("policyDecision" in result) || !("auditRecord" in result) || !("activity" in result)) {
+  if (!isRecord(result) || !("resource" in result) || !("operation" in result) || !("activity" in result)) {
     throw new Error(`domain_command_write_result_invalid:${commandId}`);
   }
   return runtimeWritePayload(result as {
     resource: unknown;
     operation: unknown;
-    policyDecision: unknown;
-    auditRecord: unknown;
+    policyDecision?: unknown;
+    auditRecord?: unknown;
     rollbackPoint?: unknown;
     activity: unknown;
   });
@@ -4597,6 +4700,7 @@ async function routeGatewayMobilePayload(
   const domainResult = await runtime.runDomainCommand({
     command_id: "gateway.inbound.route",
     input_source: "gateway_inbound",
+    idempotency_key: gatewayInboundPayloadKey("mobile", payload, query),
     payload: {
       channel: "mobile",
       source_identity: extraction.source_identity,
@@ -4658,6 +4762,7 @@ async function routeGatewayEmailPayload(
   const domainResult = await runtime.runDomainCommand({
     command_id: "gateway.inbound.route",
     input_source: "gateway_inbound",
+    idempotency_key: gatewayInboundPayloadKey("email", payload, query),
     payload: {
       channel: "email",
       source_identity: extraction.source_identity,
@@ -7149,7 +7254,7 @@ function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | un
   if (run.status !== "completed" && run.status !== "failed" && run.status !== "waiting_for_backend_input") {
     return undefined;
   }
-  const createdAt = nowIso();
+  const createdAt = run.completed_at ?? run.started_at;
   const statusLabel = run.status === "completed" ? "完了" : run.status === "failed" ? "失敗" : "確認待ち";
   const notificationKind = run.status === "completed"
     ? "backend_run_completed"
@@ -7247,26 +7352,17 @@ function provenance(value: unknown) {
 function runtimeWritePayload(result: {
   resource: unknown;
   operation: unknown;
-  policyDecision: unknown;
-  auditRecord: unknown;
+  policyDecision?: unknown;
+  auditRecord?: unknown;
   rollbackPoint?: unknown;
   activity: unknown;
 }) {
   return {
     resource: result.resource,
     operation: result.operation,
-    policyDecision: result.policyDecision,
-    auditRecord: result.auditRecord,
+    ...(result.policyDecision ? { policyDecision: result.policyDecision } : {}),
+    ...(result.auditRecord ? { auditRecord: result.auditRecord } : {}),
     ...(result.rollbackPoint ? { rollbackPoint: result.rollbackPoint } : {}),
-    activity: result.activity
-  };
-}
-
-function approvalLifecyclePayload(result: Awaited<ReturnType<AgentRuntime["approveRequest"]>>) {
-  return {
-    approvalRequest: result.approvalRequest,
-    operation: result.operation,
-    auditRecord: result.auditRecord,
     activity: result.activity
   };
 }
@@ -7276,7 +7372,7 @@ function archiveMemoryPayload(result: Awaited<ReturnType<AgentRuntime["archiveMe
     memory: result.memory,
     content: result.content,
     operation: result.operation,
-    auditRecord: result.auditRecord,
+    ...(result.auditRecord ? { auditRecord: result.auditRecord } : {}),
     ...(result.rollbackPoint ? { rollbackPoint: result.rollbackPoint } : {}),
     activity: result.activity,
     changed: result.changed,
@@ -7285,6 +7381,7 @@ function archiveMemoryPayload(result: Awaited<ReturnType<AgentRuntime["archiveMe
 }
 
 function runtimeErrorPayload(payload: NonNullable<RuntimeRequestError["payload"]>) {
+  if ("replacement" in payload) return payload;
   if ("conflict" in payload) {
     return payload;
   }
@@ -7296,9 +7393,6 @@ function runtimeErrorPayload(payload: NonNullable<RuntimeRequestError["payload"]
       backendEvents: payload.backendEvents,
       workspaceChanges: payload.workspaceChanges
     };
-  }
-  if ("approvalRequest" in payload) {
-    return approvalLifecyclePayload(payload);
   }
   return archiveMemoryPayload(payload);
 }

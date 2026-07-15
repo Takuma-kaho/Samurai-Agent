@@ -30,7 +30,7 @@ try {
     assertions: [
       { name: "Action Catalog generated from command schema", actual: result.action_catalog_matches, expected: true },
       { name: "Backend bridge mappings", actual: result.bridge_mappings >= 6, expected: true },
-      { name: "Provider mappings", actual: result.provider_mappings, expected: 5 },
+      { name: "Provider mappings", actual: result.provider_mappings, expected: 4 },
       { name: "Surface mappings", actual: result.surface_mappings, expected: 6 },
       { name: "Patch version contract", actual: result.expected_version_in_patch_schema, expected: true }
     ], result

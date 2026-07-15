@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const verifierProcessTimeoutMs = 30_000;
+const verifierTestTimeoutMs = verifierProcessTimeoutMs + 5_000;
 const roots: string[] = [];
 
 afterEach(async () => {
@@ -60,7 +61,7 @@ describe("external backend verification script", () => {
         })
       })
     ]);
-  });
+  }, verifierTestTimeoutMs);
 
   it("runs and resumes a configured Codex-style backend through the verifier", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-external-backend-resume-e2e-"));
@@ -119,7 +120,7 @@ describe("external backend verification script", () => {
         })
       })
     ]);
-  });
+  }, verifierTestTimeoutMs);
 
   it("returns a structured failure and non-zero exit when a configured backend run fails", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-external-backend-failed-e2e-"));

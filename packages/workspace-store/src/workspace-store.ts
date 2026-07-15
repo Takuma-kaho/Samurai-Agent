@@ -234,6 +234,7 @@ interface OperationsTable {
   approval_request_id: string | null;
   result_ref_json: JsonColumn | null;
   error: string | null;
+  correlation_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -243,10 +244,13 @@ interface DomainCommandExecutionsTable {
   idempotency_key: string;
   command_id: string;
   input_source: string;
+  correlation_id: string;
   payload_hash: string;
+  phase: string;
   status: string;
   result_json: JsonColumn | null;
   error: string | null;
+  heartbeat_at: string;
   created_at: string;
   updated_at: string;
 }
@@ -927,6 +931,7 @@ interface WorkspaceChangesTable {
   change_type: string;
   summary: string;
   legacy_operation_id: string | null;
+  correlation_id: string | null;
   created_at: string;
 }
 
@@ -1534,9 +1539,11 @@ export class WorkspaceStore {
         command_id TEXT NOT NULL,
         input_source TEXT NOT NULL,
         payload_hash TEXT NOT NULL,
+        phase TEXT NOT NULL DEFAULT 'external_running',
         status TEXT NOT NULL,
         result_json TEXT,
         error TEXT,
+        heartbeat_at TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )`,
@@ -2245,6 +2252,8 @@ export class WorkspaceStore {
       await this.ensureAutomationJobColumns();
       await this.ensureAutomationRunColumns();
       await this.ensureCollectionRecordColumns();
+      await this.ensureDomainCommandExecutionColumns();
+      await this.ensureDomainCorrelationColumns();
       await this.ensureSessionSearchIndexes();
       const migrationVersion = 1;
       const migrationName = "core_baseline";
@@ -2401,6 +2410,30 @@ export class WorkspaceStore {
       if (!isDuplicateColumnError(error)) {
         throw error;
       }
+    }
+  }
+
+  private async ensureDomainCommandExecutionColumns(): Promise<void> {
+    if (!await this.hasTableColumn("domain_command_executions", "correlation_id")) {
+      await sql.raw("ALTER TABLE domain_command_executions ADD COLUMN correlation_id TEXT").execute(this.db);
+      await sql.raw("UPDATE domain_command_executions SET correlation_id = id WHERE correlation_id IS NULL").execute(this.db);
+    }
+    if (!await this.hasTableColumn("domain_command_executions", "heartbeat_at")) {
+      await sql.raw("ALTER TABLE domain_command_executions ADD COLUMN heartbeat_at TEXT").execute(this.db);
+      await sql.raw("UPDATE domain_command_executions SET heartbeat_at = updated_at WHERE heartbeat_at IS NULL").execute(this.db);
+    }
+    if (!await this.hasTableColumn("domain_command_executions", "phase")) {
+      await sql.raw("ALTER TABLE domain_command_executions ADD COLUMN phase TEXT NOT NULL DEFAULT 'external_running'").execute(this.db);
+    }
+    await sql.raw("UPDATE domain_command_executions SET status = 'outcome_unknown', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'running' AND phase = 'external_running' AND unixepoch(COALESCE(heartbeat_at, updated_at)) < unixepoch('now', '-5 minutes')").execute(this.db);
+  }
+
+  private async ensureDomainCorrelationColumns(): Promise<void> {
+    if (!await this.hasTableColumn("operations", "correlation_id")) {
+      await sql.raw("ALTER TABLE operations ADD COLUMN correlation_id TEXT").execute(this.db);
+    }
+    if (!await this.hasTableColumn("workspace_changes", "correlation_id")) {
+      await sql.raw("ALTER TABLE workspace_changes ADD COLUMN correlation_id TEXT").execute(this.db);
     }
   }
 
@@ -3100,6 +3133,25 @@ export class WorkspaceStore {
     return record;
   }
 
+  async compareAndSetDomainCommandExecution(input: { id: string; expectedStatus: DomainCommandExecutionRecord["status"]; expectedHeartbeatAt: string; next: DomainCommandExecutionRecord }): Promise<boolean> {
+    const result = await this.db.updateTable("domain_command_executions")
+      .set(domainCommandExecutionToRow(input.next))
+      .where("id", "=", input.id)
+      .where("status", "=", input.expectedStatus)
+      .where("heartbeat_at", "=", input.expectedHeartbeatAt)
+      .executeTakeFirst();
+    return Number(result.numUpdatedRows ?? 0) === 1;
+  }
+
+  async heartbeatDomainCommandExecution(id: string, heartbeatAt: string): Promise<boolean> {
+    const result = await this.db.updateTable("domain_command_executions")
+      .set({ heartbeat_at: heartbeatAt, updated_at: heartbeatAt })
+      .where("id", "=", id)
+      .where("status", "=", "running")
+      .executeTakeFirst();
+    return Number(result.numUpdatedRows ?? 0) === 1;
+  }
+
   async updateOperation(operation: OperationRecord): Promise<OperationRecord> {
     await this.db
       .updateTable("operations")
@@ -3361,8 +3413,16 @@ export class WorkspaceStore {
   }
 
   async saveWorkspaceChange(change: WorkspaceChangeRecord): Promise<WorkspaceChangeRecord> {
-    await this.db.insertInto("workspace_changes").values(workspaceChangeToRow(change)).execute();
-    return change;
+    const operation = change.legacy_operation_id ? await this.getOperation(change.legacy_operation_id) : undefined;
+    const correlated = !change.correlation_id && operation?.correlation_id
+      ? { ...change, correlation_id: operation.correlation_id }
+      : change;
+    await this.db.insertInto("workspace_changes").values(workspaceChangeToRow(correlated)).execute();
+    return correlated;
+  }
+
+  async setWorkspaceChangeCorrelation(changeId: string, correlationId: string): Promise<void> {
+    await this.db.updateTable("workspace_changes").set({ correlation_id: correlationId }).where("id", "=", changeId).execute();
   }
 
   async listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]> {
@@ -8265,6 +8325,7 @@ function operationToRow(operation: OperationRecord): OperationsTable {
     approval_request_id: operation.approval_request_id ?? null,
     result_ref_json: operation.result_ref ? stringify(operation.result_ref) : null,
     error: operation.error ?? null,
+    correlation_id: operation.correlation_id ?? null,
     created_at: operation.created_at,
     updated_at: operation.updated_at
   };
@@ -8289,6 +8350,7 @@ function operationFromRow(row: OperationsTable): OperationRecord {
     approval_request_id: row.approval_request_id ?? undefined,
     result_ref: row.result_ref_json ? parse(row.result_ref_json) : undefined,
     error: row.error ?? undefined,
+    correlation_id: row.correlation_id ?? undefined,
     created_at: row.created_at,
     updated_at: row.updated_at
   };
@@ -8300,10 +8362,13 @@ function domainCommandExecutionToRow(record: DomainCommandExecutionRecord): Doma
     idempotency_key: record.idempotency_key,
     command_id: record.command_id,
     input_source: record.input_source,
+    correlation_id: record.correlation_id,
     payload_hash: record.payload_hash,
+    phase: record.phase,
     status: record.status,
     result_json: record.result === undefined ? null : stringify(record.result),
-    error: record.error ?? null,
+    error: record.error ? stringify(record.error) : null,
+    heartbeat_at: record.heartbeat_at,
     created_at: record.created_at,
     updated_at: record.updated_at
   };
@@ -8476,13 +8541,28 @@ function domainCommandExecutionFromRow(row: DomainCommandExecutionsTable): Domai
     idempotency_key: row.idempotency_key,
     command_id: row.command_id,
     input_source: row.input_source,
+    correlation_id: row.correlation_id,
     payload_hash: row.payload_hash,
+    phase: row.phase === "claimed" || row.phase === "internal_running" ? row.phase : "external_running",
     status: row.status as DomainCommandExecutionRecord["status"],
     result: row.result_json === null ? undefined : parse(row.result_json),
-    error: row.error ?? undefined,
+    error: row.error ? parseDomainCommandExecutionError(row.error) : undefined,
+    heartbeat_at: row.heartbeat_at || row.updated_at,
     created_at: row.created_at,
     updated_at: row.updated_at
   };
+}
+
+function parseDomainCommandExecutionError(value: string): NonNullable<DomainCommandExecutionRecord["error"]> {
+  try {
+    const parsed = JSON.parse(value) as { code?: unknown; message?: unknown; retryable?: unknown; details?: JsonValue };
+    if (parsed && typeof parsed.code === "string" && typeof parsed.message === "string" && typeof parsed.retryable === "boolean") {
+      return { code: parsed.code, message: parsed.message, retryable: parsed.retryable, ...(parsed.details !== undefined ? { details: parsed.details } : {}) };
+    }
+  } catch {
+    // Records created before typed errors stored the message directly.
+  }
+  return { code: "domain_command_failed", message: value, retryable: false };
 }
 
 function backendRunToRow(run: BackendRunRecord): BackendRunsTable {
@@ -8598,6 +8678,7 @@ function workspaceChangeToRow(change: WorkspaceChangeRecord): WorkspaceChangesTa
     change_type: change.change_type,
     summary: change.summary,
     legacy_operation_id: change.legacy_operation_id ?? null,
+    correlation_id: change.correlation_id ?? null,
     created_at: change.created_at
   };
 }
@@ -8611,6 +8692,7 @@ function workspaceChangeFromRow(row: WorkspaceChangesTable): WorkspaceChangeReco
     change_type: row.change_type as WorkspaceChangeRecord["change_type"],
     summary: row.summary,
     legacy_operation_id: row.legacy_operation_id ?? undefined,
+    correlation_id: row.correlation_id ?? undefined,
     created_at: row.created_at
   };
 }

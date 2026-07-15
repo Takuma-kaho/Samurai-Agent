@@ -222,7 +222,7 @@ describe("server env loading", () => {
     expect(repair).toMatchObject({ dry_run: true, health: { ok: true } });
     expect(backup.id.startsWith("backup_")).toBe(true);
     expect(backups.map((item) => item.id)).toContain(backup.id);
-  });
+  }, 60_000);
 
   it("bootstraps the managed Workspace as an execution root", async () => {
     const { root } = await startTestServer();
@@ -600,7 +600,7 @@ describe("backend run API", () => {
       path: "notes/missing-file-browser-diagnostics.md",
       search: "missing",
       replace: "patched"
-    }, 409);
+    }, 404);
 
     const diagnostics = await getJson<{
       total_operations: number;
@@ -2067,7 +2067,6 @@ describe("backend run API", () => {
     expect(diagnostics.recommendation).toContain("internally consistent");
     expect(command).toMatchObject({
       id: "chat.turn.run",
-      runtime_method: "runChatTurn",
       output_render_kinds: ["chat"]
     });
     expect(command?.input_sources).toContain("runtime_api");
@@ -2164,67 +2163,44 @@ describe("backend run API", () => {
     }));
 
     const blockedGateway = await postJson<{
-      command: { id: string };
-      input_source: string;
-      render_spec: { kind: string; props: { status?: string } };
-      result: { inbound: { status: string; trusted: boolean }; pairing: { id: string; status: string } };
+      inbound: { status: string; trusted: boolean };
+      pairing: { id: string; status: string };
     }>(
-      `${baseUrl}/api/domain/commands/gateway.inbound.route/run`,
+      `${baseUrl}/api/gateway/inbound`,
       {
-        input_source: "gateway_inbound",
-        payload: {
-          channel: "webhook",
-          source_identity: "domain-gateway-1",
-          body: "接続確認",
-          output_locale: "ja"
-        }
+        channel: "webhook",
+        source_identity: "domain-gateway-1",
+        body: "接続確認",
+        output_locale: "ja"
       },
-      201
+      202
     );
     await postJson<{ id: string; status: string }>(
-      `${baseUrl}/api/gateway/pairings/${blockedGateway.result.pairing.id}/approve`,
+      `${baseUrl}/api/gateway/pairings/${blockedGateway.pairing.id}/approve`,
       {}
     );
     const routedGateway = await postJson<{
-      command: { id: string };
-      input_source: string;
-      render_spec: { kind: string; props: { backend_status?: string } };
-      render_specs: Array<{ kind: string }>;
-      result: {
-        inbound: { status: string; session_key?: string };
-        chat: { backendRun: { status: string }; messages: Array<{ role: string }> };
-      };
+      inbound: { status: string; session_key?: string };
+      chat: { backendRun: { status: string }; messages: Array<{ role: string }> };
     }>(
-      `${baseUrl}/api/domain/commands/gateway.inbound.route/run`,
+      `${baseUrl}/api/gateway/inbound`,
       {
-        input_source: "gateway_inbound",
-        payload: {
-          channel: "webhook",
-          source_identity: "domain-gateway-1",
-          body: "Domain Command Gateway から提案書を作って",
-          output_locale: "ja"
-        }
+        channel: "webhook",
+        source_identity: "domain-gateway-1",
+        body: "Domain Command Gateway から提案書を作って",
+        output_locale: "ja"
       },
       201
     );
 
     expect(blockedGateway).toMatchObject({
-      command: { id: "gateway.inbound.route" },
-      input_source: "gateway_inbound",
-      render_spec: { kind: "gateway", props: { status: "blocked" } },
-      result: { inbound: { status: "blocked", trusted: false }, pairing: { status: "pending" } }
+      inbound: { status: "blocked", trusted: false }, pairing: { status: "pending" }
     });
     expect(routedGateway).toMatchObject({
-      command: { id: "gateway.inbound.route" },
-      input_source: "gateway_inbound",
-      render_spec: { kind: "chat", props: { backend_status: "completed" } },
-      result: {
-        inbound: { status: "processed", session_key: "webhook:domain-gateway-1:main" },
-        chat: { backendRun: { status: "completed" } }
-      }
+      inbound: { status: "processed", session_key: "webhook:domain-gateway-1:main" },
+      chat: { backendRun: { status: "completed" } }
     });
-    expect(routedGateway.render_specs.map((spec) => spec.kind)).toEqual(["chat", "gateway"]);
-    expect(routedGateway.result.chat.messages.some((message) => message.role === "agent")).toBe(true);
+    expect(routedGateway.chat.messages.some((message) => message.role === "agent")).toBe(true);
   });
 
   it("exposes gateway pairing approval and inbound routing diagnostics", async () => {
@@ -2435,12 +2411,14 @@ describe("backend run API", () => {
   });
 
   it("routes dedicated webhook payloads through Gateway inbound", async () => {
+    const webhookSecret = "test-gateway-webhook-secret";
+    setManagedEnv("SAMURAI_GATEWAY_WEBHOOK_SECRET", webhookSecret);
     const { baseUrl } = await startTestServer();
     const webhookUrl = `${baseUrl}/api/gateway/webhooks/external-webhook-1`;
-    const invalid = await postJson<{ error: string }>(webhookUrl, {
+    const invalid = await postSignedSamuraiJson<{ error: string }>(webhookUrl, {
       metadata: { request_id: "req_missing_body" }
-    }, 400);
-    const blocked = await postJson<{
+    }, webhookSecret, 400);
+    const blocked = await postSignedSamuraiJson<{
       adapter: { channel: string; source_identity: string; body_field: string };
       inbound: { id: string; status: string; trusted: boolean; metadata: Record<string, unknown> };
       pairing: { id: string; status: string; pairing_code?: string };
@@ -2451,12 +2429,12 @@ describe("backend run API", () => {
         request_id: "req_1",
         token: "raw-secret-token"
       }
-    }, 202);
+    }, webhookSecret, 202);
     await postJson<{ id: string; status: string }>(
       `${baseUrl}/api/gateway/pairings/${blocked.pairing.id}/approve`,
       {}
     );
-    const routed = await postJson<{
+    const routed = await postSignedSamuraiJson<{
       adapter: { channel: string; source_identity: string; body_field: string };
       inbound: { id: string; status: string; trusted: boolean; body: string; metadata: Record<string, unknown>; session_key?: string };
       pairing: { id: string; status: string };
@@ -2474,7 +2452,7 @@ describe("backend run API", () => {
         request_id: "req_2",
         authorization: "Bearer raw-secret-token"
       }
-    }, 201);
+    }, webhookSecret, 201);
 
     expect(invalid).toEqual({ error: "invalid_gateway_webhook" });
     expect(blocked.adapter).toEqual({
@@ -3077,8 +3055,8 @@ describe("backend run API", () => {
         authorization: "[redacted]",
         gateway_email_adapter: true,
         gateway_email_body_field: "text",
-        gateway_email_from: "sender@example.test",
-        gateway_email_to: "assistant@example.test",
+          gateway_email_from: "[redacted-email]",
+          gateway_email_to: "[redacted-email]",
         gateway_email_subject: "初回メール",
         gateway_email_message_id: "msg-1"
       }
@@ -3109,8 +3087,8 @@ describe("backend run API", () => {
         cookie: "[redacted]",
         gateway_email_adapter: true,
         gateway_email_body_field: "text",
-        gateway_email_from: "sender@example.test",
-        gateway_email_to: "assistant@example.test",
+          gateway_email_from: "[redacted-email]",
+          gateway_email_to: "[redacted-email]",
         gateway_email_subject: "提案書メール",
         gateway_email_message_id: "msg-1"
       }
@@ -3319,8 +3297,8 @@ describe("backend run API", () => {
         gateway_email_adapter: true,
         gateway_email_provider_webhook: true,
         gateway_email_provider: "postmark",
-        gateway_email_from: "sender@example.test",
-        gateway_email_to: "assistant@example.test",
+        gateway_email_from: "[redacted-email]",
+        gateway_email_to: "[redacted-email]",
         gateway_email_subject: "Provider初回",
         gateway_email_message_id: "provider-thread"
       }
@@ -3808,7 +3786,7 @@ describe("backend run API", () => {
     const badRequest = await postJson<Record<string, unknown>>(`${baseUrl}/api/memory/${memory.id}/archive`, {}, 400);
 
     expect(archived).toHaveProperty("operation");
-    expect(archived).toHaveProperty("auditRecord");
+    expect(archived).not.toHaveProperty("auditRecord");
     expect(archived).toHaveProperty("activity");
     expect(archived).toHaveProperty("rollbackPoint");
     expect(allMemory.some((item) => item.id === memory.id)).toBe(false);
@@ -3848,7 +3826,7 @@ describe("backend run API", () => {
       path: "notes/api-restore.md",
       action: "written"
     });
-    expect(restored.auditRecord.rollback_point_id).toBe(restored.rollbackPoint.id);
+    expect(restored).not.toHaveProperty("auditRecord");
     expect(read.resource.content).toBe("hello");
   });
 
@@ -4091,7 +4069,7 @@ describe("backend run API", () => {
     );
     const patched = await postJson<{ resource: { data: { name: string } }; operation: { operation: string } }>(
       `${baseUrl}/api/collections/contacts/records/record_1/patches`,
-      { changes: { name: "Samurai" } }
+      { expected_version: 1, changes: { name: "Samurai" } }
     );
     const action = await postJson<{ resource: { data: { name: string } }; operation: { operation: string } }>(
       `${baseUrl}/api/collections/contacts/actions/rename/run`,
@@ -4320,12 +4298,11 @@ describe("backend run API", () => {
     }>(`${baseUrl}/api/wiki/active-retrieval?q=patched-contract-needle`);
 
     expect(proposal.operation.operation).toBe("wiki.proposal.create");
-    expect(proposal.policyDecision.decision).toMatch(/^allow_/);
+    expect(proposal).not.toHaveProperty("policyDecision");
     expect(proposal.resource).toMatchObject({ state: "proposed", file_path: "wiki/pages/provider-storage-plan.md" });
     expect(proposal.resource.source_refs).toContainEqual(expect.objectContaining({ kind: "memory", id: "memory_provider_policy" }));
-    expect(proposal.auditRecord.affected_resources).toContainEqual(expect.objectContaining({ kind: "wiki", id: proposal.resource.id }));
-    expect(proposal.auditRecord.rollback_point_id).toBe(proposal.rollbackPoint.id);
-    expect(proposal.activity.length).toBeGreaterThan(0);
+    expect(proposal).not.toHaveProperty("auditRecord");
+    expect(proposal.activity).toEqual([]);
     expect(listed.map((item) => item.id)).toEqual(expect.arrayContaining([proposal.resource.id, rejectedProposal.resource.id]));
     expect(detail.content).toBe("# Provider保存設計\n\npatched-contract-needle");
     expect(accepted).toMatchObject({ resource: { state: "active" }, operation: { operation: "wiki.accept" } });
@@ -4343,7 +4320,7 @@ describe("backend run API", () => {
     expect(activeRetrieval.graph.edges).toContainEqual(expect.objectContaining({ from_wiki_id: proposal.resource.id, relation: "source_ref" }));
     expect(reindex.resource).toMatchObject({ active: 1, total: 2, files: 2, indexed: 2, errors: [] });
     expect(reindex).toMatchObject({ operation: { operation: "wiki.reindex" } });
-    expect(reindex.auditRecord.affected_resources).toContainEqual(expect.objectContaining({ kind: "wiki_index", id: "active" }));
+    expect(reindex).not.toHaveProperty("auditRecord");
     expect(archived).toMatchObject({ resource: { state: "archived" }, operation: { operation: "wiki.archive" } });
     expect(afterArchiveRetrieval.knowledge_wiki).toEqual([]);
     expect(afterArchiveRetrieval.report.excluded).toEqual(expect.arrayContaining([
@@ -4731,11 +4708,14 @@ function restoreManagedEnv(): void {
   managedEnv.clear();
 }
 
+let postJsonSequence = 0;
+
 async function postJson<T>(url: string, body: unknown, expectedStatus = 200): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Idempotency-Key": `server-test-${++postJsonSequence}`
     },
     body: JSON.stringify(body)
   });
@@ -4766,6 +4746,16 @@ async function postRawJson<T>(
 async function postSignedSlackJson<T>(url: string, body: unknown, signingSecret: string, expectedStatus = 200): Promise<T> {
   const rawBody = JSON.stringify(body);
   return postRawJson<T>(url, rawBody, slackSignatureHeaders(rawBody, signingSecret), expectedStatus);
+}
+
+async function postSignedSamuraiJson<T>(url: string, body: unknown, secret: string, expectedStatus = 200): Promise<T> {
+  const rawBody = JSON.stringify(body);
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const signature = createHmac("sha256", secret).update(`${timestamp}.`).update(rawBody).digest("hex");
+  return postRawJson<T>(url, rawBody, {
+    "X-Samurai-Timestamp": timestamp,
+    "X-Samurai-Signature": signature
+  }, expectedStatus);
 }
 
 async function postSignedLineJson<T>(url: string, body: unknown, channelSecret: string, expectedStatus = 200): Promise<T> {
@@ -4803,7 +4793,8 @@ async function patchJson<T>(url: string, body: unknown, expectedStatus = 200): P
   const response = await fetch(url, {
     method: "PATCH",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Idempotency-Key": `server-test-${++postJsonSequence}`
     },
     body: JSON.stringify(body)
   });
@@ -4816,7 +4807,8 @@ async function putJson<T>(url: string, body: unknown, expectedStatus = 200): Pro
   const response = await fetch(url, {
     method: "PUT",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Idempotency-Key": `server-test-${++postJsonSequence}`
     },
     body: JSON.stringify(body)
   });

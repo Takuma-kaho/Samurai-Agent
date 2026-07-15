@@ -287,11 +287,11 @@ export function getApiBaseUrl(): string | undefined {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiEndpoint(path), {
+    ...init,
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {})
-    },
-    ...init
+    }
   });
 
   const body = await readJson(response);
@@ -332,10 +332,11 @@ export const api = {
   getSurfaceContract(source?: DomainCommandInputSource) {
     return request<SurfaceContractPayload>(source ? `/api/surface/contract?source=${encodeURIComponent(source)}` : "/api/surface/contract");
   },
-  runDomainCommand<T = unknown>(commandId: string, payload: Record<string, JsonValue>, inputSource: DomainCommandInputSource = "runtime_api") {
+  runDomainCommand<T = unknown>(commandId: string, payload: Record<string, JsonValue>, idempotencyKey = crypto.randomUUID()) {
     return request<{ command: SurfaceCommandEntry; result: T; render_spec?: unknown; render_specs?: unknown[] }>(`/api/domain/commands/${encodeURIComponent(commandId)}/run`, {
       method: "POST",
-      body: JSON.stringify({ input_source: inputSource, payload })
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ payload })
     });
   },
   getGeneratedSurface(surfaceId: string) {

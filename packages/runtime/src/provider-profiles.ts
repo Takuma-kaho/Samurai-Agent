@@ -174,7 +174,6 @@ function stablePrompt(locale: SupportedLocale): string {
     "Use tools only for state-changing or boundary-crossing intents.",
     "Use create_artifact only when the user asks to create a durable local artifact or draft.",
     "Use request_external_send when the user asks to send, publish, post, or otherwise affect an external channel.",
-    "Use request_delete when the user asks to delete or remove a workspace resource.",
     "Use remember_topic only when the user explicitly asks you to remember a preference or reusable fact.",
     "You must not claim that external sends, publishing, deletion, or destructive actions were executed.",
     "You do not decide risk, scope, reversibility, approval level, or operation names.",
@@ -451,7 +450,6 @@ function gatewayBoundarySummary(input: ProviderInput): string {
 
 const artifactParameters = requireDomainCommandEntry("artifact.create").input_schema;
 const externalSendParameters = requireDomainCommandEntry("external.send.prepare").input_schema;
-const deleteParameters = requireDomainCommandEntry("workspace.delete").input_schema;
 const rememberTopicParameters = requireDomainCommandEntry("memory.topic.create").input_schema;
 
 function toolDefinitions() {
@@ -465,11 +463,6 @@ function toolDefinitions() {
       name: "request_external_send",
       description: "Request an approval-gated external send, publish, post, or mail operation.",
       parameters: externalSendParameters
-    },
-    {
-      name: "request_delete",
-      description: "Request an approval-gated workspace delete operation.",
-      parameters: deleteParameters
     },
     {
       name: "remember_topic",
@@ -631,9 +624,6 @@ function normalizeLegacyProviderOutput(value: Record<string, unknown>): Provider
   }
   if (value.outboundIntent === true) {
     toolCalls.push({ name: "request_external_send", arguments: {} });
-  }
-  if (value.deleteIntent === true) {
-    toolCalls.push({ name: "request_delete", arguments: {} });
   }
   return { content, toolCalls };
 }

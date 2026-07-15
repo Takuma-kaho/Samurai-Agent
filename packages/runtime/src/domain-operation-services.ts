@@ -1,0 +1,47 @@
+import type { SkillWithFilePath } from "@samurai-agent/workspace-store";
+import type { ArtifactDomainService } from "./commands/services/artifact-domain-service.js";
+import type { AutomationDomainService } from "./commands/services/automation-domain-service.js";
+import type { BrowserDomainService } from "./commands/services/browser-domain-service.js";
+import type { ClientEventDomainService } from "./commands/services/client-event-domain-service.js";
+import type { CollectionDomainService } from "./commands/services/collection-domain-service.js";
+import type { ConversationDomainService } from "./commands/services/conversation-domain-service.js";
+import type { ExecutionDomainService } from "./commands/services/execution-domain-service.js";
+import type { ExternalSendDomainService } from "./commands/services/external-send-domain-service.js";
+import type { FileDomainService } from "./commands/services/file-domain-service.js";
+import type { GatewayDomainService } from "./commands/services/gateway-domain-service.js";
+import type { GeneratedSurfaceDomainService } from "./commands/services/generated-surface-domain-service.js";
+import type { LearningDomainService } from "./commands/services/learning-domain-service.js";
+import type { MemoryDomainService } from "./commands/services/memory-domain-service.js";
+import type { ObjectiveDomainService } from "./commands/services/objective-domain-service.js";
+import type { PluginDomainService } from "./commands/services/plugin-domain-service.js";
+import type { PresentationDomainService } from "./commands/services/presentation-domain-service.js";
+import type { SettingsDomainService } from "./commands/services/settings-domain-service.js";
+import type { SkillDomainService } from "./commands/services/skill-domain-service.js";
+import type { SystemDomainService } from "./commands/services/system-domain-service.js";
+import type { TranslationDomainService } from "./commands/services/translation-domain-service.js";
+import type { WikiDomainService } from "./commands/services/wiki-domain-service.js";
+
+export interface RuntimeDomainServices {
+  artifactDomainService: ArtifactDomainService;
+  automationDomainService: AutomationDomainService;
+  browserDomainService: BrowserDomainService;
+  clientEventDomainService: ClientEventDomainService;
+  collectionDomainService: CollectionDomainService;
+  conversationDomainService: ConversationDomainService;
+  executionDomainService: ExecutionDomainService;
+  externalSendDomainService: ExternalSendDomainService;
+  fileDomainService: FileDomainService;
+  gatewayDomainService: GatewayDomainService;
+  generatedSurfaceDomainService: GeneratedSurfaceDomainService;
+  learningDomainService: LearningDomainService;
+  memoryDomainService: MemoryDomainService;
+  objectiveDomainService: ObjectiveDomainService;
+  pluginDomainService: PluginDomainService;
+  presentationDomainService: PresentationDomainService;
+  settingsDomainService: SettingsDomainService;
+  skillDomainService: SkillDomainService<SkillWithFilePath>;
+  systemDomainService: SystemDomainService;
+  translationDomainService: TranslationDomainService;
+  wikiDomainService: WikiDomainService;
+}
+

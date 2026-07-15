@@ -14,6 +14,7 @@ import {
   getDomainCommandCatalogDiagnostics,
   getDomainCommandForProviderToolName,
   getDomainCommandForSurfaceOperationKind,
+  getDomainQueryForProviderToolName,
   getPluginManifest,
   listActionCatalogEntries,
   listDomainCommandEntries,
@@ -62,8 +63,8 @@ describe("action catalog", () => {
     expect(getDomainCommandForProviderToolName("request_external_send")?.output_render_kinds).toEqual(["status_timeline"]);
     expect(getDomainCommandForProviderToolName("mcp__samurai__collection_schema_save")?.id).toBe("collection.schema.save");
     expect(getDomainCommandForProviderToolName("mcp__samurai__collection_record_create")?.id).toBe("collection.record.create");
-    expect(getDomainCommandForProviderToolName("mcp__samurai__collection_view_present")?.id).toBe("collection.view.present");
-    expect(getDomainCommandForProviderToolName("samurai.collection.view.present")?.output_render_kinds).toEqual(["collection", "custom_view"]);
+    expect(getDomainQueryForProviderToolName("mcp__samurai__collection_view_present")?.id).toBe("collection.view.present");
+    expect(getDomainQueryForProviderToolName("samurai.collection.view.present")?.output_render_kinds).toEqual(["collection", "custom_view"]);
     expect(listDomainCommandEntries("gateway_inbound").map((entry) => entry.id)).toContain("gateway.inbound.route");
     expect(listDomainCommandEntries("automation").map((entry) => entry.id)).toEqual(expect.arrayContaining([
       "chat.turn.run",
@@ -86,12 +87,11 @@ describe("action catalog", () => {
     expect(diagnostics.coverage.render_kinds).toEqual([...domainCommandOutputRenderKinds]);
   });
 
-  it("reports registered plugin action handlers", async () => {
+  it("keeps Domain actions outside the Plugin handler registry", async () => {
     const registry = new PluginRuntimeRegistry();
     expect(registry.hasRegisteredHandler("collection.action.run")).toBe(false);
-    registry.registerHandler("runtime.collection.action.run", async () => ({ status: "completed", output: { ok: true } }));
-
-    expect(registry.hasRegisteredHandler("collection.action.run")).toBe(true);
+    registry.registerHandler("domain.collection.action.run", async () => ({ status: "completed", output: { ok: true } }));
+    expect(registry.hasRegisteredHandler("collection.action.run")).toBe(false);
   });
 
   it("loads filesystem plugin manifests into action discovery", async () => {

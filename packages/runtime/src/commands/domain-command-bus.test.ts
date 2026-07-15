@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
-import { DomainCommandConflictError, DurableDomainCommandBus } from "./domain-command-bus";
+import type { DomainCommandExecutionRecord } from "@samurai-agent/core-schemas";
+import { DomainCommandConflictError, DomainCommandOutcomeUnknownError, DomainCommandReplayError, DurableDomainCommandBus } from "./domain-command-bus";
 
 const roots: string[] = [];
 
@@ -58,5 +59,67 @@ describe("DurableDomainCommandBus", () => {
       idempotencyKey: "reused-key"
     }, async () => ({ ok: false }))).rejects.toBeInstanceOf(DomainCommandConflictError);
     await store.close();
+  });
+
+  it("covers local conflicts, observers, undefined results, and primitive failures", async () => {
+    const store = await createStore();
+    const checkpoints: string[] = [];
+    const bus = new DurableDomainCommandBus(store, 30_000, { checkpoint: (name) => { checkpoints.push(name); } });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const first = bus.execute({ commandId: "test.local", inputSource: "test", payload: { value: 1 }, idempotencyKey: "local" }, async () => {
+      await blocked;
+      return undefined;
+    });
+    await expect(bus.execute({ commandId: "test.local", inputSource: "test", payload: { value: 2 }, idempotencyKey: "local" }, async () => null)).rejects.toBeInstanceOf(DomainCommandConflictError);
+    release();
+    await expect(first).resolves.toBeUndefined();
+    expect(checkpoints).toEqual(["claimed", "handler_started", "handler_succeeded", "result_saved"]);
+
+    await expect(bus.execute({ commandId: "test.primitive", inputSource: "test", payload: {}, idempotencyKey: "primitive" }, async () => { throw "primitive"; })).rejects.toBe("primitive");
+    await expect(new DurableDomainCommandBus(store).execute({ commandId: "test.primitive", inputSource: "test", payload: {}, idempotencyKey: "primitive" }, async () => null)).rejects.toMatchObject({
+      name: "DomainCommandReplayError", code: "domain_command_failed", retryable: false
+    });
+    const fallbackError = { unexpected: true, retryable: true };
+    await expect(bus.execute({ commandId: "test.fallback", inputSource: "test", correlationId: "explicit-correlation", payload: {}, idempotencyKey: "fallback" }, async () => { throw fallbackError; })).rejects.toBe(fallbackError);
+    await expect(new DurableDomainCommandBus(store).execute({ commandId: "test.fallback", inputSource: "test", correlationId: "explicit-correlation", payload: {}, idempotencyKey: "fallback" }, async () => null)).rejects.toMatchObject({
+      code: "domain_command_failed", message: "[object Object]", retryable: true
+    });
+    await store.close();
+  });
+
+  it("resolves every durable recovery branch", async () => {
+    const now = new Date(0).toISOString();
+    const input = { commandId: "test.recovery", inputSource: "test", payload: {}, idempotencyKey: "recovery" };
+    const record = (overrides: Partial<DomainCommandExecutionRecord> = {}): DomainCommandExecutionRecord => ({
+      id: "execution", idempotency_key: "recovery", command_id: "test.recovery", input_source: "test",
+      correlation_id: "correlation", payload_hash: "unused", phase: "internal_running", status: "running",
+      heartbeat_at: now, created_at: now, updated_at: now, ...overrides
+    });
+    const executeWith = async (initial: DomainCommandExecutionRecord, latest: DomainCommandExecutionRecord | undefined, changed = false, executionClass?: "internal" | "external") => {
+      const store = {
+        claimDomainCommandExecution: async () => ({ claimed: false as const, record: initial }),
+        getDomainCommandExecution: async () => latest,
+        compareAndSetDomainCommandExecution: async () => changed,
+        updateDomainCommandExecution: async (value: DomainCommandExecutionRecord) => value,
+        heartbeatDomainCommandExecution: async () => true
+      } as unknown as WorkspaceStore;
+      return new DurableDomainCommandBus(store, 1).execute({ ...input, executionClass }, async () => ({ recovered: true }));
+    };
+    const hashStore = await createStore();
+    await new DurableDomainCommandBus(hashStore).execute(input, async () => ({ hash: true }));
+    const persisted = await hashStore.getDomainCommandExecution("recovery");
+    expect(persisted).toBeDefined();
+    await hashStore.close();
+    const base = { ...persisted!, status: "running" as const, heartbeat_at: now, updated_at: now };
+
+    await expect(executeWith({ ...base, status: "outcome_unknown" }, undefined)).rejects.toBeInstanceOf(DomainCommandOutcomeUnknownError);
+    await expect(executeWith({ ...base, phase: "external_running" }, undefined)).rejects.toThrow("domain_command_execution_missing");
+    await expect(executeWith(base, undefined)).rejects.toThrow("domain_command_execution_missing");
+    await expect(executeWith({ ...base, phase: "external_running" }, { ...base, status: "completed", result: { replayed: true } })).resolves.toEqual({ replayed: true });
+    await expect(executeWith(base, { ...base, status: "failed", error: undefined })).rejects.toBeInstanceOf(DomainCommandReplayError);
+    await expect(executeWith({ ...base, phase: "claimed", heartbeat_at: undefined, updated_at: undefined }, undefined, true, "external")).resolves.toEqual({ recovered: true });
+    const liveWithoutRefresh = { ...base, heartbeat_at: new Date().toISOString(), updated_at: undefined };
+    await expect(executeWith(liveWithoutRefresh, undefined, true)).resolves.toEqual({ recovered: true });
   });
 });

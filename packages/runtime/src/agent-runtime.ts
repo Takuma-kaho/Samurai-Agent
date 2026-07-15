@@ -1,5 +1,30 @@
 import { createArtifactDraft, type ArtifactKind, type ArtifactPayload } from "@samurai-agent/artifacts";
 import { createTaskFingerprint } from "./learning/task-evaluation";
+import { routeGatewayInbound, runDueAutomation, type GatewayInboundInput } from "./domain-ingress-coordinator.js";
+import {
+  artifactCommandId,
+  collectionPatchCommandId,
+  effectiveProviderCommandId,
+  generatedSurfaceWriteCommandId,
+  isArtifactCommand,
+  isGeneratedSurfaceRevision,
+  isMcpCallCommand,
+  isMemoryCommand,
+  memoryCommandId,
+  mcpCallCommandId,
+  sandboxExecCommandId,
+  isProviderSkillView,
+  providerCapturedWriteCommandId,
+  type ProviderCapturedWriteCommandId
+} from "./provider-operation-dispatch.js";
+import {
+  collectionRecordCreateCommandId,
+  collectionRecordPatchCommandId,
+  collectionRecordsQueryId,
+  collectionSchemaDocsQueryId,
+  collectionSchemaQueryId,
+  collectionSchemaSaveCommandId
+} from "./collection-compatibility-dispatch.js";
 export * from "./collections/safe-collection";
 export * from "./context/user-model";
 export * from "./context/session-compaction";
@@ -7,18 +32,36 @@ export * from "./context/federated-retrieval";
 export * from "./context/progressive-skills";
 export * from "./learning/task-evaluation";
 export * from "./automation/schedule-policy";
-import { buildActivityInboxItems, createAuditRecord } from "@samurai-agent/audit";
-import { getCapabilityManifest, proposalCapabilityManifest } from "@samurai-agent/capability-registry";
+import { buildActivityInboxItems } from "@samurai-agent/audit";
+import { proposalCapabilityManifest } from "@samurai-agent/capability-registry";
 import {
   PluginRuntimeRegistry,
+  collectionManageCompatibilityEntry,
+  listDomainCommandEntries,
+  listDomainQueryEntries,
   getDomainCommandEntry,
+  getDeprecatedDomainCommandEntry,
   getDomainCommandForProviderToolName,
   getDomainCommandForSurfaceOperationKind,
+  getDomainQueryEntry,
+  getDomainQueryForProviderToolName,
+  getDomainQueryForSurfaceOperationKind,
   requireDomainCommandEntry,
+  requireDomainQueryEntry,
+  validateDomainCommandInput,
+  validateDomainOutput,
+  validateDomainQueryInput,
   type DomainCommandEntry,
   type DomainCommandInputSource,
-  type DomainCommandOutputRenderKind
+  type DomainCommandOutputRenderKind,
+  type DomainQueryEntry
 } from "@samurai-agent/action-catalog";
+import {
+  DomainOperationError,
+  DomainOperationRegistry,
+  type DomainRuntimeCapability,
+  type TrustedDomainContext
+} from "@samurai-agent/domain-operations";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { connect as netConnect, type Socket } from "node:net";
@@ -39,30 +82,24 @@ import {
   type AgentBackendKind,
   type ApprovalRequest,
   type ArtifactRecord,
+  type ArtifactRevisionRecord,
   type AuditRecord,
   type AutomationJobRecord,
   type BackendEventRecord,
   type BackendRunRecord,
-  CaptureModeSchema,
-  ClientEventRecordSchema,
+  type ClientEventRecord,
   type CollectionPatch,
   type CollectionRecord,
   type CollectionSchema,
   CollectionSchemaSchema,
   ContextFreezeResponseSchema,
   type ActorIdentity,
-  CuratorLifecycleReportSchema,
-  CuratorReviewReportSchema,
   EvaluationTraceReportSchema,
-  type CuratorStateRecord,
   type ExternalAssistHint,
   type ExternalAssistRecord,
-  type ExternalSendChannel,
-  ExternalProviderRoleSchema,
   type GatewayBoundaryPolicy,
   type GatewayBoundaryRuntimeSnapshot,
   type GatewayConcurrencyLockRecord,
-  GatewayMcpConfigRecordSchema,
   type GatewayRepairAction,
   type GatewayRepairResult,
   type GatewaySandboxInstanceRecord,
@@ -72,9 +109,9 @@ import {
   type GrantRecord,
   type GeneratedSurfaceDefinition,
   type GeneratedSurfaceActionDeclaration,
-  type SurfaceGenerationRequest,
   SurfaceGenerationRequestSchema,
   SurfaceInteractionRecordSchema,
+  type SurfaceGenerationRequest,
   type GatewayChannel,
   type HostContextAssembly,
   type ContextHandoff,
@@ -93,10 +130,8 @@ import {
   type GatewayInboundMessageRecord,
   type GatewayDeliveryRecord,
   type GatewayPairingPolicyRecord,
-  GatewayPairingPolicyRecordSchema,
   type GatewayPairingRecord,
   type GatewayRoutingPolicyRecord,
-  GatewayRoutingPolicyRecordSchema,
   type PolicyDecisionRecord,
   type PolicyEvaluationInput,
   ProvenanceSchema,
@@ -105,41 +140,27 @@ import {
   type KnowledgeWikiGraph,
   type KnowledgeWikiLintReport,
   KnowledgeWikiLintReportSchema,
-  type LearningResourceUseRecord,
   type LearningEvaluationRecord,
   type SkillOptimizationRun,
-  type SkillOptimizationDataset,
   type OptimizationCandidate,
-  type OptimizationEvaluation,
-  type SkillOptimizationSnapshot,
-  type OptimizationPromotion,
   type LearningJobReportRecord,
   type ReflectionRunRecord,
   type ReflectionSuggestionRecord,
   type ResourceRef,
   type ResourceTranslationRecord,
-  ResourceTranslationRecordSchema,
   type RollbackPoint,
   type SessionRecord,
-  type SettingsRecord,
   type CuratorLifecycleAction,
   type CuratorLifecycleReport,
   type CuratorReviewReport,
   type EvaluationTraceReport,
-  type SkillState,
   type SurfaceRendererRegistryEntry,
   type WikiFrontmatter,
   type WorkspaceChangeRecord,
   type ToolRunRecord,
   SkillFrontmatterSchema,
   GatewayRepairResultSchema,
-  GraphDocumentSchema,
-  type GraphDocument,
-  GraphNodeSchema,
-  GraphEdgeSchema,
-  GatewaySandboxWorkspaceSyncDirectionSchema,
   GatewaySandboxWorkspaceSyncResultSchema,
-  externalSendChannels,
   gatewayChannels,
   type SkillFrontmatter,
   type SupportedLocale,
@@ -154,11 +175,8 @@ import {
   parseBackgroundReviewResult,
   restrictBackgroundReviewResult,
   evaluateLearningEffect,
-  curateSkills,
-  curateMemory,
   skillConsolidationPrompt,
   parseSkillConsolidationResult,
-  buildSkillConsolidationGroups,
   type SkillConsolidationRunner,
   standardLearningJobDefinitions,
   learningRetryDelayMs,
@@ -168,7 +186,6 @@ import {
   type ReviewSnapshot
 } from "@samurai-agent/learning";
 import {
-  createDefaultGatewayBoundaryPolicy,
   createGatewayEnvelope,
   createSandboxCommandAdapter,
   createSandboxLifecycleAdapter,
@@ -182,15 +199,11 @@ import {
   executeSandboxLifecycleAction,
   executeSandboxWorkspaceSync,
   executeMcpToolInvocation,
-  evaluateGatewayPairingPolicy,
   expirePairing,
-  gatewayContextForPairing,
   gatewayMcpConfigToBoundaryRef,
   httpMcpServerConfigFromGatewayConfig,
   revokePairing,
   rotatePairingCode,
-  resolveGatewaySessionRouting,
-  sessionKeyForExternalSource,
   stdioMcpServerConfigFromGatewayConfig,
   webGatewayContext,
   type GatewayContext,
@@ -200,18 +213,8 @@ import {
   type SandboxCommandExecutionInput,
   type SandboxWorkspaceSyncExecutionResult
 } from "@samurai-agent/gateway";
-import {
-  buildSkillOptimizationDataset,
-  evaluateOptimizationGates,
-  evaluateSkillOptimizationSafety,
-  startPythonSkillOptimization,
-  type OptimizationExampleInput,
-  type PythonSkillOptimizationCandidate,
-  type PythonSkillOptimizationResult
-} from "@samurai-agent/skill-optimization";
 import { isSupportedLocale } from "@samurai-agent/localization";
 import { createSessionMemory, createTopicMemory, loadFreezeSnapshot, retrieveActiveMemoryWithReport, type MemoryCandidate } from "@samurai-agent/memory";
-import { evaluatePolicy } from "@samurai-agent/policy-engine";
 import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type MessageSubmitOperation, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   CollectionRecordVersionConflictError,
@@ -231,9 +234,44 @@ import {
 import { handleBackendToolCall, type BackendToolBoundaryFeedback } from "./backend/feedback";
 import { BackendEventBridge, normalizeBackendOutputEvent } from "./backend/event-bridge";
 import { SamuraiNativeBackend } from "./backend/native-backend";
-import { DomainCommandConflictError, DurableDomainCommandBus } from "./commands/domain-command-bus";
+import { DomainCommandConflictError, DomainCommandIdempotencyKeyRequiredError, DurableDomainCommandBus } from "./commands/domain-command-bus";
+import { createDomainOperationPorts } from "./domain-operation-composition";
+import {
+  commandIdForSurfaceOperation,
+  isCollectionActionRunSurface,
+  isCollectionRecordCreateSurface,
+  isCollectionRecordDeleteSurface,
+  isCollectionSchemaSaveOperation,
+  isCollectionViewPresentSurface,
+  isMessagePresentationUpdateSurface,
+  queryIdForSurfaceOperation,
+  surfaceOperationArtifactKind,
+  surfaceOperationEffect,
+  surfaceOperationResultKind
+} from "./surface-operation-dispatch.js";
+export { planSurfaceOperationDispatch } from "./surface-operation-dispatch.js";
 import { DurableWorkCoordinator } from "./execution/durable-work-coordinator";
-import { buildGeneratedSurfaceRevision, parseGeneratedSurfaceOutput } from "./presentation/generated-surface";
+import { ExecutionDomainService } from "./commands/services/execution-domain-service";
+import { PluginDomainService } from "./commands/services/plugin-domain-service";
+import { SettingsDomainService } from "./commands/services/settings-domain-service";
+import { ObjectiveDomainService } from "./commands/services/objective-domain-service";
+import { PresentationDomainService } from "./commands/services/presentation-domain-service";
+import { TranslationDomainService } from "./commands/services/translation-domain-service";
+import { LearningDomainService } from "./commands/services/learning-domain-service";
+import { SystemDomainService, type ReflectionTarget } from "./commands/services/system-domain-service";
+import { ClientEventDomainService } from "./commands/services/client-event-domain-service";
+import { GatewayDomainService } from "./commands/services/gateway-domain-service";
+import { WikiDomainService } from "./commands/services/wiki-domain-service";
+import { AutomationDomainService } from "./commands/services/automation-domain-service";
+import { GeneratedSurfaceDomainService } from "./commands/services/generated-surface-domain-service";
+import { SkillDomainService } from "./commands/services/skill-domain-service";
+import { CollectionDomainService } from "./commands/services/collection-domain-service";
+import { ConversationDomainService } from "./commands/services/conversation-domain-service";
+import { FileDomainService } from "./commands/services/file-domain-service";
+import { BrowserDomainService } from "./commands/services/browser-domain-service";
+import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
+import { MemoryDomainService } from "./commands/services/memory-domain-service";
+import { ArtifactDomainService, type ArtifactCreateInput, type ArtifactMutationInput, type ArtifactRevisionInput, type ArtifactSurfaceResult } from "./commands/services/artifact-domain-service";
 export {
   HttpExternalAssistProvider,
   LocalFileExternalAssistProvider,
@@ -323,16 +361,6 @@ interface BackendToolEventHandlingResult {
 
 type BackendEventRecorder = (event: BackendOutputEvent) => Promise<BackendEventRecord>;
 
-export type ApprovalLifecycleStatus = "approved" | "denied" | "expired";
-
-export interface ApprovalLifecycleResult {
-  approvalRequest: ApprovalRequest;
-  operation: OperationRecord;
-  auditRecord: AuditRecord;
-  activity: ActivityInboxItem[];
-  status: ApprovalLifecycleStatus;
-}
-
 export interface ArchiveMemoryInput {
   memoryId: string;
   sessionId: string;
@@ -344,7 +372,7 @@ export interface ArchiveMemoryRuntimeResult {
   memory: ArchiveMemoryResult["after"]["frontmatter"] & { file_path: string };
   content: string;
   operation: OperationRecord;
-  auditRecord: AuditRecord;
+  auditRecord?: AuditRecord;
   rollbackPoint?: RollbackPoint;
   activity: ActivityInboxItem[];
   changed: boolean;
@@ -354,10 +382,26 @@ export interface ArchiveMemoryRuntimeResult {
 export interface RuntimeWriteResult<TResource> {
   resource: TResource;
   operation: OperationRecord;
-  policyDecision: PolicyDecisionRecord;
-  auditRecord: AuditRecord;
+  policyDecision?: PolicyDecisionRecord;
+  auditRecord?: AuditRecord;
   rollbackPoint?: RollbackPoint;
   activity: ActivityInboxItem[];
+}
+
+interface RecordedMutationInput<TResource, TExtra extends Record<string, unknown> = {}> {
+  session: SessionRecord;
+  envelope: MessageEnvelope;
+  context?: GatewayContext;
+  operationName: string;
+  proposedEffects: string[];
+  inputRef?: OperationRecord["input_ref"];
+  targetResourceRefs?: OperationRecord["target_resource_refs"];
+  execute: (operation: OperationRecord) => Promise<{
+    resource: TResource;
+    ref: NonNullable<OperationRecord["result_ref"]>;
+    rollbackPoint?: RollbackPoint;
+    summary: string;
+  } & TExtra>;
 }
 
 export type SkillRuntimeResult = RuntimeWriteResult<SkillWithFilePath>;
@@ -367,15 +411,20 @@ export interface SkillViewRuntimeResult {
   content: string;
   file_refs: Array<{ path: string; file_path: string }>;
   disclosure_level: "body" | "support";
-  use_record: LearningResourceUseRecord;
+  usage: {
+    skill_id: string;
+    run_id: string;
+    resource_id: string;
+    content_hash: string;
+    stage: "body_loaded" | "support_loaded";
+    metadata: Record<string, JsonValue>;
+  };
 }
 export type WikiRuntimeResult = RuntimeWriteResult<WikiWithFilePath>;
 export type CollectionSchemaRuntimeResult = RuntimeWriteResult<CollectionSchemaWithFilePath>;
 export type CollectionRecordRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
 export type CollectionDeleteRuntimeResult = RuntimeWriteResult<CollectionRecordWithFilePath>;
 export type CollectionReindexRuntimeResult = RuntimeWriteResult<CollectionReindexResult>;
-export type CollectionManageRuntimeResult = RuntimeWriteResult<Record<string, JsonValue>>;
-export type GrantRuntimeResult = RuntimeWriteResult<GrantRecord>;
 export interface CollectionPluginActionResult {
   collection_id: string;
   action_id: string;
@@ -497,14 +546,37 @@ export interface DomainCommandRuntimeInput {
   idempotency_key?: string;
 }
 
+export interface DomainQueryRuntimeInput {
+  query_id: string;
+  payload?: Record<string, unknown>;
+  input_source?: DomainCommandInputSource;
+}
+
 export interface DomainCommandRuntimeResult<TResult = unknown> {
   command: DomainCommandEntry;
+  ok: true;
+  contract_version: string;
+  execution_id: string;
   input_source: DomainCommandInputSource;
   payload: Record<string, JsonValue>;
   render_spec?: SurfaceRenderSpec;
   render_specs: SurfaceRenderSpec[];
   result: TResult;
 }
+
+export interface DomainQueryRuntimeResult<TResult = unknown> {
+  query: DomainQueryEntry;
+  ok: true;
+  contract_version: string;
+  execution_id: string;
+  input_source: DomainCommandInputSource;
+  payload: Record<string, JsonValue>;
+  render_spec?: SurfaceRenderSpec;
+  render_specs: SurfaceRenderSpec[];
+  result: TResult;
+}
+
+type DomainDispatchEntry = DomainCommandEntry | DomainQueryEntry;
 
 type FileActionResource = FileActionRuntimeResult["resource"];
 type BrowserActionResource = BrowserActionRuntimeResult["resource"];
@@ -516,8 +588,8 @@ export interface CollectionPatchRuntimeResult extends RuntimeWriteResult<Collect
 export interface AutomationRunRuntimeResult {
   automationRun: AutomationRunRecord;
   operation: OperationRecord;
-  policyDecision: PolicyDecisionRecord;
-  auditRecord: AuditRecord;
+  policyDecision?: PolicyDecisionRecord;
+  auditRecord?: AuditRecord;
   rollbackPoint?: RollbackPoint;
   activity: ActivityInboxItem[];
   memoryReviewTrace?: ReflectionRuntimeResult;
@@ -602,14 +674,19 @@ export interface EvaluationJudgeProvider {
 
 export class RuntimeRequestError extends Error {
   constructor(
-    readonly code: "not_found" | "conflict" | "forbidden" | "provider_not_configured" | "provider_failed" | "backend_cancelled" | "backend_execution_root_not_ready",
+    readonly code: "bad_request" | "gone" | "not_found" | "conflict" | "forbidden" | "provider_not_configured" | "provider_failed" | "backend_cancelled" | "backend_execution_root_not_ready",
     message: string,
-    readonly payload?: ApprovalLifecycleResult | ArchiveMemoryRuntimeResult | BackendRunErrorPayload | ResourceVersionConflictPayload,
+    readonly payload?: ArchiveMemoryRuntimeResult | BackendRunErrorPayload | ResourceVersionConflictPayload | DeprecatedOperationPayload,
     readonly diagnostics?: ProviderDiagnostics
   ) {
     super(message);
     this.name = "RuntimeRequestError";
   }
+}
+
+export interface DeprecatedOperationPayload {
+  deprecated_operation_id: string;
+  replacement: { kind: "effective_inventory"; target: "/api/domain/commands/effective" };
 }
 
 interface OperationPlan {
@@ -725,113 +802,6 @@ function parseTimeout(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function commandRenderKind(command: DomainCommandEntry, renderKind: SurfaceRenderKind): SurfaceRenderKind {
-  if (!command.output_render_kinds.includes(renderKind as DomainCommandOutputRenderKind)) {
-    throw new Error(`Domain command ${command.id} does not declare render kind: ${renderKind}`);
-  }
-  return renderKind;
-}
-
-export function planSurfaceOperationDispatch(operation: SurfaceOperation): SurfaceOperationDispatchPlan {
-  if (operation.kind === "message.submit") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("chat.turn.run");
-    return surfaceDispatchPlan(operation, {
-      dispatchTarget: "host_chat",
-      runtimeMethod: command.runtime_method,
-      operationName: command.id,
-      resultKind: "chat_turn",
-      renderKind: commandRenderKind(command, "chat"),
-      requiresSession: true,
-      writesWorkspace: command.writes_workspace,
-      outputResourceKind: command.output_resource_kind,
-      proposedEffects: command.proposed_effects
-    });
-  }
-  if (operation.kind === "collection.record.create") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.record.create");
-    return surfaceDispatchPlan(operation, {
-      dispatchTarget: "collection_engine",
-      runtimeMethod: command.runtime_method,
-      operationName: command.id,
-      resultKind: "collection_record",
-      renderKind: commandRenderKind(command, "collection_record"),
-      requiresSession: false,
-      writesWorkspace: command.writes_workspace,
-      outputResourceKind: command.output_resource_kind,
-      proposedEffects: command.proposed_effects
-    });
-  }
-  if (operation.kind === "collection.view.present") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.view.present");
-    return surfaceDispatchPlan(operation, {
-      dispatchTarget: "collection_engine",
-      runtimeMethod: command.runtime_method,
-      operationName: command.id,
-      resultKind: "collection_view",
-      renderKind: commandRenderKind(command, "custom_view"),
-      requiresSession: false,
-      writesWorkspace: command.writes_workspace,
-      outputResourceKind: command.output_resource_kind,
-      proposedEffects: command.proposed_effects
-    });
-  }
-  if (operation.kind === "collection.record.patch") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.patch.apply");
-    return surfaceDispatchPlan(operation, {
-      dispatchTarget: "collection_engine",
-      runtimeMethod: command.runtime_method,
-      operationName: command.id,
-      resultKind: "collection_patch",
-      renderKind: commandRenderKind(command, "collection_record"),
-      requiresSession: false,
-      writesWorkspace: command.writes_workspace,
-      outputResourceKind: command.output_resource_kind,
-      proposedEffects: command.proposed_effects
-    });
-  }
-  if (operation.kind === "collection.record.delete") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.record.delete");
-    return surfaceDispatchPlan(operation, {
-      dispatchTarget: "collection_engine",
-      runtimeMethod: command.runtime_method,
-      operationName: command.id,
-      resultKind: "collection_delete",
-      renderKind: commandRenderKind(command, "custom_view"),
-      requiresSession: false,
-      writesWorkspace: command.writes_workspace,
-      outputResourceKind: command.output_resource_kind,
-      proposedEffects: command.proposed_effects
-    });
-  }
-  if (operation.kind === "collection.action.run") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.action.run");
-    return surfaceDispatchPlan(operation, {
-      dispatchTarget: "collection_engine",
-      runtimeMethod: command.runtime_method,
-      operationName: command.id,
-      resultKind: "collection_action",
-      renderKind: commandRenderKind(command, "custom_view"),
-      requiresSession: false,
-      writesWorkspace: command.writes_workspace,
-      outputResourceKind: command.output_resource_kind,
-      proposedEffects: command.proposed_effects
-    });
-  }
-  const structuredOperation = operation as StructuredSurfaceOperation;
-  const command = getDomainCommandForSurfaceOperationKind(structuredOperation.kind) ?? requireDomainCommandEntry("artifact.create");
-  return surfaceDispatchPlan(structuredOperation, {
-    dispatchTarget: "artifact_pipeline",
-    runtimeMethod: command.runtime_method,
-    operationName: command.id,
-    resultKind: surfaceOperationResultKind(structuredOperation),
-    renderKind: commandRenderKind(command, surfaceOperationRenderKind(structuredOperation)),
-    requiresSession: true,
-    writesWorkspace: command.writes_workspace,
-    outputResourceKind: surfaceOperationArtifactKind(structuredOperation),
-    proposedEffects: [surfaceOperationEffect(structuredOperation)]
-  });
-}
-
 export class AgentRuntime {
   private readonly backendRegistry: AgentBackendRegistry;
   private readonly stdioMcpProcessPool: PooledMcpToolAdapter;
@@ -839,9 +809,31 @@ export class AgentRuntime {
   private readonly externalAssistProviders: ExternalAssistProvider[];
   private readonly backendToolBridgeTokens = new Map<string, string>();
   private readonly backendEventSequences = new Map<string, number>();
-  private readonly skillOptimizationWorkers = new Map<string, { cancel: () => void }>();
+  private readonly backgroundTasks = new Set<Promise<unknown>>();
   private readonly domainCommandBus: DurableDomainCommandBus;
+  private readonly domainOperationRegistry: DomainOperationRegistry;
   private readonly durableWorkCoordinator: DurableWorkCoordinator;
+  private readonly executionDomainService: ExecutionDomainService;
+  private readonly pluginDomainService: PluginDomainService;
+  private readonly settingsDomainService: SettingsDomainService;
+  private readonly objectiveDomainService: ObjectiveDomainService;
+  private readonly presentationDomainService: PresentationDomainService;
+  private readonly translationDomainService: TranslationDomainService;
+  private readonly learningDomainService: LearningDomainService;
+  private readonly systemDomainService: SystemDomainService;
+  private readonly clientEventDomainService: ClientEventDomainService;
+  private readonly gatewayDomainService: GatewayDomainService;
+  private readonly wikiDomainService: WikiDomainService;
+  private readonly automationDomainService: AutomationDomainService;
+  private readonly generatedSurfaceDomainService: GeneratedSurfaceDomainService;
+  private readonly skillDomainService: SkillDomainService<SkillWithFilePath>;
+  private readonly collectionDomainService: CollectionDomainService;
+  private readonly memoryDomainService: MemoryDomainService;
+  private readonly artifactDomainService: ArtifactDomainService;
+  private readonly conversationDomainService: ConversationDomainService;
+  private readonly fileDomainService: FileDomainService;
+  private readonly browserDomainService: BrowserDomainService;
+  private readonly externalSendDomainService: ExternalSendDomainService;
 
   constructor(
     private readonly store: WorkspaceStore,
@@ -853,10 +845,597 @@ export class AgentRuntime {
     private readonly evaluationJudgeProvider?: EvaluationJudgeProvider,
     private readonly workspaceOptions: AgentRuntimeWorkspaceOptions = {}
   ) {
+    const runWebMutation = <TResource, TExtra extends Record<string, unknown> = {}>(
+      input: Omit<RecordedMutationInput<TResource, TExtra>, "context">
+    ) => this.runRecordedMutation<TResource, TExtra>({ ...input, context: webGatewayContext });
     this.domainCommandBus = new DurableDomainCommandBus(this.store);
+    this.presentationDomainService = new PresentationDomainService({
+      getPresentation: (id) => this.store.getMessagePresentation(id),
+      presentView: (input) => this.presentCollectionView(input),
+      applyViewState: (spec, viewState) => applyCollectionPresentationViewState(spec, collectionPresentationUserViewStatePatch(viewState)),
+      viewStateFromSpec: (spec) => collectionRenderSpecViewState(spec),
+      updateViewState: (input) => this.store.updateMessagePresentationViewState(input),
+      savePresentation: (record) => this.store.saveMessagePresentation(record)
+    }, (id) => new RuntimeRequestError("not_found", `Message presentation not found: ${id}`));
     this.backendRegistry = backendRegistry ?? createDefaultAgentBackendRegistry(provider);
     this.durableWorkCoordinator = new DurableWorkCoordinator(this.store, this.backendRegistry);
+    this.executionDomainService = new ExecutionDomainService({
+      store: {
+        getObjective: (id) => this.store.getObjective(id),
+        saveWorkItem: (record) => this.store.saveWorkItem(record),
+        createWorkspaceBackup: () => this.store.createWorkspaceBackup(),
+        restoreWorkspaceBackup: (backupId) => this.store.restoreWorkspaceBackup(backupId),
+        repairWorkspace: (options) => this.store.repairWorkspace(options)
+      },
+      coordinator: {
+        followUp: (workItemId, instruction) => this.durableWorkCoordinator.followUp(workItemId, instruction),
+        steer: (workItemId, instruction) => this.durableWorkCoordinator.steer(workItemId, instruction)
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
     this.pluginRegistry = pluginRegistry ?? new PluginRuntimeRegistry();
+    this.pluginDomainService = new PluginDomainService({
+      plugins: {
+        setEnabled: (pluginId, enabled) => this.pluginRegistry.setPluginEnabled(pluginId, enabled),
+        findStatus: (pluginId) => this.pluginRegistry.listPluginStatuses().find((item) => item.manifest_id === pluginId),
+        saveState: (input) => this.store.savePluginState(input)
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.settingsDomainService = new SettingsDomainService({
+      patch: (patch) => this.store.patchSettings(patch)
+    });
+    this.objectiveDomainService = new ObjectiveDomainService({
+      objectives: {
+        save: (record) => this.store.saveObjective(record),
+        transition: (objectiveId, action) => this.durableWorkCoordinator.transitionObjective(objectiveId, action)
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.translationDomainService = new TranslationDomainService({
+      translations: {
+        saveTranslation: (record) => this.store.saveResourceTranslation(record),
+        saveAutomationJob: (input) => this.saveAutomationJob(input)
+      },
+      sources: {
+        loadArtifact: async (id) => {
+          const resource = await this.store.getArtifact(id); const content = resource ? await this.store.readArtifactContent(id) : undefined;
+          return resource && content !== undefined ? { ref: resource.file_ref, source_locale: resource.locale, content } : undefined;
+        },
+        loadMemory: async (id) => {
+          const resource = await this.store.getMemory(id); const content = resource ? await this.store.readMemoryContent(id) : undefined;
+          return resource && content !== undefined ? { ref: memoryRef(resource), source_locale: resource.content_locale, content } : undefined;
+        },
+        loadWiki: async (id) => {
+          const resource = await this.store.getWiki(id); const content = resource ? await this.store.readWikiContent(id) : undefined;
+          return resource && content !== undefined ? { ref: wikiRef(resource), source_locale: resource.content_locale, content } : undefined;
+        },
+        loadSkill: async (id) => {
+          const resource = await this.store.getSkill(id); const content = resource ? await this.store.readSkillMarkdown(id) : undefined;
+          return resource && content !== undefined ? { ref: skillRef(resource), content } : undefined;
+        },
+        loadCollectionRecord: async (ref) => {
+          const target = collectionRecordTargetFromRef(ref);
+          const resource = target ? await this.store.getCollectionRecord(target.collectionId, target.recordId) : undefined;
+          return resource ? { ref: collectionRecordRef(resource), source_locale: localeFromJson(resource.data.content_locale), content: JSON.stringify(resource.data, null, 2) } : undefined;
+        }
+      },
+      execution: {
+        runChat: (input) => this.runChatTurn({
+          sessionId: input.sessionId, content: input.content, input_locale: input.inputLocale, output_locale: input.outputLocale,
+          metadata: input.metadata, gateway_context: input.context as GatewayContext
+        }),
+        saveWorkspaceChange: (change) => this.store.saveWorkspaceChange(change),
+        emitWorkspaceChange: async (change) => { await this.emit("workspace.change.created", change); }
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.learningDomainService = new LearningDomainService({
+      learning: {
+        saveCuratorState: (input) => this.store.saveCuratorState(input),
+        restoreSnapshot: (snapshotId) => this.store.restoreLearningSnapshot(snapshotId),
+        createSnapshot: (runId) => this.store.createLearningSnapshot(runId),
+        listSnapshots: () => this.store.listLearningSnapshots(),
+        pruneSnapshots: (retain) => this.store.pruneLearningSnapshots(retain)
+      },
+      evaluation: {
+        ensureSession: () => this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled evaluation"),
+        listSkills: () => this.store.listSkills(), listBackendRuns: () => this.store.listBackendRuns(),
+        listBackendEvents: () => this.store.listBackendEvents(), listWorkspaceChanges: () => this.store.listWorkspaceChanges(),
+        listToolRuns: () => this.store.listToolRuns(), listAuditRecords: () => this.store.listAuditRecords(),
+        listLearningUses: () => this.store.listLearningResourceUses(), listEvaluations: () => this.store.listLearningEvaluations(),
+        createReflectionRun: (run) => this.store.createReflectionRun(run), updateReflectionRun: (run) => this.store.updateReflectionRun(run),
+        saveSuggestion: (suggestion) => this.store.saveReflectionSuggestion(suggestion), saveEvaluation: (evaluation) => this.store.saveLearningEvaluation(evaluation),
+        saveJobReport: (report) => this.store.saveLearningJobReport(report),
+        createSuggestions: (run, input) => this.createEvaluationTraceSuggestions(run, input),
+        createReport: (input) => this.createEvaluationTraceReport(input),
+        nextRunAt: (fromMs) => nextRunFromSchedule("daily", fromMs)
+      },
+      curator: {
+        ensureSession: () => this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled curator"),
+        getState: () => this.store.getCuratorState(), listMemory: () => this.store.listMemory(), listSkills: () => this.store.listSkills(),
+        listSkillUsage: () => this.store.listSkillUsage(), listWiki: () => this.store.listWiki({ activeOnly: false }),
+        listBackendRuns: () => this.store.listBackendRuns(), listEvaluations: () => this.store.listLearningEvaluations(),
+        listReflectionRuns: () => this.store.listReflectionRuns(), createReflectionRun: (run) => this.store.createReflectionRun(run),
+        updateReflectionRun: (run) => this.store.updateReflectionRun(run), createSnapshot: (runId) => this.store.createLearningSnapshot(runId),
+        restoreSnapshot: (id) => this.store.restoreLearningSnapshot(id), saveState: (input) => this.store.saveCuratorState(input),
+        saveSuggestion: (value) => this.store.saveReflectionSuggestion(value), saveJobReport: (value) => this.store.saveLearningJobReport(value),
+        readMemory: (id) => this.store.readMemoryContent(id), replaceMemory: (id, content) => this.store.replaceMemoryContent(id, content),
+        archiveMemory: (id) => this.store.archiveMemory(id), readWiki: (id) => this.store.readWikiContent(id),
+        readSkill: (id) => this.store.readSkillMarkdown(id), listSkillSupport: (id) => this.store.listSkillSupportFiles(id),
+        replaceSkill: (id, markdown) => this.store.replaceSkillContent(id, markdown), writeSkillSupport: (input) => this.store.writeSkillSupportFile(input),
+        updateSkillState: (id, state) => this.store.updateSkillState(id, state),
+        applySkillLifecycle: (input) => this.skillDomainService.applyLifecycleInput(input),
+        consolidate: async (input, session) => this.workspaceOptions.skillConsolidationRunner
+          ? this.workspaceOptions.skillConsolidationRunner.consolidate(input)
+          : this.workspaceOptions.enableBackendBackgroundReview
+            ? this.runSkillConsolidationWithBackend(input, session as SessionRecord)
+            : undefined,
+        errorMessage: (error) => errorMessage(error), nextRunAt: (fromMs) => nextRunFromSchedule("weekly", fromMs)
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.systemDomainService = new SystemDomainService({
+      operations: {
+        getSession: (id) => this.store.getSession(id),
+        listMessages: (sessionId) => this.store.listMessages(sessionId),
+        listSessions: () => this.store.listSessions(),
+        listBackendRuns: () => this.store.listBackendRuns(),
+        listToolRuns: (runId) => this.store.listToolRuns(runId ? { runId } : {}),
+        listWorkspaceChanges: (sessionId) => this.store.listWorkspaceChanges(sessionId),
+        listBackendEvents: (input) => this.store.listBackendEvents(input),
+        loadArtifacts: (input) => this.loadReflectionArtifacts(input as Parameters<AgentRuntime["loadReflectionArtifacts"]>[0]),
+        executeReflection: (input) => this.runReflectionForCompletedTurn(input as Parameters<AgentRuntime["runReflectionForCompletedTurn"]>[0]),
+        listReflectionSuggestions: () => this.store.listReflectionSuggestions(),
+        updateReflectionSuggestion: (suggestion) => this.store.updateReflectionSuggestion(suggestion as ReflectionSuggestionRecord),
+        ensureReflectionSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+        createReflectionEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
+        runReflectionMutation: (input) => this.runRecordedMutation<ReflectionTarget>({ ...input, context: webGatewayContext }),
+        createMemoryTarget: async (input) => {
+          const resource = await createTopicMemory(this.store, input.envelope as Parameters<typeof createTopicMemory>[1], input.title, input.content);
+          return { resource, ref: memoryRef(resource) };
+        },
+        createWikiTarget: async (input) => {
+          const result = await this.createWikiProposal({
+            title: input.title, content: input.content, source_refs: input.sourceRefs,
+            provenance: { kind: "generated_local", summary: "Applied from reflection suggestion.", verified: false }
+          });
+          return { resource: result.resource, ref: result.operation.result_ref!, rollbackPoint: result.rollbackPoint };
+        },
+        createSkillTarget: async (input) => {
+          const result = await this.createSkillCandidate({
+            title: input.title, description: summarize(input.content), content: input.content,
+            tags: ["reflection"], source_refs: input.sourceRefs,
+            provenance_detail: { kind: "generated_local", summary: "Applied from reflection suggestion.", verified: false }
+          });
+          return { resource: result.resource, ref: result.operation.result_ref!, rollbackPoint: result.rollbackPoint };
+        },
+        createReflectionRollback: (operation, refs, after) => this.createRollbackPoint(operation as OperationRecord, refs, {}, after),
+        now: () => nowIso()
+      },
+      rollback: {
+        get: (id) => this.store.getRollbackPoint(id),
+        resolve: (value) => this.resolveWorkspacePath(value),
+        read: (value) => readFile(value, "utf8").catch(() => undefined),
+        write: (value, content) => writeFile(value, content),
+        remove: (value) => rm(value, { force: true }),
+        ensureParent: (value) => mkdir(path.dirname(value), { recursive: true }).then(() => undefined),
+        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
+        runMutation: (input) => runWebMutation(input),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs, before, after),
+        fileRef: (value) => fileRef(value),
+        requestError: (code, message) => new RuntimeRequestError(code, message)
+      },
+      tools: {
+        executeSandbox: (context, input) => this.executeSandboxDomainOperation(context, input),
+        callMcp: (context, input) => this.executeMcpDomainOperation(context, input)
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.clientEventDomainService = new ClientEventDomainService({
+      events: {
+        acknowledge: (eventId) => this.store.ackClientEvent(eventId),
+        deliver: (eventId) => this.store.markClientEventDelivered(eventId),
+        expire: (now) => this.store.expireClientEvents({ now }),
+        fail: (eventId, errorCode) => this.store.failClientEvent(eventId, errorCode),
+        save: (event: ClientEventRecord) => this.store.saveClientEvent(event)
+      },
+      notFoundError: () => new RuntimeRequestError("not_found", "client_event_not_found")
+    });
+    this.gatewayDomainService = new GatewayDomainService({
+      gateway: {
+        expireConcurrencyLocks: (now) => this.store.expireGatewayConcurrencyLocks(now),
+        routeInbound: (input) => this.gatewayDomainService.executeInbound({
+          ...input,
+          channel: gatewayChannelPayload(input.channel),
+          input_locale: supportedLocalePayload(input.input_locale),
+          output_locale: supportedLocalePayload(input.output_locale)
+        }),
+        saveMcpConfig: (record) => this.store.saveGatewayMcpConfig(record),
+        savePairingPolicy: (record) => this.saveGatewayPairingPolicy(record),
+        saveRoutingPolicy: (record) => this.saveGatewayRoutingPolicy(record),
+        deleteSandbox: (id) => this.deleteGatewaySandboxInstance(id),
+        recreateSandbox: (id) => this.recreateGatewaySandboxInstance(id),
+        syncSandbox: (id, input) => this.syncGatewaySandboxWorkspace(id, input),
+        repairState: (input) => this.repairGatewayState(input)
+      },
+      pairing: {
+        get: (id) => this.store.getGatewayPairing(id),
+        save: (record) => this.store.saveGatewayPairing(record),
+        expireAll: (now) => this.store.expireGatewayPairings(now),
+        emitUpdated: async (record) => { await this.emit("gateway.pairing.updated", record); }
+      },
+      inbound: {
+        expirePairings: () => this.expireGatewayPairings(),
+        getRoutingPolicy: (channel) => this.getGatewayRoutingPolicy(channel),
+        getPairingPolicy: (channel) => this.getGatewayPairingPolicy(channel),
+        saveInbound: (record) => this.store.saveGatewayInboundMessage(record),
+        emit: async (name, payload) => { await this.emit(
+          name as Parameters<AgentRuntime["emit"]>[0],
+          payload as Parameters<AgentRuntime["emit"]>[1]
+        ); },
+        findDuplicate: (input) => this.findRecentGatewayInboundDuplicate(input.channel, input.sourceIdentity, input.body, input.windowMs, input.externalMessageId),
+        isRateLimited: (input) => this.isGatewayRateLimited(input.channel, input.sourceIdentity, input.windowMs, input.maxMessages),
+        findPairing: (input) => this.store.findGatewayPairing(input),
+        getPairing: (id) => this.store.getGatewayPairing(id),
+        savePairing: (record) => this.store.saveGatewayPairing(record),
+        saveBoundaryPolicy: (policy) => this.store.saveGatewayBoundaryPolicy(policy),
+        acquireLock: (policy, inbound) => this.acquireGatewayConcurrencyLock(policy, inbound),
+        releaseLock: (lockKey) => this.store.releaseGatewayConcurrencyLock(lockKey),
+        ensureSession: (context, title) => this.ensureSessionForContext(context, title),
+        runChat: (input) => this.runChatTurn({ sessionId: input.sessionId, content: input.body, backend_id: input.backendId,
+          input_locale: input.inputLocale as SupportedLocale | undefined, output_locale: input.outputLocale as SupportedLocale | undefined,
+          metadata: input.metadata, gateway_context: input.context, gateway_boundary_policy: input.boundaryPolicy }),
+        enqueueDeliveries: (input) => this.enqueueGatewayReplyDeliveries({ ...input, chat: input.chat as RunChatTurnResult }),
+        errorMessage: (error) => safeRuntimeErrorMessage(error, "gateway_inbound_failed"),
+        conflictError: (message) => new RuntimeRequestError("conflict", message)
+      },
+      conflictError: (message) => new RuntimeRequestError("conflict", message),
+      notFoundError: (message) => new RuntimeRequestError("not_found", message)
+    });
+    this.wikiDomainService = new WikiDomainService({
+      wiki: {
+        get: (id) => this.store.getWiki(id),
+        readContent: (id) => this.store.readWikiContent(id),
+        save: (record, content) => this.store.saveWikiPage(record, content),
+        update: (input) => this.store.updateWikiPage(input),
+        setState: (id, state) => this.store.setWikiState(id, state),
+        reindex: () => this.store.reindexWiki(),
+        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
+        runMutation: (input) => runWebMutation(input),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs, before, after),
+        requestError: (code, message) => new RuntimeRequestError(code, message)
+      },
+      conflictError: (message) => new RuntimeRequestError("conflict", message)
+    });
+    this.automationDomainService = new AutomationDomainService({
+      automation: {
+        releaseLock: (jobId, now) => this.store.releaseAutomationJobLock(jobId, now),
+        requeue: (jobId, nextRunAt) => this.store.requeueAutomationJob(jobId, { nextRunAt }),
+        getJob: (jobId) => this.store.getAutomationJob(jobId),
+        acquireLock: (jobId, input) => this.store.acquireAutomationJobLock(jobId, input),
+        runJob: (job, now) => this.automationDomainService.execute(job, now)
+      },
+      mutation: {
+        saveJob: (job) => this.store.saveAutomationJob(job),
+        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
+        runMutation: (input) => runWebMutation(input),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs, before, after),
+        ref: (job) => automationJobRef(job),
+        contract: (id) => requireDomainCommandEntry(id)
+      },
+      execution: {
+        createRun: (input) => this.store.createAutomationRun(input),
+        updateRun: (record) => this.store.updateAutomationRun(record),
+        ensureSession: (context, title) => this.ensureSessionForContext(context, title),
+        createEnvelope: (context, content) => createGatewayEnvelope(context, content),
+        runMutation: <T>(input: RecordedMutationInput<T>) => this.runRecordedMutation<T>(input),
+        reindexWiki: () => this.store.reindexWiki(),
+        runCurator: () => this.learningDomainService.executeCurator() as Promise<ReflectionRuntimeResult>,
+        runMemoryReview: (session) => this.systemDomainService.runScheduledReflection(session as SessionRecord) as Promise<ReflectionRuntimeResult>,
+        runEvaluation: () => this.learningDomainService.executeEvaluation() as Promise<ReflectionRuntimeResult>,
+        runTranslation: (job, session, context) => this.runResourceTranslationJob(job, session as SessionRecord, context),
+        runCollectionTrigger: (job) => this.collectionDomainService.executeTriggerJob(job),
+        runInstruction: (job, session, context) => this.runAutomationInstructionJob(job, session as SessionRecord, context),
+        errorMessage: (error) => safeRuntimeErrorMessage(error),
+        retryAt: (failureCount) => nextRetryAt(failureCount)
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.generatedSurfaceDomainService = new GeneratedSurfaceDomainService({
+      surfaces: {
+        getSurface: (id) => this.store.getGeneratedSurface(id),
+        getRevision: (id) => this.store.getGeneratedSurfaceRevision(id),
+        readBundle: (id) => this.store.readGeneratedSurfaceBundle(id),
+        saveRevision: (input) => this.store.saveGeneratedSurfaceRevision(input),
+        saveInteraction: (record) => this.store.saveSurfaceInteraction(record),
+        updateState: (id, state) => this.store.updateGeneratedSurfaceState(id, state),
+        dispatchCommand: (input) => this.runDomainCommand(input)
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.skillDomainService = new SkillDomainService({
+      optimization: {
+        repoRoot: () => path.resolve(this.workspaceOptions.repoRoot ?? process.cwd()),
+        getSkill: (id) => this.store.getSkill(id),
+        readMarkdown: (id) => this.store.readSkillMarkdown(id),
+        listUses: (input) => this.store.listLearningResourceUses(input),
+        getBackendRun: (id) => this.store.getBackendRun(id),
+        getSession: (id) => this.store.getSession(id),
+        acquireLock: (input) => this.store.acquireSkillOptimizationLock(input),
+        getLock: (skillId) => this.store.getSkillOptimizationLock(skillId),
+        releaseLock: (input) => this.store.releaseSkillOptimizationLock(input),
+        saveDataset: (record) => this.store.saveSkillOptimizationDataset(record),
+        saveObjective: (record) => this.store.saveObjective(record),
+        getObjective: (id) => this.store.getObjective(id),
+        updateObjective: (record) => this.store.updateObjective(record),
+        saveWorkItem: (record) => this.store.saveWorkItem(record),
+        getWorkItem: (id) => this.store.getWorkItem(id),
+        claimWorkItem: (input) => this.store.claimWorkItem(input),
+        completeWorkItem: (input) => this.store.completeWorkItem(input),
+        failWorkItem: (input) => this.store.failWorkItem(input),
+        getRun: (id) => this.store.getSkillOptimizationRun(id),
+        saveRun: (record) => this.store.saveSkillOptimizationRun(record),
+        getCandidate: (id) => this.store.getOptimizationCandidate(id),
+        saveCandidate: (record) => this.store.saveOptimizationCandidate(record),
+        saveEvaluation: (record) => this.store.saveOptimizationEvaluation(record),
+        getSnapshot: (id) => this.store.getSkillOptimizationSnapshot(id),
+        saveSnapshot: (record) => this.store.saveSkillOptimizationSnapshot(record),
+        listPromotions: () => this.store.listOptimizationPromotions(),
+        savePromotion: (record) => this.store.saveOptimizationPromotion(record),
+        replaceContentIfUnchanged: (input) => this.store.replaceSkillContentIfUnchanged(input),
+        savePresentations: (input) => this.saveSkillOptimizationPresentations(input),
+        hostComplete: async (input) => {
+          if (!this.provider) throw new RuntimeRequestError("provider_not_configured", "GEPAのHost LLMが未設定です。");
+          const session = input.sessionId ? await this.store.getSession(input.sessionId) : undefined;
+          const content = input.messages.map((message) => `${message.role}: ${message.content}`).join("\n\n").trim();
+          const output = await this.generateProviderOutput({
+            envelope: createGatewayEnvelope(webGatewayContext, content || "GEPA候補を改善してください。", session?.ui_locale ?? "ja", session?.output_locale ?? "ja"),
+            activeMemory: [], knowledgeWiki: [], collectionNotes: [], selectedSkills: [], sessionSearch: [],
+            availableTools: [], recentMessages: [], temporaryContext: []
+          });
+          if (!output.content.trim()) throw new Error("gepa_host_empty_response");
+          return { content: output.content };
+        },
+        requestError: (code, message) => new RuntimeRequestError(code, message),
+        errorMessage: (error, fallback) => safeRuntimeErrorMessage(error, fallback)
+      },
+      queries: {
+        getSkill: (id) => this.store.getSkill(id),
+        getRun: (id) => this.store.getBackendRun(id),
+        readSupportFile: (input) => this.store.readSkillSupportFile(input),
+        readMarkdown: (id) => this.store.readSkillMarkdown(id),
+        listSupportFiles: (id) => this.store.listSkillSupportFiles(id)
+      },
+      usage: {
+        listUses: (input) => this.store.listLearningResourceUses(input),
+        recordUse: (record) => this.store.recordLearningResourceUse(record),
+        incrementSkillUsage: (input) => this.store.recordSkillUsage(input)
+      },
+      mutation: {
+        getSkill: (id) => this.store.getSkill(id),
+        readMarkdown: (id) => this.store.readSkillMarkdown(id),
+        patchSkill: (input) => this.store.patchSkill(input),
+        updateState: (id, state) => this.store.updateSkillState(id, state),
+        saveMarkdown: (input) => this.store.saveSkillMarkdown(input),
+        listSupportFiles: (id) => this.store.listSkillSupportFiles(id),
+        writeSupportFile: (input) => this.store.writeSkillSupportFile(input),
+        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
+        runMutation: (input) => runWebMutation(input),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs as ResourceRef[], before, after),
+        requestError: (code, message) => new RuntimeRequestError(code, message),
+        contract: (id) => requireDomainCommandEntry(id)
+      },
+      conflictError: (message) => new RuntimeRequestError("conflict", message)
+    });
+    this.conversationDomainService = new ConversationDomainService({
+      createSession: (input) => this.createSession(input),
+      runChatTurn: (input) => this.runChatTurn(input),
+      reindexSessionSearch: () => this.store.reindexSessionSearch(),
+      conflict: (message) => new RuntimeRequestError("conflict", message)
+    });
+    this.fileDomainService = new FileDomainService({
+      resolve: (input) => this.resolveWorkspacePath(input),
+      readText: (absolutePath) => readFile(absolutePath, "utf8"),
+      readBytes: (absolutePath) => readFile(absolutePath),
+      stat: async (absolutePath) => { const info = await stat(absolutePath); return { size: info.size, modifiedAt: info.mtime.toISOString() }; },
+      list: (workspacePath) => listWorkspaceDirectory(workspacePath.absolutePath, workspacePath.relativePath),
+      listArtifacts: () => this.store.listArtifacts(),
+      listChanges: () => this.store.listWorkspaceChanges()
+    }, {
+      readTextIfExists: (absolutePath) => readFile(absolutePath, "utf8").catch(() => undefined),
+      writeText: (absolutePath, content) => writeFile(absolutePath, content),
+      ensureParent: (absolutePath) => mkdir(path.dirname(absolutePath), { recursive: true }).then(() => undefined),
+      reindexCollections: () => this.store.reindexCollections(),
+      isManagedCollectionPath: (relativePath) => isManagedCollectionWorkspacePath(relativePath)
+    }, {
+      ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+      createEnvelope: (_session, content) => createGatewayEnvelope(webGatewayContext, content),
+      runMutation: (input) => this.runRecordedMutation({ ...input, context: webGatewayContext }),
+      createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.browserDomainService = new BrowserDomainService({
+      readPage: (url) => readBrowserPage(url)
+    }, {
+      interact: async (input) => {
+        const adapter = this.workspaceOptions.browserAdapter;
+        if (!adapter) throw new RuntimeRequestError("provider_not_configured", "browser_interact_adapter_unavailable");
+        return { adapterId: adapter.id, ...(await adapter.interact(input)) };
+      },
+      screenshot: async (input) => {
+        const adapter = this.workspaceOptions.browserAdapter;
+        if (!adapter) throw new RuntimeRequestError("provider_not_configured", "browser_screenshot_adapter_unavailable");
+        const capture = await adapter.screenshot(input);
+        return { adapterId: adapter.id, bytes: capture.bytes, mimeType: capture.mime_type, width: capture.width, height: capture.height };
+      }
+    }, {
+      resolve: (input) => this.resolveWorkspacePath(input),
+      ensureParent: (absolutePath) => mkdir(path.dirname(absolutePath), { recursive: true }).then(() => undefined),
+      readBytesIfExists: (absolutePath) => readFile(absolutePath).catch(() => undefined),
+      readTextIfExists: (absolutePath) => readFile(absolutePath, "utf8").catch(() => undefined),
+      write: (absolutePath, content) => writeFile(absolutePath, content)
+    }, {
+      ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+      createEnvelope: (_session, content) => createGatewayEnvelope(webGatewayContext, content),
+      runMutation: (input) => this.runRecordedMutation({ ...input, context: webGatewayContext }),
+      createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
+      stableHash: (value) => stableHash(value)
+    });
+    this.externalSendDomainService = new ExternalSendDomainService({
+      get: (id) => this.store.getExternalSend(id),
+      save: (record) => this.store.saveExternalSend(record),
+      dispatch: (record, dryRun) => dispatchExternalSendAdapter(record, dryRun)
+    }, {
+      ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+      createEnvelope: (_session, content) => createGatewayEnvelope(webGatewayContext, content),
+      runMutation: (input) => this.runRecordedMutation({ ...input, context: webGatewayContext }),
+      createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
+      createId: () => createId("send"), now: () => nowIso(),
+      defaultDryRun: () => process.env.SAMURAI_EXTERNAL_SEND_DISPATCH !== "true",
+      notFound: (message) => new RuntimeRequestError("not_found", message)
+    });
+    this.collectionDomainService = new CollectionDomainService({
+      actions: {
+        getSession: (id) => this.store.getSession(id),
+        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+        resolveRecordData: (schema, record) => this.collectionActionResolvedRecordData(schema, record as CollectionRecordWithFilePath),
+        runInstruction: async (input) => {
+          const chat = await this.runChatTurn({
+            sessionId: input.session.id, content: input.prompt, backend_id: input.backendId,
+            input_locale: input.session.ui_locale as SupportedLocale, output_locale: input.session.output_locale as SupportedLocale,
+            metadata: input.metadata, gateway_context: webGatewayContext
+          });
+          return { ...chat, customView: input.customView ? collectionActionCustomViewOutput(chat) : undefined };
+        },
+        runPlugin: (input) => this.pluginRegistry.executeAction(input.catalogActionId, input.payload, input.context)
+      },
+      queries: {
+        getSchema: (id) => this.store.getCollectionSchema(id),
+        listRecords: (schema, input) => this.collectionManageGetItems(schema, input),
+        schemaDocs: () => collectionSchemaDocs(),
+        presentView: (input) => this.presentCollectionView(input)
+      },
+      mutation: {
+        getSchema: (id) => this.store.getCollectionSchema(id),
+        saveSchema: (schema) => this.store.saveCollectionSchema(schema),
+        updateSchema: (schema) => this.store.updateCollectionSchema(schema),
+        saveRecord: (record) => this.store.saveCollectionRecord(record),
+        getRecord: (collectionId, recordId) => this.store.getCollectionRecord(collectionId, recordId),
+        deleteRecord: (collectionId, recordId) => this.store.deleteCollectionRecord(collectionId, recordId),
+        applyRecordPatch: (input) => this.store.applyCollectionRecordPatch(input),
+        mapPatchError: (error) => error instanceof CollectionRecordVersionConflictError
+          ? new RuntimeRequestError("conflict", error.message, resourceVersionConflictPayload(error))
+          : error instanceof Error ? error : new Error(String(error)),
+        reindex: () => this.store.reindexCollections(),
+        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
+        runMutation: <T, Extra extends Record<string, unknown>>(input: Omit<RecordedMutationInput<T, Extra>, "context">) => runWebMutation<T, Extra>(input),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs as ResourceRef[], before, after),
+        contract: (id) => requireDomainCommandEntry(id),
+        queueTrigger: async (input) => { await this.queueCollectionTriggerAutomations(input); }
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.memoryDomainService = new MemoryDomainService({
+      memories: {
+        getSession: (id) => this.store.getSession(id),
+        createSession: (input) => this.createSession(input),
+        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+        createEnvelope: (input) => {
+          const context = { ...webGatewayContext, session_key: input.session.session_key };
+          const envelope = createGatewayEnvelope(context, input.content, input.inputLocale, input.outputLocale, input.metadata);
+          return input.envelopeId ? { ...envelope, id: input.envelopeId } : envelope;
+        },
+        writeSessionMemory: (envelope, content) => createSessionMemory(this.store, envelope, content),
+        writeTopicMemory: (envelope, topicKind, content) => createTopicMemory(this.store, envelope, topicKind, content),
+        memoryRef: (memory) => memoryRef(memory),
+        createRollback: (operation, refs, after) => this.createRollbackPoint(operation, refs, {}, after),
+        emitCandidate: async (memory) => { await this.emit("memory.candidate.created", memory); },
+        runMutation: (input) => this.runRecordedMutation<MemoryFrontmatter>({
+          ...input,
+          context: { ...webGatewayContext, session_key: input.session.session_key }
+        })
+      },
+      archive: {
+        getMemory: (id) => this.store.getMemory(id),
+        listMemoryForSession: (sessionId) => this.store.listMemoryForSession(sessionId, { includeArchived: true }),
+        archive: (id) => this.store.archiveMemory(id),
+        saveOperation: (operation) => this.store.saveOperation(operation),
+        updateOperation: (operation) => this.store.updateOperation(operation),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
+        rebuildActivity: () => this.rebuildActivity(),
+        emitOperation: async (operation) => { await this.emit("operation.created", operation); },
+        capabilityId: proposalCapabilityManifest.id
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.artifactDomainService = new ArtifactDomainService({
+      contract: (id) => requireDomainCommandEntry(id as Parameters<typeof requireDomainCommandEntry>[0]),
+      createSession: (input) => this.createSession(input),
+      getSession: (id) => this.store.getSession(id),
+      ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
+      createEnvelope: (session, content, inputLocale, outputLocale, metadata, envelopeId) => {
+        const context = { ...webGatewayContext, session_key: session.session_key };
+        const created = createGatewayEnvelope(context, content, inputLocale, outputLocale, metadata);
+        return envelopeId ? { ...created, id: envelopeId } : created;
+      },
+      runMutation: <TExtra extends Record<string, unknown>>(input: ArtifactMutationInput<TExtra>) => this.runRecordedMutation<ArtifactRecord, TExtra>({
+        ...input, context: { ...webGatewayContext, session_key: input.session.session_key },
+        execute: async (operation) => {
+          const result = await input.execute(operation);
+          const { extra, ...base } = result;
+          return { ...base, ...extra };
+        }
+      }),
+      runSurface: async (input): Promise<ArtifactSurfaceResult> => {
+        const result = await this.runStructuredSurfaceOperation({ ...input, id: typeof input.id === "string" && input.id ? input.id : createId("surface") } as StructuredSurfaceOperation);
+        const operation = jsonSafe(result.operation);
+        if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new Error("surface_operation_not_json_object");
+        return { ...result, operation };
+      },
+      getArtifact: (id) => this.store.getArtifact(id),
+      readContent: (id) => this.store.readArtifactContent(id),
+      getRevision: (id) => this.store.getArtifactRevision(id),
+      readRevisionContent: (id) => this.store.readArtifactRevisionContent(id),
+      createRevision: (input) => this.store.createArtifactRevision(input),
+      repairRevisionSource: (id) => this.store.repairArtifactRevisionSource(id),
+      createDraft: (input) => createArtifactDraft({ store: this.store, ...input }),
+      createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
+      exportPdf: async (input) => {
+        const adapter = this.workspaceOptions.pdfExportAdapter;
+        if (!adapter) throw new RuntimeRequestError("provider_not_configured", "pdf_export_adapter_unavailable");
+        return { adapterId: adapter.id, bytes: await adapter.export({ title: input.title, content: input.content, source_artifact: input.source }) };
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.domainOperationRegistry = new DomainOperationRegistry(createDomainOperationPorts({
+      artifactDomainService: this.artifactDomainService,
+      automationDomainService: this.automationDomainService,
+      browserDomainService: this.browserDomainService,
+      clientEventDomainService: this.clientEventDomainService,
+      collectionDomainService: this.collectionDomainService,
+      conversationDomainService: this.conversationDomainService,
+      executionDomainService: this.executionDomainService,
+      externalSendDomainService: this.externalSendDomainService,
+      fileDomainService: this.fileDomainService,
+      gatewayDomainService: this.gatewayDomainService,
+      generatedSurfaceDomainService: this.generatedSurfaceDomainService,
+      learningDomainService: this.learningDomainService,
+      memoryDomainService: this.memoryDomainService,
+      objectiveDomainService: this.objectiveDomainService,
+      pluginDomainService: this.pluginDomainService,
+      presentationDomainService: this.presentationDomainService,
+      settingsDomainService: this.settingsDomainService,
+      skillDomainService: this.skillDomainService,
+      systemDomainService: this.systemDomainService,
+      translationDomainService: this.translationDomainService,
+      wikiDomainService: this.wikiDomainService
+    }));
     this.externalAssistProviders = normalizeExternalAssistProviders(externalAssistProvider);
     this.stdioMcpProcessPool = createPooledStdioMcpToolAdapter({
       resolveConfig: async (input) => {
@@ -867,7 +1446,12 @@ export class AgentRuntime {
   }
 
   async shutdownMcpProcessPool(): Promise<void> {
+    await Promise.allSettled([...this.backgroundTasks]);
     await this.stdioMcpProcessPool.closeAll();
+  }
+
+  getDomainOperationBindingIdentity(id: string) {
+    return this.domainOperationRegistry.bindingIdentity(id);
   }
 
   getMcpProcessPoolStats(): ReturnType<PooledMcpToolAdapter["stats"]> {
@@ -944,10 +1528,11 @@ export class AgentRuntime {
     report: ContextPreview["active_memory_report"];
   }> {
     const result = await retrieveActiveMemoryWithReport(this.store, input.query ?? "");
-    return {
+    const output = {
       active_memory: result.candidates.map(activeMemoryPreviewEntry),
       report: result.report
     };
+    return output;
   }
 
   async previewKnowledgeWiki(input: { query?: string }): Promise<{
@@ -1006,644 +1591,19 @@ export class AgentRuntime {
   }
 
   async runReflection(input: { sessionId: string; sourceRunId?: string }): Promise<ReflectionRuntimeResult> {
-    const session = await this.store.getSession(input.sessionId);
-    if (!session) {
-      throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
-    }
-    const messages = await this.store.listMessages(session.id);
-    const userMessage = [...messages].reverse().find((message) => message.role === "user");
-    const agentMessage = [...messages].reverse().find((message) => message.role === "agent");
-    const toolRuns = await this.store.listToolRuns(input.sourceRunId ? { runId: input.sourceRunId } : {});
-    const workspaceChanges = await this.store.listWorkspaceChanges(session.id);
-    return this.runReflectionForCompletedTurn({
-      kind: "manual",
-      session,
-      sourceRunId: input.sourceRunId,
-      userMessage,
-      agentMessage,
-      backendEvents: await this.store.listBackendEvents(input.sourceRunId ? { runId: input.sourceRunId } : { sessionId: session.id }),
-      workspaceChanges,
-      toolRuns,
-      transcriptMessages: messages,
-      artifacts: await this.loadReflectionArtifacts({
-        sessionId: session.id,
-        sourceRunId: input.sourceRunId,
-        workspaceChanges
-      })
-    });
+    return this.systemDomainService.runReflectionInput(input) as Promise<ReflectionRuntimeResult>;
   }
 
   async runCuratorJob(input: { respectIdleGate?: boolean } = {}): Promise<ReflectionRuntimeResult> {
-    const session = await this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled curator");
-    const [curatorState, memories, skills, skillUsage, wikiPages, backendRuns, learningEvaluations, reflectionRuns] = await Promise.all([
-      this.store.getCuratorState(),
-      this.store.listMemory(),
-      this.store.listSkills(),
-      this.store.listSkillUsage(),
-      this.store.listWiki({ activeOnly: false }),
-      this.store.listBackendRuns(),
-      this.store.listLearningEvaluations(),
-      this.store.listReflectionRuns()
-    ]);
-    const now = nowIso();
-    const nowMs = Date.parse(now);
-    const staleCutoffMs = nowMs - curatorState.stale_after_days * 24 * 60 * 60 * 1000;
-    const archiveCutoffMs = nowMs - curatorState.archive_after_days * 24 * 60 * 60 * 1000;
-    const usageBySkill = new Map(skillUsage.map((usage) => [usage.skill_id, usage]));
-    const latestEvaluationRun = reflectionRuns.find((run) => run.kind === "evaluation");
-    const evaluationFailed = latestEvaluationRun?.status === "failed";
-    const skillLifecycleDecisions = new Map(curateSkills(skills.map((skill) => {
-      const usage = usageBySkill.get(skill.id);
-      return {
-        id: skill.id,
-        state: skill.state,
-        owner_pinned: skill.state === "pinned" || skill.frontmatter.owner_pinned,
-        usage_count: usage?.use_count ?? 0,
-        last_activity_at: usage?.last_used_at ?? skill.frontmatter.last_reviewed_at,
-        evaluations: learningEvaluations.filter((evaluation) => evaluation.learning_resource_ref.id === skill.id || evaluation.learning_resource_ref.id.startsWith(`${skill.id}:`))
-      };
-    }), {
-      now,
-      stale_after_days: curatorState.stale_after_days,
-      archive_after_days: curatorState.archive_after_days
-    }).map((decision) => [decision.skill_id, decision]));
-    let reflectionRun: ReflectionRunRecord = {
-      id: createId("reflection"),
-      kind: "curator",
-      session_id: session.id,
-      status: "started",
-      input_summary: `Curate ${memories.length} memory item(s), ${skills.length} skill item(s), ${skillUsage.length} skill usage row(s), and ${wikiPages.length} wiki page(s).`,
-      started_at: now
-    };
-    reflectionRun = await this.store.createReflectionRun(reflectionRun);
-    const snapshot = await this.store.createLearningSnapshot(reflectionRun.id);
-    const suggestions: ReflectionSuggestionRecord[] = [];
-    const skillActions: CuratorLifecycleReport["skill_actions"] = [];
-    const protectedSkills: CuratorLifecycleReport["protected_skills"] = [];
-    const keepCandidates: CuratorReviewReport["keep_candidates"] = [];
-    const memoryMergeGroups: CuratorReviewReport["memory_merge_groups"] = [];
-    const skillConsolidationGroups: CuratorReviewReport["skill_consolidation_groups"] = [];
-    const wikiPatchProposals: CuratorReviewReport["wiki_patch_proposals"] = [];
-    const archiveCandidates: CuratorReviewReport["archive_candidates"] = [];
-    const latestActivityMs = latestBackendRunActivityMs(backendRuns);
-    const minIdleMs = curatorState.min_idle_hours * 60 * 60 * 1000;
-    if (input.respectIdleGate && minIdleMs > 0 && latestActivityMs && nowMs - latestActivityMs < minIdleMs) {
-      const idleSummary = `Curator skipped because workspace activity is newer than ${curatorState.min_idle_hours} idle hour(s).`;
-      reflectionRun = await this.store.updateReflectionRun({
-        ...reflectionRun,
-        status: "completed",
-        output_summary: idleSummary,
-        completed_at: nowIso()
-      });
-      await this.store.saveCuratorState({
-        last_run_at: now,
-        last_run_summary: idleSummary,
-        run_count: curatorState.run_count + 1
-      });
-      return {
-        reflectionRun,
-        suggestions,
-        curatorReport: buildCuratorLifecycleReport({
-          now,
-          dryRun: true,
-          paused: curatorState.paused,
-          skippedReason: idleSummary,
-          curatorState,
-          memories,
-          wikiPages,
-          skills,
-          skillUsage,
-          suggestions,
-          skillActions,
-          protectedSkills
-        }),
-        curatorReviewReport: buildCuratorReviewReport({
-          now,
-          dryRun: true,
-          keepCandidates,
-          memoryMergeGroups,
-          skillConsolidationGroups,
-          wikiPatchProposals,
-          archiveCandidates
-        })
-      };
-    }
-    if (curatorState.paused) {
-      reflectionRun = await this.store.updateReflectionRun({
-        ...reflectionRun,
-        status: "completed",
-        output_summary: "Curator is paused.",
-        completed_at: nowIso()
-      });
-      await this.store.saveCuratorState({
-        last_run_at: now,
-        last_run_summary: "Curator is paused.",
-        run_count: curatorState.run_count + 1
-      });
-      return {
-        reflectionRun,
-        suggestions,
-        curatorReport: buildCuratorLifecycleReport({
-          now,
-          dryRun: true,
-          paused: true,
-          skippedReason: "Curator is paused.",
-          curatorState,
-          memories,
-          wikiPages,
-          skills,
-          skillUsage,
-          suggestions,
-          skillActions,
-          protectedSkills
-        }),
-        curatorReviewReport: buildCuratorReviewReport({
-          now,
-          dryRun: true,
-          keepCandidates,
-          memoryMergeGroups,
-          skillConsolidationGroups,
-          wikiPatchProposals,
-          archiveCandidates
-        })
-      };
-    }
-    const memoryInputs = await Promise.all(memories.map(async (memory) => ({
-      id: memory.id,
-      topic: memory.topic,
-      state: memory.state,
-      confidence: memory.confidence,
-      updated_at: memory.updated_at,
-      content: (await this.store.readMemoryContent(memory.id)) ?? ""
-    })));
-    const memoryDecisions = curateMemory(memoryInputs, { now, archive_after_days: curatorState.archive_after_days });
-    for (const decision of memoryDecisions) {
-      const relatedMemories = decision.resource_ids.map((id) => memories.find((memory) => memory.id === id)).filter((memory): memory is MemoryFrontmatter & { file_path: string } => Boolean(memory));
-      if (!relatedMemories.length) continue;
-      const suggestionId = createId("suggestion");
-      if (decision.kind === "merge") {
-        memoryMergeGroups.push({ topic: relatedMemories[0]!.topic, memory_ids: decision.resource_ids, reason: decision.reason, suggestion_id: suggestionId });
-      }
-      suggestions.push({
-        id: suggestionId,
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: decision.kind === "merge" ? "conflict" : "memory_patch",
-        status: "proposed",
-        title: decision.kind === "merge" ? `Merge or resolve memory topic: ${relatedMemories[0]!.topic}` : `Review memory: ${relatedMemories[0]!.topic}`,
-        content: `${decision.reason}\n\n${relatedMemories.map((memory) => `- ${memory.id}: ${memory.state} / confidence ${memory.confidence}`).join("\n")}`,
-        target_ref: decision.kind === "merge" ? undefined : memoryRef(relatedMemories[0]!),
-        source_refs: relatedMemories.map(memoryRef),
-        confidence: decision.kind === "merge" ? 0.68 : 0.62,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    for (const wiki of wikiPages.filter((item) => item.state === "proposed" || (item.state === "active" && !item.provenance.verified)).slice(0, 20)) {
-      const suggestionId = createId("suggestion");
-      wikiPatchProposals.push({
-        wiki_id: wiki.id,
-        title: wiki.title,
-        reason: wiki.state === "proposed" ? "Proposed page needs accept/reject review." : "Active page is not verified.",
-        suggestion_id: suggestionId
-      });
-      suggestions.push({
-        id: suggestionId,
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: "knowledge_wiki",
-        status: "proposed",
-        title: `Review Knowledge Wiki: ${wiki.title}`,
-        content: `Review this Knowledge Wiki page for acceptance, verification, or archival.\n\nState: ${wiki.state}\nVerified: ${wiki.provenance.verified ? "yes" : "no"}\n\n${(await this.store.readWikiContent(wiki.id)) ?? ""}`,
-        target_ref: wikiRef(wiki),
-        source_refs: [wikiRef(wiki)],
-        confidence: wiki.state === "proposed" ? 0.64 : 0.7,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    for (const skill of skills.filter((item) => item.state !== "archived").slice(0, 50)) {
-      const usage = usageBySkill.get(skill.id);
-      const lastActivityAt = usage?.last_used_at ?? skill.frontmatter.last_reviewed_at;
-      const lastActivityMs = lastActivityAt ? Date.parse(lastActivityAt) : Number.NaN;
-      const inactiveSince = Number.isFinite(lastActivityMs) ? (lastActivityAt ?? "unknown") : "never";
-      const pinned = skill.state === "pinned" || skill.frontmatter.owner_pinned;
-      let curatorAction: "review" | "mark_stale" | "archive" | "reactivate" | undefined;
-      if (pinned) {
-        protectedSkills.push({
-          skill_id: skill.id,
-          title: skill.title,
-          state: skill.state,
-          reason: "owner_pinned"
-        });
-        keepCandidates.push({
-          kind: "skill",
-          id: skill.id,
-          title: skill.title,
-          reason: "Owner pinned Skill is protected from curator lifecycle changes."
-        });
-        continue;
-      }
-      const lifecycleDecision = skillLifecycleDecisions.get(skill.id) ?? { decision: "keep" as const, reason: "no_curator_decision" };
-      if (evaluationFailed) {
-        keepCandidates.push({ kind: "skill", id: skill.id, title: skill.title, reason: "Latest Evaluation failed; lifecycle decision is on hold." });
-        continue;
-      }
-      if (lifecycleDecision.decision === "reactivate" || lifecycleDecision.decision === "archive" || lifecycleDecision.decision === "mark_stale" || lifecycleDecision.decision === "review") {
-        curatorAction = lifecycleDecision.decision;
-      } else if (lifecycleDecision.decision === "patch") {
-        curatorAction = "review";
-      } else {
-        keepCandidates.push({ kind: "skill", id: skill.id, title: skill.title, reason: lifecycleDecision.reason });
-      }
-      if (!curatorAction) {
-        if (usage?.last_used_at && Date.parse(usage.last_used_at) > staleCutoffMs) {
-          keepCandidates.push({
-            kind: "skill",
-            id: skill.id,
-            title: skill.title,
-            reason: "Recent usage keeps this Skill in normal selection."
-          });
-        }
-        continue;
-      }
-      const suggestionId = createId("suggestion");
-      const proposedState = proposedSkillStateForCuratorAction(curatorAction);
-      const actionReason = curatorActionReason({
-        action: curatorAction,
-        usageCount: usage?.use_count ?? 0,
-        inactiveSince,
-        staleAfterDays: curatorState.stale_after_days,
-        archiveAfterDays: curatorState.archive_after_days
-      });
-      skillActions.push({
-        skill_id: skill.id,
-        title: skill.title,
-        current_state: skill.state,
-        ...(proposedState ? { proposed_state: proposedState } : {}),
-        action: curatorAction,
-        reason: actionReason,
-        usage_count: usage?.use_count ?? 0,
-        ...(Number.isFinite(lastActivityMs) && lastActivityAt ? { last_activity_at: lastActivityAt } : {}),
-        owner_pinned: false,
-        suggestion_id: suggestionId
-      });
-      if (curatorAction === "archive") {
-        archiveCandidates.push({
-          kind: "skill",
-          id: skill.id,
-          title: skill.title,
-          reason: actionReason,
-          suggestion_id: suggestionId
-        });
-      }
-      suggestions.push({
-        id: suggestionId,
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: "skill_patch",
-        status: "proposed",
-        title: `Review skill: ${skill.title}`,
-        content: [
-          `Curator action: ${curatorAction}`,
-          proposedState ? `Proposed state: ${proposedState}` : "Proposed state: review_only",
-          `Reason: ${actionReason}`,
-          "",
-          `Skill: ${skill.id}`,
-          `State: ${skill.state}`,
-          `Usage count: ${usage?.use_count ?? 0}`,
-          `Last activity: ${inactiveSince}`,
-          `Stale threshold days: ${curatorState.stale_after_days}`,
-          `Archive threshold days: ${curatorState.archive_after_days}`,
-          "",
-          "This lifecycle decision is applied automatically after the pre-run snapshot.",
-          "",
-          (await this.store.readSkillMarkdown(skill.id)) ?? ""
-        ].join("\n"),
-        target_ref: skillRef(skill),
-        source_refs: [skillRef(skill)],
-        confidence: curatorAction === "archive" ? 0.72 : curatorAction === "mark_stale" ? 0.66 : 0.58,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    for (const group of buildSkillConsolidationGroups(skills)) {
-      const suggestionId = createId("suggestion");
-      skillConsolidationGroups.push({
-        group_key: group.groupKey,
-        skill_ids: group.skills.map((skill) => skill.id),
-        suggested_umbrella_title: group.suggestedTitle,
-        reason: group.reason,
-        suggestion_id: suggestionId
-      });
-      suggestions.push({
-        id: suggestionId,
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: "skill_patch",
-        status: "proposed",
-        title: `Consolidate skills: ${group.suggestedTitle}`,
-        content: [
-          "Curator review action: consolidate",
-          `Group key: ${group.groupKey}`,
-          `Suggested umbrella title: ${group.suggestedTitle}`,
-          `Reason: ${group.reason}`,
-          "",
-          "Candidate Skills:",
-          ...group.skills.map((skill) => `- ${skill.id}: ${skill.title} (${skill.state})`),
-          "",
-          "This narrowed candidate is consolidated automatically only when a configured consolidator returns a complete Skill-package mutation."
-        ].join("\n"),
-        source_refs: group.skills.map(skillRef),
-        confidence: 0.68,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    let appliedMutationCount = 0;
-    try {
-      for (const group of memoryMergeGroups) {
-        const [primaryId, ...duplicateIds] = group.memory_ids;
-        if (!primaryId || duplicateIds.length === 0) continue;
-        const contents = await Promise.all(group.memory_ids.map((id) => this.store.readMemoryContent(id)));
-        const mergedContent = [...new Set(contents.map((content) => content?.trim()).filter((content): content is string => Boolean(content)))].join("\n\n");
-        await this.store.replaceMemoryContent(primaryId, mergedContent);
-        for (const duplicateId of duplicateIds) await this.store.archiveMemory(duplicateId);
-        const suggestion = suggestions.find((item) => item.id === group.suggestion_id);
-        if (suggestion) suggestion.status = "applied";
-        appliedMutationCount += 1;
-      }
-      for (const decision of memoryDecisions.filter((item) => item.kind === "stale")) {
-        for (const memoryId of decision.resource_ids) await this.store.archiveMemory(memoryId);
-        const suggestion = suggestions.find((item) => item.target_ref?.id === decision.resource_ids[0] && item.content.startsWith(decision.reason));
-        if (suggestion) suggestion.status = "applied";
-        appliedMutationCount += decision.resource_ids.length;
-      }
-      for (const group of skillConsolidationGroups) {
-        const groupSkills = group.skill_ids.map((id) => skills.find((skill) => skill.id === id)).filter((skill): skill is SkillWithFilePath => Boolean(skill));
-        const packages = await Promise.all(groupSkills.map(async (skill) => ({
-          id: skill.id,
-          title: skill.title,
-          description: skill.description,
-          markdown: (await this.store.readSkillMarkdown(skill.id)) ?? "",
-          support_files: (await this.store.listSkillSupportFiles(skill.id)).map((file) => ({ path: file.path, content: file.content }))
-        })));
-        const consolidation = this.workspaceOptions.skillConsolidationRunner
-          ? await this.workspaceOptions.skillConsolidationRunner.consolidate({ group_key: group.group_key, packages })
-          : this.workspaceOptions.enableBackendBackgroundReview
-            ? await this.runSkillConsolidationWithBackend({ group_key: group.group_key, packages }, session)
-            : undefined;
-        if (!consolidation || !group.skill_ids.includes(consolidation.primary_skill_id)) continue;
-        await this.store.replaceSkillContent(consolidation.primary_skill_id, consolidation.markdown);
-        for (const file of consolidation.support_files) {
-          await this.store.writeSkillSupportFile({ skillId: consolidation.primary_skill_id, path: file.path, content: file.content });
-        }
-        for (const archiveId of consolidation.archive_skill_ids.filter((id) => id !== consolidation.primary_skill_id && group.skill_ids.includes(id))) {
-          await this.store.updateSkillState(archiveId, "archived");
-        }
-        const suggestion = suggestions.find((item) => item.id === group.suggestion_id);
-        if (suggestion) suggestion.status = "applied";
-        appliedMutationCount += 1;
-      }
-      for (const action of skillActions) {
-        if (action.action === "review") continue;
-        await this.applyCuratorSkillAction({ skillId: action.skill_id, action: action.action });
-        const suggestion = suggestions.find((item) => item.id === action.suggestion_id);
-        if (suggestion) suggestion.status = "applied";
-        appliedMutationCount += 1;
-      }
-    } catch (error) {
-      await this.store.restoreLearningSnapshot(snapshot.id);
-      await this.store.updateReflectionRun({
-        ...reflectionRun,
-        status: "failed",
-        error: `Curator restored ${snapshot.id}: ${errorMessage(error)}`,
-        completed_at: nowIso()
-      });
-      await this.store.saveLearningJobReport({
-        id: createId("learning_job_report"), job_kind: "curator", run_id: reflectionRun.id,
-        target_resource_count: memories.length + skills.length, mutation_count: appliedMutationCount,
-        archive_count: 0, restore_count: 1, patch_count: 0, merge_count: 0,
-        skipped_reasons: {}, evaluation_count: learningEvaluations.length, snapshot_id: snapshot.id,
-        duration_ms: Math.max(0, Date.now() - nowMs), failure: errorMessage(error), created_at: nowIso()
-      });
-      throw error;
-    }
-    for (const suggestion of suggestions) {
-      await this.store.saveReflectionSuggestion(suggestion);
-    }
-    reflectionRun = await this.store.updateReflectionRun({
-      ...reflectionRun,
-      status: "completed",
-      output_summary: `Curator evaluated ${suggestions.length} decision(s), applied ${appliedMutationCount}, snapshot ${snapshot.id}.`,
-      completed_at: nowIso()
-    });
-    await this.store.saveCuratorState({
-      last_run_at: now,
-      last_run_summary: reflectionRun.output_summary,
-      run_count: curatorState.run_count + 1
-    });
-    const appliedSuggestionIds = new Set(suggestions.filter((suggestion) => suggestion.status === "applied").map((suggestion) => suggestion.id));
-    await this.store.saveLearningJobReport({
-      id: createId("learning_job_report"), job_kind: "curator", run_id: reflectionRun.id,
-      target_resource_count: memories.length + skills.length,
-      mutation_count: appliedMutationCount,
-      archive_count: skillActions.filter((action) => action.action === "archive").length + memoryDecisions.filter((decision) => decision.kind === "stale").reduce((sum, decision) => sum + decision.resource_ids.length, 0),
-      restore_count: 0,
-      patch_count: skillActions.filter((action) => action.action === "review").length,
-      merge_count: [...memoryMergeGroups, ...skillConsolidationGroups].filter((group) => appliedSuggestionIds.has(group.suggestion_id ?? "")).length,
-      skipped_reasons: evaluationFailed ? { evaluation_failed_hold: skills.length } : {},
-      evaluation_count: learningEvaluations.length,
-      snapshot_id: snapshot.id,
-      duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(now)),
-      next_run_at: nextRunFromSchedule("weekly", Date.parse(now)),
-      created_at: nowIso()
-    });
-    return {
-      reflectionRun,
-      suggestions,
-      curatorReport: buildCuratorLifecycleReport({
-        now,
-        dryRun: false,
-        paused: false,
-        curatorState,
-        memories,
-        wikiPages,
-        skills,
-        skillUsage,
-        suggestions,
-        skillActions,
-        protectedSkills,
-        snapshotId: snapshot.id,
-        evaluationCount: learningEvaluations.length,
-        appliedMutationCount
-      }),
-      curatorReviewReport: buildCuratorReviewReport({
-        now,
-        dryRun: true,
-        keepCandidates,
-        memoryMergeGroups,
-        skillConsolidationGroups,
-        wikiPatchProposals,
-        archiveCandidates
-      })
-    };
+    return this.learningDomainService.executeCurator(input) as Promise<ReflectionRuntimeResult>;
   }
 
   async applyCuratorSkillAction(input: { skillId: string; action: Exclude<CuratorLifecycleAction, "review"> }): Promise<SkillRuntimeResult> {
-    const targetState = proposedSkillStateForCuratorAction(input.action);
-    if (!targetState) {
-      throw new RuntimeRequestError("conflict", "curator_review_has_no_state_transition");
-    }
-    const current = await this.store.getSkill(input.skillId);
-    if (!current) {
-      throw new RuntimeRequestError("not_found", `Skill not found: ${input.skillId}`);
-    }
-    if (current.state === "pinned" || current.frontmatter.owner_pinned) {
-      throw new RuntimeRequestError("conflict", "curator_skill_is_pinned");
-    }
-    const beforeMarkdown = await this.store.readSkillMarkdown(input.skillId);
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Apply curator skill lifecycle: ${input.action} ${current.title}`);
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "skill.lifecycle.apply",
-      proposedEffects: [`Set Skill ${current.title} state to ${targetState}.`],
-      targetResourceRefs: [skillRef(current)],
-      execute: async (operation) => {
-        const saved = await this.store.updateSkillState(input.skillId, targetState);
-        if (!saved) {
-          throw new RuntimeRequestError("not_found", `Skill not found: ${input.skillId}`);
-        }
-        const ref = skillRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { skill: current as unknown as JsonValue, markdown: beforeMarkdown ?? "" },
-          { skill: saved as unknown as JsonValue, action: input.action, target_state: targetState }
-        );
-        return {
-          resource: saved,
-          ref,
-          rollbackPoint,
-          summary: `Applied curator lifecycle ${input.action} to Skill ${saved.title}.`
-        };
-      }
-    });
+    return this.skillDomainService.applyLifecycleInput(input) as Promise<SkillRuntimeResult>;
   }
 
   async runEvaluationJob(): Promise<ReflectionRuntimeResult> {
-    const session = await this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled evaluation");
-    const [skills, backendRuns, backendEvents, workspaceChanges, toolRuns, auditRecords, learningUses, existingLearningEvaluations] = await Promise.all([
-      this.store.listSkills(),
-      this.store.listBackendRuns(),
-      this.store.listBackendEvents(),
-      this.store.listWorkspaceChanges(),
-      this.store.listToolRuns(),
-      this.store.listAuditRecords(),
-      this.store.listLearningResourceUses(),
-      this.store.listLearningEvaluations()
-    ]);
-    const now = nowIso();
-    let reflectionRun: ReflectionRunRecord = {
-      id: createId("reflection"),
-      kind: "evaluation",
-      session_id: session.id,
-      status: "started",
-      input_summary: `Evaluate ${backendRuns.length} backend run(s), ${backendEvents.length} backend event(s), ${workspaceChanges.length} workspace change(s), ${toolRuns.length} tool run(s), ${auditRecords.length} audit record(s), and ${skills.length} skill item(s).`,
-      started_at: now
-    };
-    reflectionRun = await this.store.createReflectionRun(reflectionRun);
-    const suggestions = this.createEvaluationTraceSuggestions(reflectionRun, {
-      skills,
-      backendRuns,
-      backendEvents,
-      workspaceChanges,
-      toolRuns,
-      auditRecords,
-      now
-    });
-    const evaluationReport = await this.createEvaluationTraceReport({
-      backendRuns,
-      backendEvents,
-      workspaceChanges,
-      toolRuns,
-      auditRecords,
-      now
-    });
-    const learningEvaluations: LearningEvaluationRecord[] = [];
-    for (const use of actualLearningResourceUses(learningUses)) {
-      const version = use.resource_version ?? use.content_hash;
-      if (existingLearningEvaluations.some((evaluation) => evaluation.learning_resource_ref.id === use.resource_id && evaluation.learning_resource_version === version && evaluation.compared_run_ids.includes(use.run_id))) continue;
-      const usedRun = backendRuns.find((run) => run.id === use.run_id);
-      if (!usedRun) continue;
-      const earlierRuns = backendRuns
-        .filter((run) => run.id !== usedRun.id && run.backend_kind === usedRun.backend_kind && Date.parse(run.started_at) < Date.parse(usedRun.started_at))
-        .slice(0, 5);
-      const signals = (run: BackendRunRecord) => {
-        const runTools = toolRuns.filter((tool) => tool.run_id === run.id);
-        const runEvents = backendEvents.filter((event) => event.run_id === run.id);
-        return {
-          run_id: run.id,
-          completed: run.status === "completed" ? 1 : 0,
-          tool_failure_rate: runTools.length ? runTools.filter((tool) => tool.status === "failed").length / runTools.length : 0,
-          waiting_or_retry_rate: runEvents.length ? runEvents.filter((event) => event.event_type === "backend_waiting_for_native_input" || event.event_type === "run_failed").length / runEvents.length : 0,
-          workspace_change_count: workspaceChanges.filter((change) => change.run_id === run.id).length,
-          artifact_regeneration_count: Math.max(0, workspaceChanges.filter((change) => change.run_id === run.id && change.change_type === "artifact_created").length - 1),
-          correction_count: 0
-        };
-      };
-      const resourceRef: ResourceRef = {
-        kind: use.resource_kind,
-        id: use.resource_id,
-        uri: `learning/${use.resource_kind}/${encodeURIComponent(use.resource_id)}`,
-        version
-      };
-      const evaluation = evaluateLearningEffect({
-        id: createId("learning_evaluation"),
-        resource_ref: resourceRef,
-        resource_version: version,
-        task_class: usedRun.backend_kind,
-        before: earlierRuns.map(signals),
-        after: [signals(usedRun)],
-        evidence_refs: [resourceRef, ...[usedRun, ...earlierRuns].map(backendRunRef)],
-        created_at: now
-      });
-      await this.store.saveLearningEvaluation(evaluation);
-      learningEvaluations.push(evaluation);
-    }
-    if (!suggestions.length && skills.length) {
-      suggestions.push({
-        id: createId("suggestion"),
-        reflection_run_id: reflectionRun.id,
-        suggestion_type: "skill_patch",
-        status: "proposed",
-        title: "Skill evaluation checkpoint",
-        content: `No trace anomalies were found. Review ${skills.length} skill item(s) for freshness, coverage, and repeated manual work patterns.`,
-        source_refs: [],
-        confidence: 0.52,
-        created_at: now,
-        updated_at: now
-      });
-    }
-    for (const suggestion of suggestions) {
-      await this.store.saveReflectionSuggestion(suggestion);
-    }
-    reflectionRun = await this.store.updateReflectionRun({
-      ...reflectionRun,
-      status: "completed",
-      output_summary: `Evaluation created ${suggestions.length} suggestion(s) and ${evaluationReport.run_scores.length} run score(s).`,
-      completed_at: nowIso()
-    });
-    await this.store.saveLearningJobReport({
-      id: createId("learning_job_report"), job_kind: "evaluation", run_id: reflectionRun.id,
-      target_resource_count: actualLearningResourceUses(learningUses).length,
-      mutation_count: learningEvaluations.length, archive_count: 0, restore_count: 0, patch_count: 0, merge_count: 0,
-      skipped_reasons: learningEvaluations.length === 0 ? { no_new_evaluable_usage: 1 } : {},
-      evaluation_count: learningEvaluations.length,
-      duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(now)),
-      next_run_at: nextRunFromSchedule("daily", Date.parse(reflectionRun.completed_at ?? nowIso())),
-      created_at: nowIso()
-    });
-    return { reflectionRun, suggestions, evaluationReport, learningEvaluations };
+    return this.learningDomainService.executeEvaluation() as Promise<ReflectionRuntimeResult>;
   }
 
   private async createEvaluationTraceReport(input: {
@@ -1857,17 +1817,14 @@ export class AgentRuntime {
     if (toolName === "samurai.skill.view") {
       const runId = stringPayload(input.run_id);
       if (!runId) throw new RuntimeRequestError("conflict", "skill_view_run_id_required");
-      const view = await this.viewSkill({
-        skillId: stringPayload(input.skill_id),
-        runId,
-        path: stringPayload(input.path) || undefined
+      const queryId = getDomainQueryForProviderToolName(toolName)?.id;
+      if (!queryId) throw new RuntimeRequestError("not_found", `provider_query_mapping_missing:${toolName}`);
+      const queryResult = await this.runDomainQuery({
+        query_id: queryId,
+        input_source: "provider_tool_call",
+        payload: input
       });
-      return {
-        skill_id: view.skill.id,
-        content: view.content,
-        file_refs: view.file_refs,
-        disclosure_level: view.disclosure_level
-      };
+      return jsonSafe(queryResult.result);
     }
     if (toolName === "samurai.collection.search") {
       const collectionId = typeof input.collection_id === "string" && input.collection_id.trim() ? input.collection_id.trim() : "";
@@ -1900,11 +1857,7 @@ export class AgentRuntime {
       return descriptor;
     }
     if (toolName === "samurai.collection.manage") {
-      const sessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
-      const session = sessionId ? await this.store.getSession(sessionId) : undefined;
-      const envelope = createGatewayEnvelope(webGatewayContext, `Manage collection: ${stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.action)}`);
-      const result = await this.manageCollection(input, session ? { session, envelope } : undefined);
-      return result.resource;
+      return this.runCollectionManageCompatibility(input, "provider_tool_call");
     }
     throw new RuntimeRequestError("conflict", "tool_bridge_tool_not_allowed");
   }
@@ -2528,7 +2481,9 @@ export class AgentRuntime {
     const autoLearningEnabled = settings.memory_capture_mode === "auto" || settings.skill_capture_mode === "auto";
     const reflection = autoLearningEnabled && !this.workspaceOptions.detachBackgroundReview ? await runBackgroundReview() : undefined;
     if (autoLearningEnabled && this.workspaceOptions.detachBackgroundReview) {
-      void runBackgroundReview().catch(() => undefined);
+      const task = runBackgroundReview().catch(() => undefined);
+      this.backgroundTasks.add(task);
+      void task.finally(() => this.backgroundTasks.delete(task));
     }
 
     const messagePresentations = await this.saveGeneratedSurfacePresentations({
@@ -2888,21 +2843,41 @@ export class AgentRuntime {
   }
 
   async runSurfaceOperation(input: SurfaceOperation): Promise<SurfaceOperationRuntimeResult> {
-    const command = getDomainCommandForSurfaceOperationKind(input.kind)
-      ?? (input.kind === "message.submit" ? requireDomainCommandEntry("chat.turn.run") : requireDomainCommandEntry("artifact.create"));
-    try {
-      return await this.domainCommandBus.execute({
-        commandId: command.id,
-        inputSource: "surface_operation",
-        payload: jsonRecordOrEmpty(jsonSafe(input)),
-        idempotencyKey: input.id
-      }, () => this.executeSurfaceOperation(input));
-    } catch (error) {
-      if (error instanceof DomainCommandConflictError) {
-        throw new RuntimeRequestError("conflict", error.message);
+    const query = getDomainQueryForSurfaceOperationKind(input.kind);
+    if (query && isCollectionViewPresentSurface(input)) {
+      const queryResult = await this.runDomainQuery({
+        query_id: query.id,
+        input_source: "surface_operation",
+        payload: {
+          collection_id: input.collection_id,
+          view_id: input.view_id,
+          surface_operation_id: input.id,
+          ...(input.session_id ? { session_id: input.session_id } : {})
+        }
+      });
+      const result = queryResult.result as CollectionViewRuntimeResult & { render_spec?: SurfaceRenderSpec };
+      const renderSpec = result.render_spec ?? queryResult.render_specs[0];
+      if (!renderSpec) {
+        throw new RuntimeRequestError("conflict", `domain_query_render_spec_missing:${query.id}`);
       }
-      throw error;
+      return {
+        operation: input,
+        result_kind: "collection_view",
+        render_spec: renderSpec,
+        render_specs: queryResult.render_specs.length > 0 ? queryResult.render_specs : [renderSpec],
+        result
+      };
     }
+    const command = requireDomainCommandEntry(commandIdForSurfaceOperation(input.kind));
+    if (!command.allowed_sources.includes("surface_operation")) throw new RuntimeRequestError("conflict", `domain_command_source_not_allowed:${command.id}:surface_operation`);
+    return this.executeSurfaceOperation(input);
+  }
+
+  private async runSurfaceDomainCommand<TResult>(commandId: string, payload: Record<string, unknown>): Promise<TResult> {
+    const surfaceId = typeof payload.surface_operation_id === "string" ? payload.surface_operation_id : "";
+    if (!surfaceId) throw new RuntimeRequestError("conflict", "surface_operation_id_required");
+    const output = await this.runDomainCommand({ command_id: commandId, input_source: "surface_operation", idempotency_key: surfaceId, payload });
+    return output.result as TResult;
   }
 
   private async executeSurfaceOperation(input: SurfaceOperation): Promise<SurfaceOperationRuntimeResult> {
@@ -2911,8 +2886,9 @@ export class AgentRuntime {
         throw new RuntimeRequestError("conflict", "surface_operation_session_required");
       }
       const collectionSchemasBefore = await this.store.listCollectionSchemas();
-      const result = await this.runChatTurn({
-        sessionId: input.session_id,
+      const result = await this.runSurfaceDomainCommand<RunChatTurnResult>(commandIdForSurfaceOperation(input.kind), {
+        surface_operation_id: input.id,
+        session_id: input.session_id,
         content: input.content,
         backend_id: input.backend_id,
         input_locale: input.input_locale,
@@ -2930,7 +2906,7 @@ export class AgentRuntime {
       const collectionRenderSpecs = await this.collectionRenderSpecsFromWorkspaceChanges(input, result, collectionSchemasBefore);
       renderSpecs.push(...collectionRenderSpecs);
       for (const operation of result.operations) {
-        const collectionId = operation.operation === "collection.schema.save" && operation.result_ref?.kind === "collection_schema"
+        const collectionId = isCollectionSchemaSaveOperation(operation) && operation.result_ref?.kind === "collection_schema"
           ? operation.result_ref.id
           : operation.operation === "collection.manage" && operation.result_ref?.kind === "collection"
             ? operation.result_ref.id
@@ -2998,16 +2974,13 @@ export class AgentRuntime {
       };
     }
 
-    if (input.kind === "collection.record.create") {
-      const now = nowIso();
-      const result = await this.createCollectionRecord({
-        id: input.record_id,
+    if (isCollectionRecordCreateSurface(input)) {
+      const result = await this.runSurfaceDomainCommand<CollectionRecordRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
+        surface_operation_id: input.id,
+        record_id: input.record_id,
         collection_id: input.collection_id,
-        version: 1,
         data: input.data,
-        resource_refs: [],
-        created_at: now,
-        updated_at: now
+        resource_refs: []
       });
       const resolution = await this.store.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
       const renderSpec = negotiatedRenderSpec(input, collectionRecordRenderSpec(result.resource, "Collection record", resolution));
@@ -3020,7 +2993,7 @@ export class AgentRuntime {
       };
     }
 
-    if (input.kind === "collection.view.present") {
+    if (isCollectionViewPresentSurface(input)) {
       const result = await this.presentCollectionView({
         collectionId: input.collection_id,
         viewId: input.view_id
@@ -3040,37 +3013,19 @@ export class AgentRuntime {
       };
     }
 
-    if (input.kind === "message.presentation.update") {
-      const existing = await this.store.getMessagePresentation(input.presentation_id);
-      if (!existing) {
-        throw new RuntimeRequestError("not_found", `Message presentation not found: ${input.presentation_id}`);
-      }
-      const requestedViewState = jsonRecordOrEmpty(input.view_state);
-      const requestedViewId = typeof requestedViewState.view_id === "string" && requestedViewState.view_id.trim()
-        ? requestedViewState.view_id.trim()
-        : undefined;
-      const result = await this.presentCollectionView({
-        collectionId: existing.collection_id,
-        viewId: requestedViewId ?? existing.view_id
+    if (isMessagePresentationUpdateSurface(input)) {
+      const domainResult = await this.runSurfaceDomainCommand<{ presentation: MessagePresentationRecord; render_spec: SurfaceRenderSpec; render_specs: SurfaceRenderSpec[] }>(commandIdForSurfaceOperation(input.kind), {
+        surface_operation_id: input.id,
+        presentation_id: input.presentation_id,
+        view_state: input.view_state
       });
-      const renderSpecWithState = applyCollectionPresentationViewState(
-        result.render_spec,
-        collectionPresentationUserViewStatePatch(requestedViewState)
-      );
-      const updated = await this.store.updateMessagePresentationViewState({
-        id: input.presentation_id,
-        viewState: collectionRenderSpecViewState(renderSpecWithState)
-      });
-      if (!updated) {
-        throw new RuntimeRequestError("not_found", `Message presentation not found: ${input.presentation_id}`);
-      }
-      const renderSpec = negotiatedRenderSpec(input, renderSpecWithState);
+      const renderSpec = negotiatedRenderSpec(input, domainResult.render_spec);
       return {
         operation: input,
         result_kind: "message_presentation",
         render_spec: renderSpec,
         render_specs: [renderSpec],
-        result: updated
+        result: domainResult.presentation
       };
     }
 
@@ -3078,17 +3033,13 @@ export class AgentRuntime {
       if (input.expected_version === undefined) {
         throw new RuntimeRequestError("conflict", "collection_patch_expected_version_required");
       }
-      const result = await this.applyCollectionPatch({
-        collectionId: input.collection_id,
-        recordId: input.record_id,
-        patch: {
-          id: input.patch_id,
-          record_id: input.record_id,
-          changes: input.changes,
-          expected_version: input.expected_version,
-          source_operation_id: input.id,
-          created_at: nowIso()
-        }
+      const result = await this.runSurfaceDomainCommand<CollectionPatchRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
+        surface_operation_id: input.id,
+        collection_id: input.collection_id,
+        record_id: input.record_id,
+        patch_id: input.patch_id,
+        changes: input.changes,
+        expected_version: input.expected_version
       });
       const resolution = await this.store.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
       const renderSpec = negotiatedRenderSpec(input, collectionRecordRenderSpec(result.resource, "Collection patch applied", resolution));
@@ -3101,11 +3052,12 @@ export class AgentRuntime {
       };
     }
 
-    if (input.kind === "collection.record.delete") {
-      const result = await this.deleteCollectionRecord({
-        collectionId: input.collection_id,
-        recordId: input.record_id,
-        viewId: input.view_id
+    if (isCollectionRecordDeleteSurface(input)) {
+      const result = await this.runSurfaceDomainCommand<CollectionDeleteRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
+        surface_operation_id: input.id,
+        collection_id: input.collection_id,
+        record_id: input.record_id,
+        view_id: input.view_id
       });
       const view = await this.presentCollectionView({
         collectionId: input.collection_id,
@@ -3121,14 +3073,16 @@ export class AgentRuntime {
       };
     }
 
-    if (input.kind === "collection.action.run") {
-      const result = await this.runCollectionAction({
-        collectionId: input.collection_id,
-        actionId: input.action_id,
-        backendId: input.backend_id,
-        recordId: input.record_id,
-        sessionId: input.session_id,
-        payload: input.payload
+    if (isCollectionActionRunSurface(input)) {
+      const result = await this.runSurfaceDomainCommand<CollectionActionRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
+        surface_operation_id: input.id,
+        collection_id: input.collection_id,
+        action_id: input.action_id,
+        backend_id: input.backend_id,
+        record_id: input.record_id,
+        session_id: input.session_id,
+        payload: input.payload,
+        view_id: input.view_id
       });
       const view = await this.presentCollectionView({
         collectionId: input.collection_id,
@@ -3148,7 +3102,16 @@ export class AgentRuntime {
       };
     }
 
-    return this.runStructuredSurfaceOperation(input);
+    return this.runSurfaceDomainCommand<SurfaceOperationRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
+      surface_operation_id: input.id,
+      session_id: input.session_id,
+      title: "title" in input && typeof input.title === "string" ? input.title : input.kind,
+      content: surfaceOperationPrompt(input),
+      instruction: surfaceOperationPrompt(input),
+      input_locale: input.input_locale,
+      output_locale: input.output_locale,
+      metadata: { surface_operation_kind: input.kind, surface_operation_payload: jsonSafe(input) }
+    });
   }
 
   private async saveMessagePresentationsForRenderSpecs(input: {
@@ -3159,17 +3122,9 @@ export class AgentRuntime {
     if (!input.messageId) {
       return [];
     }
-    const presentations: MessagePresentationRecord[] = [];
-    const seen = new Set<string>();
-    for (const spec of input.renderSpecs) {
-      const presentation = messagePresentationFromRenderSpec(spec, input.sessionId, input.messageId);
-      if (!presentation || seen.has(`${presentation.collection_id}:${presentation.view_id}:${presentation.renderer}`)) {
-        continue;
-      }
-      seen.add(`${presentation.collection_id}:${presentation.view_id}:${presentation.renderer}`);
-      presentations.push(await this.store.saveMessagePresentation(presentation));
-    }
-    return presentations;
+    return this.presentationDomainService.saveUnique(input.renderSpecs
+      .map((spec) => messagePresentationFromRenderSpec(spec, input.sessionId, input.messageId!))
+      .filter((record): record is MessagePresentationRecord => Boolean(record)));
   }
 
   private async saveMessagePresentationsForBackendEvents(input: {
@@ -3181,7 +3136,6 @@ export class AgentRuntime {
       return [];
     }
     const presentations: MessagePresentationRecord[] = [];
-    const seen = new Set<string>();
     for (const event of input.backendEvents) {
       if (event.event_type !== "tool_call_output") {
         continue;
@@ -3190,14 +3144,9 @@ export class AgentRuntime {
       if (!descriptor || descriptor.status !== "ready") {
         continue;
       }
-      const key = `${descriptor.collection_id}:${descriptor.view_id}:${descriptor.renderer}:${descriptor.record_id ?? ""}`;
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      presentations.push(await this.store.saveMessagePresentation(messagePresentationFromDescriptor(descriptor, input.sessionId, input.messageId)));
+      presentations.push(messagePresentationFromDescriptor(descriptor, input.sessionId, input.messageId));
     }
-    return presentations;
+    return this.presentationDomainService.saveUnique(presentations);
   }
 
   private async resolveDirectCollectionPresentation(input: MessageSubmitOperation): Promise<CollectionPresentationResolution | undefined> {
@@ -3404,7 +3353,7 @@ export class AgentRuntime {
       toolRuns: []
     }));
     const appRender = negotiatedRenderSpec(input, viewSpec);
-    return {
+    const output: SurfaceOperationRuntimeResult = {
       operation: input,
       result_kind: "chat_turn",
       render_spec: chatRender,
@@ -3429,10 +3378,11 @@ export class AgentRuntime {
         toolRuns: []
       }
     };
+    return output;
   }
 
   private async collectionRenderSpecsFromWorkspaceChanges(input: SurfaceOperation, result: RunChatTurnResult, schemasBefore: CollectionSchemaWithFilePath[]): Promise<SurfaceRenderSpec[]> {
-    if (input.kind !== "message.submit" || !shouldCreateCollectionSchemaOutput(input.content)) {
+    if (input.kind !== "message.submit") {
       return [];
     }
     const beforeById = new Map(schemasBefore.map((schema) => [schema.id, collectionSchemaSignature(schema)]));
@@ -3441,7 +3391,7 @@ export class AgentRuntime {
     const changedCollectionIds = new Set<string>();
     const runtimeSavedCollectionIds = new Set<string>();
     for (const operation of result.operations) {
-      if (operation.operation === "collection.schema.save" && operation.result_ref?.kind === "collection_schema") {
+      if (isCollectionSchemaSaveOperation(operation)) {
         runtimeSavedCollectionIds.add(operation.result_ref.id);
         changedCollectionIds.add(operation.result_ref.id);
       }
@@ -3468,38 +3418,151 @@ export class AgentRuntime {
   }
 
   async runDomainCommand(input: DomainCommandRuntimeInput): Promise<DomainCommandRuntimeResult> {
+    return this.runDomainCommandWithTrustedContext(input, {});
+  }
+
+  private async runDomainCommandWithTrustedContext(
+    input: DomainCommandRuntimeInput,
+    trusted: { runId?: string }
+  ): Promise<DomainCommandRuntimeResult> {
+    const deprecated = getDeprecatedDomainCommandEntry(input.command_id);
+    if (deprecated) {
+      throw new RuntimeRequestError("gone", `deprecated_operation:${input.command_id}`, {
+        deprecated_operation_id: deprecated.id,
+        replacement: deprecated.replacement
+      });
+    }
     const command = requireDomainCommandEntry(input.command_id);
+    if (command.availability !== "active" || command.id === "collection.manage") {
+      throw new RuntimeRequestError("conflict", `deprecated_command:${command.id}`);
+    }
+    if (!this.domainOperationAvailable(command)) {
+      throw new RuntimeRequestError("conflict", `domain_operation_unavailable:${command.id}`);
+    }
     const inputSource = input.input_source ?? "runtime_api";
-    if (!command.input_sources.includes(inputSource)) {
+    if (!command.allowed_sources.includes(inputSource)) {
       throw new RuntimeRequestError("conflict", `domain_command_source_not_allowed:${command.id}:${inputSource}`);
     }
-    const payload = jsonRecord(input.payload ?? {});
+    const payload = jsonDefinedRecord(input.payload ?? {});
+    const inputIssue = validateDomainCommandInput(command, payload);
+    if (inputIssue) {
+      throw new RuntimeRequestError("conflict", `domain_command_input_invalid:${command.id}:${inputIssue.path}:${inputIssue.message}`);
+    }
     let result: unknown;
+    const trustedContext = this.trustedDomainContext(inputSource, payload, trusted);
     try {
       result = await this.domainCommandBus.execute({
         commandId: command.id,
+        contractVersion: command.contract_version,
         inputSource,
         payload,
-        idempotencyKey: input.idempotency_key
-      }, () => this.executeDomainCommand(command, payload, inputSource));
+        idempotencyKey: input.idempotency_key,
+        workspaceId: stableHash(this.store.rootDir),
+        sessionId: stringPayload(payload.session_id) || undefined,
+        actorId: `trusted:${inputSource}`,
+        correlationId: trustedContext.correlationId,
+        executionClass: command.idempotency_policy === "external" ? "external" : "internal"
+      }, () => this.executeDomainCommand(command, payload, trustedContext));
     } catch (error) {
+      if (error instanceof DomainCommandIdempotencyKeyRequiredError) {
+        throw new RuntimeRequestError("bad_request", error.code);
+      }
       if (error instanceof DomainCommandConflictError) {
         throw new RuntimeRequestError("conflict", error.message);
       }
+      if (error instanceof DomainOperationError) {
+        if (error.handlerCause instanceof RuntimeRequestError) throw error.handlerCause;
+        throw new RuntimeRequestError(error.code === "not_found" ? "not_found" : "conflict", error.message);
+      }
       throw error;
     }
+    await this.attachDomainCorrelation(result, trustedContext.correlationId);
     const renderSpecs = assertDomainCommandRenderSpecs(command, await this.domainCommandRenderSpecs(command, result));
-    return {
+    const output: DomainCommandRuntimeResult = {
       command,
+      ok: true,
+      contract_version: command.contract_version,
+      execution_id: input.idempotency_key ?? stableHash({ command_id: command.id, contract_version: command.contract_version, payload }),
       input_source: inputSource,
       payload,
       render_spec: renderSpecs[0],
       render_specs: renderSpecs,
       result
     };
+    const outputIssue = validateDomainOutput(command, output);
+    if (outputIssue) throw new RuntimeRequestError("conflict", `domain_command_output_invalid:${command.id}:${outputIssue.path}:${outputIssue.message}`);
+    return output;
   }
 
-  private async domainCommandRenderSpecs(command: DomainCommandEntry, result: unknown): Promise<SurfaceRenderSpec[]> {
+  async runDomainQuery(input: DomainQueryRuntimeInput): Promise<DomainQueryRuntimeResult> {
+    const query = requireDomainQueryEntry(input.query_id);
+    if (!this.domainOperationAvailable(query)) {
+      throw new RuntimeRequestError("conflict", `domain_operation_unavailable:${query.id}`);
+    }
+    const inputSource = input.input_source ?? "runtime_api";
+    if (!query.allowed_sources.includes(inputSource)) {
+      throw new RuntimeRequestError("conflict", `domain_query_source_not_allowed:${query.id}:${inputSource}`);
+    }
+    const payload = jsonDefinedRecord(input.payload ?? {});
+    const inputIssue = validateDomainQueryInput(query, payload);
+    if (inputIssue) {
+      throw new RuntimeRequestError("conflict", `domain_query_input_invalid:${query.id}:${inputIssue.path}:${inputIssue.message}`);
+    }
+    let result: unknown;
+    try {
+      result = (await this.domainOperationRegistry.execute(
+        this.trustedDomainContext(inputSource, payload),
+        query.id,
+        payload
+      )).value;
+    } catch (error) {
+      if (error instanceof DomainOperationError) {
+        if (error.handlerCause instanceof RuntimeRequestError) throw error.handlerCause;
+        throw new RuntimeRequestError(error.code === "not_found" ? "not_found" : "conflict", error.message);
+      }
+      throw error;
+    }
+    const renderSpecs = assertDomainQueryRenderSpecs(query, await this.domainQueryRenderSpecs(query, result));
+    const output: DomainQueryRuntimeResult = {
+      query,
+      ok: true,
+      contract_version: query.contract_version,
+      execution_id: stableHash({ query_id: query.id, contract_version: query.contract_version, payload }),
+      input_source: inputSource,
+      payload,
+      render_spec: renderSpecs[0],
+      render_specs: renderSpecs,
+      result
+    };
+    const outputIssue = validateDomainOutput(query, output);
+    if (outputIssue) throw new RuntimeRequestError("conflict", `domain_query_output_invalid:${query.id}:${outputIssue.path}:${outputIssue.message}`);
+    return output;
+  }
+
+  async listEffectiveDomainOperations(sessionId: string, source: DomainCommandInputSource): Promise<{ commands: DomainCommandEntry[]; queries: DomainQueryEntry[] }> {
+    const session = await this.store.getSession(sessionId);
+    if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
+    const commands = listDomainCommandEntries(source).filter((entry) => this.domainOperationAvailable(entry));
+    const queries = listDomainQueryEntries(source).filter((entry) => this.domainOperationAvailable(entry));
+    return { commands, queries };
+  }
+
+  private domainOperationAvailable(entry: DomainCommandEntry | DomainQueryEntry): boolean {
+    const available = this.effectiveDomainCapabilities();
+    return entry.runtime_requirements.every((requirement) => available.has(requirement));
+  }
+
+  private effectiveDomainCapabilities(): Set<DomainRuntimeCapability> {
+    const capabilities = new Set<DomainRuntimeCapability>();
+    if (this.backendRegistry.statuses().some((status) => status.enabled && status.configured && status.connection_state === "ready")) capabilities.add("agent_backend");
+    if (this.workspaceOptions.pdfExportAdapter) capabilities.add("pdf_export");
+    if (this.workspaceOptions.browserAdapter) capabilities.add("browser_adapter");
+    if (this.pluginRegistry.listPluginStatuses().length > 0) capabilities.add("plugin_runtime");
+    return capabilities;
+  }
+
+  private async domainCommandRenderSpecs(command: DomainDispatchEntry, result: unknown): Promise<SurfaceRenderSpec[]> {
+    if (command.output_render_kinds.length === 0) return [];
     const surfaceOperationSpecs = surfaceOperationRuntimeRenderSpecs(result);
     if (surfaceOperationSpecs.length > 0) {
       return surfaceOperationSpecs;
@@ -3515,6 +3578,7 @@ export class AgentRuntime {
       return specs;
     }
     if (isCollectionRecordRuntimeResult(result)) {
+      if (isResourceDeletionResult(result)) return [];
       const resolution = await this.store.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
       return [collectionRecordRenderSpec(result.resource, command.title, resolution)];
     }
@@ -3522,1620 +3586,48 @@ export class AgentRuntime {
     return resourceSpec ? [resourceSpec] : [];
   }
 
-  private async startSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
-    const skillId = requiredPayloadId(payload, "skill_id");
-    const skill = await this.store.getSkill(skillId);
-    const markdown = await this.store.readSkillMarkdown(skillId);
-    if (!skill || markdown === undefined) {
-      throw new RuntimeRequestError("not_found", "skill_not_found");
+  private async domainQueryRenderSpecs(query: DomainQueryEntry, result: unknown): Promise<SurfaceRenderSpec[]> {
+    return this.domainCommandRenderSpecs(query, result);
+  }
+
+  private async executeDomainCommand(
+    entry: DomainCommandEntry,
+    payload: Record<string, JsonValue>,
+    context: TrustedDomainContext
+  ): Promise<unknown> {
+    return (await this.domainOperationRegistry.execute(context, entry.id, payload)).value;
+  }
+
+  private async attachDomainCorrelation(result: unknown, correlationId: string): Promise<void> {
+    const operationCandidates = domainResultOperations(result);
+    for (const candidate of operationCandidates) {
+      const operation = await this.store.getOperation(candidate.id);
+      if (!operation) continue;
+      if (operation.correlation_id !== correlationId) await this.store.updateOperation({ ...operation, correlation_id: correlationId });
+      const changes = await this.store.listWorkspaceChanges();
+      for (const change of changes) {
+        if (change.legacy_operation_id === operation.id && change.correlation_id !== correlationId) {
+          await this.store.setWorkspaceChangeCorrelation(change.id, correlationId);
+        }
+      }
     }
-    if (skill.state === "archived" || skill.state === "candidate") {
-      throw new RuntimeRequestError("conflict", "skill_not_optimizable_in_current_state");
-    }
+  }
+
+  private trustedDomainContext(
+    inputSource: DomainCommandInputSource,
+    payload: Record<string, JsonValue>,
+    trusted: { runId?: string } = {}
+  ): TrustedDomainContext {
     const sessionId = stringPayload(payload.session_id) || undefined;
-    if (sessionId && !await this.store.getSession(sessionId)) {
-      throw new RuntimeRequestError("not_found", "skill_optimization_session_not_found");
-    }
-    const skillBody = stripSkillFrontmatter(markdown);
-    const baselineContentHash = stableHash(skillBody);
-    const real = await this.skillOptimizationRealExamples(skill, baselineContentHash);
-    const golden = optimizationExamplesFromPayload(payload.golden_examples, "golden");
-    const synthetic = optimizationExamplesFromPayload(payload.synthetic_examples, "synthetic");
-    let dataset: SkillOptimizationDataset;
-    try {
-      dataset = buildSkillOptimizationDataset({
-        skill_id: skill.id,
-        real,
-        golden,
-        synthetic
-      });
-    } catch (error) {
-      throw new RuntimeRequestError("conflict", safeRuntimeErrorMessage(error, "skill_optimization_dataset_invalid"));
-    }
-
-    const now = nowIso();
-    const runId = createId("skill_optimization_run");
-    const objectiveId = createId("objective");
-    const workItemId = createId("work");
-    const objective: ObjectiveRecord = ObjectiveRecordSchema.parse({
-      id: objectiveId,
-      ...(sessionId ? { session_id: sessionId } : {}),
-      title: `Skill改善: ${skill.title}`,
-      objective: stringPayload(payload.objective) || `Skill「${skill.title}」の本文をGEPAで改善候補化する`,
-      completion_criteria: ["GEPA候補を生成する", "holdout評価と安全検証を記録する", "ユーザー確認後にのみ反映する"],
-      status: "active",
-      max_attempts: 1,
-      created_at: now,
-      updated_at: now
-    });
-    const workItem: WorkItemRecord = WorkItemRecordSchema.parse({
-      id: workItemId,
-      objective_id: objectiveId,
-      instruction: `GEPAでSkill ${skill.id} の改善候補を生成・評価する`,
-      status: "ready",
-      priority: 5,
-      attempt: 0,
-      max_attempts: 1,
-      idempotency_key: `skill-optimization:${runId}`,
-      created_at: now,
-      updated_at: now
-    });
-    const run: SkillOptimizationRun = {
-      id: runId,
-      ...(sessionId ? { session_id: sessionId } : {}),
-      target_skill_id: skill.id,
-      baseline_content_hash: baselineContentHash,
-      baseline_version: stableHash({ skill_id: skill.id, content_hash: baselineContentHash, reviewed_at: skill.frontmatter.last_reviewed_at ?? "" }),
-      dataset_id: dataset.id,
-      objective_id: objective.id,
-      work_item_id: workItem.id,
-      optimizer: "gepa",
-      optimizer_version: "dspy==3.2.1",
-      status: "queued",
-      phase: "dataset",
-      progress: 0.05,
-      candidate_ids: [],
-      trace_refs: [skillRef(skill)],
-      provenance: {
-        optimizer: "gepa",
-        worker: "workers/skill-optimization/worker.py",
-        dataset_id: dataset.id,
-        baseline_content_hash: baselineContentHash,
-        selected_real_examples: real.length,
-        selected_golden_examples: golden.length,
-        selected_synthetic_examples: synthetic.length
-      },
-      created_at: now,
-      updated_at: now,
-      started_at: now
+    const runId = trusted.runId;
+    return {
+      inputSource,
+      workspaceId: stableHash(this.store.rootDir),
+      actorId: `trusted:${inputSource}`,
+      ...(sessionId ? { sessionId } : {}),
+      ...(runId ? { runId } : {}),
+      correlationId: stableHash({ input_source: inputSource, session_id: sessionId ?? null, run_id: runId ?? null, payload })
     };
-    if (!await this.store.acquireSkillOptimizationLock({ skillId: skill.id, runId, acquiredAt: now })) {
-      throw new RuntimeRequestError("conflict", "skill_optimization_already_running");
-    }
-    try {
-      await this.store.saveSkillOptimizationDataset(dataset);
-      await this.store.saveObjective(objective);
-      await this.store.saveWorkItem(workItem);
-      const claimed = await this.store.claimWorkItem({
-        workerId: `skill-optimization:${runId}`,
-        leaseMs: 24 * 60 * 60 * 1000,
-        now
-      });
-      if (!claimed || claimed.id !== workItem.id) {
-        throw new Error("skill_optimization_work_item_claim_failed");
-      }
-      const runningRun: SkillOptimizationRun = {
-        ...run,
-        status: "running",
-        phase: "optimizing",
-        progress: 0.1,
-        updated_at: now
-      };
-      await this.store.saveSkillOptimizationRun(runningRun);
-      void this.runSkillOptimizationWorker({
-        run: runningRun,
-        dataset,
-        skillBody,
-        skillId: skill.id,
-        sessionId,
-        workerId: `skill-optimization:${runId}`
-      });
-      return { run: runningRun, dataset, objective, work_item: claimed };
-    } catch (error) {
-      await this.store.releaseSkillOptimizationLock({ skillId: skill.id, runId });
-      throw error;
-    }
-  }
-
-  private async skillOptimizationRealExamples(skill: SkillWithFilePath, baselineContentHash: string): Promise<OptimizationExampleInput[]> {
-    const uses = (await this.store.listLearningResourceUses({ resourceId: skill.id }))
-      .filter((use) => use.resource_kind === "skill" && use.stage === "body_loaded" && use.content_hash === baselineContentHash);
-    const examples: OptimizationExampleInput[] = [];
-    const seenPrompts = new Set<string>();
-    for (const use of uses) {
-      const run = await this.store.getBackendRun(use.run_id);
-      if (!run || run.status !== "completed" || !run.input_summary.trim() || !run.output_summary?.trim()) continue;
-      const prompt = run.input_summary.trim();
-      if (seenPrompts.has(prompt)) continue;
-      seenPrompts.add(prompt);
-      const feedback = typeof use.metadata.feedback === "string" && use.metadata.feedback.trim()
-        ? use.metadata.feedback
-        : `実行結果: ${run.output_summary.trim()}`;
-      examples.push({
-        prompt,
-        expected_behavior: run.output_summary.trim(),
-        feedback,
-        source: "real",
-        skill_body_read_run_id: run.id,
-        trace_refs: [backendRunRef(run), skillRef(skill)],
-        metadata: { run_status: run.status, source_stage: use.stage }
-      });
-    }
-    return examples;
-  }
-
-  private async runSkillOptimizationWorker(input: {
-    run: SkillOptimizationRun;
-    dataset: SkillOptimizationDataset;
-    skillBody: string;
-    skillId: string;
-    sessionId?: string;
-    workerId: string;
-  }): Promise<void> {
-    const repoRoot = path.resolve(this.workspaceOptions.repoRoot ?? process.cwd());
-    const worker = startPythonSkillOptimization({
-      run_id: input.run.id,
-      skill_id: input.skillId,
-      skill_body: input.skillBody,
-      dataset: input.dataset,
-      worker_script: path.resolve(repoRoot, "workers/skill-optimization/worker.py"),
-      cwd: repoRoot,
-      host_complete: async (messages) => {
-        if (!this.provider) {
-          throw new RuntimeRequestError("provider_not_configured", "GEPAのHost LLMが未設定です。");
-        }
-        const session = input.sessionId ? await this.store.getSession(input.sessionId) : undefined;
-        const content = messages.map((message) => `${message.role}: ${message.content}`).join("\n\n").trim();
-        const output = await this.generateProviderOutput({
-          envelope: createGatewayEnvelope(webGatewayContext, content || "GEPA候補を改善してください。", session?.ui_locale ?? "ja", session?.output_locale ?? "ja"),
-          activeMemory: [],
-          knowledgeWiki: [],
-          collectionNotes: [],
-          selectedSkills: [],
-          sessionSearch: [],
-          availableTools: [],
-          recentMessages: [],
-          temporaryContext: []
-        });
-        if (!output.content.trim()) throw new Error("gepa_host_empty_response");
-        return { content: output.content };
-      },
-      on_progress: (progress) => {
-        void this.updateSkillOptimizationRun(input.run.id, {
-          phase: progress.phase === "evaluating" ? "evaluating" : "optimizing",
-          progress: Math.max(0.1, Math.min(0.95, progress.value)),
-          provenance: {
-            ...input.run.provenance,
-            last_progress_message: progress.message ?? "",
-            worker_phase: progress.phase
-          }
-        }).catch(() => undefined);
-      }
-    });
-    this.skillOptimizationWorkers.set(input.run.id, { cancel: worker.cancel });
-    let result: PythonSkillOptimizationResult;
-    try {
-      result = await worker.promise;
-    } catch (error) {
-      result = { status: "failed", feedback: [], trace: [], optimizer_version: "dspy==3.2.1", error: safeRuntimeErrorMessage(error) };
-    } finally {
-      this.skillOptimizationWorkers.delete(input.run.id);
-    }
-    await this.finishSkillOptimization({ ...input, result });
-  }
-
-  private async updateSkillOptimizationRun(id: string, patch: Partial<SkillOptimizationRun>): Promise<SkillOptimizationRun | undefined> {
-    const current = await this.store.getSkillOptimizationRun(id);
-    if (!current) return undefined;
-    const next = { ...current, ...patch, updated_at: nowIso() };
-    return this.store.saveSkillOptimizationRun(next);
-  }
-
-  private async finishSkillOptimization(input: {
-    run: SkillOptimizationRun;
-    dataset: SkillOptimizationDataset;
-    skillBody: string;
-    skillId: string;
-    sessionId?: string;
-    workerId: string;
-    result: PythonSkillOptimizationResult;
-  }): Promise<void> {
-    const current = await this.store.getSkillOptimizationRun(input.run.id) ?? input.run;
-    const settleWork = async (kind: "complete" | "failed" | "cancelled", error?: string) => {
-      if (kind === "complete") {
-        await this.store.completeWorkItem({ workItemId: current.work_item_id, workerId: input.workerId }).catch(() => undefined);
-      } else {
-        await this.store.failWorkItem({ workItemId: current.work_item_id, workerId: input.workerId, failureKind: kind === "cancelled" ? "cancelled" : "non_retryable", error: error ?? kind }).catch(() => undefined);
-      }
-    };
-    const settleObjective = async (status: ObjectiveRecord["status"]) => {
-      const objective = await this.store.getObjective(current.objective_id);
-      if (objective && objective.status === "active") {
-        await this.store.updateObjective({ ...objective, status, updated_at: nowIso(), ...(status === "completed" || status === "cancelled" || status === "failed" ? { completed_at: nowIso() } : {}) });
-      }
-    };
-    const candidateInputs: PythonSkillOptimizationCandidate[] = (input.result.candidates ?? [])
-      .filter((candidate) => candidate.body.trim().length > 0);
-    if (candidateInputs.length === 0 && input.result.candidate_body?.trim()) {
-      candidateInputs.push({
-        index: 0,
-        body: input.result.candidate_body.trim(),
-        ...(typeof input.result.baseline_holdout_score === "number" ? { baseline_holdout_score: input.result.baseline_holdout_score } : {}),
-        ...(typeof input.result.holdout_score === "number" ? { holdout_score: input.result.holdout_score } : {}),
-        ...(typeof input.result.important_regression === "boolean" ? { important_regression: input.result.important_regression } : {}),
-        evaluations: input.result.evaluations ?? [],
-        feedback: input.result.feedback
-      });
-    }
-    if (input.result.status !== "completed" || candidateInputs.length === 0) {
-      const status = input.result.status === "cancelled" ? "cancelled" : "failed";
-      const error = input.result.error || "gepa_candidate_not_created";
-      await this.store.saveSkillOptimizationRun({ ...current, status, phase: status, progress: 1, error, updated_at: nowIso(), completed_at: nowIso() });
-      await settleWork(status === "cancelled" ? "cancelled" : "failed", error);
-      await settleObjective(status === "cancelled" ? "cancelled" : "failed");
-      await this.store.releaseSkillOptimizationLock({ skillId: input.skillId, runId: current.id });
-      return;
-    }
-    if (current.status === "cancelled" || current.status === "failed") {
-      await settleWork(current.status === "cancelled" ? "cancelled" : "failed", current.error);
-      return;
-    }
-
-    const relatedTestsPassed = input.result.related_tests_passed === true;
-    const now = nowIso();
-    const candidateIdsBySourceIndex = new Map<number, string>();
-    candidateInputs.forEach((candidateInput, position) => {
-      const sourceIndex = Number.isInteger(candidateInput.index) ? candidateInput.index : position;
-      candidateIdsBySourceIndex.set(sourceIndex, createId("optimization_candidate"));
-    });
-    const candidates: OptimizationCandidate[] = [];
-    for (const [position, candidateInput] of candidateInputs.entries()) {
-      const sourceIndex = Number.isInteger(candidateInput.index) ? candidateInput.index : position;
-      const candidateId = candidateIdsBySourceIndex.get(sourceIndex) ?? createId("optimization_candidate");
-      const body = candidateInput.body.trim();
-      const safety = evaluateSkillOptimizationSafety(body);
-      const safetyChecksPassed = safety.passed && input.result.safety_checks_passed === true;
-      const evaluations = candidateInput.evaluations.length > 0
-        ? candidateInput.evaluations
-        : (position === 0 ? input.result.evaluations ?? [] : []);
-      const baselineHoldoutScore = clampOptimizationScore(candidateInput.baseline_holdout_score ?? input.result.baseline_holdout_score);
-      const holdoutScore = clampOptimizationScore(candidateInput.holdout_score ?? input.result.holdout_score);
-      const importantRegression = candidateInput.important_regression === true
-        || (position === 0 && input.result.important_regression === true)
-        || evaluations.some((evaluation) => evaluation.important_regression);
-      const gates = evaluateOptimizationGates({
-        baseline_holdout_score: baselineHoldoutScore,
-        holdout_score: holdoutScore,
-        related_tests_passed: relatedTestsPassed,
-        safety_checks_passed: safetyChecksPassed,
-        important_regression: importantRegression
-      });
-      const traceRef: ResourceRef = { kind: "skill_optimization_trace", id: candidateId, uri: `skill-optimization/${current.id}/trace/${candidateId}`, label: "GEPA execution trace" };
-      const parentCandidateId = typeof candidateInput.parent_index === "number"
-        ? candidateIdsBySourceIndex.get(candidateInput.parent_index)
-        : undefined;
-      const candidate: OptimizationCandidate = {
-        id: candidateId,
-        run_id: current.id,
-        skill_id: input.skillId,
-        ...(parentCandidateId ? { parent_candidate_id: parentCandidateId } : {}),
-        body,
-        content_hash: stableHash(body),
-        baseline_holdout_score: baselineHoldoutScore,
-        holdout_score: holdoutScore,
-        holdout_delta: gates.holdout_delta,
-        feedback: [...new Set([...(candidateInput.feedback ?? []), ...input.result.feedback, ...safety.reasons, gates.reason].filter(Boolean))],
-        dataset_id: input.dataset.id,
-        trace_refs: [traceRef, ...input.result.trace.flatMap((item) => {
-          const id = typeof item.id === "string" ? item.id : "";
-          return id ? [{ kind: "skill_optimization_trace", id, uri: `skill-optimization/${current.id}/trace/${id}`, label: "GEPA trace" } satisfies ResourceRef] : [];
-        })],
-        safety: {
-          related_tests_passed: relatedTestsPassed,
-          safety_checks_passed: safetyChecksPassed,
-          important_regression: importantRegression
-        },
-        status: gates.passed ? "passed" : "rejected",
-        created_at: now,
-        updated_at: now
-      };
-      candidates.push(candidate);
-      await this.store.saveOptimizationCandidate(candidate);
-      for (const evaluation of evaluations) {
-        const evaluationRecord: OptimizationEvaluation = {
-          id: createId("optimization_evaluation"),
-          run_id: current.id,
-          candidate_id: candidate.id,
-          split: evaluation.split,
-          score: clampOptimizationScore(evaluation.score),
-          feedback: evaluation.feedback.length > 0 ? evaluation.feedback : ["GEPA evaluation completed."],
-          important_regression: evaluation.important_regression,
-          related_tests_passed: relatedTestsPassed,
-          safety_checks_passed: safetyChecksPassed,
-          trace_refs: [traceRef],
-          created_at: now
-        };
-        await this.store.saveOptimizationEvaluation(evaluationRecord);
-      }
-    }
-    const passedCandidates = candidates.filter((candidate) => candidate.status === "passed");
-    const firstCandidate = candidates[0];
-    const nextRun: SkillOptimizationRun = {
-      ...current,
-      status: "completed",
-      phase: passedCandidates.length > 0 ? "awaiting_confirmation" : "completed",
-      progress: 1,
-      candidate_ids: [...current.candidate_ids, ...candidates.map((candidate) => candidate.id)],
-      trace_refs: [...current.trace_refs, ...candidates.flatMap((candidate) => candidate.trace_refs)],
-      provenance: {
-        ...current.provenance,
-        candidate_count: candidates.length,
-        passed_candidate_count: passedCandidates.length,
-        candidate_summaries: candidates.map((candidate) => ({
-          id: candidate.id,
-          parent_candidate_id: candidate.parent_candidate_id ?? null,
-          holdout_score: candidate.holdout_score,
-          holdout_delta: candidate.holdout_delta,
-          status: candidate.status
-        })),
-        ...(firstCandidate ? {
-          baseline_holdout_score: firstCandidate.baseline_holdout_score,
-          holdout_score: firstCandidate.holdout_score,
-          holdout_delta: firstCandidate.holdout_delta
-        } : {})
-      },
-      updated_at: now,
-      completed_at: now
-    };
-    await this.store.saveSkillOptimizationRun(nextRun);
-    if (input.sessionId) {
-      await this.saveSkillOptimizationPresentations({ sessionId: input.sessionId, run: nextRun, candidates }).catch(() => undefined);
-    }
-    await settleWork("complete");
-    if (passedCandidates.length === 0) {
-      await settleObjective("completed");
-      await this.store.releaseSkillOptimizationLock({ skillId: input.skillId, runId: current.id });
-    }
-  }
-
-  private async cancelSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
-    const runId = requiredPayloadId(payload, "run_id");
-    const run = await this.store.getSkillOptimizationRun(runId);
-    if (!run) throw new RuntimeRequestError("not_found", "skill_optimization_run_not_found");
-    if (["completed", "failed", "cancelled"].includes(run.status) && run.phase !== "awaiting_confirmation") return run;
-    this.skillOptimizationWorkers.get(runId)?.cancel();
-    const now = nowIso();
-    const cancelled = await this.store.saveSkillOptimizationRun({ ...run, status: "cancelled", phase: "cancelled", progress: 1, error: "cancelled_by_user", updated_at: now, completed_at: now });
-    const work = await this.store.getWorkItem(run.work_item_id);
-    if (work?.status === "running") {
-      await this.store.failWorkItem({ workItemId: work.id, workerId: `skill-optimization:${run.id}`, failureKind: "cancelled", error: "cancelled_by_user" });
-    }
-    const objective = await this.store.getObjective(run.objective_id);
-    if (objective && objective.status === "active") await this.store.updateObjective({ ...objective, status: "cancelled", updated_at: now, completed_at: now });
-    await this.store.releaseSkillOptimizationLock({ skillId: run.target_skill_id, runId });
-    return cancelled;
-  }
-
-  private async promoteSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
-    const runId = requiredPayloadId(payload, "run_id");
-    const candidateId = requiredPayloadId(payload, "candidate_id");
-    const [run, candidate] = await Promise.all([
-      this.store.getSkillOptimizationRun(runId),
-      this.store.getOptimizationCandidate(candidateId)
-    ]);
-    if (!run || !candidate) throw new RuntimeRequestError("not_found", "skill_optimization_candidate_not_found");
-    if (candidate.run_id !== run.id || candidate.status !== "passed") throw new RuntimeRequestError("conflict", "skill_optimization_candidate_not_promotable");
-    const targetSkill = await this.store.getSkill(run.target_skill_id);
-    const raw = targetSkill ? await this.store.readSkillMarkdown(targetSkill.id) : undefined;
-    if (!targetSkill || !raw) throw new RuntimeRequestError("not_found", "skill_not_found");
-    const lock = await this.store.getSkillOptimizationLock(targetSkill.id);
-    if (!lock || lock.run_id !== run.id) throw new RuntimeRequestError("conflict", "skill_optimization_lock_missing");
-    const now = nowIso();
-    const snapshot: SkillOptimizationSnapshot = {
-      id: createId("skill_optimization_snapshot"),
-      skill_id: targetSkill.id,
-      run_id: run.id,
-      candidate_id: candidate.id,
-      content_hash: stableHash(stripSkillFrontmatter(raw)),
-      markdown: raw,
-      created_at: now
-    };
-    await this.store.saveSkillOptimizationSnapshot(snapshot);
-    await this.updateSkillOptimizationRun(run.id, { phase: "promoting", progress: 1 });
-    let promoted: SkillWithFilePath | undefined;
-    try {
-      promoted = await this.store.replaceSkillContentIfUnchanged({ id: targetSkill.id, expectedContentHash: run.baseline_content_hash, content: candidate.body, lockRunId: run.id });
-    } catch (error) {
-      const conflict: OptimizationPromotion = {
-        id: createId("optimization_promotion"),
-        run_id: run.id,
-        candidate_id: candidate.id,
-        skill_id: targetSkill.id,
-        snapshot_id: snapshot.id,
-        expected_content_hash: run.baseline_content_hash,
-        promoted_content_hash: candidate.content_hash,
-        status: "conflict",
-        provenance: { error: safeRuntimeErrorMessage(error) },
-        created_at: now
-      };
-      await this.store.saveOptimizationPromotion(conflict);
-      await this.store.releaseSkillOptimizationLock({ skillId: targetSkill.id, runId: run.id });
-      await this.store.saveSkillOptimizationRun({ ...(await this.store.getSkillOptimizationRun(run.id) ?? run), status: "failed", phase: "failed", error: "skill_content_conflict", updated_at: now, completed_at: now });
-      throw new RuntimeRequestError("conflict", "skill_content_conflict");
-    }
-    if (!promoted) throw new RuntimeRequestError("not_found", "skill_not_found");
-    const promotion: OptimizationPromotion = {
-      id: createId("optimization_promotion"),
-      run_id: run.id,
-      candidate_id: candidate.id,
-      skill_id: targetSkill.id,
-      snapshot_id: snapshot.id,
-      expected_content_hash: run.baseline_content_hash,
-      promoted_content_hash: candidate.content_hash,
-      status: "promoted",
-      provenance: { confirmed_by: "owner", confirmation_command: "skill.optimization.promote" },
-      created_at: now
-    };
-    await this.store.saveOptimizationPromotion(promotion);
-    await this.store.saveOptimizationCandidate({ ...candidate, status: "promoted", updated_at: now });
-    const completedRun = await this.store.saveSkillOptimizationRun({ ...(await this.store.getSkillOptimizationRun(run.id) ?? run), status: "completed", phase: "completed", progress: 1, updated_at: now, completed_at: now });
-    await this.store.releaseSkillOptimizationLock({ skillId: targetSkill.id, runId: run.id });
-    const objective = await this.store.getObjective(run.objective_id);
-    if (objective && objective.status === "active") await this.store.updateObjective({ ...objective, status: "completed", updated_at: now, completed_at: now });
-    return { run: completedRun, skill: promoted, candidate: { ...candidate, status: "promoted" }, snapshot, promotion };
-  }
-
-  private async rejectSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
-    const runId = requiredPayloadId(payload, "run_id");
-    const candidateId = requiredPayloadId(payload, "candidate_id");
-    const run = await this.store.getSkillOptimizationRun(runId);
-    const candidate = await this.store.getOptimizationCandidate(candidateId);
-    if (!run || !candidate || candidate.run_id !== run.id) throw new RuntimeRequestError("not_found", "skill_optimization_candidate_not_found");
-    const now = nowIso();
-    const rejected = await this.store.saveOptimizationCandidate({ ...candidate, status: "rejected", updated_at: now });
-    const nextRun = await this.store.saveSkillOptimizationRun({ ...run, status: "completed", phase: "completed", updated_at: now, completed_at: now });
-    await this.store.releaseSkillOptimizationLock({ skillId: run.target_skill_id, runId: run.id });
-    const objective = await this.store.getObjective(run.objective_id);
-    if (objective && objective.status === "active") await this.store.updateObjective({ ...objective, status: "completed", updated_at: now, completed_at: now });
-    return { run: nextRun, candidate: rejected };
-  }
-
-  private async rollbackSkillOptimization(payload: Record<string, JsonValue>): Promise<unknown> {
-    const promotionId = stringPayload(payload.promotion_id);
-    const snapshotId = stringPayload(payload.snapshot_id);
-    const promotion = promotionId ? (await this.store.listOptimizationPromotions()).find((item) => item.id === promotionId) : undefined;
-    const snapshot = await this.store.getSkillOptimizationSnapshot(snapshotId || promotion?.snapshot_id || "");
-    if (!snapshot) throw new RuntimeRequestError("not_found", "skill_optimization_snapshot_not_found");
-    const current = await this.store.getSkill(snapshot.skill_id);
-    const raw = current ? await this.store.readSkillMarkdown(current.id) : undefined;
-    if (!current || !raw) throw new RuntimeRequestError("not_found", "skill_not_found");
-    if (promotion && stableHash(stripSkillFrontmatter(raw)) !== promotion.promoted_content_hash) {
-      throw new RuntimeRequestError("conflict", "skill_rollback_content_conflict");
-    }
-    const now = nowIso();
-    let restored: SkillWithFilePath | undefined;
-    try {
-      restored = await this.store.replaceSkillContentIfUnchanged({ id: current.id, expectedContentHash: stableHash(stripSkillFrontmatter(raw)), content: stripSkillFrontmatter(snapshot.markdown) });
-    } catch {
-      throw new RuntimeRequestError("conflict", "skill_rollback_content_conflict");
-    }
-    const restoredSnapshot = await this.store.saveSkillOptimizationSnapshot({ ...snapshot, restored_at: now });
-    const restoredPromotion = promotion
-      ? await this.store.saveOptimizationPromotion({ ...promotion, status: "rolled_back", provenance: { ...promotion.provenance, rolled_back_at: now } })
-      : undefined;
-    const candidate = await this.store.getOptimizationCandidate(snapshot.candidate_id);
-    if (candidate) await this.store.saveOptimizationCandidate({ ...candidate, status: "rolled_back", updated_at: now });
-    return { skill: restored, snapshot: restoredSnapshot, promotion: restoredPromotion };
-  }
-
-  private async executeDomainCommand(command: DomainCommandEntry, payload: Record<string, JsonValue>, inputSource: DomainCommandInputSource): Promise<unknown> {
-    if (command.id === "session.create") {
-      return this.createSession({
-        title: stringPayload(payload.title) || undefined,
-        ui_locale: supportedLocalePayload(payload.ui_locale),
-        output_locale: supportedLocalePayload(payload.output_locale)
-      });
-    }
-    if (command.id === "chat.turn.run") {
-      const sessionId = stringPayload(payload.session_id) || (await this.createSession({
-        title: stringPayload(payload.title) || undefined,
-        ui_locale: supportedLocalePayload(payload.ui_locale),
-        output_locale: supportedLocalePayload(payload.output_locale)
-      })).id;
-      const content = stringPayload(payload.content) || stringPayload(payload.user_intent) || stringPayload(payload.target_instruction);
-      if (!content) {
-        throw new RuntimeRequestError("conflict", "domain_command_chat_content_required");
-      }
-      return this.runChatTurn({
-        sessionId,
-        content,
-        backend_id: stringPayload(payload.backend_id) || undefined,
-        input_locale: supportedLocalePayload(payload.input_locale),
-        output_locale: supportedLocalePayload(payload.output_locale),
-        metadata: {
-          domain_command_id: command.id,
-          domain_command_payload: payload
-        }
-      });
-    }
-
-    if (command.id === "gateway.inbound.route") {
-      const sourceIdentity = stringPayload(payload.source_identity);
-      const body = stringPayload(payload.body) || stringPayload(payload.content) || stringPayload(payload.user_intent);
-      if (!sourceIdentity || !body) {
-        throw new RuntimeRequestError("conflict", "domain_command_gateway_inbound_source_body_required");
-      }
-      return this.executeGatewayInbound({
-        channel: gatewayChannelPayload(payload.channel),
-        source_identity: sourceIdentity,
-        body,
-        source_label: stringPayload(payload.source_label) || undefined,
-        account_id: stringPayload(payload.account_id) || undefined,
-        thread_id: stringPayload(payload.thread_id) || undefined,
-        route: stringPayload(payload.route) || undefined,
-        metadata: recordPayload(payload.metadata),
-        backend_id: stringPayload(payload.backend_id) || undefined,
-        input_locale: supportedLocalePayload(payload.input_locale),
-        output_locale: supportedLocalePayload(payload.output_locale)
-      });
-    }
-
-    if (command.id === "artifact.create" || command.id === "graph.create") {
-      const graphCreate = command.id === "graph.create";
-      const sessionId = stringPayload(payload.session_id) || (await this.createSession({
-        title: stringPayload(payload.title) || "Artifact command",
-        ui_locale: supportedLocalePayload(payload.ui_locale),
-        output_locale: supportedLocalePayload(payload.output_locale)
-      })).id;
-      const title = stringPayload(payload.title) || "Untitled artifact";
-      const instruction = stringPayload(payload.instruction) || stringPayload(payload.content) || stringPayload(payload.body);
-      if (!instruction) {
-        throw new RuntimeRequestError("conflict", "domain_command_artifact_instruction_required");
-      }
-      if (graphCreate || payload.kind === "graph") {
-        try {
-          GraphDocumentSchema.parse(JSON.parse(instruction));
-        } catch {
-          throw new RuntimeRequestError("conflict", "graph_document_invalid");
-        }
-      }
-      if (graphCreate || payload.provider_tool_call === true) {
-        const session = await this.store.getSession(sessionId);
-        if (!session) {
-          throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
-        }
-        const inputLocale = supportedLocalePayload(payload.input_locale) ?? session.ui_locale;
-        const outputLocale = supportedLocalePayload(payload.output_locale) ?? session.output_locale;
-        const context = {
-          ...webGatewayContext,
-          session_key: session.session_key
-        };
-        const createdEnvelope = createGatewayEnvelope(context, instruction, inputLocale, outputLocale, recordPayload(payload.metadata));
-        const envelopeId = stringPayload(payload.envelope_id) || stringPayload(payload.input_message_id);
-        const envelope = envelopeId ? { ...createdEnvelope, id: envelopeId } : createdEnvelope;
-        return this.runAllowedWrite<ArtifactRecord, Record<string, unknown>>({
-          session,
-          envelope,
-          context,
-          operationName: command.id,
-          proposedEffects: command.proposed_effects,
-          execute: async (operation) => {
-            const artifact = await createArtifactDraft({
-              store: this.store,
-              operation,
-              title,
-              content: instruction,
-              kind: graphCreate ? "graph" : artifactKindPayload(payload.kind),
-              locale: outputLocale,
-              sourceLocales: [inputLocale],
-              createdBy: "backend"
-            });
-            const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref], {}, { artifact_id: artifact.id });
-            return {
-              resource: artifact,
-              ref: artifact.file_ref,
-              rollbackPoint,
-              summary: `Created artifact ${artifact.title}.`
-            };
-          }
-        });
-      }
-      return this.runStructuredSurfaceOperation({
-        id: stringPayload(payload.surface_operation_id) || createId("surface"),
-        kind: "artifact.request",
-        session_id: sessionId,
-        action: "create",
-        title,
-        instruction,
-        input_locale: supportedLocalePayload(payload.input_locale),
-        output_locale: supportedLocalePayload(payload.output_locale),
-        metadata: recordPayload(payload.metadata)
-      });
-    }
-
-    if (command.id === "graph.patch") {
-      const artifactId = requiredPayloadId(payload, "artifact_id");
-      const artifact = await this.store.getArtifact(artifactId);
-      if (!artifact || artifact.kind !== "graph") throw new RuntimeRequestError("not_found", "graph_artifact_not_found");
-      const currentContent = await this.store.readArtifactContent(artifactId);
-      if (!currentContent) throw new RuntimeRequestError("not_found", "graph_document_content_not_found");
-      let current: GraphDocument;
-      try {
-        current = GraphDocumentSchema.parse(JSON.parse(currentContent));
-      } catch {
-        throw new RuntimeRequestError("conflict", "graph_document_invalid");
-      }
-      const next = applyGraphDocumentPatch(current, payload);
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const envelope = createGatewayEnvelope(webGatewayContext, `Edit graph: ${artifact.title}`);
-      return this.runAllowedWrite<ArtifactRecord, { revision: Awaited<ReturnType<WorkspaceStore["createArtifactRevision"]>>["revision"] }>({
-        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [artifact.file_ref],
-        execute: async (operation) => {
-          const created = await this.store.createArtifactRevision({
-            artifactId,
-            content: `${JSON.stringify(next, null, 2)}\n`,
-            extension: "json",
-            baseRevisionId: stringPayload(payload.base_revision_id) || (typeof artifact.metadata.current_revision_id === "string" ? artifact.metadata.current_revision_id : undefined),
-            editorSource: artifactEditorSourcePayload(payload.editor_source, inputSource),
-            changeSummary: stringPayload(payload.change_summary) || "Updated graph nodes and edges.",
-            provenance: recordPayload(payload.provenance)
-          });
-          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
-          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Updated graph ${artifact.title}.` };
-        }
-      });
-    }
-
-    if (command.id === "image.generate") {
-      const image = imageProviderResultPayload(payload);
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const envelope = createGatewayEnvelope(webGatewayContext, `Save generated image: ${stringPayload(payload.title) || "Generated image"}`);
-      return this.runAllowedWrite<ArtifactRecord, Record<string, unknown>>({
-        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects,
-        execute: async (operation) => {
-          const artifact = await createArtifactDraft({
-            store: this.store,
-            operation,
-            title: stringPayload(payload.title) || "Generated image",
-            content: { bytes: image.bytes, mime_type: image.mimeType, extension: image.extension, preview: stringPayload(payload.preview) || undefined },
-            kind: "image",
-            locale: supportedLocalePayload(payload.output_locale) ?? session.output_locale,
-            sourceLocales: [supportedLocalePayload(payload.input_locale) ?? session.ui_locale],
-            createdBy: "image_provider",
-            metadata: { image_operation: "generate", prompt: image.prompt, provider: image.provider, source_run_id: image.sourceRunId, mime_type: image.mimeType, width: image.width, height: image.height, provenance: image.provenance }
-          });
-          const created = await this.store.createArtifactRevision({
-            artifactId: artifact.id,
-            content: image.bytes,
-            extension: image.extension,
-            producerRunId: image.sourceRunId,
-            editorSource: "image_provider",
-            changeSummary: "Saved generated image provider result.",
-            provenance: { operation: "generate", prompt: image.prompt, provider: image.provider, source_run_id: image.sourceRunId, mime_type: image.mimeType, width: image.width, height: image.height, ...image.provenance }
-          });
-          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], {}, { artifact_id: artifact.id });
-          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Saved generated image ${artifact.title}.` };
-        }
-      });
-    }
-
-    if (command.id === "image.edit") {
-      const artifactId = requiredPayloadId(payload, "artifact_id");
-      const artifact = await this.store.getArtifact(artifactId);
-      if (!artifact || artifact.kind !== "image") throw new RuntimeRequestError("not_found", "image_artifact_not_found");
-      const image = imageProviderResultPayload(payload);
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const envelope = createGatewayEnvelope(webGatewayContext, `Save edited image: ${artifact.title}`);
-      return this.runAllowedWrite<ArtifactRecord, { revision: Awaited<ReturnType<WorkspaceStore["createArtifactRevision"]>>["revision"] }>({
-        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [artifact.file_ref],
-        execute: async (operation) => {
-          const created = await this.store.createArtifactRevision({
-            artifactId,
-            content: image.bytes,
-            extension: image.extension,
-            baseRevisionId: stringPayload(payload.base_revision_id) || (typeof artifact.metadata.current_revision_id === "string" ? artifact.metadata.current_revision_id : undefined),
-            producerRunId: image.sourceRunId,
-            editorSource: "image_provider",
-            changeSummary: stringPayload(payload.change_summary) || "Saved image provider edit.",
-            provenance: { operation: "edit", prompt: image.prompt, provider: image.provider, source_asset_id: artifact.id, source_run_id: image.sourceRunId, mime_type: image.mimeType, width: image.width, height: image.height, ...image.provenance }
-          });
-          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
-          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Saved edited image ${artifact.title}.` };
-        }
-      });
-    }
-
-    if (command.id === "artifact.export_pdf") {
-      const artifactId = requiredPayloadId(payload, "artifact_id");
-      const source = await this.store.getArtifact(artifactId);
-      if (!source) throw new RuntimeRequestError("not_found", "artifact_not_found");
-      const content = await this.store.readArtifactContent(artifactId);
-      if (content === undefined) throw new RuntimeRequestError("conflict", "artifact_pdf_source_not_text");
-      const adapter = this.workspaceOptions.pdfExportAdapter;
-      if (!adapter) throw new RuntimeRequestError("provider_not_configured", "pdf_export_adapter_unavailable");
-      const bytes = await adapter.export({ title: source.title, content, source_artifact: source });
-      if (bytes.byteLength < 8 || Buffer.from(bytes.subarray(0, 5)).toString("ascii") !== "%PDF-") throw new RuntimeRequestError("provider_failed", "pdf_export_invalid_result");
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const envelope = createGatewayEnvelope(webGatewayContext, `Export PDF: ${source.title}`);
-      return this.runAllowedWrite<ArtifactRecord, Record<string, unknown>>({
-        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [source.file_ref],
-        execute: async (operation) => {
-          const pdf = await createArtifactDraft({ store: this.store, operation, title: `${source.title}.pdf`, content: { bytes, mime_type: "application/pdf", extension: "pdf", preview: source.title }, kind: "pdf", locale: source.locale, sourceLocales: source.source_locales, createdBy: "pdf_export_adapter", metadata: { source_artifact_id: source.id, source_revision_id: typeof source.metadata.current_revision_id === "string" ? source.metadata.current_revision_id : null, export_adapter_id: adapter.id } });
-          const rollbackPoint = await this.createRollbackPoint(operation, [source.file_ref, pdf.file_ref], {}, { artifact_id: pdf.id, source_artifact_id: source.id });
-          return { resource: pdf, ref: pdf.file_ref, rollbackPoint, summary: `Exported ${source.title} as PDF.` };
-        }
-      });
-    }
-
-    if (command.id === "artifact.revise") {
-      const artifactId = requiredPayloadId(payload, "artifact_id");
-      const content = stringPayload(payload.content);
-      if (!content) throw new RuntimeRequestError("conflict", "artifact_revision_content_required");
-      const artifact = await this.store.getArtifact(artifactId);
-      if (!artifact) throw new RuntimeRequestError("not_found", "artifact_not_found");
-      if (artifact.kind === "graph") {
-        try {
-          GraphDocumentSchema.parse(JSON.parse(content));
-        } catch {
-          throw new RuntimeRequestError("conflict", "graph_document_invalid");
-        }
-      }
-      const session = stringPayload(payload.session_id) ? await this.store.getSession(stringPayload(payload.session_id)) : await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
-      const envelope = createGatewayEnvelope(webGatewayContext, `Revise artifact: ${artifact.title}`);
-      return this.runAllowedWrite<ArtifactRecord, { revision: Awaited<ReturnType<WorkspaceStore["createArtifactRevision"]>>["revision"] }>({
-        session,
-        envelope,
-        context: webGatewayContext,
-        operationName: command.id,
-        proposedEffects: command.proposed_effects,
-        targetResourceRefs: [artifact.file_ref],
-        execute: async (operation) => {
-          const editorSource = artifactEditorSourcePayload(payload.editor_source, inputSource);
-          const created = await this.store.createArtifactRevision({
-            artifactId,
-            content,
-            producerRunId: stringPayload(payload.producer_run_id) || undefined,
-            extension: stringPayload(payload.extension) || undefined,
-            baseRevisionId: stringPayload(payload.base_revision_id) || undefined,
-            editorSource,
-            changeSummary: stringPayload(payload.change_summary) || undefined,
-            provenance: recordPayload(payload.provenance)
-          });
-          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
-          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Created revision ${created.revision.revision} of ${artifact.title}.` };
-        }
-      });
-    }
-    if (command.id === "artifact.restore_revision") {
-      const artifactId = requiredPayloadId(payload, "artifact_id");
-      const revisionId = requiredPayloadId(payload, "revision_id");
-      const artifact = await this.store.getArtifact(artifactId);
-      const sourceRevision = await this.store.getArtifactRevision(revisionId);
-      if (!artifact || !sourceRevision || sourceRevision.artifact_id !== artifactId) throw new RuntimeRequestError("not_found", "artifact_revision_not_found");
-      const content = await this.store.readArtifactRevisionContent(revisionId);
-      if (!content) throw new RuntimeRequestError("not_found", "artifact_revision_content_not_found");
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const envelope = createGatewayEnvelope(webGatewayContext, `Restore artifact revision: ${artifact.title}`);
-      return this.runAllowedWrite<ArtifactRecord, { revision: Awaited<ReturnType<WorkspaceStore["createArtifactRevision"]>>["revision"] }>({
-        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [artifact.file_ref, sourceRevision.file_ref],
-        execute: async (operation) => {
-          const created = await this.store.createArtifactRevision({
-            artifactId,
-            content,
-            baseRevisionId: stringPayload(payload.base_revision_id) || (typeof artifact.metadata.current_revision_id === "string" ? artifact.metadata.current_revision_id : undefined),
-            editorSource: "restore",
-            changeSummary: stringPayload(payload.change_summary) || `Restored revision ${sourceRevision.revision}.`,
-            provenance: { restored_from_revision_id: sourceRevision.id }
-          });
-          const rollbackPoint = await this.createRollbackPoint(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
-          return { resource: created.artifact, revision: created.revision, ref: created.artifact.file_ref, rollbackPoint, summary: `Restored revision ${sourceRevision.revision} of ${artifact.title}.` };
-        }
-      });
-    }
-    if (command.id === "artifact.repair") {
-      const artifactId = requiredPayloadId(payload, "artifact_id");
-      const artifact = await this.store.getArtifact(artifactId);
-      if (!artifact) throw new RuntimeRequestError("not_found", "artifact_not_found");
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const envelope = createGatewayEnvelope(webGatewayContext, `Repair artifact source: ${artifact.title}`);
-      return this.runAllowedWrite<ArtifactRecord, { repair: { repaired: boolean } }>({
-        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [artifact.file_ref],
-        execute: async () => {
-          const repair = await this.store.repairArtifactRevisionSource(artifactId);
-          return { resource: artifact, repair: { repaired: repair.repaired }, ref: artifact.file_ref, summary: repair.repaired ? `Repaired artifact ${artifact.title}.` : `Artifact ${artifact.title} did not require repair.` };
-        }
-      });
-    }
-
-    if (command.id === "memory.session.create") {
-      const content = stringPayload(payload.content) || stringPayload(payload.user_intent) || stringPayload(payload.target_instruction);
-      if (!content) {
-        throw new RuntimeRequestError("conflict", "domain_command_memory_content_required");
-      }
-      const requestedSessionId = stringPayload(payload.session_id);
-      const session = requestedSessionId
-        ? await this.store.getSession(requestedSessionId)
-        : await this.createSession({
-          title: stringPayload(payload.title) || undefined,
-          ui_locale: supportedLocalePayload(payload.ui_locale),
-          output_locale: supportedLocalePayload(payload.output_locale)
-        });
-      if (!session) {
-        throw new RuntimeRequestError("not_found", `Session not found: ${requestedSessionId}`);
-      }
-      const context = {
-        ...webGatewayContext,
-        session_key: session.session_key
-      };
-      const createdEnvelope = createGatewayEnvelope(
-        context,
-        content,
-        supportedLocalePayload(payload.input_locale) ?? session.ui_locale,
-        supportedLocalePayload(payload.output_locale) ?? session.output_locale,
-        recordPayload(payload.metadata)
-      );
-      const envelopeId = stringPayload(payload.envelope_id) || stringPayload(payload.input_message_id);
-      const envelope = envelopeId ? { ...createdEnvelope, id: envelopeId } : createdEnvelope;
-      return this.runAllowedWrite<MemoryFrontmatter, Record<string, unknown>>({
-        session,
-        envelope,
-        context,
-        operationName: command.id,
-        proposedEffects: command.proposed_effects,
-        execute: async (operation) => {
-          const memory = await createSessionMemory(this.store, envelope, content);
-          const ref = memoryRef(memory);
-          const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { memory_id: memory.id });
-          await this.emit("memory.candidate.created", memory);
-          return {
-            resource: memory,
-            ref,
-            rollbackPoint,
-            summary: `Created session memory ${memory.topic}.`
-          };
-        }
-      });
-    }
-
-    if (command.id === "memory.topic.create") {
-      const content = stringPayload(payload.content) || stringPayload(payload.topic) || stringPayload(payload.user_intent) || stringPayload(payload.target_instruction);
-      if (!content) {
-        throw new RuntimeRequestError("conflict", "domain_command_memory_topic_required");
-      }
-      const requestedSessionId = stringPayload(payload.session_id);
-      const session = requestedSessionId
-        ? await this.store.getSession(requestedSessionId)
-        : await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      if (!session) {
-        throw new RuntimeRequestError("not_found", `Session not found: ${requestedSessionId}`);
-      }
-      const context = {
-        ...webGatewayContext,
-        session_key: session.session_key
-      };
-      const createdEnvelope = createGatewayEnvelope(
-        context,
-        content,
-        supportedLocalePayload(payload.input_locale),
-        supportedLocalePayload(payload.output_locale),
-        recordPayload(payload.metadata)
-      );
-      const envelopeId = stringPayload(payload.envelope_id) || stringPayload(payload.input_message_id);
-      const envelope = envelopeId ? { ...createdEnvelope, id: envelopeId } : createdEnvelope;
-      return this.runAllowedWrite<MemoryFrontmatter, Record<string, unknown>>({
-        session,
-        envelope,
-        context,
-        operationName: command.id,
-        proposedEffects: command.proposed_effects,
-        execute: async (operation) => {
-          const memory = await createTopicMemory(this.store, envelope, stringPayload(payload.topic_kind) || "preference", content);
-          const ref = memoryRef(memory);
-          const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { memory_id: memory.id });
-          await this.emit("memory.candidate.created", memory);
-          return {
-            resource: memory,
-            ref,
-            rollbackPoint,
-            summary: `Created topic memory ${memory.topic}.`
-          };
-        }
-      });
-    }
-
-    if (command.id === "memory.archive") {
-      const sessionId = stringPayload(payload.session_id);
-      if (!sessionId) {
-        throw new RuntimeRequestError("conflict", "domain_command_memory_archive_session_id_required");
-      }
-      return this.archiveMemory({ memoryId: requiredPayloadId(payload, "memory_id"), sessionId });
-    }
-
-    if (command.id === "rollback.restore") {
-      return this.restoreRollbackPoint(requiredPayloadId(payload, "rollback_point_id"));
-    }
-
-    if (command.id === "collection.record.create") {
-      const collectionId = stringPayload(payload.collection_id);
-      if (!collectionId) {
-        throw new RuntimeRequestError("conflict", "domain_command_collection_id_required");
-      }
-      const now = nowIso();
-      return this.createCollectionRecord({
-        id: stringPayload(payload.record_id) || stringPayload(payload.id) || createId("collection_record"),
-        collection_id: collectionId,
-        version: 1,
-        data: recordPayload(payload.data),
-        resource_refs: resourceRefsPayload(payload.resource_refs),
-        created_at: now,
-        updated_at: now
-      });
-    }
-
-    if (command.id === "collection.view.present") {
-      const collectionId = stringPayload(payload.collection_id);
-      if (!collectionId) {
-        throw new RuntimeRequestError("conflict", "domain_command_collection_id_required");
-      }
-      return this.presentCollectionView({
-        collectionId,
-        viewId: stringPayload(payload.view_id) || undefined
-      });
-    }
-
-    if (command.id === "collection.patch.apply") {
-      const collectionId = stringPayload(payload.collection_id);
-      const recordId = stringPayload(payload.record_id);
-      if (!collectionId || !recordId) {
-        throw new RuntimeRequestError("conflict", "domain_command_collection_patch_target_required");
-      }
-      const expectedVersion = positiveIntegerPayload(payload.expected_version);
-      if (expectedVersion === undefined) {
-        throw new RuntimeRequestError("conflict", "domain_command_collection_patch_expected_version_required");
-      }
-      return this.applyCollectionPatch({
-        collectionId,
-        recordId,
-        patch: {
-          id: stringPayload(payload.patch_id) || stringPayload(payload.id) || createId("collection_patch"),
-          record_id: recordId,
-          changes: recordPayload(payload.changes),
-          expected_version: expectedVersion,
-          source_operation_id: stringPayload(payload.source_operation_id) || createId("domain_command"),
-          created_at: nowIso()
-        }
-      });
-    }
-
-    if (command.id === "collection.record.delete") {
-      const collectionId = stringPayload(payload.collection_id);
-      const recordId = stringPayload(payload.record_id);
-      if (!collectionId || !recordId) {
-        throw new RuntimeRequestError("conflict", "domain_command_collection_delete_target_required");
-      }
-      return this.deleteCollectionRecord({
-        collectionId,
-        recordId,
-        viewId: stringPayload(payload.view_id) || undefined
-      });
-    }
-
-    if (command.id === "collection.schema.save") {
-      return this.saveCollectionSchema(CollectionSchemaSchema.parse(payload));
-    }
-
-    if (command.id === "collection.manage") {
-      return this.manageCollection(payload);
-    }
-
-    if (command.id === "collection.action.run") {
-      return this.runCollectionAction({
-        collectionId: stringPayload(payload.collection_id),
-        actionId: stringPayload(payload.action_id),
-        backendId: stringPayload(payload.backend_id) || undefined,
-        recordId: stringPayload(payload.record_id) || undefined,
-        sessionId: stringPayload(payload.session_id) || undefined,
-        payload: recordPayload(payload.payload)
-      });
-    }
-
-    if (command.id === "collection.reindex") {
-      return this.reindexCollections();
-    }
-
-    if (command.id === "wiki.proposal.create") {
-      const title = stringPayload(payload.title);
-      const content = stringPayload(payload.content);
-      if (!title || !content) {
-        throw new RuntimeRequestError("conflict", "domain_command_wiki_title_content_required");
-      }
-      return this.createWikiProposal({
-        title,
-        content,
-        slug: stringPayload(payload.slug) || undefined,
-        tags: domainStringArrayPayload(payload.tags),
-        content_locale: supportedLocalePayload(payload.content_locale),
-        source_refs: wikiSourceRefsPayload(payload.source_refs),
-        provenance: wikiProvenancePayload(payload.provenance)
-      });
-    }
-
-    if (command.id === "wiki.accept") {
-      return this.acceptWikiPage(requiredPayloadId(payload, "wiki_id"));
-    }
-    if (command.id === "wiki.reject") {
-      return this.rejectWikiPage(requiredPayloadId(payload, "wiki_id"));
-    }
-    if (command.id === "wiki.archive") {
-      return this.archiveWikiPage(requiredPayloadId(payload, "wiki_id"));
-    }
-    if (command.id === "wiki.patch") {
-      return this.patchWikiPage({
-        id: requiredPayloadId(payload, "wiki_id"),
-        title: stringPayload(payload.title) || undefined,
-        content: typeof payload.content === "string" ? payload.content : undefined,
-        tags: Array.isArray(payload.tags) ? domainStringArrayPayload(payload.tags) : undefined,
-        content_locale: supportedLocalePayload(payload.content_locale),
-        source_refs: wikiSourceRefsPayload(payload.source_refs),
-        provenance: wikiProvenancePayload(payload.provenance)
-      });
-    }
-    if (command.id === "wiki.reindex") {
-      return this.reindexWiki();
-    }
-
-    if (command.id === "skill.candidate.create") {
-      const title = stringPayload(payload.title);
-      const content = stringPayload(payload.content);
-      if (!title || !content) {
-        throw new RuntimeRequestError("conflict", "domain_command_skill_title_content_required");
-      }
-      return this.createSkillCandidate({
-        title,
-        description: stringPayload(payload.description) || summarize(content),
-        content,
-        tags: domainStringArrayPayload(payload.tags),
-        required_capabilities: domainStringArrayPayload(payload.required_capabilities),
-        source_refs: skillSourceRefsPayload(payload.source_refs),
-        provenance_detail: skillProvenancePayload(payload.provenance_detail)
-      });
-    }
-    if (command.id === "skill.project.save") {
-      return this.saveSkillProject({ candidateId: requiredPayloadId(payload, "candidate_id") });
-    }
-    if (command.id === "skill.support_file.save") {
-      const skillId = requiredPayloadId(payload, "skill_id");
-      const supportPath = stringPayload(payload.path);
-      const content = stringPayload(payload.content);
-      if (!supportPath) {
-        throw new RuntimeRequestError("conflict", "domain_command_skill_support_path_required");
-      }
-      return this.saveSkillSupportFile({ skillId, path: supportPath, content });
-    }
-    if (command.id === "skill.lifecycle.apply") {
-      const action = stringPayload(payload.action);
-      if (!isCuratorLifecycleApplyAction(action)) {
-        throw new RuntimeRequestError("conflict", "domain_command_skill_lifecycle_action_required");
-      }
-      return this.applyCuratorSkillAction({ skillId: requiredPayloadId(payload, "skill_id"), action });
-    }
-    if (command.id === "skill.patch") {
-      const skillId = requiredPayloadId(payload, "skill_id");
-      const current = await this.store.getSkill(skillId);
-      if (!current) throw new RuntimeRequestError("not_found", "skill_not_found");
-      const beforeMarkdown = await this.store.readSkillMarkdown(skillId);
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const envelope = createGatewayEnvelope(webGatewayContext, `Edit Skill: ${current.title}`);
-      return this.runAllowedWrite({
-        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [skillRef(current)],
-        execute: async (operation) => {
-          const saved = await this.store.patchSkill({ id: skillId, title: optionalStringPayload(payload.title), description: optionalStringPayload(payload.description), tags: domainStringArrayPayload(payload.tags), content: optionalStringPayload(payload.content) });
-          if (!saved) throw new RuntimeRequestError("not_found", "skill_not_found");
-          const ref = skillRef(saved);
-          const rollbackPoint = await this.createRollbackPoint(operation, [ref], { skill: current as unknown as JsonValue, markdown: beforeMarkdown ?? "" }, { skill: saved as unknown as JsonValue });
-          return { resource: saved, ref, rollbackPoint, summary: `Updated Skill ${saved.title}.` };
-        }
-      });
-    }
-    if (command.id === "skill.view") {
-      return this.viewSkill({
-        skillId: requiredPayloadId(payload, "skill_id"),
-        runId: requiredPayloadId(payload, "run_id"),
-        path: stringPayload(payload.path) || undefined
-      });
-    }
-
-    if (command.id === "file.read" || command.id === "file.inspect" || command.id === "file.list" || command.id === "file.write" || command.id === "file.patch") {
-      return this.runFileAction({
-        operation: command.id,
-        path: stringPayload(payload.path),
-        content: typeof payload.content === "string" ? payload.content : undefined,
-        search: typeof payload.search === "string" ? payload.search : undefined,
-        replace: typeof payload.replace === "string" ? payload.replace : undefined
-      });
-    }
-
-    if (command.id === "browser.navigate" || command.id === "browser.extract" || command.id === "browser.interact" || command.id === "browser.screenshot" || command.id === "browser.download_to_workspace") {
-      return this.runBrowserAction({
-        operation: command.id,
-        url: stringPayload(payload.url),
-        output_path: stringPayload(payload.output_path) || undefined,
-        action: browserInteractionActionPayload(payload.action),
-        selector: stringPayload(payload.selector) || undefined,
-        value: stringPayload(payload.value) || undefined
-      });
-    }
-
-    if (command.id === "external.send.prepare") {
-      const channel = externalSendChannelPayload(payload.channel);
-      return this.prepareExternalSend({
-        channel,
-        target: recordPayload(payload.target),
-        title: stringPayload(payload.title),
-        body: stringPayload(payload.body)
-      });
-    }
-    if (command.id === "external.send") {
-      const body = stringPayload(payload.body) || stringPayload(payload.content) || stringPayload(payload.user_intent) || "External send requested by backend.";
-      return this.prepareExternalSend({
-        channel: externalSendChannelPayload(payload.channel),
-        target: recordPayload(payload.target),
-        title: stringPayload(payload.title) || "External send request",
-        body
-      });
-    }
-    if (command.id === "external.send.dispatch") {
-      return this.dispatchExternalSend({
-        sendId: stringPayload(payload.send_id) || stringPayload(payload.sendId),
-        dryRun: booleanPayload(payload.dry_run)
-      });
-    }
-
-    if (command.id === "automation.job.save") {
-      return this.saveAutomationJob({
-        title: stringPayload(payload.title),
-        kind: automationJobKindPayload(payload.kind),
-        schedule: stringPayload(payload.schedule),
-        target_instruction: stringPayload(payload.target_instruction),
-        delivery_target: recordPayload(payload.delivery_target),
-        enabled: booleanPayload(payload.enabled),
-        next_run_at: stringPayload(payload.next_run_at) || undefined,
-        max_attempts: numberPayload(payload.max_attempts)
-      });
-    }
-    if (command.id === "automation.job.set_status") {
-      const jobId = requiredPayloadId(payload, "job_id");
-      const status = payload.status === "enabled" || payload.status === "disabled" ? payload.status : undefined;
-      if (!status) throw new RuntimeRequestError("conflict", "automation_job_status_invalid");
-      const current = await this.store.getAutomationJob(jobId);
-      if (!current) throw new RuntimeRequestError("not_found", "automation_job_not_found");
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const envelope = createGatewayEnvelope(webGatewayContext, `${status === "enabled" ? "Resume" : "Pause"} automation: ${current.title}`);
-      return this.runAllowedWrite({
-        session, envelope, context: webGatewayContext, operationName: command.id, proposedEffects: command.proposed_effects, targetResourceRefs: [automationJobRef(current)],
-        execute: async (operation) => {
-          const saved = await this.store.saveAutomationJob({ ...current, status, locked_until: status === "disabled" ? undefined : current.locked_until, updated_at: nowIso() });
-          const ref = automationJobRef(saved);
-          const rollbackPoint = await this.createRollbackPoint(operation, [ref], { automation_job: current as unknown as JsonValue }, { automation_job: saved as unknown as JsonValue });
-          return { resource: saved, ref, rollbackPoint, summary: `${status === "enabled" ? "Resumed" : "Paused"} automation ${saved.title}.` };
-        }
-      });
-    }
-    if (command.id === "automation.job.run") {
-      const jobId = requiredPayloadId(payload, "job_id");
-      const job = await this.store.getAutomationJob(jobId);
-      if (!job) {
-        throw new RuntimeRequestError("not_found", `Automation job not found: ${jobId}`);
-      }
-      const now = stringPayload(payload.now) || nowIso();
-      const locked = await this.store.acquireAutomationJobLock(job.id, {
-        lockedUntil: new Date(Date.parse(now) + 15 * 60_000).toISOString(),
-        now
-      });
-      if (!locked) {
-        throw new RuntimeRequestError("conflict", "automation_job_locked");
-      }
-      return this.runAutomationJob(locked, now);
-    }
-    if (command.id === "automation.memory_review.run") {
-      return this.runMemoryReviewAutomation();
-    }
-    if (command.id === "curator.run") {
-      return this.runCuratorJob();
-    }
-    if (command.id === "curator.snapshot.create") {
-      return this.store.createLearningSnapshot(stringPayload(payload.run_id) || createId("curator_manual"));
-    }
-    if (command.id === "curator.snapshot.list") {
-      return this.store.listLearningSnapshots();
-    }
-    if (command.id === "curator.restore") {
-      const restored = await this.store.restoreLearningSnapshot(requiredPayloadId(payload, "snapshot_id"));
-      if (!restored) throw new RuntimeRequestError("not_found", "curator_snapshot_not_found");
-      return restored;
-    }
-    if (command.id === "curator.pause") {
-      return this.store.saveCuratorState({ paused: true });
-    }
-    if (command.id === "curator.resume") {
-      return this.store.saveCuratorState({ paused: false });
-    }
-    if (command.id === "reflection.run") {
-      return this.runReflection({
-        sessionId: requiredPayloadId(payload, "session_id"),
-        sourceRunId: stringPayload(payload.source_run_id) || undefined
-      });
-    }
-    if (command.id === "evaluation.run") {
-      return this.runEvaluationJob();
-    }
-    if (command.id === "workspace.repair") {
-      return this.store.repairWorkspace({ dryRun: payload.dry_run !== false });
-    }
-    if (command.id === "workspace.backup.create") {
-      return this.store.createWorkspaceBackup();
-    }
-    if (command.id === "workspace.backup.restore") {
-      return this.store.restoreWorkspaceBackup(requiredPayloadId(payload, "backup_id"));
-    }
-    if (command.id === "gateway.mcp_config.save") {
-      return this.store.saveGatewayMcpConfig(GatewayMcpConfigRecordSchema.parse(payload));
-    }
-    if (command.id === "gateway.pairing_policy.save") {
-      return this.saveGatewayPairingPolicy(GatewayPairingPolicyRecordSchema.parse(payload));
-    }
-    if (command.id === "gateway.routing_policy.save") {
-      return this.saveGatewayRoutingPolicy(GatewayRoutingPolicyRecordSchema.parse(payload));
-    }
-    if (command.id === "gateway.pairing.expire") {
-      return this.expireGatewayPairings(stringPayload(payload.now) || undefined);
-    }
-    if (command.id === "gateway.state.repair") {
-      return this.repairGatewayState({
-        dryRun: payload.dry_run !== false,
-        now: stringPayload(payload.now) || undefined
-      });
-    }
-    if (command.id === "gateway.pairing.approve") {
-      return this.approveGatewayPairing(requiredPayloadId(payload, "pairing_id"));
-    }
-    if (command.id === "gateway.pairing.reject") {
-      return this.rejectGatewayPairing(requiredPayloadId(payload, "pairing_id"));
-    }
-    if (command.id === "gateway.pairing.rotate") {
-      return this.rotateGatewayPairing(requiredPayloadId(payload, "pairing_id"));
-    }
-    if (command.id === "gateway.pairing.revoke") {
-      return this.revokeGatewayPairing(requiredPayloadId(payload, "pairing_id"));
-    }
-    if (command.id === "gateway.sandbox.recreate") {
-      return this.recreateGatewaySandboxInstance(requiredPayloadId(payload, "sandbox_id"));
-    }
-    if (command.id === "gateway.sandbox.delete") {
-      return this.deleteGatewaySandboxInstance(requiredPayloadId(payload, "sandbox_id"));
-    }
-    if (command.id === "gateway.sandbox.sync") {
-      const parsedDirection = GatewaySandboxWorkspaceSyncDirectionSchema.safeParse(payload.direction);
-      return this.syncGatewaySandboxWorkspace(requiredPayloadId(payload, "sandbox_id"), {
-        direction: parsedDirection.success ? parsedDirection.data : undefined,
-        dryRun: payload.dry_run !== false
-      });
-    }
-    if (command.id === "gateway.concurrency_lock.expire") {
-      const locks = await this.store.expireGatewayConcurrencyLocks(stringPayload(payload.now) || undefined);
-      return { expired_count: locks.length, locks };
-    }
-    if (command.id === "automation.job.requeue") {
-      const job = await this.store.requeueAutomationJob(requiredPayloadId(payload, "job_id"), { nextRunAt: stringPayload(payload.next_run_at) || undefined });
-      if (!job) throw new RuntimeRequestError("not_found", "automation_job_not_found");
-      return job;
-    }
-    if (command.id === "automation.job.release_lock") {
-      const job = await this.store.releaseAutomationJobLock(requiredPayloadId(payload, "job_id"), stringPayload(payload.now) || undefined);
-      if (!job) throw new RuntimeRequestError("not_found", "automation_job_not_found");
-      return job;
-    }
-    if (command.id === "client.event.save") {
-      return this.store.saveClientEvent(ClientEventRecordSchema.parse(payload));
-    }
-    if (command.id === "client.event.deliver" || command.id === "client.event.ack" || command.id === "client.event.fail") {
-      const eventId = requiredPayloadId(payload, "event_id");
-      const event = command.id === "client.event.deliver"
-        ? await this.store.markClientEventDelivered(eventId)
-        : command.id === "client.event.ack"
-          ? await this.store.ackClientEvent(eventId)
-          : await this.store.failClientEvent(eventId, stringPayload(payload.error_code) || "client_event_failed");
-      if (!event) throw new RuntimeRequestError("not_found", "client_event_not_found");
-      return event;
-    }
-    if (command.id === "settings.patch") {
-      const patch: Partial<SettingsRecord> = {};
-      const uiLocale = supportedLocalePayload(payload.ui_locale);
-      const outputLocale = supportedLocalePayload(payload.output_locale);
-      if (uiLocale) patch.ui_locale = uiLocale;
-      if (outputLocale) patch.output_locale = outputLocale;
-      for (const key of ["memory_capture_mode", "knowledge_wiki_capture_mode", "skill_capture_mode"] as const) {
-        const parsed = CaptureModeSchema.safeParse(payload[key]);
-        if (parsed.success) patch[key] = parsed.data;
-      }
-      const externalRole = ExternalProviderRoleSchema.safeParse(payload.external_provider_role);
-      if (externalRole.success) patch.external_provider_role = externalRole.data;
-      return this.store.patchSettings(patch);
-    }
-    if (command.id === "resource.translation.save") {
-      return this.store.saveResourceTranslation(ResourceTranslationRecordSchema.parse(payload));
-    }
-    if (command.id === "resource.translation_job.save") {
-      const sourceRef = resourceRefFromJson(payload.source_ref);
-      const targetLocale = supportedLocalePayload(payload.target_locale);
-      if (!sourceRef || !targetLocale) {
-        throw new RuntimeRequestError("conflict", "domain_command_translation_job_source_target_required");
-      }
-      return this.saveResourceTranslationJob({
-        source_ref: sourceRef,
-        source_locale: supportedLocalePayload(payload.source_locale),
-        target_locale: targetLocale,
-        schedule: stringPayload(payload.schedule) || undefined,
-        title: stringPayload(payload.title) || undefined,
-        enabled: booleanPayload(payload.enabled),
-        next_run_at: stringPayload(payload.next_run_at) || undefined,
-        max_attempts: numberPayload(payload.max_attempts)
-      });
-    }
-    if (command.id === "approval.approve") {
-      return this.approveRequest(requiredPayloadId(payload, "approval_id"), stringPayload(payload.decided_by) || "owner");
-    }
-    if (command.id === "approval.deny") {
-      return this.denyRequest(
-        requiredPayloadId(payload, "approval_id"),
-        stringPayload(payload.decided_by) || "owner",
-        stringPayload(payload.reason) || "Denied by owner."
-      );
-    }
-    if (command.id === "session.search.reindex") {
-      return this.store.reindexSessionSearch();
-    }
-    if (command.id === "learning.snapshot.prune") {
-      return this.store.pruneLearningSnapshots(positiveIntegerPayload(payload.retain) ?? 20);
-    }
-    if (command.id === "client.event.expire") {
-      const events = await this.store.expireClientEvents({ now: stringPayload(payload.now) || undefined });
-      return { expired_count: events.length, events };
-    }
-    if (command.id === "objective.create") {
-      const now = nowIso();
-      const completionCriteria = domainStringArrayPayload(payload.completion_criteria);
-      if (!stringPayload(payload.objective) || !completionCriteria?.length) {
-        throw new RuntimeRequestError("conflict", "objective_and_completion_criteria_required");
-      }
-      const record: ObjectiveRecord = ObjectiveRecordSchema.parse({
-        id: stringPayload(payload.objective_id) || stringPayload(payload.id) || createId("objective"),
-        session_id: stringPayload(payload.session_id) || undefined,
-        title: stringPayload(payload.title) || summarize(stringPayload(payload.objective), 80),
-        objective: stringPayload(payload.objective),
-        completion_criteria: completionCriteria,
-        status: "active",
-        token_budget: positiveIntegerPayload(payload.token_budget),
-        time_budget_ms: positiveIntegerPayload(payload.time_budget_ms),
-        max_attempts: positiveIntegerPayload(payload.max_attempts),
-        created_at: now,
-        updated_at: now
-      });
-      return this.store.saveObjective(record);
-    }
-    if (command.id === "work_item.create") {
-      const objectiveId = requiredPayloadId(payload, "objective_id");
-      if (!await this.store.getObjective(objectiveId)) throw new RuntimeRequestError("not_found", "objective_not_found");
-      const now = nowIso();
-      const record: WorkItemRecord = WorkItemRecordSchema.parse({
-        id: stringPayload(payload.work_item_id) || stringPayload(payload.id) || createId("work"),
-        objective_id: objectiveId,
-        parent_work_item_id: stringPayload(payload.parent_work_item_id) || undefined,
-        instruction: stringPayload(payload.instruction),
-        status: "ready",
-        priority: numberPayload(payload.priority) ?? 0,
-        attempt: 0,
-        max_attempts: positiveIntegerPayload(payload.max_attempts) ?? 3,
-        idempotency_key: stringPayload(payload.work_idempotency_key) || `${objectiveId}:${stableHash(payload)}`,
-        created_at: now,
-        updated_at: now
-      });
-      return this.store.saveWorkItem(record);
-    }
-    if (command.id === "objective.transition") {
-      const action = stringPayload(payload.action);
-      if (action !== "pause" && action !== "resume" && action !== "cancel") throw new RuntimeRequestError("conflict", "objective_transition_action_required");
-      return this.durableWorkCoordinator.transitionObjective(requiredPayloadId(payload, "objective_id"), action);
-    }
-    if (command.id === "work_item.steer") {
-      return this.durableWorkCoordinator.steer(requiredPayloadId(payload, "work_item_id"), stringPayload(payload.instruction));
-    }
-    if (command.id === "work_item.follow_up") {
-      return this.durableWorkCoordinator.followUp(requiredPayloadId(payload, "work_item_id"), stringPayload(payload.instruction));
-    }
-    if (command.id === "presentation.plan") {
-      const requested = stringPayload(payload.requested_kind) || "built_in_surface";
-      return {
-        requested_kind: requested,
-        selected_kind: requested === "generated_surface" ? "generated_surface" : "built_in_surface",
-        reason: requested === "generated_surface" ? "User explicitly requested an independent UI." : "A built-in Workspace renderer is preferred when it can represent the result.",
-        fallback_chain: ["built_in_surface", "artifact", "text"]
-      };
-    }
-    if (command.id === "generated_surface.create" || command.id === "generated_surface.revise") {
-      const request = SurfaceGenerationRequestSchema.parse(recordPayload(payload.request));
-      const bundle = parseGeneratedSurfaceOutput(recordPayload(payload.bundle));
-      if (!bundle) throw new RuntimeRequestError("conflict", "generated_surface_bundle_invalid");
-      const existing = command.id === "generated_surface.revise"
-        ? await this.store.getGeneratedSurface(requiredPayloadId(payload, "surface_id"))
-        : undefined;
-      if (command.id === "generated_surface.revise" && !existing) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
-      const built = buildGeneratedSurfaceRevision({
-        request,
-        bundle,
-        existing,
-        producerRunId: stringPayload(payload.producer_run_id) || undefined,
-        promptFingerprint: stringPayload(payload.prompt_fingerprint) || undefined
-      });
-      return this.store.saveGeneratedSurfaceRevision({ definition: built.definition, revision: built.revision, html: bundle.html, css: bundle.css, script: bundle.script, assets: bundle.assets });
-    }
-    if (command.id === "generated_surface.state") {
-      const action = stringPayload(payload.action);
-      const state = action === "pin" ? "pinned" : action === "unpin" ? "ephemeral" : action === "archive" ? "archived" : undefined;
-      if (!state) throw new RuntimeRequestError("conflict", "generated_surface_state_action_required");
-      const surface = await this.store.updateGeneratedSurfaceState(requiredPayloadId(payload, "surface_id"), state);
-      if (!surface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
-      const kind = action === "pin" ? "pinned" : action === "unpin" ? "unpinned" : "dismissed";
-      await this.store.saveSurfaceInteraction(SurfaceInteractionRecordSchema.parse({
-        id: stringPayload(payload.interaction_id) || createId("surface_interaction"), kind, session_id: surface.session_id,
-        message_id: stringPayload(payload.message_id) || undefined, surface_id: surface.id, revision_id: surface.current_revision_id, created_at: nowIso()
-      }));
-      return surface;
-    }
-    if (command.id === "generated_surface.interaction.record") {
-      const surface = await this.store.getGeneratedSurface(requiredPayloadId(payload, "surface_id"));
-      if (!surface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
-      return this.store.saveSurfaceInteraction(SurfaceInteractionRecordSchema.parse({
-        id: stringPayload(payload.interaction_id) || createId("surface_interaction"),
-        kind: stringPayload(payload.kind), session_id: surface.session_id, message_id: stringPayload(payload.message_id) || undefined,
-        surface_id: surface.id, revision_id: stringPayload(payload.revision_id) || surface.current_revision_id,
-        command_id: stringPayload(payload.command_id) || undefined, user_feedback: stringPayload(payload.user_feedback) || undefined, created_at: nowIso()
-      }));
-    }
-    if (command.id === "generated_surface.action.run") {
-      const surface = await this.store.getGeneratedSurface(requiredPayloadId(payload, "surface_id"));
-      if (!surface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
-      const revisionId = stringPayload(payload.revision_id) || surface.current_revision_id;
-      if (revisionId !== surface.current_revision_id) throw new RuntimeRequestError("conflict", "generated_surface_revision_stale");
-      const actionId = requiredPayloadId(payload, "action_id");
-      const action = surface.actions.find((item) => item.id === actionId);
-      if (!action || !surface.capability_manifest.allowed_domain_commands.includes(action.command_id)) throw new RuntimeRequestError("forbidden", "generated_surface_action_not_declared");
-      const interactionId = requiredPayloadId(payload, "interaction_id");
-      const domainResult = await this.runDomainCommand({
-        command_id: action.command_id,
-        input_source: "generated_surface",
-        idempotency_key: `${surface.id}:${revisionId}:${interactionId}:${action.id}`,
-        payload: { ...action.payload_template, ...recordPayload(payload.action_payload) }
-      });
-      await this.store.saveSurfaceInteraction(SurfaceInteractionRecordSchema.parse({
-        id: interactionId, kind: "action", session_id: surface.session_id, message_id: stringPayload(payload.message_id) || undefined,
-        surface_id: surface.id, revision_id: revisionId, command_id: action.command_id, command_result: jsonSafe(domainResult.result), created_at: nowIso()
-      }));
-      return { surface, action, command: domainResult };
-    }
-    if (command.id === "generated_surface.export") {
-      const surface = await this.store.getGeneratedSurface(requiredPayloadId(payload, "surface_id"));
-      if (!surface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
-      const revisionId = stringPayload(payload.revision_id) || surface.current_revision_id;
-      const revision = await this.store.getGeneratedSurfaceRevision(revisionId);
-      const bundle = revision ? await this.store.readGeneratedSurfaceBundle(revision.id) : undefined;
-      if (!revision || revision.surface_id !== surface.id || !bundle) throw new RuntimeRequestError("not_found", "generated_surface_revision_not_found");
-      const format = stringPayload(payload.format) === "zip" ? "zip" : "html";
-      return { surface, revision, bundle, format, file_name: `${surface.id}-revision-${revision.revision}.${format}` };
-    }
-    if (command.id === "skill.optimization.start") {
-      return this.startSkillOptimization(payload);
-    }
-    if (command.id === "skill.optimization.cancel") {
-      return this.cancelSkillOptimization(payload);
-    }
-    if (command.id === "skill.optimization.promote") {
-      return this.promoteSkillOptimization(payload);
-    }
-    if (command.id === "skill.optimization.reject") {
-      return this.rejectSkillOptimization(payload);
-    }
-    if (command.id === "skill.optimization.rollback") {
-      return this.rollbackSkillOptimization(payload);
-    }
-
-    if (command.id === "reflection.suggestion.apply") {
-      return this.applyReflectionSuggestion({ suggestionId: stringPayload(payload.suggestion_id) || stringPayload(payload.id) });
-    }
-
-    if (command.id === "grant.create") {
-      return this.createGrant({
-        capabilityId: stringPayload(payload.capability_id) || undefined,
-        operation: stringPayload(payload.operation),
-        actorIdentity: actorIdentityPayload(payload.actor_identity),
-        channel: stringPayload(payload.channel) || undefined,
-        resourceScope: stringPayload(payload.resource_scope) || undefined,
-        grantedBy: stringPayload(payload.granted_by) || undefined,
-        reason: stringPayload(payload.reason) || undefined,
-        expiresAt: stringPayload(payload.expires_at) || undefined
-      });
-    }
-    if (command.id === "grant.revoke") {
-      return this.revokeGrant({
-        grantId: requiredPayloadId(payload, "grant_id"),
-        revokedBy: stringPayload(payload.revoked_by) || undefined,
-        reason: stringPayload(payload.reason) || undefined
-      });
-    }
-    if (command.id === "workspace.delete") {
-      const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-      const targetInstruction = stringPayload(payload.target_instruction)
-        || stringPayload(payload.content)
-        || stringPayload(payload.resource_id)
-        || "workspace resource";
-      const envelope = createGatewayEnvelope(webGatewayContext, `Request workspace delete: ${targetInstruction}`);
-      const explicitTargetRef = resourceRefFromJson(payload.resource_ref);
-      const targetResourceRefs = explicitTargetRef
-        ? [explicitTargetRef]
-        : resourceRefsPayload(payload.resource_refs);
-      const operation = await this.createOperation(session, envelope, command.id, command.proposed_effects, {
-        context: webGatewayContext,
-        targetResourceRefs
-      });
-      const decision = await this.savePolicyDecision(evaluatePolicy({
-        input: this.createPolicyInput(operation),
-        manifest: getCapabilityManifest(operation.capability_id),
-        grants: await this.store.listGrants(),
-        operationId: operation.id
-      }));
-      operation.policy_decision_id = decision.id;
-      operation.status = decision.decision === "deny" ? "denied" : "deferred";
-      operation.result_ref = targetResourceRefs[0] ?? {
-        kind: "workspace_resource",
-        id: stableHash(targetInstruction),
-        uri: `workspace/delete-requests/${stableHash(targetInstruction)}`,
-        label: targetInstruction
-      };
-      operation.updated_at = nowIso();
-      await this.store.updateOperation(operation);
-      const auditRecord = await this.auditOperation(
-        operation,
-        decision,
-        decision.decision === "deny"
-          ? "Workspace delete request denied by policy."
-          : "Workspace delete request recorded; v1 does not execute deletion.",
-        targetResourceRefs,
-        undefined
-      );
-      return {
-        operation,
-        policyDecision: decision,
-        auditRecord,
-        activity: await this.rebuildActivity(),
-        status: operation.status
-      };
-    }
-    if (command.id === "sandbox.exec" || command.id === "mcp.call") {
-      throw new RuntimeRequestError("conflict", `domain_command_requires_backend_tool_context:${command.id}`);
-    }
-
-    throw new RuntimeRequestError("conflict", `domain_command_not_executable:${command.id}`);
   }
 
   listSurfaceRenderers(): SurfaceRendererRegistryEntry[] {
@@ -5151,7 +3643,7 @@ export class AgentRuntime {
     return [...byId.values()];
   }
 
-  private async runStructuredSurfaceOperation(input: StructuredSurfaceOperation): Promise<SurfaceOperationRuntimeResult> {
+  private async runStructuredSurfaceOperation(input: StructuredSurfaceOperation): Promise<SurfaceOperationResultEnvelope<SurfaceArtifactRuntimeResult>> {
     if (!input.session_id) {
       throw new RuntimeRequestError("conflict", "surface_operation_session_required");
     }
@@ -5181,7 +3673,7 @@ export class AgentRuntime {
       ...(sourceArtifact ? { source_artifact_id: sourceArtifact.id, source_artifact_uri: sourceArtifact.file_ref.uri } : {})
     });
 
-    const result = await this.runAllowedWrite<ArtifactRecord, { sourceArtifact?: ArtifactRecord; workspaceChange: WorkspaceChangeRecord }>({
+    const result = await this.runRecordedMutation<ArtifactRecord, { sourceArtifact?: ArtifactRecord; workspaceChange: WorkspaceChangeRecord }>({
       session,
       envelope,
       context: webGatewayContext,
@@ -5258,691 +3750,32 @@ export class AgentRuntime {
     };
   }
 
-  async approveRequest(approvalRequestId: string, decidedBy = "owner"): Promise<ApprovalLifecycleResult> {
-    const approval = await this.store.getApprovalRequest(approvalRequestId);
-    if (!approval) {
-      throw new RuntimeRequestError("not_found", `Approval request not found: ${approvalRequestId}`);
-    }
-    const operation = await this.store.getOperation(approval.operation_id);
-    if (!operation) {
-      throw new RuntimeRequestError("not_found", `Operation not found: ${approval.operation_id}`);
-    }
-
-    this.assertApprovalCanBeDecided(approval, operation);
-
-    if (Date.parse(approval.expires_at) <= Date.now()) {
-      const result = await this.expireApprovalRequest(approval, operation, decidedBy);
-      throw new RuntimeRequestError("conflict", "Approval request expired.", result);
-    }
-
-    const savedDecision = await this.getSavedDecisionForApproval(operation);
-    const manifest = getCapabilityManifest(operation.capability_id);
-    const decision = await this.savePolicyDecision(evaluatePolicy({
-      input: savedDecision.policy_inputs,
-      manifest,
-      grants: await this.store.listGrants(),
-      operationId: operation.id
-    }));
-
-    const approved: ApprovalRequest = {
-      ...approval,
-      status: decision.decision === "deny" ? "cancelled" : "approved",
-      decided_by: decidedBy,
-      decided_at: nowIso()
-    };
-    await this.store.updateApprovalRequest(approved);
-
-    if (decision.decision !== "deny" && operation.operation === "external.send.dispatch") {
-      return this.executeApprovedExternalDispatch(approved, operation, decision);
-    }
-
-    operation.policy_decision_id = decision.id;
-    operation.status = decision.decision === "deny" ? "denied" : "deferred";
-    operation.result_ref = {
-      kind: "approval",
-      id: approved.id,
-      uri: `approval_requests/${approved.id}`,
-      label: decision.decision === "deny" ? "Approval cancelled by policy" : "Approved without external execution"
-    };
-    operation.updated_at = nowIso();
-    await this.store.updateOperation(operation);
-
-    const audit = await this.auditOperation(
-      operation,
-      decision,
-      decision.decision === "deny"
-        ? "Approval was cancelled because policy re-evaluation denied the operation."
-        : "Approval accepted. v1 deferred the external effect and recorded audit only.",
-      [],
-      undefined
-    );
-    return {
-      approvalRequest: approved,
-      operation,
-      auditRecord: audit,
-      activity: await this.rebuildActivity(),
-      status: decision.decision === "deny" ? "denied" : "approved"
-    };
-  }
-
-  async denyRequest(approvalRequestId: string, decidedBy = "owner", reason = "Denied by owner."): Promise<ApprovalLifecycleResult> {
-    const approval = await this.store.getApprovalRequest(approvalRequestId);
-    if (!approval) {
-      throw new RuntimeRequestError("not_found", `Approval request not found: ${approvalRequestId}`);
-    }
-    const operation = await this.store.getOperation(approval.operation_id);
-    if (!operation) {
-      throw new RuntimeRequestError("not_found", `Operation not found: ${approval.operation_id}`);
-    }
-
-    this.assertApprovalCanBeDecided(approval, operation);
-
-    if (Date.parse(approval.expires_at) <= Date.now()) {
-      const result = await this.expireApprovalRequest(approval, operation, decidedBy);
-      throw new RuntimeRequestError("conflict", "Approval request expired.", result);
-    }
-
-    const savedDecision = await this.getSavedDecisionForApproval(operation);
-    const denied: ApprovalRequest = {
-      ...approval,
-      status: "denied",
-      reason: reason.trim() || approval.reason,
-      decided_by: decidedBy,
-      decided_at: nowIso()
-    };
-    await this.store.updateApprovalRequest(denied);
-
-    operation.status = "denied";
-    operation.result_ref = {
-      kind: "approval",
-      id: denied.id,
-      uri: `approval_requests/${denied.id}`,
-      label: "Denied by owner"
-    };
-    operation.updated_at = nowIso();
-    await this.store.updateOperation(operation);
-
-    const audit = await this.auditOperation(operation, savedDecision, "Approval was denied. No external effect executed.", [], undefined);
-    return {
-      approvalRequest: denied,
-      operation,
-      auditRecord: audit,
-      activity: await this.rebuildActivity(),
-      status: "denied"
-    };
-  }
-
   async archiveMemory(input: ArchiveMemoryInput): Promise<ArchiveMemoryRuntimeResult> {
-    const session = await this.store.getSession(input.sessionId);
-    if (!session) {
-      throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
-    }
-
-    const memory = await this.store.getMemory(input.memoryId);
-    if (!memory) {
-      throw new RuntimeRequestError("not_found", `Memory not found: ${input.memoryId}`);
-    }
-
-    const sessionMemory = await this.store.listMemoryForSession(session.id, { includeArchived: true });
-    if (!sessionMemory.some((item) => item.id === input.memoryId)) {
-      throw new RuntimeRequestError("conflict", "memory_not_in_session");
-    }
-
-    const operation = await this.createMemoryArchiveOperation(session, memory, input.actorIdentity ?? "owner", input.decidedBy ?? "owner");
-    const manifest = getCapabilityManifest(operation.capability_id);
-    const decision = await this.savePolicyDecision(evaluatePolicy({
-      input: this.createPolicyInput(operation),
-      manifest,
-      grants: await this.store.listGrants(),
-      operationId: operation.id
-    }));
-    operation.policy_decision_id = decision.id;
-
-    if (decision.decision === "deny") {
-      operation.status = "denied";
-      operation.updated_at = nowIso();
-      await this.store.updateOperation(operation);
-      const audit = await this.auditOperation(operation, decision, "Memory archive denied by policy.", [memoryRef(memory)], undefined);
-      const activity = await this.rebuildActivity();
-      throw new RuntimeRequestError("forbidden", "policy_denied", {
-        memory,
-        content: (await this.store.readMemoryContent(input.memoryId)) ?? "",
-        operation,
-        auditRecord: audit,
-        activity,
-        changed: false
-      });
-    }
-
-    if (decision.decision !== "allow_auto" && decision.decision !== "allow_with_audit") {
-      operation.status = "denied";
-      operation.updated_at = nowIso();
-      await this.store.updateOperation(operation);
-      const audit = await this.auditOperation(operation, decision, "Memory archive requires approval and was not executed in this endpoint.", [memoryRef(memory)], undefined);
-      const activity = await this.rebuildActivity();
-      throw new RuntimeRequestError("forbidden", "policy_denied", {
-        memory,
-        content: (await this.store.readMemoryContent(input.memoryId)) ?? "",
-        operation,
-        auditRecord: audit,
-        activity,
-        changed: false
-      });
-    }
-
-    const archive = await this.store.archiveMemory(input.memoryId);
-    if (!archive) {
-      throw new RuntimeRequestError("not_found", `Memory not found: ${input.memoryId}`);
-    }
-
-    const archivedMemory = {
-      ...archive.after.frontmatter,
-      file_path: archive.after.file_path
-    };
-    const ref = memoryRef(archivedMemory);
-    let rollbackPoint: RollbackPoint | undefined;
-    if (archive.changed) {
-      rollbackPoint = await this.createRollbackPoint(
-        operation,
-        [ref],
-        { memory: archive.before as unknown as JsonValue },
-        { memory: archive.after as unknown as JsonValue }
-      );
-    }
-
-    operation.status = "completed";
-    operation.result_ref = ref;
-    operation.updated_at = nowIso();
-    await this.store.updateOperation(operation);
-
-    const summary = archive.changed
-      ? `Archived memory ${archive.after.frontmatter.topic}.${archive.warning ? ` Warning: ${archive.warning}` : ""}`
-      : `Memory ${archive.after.frontmatter.topic} was already archived.`;
-    const audit = await this.auditOperation(operation, decision, summary, [ref], rollbackPoint?.id);
-    const activity = await this.rebuildActivity();
-
-    return {
-      memory: archivedMemory,
-      content: archive.content,
-      operation,
-      auditRecord: audit,
-      rollbackPoint,
-      activity,
-      changed: archive.changed,
-      warning: archive.warning
-    };
+    return this.memoryDomainService.archiveMemory(input) as Promise<ArchiveMemoryRuntimeResult>;
   }
 
   async viewSkill(input: { skillId: string; runId: string; path?: string }): Promise<SkillViewRuntimeResult> {
-    const [skill, run] = await Promise.all([
-      this.store.getSkill(input.skillId),
-      this.store.getBackendRun(input.runId)
-    ]);
-    if (!skill) {
-      throw new RuntimeRequestError("not_found", `Skill not found: ${input.skillId}`);
-    }
-    if (!run) {
-      throw new RuntimeRequestError("not_found", `Backend run not found: ${input.runId}`);
-    }
-    if (skill.state === "archived" || skill.state === "candidate") {
-      throw new RuntimeRequestError("conflict", "skill_not_readable_in_current_state");
-    }
-
-    const support = input.path ? await this.store.readSkillSupportFile({ skillId: skill.id, path: input.path }) : undefined;
-    if (input.path && !support) {
-      throw new RuntimeRequestError("not_found", `Skill support file not found: ${input.path}`);
-    }
-    const markdown = support ? undefined : await this.store.readSkillMarkdown(skill.id);
-    if (!support && markdown === undefined) {
-      throw new RuntimeRequestError("not_found", `Skill body not found: ${skill.id}`);
-    }
-    const content = support ? support.content : stripSkillFrontmatter(markdown ?? "");
-    const stage = support ? "support_loaded" as const : "body_loaded" as const;
-    const resourceId = support ? `${skill.id}:${support.path}` : skill.id;
-    const existingUse = (await this.store.listLearningResourceUses({ runId: run.id, resourceId }))
-      .find((record) => record.stage === stage);
-    const useRecord = await this.store.recordLearningResourceUse({
-      id: createId("learning_use"),
-      run_id: run.id,
-      session_id: run.session_id,
-      resource_kind: support ? "skill_support" : "skill",
-      resource_id: resourceId,
-      content_hash: stableHash(content),
-      stage,
-      metadata: support ? { skill_id: skill.id, path: support.path } : { skill_id: skill.id },
-      created_at: nowIso()
-    });
-    if (!existingUse) {
-      await this.store.recordSkillUsage({ skillId: skill.id, runId: run.id });
-    }
-    const supportFiles = await this.store.listSkillSupportFiles(skill.id);
-    return {
-      skill,
-      content,
-      file_refs: support
-        ? [{ path: support.path, file_path: support.file_path }]
-        : supportFiles.map((file) => ({ path: file.path, file_path: file.file_path })),
-      disclosure_level: support ? "support" : "body",
-      use_record: useRecord
-    };
+    return this.skillDomainService.viewSkill(input) as Promise<SkillViewRuntimeResult>;
   }
 
-  async runFileAction(input: {
-    operation: "file.read" | "file.inspect" | "file.list" | "file.write" | "file.patch";
-    path: string;
-    content?: string;
-    search?: string;
-    replace?: string;
-  }): Promise<FileActionRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const workspacePath = this.resolveWorkspacePath(input.path);
-    const envelope = createGatewayEnvelope(webGatewayContext, `${input.operation}: ${workspacePath.relativePath}`);
-    return this.runAllowedWrite<FileActionResource, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: input.operation,
-      proposedEffects: [`${input.operation} ${workspacePath.relativePath} inside the workspace.`],
-      targetResourceRefs: [fileRef(workspacePath.relativePath)],
-      execute: async (operation) => {
-        const ref = fileRef(workspacePath.relativePath);
-        if (input.operation === "file.read") {
-          const content = await readFile(workspacePath.absolutePath, "utf8");
-          return {
-            resource: { path: workspacePath.relativePath, content },
-            ref,
-            summary: `Read workspace file ${workspacePath.relativePath}.`
-          };
-        }
-        if (input.operation === "file.inspect") {
-          const [bytes, info, artifacts, changes] = await Promise.all([readFile(workspacePath.absolutePath), stat(workspacePath.absolutePath), this.store.listArtifacts(), this.store.listWorkspaceChanges()]);
-          return {
-            resource: {
-              path: workspacePath.relativePath,
-              metadata: { size: info.size, modified_at: info.mtime.toISOString(), content_hash: createHash("sha256").update(bytes).digest("hex") },
-              provenance: {
-                artifact_ids: artifacts.filter((artifact) => artifact.file_ref.uri === workspacePath.relativePath).map((artifact) => artifact.id),
-                workspace_change_ids: changes.filter((change) => change.resource_ref.uri === workspacePath.relativePath).map((change) => change.id)
-              }
-            },
-            ref,
-            summary: `Inspected workspace file ${workspacePath.relativePath}.`
-          };
-        }
-        if (input.operation === "file.list") {
-          const entries = await listWorkspaceDirectory(workspacePath.absolutePath, workspacePath.relativePath);
-          return {
-            resource: { path: workspacePath.relativePath, entries },
-            ref,
-            summary: `Listed workspace directory ${workspacePath.relativePath}.`
-          };
-        }
-        const before = await readFile(workspacePath.absolutePath, "utf8").catch(() => undefined);
-        let nextContent = input.content ?? "";
-        if (input.operation === "file.patch") {
-          if (before === undefined) {
-            throw new RuntimeRequestError("not_found", `File not found: ${workspacePath.relativePath}`);
-          }
-          const search = input.search ?? "";
-          if (!search || !before.includes(search)) {
-            throw new RuntimeRequestError("conflict", "file_patch_search_not_found");
-          }
-          nextContent = before.replace(search, input.replace ?? "");
-        }
-        await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
-        await writeFile(workspacePath.absolutePath, nextContent);
-        if (isManagedCollectionWorkspacePath(workspacePath.relativePath)) {
-          await this.store.reindexCollections();
-        }
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { path: workspacePath.relativePath, content: before ?? null },
-          { path: workspacePath.relativePath, content: nextContent }
-        );
-        return {
-          resource: { path: workspacePath.relativePath, content: nextContent },
-          ref,
-          rollbackPoint,
-          summary: `${input.operation === "file.write" ? "Wrote" : "Patched"} workspace file ${workspacePath.relativePath}.`
-        };
-      }
-    });
+  async recordSkillUsage(input: { skillId: string; runId: string; resourceId: string; contentHash: string; stage: "body_loaded" | "support_loaded"; metadata: Record<string, JsonValue> }): Promise<{ use_record: Awaited<ReturnType<WorkspaceStore["recordLearningResourceUse"]>> }> {
+    return this.skillDomainService.recordUsageInput(input) as Promise<{ use_record: Awaited<ReturnType<WorkspaceStore["recordLearningResourceUse"]>> }>;
   }
 
   async restoreRollbackPoint(id: string): Promise<RollbackRestoreRuntimeResult> {
-    const point = await this.store.getRollbackPoint(id);
-    if (!point) {
-      throw new RuntimeRequestError("not_found", `Rollback point not found: ${id}`);
-    }
-    if (!point.reversible) {
-      throw new RuntimeRequestError("conflict", "rollback_not_reversible");
-    }
-    if (Date.parse(point.expires_at) < Date.now()) {
-      throw new RuntimeRequestError("conflict", "rollback_expired");
-    }
-    const snapshot = fileRollbackSnapshot(point.before_snapshot);
-    if (!snapshot) {
-      throw new RuntimeRequestError("conflict", "rollback_restore_unsupported_snapshot");
-    }
-    const workspacePath = this.resolveWorkspacePath(snapshot.path);
-    if (workspacePath.relativePath === ".") {
-      throw new RuntimeRequestError("forbidden", "rollback_restore_requires_file_path");
-    }
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `rollback.restore: ${point.id}`);
-    const ref = fileRef(workspacePath.relativePath);
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "rollback.restore",
-      proposedEffects: [`Restore rollback point ${point.id} for ${workspacePath.relativePath}.`],
-      targetResourceRefs: [ref],
-      execute: async (operation) => {
-        const current = await readFile(workspacePath.absolutePath, "utf8").catch(() => undefined);
-        if (snapshot.content === null) {
-          await rm(workspacePath.absolutePath, { force: true });
-        } else {
-          await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
-          await writeFile(workspacePath.absolutePath, snapshot.content);
-        }
-        const restoreRollback = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { path: workspacePath.relativePath, content: current ?? null },
-          { path: workspacePath.relativePath, content: snapshot.content }
-        );
-        return {
-          resource: {
-            rollback_point_id: point.id,
-            path: workspacePath.relativePath,
-            action: snapshot.content === null ? "deleted" : "written"
-          },
-          ref,
-          rollbackPoint: restoreRollback,
-          summary: `Restored rollback point ${point.id} for ${workspacePath.relativePath}.`
-        };
-      }
-    });
-  }
-
-  async runBrowserAction(input: {
-    operation: "browser.navigate" | "browser.extract" | "browser.interact" | "browser.screenshot" | "browser.download_to_workspace";
-    url: string;
-    output_path?: string;
-    action?: "navigate" | "click" | "input";
-    selector?: string;
-    value?: string;
-  }): Promise<BrowserActionRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `${input.operation}: ${input.url}`);
-    return this.runAllowedWrite<BrowserActionResource, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: input.operation,
-      proposedEffects: [`${input.operation} ${input.url} without mutating external state.`],
-      execute: async (operation) => {
-        if (input.operation === "browser.screenshot") {
-          const adapter = this.workspaceOptions.browserAdapter;
-          if (!adapter) throw new Error("browser_screenshot_adapter_unavailable");
-          const capture = await adapter.screenshot({ url: input.url });
-          const extension = capture.mime_type === "image/jpeg" ? "jpg" : "png";
-          const outputPath = input.output_path || path.posix.join("browser", `${stableHash(input.url)}.${extension}`);
-          const workspacePath = this.resolveWorkspacePath(outputPath);
-          await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
-          const before = await readFile(workspacePath.absolutePath).catch(() => undefined);
-          await writeFile(workspacePath.absolutePath, capture.bytes);
-          const fileResourceRef = fileRef(workspacePath.relativePath);
-          const rollbackPoint = await this.createRollbackPoint(operation, [fileResourceRef], { path: workspacePath.relativePath, content: before ? Buffer.from(before).toString("base64") : null }, { path: workspacePath.relativePath, content_hash: stableHash(capture.bytes) });
-          return { resource: { url: input.url, file_path: workspacePath.relativePath, screenshot_ref: workspacePath.relativePath, adapter_id: adapter.id, mime_type: capture.mime_type, width: capture.width, height: capture.height }, ref: fileResourceRef, rollbackPoint, summary: `Captured a real browser screenshot from ${input.url}.` };
-        }
-        if (input.operation === "browser.interact") {
-          const adapter = this.workspaceOptions.browserAdapter;
-          if (!adapter) throw new Error("browser_interact_adapter_unavailable");
-          const result = await adapter.interact({ url: input.url, action: input.action ?? "navigate", selector: input.selector, value: input.value });
-          return { resource: { ...result, adapter_id: adapter.id }, ref: { kind: "browser_page", id: stableHash(result.url), uri: result.url, label: result.title || result.url }, summary: `Completed browser ${input.action ?? "navigate"} through ${adapter.id}.` };
-        }
-        const page = await readBrowserPage(input.url);
-        const ref = {
-          kind: "browser_page",
-          id: stableHash(input.url),
-          uri: input.url,
-          label: page.title || input.url
-        };
-        if (input.operation === "browser.download_to_workspace") {
-          const outputPath = input.output_path || path.posix.join("browser", `${stableHash(input.url)}.txt`);
-          const workspacePath = this.resolveWorkspacePath(outputPath);
-          await mkdir(path.dirname(workspacePath.absolutePath), { recursive: true });
-          const content = page.text;
-          const before = await readFile(workspacePath.absolutePath, "utf8").catch(() => undefined);
-          await writeFile(workspacePath.absolutePath, content);
-          const fileResourceRef = fileRef(workspacePath.relativePath);
-          const rollbackPoint = await this.createRollbackPoint(
-            operation,
-            [fileResourceRef],
-            { path: workspacePath.relativePath, content: before ?? null },
-            { path: workspacePath.relativePath, content }
-          );
-          return {
-            resource: {
-              url: input.url,
-              title: page.title,
-              text: page.text,
-              file_path: workspacePath.relativePath,
-              snapshot_kind: "html_snapshot"
-            },
-            ref: fileResourceRef,
-            rollbackPoint,
-            summary: `Saved an HTML/text snapshot from ${input.url} into the workspace.`
-          };
-        }
-        return {
-          resource: { url: input.url, title: page.title, text: page.text },
-          ref,
-          summary: `Read browser page ${input.url}.`
-        };
-      }
-    });
-  }
-
-  async prepareExternalSend(input: {
-    channel: ExternalSendRecord["channel"];
-    target: Record<string, JsonValue>;
-    title: string;
-    body: string;
-  }): Promise<ExternalSendRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Prepare external send: ${input.title}`);
-    const now = nowIso();
-    const draft: ExternalSendRecord = {
-      id: createId("send"),
-      channel: input.channel,
-      status: "draft",
-      target: input.target,
-      title: input.title,
-      body: input.body,
-      created_at: now,
-      updated_at: now
-    };
-    return this.runAllowedWrite<ExternalSendRecord, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "external.send.prepare",
-      proposedEffects: ["Create an outbound send draft without dispatching."],
-      execute: async (operation) => {
-        const send = await this.store.saveExternalSend({ ...draft, operation_id: operation.id });
-        const ref = externalSendRef(send);
-        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { external_send: send as unknown as JsonValue });
-        return { resource: send, ref, rollbackPoint, summary: `Prepared external send draft ${send.title}.` };
-      }
-    });
-  }
-
-  async createGrant(input: {
-    capabilityId?: string;
-    operation: string;
-    actorIdentity?: GrantRecord["actor_identity"];
-    channel?: string;
-    resourceScope?: string;
-    grantedBy?: string;
-    reason?: string;
-    expiresAt?: string;
-  }): Promise<GrantRuntimeResult> {
-    const capabilityId = input.capabilityId ?? proposalCapabilityManifest.id;
-    const manifest = getCapabilityManifest(capabilityId);
-    if (!manifest) {
-      throw new RuntimeRequestError("not_found", `Capability manifest not found: ${capabilityId}`);
-    }
-    const capabilityOperation = manifest.operations.find((item) => item.operation === input.operation);
-    if (!capabilityOperation) {
-      throw new RuntimeRequestError("not_found", `Capability operation not found: ${input.operation}`);
-    }
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Create grant: ${capabilityId}/${input.operation}`);
-    const now = nowIso();
-    const grant: GrantRecord = {
-      id: createId("grant"),
-      capability_id: capabilityId,
-      operation: input.operation,
-      actor_identity: input.actorIdentity ?? "owner",
-      channel: input.channel ?? "web",
-      resource_scope: input.resourceScope ?? "*",
-      manifest_version: manifest.version,
-      risk_snapshot: capabilityOperation.risk,
-      scope_snapshot: capabilityOperation.scope,
-      external_impact_snapshot: capabilityOperation.external_impact,
-      secret_requirement_snapshot: capabilityOperation.secret_requirement,
-      granted_by: input.grantedBy ?? "owner",
-      reason: input.reason?.trim() || `Grant ${input.operation} for ${input.actorIdentity ?? "owner"}.`,
-      created_at: now,
-      expires_at: input.expiresAt
-    };
-    return this.runAllowedWrite<GrantRecord, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "grant.create",
-      proposedEffects: [`Create grant ${grant.id} for ${grant.capability_id}/${grant.operation}.`],
-      targetResourceRefs: [grantRef(grant)],
-      execute: async (operation) => {
-        const saved = await this.store.saveGrant(grant);
-        const ref = grantRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { grant: saved as unknown as JsonValue });
-        return { resource: saved, ref, rollbackPoint, summary: `Created grant ${saved.id} for ${saved.operation}.` };
-      }
-    });
-  }
-
-  async revokeGrant(input: {
-    grantId: string;
-    revokedBy?: string;
-    reason?: string;
-  }): Promise<GrantRuntimeResult> {
-    const existing = await this.store.getGrant(input.grantId);
-    if (!existing) {
-      throw new RuntimeRequestError("not_found", `Grant not found: ${input.grantId}`);
-    }
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Revoke grant: ${existing.id}`);
-    return this.runAllowedWrite<GrantRecord, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "grant.revoke",
-      proposedEffects: [`Revoke grant ${existing.id} for ${existing.capability_id}/${existing.operation}.`],
-      inputRef: grantRef(existing),
-      targetResourceRefs: [grantRef(existing)],
-      execute: async (operation) => {
-        if (existing.revoked_at) {
-          return {
-            resource: existing,
-            ref: grantRef(existing),
-            summary: `Grant ${existing.id} was already revoked.`
-          };
-        }
-        const revoked = await this.store.revokeGrant(existing.id, nowIso()) ?? existing;
-        const ref = grantRef(revoked);
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { grant: existing as unknown as JsonValue },
-          { grant: revoked as unknown as JsonValue, revoked_by: input.revokedBy ?? "owner", reason: input.reason ?? "" }
-        );
-        return { resource: revoked, ref, rollbackPoint, summary: `Revoked grant ${revoked.id}.` };
-      }
-    });
-  }
-
-  async dispatchExternalSend(input: { sendId: string; dryRun?: boolean } ): Promise<ExternalSendRuntimeResult> {
-    const existing = await this.store.getExternalSend(input.sendId);
-    if (!existing) {
-      throw new RuntimeRequestError("not_found", `External send not found: ${input.sendId}`);
-    }
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Dispatch external send: ${existing.title}`);
-    return this.runAllowedWrite<ExternalSendRecord, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "external.send.dispatch",
-      proposedEffects: ["Dispatch a prepared outbound send to an external channel."],
-      inputRef: externalSendRef(existing),
-      targetResourceRefs: [externalSendRef(existing)],
-      execute: async (operation) => {
-        const result = await dispatchExternalSendAdapter(existing, input.dryRun ?? process.env.SAMURAI_EXTERNAL_SEND_DISPATCH !== "true");
-        const now = nowIso();
-        const next: ExternalSendRecord = {
-          ...existing,
-          status: externalSendStatusFromDispatchResult(result),
-          operation_id: operation.id,
-          dispatch_result: result as Record<string, JsonValue>,
-          updated_at: now,
-          dispatched_at: result.dispatched ? now : undefined
-        };
-        const saved = await this.store.saveExternalSend(next);
-        const ref = externalSendRef(saved);
-        return { resource: saved, ref, summary: externalSendDispatchSummary(saved, result) };
-      }
-    });
+    return this.systemDomainService.restoreRollbackPoint(id) as Promise<RollbackRestoreRuntimeResult>;
   }
 
   async approveGatewayPairing(id: string): Promise<GatewayPairingRecord> {
-    const pairing = await this.store.getGatewayPairing(id);
-    if (!pairing) {
-      throw new RuntimeRequestError("not_found", `Gateway pairing not found: ${id}`);
-    }
-    const freshPairing = expirePairing(pairing);
-    if (freshPairing.status === "expired") {
-      await this.store.saveGatewayPairing(freshPairing);
-      await this.emit("gateway.pairing.updated", freshPairing);
-      return freshPairing;
-    }
-    const approved = approvePairing(freshPairing);
-    await this.store.saveGatewayPairing(approved);
-    await this.emit("gateway.pairing.updated", approved);
-    return approved;
+    return this.gatewayDomainService.approvePairingById(id);
   }
 
   async rejectGatewayPairing(id: string): Promise<GatewayPairingRecord> {
-    const pairing = await this.store.getGatewayPairing(id);
-    if (!pairing) {
-      throw new RuntimeRequestError("not_found", `Gateway pairing not found: ${id}`);
-    }
-    const rejected = rejectPairing(pairing);
-    await this.store.saveGatewayPairing(rejected);
-    await this.emit("gateway.pairing.updated", rejected);
-    return rejected;
+    return this.gatewayDomainService.rejectPairingById(id);
   }
 
   async expireGatewayPairings(now = nowIso()): Promise<GatewayPairingRecord[]> {
-    const expired = await this.store.expireGatewayPairings(now);
-    for (const pairing of expired) {
-      await this.emit("gateway.pairing.updated", pairing);
-    }
-    return expired;
+    return this.gatewayDomainService.expirePairingsAt(now);
   }
 
   async listGatewayPairingPolicies(): Promise<GatewayPairingPolicyRecord[]> {
@@ -6168,298 +4001,17 @@ export class AgentRuntime {
   }
 
   async rotateGatewayPairing(id: string): Promise<GatewayPairingRecord> {
-    const pairing = await this.store.getGatewayPairing(id);
-    if (!pairing) {
-      throw new RuntimeRequestError("not_found", `Gateway pairing not found: ${id}`);
-    }
-    const freshPairing = expirePairing(pairing);
-    if (freshPairing.status === "expired") {
-      await this.store.saveGatewayPairing(freshPairing);
-      await this.emit("gateway.pairing.updated", freshPairing);
-      return freshPairing;
-    }
-    const rotated = rotatePairingCode(freshPairing);
-    await this.store.saveGatewayPairing(rotated);
-    await this.emit("gateway.pairing.updated", rotated);
-    return rotated;
+    return this.gatewayDomainService.rotatePairingById(id);
   }
 
   async revokeGatewayPairing(id: string): Promise<GatewayPairingRecord> {
-    const pairing = await this.store.getGatewayPairing(id);
-    if (!pairing) {
-      throw new RuntimeRequestError("not_found", `Gateway pairing not found: ${id}`);
-    }
-    const revoked = revokePairing(pairing);
-    await this.store.saveGatewayPairing(revoked);
-    await this.emit("gateway.pairing.updated", revoked);
-    return revoked;
+    return this.gatewayDomainService.revokePairingById(id);
   }
 
-  async handleGatewayInbound(input: {
-    channel: GatewayPairingRecord["channel"];
-    source_identity: string;
-    body: string;
-    source_label?: string;
-    account_id?: string;
-    thread_id?: string;
-    route?: string;
-    metadata?: Record<string, JsonValue>;
-    backend_id?: string;
-    input_locale?: SupportedLocale;
-    output_locale?: SupportedLocale;
-  }): Promise<GatewayInboundRuntimeResult> {
-    const command = await this.runDomainCommand({
-      command_id: "gateway.inbound.route",
-      input_source: "gateway_inbound",
-      idempotency_key: stringPayload(input.metadata?.idempotency_key) || stringPayload(input.metadata?.message_id) || undefined,
-      payload: jsonRecordOrEmpty(jsonSafe(input))
-    });
-    return command.result as GatewayInboundRuntimeResult;
+  async handleGatewayInbound(input: GatewayInboundInput): Promise<GatewayInboundRuntimeResult> {
+    return routeGatewayInbound<GatewayInboundRuntimeResult>({ run: (request) => this.runDomainCommand(request) }, input);
   }
 
-  private async executeGatewayInbound(input: {
-    channel: GatewayPairingRecord["channel"];
-    source_identity: string;
-    body: string;
-    source_label?: string;
-    account_id?: string;
-    thread_id?: string;
-    route?: string;
-    metadata?: Record<string, JsonValue>;
-    backend_id?: string;
-    input_locale?: SupportedLocale;
-    output_locale?: SupportedLocale;
-  }): Promise<GatewayInboundRuntimeResult> {
-    const sourceIdentity = normalizeGatewaySourceIdentity(input.source_identity);
-    const body = input.body.trim();
-    if (!sourceIdentity || !body) {
-      throw new RuntimeRequestError("conflict", "gateway_source_and_body_required");
-    }
-
-    await this.expireGatewayPairings();
-    const routingPolicy = await this.getGatewayRoutingPolicy(input.channel);
-    const routingResolution = resolveGatewaySessionRouting(routingPolicy, {
-      channel: input.channel,
-      source_identity: sourceIdentity,
-      source_label: input.source_label,
-      account_id: input.account_id,
-      thread_id: input.thread_id,
-      route: input.route,
-      metadata: input.metadata
-    });
-    const targetSessionKey = routingResolution.session_key;
-    const pairingPolicy = await this.getGatewayPairingPolicy(input.channel);
-    const pairingPolicyEvaluation = evaluateGatewayPairingPolicy(pairingPolicy, {
-      channel: input.channel,
-      source_identity: sourceIdentity
-    });
-    const inboundMetadata = gatewayInboundPolicyMetadata(
-      input,
-      sourceIdentity,
-      targetSessionKey,
-      pairingPolicy,
-      pairingPolicyEvaluation,
-      routingPolicy,
-      routingResolution
-    );
-
-    if (!routingResolution.allowed) {
-      const inbound = await this.store.saveGatewayInboundMessage({
-        ...createGatewayInboundMessage({
-          channel: input.channel,
-          source_identity: sourceIdentity,
-          body,
-          metadata: inboundMetadata
-        }),
-        error: "gateway_routing_policy_disabled"
-      });
-      await this.emit("gateway.inbound.blocked", inbound);
-      return { inbound };
-    }
-
-    const duplicate = await this.findRecentGatewayInboundDuplicate(
-      input.channel,
-      sourceIdentity,
-      body,
-      pairingPolicyEvaluation.duplicate_window_ms,
-      stringPayload(input.metadata?.message_id) || stringPayload(input.metadata?.idempotency_key) || undefined
-    );
-    if (duplicate) {
-      return {
-        inbound: duplicate,
-        pairing: duplicate.pairing_id ? await this.store.getGatewayPairing(duplicate.pairing_id) : undefined
-      };
-    }
-
-    if (!pairingPolicyEvaluation.allowed) {
-      const inbound = await this.store.saveGatewayInboundMessage({
-        ...createGatewayInboundMessage({
-          channel: input.channel,
-          source_identity: sourceIdentity,
-          body,
-          metadata: inboundMetadata
-        }),
-        error: gatewayPairingPolicyError(pairingPolicyEvaluation.reason)
-      });
-      await this.emit("gateway.inbound.blocked", inbound);
-      return { inbound };
-    }
-
-    if (await this.isGatewayRateLimited(
-      input.channel,
-      sourceIdentity,
-      pairingPolicyEvaluation.rate_limit_window_ms,
-      pairingPolicyEvaluation.rate_limit_max
-    )) {
-      const inbound = await this.store.saveGatewayInboundMessage({
-        ...createGatewayInboundMessage({
-          channel: input.channel,
-          source_identity: sourceIdentity,
-          body,
-          metadata: inboundMetadata
-        }),
-        error: "gateway_rate_limited"
-      });
-      await this.emit("gateway.inbound.blocked", inbound);
-      return { inbound };
-    }
-
-    let pairing = await this.store.findGatewayPairing({
-      channel: input.channel,
-      sourceIdentity,
-      status: "approved",
-      sessionKey: targetSessionKey
-    });
-    if (!pairing) {
-      const pending = await this.store.findGatewayPairing({
-        channel: input.channel,
-        sourceIdentity,
-        status: "pending",
-        sessionKey: targetSessionKey
-      });
-      const pendingPairing = pending ? {
-        ...pending,
-        metadata: {
-          ...pending.metadata,
-          ...inboundMetadata
-        },
-        updated_at: nowIso()
-      } : createPendingPairing({
-        channel: input.channel,
-        source_identity: sourceIdentity,
-        source_label: input.source_label,
-        account_id: routingResolution.account_id,
-        thread_id: routingResolution.thread_id,
-        route: routingResolution.route,
-        metadata: inboundMetadata,
-        pairing_ttl_ms: pairingPolicyEvaluation.pairing_ttl_ms
-      });
-      if (pairingPolicyEvaluation.trusted_without_pairing) {
-        pairing = await this.store.saveGatewayPairing(approvePairing({
-          ...pendingPairing,
-          metadata: {
-            ...pendingPairing.metadata,
-            gateway_pairing_policy_auto_approved: true
-          }
-        }));
-        await this.emit("gateway.pairing.updated", pairing);
-      } else {
-        await this.store.saveGatewayPairing(pendingPairing);
-        await this.emit("gateway.pairing.requested", pendingPairing);
-      }
-    }
-
-    if (!pairing) {
-      const pendingPairing = await this.store.findGatewayPairing({
-        channel: input.channel,
-        sourceIdentity,
-        status: "pending",
-        sessionKey: targetSessionKey
-      });
-      const inbound = await this.store.saveGatewayInboundMessage(createGatewayInboundMessage({
-        channel: input.channel,
-        source_identity: sourceIdentity,
-        body,
-        pairing: pendingPairing,
-        metadata: inboundMetadata
-      }));
-      await this.emit("gateway.inbound.blocked", inbound);
-      return { inbound, pairing: pendingPairing };
-    }
-
-    const inbound = await this.store.saveGatewayInboundMessage(createGatewayInboundMessage({
-      channel: input.channel,
-      source_identity: sourceIdentity,
-      body,
-      pairing,
-      metadata: inboundMetadata
-    }));
-
-    const gatewayContext = gatewayContextForPairing(pairing);
-    const boundaryPolicy = await this.store.saveGatewayBoundaryPolicy(createDefaultGatewayBoundaryPolicy({
-      source_channel: input.channel,
-      source_identity: sourceIdentity,
-      session_key: pairing.session_key,
-      allowlist: pairingPolicyEvaluation.allowlist_snapshot
-    }));
-    await this.emit("gateway.boundary_policy.saved", boundaryPolicy);
-    const concurrencyLock = await this.acquireGatewayConcurrencyLock(boundaryPolicy, inbound);
-    if (!concurrencyLock.acquired) {
-      const blocked = await this.store.saveGatewayInboundMessage({
-        ...inbound,
-        status: "blocked",
-        error: "gateway_concurrency_locked",
-        updated_at: nowIso()
-      });
-      await this.emit("gateway.inbound.blocked", blocked);
-      return { inbound: blocked, pairing, boundaryPolicy, concurrencyLock: concurrencyLock.lock };
-    }
-
-    const session = await this.ensureSessionForContext(gatewayContext, `Gateway ${pairing.source_label || pairing.source_identity}`);
-    try {
-      await this.emit("gateway.inbound.routed", inbound);
-      const chat = await this.runChatTurn({
-        sessionId: session.id,
-        content: body,
-        backend_id: input.backend_id,
-        input_locale: input.input_locale,
-        output_locale: input.output_locale,
-        metadata: {
-          ...(input.metadata ?? {}),
-          gateway_inbound_id: inbound.id,
-          gateway_channel: input.channel,
-          gateway_source_identity: sourceIdentity,
-          gateway_pairing_policy_id: pairingPolicy.id,
-          gateway_pairing_policy_trust_mode: pairingPolicy.trust_mode,
-          gateway_routing_policy_id: routingPolicy.id,
-          gateway_routing_session_key_strategy: routingPolicy.session_key_strategy,
-          gateway_boundary_policy_id: boundaryPolicy.id
-        },
-        gateway_context: gatewayContext,
-        gateway_boundary_policy: boundaryPolicy
-      });
-      const processed = await this.store.saveGatewayInboundMessage({
-        ...inbound,
-        status: "processed",
-        message_id: chat.messages.find((message) => message.role === "user")?.id,
-        updated_at: nowIso()
-      });
-      const deliveries = await this.enqueueGatewayReplyDeliveries({ channel: input.channel, inbound: processed, sessionKey: pairing.session_key, chat });
-      await this.emit("gateway.inbound.processed", processed);
-      return { inbound: processed, pairing, boundaryPolicy, concurrencyLock: concurrencyLock.lock, session, chat, deliveries };
-    } catch (error) {
-      const failed = await this.store.saveGatewayInboundMessage({
-        ...inbound,
-        status: "failed",
-        error: safeRuntimeErrorMessage(error, "gateway_inbound_failed"),
-        updated_at: nowIso()
-      });
-      await this.emit("gateway.inbound.failed", failed);
-      throw error;
-    } finally {
-      await this.store.releaseGatewayConcurrencyLock(concurrencyLock.lock.lock_key);
-    }
-  }
 
   private async enqueueGatewayReplyDeliveries(input: { channel: GatewayChannel; inbound: GatewayInboundMessageRecord; sessionKey: string; chat: RunChatTurnResult }): Promise<GatewayDeliveryRecord[]> {
     const text = [...input.chat.messages].reverse().find((message) => message.role === "agent")?.content ?? "";
@@ -6573,36 +4125,7 @@ export class AgentRuntime {
     next_run_at?: string;
     max_attempts?: number;
   }): Promise<AutomationJobRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Save automation job: ${input.title}`);
-    const now = nowIso();
-    const job: AutomationJobRecord = {
-      id: createId("automation"),
-      title: input.title,
-      kind: input.kind,
-      status: input.enabled === false ? "disabled" : "enabled",
-      schedule: input.schedule,
-      target_instruction: input.target_instruction,
-      delivery_target: input.delivery_target ?? { channel: "activity" },
-      next_run_at: input.next_run_at ?? now,
-      failure_count: 0,
-      max_attempts: input.max_attempts ?? 3,
-      created_at: now,
-      updated_at: now
-    };
-    return this.runAllowedWrite<AutomationJobRecord, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "automation.job.save",
-      proposedEffects: ["Save an automation job definition."],
-      execute: async (operation) => {
-        const saved = await this.store.saveAutomationJob(job);
-        const ref = automationJobRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { automation_job: saved as unknown as JsonValue });
-        return { resource: saved, ref, rollbackPoint, summary: `Saved automation job ${saved.title}.` };
-      }
-    });
+    return this.automationDomainService.saveInput(input) as Promise<AutomationJobRuntimeResult>;
   }
 
   async saveResourceTranslationJob(input: {
@@ -6615,28 +4138,7 @@ export class AgentRuntime {
     next_run_at?: string;
     max_attempts?: number;
   }): Promise<AutomationJobRuntimeResult> {
-    const source = await this.loadTranslatableResource(input.source_ref, input.source_locale);
-    if (!source) {
-      throw new RuntimeRequestError("not_found", `Translatable resource not found: ${input.source_ref.kind}/${input.source_ref.id}`);
-    }
-    const schedule = input.schedule?.trim() || "once";
-    return this.saveAutomationJob({
-      title: input.title?.trim() || `Translate ${source.ref.kind}/${source.ref.id} to ${input.target_locale}`,
-      kind: "resource_translation",
-      schedule,
-      target_instruction: `Translate ${source.ref.kind}/${source.ref.id} from ${source.source_locale} to ${input.target_locale}.`,
-      delivery_target: {
-        channel: "resource_translation",
-        source_ref: source.ref as unknown as JsonValue,
-        source_locale: source.source_locale,
-        target_locale: input.target_locale,
-        original_hash: source.original_hash,
-        source_label: source.ref.label ?? source.ref.id
-      },
-      enabled: input.enabled,
-      next_run_at: input.next_run_at,
-      max_attempts: input.max_attempts
-    });
+    return this.translationDomainService.saveTranslationJob(input) as Promise<AutomationJobRuntimeResult>;
   }
 
   previewAutomationSchedule(schedule: string, from = nowIso()): AutomationSchedulePreview {
@@ -6680,92 +4182,16 @@ export class AgentRuntime {
 
   async runDueAutomationJobs(now = nowIso()): Promise<AutomationRunRuntimeResult[]> {
     const jobs = await this.store.listAutomationJobs({ dueAt: now, enabledOnly: true });
-    const results: AutomationRunRuntimeResult[] = [];
-    for (const job of jobs) {
-      try {
-        const command = await this.runDomainCommand({
-          command_id: "automation.job.run",
-          input_source: "automation",
-          idempotency_key: `automation:${job.id}:${job.next_run_at ?? now}`,
-          payload: { job_id: job.id, now }
-        });
-        results.push(command.result as AutomationRunRuntimeResult);
-      } catch (error) {
-        if (error instanceof RuntimeRequestError && error.message === "automation_job_locked") {
-          continue;
-        }
-        throw error;
-      }
-    }
-    return results;
+    return runDueAutomation<AutomationRunRuntimeResult>({
+      dispatcher: { run: (request) => this.runDomainCommand(request) },
+      jobs,
+      now,
+      isLockedError: (error) => error instanceof RuntimeRequestError && error.message === "automation_job_locked"
+    });
   }
 
   async applyReflectionSuggestion(input: { suggestionId: string }): Promise<RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>> {
-    const suggestions = await this.store.listReflectionSuggestions();
-    const suggestion = suggestions.find((item) => item.id === input.suggestionId);
-    if (!suggestion) {
-      throw new RuntimeRequestError("not_found", `Reflection suggestion not found: ${input.suggestionId}`);
-    }
-    if (suggestion.status !== "proposed") {
-      throw new RuntimeRequestError("conflict", "reflection_suggestion_already_settled");
-    }
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Apply reflection suggestion: ${suggestion.title}`);
-    return this.runAllowedWrite<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "reflection.suggestion.apply",
-      proposedEffects: [`Apply ${suggestion.suggestion_type} reflection suggestion.`],
-      targetResourceRefs: suggestion.source_refs,
-      execute: async (operation) => {
-        const now = nowIso();
-        if (suggestion.suggestion_type === "memory") {
-          const memory = await createTopicMemory(this.store, envelope, suggestion.title || "reflection", suggestion.content);
-          const ref = memoryRef(memory);
-          const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { memory: memory as unknown as JsonValue });
-          await this.store.updateReflectionSuggestion({ ...suggestion, status: "applied", updated_at: now });
-          return { resource: memory, ref, rollbackPoint, summary: `Applied reflection suggestion as Memory ${memory.topic}.` };
-        }
-        if (suggestion.suggestion_type === "knowledge_wiki") {
-          const wiki = await this.createWikiProposal({
-            title: suggestion.title,
-            content: suggestion.content,
-            source_refs: suggestion.source_refs,
-            provenance: { kind: "generated_local", summary: "Applied from reflection suggestion.", verified: false }
-          });
-          await this.store.updateReflectionSuggestion({ ...suggestion, status: "applied", target_ref: wiki.operation.result_ref, updated_at: now });
-          return {
-            resource: wiki.resource,
-            ref: wiki.operation.result_ref!,
-            rollbackPoint: wiki.rollbackPoint,
-            summary: `Applied reflection suggestion as Knowledge Wiki proposal ${wiki.resource.title}.`
-          };
-        }
-        if (suggestion.suggestion_type === "skill") {
-          const skill = await this.createSkillCandidate({
-            title: suggestion.title,
-            description: summarize(suggestion.content),
-            content: suggestion.content,
-            tags: ["reflection"],
-            source_refs: suggestion.source_refs,
-            provenance_detail: {
-              kind: "generated_local",
-              summary: "Applied from reflection suggestion.",
-              verified: false
-            }
-          });
-          await this.store.updateReflectionSuggestion({ ...suggestion, status: "applied", target_ref: skill.operation.result_ref, updated_at: now });
-          return {
-            resource: skill.resource,
-            ref: skill.operation.result_ref!,
-            rollbackPoint: skill.rollbackPoint,
-            summary: `Applied reflection suggestion as Skill candidate ${skill.resource.title}.`
-          };
-        }
-        throw new RuntimeRequestError("conflict", "reflection_suggestion_type_not_applyable");
-      }
-    });
+    return this.systemDomainService.applyReflectionSuggestion(input) as Promise<RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>>;
   }
 
   async createSkillCandidate(input: {
@@ -6777,121 +4203,15 @@ export class AgentRuntime {
     source_refs?: SkillFrontmatter["source_refs"];
     provenance_detail?: SkillFrontmatter["provenance_detail"];
   }): Promise<SkillRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Create skill candidate: ${input.title}`);
-    const skillId = createId("skill");
-    const now = nowIso();
-    const markdown = renderSkillMarkdown(
-      {
-        id: skillId,
-        state: "candidate",
-        title: input.title,
-        description: input.description,
-        tags: input.tags ?? [],
-        provenance: "generated_local",
-        trust_level: "generated_local",
-        allowed_scopes: ["skill"],
-        required_capabilities: input.required_capabilities ?? [],
-        schedule_policy: {},
-        secret_policy: {},
-        owner_pinned: false,
-        last_reviewed_at: now,
-        source_refs: input.source_refs ?? [],
-        provenance_detail: input.provenance_detail ?? {
-          kind: "generated_local",
-          summary: "Created from a local runtime operation.",
-          verified: false
-        }
-      },
-      input.content
-    );
-
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "skill.candidate.create",
-      proposedEffects: ["Create a local skill candidate markdown file."],
-      execute: async (operation) => {
-        const skill = await this.store.saveSkillMarkdown({ state: "candidate", skillId, markdown });
-        const ref = skillRef(skill);
-        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { skill_id: skill.id });
-        return { resource: skill, ref, rollbackPoint, summary: `Created skill candidate ${skill.title}.` };
-      }
-    });
+    return this.skillDomainService.createCandidateInput(input) as Promise<SkillRuntimeResult>;
   }
 
   async saveSkillProject(input: { candidateId: string }): Promise<SkillRuntimeResult> {
-    const candidateMarkdown = await this.store.readSkillMarkdown(input.candidateId);
-    if (!candidateMarkdown) {
-      throw new RuntimeRequestError("not_found", `Skill candidate not found: ${input.candidateId}`);
-    }
-    const parsedCandidate = parseSkillMarkdown(candidateMarkdown);
-    if (parsedCandidate.frontmatter.state !== "candidate") {
-      throw new RuntimeRequestError("conflict", "skill_is_not_candidate");
-    }
-
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Save project skill from candidate: ${input.candidateId}`);
-    const skillId = createId("skill");
-    const markdown = renderSkillMarkdown(
-      {
-        ...parsedCandidate.frontmatter,
-        id: skillId,
-        state: "project",
-        provenance: `candidate:${input.candidateId}`,
-        last_reviewed_at: nowIso()
-      },
-      parsedCandidate.content
-    );
-
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "skill.project.save",
-      proposedEffects: ["Create a project skill markdown file from an existing candidate."],
-      execute: async (operation) => {
-        const skill = await this.store.saveSkillMarkdown({ state: "project", skillId, markdown });
-        const ref = skillRef(skill);
-        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { skill_id: skill.id, candidate_id: input.candidateId });
-        return { resource: skill, ref, rollbackPoint, summary: `Saved project skill ${skill.title}.` };
-      }
-    });
+    return this.skillDomainService.saveProjectInput(input) as Promise<SkillRuntimeResult>;
   }
 
   async saveSkillSupportFile(input: { skillId: string; path: string; content: string }): Promise<SkillSupportRuntimeResult> {
-    const skill = await this.store.getSkill(input.skillId);
-    if (!skill) {
-      throw new RuntimeRequestError("not_found", `Skill not found: ${input.skillId}`);
-    }
-    const before = (await this.store.listSkillSupportFiles(input.skillId)).find((file) => file.path === input.path);
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Save Skill support file: ${skill.title}/${input.path}`);
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "skill.support_file.save",
-      proposedEffects: [`Save support file ${input.path} for Skill ${skill.title}.`],
-      targetResourceRefs: [skillRef(skill)],
-      execute: async (operation) => {
-        const saved = await this.store.writeSkillSupportFile(input);
-        const ref = skillSupportFileRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { path: saved.file_path, content: before?.content ?? null },
-          { path: saved.file_path, content: saved.content }
-        );
-        return {
-          resource: saved,
-          ref,
-          rollbackPoint,
-          summary: `Saved support file ${saved.path} for Skill ${skill.title}.`
-        };
-      }
-    });
+    return this.skillDomainService.saveSupportFileInput(input) as Promise<SkillSupportRuntimeResult>;
   }
 
   async createWikiProposal(input: {
@@ -6903,51 +4223,19 @@ export class AgentRuntime {
     source_refs?: WikiFrontmatter["source_refs"];
     provenance?: WikiFrontmatter["provenance"];
   }): Promise<WikiRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Create wiki proposal: ${input.title}`);
-    const now = nowIso();
-    const wiki: WikiFrontmatter = {
-      id: createId("wiki"),
-      slug: slugify(input.slug ?? input.title),
-      title: input.title,
-      state: "proposed",
-      content_locale: input.content_locale ?? session.output_locale,
-      tags: input.tags ?? [],
-      source_refs: input.source_refs ?? [],
-      provenance: input.provenance ?? {
-        kind: "user_authored",
-        summary: "Created from an explicit local request.",
-        verified: true
-      },
-      created_at: now,
-      updated_at: now
-    };
-
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "wiki.proposal.create",
-      proposedEffects: ["Create a proposed wiki markdown page."],
-      execute: async (operation) => {
-        const saved = await this.store.saveWikiPage(wiki, input.content);
-        const ref = wikiRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { wiki_id: saved.id });
-        return { resource: saved, ref, rollbackPoint, summary: `Created wiki proposal ${saved.title}.` };
-      }
-    });
+    return this.wikiDomainService.createProposalInput(input) as Promise<WikiRuntimeResult>;
   }
 
   async acceptWikiPage(id: string): Promise<WikiRuntimeResult> {
-    return this.updateWikiState(id, "active", "wiki.accept", "Accept a wiki proposal for active retrieval.", "Accepted wiki page");
+    return this.wikiDomainService.changeState(id, "active", "wiki.accept", "Accept a wiki proposal for active retrieval.", "Accepted wiki page") as Promise<WikiRuntimeResult>;
   }
 
   async rejectWikiPage(id: string): Promise<WikiRuntimeResult> {
-    return this.updateWikiState(id, "rejected", "wiki.reject", "Reject a wiki proposal without deleting its markdown.", "Rejected wiki page");
+    return this.wikiDomainService.changeState(id, "rejected", "wiki.reject", "Reject a wiki proposal without deleting its markdown.", "Rejected wiki page") as Promise<WikiRuntimeResult>;
   }
 
   async archiveWikiPage(id: string): Promise<WikiRuntimeResult> {
-    return this.updateWikiState(id, "archived", "wiki.archive", "Archive a wiki page without deleting its markdown.", "Archived wiki page");
+    return this.wikiDomainService.changeState(id, "archived", "wiki.archive", "Archive a wiki page without deleting its markdown.", "Archived wiki page") as Promise<WikiRuntimeResult>;
   }
 
   async patchWikiPage(input: {
@@ -6959,234 +4247,28 @@ export class AgentRuntime {
     source_refs?: WikiFrontmatter["source_refs"];
     provenance?: WikiFrontmatter["provenance"];
   }): Promise<WikiRuntimeResult> {
-    const current = await this.store.getWiki(input.id);
-    if (!current) {
-      throw new RuntimeRequestError("not_found", `Wiki page not found: ${input.id}`);
-    }
-    const beforeContent = await this.store.readWikiContent(input.id);
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Patch wiki page: ${current.title}`);
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "wiki.patch",
-      proposedEffects: ["Edit wiki page frontmatter or markdown content."],
-      execute: async (operation) => {
-        const saved = await this.store.updateWikiPage(input);
-        if (!saved) {
-          throw new RuntimeRequestError("not_found", `Wiki page not found: ${input.id}`);
-        }
-        const ref = wikiRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { wiki: current as unknown as JsonValue, content: beforeContent ?? "" },
-          { wiki: saved as unknown as JsonValue, content: input.content ?? beforeContent ?? "" }
-        );
-        return { resource: saved, ref, rollbackPoint, summary: `Updated wiki page ${saved.title}.` };
-      }
-    });
+    return this.wikiDomainService.patchInput(input) as Promise<WikiRuntimeResult>;
   }
 
   async reindexWiki(): Promise<RuntimeWriteResult<WikiReindexResult>> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, "Reindex wiki pages");
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "wiki.reindex",
-      proposedEffects: ["Refresh the SQLite wiki index from markdown files."],
-      execute: async () => {
-        const result = await this.store.reindexWiki();
-        const ref = {
-          kind: "wiki_index",
-          id: "active",
-          uri: "wiki/pages",
-          label: "Wiki index"
-        };
-        return { resource: result, ref, summary: `Reindexed ${result.active} active wiki pages.` };
-      }
-    });
+    return this.wikiDomainService.reindex() as Promise<RuntimeWriteResult<WikiReindexResult>>;
   }
 
   async saveCollectionSchema(schema: CollectionSchema, contextOverride?: { session: SessionRecord; envelope: MessageEnvelope }): Promise<CollectionSchemaRuntimeResult> {
-    const session = contextOverride?.session ?? await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = contextOverride?.envelope ?? createGatewayEnvelope(webGatewayContext, `Save collection schema: ${schema.id}`);
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "collection.schema.save",
-      proposedEffects: ["Create a collection schema file and SQLite index row."],
-      execute: async (operation) => {
-        const saved = await this.store.saveCollectionSchema(schema);
-        const ref = collectionSchemaRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { collection_id: saved.id, version: saved.version });
-        return { resource: saved, ref, rollbackPoint, summary: `Saved collection schema ${saved.id}.` };
-      }
-    });
+    return this.collectionDomainService.saveSchemaInput(schema, contextOverride) as Promise<CollectionSchemaRuntimeResult>;
   }
 
   async reindexCollections(): Promise<CollectionReindexRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, "Reindex collections");
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "collection.reindex",
-      proposedEffects: ["Refresh Collection SQLite indexes from schema and record files."],
-      execute: async () => {
-        const result = await this.store.reindexCollections();
-        const ref = {
-          kind: "collection_index",
-          id: "collections",
-          uri: "collections",
-          label: "Collection index"
-        };
-        return {
-          resource: result,
-          ref,
-          summary: `Reindexed ${result.schemas.indexed} collection schema(s) and ${result.records.indexed} record(s).`
-        };
-      }
-    });
+    return this.collectionDomainService.reindexCollections();
   }
 
   async createCollectionRecord(record: CollectionRecord): Promise<CollectionRecordRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Create collection record: ${record.collection_id}/${record.id}`);
-    const result = await this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "collection.record.create",
-      proposedEffects: ["Create a collection record file and SQLite index row."],
-      execute: async (operation) => {
-        const saved = await this.store.saveCollectionRecord(record);
-        const ref = collectionRecordRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { collection_id: saved.collection_id, record_id: saved.id });
-        return { resource: saved, ref, rollbackPoint, summary: `Created collection record ${saved.collection_id}/${saved.id}.` };
-      }
-    });
-    await this.queueCollectionTriggerAutomations({
-      collectionId: result.resource.collection_id,
-      recordId: result.resource.id,
-      event: "record.created"
-    });
-    return result;
+    return this.collectionDomainService.createRecordInput(record) as Promise<CollectionRecordRuntimeResult>;
   }
 
-  async manageCollection(input: Record<string, JsonValue>, contextOverride?: { session: SessionRecord; envelope: MessageEnvelope }): Promise<CollectionManageRuntimeResult> {
-    const action = stringPayload(input.action);
-    const collectionId = stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.id);
-    const session = contextOverride?.session ?? await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = contextOverride?.envelope ?? createGatewayEnvelope(webGatewayContext, `Manage collection: ${collectionId || action || "collection"}`);
-    const operationName = "collection.manage";
-    return this.runAllowedWrite<Record<string, JsonValue>, Record<string, unknown>>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName,
-      proposedEffects: [`Run Collection manage action ${action || "unknown"}.`],
-      execute: async (operation) => {
-        const payload = await this.executeCollectionManageAction(input, operation);
-        const ref = collectionManageResultRef(payload, collectionId || stringPayload(payload.collection_id) || action || "collection");
-        return {
-          resource: payload,
-          ref,
-          summary: `Ran Collection manage action ${action}.`
-        };
-      }
-    });
-  }
-
-  private async executeCollectionManageAction(input: Record<string, JsonValue>, operation: OperationRecord): Promise<Record<string, JsonValue>> {
-    const action = stringPayload(input.action);
-    const collectionId = stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.id);
-    if (action === "schemaDocs") {
-      return {
-        action,
-        schema_docs: collectionSchemaDocs()
-      };
-    }
-    if (action === "putSchema") {
-      const schemaInput = recordPayload(input.schema) && Object.keys(recordPayload(input.schema)).length > 0
-        ? recordPayload(input.schema)
-        : input;
-      const schema = CollectionSchemaSchema.parse(schemaInput);
-      const saved = await this.store.updateCollectionSchema(schema);
-      return {
-        action,
-        collection_id: saved.id,
-        schema: saved as unknown as JsonValue,
-        status: "written"
-      };
-    }
-    if (!collectionId) {
-      throw new RuntimeRequestError("conflict", "collection_manage_collection_id_required");
-    }
-    const schema = await this.store.getCollectionSchema(collectionId);
-    if (!schema) {
-      throw new RuntimeRequestError("not_found", `Collection schema not found: ${collectionId}`);
-    }
-    if (action === "getSchema") {
-      return {
-        action,
-        collection_id: schema.id,
-        schema: schema as unknown as JsonValue
-      };
-    }
-    if (action === "patchSchema") {
-      const rawPatches = input.patches ?? input.patch;
-      const patches = validateAppEditPatch(rawPatches, schema);
-      const nextSchema = buildAppEditPatchedSchema(schema, patches, {
-        viewId: stringPayload(input.view_id)
-      });
-      if (!nextSchema) {
-        return {
-          action,
-          collection_id: schema.id,
-          status: "unchanged",
-          schema: schema as unknown as JsonValue
-        };
-      }
-      const saved = await this.store.updateCollectionSchema(nextSchema);
-      return {
-        action,
-        collection_id: saved.id,
-        status: "patched",
-        schema: saved as unknown as JsonValue
-      };
-    }
-    if (action === "getItems") {
-      const result = await this.collectionManageGetItems(schema, {
-        ids: jsonStringArray(input.ids),
-        fields: jsonStringArray(input.fields)
-      });
-      return {
-        action,
-        ...result
-      };
-    }
-    if (action === "putItems") {
-      const items = Array.isArray(input.items) ? input.items.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item) && isJsonValue(item)) : [];
-      if (items.length === 0) {
-        throw new RuntimeRequestError("conflict", "collection_manage_items_required");
-      }
-      const mode = collectionManagePutMode(input.mode);
-      const result = await this.collectionManagePutItems(schema, items, mode, operation);
-      return {
-        action,
-        ...result
-      };
-    }
-    throw new RuntimeRequestError("conflict", `collection_manage_action_unsupported:${action || "missing"}`);
-  }
-
-  private async collectionManageGetItems(schema: CollectionSchemaWithFilePath, options: { ids?: string[]; fields?: string[] } = {}): Promise<Record<string, JsonValue>> {
+  private async collectionManageGetItems(schema: CollectionSchemaWithFilePath, options: { ids?: string[]; fields?: string[] } = {}): Promise<{
+    collection_id: string; count: number; items: Record<string, JsonValue>[]; linked_data: JsonValue; schema_fields: JsonValue;
+  }> {
     const loaded = options.ids && options.ids.length > 0
       ? (await Promise.all(options.ids.map((id) => this.store.getCollectionRecord(schema.id, id)))).filter((record): record is CollectionRecordWithFilePath => Boolean(record))
       : await this.store.listCollectionRecords(schema.id);
@@ -7198,7 +4280,7 @@ export class AgentRuntime {
     return {
       collection_id: schema.id,
       count: projected.length,
-      items: projected as unknown as JsonValue,
+      items: projected,
       linked_data: linkedData as unknown as JsonValue,
       schema_fields: genericCollectionSchemaFields(schema, linkedData) as unknown as JsonValue
     };
@@ -7211,11 +4293,115 @@ export class AgentRuntime {
     return Object.keys(item).length > 0 ? item : undefined;
   }
 
-  private async collectionManagePutItems(
-    schema: CollectionSchemaWithFilePath,
+  async presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<CollectionViewRuntimeResult & { render_spec: SurfaceRenderSpec }> {
+    const schema = await this.store.getCollectionSchema(input.collectionId);
+    if (!schema) {
+      throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
+    }
+    const records = await this.store.listCollectionRecords(input.collectionId);
+    const linkedData = await this.genericCollectionLinkedData(schema, records);
+    const renderSpec = genericCollectionRenderSpec(schema, records, input.viewId, linkedData);
+    return {
+      collection_id: input.collectionId,
+      view_id: String(renderSpec.props.view_id ?? input.viewId ?? "default"),
+      schema,
+      record_count: records.length,
+      render_spec: renderSpec
+    };
+  }
+
+  async runCollectionManageCompatibility(
+    input: Record<string, JsonValue>,
+    inputSource: DomainCommandInputSource,
+    idempotencyKey?: string
+  ): Promise<JsonValue> {
+    const action = stringPayload(input.action);
+    const collectionId = stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.id);
+    if (action === "schemaDocs") {
+      const result = await this.runDomainQuery({
+        query_id: collectionSchemaDocsQueryId(),
+        input_source: inputSource,
+        payload: {}
+      });
+      return jsonSafe({ action, ...(unknownRecord(result.result)) });
+    }
+    if (action === "getSchema") {
+      const result = await this.runDomainQuery({
+        query_id: collectionSchemaQueryId(),
+        input_source: inputSource,
+        payload: { collection_id: collectionId }
+      });
+      return jsonSafe({ action, ...(unknownRecord(result.result)) });
+    }
+    if (action === "getItems") {
+      const ids = jsonStringArray(input.ids);
+      const fields = jsonStringArray(input.fields);
+      const result = await this.runDomainQuery({
+        query_id: collectionRecordsQueryId(),
+        input_source: inputSource,
+        payload: {
+          collection_id: collectionId,
+          ...(ids ? { ids } : {}),
+          ...(fields ? { fields } : {})
+        }
+      });
+      return jsonSafe({ action, ...(unknownRecord(result.result)) });
+    }
+    if (action === "putSchema") {
+      const schemaInput = recordPayload(input.schema) && Object.keys(recordPayload(input.schema)).length > 0
+        ? recordPayload(input.schema)
+        : input;
+      const schema = CollectionSchemaSchema.parse(schemaInput);
+      const result = await this.runDomainCommand({
+        command_id: collectionSchemaSaveCommandId(),
+        input_source: inputSource,
+        idempotency_key: idempotencyKey,
+        payload: schema as unknown as Record<string, unknown>
+      });
+      const resource = unknownRecord(unknownRecord(result.result).resource);
+      return jsonSafe({ action, collection_id: schema.id, schema: Object.keys(resource).length > 0 ? resource : result.result, status: "written" });
+    }
+    if (!collectionId) {
+      throw new RuntimeRequestError("conflict", "collection_manage_collection_id_required");
+    }
+    const schemaResult = await this.runDomainQuery({
+      query_id: collectionSchemaQueryId(),
+      input_source: inputSource,
+      payload: { collection_id: collectionId }
+    });
+    const schemaRecord = unknownRecord(unknownRecord(schemaResult.result).schema);
+    const schema = CollectionSchemaSchema.parse(schemaRecord);
+    if (action === "patchSchema") {
+      const patches = validateAppEditPatch(input.patches ?? input.patch, schema);
+      const nextSchema = buildAppEditPatchedSchema(schema, patches, { viewId: stringPayload(input.view_id) });
+      if (!nextSchema) {
+        return jsonSafe({ action, collection_id: schema.id, status: "unchanged", schema });
+      }
+      const result = await this.runDomainCommand({
+        command_id: collectionSchemaSaveCommandId(),
+        input_source: inputSource,
+        idempotency_key: idempotencyKey,
+        payload: nextSchema as unknown as Record<string, unknown>
+      });
+      const resource = unknownRecord(unknownRecord(result.result).resource);
+      return jsonSafe({ action, collection_id: schema.id, status: "patched", schema: Object.keys(resource).length > 0 ? resource : result.result });
+    }
+    if (action === "putItems") {
+      const items = Array.isArray(input.items)
+        ? input.items.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item) && isJsonValue(item))
+        : [];
+      if (items.length === 0) throw new RuntimeRequestError("conflict", "collection_manage_items_required");
+      return jsonSafe({ action, ...(await this.collectionManagePutItemsViaCommands(schema, items, collectionManagePutMode(input.mode), inputSource, idempotencyKey)) });
+    }
+    throw new RuntimeRequestError("conflict", `collection_manage_action_unsupported:${action || "missing"}`);
+  }
+
+  private async collectionManagePutItemsViaCommands(
+    schema: CollectionSchema,
     items: Array<Record<string, JsonValue>>,
     mode: "create" | "upsert" | "merge",
-    operation: OperationRecord
+    inputSource: DomainCommandInputSource,
+    idempotencyKey?: string
   ): Promise<Record<string, JsonValue>> {
     const written: string[] = [];
     const rejected: Array<Record<string, JsonValue>> = [];
@@ -7240,62 +4426,41 @@ export class AgentRuntime {
           rejected.push({ id: recordId, problem: "record_not_found" });
           continue;
         }
-        const now = nowIso();
         const data = mode === "merge" && existing
           ? { ...existing.data, ...collectionManageRecordData(item) }
           : collectionManageRecordData(item);
-        const saved = existing || mode !== "create"
-          ? await this.store.upsertCollectionRecord({
-              id: recordId,
+        if (existing && mode !== "create") {
+          await this.runDomainCommand({
+            command_id: collectionRecordPatchCommandId(),
+            input_source: inputSource,
+            idempotency_key: idempotencyKey ? `${idempotencyKey}:${recordId}` : undefined,
+            payload: {
               collection_id: schema.id,
-              version: (existing?.version ?? 0) + 1,
-              data,
-              resource_refs: existing?.resource_refs ?? resourceRefsPayload(item.resource_refs),
-              created_at: existing?.created_at ?? now,
-              updated_at: now
-            })
-          : await this.store.saveCollectionRecord({
-              id: recordId,
+              record_id: recordId,
+              patch_id: `${recordId}:${stableHash(data)}`,
+              expected_version: existing.version,
+              changes: data
+            }
+          });
+        } else {
+          await this.runDomainCommand({
+            command_id: collectionRecordCreateCommandId(),
+            input_source: inputSource,
+            idempotency_key: idempotencyKey ? `${idempotencyKey}:${recordId}` : undefined,
+            payload: {
               collection_id: schema.id,
-              version: 1,
+              record_id: recordId,
               data,
-              resource_refs: resourceRefsPayload(item.resource_refs),
-              created_at: now,
-              updated_at: now
-            });
-        written.push(saved.id);
-        await this.queueCollectionTriggerAutomations({
-          collectionId: saved.collection_id,
-          recordId: saved.id,
-          event: existing ? "record.patched" : "record.created"
-        });
+              resource_refs: resourceRefsPayload(item.resource_refs)
+            }
+          });
+        }
+        written.push(recordId);
       } catch (error) {
         rejected.push({ id: recordId, problem: safeRuntimeErrorMessage(error, "collection_record_write_failed") });
       }
     }
-    return {
-      collection_id: schema.id,
-      mode,
-      written,
-      rejected
-    };
-  }
-
-  async presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<CollectionViewRuntimeResult & { render_spec: SurfaceRenderSpec }> {
-    const schema = await this.store.getCollectionSchema(input.collectionId);
-    if (!schema) {
-      throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
-    }
-    const records = await this.store.listCollectionRecords(input.collectionId);
-    const linkedData = await this.genericCollectionLinkedData(schema, records);
-    const renderSpec = genericCollectionRenderSpec(schema, records, input.viewId, linkedData);
-    return {
-      collection_id: input.collectionId,
-      view_id: String(renderSpec.props.view_id ?? input.viewId ?? "default"),
-      schema,
-      record_count: records.length,
-      render_spec: renderSpec
-    };
+    return { collection_id: schema.id, mode, written, rejected };
   }
 
   private async genericCollectionLinkedData(schema: CollectionSchema, records: CollectionRecordWithFilePath[] = []): Promise<GenericCollectionLinkedData> {
@@ -7381,79 +4546,11 @@ export class AgentRuntime {
   }
 
   async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Apply collection patch: ${input.collectionId}/${input.recordId}`);
-    const result = await this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "collection.patch.apply",
-      proposedEffects: ["Apply a collection patch to an existing local record."],
-      execute: async (operation) => {
-        const patch = { ...input.patch, source_operation_id: operation.id };
-        let patched: Awaited<ReturnType<WorkspaceStore["applyCollectionRecordPatch"]>>;
-        try {
-          patched = await this.store.applyCollectionRecordPatch({ ...input, patch });
-        } catch (error) {
-          if (error instanceof CollectionRecordVersionConflictError) {
-            throw new RuntimeRequestError("conflict", error.message, resourceVersionConflictPayload(error));
-          }
-          throw error;
-        }
-        const ref = collectionRecordRef(patched.after);
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { record: patched.before as unknown as JsonValue },
-          { record: patched.after as unknown as JsonValue }
-        );
-        return {
-          resource: patched.after,
-          before: patched.before,
-          ref,
-          rollbackPoint,
-          summary: `Applied collection patch ${patch.id}.`
-        };
-      }
-    });
-    await this.queueCollectionTriggerAutomations({
-      collectionId: result.resource.collection_id,
-      recordId: result.resource.id,
-      event: "record.patched"
-    });
-    return { ...result, before: (result as CollectionPatchRuntimeResult).before };
+    return this.collectionDomainService.applyPatchInput(input) as Promise<CollectionPatchRuntimeResult>;
   }
 
   async deleteCollectionRecord(input: { collectionId: string; recordId: string; viewId?: string }): Promise<CollectionDeleteRuntimeResult> {
-    const schema = await this.store.getCollectionSchema(input.collectionId);
-    if (!schema) {
-      throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
-    }
-    assertCollectionDeleteAllowed(schema, input.viewId);
-    const record = await this.store.getCollectionRecord(input.collectionId, input.recordId);
-    if (!record) {
-      throw new RuntimeRequestError("not_found", `Collection record not found: ${input.collectionId}/${input.recordId}`);
-    }
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `Delete collection record: ${input.collectionId}/${input.recordId}`);
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "collection.record.delete",
-      proposedEffects: ["Delete a collection record file and SQLite index row."],
-      execute: async (operation) => {
-        const deleted = await this.store.deleteCollectionRecord(input.collectionId, input.recordId);
-        const ref = collectionRecordRef(deleted);
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { record: record as unknown as JsonValue },
-          {}
-        );
-        return { resource: deleted, ref, rollbackPoint, summary: `Deleted collection record ${deleted.collection_id}/${deleted.id}.` };
-      }
-    });
+    return this.collectionDomainService.deleteRecordInput(input) as Promise<CollectionDeleteRuntimeResult>;
   }
 
   async listCollectionActions(collectionId?: string): Promise<CollectionActionDescriptor[]> {
@@ -7472,577 +4569,24 @@ export class AgentRuntime {
     sessionId?: string;
     payload?: Record<string, unknown>;
   }): Promise<CollectionActionRuntimeResult> {
-    const schema = await this.store.getCollectionSchema(input.collectionId);
-    if (!schema) {
-      throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
-    }
-    const action = findCollectionAction(schema, input.actionId);
-    if (!action) {
-      throw new RuntimeRequestError("not_found", `Collection action not found: ${input.collectionId}/${input.actionId}`);
-    }
-    const kind = collectionActionKind(action);
-    const payload = jsonRecord(input.payload ?? {});
-    const session = input.sessionId
-      ? await this.store.getSession(input.sessionId)
-      : await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    if (!session) {
-      throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
-    }
-    const envelope = createGatewayEnvelope(webGatewayContext, `Run collection action: ${input.collectionId}/${input.actionId}`);
-    let patchBefore: CollectionRecordWithFilePath | undefined;
-    const result = await this.runAllowedWrite<CollectionRecordWithFilePath | CollectionReindexResult | CollectionPluginActionResult | CollectionInstructionActionResult, { chat?: RunChatTurnResult }>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "collection.action.run",
-      proposedEffects: [`Run collection action ${input.collectionId}/${input.actionId}.`],
-      execute: async (operation) => {
-        if (kind === "patch_record" || kind === "patch") {
-          const recordId = input.recordId ?? collectionActionString(action, "record_id") ?? stringPayload(payload.record_id);
-          if (!recordId) {
-            throw new RuntimeRequestError("conflict", "collection_action_record_id_required");
-          }
-          const changes = collectionActionRecord(payload.changes) ?? collectionActionRecord(action.changes);
-          if (!changes) {
-            throw new RuntimeRequestError("conflict", "collection_action_changes_required");
-          }
-          const patched = await this.store.applyCollectionRecordPatch({
-            collectionId: input.collectionId,
-            recordId,
-            patch: {
-              id: createId("collection_patch"),
-              record_id: recordId,
-              changes,
-              source_operation_id: operation.id,
-              created_at: nowIso()
-            }
-          });
-          patchBefore = patched.before;
-          const ref = collectionRecordRef(patched.after);
-          const rollbackPoint = await this.createRollbackPoint(
-            operation,
-            [ref],
-            { record: patched.before as unknown as JsonValue },
-            { record: patched.after as unknown as JsonValue }
-          );
-          return {
-            resource: patched.after,
-            ref,
-            rollbackPoint,
-            summary: `Ran collection action ${input.actionId} and patched ${input.collectionId}/${recordId}.`
-          };
-        }
-        if (kind === "create_record" || kind === "create") {
-          const recordId = input.recordId ?? collectionActionString(action, "record_id") ?? (stringPayload(payload.record_id) || createId("collection_record"));
-          const data = collectionActionRecord(payload.data) ?? collectionActionRecord(action.data);
-          if (!data) {
-            throw new RuntimeRequestError("conflict", "collection_action_data_required");
-          }
-          const now = nowIso();
-          const saved = await this.store.saveCollectionRecord({
-            id: recordId,
-            collection_id: input.collectionId,
-            data,
-            resource_refs: [],
-            created_at: now,
-            updated_at: now
-          });
-          const ref = collectionRecordRef(saved);
-          const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { collection_id: saved.collection_id, record_id: saved.id });
-          return {
-            resource: saved,
-            ref,
-            rollbackPoint,
-            summary: `Ran collection action ${input.actionId} and created ${input.collectionId}/${recordId}.`
-          };
-        }
-        if (kind === "reindex" || kind === "reindex_collection") {
-          const resource = await this.store.reindexCollections();
-          return {
-            resource,
-            ref: {
-              kind: "collection_index",
-              id: "collections",
-              uri: "collections",
-              label: "Collection index"
-            },
-            summary: `Ran collection action ${input.actionId} and reindexed collections.`
-          };
-        }
-        if (isInstructionCollectionActionKind(kind)) {
-          const recordId = input.recordId ?? collectionActionString(action, "record_id") ?? stringPayload(payload.record_id);
-          const record = recordId ? await this.store.getCollectionRecord(input.collectionId, recordId) : undefined;
-          if (recordId && !record) {
-            throw new RuntimeRequestError("not_found", `Collection record not found: ${input.collectionId}/${recordId}`);
-          }
-          const resolvedRecordData = record ? await this.collectionActionResolvedRecordData(schema, record) : undefined;
-          const instruction = collectionActionInstruction(action, payload);
-          if (!instruction) {
-            throw new RuntimeRequestError("conflict", `collection_action_instruction_required:${input.actionId}`);
-          }
-          const chat = await this.runChatTurn({
-            sessionId: session.id,
-            content: collectionActionInstructionPrompt({
-              collectionId: input.collectionId,
-              actionId: input.actionId,
-              instruction,
-              record,
-              resolvedRecordData,
-              payload,
-              outputSurface: collectionActionOutputSurface(action, payload)
-            }),
-            backend_id: input.backendId,
-            input_locale: session.ui_locale,
-            output_locale: session.output_locale,
-            metadata: {
-              collection_action_operation_id: operation.id,
-              collection_id: input.collectionId,
-              collection_action_id: input.actionId,
-              collection_action_kind: kind,
-              ...(recordId ? { collection_record_id: recordId } : {})
-            },
-            gateway_context: webGatewayContext
-          });
-          const customView = collectionActionOutputSurface(action, payload) === "custom_view"
-            ? collectionActionCustomViewOutput(chat)
-            : undefined;
-          const resource: CollectionInstructionActionResult = {
-            collection_id: input.collectionId,
-            action_id: input.actionId,
-            action_kind: kind,
-            status: "completed",
-            backend_run_id: chat.backendRun.id,
-            session_id: chat.session.id,
-            ...(customView ? { custom_view: customView } : {}),
-            output: {
-              backend_status: chat.backendRun.status,
-              message_ids: chat.messages.map((message) => message.id),
-              ...(customView ? { custom_view: customView } : {})
-            }
-          };
-          return {
-            resource,
-            ref: collectionActionExecutionRef(input.collectionId, input.actionId, operation.id),
-            chat,
-            summary: `Ran collection instruction action ${input.collectionId}/${input.actionId}.`
-          };
-        }
-        if (isPluginCollectionAction(action, kind)) {
-          const catalogActionId = collectionActionCatalogId(action, input.actionId);
-          const pluginInput: Record<string, JsonValue> = {
-            ...payload,
-            collection_id: input.collectionId,
-            action_id: input.actionId
-          };
-          const pluginRecordId = input.recordId ?? stringPayload(payload.record_id);
-          if (pluginRecordId) {
-            pluginInput.record_id = pluginRecordId;
-          }
-          const execution = await this.pluginRegistry.executeAction(catalogActionId, pluginInput, {
-            collection_id: input.collectionId,
-            action_id: input.actionId,
-            action_kind: kind,
-            operation_id: operation.id
-          });
-          if (execution.status !== "completed") {
-            throw new RuntimeRequestError("conflict", `collection_plugin_action_failed:${execution.error ?? "unknown"}`);
-          }
-          const resource: CollectionPluginActionResult = {
-            collection_id: input.collectionId,
-            action_id: input.actionId,
-            action_kind: kind,
-            catalog_action_id: catalogActionId,
-            handler_id: execution.handler_id,
-            status: "completed",
-            output: execution.output
-          };
-          return {
-            resource,
-            ref: collectionActionExecutionRef(input.collectionId, input.actionId, operation.id),
-            summary: `Ran collection plugin action ${input.collectionId}/${input.actionId}.`
-          };
-        }
-        throw new RuntimeRequestError("conflict", `collection_action_kind_unsupported:${kind}`);
-      }
-    });
-    if (patchBefore) {
-      await this.queueCollectionTriggerAutomations({
-        collectionId: input.collectionId,
-        recordId: (result.resource as CollectionRecordWithFilePath).id,
-        event: "record.patched"
-      });
-      return { ...result, before: patchBefore } as CollectionPatchRuntimeResult;
-    }
-    if ("collection_id" in result.resource && "id" in result.resource) {
-      await this.queueCollectionTriggerAutomations({
-        collectionId: result.resource.collection_id,
-        recordId: result.resource.id,
-        event: "record.created"
-      });
-    }
-    return result as CollectionRecordRuntimeResult | CollectionReindexRuntimeResult | CollectionPluginActionRuntimeResult | CollectionInstructionActionRuntimeResult;
+    return this.collectionDomainService.runActionInput({
+      ...input,
+      payload: jsonRecord(input.payload ?? {})
+    }) as Promise<CollectionActionRuntimeResult>;
   }
 
-  private async runMemoryReviewTraceReflection(session: SessionRecord): Promise<ReflectionRuntimeResult> {
-    const [sessions, backendRuns, workspaceChanges, toolRuns] = await Promise.all([
-      this.store.listSessions(),
-      this.store.listBackendRuns(),
-      this.store.listWorkspaceChanges(),
-      this.store.listToolRuns()
-    ]);
-    const recentSessionMessages = (await Promise.all(
-      sessions.slice(0, 10).map((item) => this.store.listMessages(item.id))
-    ))
-      .flat()
-      .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
-      .slice(0, 30)
-      .reverse();
-    const recentRuns = backendRuns.slice(0, 8);
-    const backendEvents = (await Promise.all(
-      recentRuns.map((run) => this.store.listBackendEvents({ runId: run.id }))
-    )).flat().slice(0, 80);
-    const latestUser = [...recentSessionMessages].reverse().find((message) => message.role === "user");
-    const latestAgent = [...recentSessionMessages].reverse().find((message) => message.role === "agent");
-    const sourceRun = recentRuns[0];
-    return this.runReflectionForCompletedTurn({
-      kind: "scheduled",
-      session,
-      sourceRunId: sourceRun?.id,
-      backendRun: sourceRun,
-      userMessage: latestUser,
-      agentMessage: latestAgent,
-      backendEvents,
-      workspaceChanges: workspaceChanges.slice(0, 50),
-      toolRuns: toolRuns.slice(0, 50),
-      transcriptMessages: recentSessionMessages,
-      artifacts: await this.loadReflectionArtifacts({
-        sessionId: sourceRun?.session_id ?? latestUser?.session_id ?? session.id,
-        sourceRunId: sourceRun?.id,
-        workspaceChanges
-      })
-    });
-  }
 
   async runMemoryReviewAutomation(): Promise<AutomationRunRuntimeResult> {
-    const startedAt = nowIso();
-    let automationRun = await this.store.createAutomationRun({
-      id: createId("automation_run"),
-      kind: "memory_review",
-      source: "cron",
-      status: "started",
-      started_at: startedAt
-    });
-
-    const session = await this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled memory review");
-    automationRun = await this.store.updateAutomationRun({ ...automationRun, session_id: session.id });
-
-    const envelope = createCronMemoryReviewEnvelope();
-    let traceResult: ReflectionRuntimeResult | undefined;
-    try {
-      const result = await this.runAllowedWrite({
-        session,
-        envelope,
-        context: cronMemoryReviewGatewayContext,
-        operationName: "automation.memory_review.run",
-        inputRef: {
-          kind: "automation_run",
-          id: automationRun.id,
-          uri: `automation-runs/${automationRun.id}`,
-          label: "Automation run"
-        },
-        proposedEffects: ["Run scheduled memory review and deterministic curator without external effects."],
-        execute: async (operation) => {
-          traceResult = await this.runMemoryReviewTraceReflection(session);
-          const ref = {
-            kind: "automation_run",
-            id: automationRun.id,
-            uri: `automation-runs/${automationRun.id}`,
-            label: "Memory review automation"
-          };
-          return {
-            resource: automationRun,
-            ref,
-            summary: `Memory review automation ran Background Review and applied ${traceResult.suggestions.length} learning change(s).`
-          };
-        }
-      });
-      automationRun = await this.store.updateAutomationRun({
-        ...automationRun,
-        status: "completed",
-        operation_id: result.operation.id,
-        completed_at: nowIso()
-      });
-      return { ...result, automationRun, memoryReviewTrace: traceResult };
-    } catch (error) {
-      automationRun = await this.store.updateAutomationRun({
-        ...automationRun,
-        status: "failed",
-        completed_at: nowIso(),
-        error: safeRuntimeErrorMessage(error)
-      });
-      throw error;
-    }
+    return this.automationDomainService.executeMemoryReview() as Promise<AutomationRunRuntimeResult>;
   }
 
-  private async runAutomationJob(job: AutomationJobRecord, runStartedAt = nowIso()): Promise<AutomationRunRuntimeResult> {
-    let automationRun = await this.store.createAutomationRun({
-      id: createId("automationrun"),
-      kind: job.kind,
-      source: "automation_job",
-      status: "started",
-      started_at: runStartedAt
-    });
-    const context: GatewayContext = {
-      source: "cron",
-      actor_identity: "owner_scheduled",
-      instruction_source: "scheduled_context",
-      channel: "cron",
-      session_key: `cron:automation:${job.id}`
-    };
-    const session = await this.ensureSessionForContext(context, job.title);
-    automationRun = await this.store.updateAutomationRun({ ...automationRun, session_id: session.id });
-    const envelope = createGatewayEnvelope(context, job.target_instruction);
-    try {
-      const result = await this.runAllowedWrite({
-        session,
-        envelope,
-        context,
-        operationName: "automation.job.run",
-        inputRef: automationJobRef(job),
-        proposedEffects: [`Run automation job ${job.title}.`],
-        execute: async (operation) => {
-          let resource: AutomationRunRecord = automationRun;
-          let summary = `Ran automation job ${job.title}.`;
-          if (job.kind === "wiki_reindex") {
-            const reindex = await this.store.reindexWiki();
-            summary = `Reindexed Knowledge Wiki pages: ${reindex.active}/${reindex.total} active.`;
-          } else if (job.kind === "skill_curator") {
-            const curator = await this.runCuratorJob();
-            summary = `Skill curator evaluated ${curator.suggestions.length} learning decision(s).`;
-          } else if (job.kind === "memory_review") {
-            const review = await this.runMemoryReviewTraceReflection(session);
-            summary = `Background Review applied ${review.suggestions.length} learning change(s).`;
-          } else if (job.kind === "learning_evaluation") {
-            const evaluation = await this.runEvaluationJob();
-            summary = `Learning Evaluation stored ${evaluation.learningEvaluations?.length ?? 0} effect record(s).`;
-          } else if (job.kind === "resource_translation") {
-            const translation = await this.runResourceTranslationJob(job, session, context);
-            automationRun = { ...automationRun, backend_run_id: translation.backendRunId };
-            summary = `Translated ${translation.source_ref.kind}/${translation.source_ref.id} to ${translation.target_locale}.`;
-          } else if (job.kind === "custom_instruction") {
-            const collectionSummary = await this.runCollectionTriggerJob(job);
-            if (collectionSummary) {
-              summary = collectionSummary;
-            } else {
-              const instructionRun = await this.runAutomationInstructionJob(job, session, context);
-              automationRun = { ...automationRun, backend_run_id: instructionRun.backendRunId };
-              summary = instructionRun.summary;
-            }
-          } else if (job.kind === "daily_digest") {
-            const instructionRun = await this.runAutomationInstructionJob(job, session, context);
-            automationRun = { ...automationRun, backend_run_id: instructionRun.backendRunId };
-            summary = instructionRun.summary;
-          }
-          const ref = {
-            kind: "automation_run",
-            id: automationRun.id,
-            uri: `automation-runs/${automationRun.id}`,
-            label: job.title
-          };
-          resource = await this.store.updateAutomationRun({
-            ...automationRun,
-            status: "completed",
-            operation_id: operation.id,
-            completed_at: nowIso()
-          });
-          await this.store.saveAutomationJob({
-            ...job,
-            status: isOneShotSchedule(job.schedule) ? "disabled" : job.status,
-            last_run_at: nowIso(),
-            next_run_at: isOneShotSchedule(job.schedule) ? undefined : nextRunFromSchedule(job.schedule),
-            retry_after_at: undefined,
-            locked_until: undefined,
-            failure_count: 0,
-            last_error: undefined,
-            updated_at: nowIso()
-          });
-          return { resource, ref, summary };
-        }
-      });
-      return { ...result, automationRun: result.resource };
-    } catch (error) {
-      const failureCount = (job.failure_count ?? 0) + 1;
-      const retryable = failureCount < (job.max_attempts ?? 3);
-      const errorText = safeRuntimeErrorMessage(error);
-      automationRun = await this.store.updateAutomationRun({
-        ...automationRun,
-        status: "failed",
-        completed_at: nowIso(),
-        error: errorText
-      });
-      await this.store.saveAutomationJob({
-        ...job,
-        status: retryable ? "enabled" : "disabled",
-        retry_after_at: retryable ? nextRetryAt(failureCount) : undefined,
-        locked_until: undefined,
-        failure_count: failureCount,
-        last_error: errorText,
-        updated_at: nowIso()
-      });
-      throw error;
-    }
-  }
-
-  private async runCollectionTriggerJob(job: AutomationJobRecord): Promise<string | undefined> {
-    const target = collectionTriggerDeliveryTarget(job.delivery_target);
-    if (!target) {
-      return undefined;
-    }
-    const schema = await this.store.getCollectionSchema(target.collectionId);
-    if (!schema || !findCollectionAction(schema, target.actionId)) {
-      return undefined;
-    }
-    await this.runCollectionAction({
-      collectionId: target.collectionId,
-      actionId: target.actionId,
-      recordId: target.recordId,
-      payload: {
-        trigger_id: target.triggerId,
-        event: target.event,
-        action_kind: target.actionKind,
-        automation_job_id: job.id
-      }
-    });
-    return `Collection trigger ${target.triggerId} ran action ${target.collectionId}/${target.actionId}.`;
-  }
 
   private async runResourceTranslationJob(
     job: AutomationJobRecord,
     session: SessionRecord,
     context: GatewayContext
   ): Promise<ResourceTranslationJobRuntimeDetails> {
-    const target = resourceTranslationDeliveryTarget(job.delivery_target);
-    if (!target) {
-      throw new RuntimeRequestError("conflict", "invalid_resource_translation_job");
-    }
-    const source = await this.loadTranslatableResource(target.source_ref, target.source_locale);
-    if (!source) {
-      throw new RuntimeRequestError("not_found", `Translatable resource not found: ${target.source_ref.kind}/${target.source_ref.id}`);
-    }
-    if (target.original_hash && target.original_hash !== source.original_hash) {
-      throw new RuntimeRequestError("conflict", "resource_translation_source_stale");
-    }
-    const instruction = [
-      `Translate the following ${source.ref.kind} from ${source.source_locale} to ${target.target_locale}.`,
-      "Return only the translated text. Keep names, code identifiers, paths, IDs, and structured keys unchanged.",
-      "",
-      source.content
-    ].join("\n");
-    const chat = await this.runChatTurn({
-      sessionId: session.id,
-      content: instruction,
-      input_locale: source.source_locale,
-      output_locale: target.target_locale,
-      metadata: {
-        automation_job_id: job.id,
-        automation_job_kind: job.kind,
-        automation_job_title: job.title,
-        automation_schedule: job.schedule,
-        automation_delivery_target: job.delivery_target,
-        resource_translation_source_ref: source.ref,
-        resource_translation_original_hash: source.original_hash,
-        resource_translation_target_locale: target.target_locale
-      },
-      gateway_context: context
-    });
-    const translatedText = chat.messages.find((message) => message.role === "agent")?.content.trim() ?? "";
-    const now = nowIso();
-    const translation: ResourceTranslationRecord = await this.store.saveResourceTranslation({
-      id: createId("translation"),
-      source_ref: source.ref,
-      source_locale: source.source_locale,
-      target_locale: target.target_locale,
-      status: translatedText ? "draft" : "missing",
-      original_hash: source.original_hash,
-      translated_text: translatedText,
-      provenance: {
-        kind: "generated_local",
-        summary: `Generated by resource translation automation job ${job.id}.`,
-        provider: chat.backendRun.backend_id,
-        verified: false
-      },
-      created_at: now,
-      updated_at: now
-    });
-    const change: WorkspaceChangeRecord = {
-      id: createId("change"),
-      run_id: chat.backendRun.id,
-      session_id: session.id,
-      resource_ref: resourceTranslationRef(translation),
-      change_type: "other",
-      summary: `Saved ${translation.target_locale} translation for ${source.ref.kind}/${source.ref.id}.`,
-      created_at: nowIso()
-    };
-    await this.store.saveWorkspaceChange(change);
-    await this.emit("workspace.change.created", change);
-    return {
-      translation,
-      backendRunId: chat.backendRun.id,
-      source_ref: source.ref,
-      source_locale: source.source_locale,
-      target_locale: target.target_locale,
-      original_hash: source.original_hash
-    };
-  }
-
-  private async loadTranslatableResource(sourceRef: ResourceRef, fallbackLocale?: SupportedLocale): Promise<{
-    ref: ResourceRef;
-    source_locale: SupportedLocale;
-    content: string;
-    original_hash: string;
-  } | undefined> {
-    if (sourceRef.kind === "artifact") {
-      const artifact = await this.store.getArtifact(sourceRef.id);
-      const content = artifact ? await this.store.readArtifactContent(sourceRef.id) : undefined;
-      if (!artifact || content === undefined) {
-        return undefined;
-      }
-      return translatableResource(artifact.file_ref, artifact.locale, content);
-    }
-    if (sourceRef.kind === "memory") {
-      const memory = await this.store.getMemory(sourceRef.id);
-      const content = memory ? await this.store.readMemoryContent(sourceRef.id) : undefined;
-      if (!memory || content === undefined) {
-        return undefined;
-      }
-      return translatableResource(memoryRef(memory), memory.content_locale, content);
-    }
-    if (sourceRef.kind === "wiki") {
-      const wiki = await this.store.getWiki(sourceRef.id);
-      const content = wiki ? await this.store.readWikiContent(sourceRef.id) : undefined;
-      if (!wiki || content === undefined) {
-        return undefined;
-      }
-      return translatableResource(wikiRef(wiki), wiki.content_locale, content);
-    }
-    if (sourceRef.kind === "skill") {
-      const skill = await this.store.getSkill(sourceRef.id);
-      const content = skill ? await this.store.readSkillMarkdown(sourceRef.id) : undefined;
-      if (!skill || content === undefined) {
-        return undefined;
-      }
-      return translatableResource(skillRef(skill), fallbackLocale ?? "ja", stripSkillFrontmatter(content));
-    }
-    if (sourceRef.kind === "collection_record") {
-      const record = collectionRecordTargetFromRef(sourceRef);
-      const collectionRecord = record ? await this.store.getCollectionRecord(record.collectionId, record.recordId) : undefined;
-      if (!collectionRecord) {
-        return undefined;
-      }
-      const content = JSON.stringify(collectionRecord.data, null, 2);
-      return translatableResource(collectionRecordRef(collectionRecord), fallbackLocale ?? localeFromJson(collectionRecord.data.content_locale) ?? "ja", content);
-    }
-    return undefined;
+    return this.translationDomainService.executeJob(job, session, context);
   }
 
   private async runAutomationInstructionJob(
@@ -8412,19 +4956,49 @@ export class AgentRuntime {
   ): Promise<RuntimeToolCallResult | undefined> {
     const providerToolName = stringPayload(event.payload.provider_tool_name);
     const providerCommand = providerToolName ? getDomainCommandForProviderToolName(providerToolName) : undefined;
-    const toolName = stringPayload(event.payload.action_id) || providerCommand?.id || providerToolName;
+    const providerQuery = providerToolName ? getDomainQueryForProviderToolName(providerToolName) : undefined;
+    const toolName = stringPayload(event.payload.action_id) || providerCommand?.id || providerQuery?.id || providerToolName;
     const args = runtimeToolArguments(event.payload, toolName);
     const toolCallId = stringPayload(event.payload.tool_call_id) || event.tool_call_id;
-    if (toolName === "sandbox.exec") {
-      return this.handleSandboxExecToolCall(run, event, args, boundary, gatewayBoundaryPolicy);
+    if (normalizeSamuraiToolBridgeName(toolName) === "samurai.collection.manage") {
+      const output = await this.runCollectionManageCompatibility(args, "provider_tool_call", providerToolIdempotencyKey(run.id, toolCallId, "collection.manage", args));
+      const session = await this.store.getSession(run.session_id);
+      if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
+      const operation = await this.createOperation(session, runInput.envelope, "collection.manage", ["Run the legacy Collection compatibility adapter."]);
+      const completedOperation = { ...operation, status: "completed" as const, updated_at: nowIso() };
+      await this.store.updateOperation(completedOperation);
+      const toolRun = await this.store.saveToolRun({
+        id: createId("toolrun"),
+        run_id: run.id,
+        session_id: run.session_id,
+        tool_call_id: toolCallId,
+        provider_tool_name: providerToolName || toolName,
+        action_id: "collection.manage",
+        status: "completed",
+        input_summary: summarize(JSON.stringify(args), 220),
+        output_summary: summarize(JSON.stringify(output), 220),
+        resource_refs: [],
+        created_at: nowIso()
+      });
+      return {
+        operation: completedOperation,
+        toolRun,
+        outputPayload: { status: "completed", action_id: "collection.manage", output },
+        resourceRefs: withGatewayBoundaryRefs([], boundary)
+      };
     }
-    if (toolName === "mcp.call") {
-      return this.handleMcpToolCall(run, event, args, boundary, gatewayBoundaryPolicy);
+    const mappedQuery = getDomainQueryEntry(toolName)
+      ?? providerQuery
+      ?? getDomainQueryForProviderToolName(toolName)
+      ?? getDomainQueryForProviderToolName(normalizeSamuraiToolBridgeName(toolName));
+    if (mappedQuery && mappedQuery.allowed_sources.includes("provider_tool_call")) {
+      return this.handleProviderDomainQueryToolCall(run, runInput, event, mappedQuery.id, args, boundary);
     }
-    if (toolName === "artifact.create" || toolName === "memory.topic.create") {
-      return this.handleProviderDomainCommandToolCall(run, runInput, event, toolName, args, boundary);
+    const capturedWriteCommandId = providerCapturedWriteCommandId(toolName);
+    if (capturedWriteCommandId) {
+      return this.handleProviderDomainCommandToolCall(run, runInput, event, capturedWriteCommandId, args, boundary);
     }
-    if (toolName === "skill.view" || toolName === "samurai.skill.view" || normalizeSamuraiToolBridgeName(toolName) === "samurai.skill.view") {
+    if (isProviderSkillView(toolName) || isProviderSkillView(normalizeSamuraiToolBridgeName(toolName))) {
       const view = await this.viewSkill({
         skillId: stringPayload(args.skill_id),
         runId: run.id,
@@ -8432,7 +5006,7 @@ export class AgentRuntime {
       });
       const session = await this.store.getSession(run.session_id);
       if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
-      const operation = await this.createOperation(session, runInput.envelope, "skill.view", ["Read a selected Skill on demand."], {
+      const operation = await this.createOperation(session, runInput.envelope, mappedQuery?.id ?? toolName, ["Read a selected Skill on demand."], {
         targetResourceRefs: [skillRef(view.skill)]
       });
       operation.status = "completed";
@@ -8472,13 +5046,12 @@ export class AgentRuntime {
       ?? getDomainCommandForProviderToolName(normalizedToolName);
     if (mappedCommand && mappedCommand.input_sources.includes("provider_tool_call")) {
       const activeSurfaceId = stringRecordValue(runInput.metadata.active_app_context, "generated_surface_id");
-      const effectiveCommandId = mappedCommand.id === "generated_surface.create" && activeSurfaceId && shouldReviseGeneratedSurfaceOutput(runInput.user_input)
-        ? "generated_surface.revise"
-        : mappedCommand.id;
-      const commandArgs = effectiveCommandId === "generated_surface.create" || effectiveCommandId === "generated_surface.revise"
-        ? normalizeGeneratedSurfaceCommandPayload(effectiveCommandId, args, run, runInput)
+      const effectiveCommandId = effectiveProviderCommandId(mappedCommand.id, activeSurfaceId, shouldReviseGeneratedSurfaceOutput(runInput.user_input));
+      const generatedSurfaceCommandId = generatedSurfaceWriteCommandId(effectiveCommandId);
+      const commandArgs = generatedSurfaceCommandId
+        ? normalizeGeneratedSurfaceCommandPayload(generatedSurfaceCommandId, args, run, runInput)
         : args;
-      const domainResult = await this.runDomainCommand({
+      const domainResult = await this.runDomainCommandWithTrustedContext({
         command_id: effectiveCommandId,
         input_source: "provider_tool_call",
         idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, effectiveCommandId, commandArgs),
@@ -8495,7 +5068,9 @@ export class AgentRuntime {
             ...(toolCallId ? { tool_call_id: toolCallId } : {})
           }
         }
-      });
+      }, { runId: run.id });
+      const directRuntimeTool = runtimeToolCallResult(domainResult.result);
+      if (directRuntimeTool) return directRuntimeTool;
       const generatedSurface = unknownRecord(unknownRecord(domainResult.result).definition);
       if (typeof generatedSurface.id === "string" && typeof generatedSurface.preview_url === "string") {
         const session = await this.store.getSession(run.session_id);
@@ -8507,7 +5082,7 @@ export class AgentRuntime {
           label: typeof generatedSurface.title === "string" ? generatedSurface.title : "Generated Surface"
         };
         const operation = await this.createOperation(session, runInput.envelope, effectiveCommandId, [
-          effectiveCommandId === "generated_surface.revise" ? "Create a new Generated Surface revision." : "Create a Generated Surface revision."
+          isGeneratedSurfaceRevision(effectiveCommandId) ? "Create a new Generated Surface revision." : "Create a Generated Surface revision."
         ], { targetResourceRefs: [generatedRef] });
         const completedOperation = { ...operation, status: "completed" as const, result_ref: generatedRef, updated_at: nowIso() };
         await this.store.updateOperation(completedOperation);
@@ -8593,7 +5168,7 @@ export class AgentRuntime {
         action_id: writeResult.operation.operation,
         status: writeResult.operation.status === "denied" ? "ignored" : "completed",
         input_summary: summarize(JSON.stringify(args), 220),
-        output_summary: writeResult.auditRecord.outputs_summary,
+        output_summary: writeResult.auditRecord?.outputs_summary ?? `Completed ${writeResult.operation.operation}.`,
         resource_refs: withGatewayBoundaryRefs(writeResult.resourceRefs, boundary),
         created_at: nowIso()
       });
@@ -8634,18 +5209,62 @@ export class AgentRuntime {
     return undefined;
   }
 
+  private async handleProviderDomainQueryToolCall(
+    run: BackendRunRecord,
+    runInput: BackendRunInput,
+    event: BackendOutputEvent,
+    queryId: string,
+    args: Record<string, JsonValue>,
+    boundary?: BackendToolBoundaryFeedback
+  ): Promise<RuntimeToolCallResult | undefined> {
+    const queryResult = await this.runDomainQuery({
+      query_id: queryId,
+      input_source: "provider_tool_call",
+      payload: { ...args, run_id: run.id, session_id: run.session_id }
+    });
+    const session = await this.store.getSession(run.session_id);
+    if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
+    const operation = await this.createOperation(session, runInput.envelope, queryId, ["Read Workspace state through the Domain Query registry."]);
+    const completedOperation = { ...operation, status: "completed" as const, updated_at: nowIso() };
+    await this.store.updateOperation(completedOperation);
+    const toolRun = await this.store.saveToolRun({
+      id: createId("toolrun"),
+      run_id: run.id,
+      session_id: run.session_id,
+      tool_call_id: stringPayload(event.payload.tool_call_id) || event.tool_call_id,
+      provider_tool_name: stringPayload(event.payload.provider_tool_name) || queryId,
+      action_id: queryId,
+      status: "completed",
+      input_summary: summarize(JSON.stringify(args), 220),
+      output_summary: summarize(JSON.stringify(queryResult.result), 220),
+      resource_refs: [],
+      created_at: nowIso()
+    });
+    return {
+      operation: completedOperation,
+      toolRun,
+      outputPayload: {
+        status: "completed",
+        query_id: queryId,
+        result: jsonSafe(queryResult.result),
+        render_specs: jsonSafe(queryResult.render_specs)
+      },
+      resourceRefs: withGatewayBoundaryRefs([], boundary)
+    };
+  }
+
   private async handleProviderDomainCommandToolCall(
     run: BackendRunRecord,
     runInput: BackendRunInput,
     event: BackendOutputEvent,
-    commandId: "artifact.create" | "memory.topic.create",
+    commandId: ProviderCapturedWriteCommandId,
     args: Record<string, JsonValue>,
     boundary?: BackendToolBoundaryFeedback
   ): Promise<RuntimeToolCallResult | undefined> {
     const providerToolName = stringPayload(event.payload.provider_tool_name) || commandId;
     const toolCallId = stringPayload(event.payload.tool_call_id) || event.tool_call_id;
 
-    if (commandId === "artifact.create") {
+    if (isArtifactCommand(commandId)) {
       const title = stringPayload(args.title).trim();
       const content = stringPayload(args.content).trim() || stringPayload(args.instruction).trim();
       if (!title || !content) {
@@ -8659,7 +5278,7 @@ export class AgentRuntime {
       };
     }
 
-    if (commandId === "memory.topic.create") {
+    if (isMemoryCommand(commandId)) {
       const settings = await this.store.getSettings();
       if (settings.memory_capture_mode === "off") {
         return undefined;
@@ -8676,7 +5295,7 @@ export class AgentRuntime {
       };
     }
 
-    const domainResult = await this.runDomainCommand({
+    const domainResult = await this.runDomainCommandWithTrustedContext({
       command_id: commandId,
       input_source: "provider_tool_call",
       idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, commandId, args),
@@ -8694,7 +5313,7 @@ export class AgentRuntime {
           ...(toolCallId ? { tool_call_id: toolCallId } : {})
         }
       }
-    });
+    }, { runId: run.id });
     const writeResult = operationAuditRuntimeResult(domainResult.result);
     if (!writeResult) {
       return undefined;
@@ -8718,7 +5337,7 @@ export class AgentRuntime {
       action_id: writeResult.operation.operation,
       status: writeResult.operation.status === "denied" ? "ignored" : "completed",
       input_summary: summarize(JSON.stringify(args), 220),
-      output_summary: writeResult.auditRecord.outputs_summary,
+      output_summary: writeResult.auditRecord?.outputs_summary ?? `Completed ${writeResult.operation.operation}.`,
       resource_refs: boundedResourceRefs,
       created_at: nowIso()
     });
@@ -8741,8 +5360,8 @@ export class AgentRuntime {
     content: string;
     recordEvent: (event: BackendOutputEvent) => Promise<BackendEventRecord>;
   }): Promise<{ operations: OperationRecord[]; artifacts: ArtifactRecord[]; workspaceChanges: WorkspaceChangeRecord[] }> {
-    const domainResult = await this.runDomainCommand({
-      command_id: "artifact.create",
+    const domainResult = await this.runDomainCommandWithTrustedContext({
+      command_id: artifactCommandId(),
       input_source: "provider_tool_call",
       idempotency_key: `${input.run.id}:expected-output-fallback:artifact.create`,
       payload: {
@@ -8759,7 +5378,7 @@ export class AgentRuntime {
           expected_output_fallback: true
         }
       }
-    });
+    }, { runId: input.run.id });
     const writeResult = operationAuditRuntimeResult(domainResult.result);
     if (!writeResult) {
       return { operations: [], artifacts: [], workspaceChanges: [] };
@@ -8769,40 +5388,45 @@ export class AgentRuntime {
     const artifacts = isArtifactRecordResource(resource) ? [resource] : [];
     const primaryResourceRef = resourceRefs[0] ?? writeResult.operation.result_ref;
     const workspaceChanges = primaryResourceRef
-      ? [runtimeToolWorkspaceChange(input.run, writeResult.operation, primaryResourceRef, "artifact.create", resource)]
+      ? [runtimeToolWorkspaceChange(input.run, writeResult.operation, primaryResourceRef, artifactCommandId(), resource)]
       : [];
     for (const change of workspaceChanges) {
       await this.store.saveWorkspaceChange(change);
       await this.emit("workspace.change.created", change);
     }
-    for (const event of runtimeToolWorkspaceEvents("artifact.create", resource, resourceRefs)) {
+    for (const event of runtimeToolWorkspaceEvents(artifactCommandId(), resource, resourceRefs)) {
       await input.recordEvent(event);
     }
     return { operations: [writeResult.operation], artifacts, workspaceChanges };
   }
 
-  private async handleSandboxExecToolCall(
-    run: BackendRunRecord,
-    event: BackendOutputEvent,
-    args: Record<string, JsonValue>,
-    boundary?: BackendToolBoundaryFeedback,
-    gatewayBoundaryPolicy?: GatewayBoundaryPolicy
-  ): Promise<RuntimeToolCallResult | undefined> {
-    if (!gatewayBoundaryPolicy) {
-      return undefined;
-    }
-    const sandboxInstance = await this.ensureGatewaySandboxInstance(gatewayBoundaryPolicy);
+  private async executeSandboxDomainOperation(context: TrustedDomainContext, input: Record<string, JsonValue>): Promise<RuntimeToolCallResult> {
+    if (!context.runId) throw new RuntimeRequestError("conflict", "sandbox_exec_requires_trusted_backend_run");
+    const run = await this.store.getBackendRun(context.runId);
+    if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
+    const policy = await this.gatewayBoundaryPolicyForRun(run);
+    if (!policy) throw new RuntimeRequestError("conflict", "sandbox_exec_requires_gateway_boundary");
+    const sandboxInstance = await this.ensureGatewaySandboxInstance(policy);
     const execution = await executeSandboxCommand(
-      gatewayBoundaryPolicy,
-      sandboxCommandInputFromArgs(args),
+      policy,
+      sandboxCommandInputFromArgs(input),
       createSandboxCommandAdapter(),
-      {
-        workspaceRoot: this.store.rootDir,
-        fileRoot: this.store.rootDir,
-        env: process.env
-      }
+      { workspaceRoot: this.store.rootDir, fileRoot: this.store.rootDir, env: process.env }
     );
-    return this.saveSandboxExecExecution(run, stringPayload(event.payload.tool_call_id) || event.tool_call_id, args, execution, boundary, sandboxInstance);
+    return this.saveSandboxExecExecution(
+      run,
+      stringRecordValue(input.metadata, "tool_call_id") || undefined,
+      input,
+      execution,
+      gatewayBoundaryToolFeedback({
+        allowed: true,
+        action_id: sandboxExecCommandId(),
+        provider_tool_name: sandboxExecCommandId(),
+        reason: "explicit_allow",
+        policy
+      }),
+      sandboxInstance
+    );
   }
 
   private async saveSandboxExecExecution(
@@ -8876,8 +5500,8 @@ export class AgentRuntime {
         stderr: execution.stderr ?? "",
         reason: execution.reason ?? null,
         error: execution.error ?? null,
-        secret_resolution: execution.secret_resolution as unknown as JsonValue,
-        sandbox: execution.sandbox as unknown as JsonValue,
+        secret_resolution: jsonDefined(execution.secret_resolution),
+        sandbox: jsonDefined(execution.sandbox),
         sandbox_instance: sandboxInstance
           ? {
             id: sandboxInstance.id,
@@ -8892,66 +5516,61 @@ export class AgentRuntime {
     };
   }
 
-  private async handleMcpToolCall(
-    run: BackendRunRecord,
-    event: BackendOutputEvent,
-    args: Record<string, JsonValue>,
-    boundary?: BackendToolBoundaryFeedback,
-    gatewayBoundaryPolicy?: GatewayBoundaryPolicy
-  ): Promise<RuntimeToolCallResult | undefined> {
-    if (!gatewayBoundaryPolicy) {
-      return undefined;
-    }
-    const serverName = stringPayload(args.server_name);
-    const mcpToolName = stringPayload(args.tool_name);
-    if (!serverName || !mcpToolName) {
-      return undefined;
-    }
-    const toolInput = recordPayload(args.input);
+  private async executeMcpDomainOperation(context: TrustedDomainContext, input: Record<string, JsonValue>): Promise<RuntimeToolCallResult> {
+    if (!context.runId) throw new RuntimeRequestError("conflict", "mcp_call_requires_trusted_backend_run");
+    const run = await this.store.getBackendRun(context.runId);
+    if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
+    const policy = await this.gatewayBoundaryPolicyForRun(run);
+    if (!policy) throw new RuntimeRequestError("conflict", "mcp_call_requires_gateway_boundary");
+    const serverName = stringPayload(input.server_name);
+    const toolName = stringPayload(input.tool_name);
     const configured = await this.store.getGatewayMcpConfigByServerName(serverName);
-    const hasBoundaryRef = gatewayBoundaryPolicy.mcp_config_refs.some((ref) =>
+    const hasBoundaryRef = policy.mcp_config_refs.some((ref) =>
       ref.server_name === serverName || (configured ? ref.id === configured.id : false)
     );
     const executionPolicy = configured && hasBoundaryRef
       ? {
-          ...gatewayBoundaryPolicy,
-          mcp_config_refs: gatewayBoundaryPolicy.mcp_config_refs.map((ref) =>
+          ...policy,
+          mcp_config_refs: policy.mcp_config_refs.map((ref) =>
             ref.server_name === serverName || ref.id === configured.id ? gatewayMcpConfigToBoundaryRef(configured) : ref
           )
         }
-      : gatewayBoundaryPolicy;
-    const resolveConfig = async (serverName: string) => serverName === configured?.server_name
+      : policy;
+    const resolveConfig = async (name: string) => name === configured?.server_name
       ? configured
-      : await this.store.getGatewayMcpConfigByServerName(serverName);
+      : await this.store.getGatewayMcpConfigByServerName(name);
     const httpAdapter = createHttpMcpToolAdapter({
-      resolveConfig: async (input) => {
-        const config = await resolveConfig(input.server_name);
+      resolveConfig: async (request) => {
+        const config = await resolveConfig(request.server_name);
         return config ? httpMcpServerConfigFromGatewayConfig(config) : undefined;
       }
     });
     const adapter = {
-      invoke: async (input: Parameters<PooledMcpToolAdapter["invoke"]>[0]) => {
-        const config = await resolveConfig(input.server_name);
-        if (config?.transport === "http") {
-          return httpAdapter.invoke(input);
-        }
-        return this.stdioMcpProcessPool.invoke(input);
+      invoke: async (request: Parameters<PooledMcpToolAdapter["invoke"]>[0]) => {
+        const config = await resolveConfig(request.server_name);
+        return config?.transport === "http" ? httpAdapter.invoke(request) : this.stdioMcpProcessPool.invoke(request);
       }
     };
     const execution = await executeMcpToolInvocation(
       executionPolicy,
-      {
-        server_name: serverName,
-        tool_name: mcpToolName,
-        input: toolInput
-      },
+      { server_name: serverName, tool_name: toolName, input: recordPayload(input.input) },
       adapter,
-      {
-        env: process.env,
-        fileRoot: this.store.rootDir
-      }
+      { env: process.env, fileRoot: this.store.rootDir }
     );
-    return this.saveMcpToolExecution(run, stringPayload(event.payload.tool_call_id) || event.tool_call_id, args, execution, boundary, configured);
+    return this.saveMcpToolExecution(
+      run,
+      stringRecordValue(input.metadata, "tool_call_id") || undefined,
+      input,
+      execution,
+      gatewayBoundaryToolFeedback({
+        allowed: true,
+        action_id: mcpCallCommandId(),
+        provider_tool_name: mcpCallCommandId(),
+        reason: "explicit_allow",
+        policy
+      }),
+      configured
+    );
   }
 
   private async saveMcpToolExecution(
@@ -9023,8 +5642,8 @@ export class AgentRuntime {
         reason: execution.reason ?? null,
         error: execution.error ?? null,
         output: execution.output ?? null,
-        secret_resolution: execution.secret_resolution as unknown as JsonValue,
-        sandbox: execution.sandbox as unknown as JsonValue,
+        secret_resolution: jsonDefined(execution.secret_resolution),
+        sandbox: jsonDefined(execution.sandbox),
         gateway_boundary: boundary?.payload ?? {}
       }
     };
@@ -10004,53 +6623,6 @@ export class AgentRuntime {
     return operation;
   }
 
-  private async executeApprovedExternalDispatch(
-    approval: ApprovalRequest,
-    operation: OperationRecord,
-    decision: PolicyDecisionRecord
-  ): Promise<ApprovalLifecycleResult> {
-    const sendId = operation.input_ref?.kind === "external_send" ? operation.input_ref.id : operation.target_resource_refs.find((ref) => ref.kind === "external_send")?.id;
-    if (!sendId) {
-      throw new RuntimeRequestError("conflict", "external_send_ref_missing");
-    }
-    const send = await this.store.getExternalSend(sendId);
-    if (!send) {
-      throw new RuntimeRequestError("not_found", `External send not found: ${sendId}`);
-    }
-    const result = await dispatchExternalSendAdapter(send, process.env.SAMURAI_EXTERNAL_SEND_DISPATCH !== "true");
-    const now = nowIso();
-    const saved = await this.store.saveExternalSend({
-      ...send,
-      status: externalSendStatusFromDispatchResult(result),
-      operation_id: operation.id,
-      approval_request_id: approval.id,
-      dispatch_result: result as Record<string, JsonValue>,
-      updated_at: now,
-      dispatched_at: result.dispatched ? now : undefined
-    });
-    const ref = externalSendRef(saved);
-    operation.policy_decision_id = decision.id;
-    operation.approval_request_id = approval.id;
-    operation.status = "completed";
-    operation.result_ref = ref;
-    operation.updated_at = now;
-    await this.store.updateOperation(operation);
-    const audit = await this.auditOperation(
-      operation,
-      decision,
-      externalSendDispatchSummary(saved, result),
-      [ref],
-      undefined
-    );
-    return {
-      approvalRequest: approval,
-      operation,
-      auditRecord: audit,
-      activity: await this.rebuildActivity(),
-      status: "approved"
-    };
-  }
-
   private async ensureSessionForContext(context: GatewayContext, title: string): Promise<SessionRecord> {
     const existing = (await this.store.listSessions()).find((session) => session.session_key === context.session_key);
     if (existing) {
@@ -10108,52 +6680,12 @@ export class AgentRuntime {
     return count >= maxMessages;
   }
 
-  private async runAllowedWrite<TResource, TExtra extends Record<string, unknown> = Record<string, never>>(input: {
-    session: SessionRecord;
-    envelope: MessageEnvelope;
-    context: GatewayContext;
-    operationName: string;
-    proposedEffects: string[];
-    inputRef?: OperationRecord["input_ref"];
-    targetResourceRefs?: OperationRecord["target_resource_refs"];
-    execute: (operation: OperationRecord) => Promise<{
-      resource: TResource;
-      ref: NonNullable<OperationRecord["result_ref"]>;
-      rollbackPoint?: RollbackPoint;
-      summary: string;
-    } & TExtra>;
-  }): Promise<RuntimeWriteResult<TResource> & TExtra> {
+  private async runRecordedMutation<TResource, TExtra extends Record<string, unknown> = {}>(input: RecordedMutationInput<TResource, TExtra>): Promise<RuntimeWriteResult<TResource> & TExtra> {
     const operation = await this.createOperation(input.session, input.envelope, input.operationName, input.proposedEffects, {
       context: input.context,
       inputRef: input.inputRef,
       targetResourceRefs: input.targetResourceRefs
     });
-    const manifest = getCapabilityManifest(operation.capability_id);
-    const decision = await this.savePolicyDecision(evaluatePolicy({
-      input: this.createPolicyInput(operation),
-      manifest,
-      grants: await this.store.listGrants(),
-      operationId: operation.id
-    }));
-    operation.policy_decision_id = decision.id;
-
-    if (decision.decision !== "allow_auto" && decision.decision !== "allow_with_audit") {
-      operation.status = decision.decision === "deny" ? "denied" : "pending_approval";
-      operation.updated_at = nowIso();
-      await this.store.updateOperation(operation);
-      const audit = await this.auditOperation(operation, decision, "Write operation was not executed by policy.", [], undefined);
-      const approvalRequest = await this.createApprovalRequest(operation, decision);
-      operation.approval_request_id = approvalRequest.id;
-      operation.updated_at = nowIso();
-      await this.store.updateOperation(operation);
-      throw new RuntimeRequestError(decision.decision === "deny" ? "forbidden" : "conflict", "policy_blocked", {
-        approvalRequest,
-        operation,
-        auditRecord: audit,
-        activity: await this.rebuildActivity(),
-        status: decision.decision === "deny" ? "denied" : "approved"
-      });
-    }
 
     try {
       const execution = await input.execute(operation);
@@ -10161,14 +6693,11 @@ export class AgentRuntime {
       operation.result_ref = execution.ref;
       operation.updated_at = nowIso();
       await this.store.updateOperation(operation);
-      const audit = await this.auditOperation(operation, decision, execution.summary, [execution.ref], execution.rollbackPoint?.id);
       const activity = await this.rebuildActivity();
       const { resource, ref: _ref, rollbackPoint, summary: _summary, ...extra } = execution;
       return {
         resource,
         operation,
-        policyDecision: decision,
-        auditRecord: audit,
         ...(rollbackPoint ? { rollbackPoint } : {}),
         activity,
         ...((extra as unknown) as TExtra)
@@ -10178,49 +6707,11 @@ export class AgentRuntime {
       operation.error = safeRuntimeErrorMessage(error);
       operation.updated_at = nowIso();
       await this.store.updateOperation(operation);
-      await this.auditOperation(operation, decision, "Write operation failed before completion.", [], undefined);
       if (error instanceof RuntimeRequestError) {
         throw error;
       }
       throw new RuntimeRequestError("conflict", operation.error);
     }
-  }
-
-  private async updateWikiState(
-    id: string,
-    state: WikiFrontmatter["state"],
-    operationName: string,
-    effect: string,
-    summaryPrefix: string
-  ): Promise<WikiRuntimeResult> {
-    const current = await this.store.getWiki(id);
-    if (!current) {
-      throw new RuntimeRequestError("not_found", `Wiki page not found: ${id}`);
-    }
-    const session = await this.ensureSessionForContext(webGatewayContext, "Workspace operations");
-    const envelope = createGatewayEnvelope(webGatewayContext, `${summaryPrefix}: ${current.title}`);
-    return this.runAllowedWrite({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName,
-      proposedEffects: [effect],
-      targetResourceRefs: [wikiRef(current)],
-      execute: async (operation) => {
-        const saved = await this.store.setWikiState(id, state);
-        if (!saved) {
-          throw new RuntimeRequestError("not_found", `Wiki page not found: ${id}`);
-        }
-        const ref = wikiRef(saved);
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [ref],
-          { wiki: current as unknown as JsonValue },
-          { wiki: saved as unknown as JsonValue }
-        );
-        return { resource: saved, ref, rollbackPoint, summary: `${summaryPrefix} ${saved.title}.` };
-      }
-    });
   }
 
   private createPolicyInput(operation: OperationRecord): PolicyEvaluationInput {
@@ -10236,183 +6727,6 @@ export class AgentRuntime {
       prior_grants: [],
       recent_history: [],
       input_hash: operation.input_hash
-    };
-  }
-
-  private async createMemoryArchiveOperation(
-    session: SessionRecord,
-    memory: MemoryFrontmatter & { file_path: string },
-    actorIdentity: OperationRecord["actor_identity"],
-    decidedBy: string
-  ): Promise<OperationRecord> {
-    const now = nowIso();
-    const ref = memoryRef(memory);
-    const operation: OperationRecord = {
-      id: createId("operation"),
-      session_id: session.id,
-      capability_id: proposalCapabilityManifest.id,
-      operation: "memory.archive",
-      actor_identity: actorIdentity,
-      instruction_source: "owner_instruction",
-      instruction_authority: decidedBy,
-      channel: "web",
-      input_hash: stableHash({
-        memory_id: memory.id,
-        session_id: session.id,
-        operationName: "memory.archive"
-      }),
-      input_ref: ref,
-      target_resource_refs: [ref],
-      proposed_effects: ["Archive a session-linked memory so it no longer appears in normal memory views."],
-      status: "created",
-      created_at: now,
-      updated_at: now
-    };
-    await this.store.saveOperation(operation);
-    await this.emit("operation.created", operation);
-    return operation;
-  }
-
-  private async savePolicyDecision(decision: PolicyDecisionRecord): Promise<PolicyDecisionRecord> {
-    const saved = await this.store.savePolicyDecision(decision);
-    await this.emit("policy.decided", saved);
-    return saved;
-  }
-
-  private assertApprovalCanBeDecided(approval: ApprovalRequest, operation: OperationRecord): void {
-    if (
-      approval.status !== "pending" ||
-      operation.status !== "pending_approval" ||
-      operation.approval_request_id !== approval.id ||
-      approval.operation_id !== operation.id
-    ) {
-      throw new RuntimeRequestError("conflict", "Approval request is no longer pending for this operation.");
-    }
-  }
-
-  private async getSavedDecisionForApproval(operation: OperationRecord): Promise<PolicyDecisionRecord> {
-    if (!operation.policy_decision_id) {
-      throw new RuntimeRequestError("conflict", "Operation has no saved policy decision.");
-    }
-
-    const decision = await this.store.getPolicyDecision(operation.policy_decision_id);
-    if (!decision) {
-      throw new RuntimeRequestError("conflict", "Saved policy decision was not found.");
-    }
-
-    return decision;
-  }
-
-  private async expireApprovalRequest(
-    approval: ApprovalRequest,
-    operation: OperationRecord,
-    decidedBy: string
-  ): Promise<ApprovalLifecycleResult> {
-    const decision = await this.getSavedDecisionForApproval(operation);
-    const expired: ApprovalRequest = {
-      ...approval,
-      status: "expired",
-      decided_by: decidedBy,
-      decided_at: nowIso()
-    };
-    await this.store.updateApprovalRequest(expired);
-
-    operation.status = "deferred";
-    operation.result_ref = {
-      kind: "approval",
-      id: expired.id,
-      uri: `approval_requests/${expired.id}`,
-      label: "Approval expired without execution"
-    };
-    operation.updated_at = nowIso();
-    await this.store.updateOperation(operation);
-
-    const audit = await this.auditOperation(operation, decision, "Approval expired. v1 deferred the operation without execution.", [], undefined);
-    return {
-      approvalRequest: expired,
-      operation,
-      auditRecord: audit,
-      activity: await this.rebuildActivity(),
-      status: "expired"
-    };
-  }
-
-  private async executeAllowedOperation(
-    operation: OperationRecord,
-    decision: PolicyDecisionRecord,
-    envelope: MessageEnvelope,
-    operationPlan: OperationPlan
-  ): Promise<{
-    resultRef?: OperationRecord["result_ref"];
-    artifact?: ArtifactRecord;
-    memory?: MemoryFrontmatter;
-    rollbackPoint?: RollbackPoint;
-    affectedResources: OperationRecord["target_resource_refs"];
-    summary: string;
-  }> {
-    if (operation.operation === "artifact.create") {
-      if (!operationPlan.artifact) {
-        throw new RuntimeRequestError("conflict", "artifact_missing");
-      }
-      const artifact = await createArtifactDraft({
-        store: this.store,
-        operation,
-        title: operationPlan.artifact.title,
-        content: operationPlan.artifact.content,
-        locale: envelope.output_locale,
-        sourceLocales: [envelope.input_locale],
-        createdBy: "runtime"
-      });
-      const affectedResources = [artifact.file_ref];
-      const rollbackPoint = await this.createRollbackPoint(operation, affectedResources, {}, { artifact_id: artifact.id });
-      return {
-        resultRef: artifact.file_ref,
-        artifact,
-        rollbackPoint,
-        affectedResources,
-        summary: `Created artifact ${artifact.title}.`
-      };
-    }
-
-    if (operation.operation === "memory.session.create") {
-      const memory = await createSessionMemory(this.store, envelope, envelope.user_intent);
-      const ref = {
-        kind: "memory",
-        id: memory.id,
-        uri: `memory/${memory.state}/${memory.id}.md`,
-        label: memory.topic
-      };
-      const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { memory_id: memory.id });
-      return {
-        resultRef: ref,
-        memory,
-        rollbackPoint,
-        affectedResources: [ref],
-        summary: "Created session memory."
-      };
-    }
-
-    if (operation.operation === "memory.topic.create") {
-      const memory = await createTopicMemory(this.store, envelope, "preference", envelope.user_intent);
-      const ref = {
-        kind: "memory",
-        id: memory.id,
-        uri: `memory/${memory.state}/${memory.id}.md`,
-        label: memory.topic
-      };
-      const rollbackPoint = await this.createRollbackPoint(operation, [ref], {}, { memory_id: memory.id });
-      return {
-        resultRef: ref,
-        memory,
-        rollbackPoint,
-        affectedResources: [ref],
-        summary: decision.decision === "allow_with_audit" ? "Created topic memory with visible audit." : "Created topic memory."
-      };
-    }
-
-    return {
-      affectedResources: [],
-      summary: "No state change executed."
     };
   }
 
@@ -10436,45 +6750,6 @@ export class AgentRuntime {
       expires_at: expiresAt
     };
     return this.store.saveRollbackPoint(point);
-  }
-
-  private async createApprovalRequest(operation: OperationRecord, decision: PolicyDecisionRecord): Promise<ApprovalRequest> {
-    const now = nowIso();
-    const expiresAt = new Date(Date.parse(now) + 1000 * 60 * 60 * 24).toISOString();
-    const request: ApprovalRequest = {
-      id: createId("approval"),
-      operation_id: operation.id,
-      requested_level: decision.required_approval_level === "strong_approval" ? "strong_approval" : "approval",
-      status: "pending",
-      reason: decision.reason,
-      requested_by: "runtime",
-      created_at: now,
-      expires_at: expiresAt
-    };
-    return this.store.saveApprovalRequest(request);
-  }
-
-  private async auditOperation(
-    operation: OperationRecord,
-    decision: PolicyDecisionRecord,
-    outputsSummary: string,
-    affectedResources: AuditRecord["affected_resources"],
-    rollbackPointId?: string
-  ): Promise<AuditRecord> {
-    const audit = createAuditRecord({
-      actor_identity: operation.actor_identity,
-      operation_id: operation.id,
-      capability_id: operation.capability_id,
-      instruction_source: operation.instruction_source,
-      inputs_summary: operation.proposed_effects.join(" "),
-      outputs_summary: outputsSummary,
-      policy_decision_id: decision.id,
-      affected_resources: affectedResources,
-      rollback_point_id: rollbackPointId
-    });
-    await this.store.saveAuditRecord(audit);
-    await this.emit("audit.recorded", audit);
-    return audit;
   }
 
   private async generateProviderOutput(input: ProviderInput): Promise<ProviderOutput> {
@@ -10509,7 +6784,7 @@ export class AgentRuntime {
       if (!plan) {
         continue;
       }
-      if (plan.operation === "artifact.create") {
+    if (plan.operation === artifactCommandId()) {
         operations.unshift(plan);
       } else {
         operations.push(plan);
@@ -10526,7 +6801,7 @@ export class AgentRuntime {
       if (!title || !content) {
         return undefined;
       }
-      const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry("artifact.create");
+      const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry(artifactCommandId());
       return {
         operation: command.id,
         proposedEffects: command.proposed_effects,
@@ -10540,7 +6815,7 @@ export class AgentRuntime {
     }
 
     if (toolCall.name === "remember_topic") {
-      const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry("memory.topic.create");
+      const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry(memoryCommandId());
       return {
         operation: command.id,
         proposedEffects: command.proposed_effects,
@@ -10550,15 +6825,6 @@ export class AgentRuntime {
 
     if (toolCall.name === "request_external_send") {
       const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry("external.send");
-      return {
-        operation: command.id,
-        proposedEffects: command.proposed_effects,
-        toolCall
-      };
-    }
-
-    if (toolCall.name === "request_delete") {
-      const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry("workspace.delete");
       return {
         operation: command.id,
         proposedEffects: command.proposed_effects,
@@ -10600,117 +6866,6 @@ function summarize(value: string, maxLength = 160): string {
   return value.trim().replace(/\s+/g, " ").slice(0, maxLength);
 }
 
-function latestBackendRunActivityMs(runs: BackendRunRecord[]): number | undefined {
-  const timestamps = runs
-    .flatMap((run) => [run.completed_at, run.started_at])
-    .filter((value): value is string => Boolean(value))
-    .map((value) => Date.parse(value))
-    .filter((value) => Number.isFinite(value));
-  return timestamps.length ? Math.max(...timestamps) : undefined;
-}
-
-function buildCuratorLifecycleReport(input: {
-  now: string;
-  dryRun: boolean;
-  paused: boolean;
-  skippedReason?: string;
-  curatorState: CuratorStateRecord;
-  memories: MemoryFrontmatter[];
-  wikiPages: WikiWithFilePath[];
-  skills: SkillWithFilePath[];
-  skillUsage: Array<{ skill_id: string }>;
-  suggestions: ReflectionSuggestionRecord[];
-  skillActions: CuratorLifecycleReport["skill_actions"];
-  protectedSkills: CuratorLifecycleReport["protected_skills"];
-  snapshotId?: string;
-  evaluationCount?: number;
-  appliedMutationCount?: number;
-}): CuratorLifecycleReport {
-  return CuratorLifecycleReportSchema.parse({
-    id: `curator_report_${input.now.replace(/[^0-9A-Za-z]/g, "")}`,
-    checked_at: input.now,
-    dry_run: input.dryRun,
-    paused: input.paused,
-    ...(input.snapshotId ? { snapshot_id: input.snapshotId } : {}),
-    evaluation_count: input.evaluationCount ?? 0,
-    applied_mutation_count: input.appliedMutationCount ?? 0,
-    ...(input.skippedReason ? { skipped_reason: input.skippedReason } : {}),
-    thresholds: {
-      stale_after_days: input.curatorState.stale_after_days,
-      archive_after_days: input.curatorState.archive_after_days,
-      min_idle_hours: input.curatorState.min_idle_hours
-    },
-    counts: {
-      memory_items: input.memories.length,
-      wiki_pages: input.wikiPages.length,
-      skill_items: input.skills.length,
-      skill_usage_rows: input.skillUsage.length,
-      suggestions: input.suggestions.length
-    },
-    skill_actions: input.skillActions,
-    protected_skills: input.protectedSkills
-  });
-}
-
-function buildCuratorReviewReport(input: {
-  now: string;
-  dryRun: boolean;
-  keepCandidates: CuratorReviewReport["keep_candidates"];
-  memoryMergeGroups: CuratorReviewReport["memory_merge_groups"];
-  skillConsolidationGroups: CuratorReviewReport["skill_consolidation_groups"];
-  wikiPatchProposals: CuratorReviewReport["wiki_patch_proposals"];
-  archiveCandidates: CuratorReviewReport["archive_candidates"];
-}): CuratorReviewReport {
-  return CuratorReviewReportSchema.parse({
-    id: `curator_review_${input.now.replace(/[^0-9A-Za-z]/g, "")}`,
-    checked_at: input.now,
-    dry_run: input.dryRun,
-    counts: {
-      keep_candidates: input.keepCandidates.length,
-      patch_candidates: input.wikiPatchProposals.length,
-      consolidate_candidates: input.memoryMergeGroups.length + input.skillConsolidationGroups.length,
-      archive_candidates: input.archiveCandidates.length
-    },
-    keep_candidates: input.keepCandidates,
-    memory_merge_groups: input.memoryMergeGroups,
-    skill_consolidation_groups: input.skillConsolidationGroups,
-    wiki_patch_proposals: input.wikiPatchProposals,
-    archive_candidates: input.archiveCandidates
-  });
-}
-
-function proposedSkillStateForCuratorAction(action: CuratorLifecycleAction): SkillState | undefined {
-  if (action === "mark_stale") {
-    return "stale";
-  }
-  if (action === "archive") {
-    return "archived";
-  }
-  if (action === "reactivate") {
-    return "project";
-  }
-  return undefined;
-}
-
-function curatorActionReason(input: {
-  action: CuratorLifecycleAction;
-  usageCount: number;
-  inactiveSince: string;
-  staleAfterDays: number;
-  archiveAfterDays: number;
-}): string {
-  if (input.action === "archive") {
-    return `No recent activity since ${input.inactiveSince}; exceeds archive threshold of ${input.archiveAfterDays} day(s).`;
-  }
-  if (input.action === "mark_stale") {
-    return `No recent activity since ${input.inactiveSince}; exceeds stale threshold of ${input.staleAfterDays} day(s).`;
-  }
-  if (input.action === "reactivate") {
-    return `Recent usage detected (${input.usageCount} run(s)); restore from stale to project state.`;
-  }
-  return "Needs human review before lifecycle transition.";
-}
-
 function surfaceOperationPrompt(operation: SurfaceOperation): string {
   if (operation.kind === "form.submit") {
     return `Handle submitted form ${operation.form_id}: ${JSON.stringify(operation.values)}`;
@@ -10739,101 +6894,8 @@ function surfaceOperationRef(operation: StructuredSurfaceOperation): ResourceRef
   };
 }
 
-function surfaceOperationResultKind(operation: StructuredSurfaceOperation): SurfaceOperationResultKind {
-  if (operation.kind === "form.submit") {
-    return "form_submission";
-  }
-  if (operation.kind === "table.patch") {
-    return "table_patch";
-  }
-  if (operation.kind === "chart.request") {
-    return "chart_request";
-  }
-  if (operation.kind === "custom_view.action") {
-    return "custom_view_action";
-  }
-  return "artifact";
-}
-
-function surfaceOperationRenderKind(operation: StructuredSurfaceOperation): SurfaceRenderKind {
-  if (operation.kind === "form.submit") {
-    return "form";
-  }
-  if (operation.kind === "table.patch") {
-    return "table";
-  }
-  if (operation.kind === "chart.request") {
-    return "chart";
-  }
-  if (operation.kind === "custom_view.action") {
-    return "custom_view";
-  }
-  return "artifact";
-}
-
-function surfaceDispatchPlan(operation: SurfaceOperation, input: {
-  dispatchTarget: SurfaceOperationDispatchPlan["dispatch_target"];
-  runtimeMethod: string;
-  operationName: string;
-  resultKind: SurfaceOperationResultKind;
-  renderKind: SurfaceRenderKind;
-  requiresSession: boolean;
-  writesWorkspace: boolean;
-  outputResourceKind: string;
-  proposedEffects: string[];
-}): SurfaceOperationDispatchPlan {
-  return {
-    operation_id: operation.id,
-    operation_kind: operation.kind,
-    dispatch_target: input.dispatchTarget,
-    runtime_method: input.runtimeMethod,
-    operation_name: input.operationName,
-    result_kind: input.resultKind,
-    render_kind: input.renderKind,
-    requires_session: input.requiresSession,
-    writes_workspace: input.writesWorkspace,
-    output_resource_kind: input.outputResourceKind,
-    proposed_effects: input.proposedEffects
-  };
-}
-
 function negotiatedRenderSpec(operation: SurfaceOperation, spec: SurfaceRenderSpec): SurfaceRenderSpec {
   return negotiateSurfaceRenderSpec(spec, operation.renderer_capabilities);
-}
-
-function surfaceOperationEffect(operation: StructuredSurfaceOperation): string {
-  if (operation.kind === "form.submit") {
-    return `Persist submitted form ${operation.form_id} as a local structured artifact.`;
-  }
-  if (operation.kind === "table.patch") {
-    return `Persist table patch ${operation.table_id} as a local table artifact.`;
-  }
-  if (operation.kind === "chart.request") {
-    return `Persist chart request ${operation.chart_id ?? operation.title} as a local chart artifact.`;
-  }
-  if (operation.kind === "custom_view.action") {
-    return `Persist custom view action ${operation.view_id}/${operation.action_id} as a local structured artifact.`;
-  }
-  return `Persist artifact ${operation.action} request as a local artifact.`;
-}
-
-function surfaceOperationArtifactKind(operation: StructuredSurfaceOperation): ArtifactKind {
-  if (operation.kind === "table.patch") {
-    return "table";
-  }
-  if (operation.kind === "chart.request") {
-    return "chart";
-  }
-  if (operation.kind === "artifact.request" && operation.action === "export") {
-    return "generated_report";
-  }
-  if (operation.kind === "artifact.request" && operation.action === "preview") {
-    return "note";
-  }
-  if (operation.kind === "artifact.request") {
-    return "document";
-  }
-  return "structured_draft";
 }
 
 function surfaceOperationArtifactTitle(operation: StructuredSurfaceOperation, sourceArtifact?: ArtifactRecord): string {
@@ -12783,9 +8845,9 @@ function genericCollectionActions(schema: CollectionSchema, viewId: string): Gen
         ?? collectionActionString(action, "title")
         ?? id,
       operation_kind: "collection.action.run",
-      action_kind: actionKind,
-      description: collectionActionString(action, "description"),
-      scope: collectionActionScope(action, actionKind)
+      ...(actionKind ? { action_kind: actionKind } : {}),
+      ...(collectionActionString(action, "description") ? { description: collectionActionString(action, "description") } : {}),
+      ...(collectionActionScope(action, actionKind) ? { scope: collectionActionScope(action, actionKind) } : {})
     });
     existingIds.add(id);
   }
@@ -13098,7 +9160,7 @@ function collectionRecordRenderSpec(record: CollectionRecordWithFilePath, title 
   });
 }
 
-function resourceRenderSpec(command: DomainCommandEntry, result: unknown): SurfaceRenderSpec | undefined {
+function resourceRenderSpec(command: DomainDispatchEntry, result: unknown): SurfaceRenderSpec | undefined {
   const resultRecord = unknownRecord(result);
   const generatedSurface = unknownRecord(resultRecord.definition);
   if (typeof generatedSurface.id === "string" && typeof generatedSurface.preview_url === "string" && typeof generatedSurface.current_revision_id === "string") {
@@ -13260,10 +9322,19 @@ function resourceRenderSpec(command: DomainCommandEntry, result: unknown): Surfa
   return operationStatusRenderSpec(command, resultRecord);
 }
 
-function assertDomainCommandRenderSpecs(command: DomainCommandEntry, specs: SurfaceRenderSpec[]): SurfaceRenderSpec[] {
+function assertDomainCommandRenderSpecs(command: DomainDispatchEntry, specs: SurfaceRenderSpec[]): SurfaceRenderSpec[] {
   for (const spec of specs) {
     if (!command.output_render_kinds.includes(spec.kind as DomainCommandOutputRenderKind)) {
       throw new Error(`Domain command ${command.id} returned undeclared render kind: ${spec.kind}`);
+    }
+  }
+  return specs;
+}
+
+function assertDomainQueryRenderSpecs(query: DomainQueryEntry, specs: SurfaceRenderSpec[]): SurfaceRenderSpec[] {
+  for (const spec of specs) {
+    if (!query.output_render_kinds.includes(spec.kind as DomainCommandOutputRenderKind)) {
+      throw new Error(`Domain query ${query.id} returned undeclared render kind: ${spec.kind}`);
     }
   }
   return specs;
@@ -13325,7 +9396,7 @@ function memoryRenderSpec(memory: MemoryFrontmatter & { file_path?: string }, ti
   });
 }
 
-function operationStatusRenderSpec(command: DomainCommandEntry, resultRecord: Record<string, unknown>): SurfaceRenderSpec | undefined {
+function operationStatusRenderSpec(command: DomainDispatchEntry, resultRecord: Record<string, unknown>): SurfaceRenderSpec | undefined {
   const operation = unknownRecord(resultRecord.operation);
   if (!isOperationRenderResource(operation)) {
     return undefined;
@@ -13459,7 +9530,7 @@ function isOperationRenderResource(value: Record<string, unknown>): value is Pic
   return typeof value.id === "string" && typeof value.operation === "string" && typeof value.status === "string";
 }
 
-function operationAuditRuntimeResult(value: unknown): { operation: OperationRecord; auditRecord: AuditRecord; resourceRefs: ResourceRef[] } | undefined {
+function operationAuditRuntimeResult(value: unknown): { operation: OperationRecord; auditRecord?: AuditRecord; resourceRefs: ResourceRef[] } | undefined {
   const record = unknownRecord(value);
   if (record.result && record.result !== value) {
     const nested = operationAuditRuntimeResult(record.result);
@@ -13473,8 +9544,6 @@ function operationAuditRuntimeResult(value: unknown): { operation: OperationReco
     typeof operation.id !== "string"
     || typeof operation.operation !== "string"
     || typeof operation.status !== "string"
-    || typeof auditRecord.id !== "string"
-    || typeof auditRecord.outputs_summary !== "string"
   ) {
     return undefined;
   }
@@ -13484,7 +9553,7 @@ function operationAuditRuntimeResult(value: unknown): { operation: OperationReco
   const resultRef = isResourceRef(operation.result_ref) ? operation.result_ref : undefined;
   return {
     operation: operation as unknown as OperationRecord,
-    auditRecord: auditRecord as unknown as AuditRecord,
+    ...(typeof auditRecord.id === "string" && typeof auditRecord.outputs_summary === "string" ? { auditRecord: auditRecord as unknown as AuditRecord } : {}),
     resourceRefs: resultRef ? [resultRef, ...resourceRefs] : resourceRefs
   };
 }
@@ -13514,11 +9583,26 @@ function isMemoryFrontmatterResource(value: unknown): value is MemoryFrontmatter
     && typeof record.state === "string";
 }
 
+function isResourceDeletionResult(value: { rollbackPoint?: RollbackPoint }): boolean {
+  const rollback = value.rollbackPoint;
+  if (!rollback) return false;
+  return Object.keys(rollback.before_snapshot).length > 0
+    && Object.keys(rollback.after_snapshot).length === 0;
+}
+
+function runtimeToolCallResult(value: unknown): RuntimeToolCallResult | undefined {
+  const record = unknownRecord(value);
+  const operation = unknownRecord(record.operation);
+  const toolRun = unknownRecord(record.toolRun);
+  if (typeof operation.id !== "string" || typeof toolRun.id !== "string" || !Array.isArray(record.resourceRefs)) return undefined;
+  return value as RuntimeToolCallResult;
+}
+
 function runtimeToolWorkspaceChange(
   run: BackendRunRecord,
   operation: OperationRecord,
   resourceRef: ResourceRef,
-  commandId: "artifact.create" | "memory.topic.create",
+  commandId: ProviderCapturedWriteCommandId,
   resource: unknown
 ): WorkspaceChangeRecord {
   return {
@@ -13526,8 +9610,8 @@ function runtimeToolWorkspaceChange(
     run_id: run.id,
     session_id: run.session_id,
     resource_ref: resourceRef,
-    change_type: commandId === "artifact.create" ? "artifact_created" : "memory_suggested",
-    summary: commandId === "artifact.create"
+    change_type: isArtifactCommand(commandId) ? "artifact_created" : "memory_suggested",
+    summary: isArtifactCommand(commandId)
       ? `Created artifact ${isArtifactRecordResource(resource) ? resource.title : resourceRef.label ?? resourceRef.id}.`
       : `Suggested memory ${isMemoryFrontmatterResource(resource) ? resource.topic : resourceRef.label ?? resourceRef.id}.`,
     legacy_operation_id: operation.id,
@@ -13536,12 +9620,12 @@ function runtimeToolWorkspaceChange(
 }
 
 function runtimeToolWorkspaceEvents(
-  commandId: "artifact.create" | "memory.topic.create",
+  commandId: ProviderCapturedWriteCommandId,
   resource: unknown,
   resourceRefs: ResourceRef[],
   toolCallId?: string
 ): BackendOutputEvent[] {
-  if (commandId === "artifact.create") {
+  if (isArtifactCommand(commandId)) {
     const artifact = isArtifactRecordResource(resource) ? resource : undefined;
     return [
       {
@@ -13594,80 +9678,6 @@ function optionalStringPayload(value: JsonValue | undefined): string | undefined
 
 function recordPayload(value: JsonValue | undefined): Record<string, JsonValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
-}
-
-function artifactEditorSourcePayload(
-  value: JsonValue | undefined,
-  inputSource: DomainCommandInputSource
-): "chat" | "surface" | "provider" | "image_provider" | "restore" | "system" {
-  if (value === "chat" || value === "surface" || value === "provider" || value === "image_provider" || value === "restore" || value === "system") {
-    return value;
-  }
-  if (inputSource === "surface_operation" || inputSource === "generated_surface") return "surface";
-  if (inputSource === "provider_tool_call") return "provider";
-  return "system";
-}
-
-function applyGraphDocumentPatch(current: GraphDocument, payload: Record<string, JsonValue>): GraphDocument {
-  if (payload.document && typeof payload.document === "object" && !Array.isArray(payload.document)) {
-    return GraphDocumentSchema.parse(payload.document);
-  }
-  const nodes = new Map(current.nodes.map((node) => [node.id, node]));
-  const edges = new Map(current.edges.map((edge) => [edge.id, edge]));
-  for (const id of domainStringArrayPayload(payload.delete_node_ids) ?? []) nodes.delete(id);
-  for (const id of domainStringArrayPayload(payload.delete_edge_ids) ?? []) edges.delete(id);
-  for (const value of Array.isArray(payload.nodes) ? payload.nodes : []) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RuntimeRequestError("conflict", "graph_node_invalid");
-    const id = typeof value.id === "string" ? value.id : "";
-    const previous = nodes.get(id);
-    nodes.set(id, GraphNodeSchema.parse({ ...previous, ...value }));
-  }
-  for (const value of Array.isArray(payload.edges) ? payload.edges : []) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RuntimeRequestError("conflict", "graph_edge_invalid");
-    const id = typeof value.id === "string" ? value.id : "";
-    const previous = edges.get(id);
-    edges.set(id, GraphEdgeSchema.parse({ ...previous, ...value }));
-  }
-  return GraphDocumentSchema.parse({ version: "1", nodes: [...nodes.values()], edges: [...edges.values()] });
-}
-
-function imageProviderResultPayload(payload: Record<string, JsonValue>): {
-  bytes: Uint8Array;
-  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
-  extension: "png" | "jpg" | "webp" | "svg";
-  provider: string;
-  prompt: string;
-  sourceRunId: string;
-  width: number;
-  height: number;
-  provenance: Record<string, JsonValue>;
-} {
-  const provider = stringPayload(payload.provider);
-  const prompt = stringPayload(payload.prompt);
-  const sourceRunId = stringPayload(payload.source_run_id);
-  const encoded = stringPayload(payload.data_base64);
-  const mimeType = stringPayload(payload.mime_type);
-  const width = typeof payload.width === "number" ? payload.width : 0;
-  const height = typeof payload.height === "number" ? payload.height : 0;
-  if (!provider || !prompt || !sourceRunId || !encoded || !Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
-    throw new RuntimeRequestError("conflict", "image_provider_result_incomplete");
-  }
-  const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/svg+xml": "svg" } as const;
-  if (!(mimeType in extensions)) throw new RuntimeRequestError("conflict", "image_mime_type_unsupported");
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 !== 0) throw new RuntimeRequestError("conflict", "image_data_invalid");
-  const bytes = Buffer.from(encoded, "base64");
-  if (bytes.byteLength === 0) throw new RuntimeRequestError("conflict", "image_data_invalid");
-  return {
-    bytes,
-    mimeType: mimeType as keyof typeof extensions,
-    extension: extensions[mimeType as keyof typeof extensions],
-    provider,
-    prompt,
-    sourceRunId,
-    width,
-    height,
-    provenance: recordPayload(payload.provenance)
-  };
 }
 
 function browserInteractionActionPayload(value: JsonValue | undefined): "navigate" | "click" | "input" | undefined {
@@ -13754,7 +9764,7 @@ function resourceVersionConflictPayload(error: CollectionRecordVersionConflictEr
     actual_version: error.latest.version,
     latest_resource: error.latest,
     retry: {
-      command_id: "collection.patch.apply",
+      command_id: collectionPatchCommandId(),
       expected_version: error.latest.version
     }
   };
@@ -13769,32 +9779,6 @@ function resourceRefsPayload(value: JsonValue | undefined): ResourceRef[] {
     return [];
   }
   return value.map(resourceRefFromJson).filter((ref): ref is ResourceRef => Boolean(ref));
-}
-
-function optimizationExamplesFromPayload(value: JsonValue | undefined, source: "golden" | "synthetic"): OptimizationExampleInput[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
-    const record = entry as Record<string, JsonValue>;
-    const prompt = stringPayload(record.prompt) || stringPayload(record.input);
-    const expectedBehavior = stringPayload(record.expected_behavior) || stringPayload(record.expected) || stringPayload(record.output);
-    const feedback = stringPayload(record.feedback) || "User-provided evaluation example.";
-    if (!prompt || !expectedBehavior) return [];
-    return [{
-      id: stringPayload(record.id) || undefined,
-      prompt,
-      expected_behavior: expectedBehavior,
-      feedback,
-      source,
-      ...(stringPayload(record.skill_body_read_run_id) ? { skill_body_read_run_id: stringPayload(record.skill_body_read_run_id) } : {}),
-      trace_refs: resourceRefsPayload(record.trace_refs),
-      metadata: recordPayload(record.metadata)
-    } satisfies OptimizationExampleInput];
-  });
-}
-
-function clampOptimizationScore(value: number | undefined): number {
-  return Math.max(0, Math.min(100, typeof value === "number" && Number.isFinite(value) ? value : 0));
 }
 
 function wikiSourceRefsPayload(value: JsonValue | undefined): WikiFrontmatter["source_refs"] | undefined {
@@ -13817,10 +9801,6 @@ function skillProvenancePayload(value: JsonValue | undefined): SkillFrontmatter[
 
 function isCuratorLifecycleApplyAction(value: string): value is Exclude<CuratorLifecycleAction, "review"> {
   return value === "mark_stale" || value === "archive" || value === "reactivate";
-}
-
-function externalSendChannelPayload(value: JsonValue | undefined): ExternalSendChannel {
-  return typeof value === "string" && externalSendChannels.includes(value as ExternalSendChannel) ? value as ExternalSendChannel : "webhook";
 }
 
 function automationJobKindPayload(value: JsonValue | undefined): AutomationJobRecord["kind"] {
@@ -13855,7 +9835,7 @@ function runtimeToolArguments(payload: Record<string, JsonValue>, actionId: stri
     return explicitArguments;
   }
   const input = recordPayload(payload.input);
-  if (actionId === "mcp.call") {
+  if (isMcpCallCommand(actionId)) {
     const nestedInput = recordPayload(input.input);
     return {
       server_name: stringPayload(payload.server_name) || stringPayload(input.server_name),
@@ -13867,7 +9847,22 @@ function runtimeToolArguments(payload: Record<string, JsonValue>, actionId: stri
 }
 
 function jsonRecord(value: Record<string, unknown>): Record<string, JsonValue> {
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, jsonSafe(entry, key)]));
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined).map(([key, entry]) => [key, jsonSafe(entry, key)]));
+}
+
+function jsonDefinedRecord(value: Record<string, unknown>): Record<string, JsonValue> {
+  return Object.fromEntries(Object.entries(value)
+    .filter(([, entry]) => entry !== undefined)
+    .map(([key, entry]) => [key, jsonDefined(entry)]));
+}
+
+function domainResultOperations(result: unknown): Array<{ id: string }> {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return [];
+  const candidates: unknown[] = [];
+  if ("operation" in result) candidates.push(result.operation);
+  if ("operations" in result && Array.isArray(result.operations)) candidates.push(...result.operations);
+  return candidates.flatMap((candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate)
+    && "id" in candidate && typeof candidate.id === "string" ? [{ id: candidate.id }] : []);
 }
 
 function jsonSafe(value: unknown, key?: string): JsonValue {
@@ -13881,7 +9876,19 @@ function jsonSafe(value: unknown, key?: string): JsonValue {
     return value.map((entry) => jsonSafe(entry));
   }
   if (typeof value === "object" && value) {
-    return Object.fromEntries(Object.entries(value).map(([entryKey, entry]) => [entryKey, jsonSafe(entry, entryKey)]));
+    return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined).map(([entryKey, entry]) => [entryKey, jsonSafe(entry, entryKey)]));
+  }
+  return null;
+}
+
+function jsonDefined(value: unknown): JsonValue {
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(jsonDefined);
+  if (typeof value === "object" && value) {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .map(([key, entry]) => [key, jsonDefined(entry)]));
   }
   return null;
 }
@@ -13946,142 +9953,11 @@ function createDefaultRuntimeGatewayPairingPolicy(channel: GatewayPairingPolicyR
   };
 }
 
-function gatewayInboundPolicyMetadata(
-  input: {
-    channel: GatewayPairingRecord["channel"];
-    source_label?: string;
-    account_id?: string;
-    thread_id?: string;
-    route?: string;
-    metadata?: Record<string, JsonValue>;
-  },
-  sourceIdentity: string,
-  targetSessionKey: string,
-  policy: GatewayPairingPolicyRecord,
-  evaluation: ReturnType<typeof evaluateGatewayPairingPolicy>,
-  routingPolicy: GatewayRoutingPolicyRecord,
-  routingResolution: ReturnType<typeof resolveGatewaySessionRouting>
-): Record<string, JsonValue> {
-  const route = normalizeGatewayRoute(input.route);
-  return {
-    ...(input.metadata ?? {}),
-    gateway_pairing_policy: {
-      id: policy.id,
-      channel: policy.channel,
-      status: policy.status,
-      trust_mode: policy.trust_mode,
-      allowlist_snapshot: evaluation.allowlist_snapshot,
-      reason: evaluation.reason ?? null,
-      pairing_ttl_ms: evaluation.pairing_ttl_ms,
-      duplicate_window_ms: evaluation.duplicate_window_ms,
-      rate_limit_window_ms: evaluation.rate_limit_window_ms,
-      rate_limit_max: evaluation.rate_limit_max
-    },
-    gateway_routing_policy: {
-      id: routingPolicy.id,
-      channel: routingPolicy.channel,
-      status: routingPolicy.status,
-      session_key_strategy: routingPolicy.session_key_strategy,
-      default_account_id: routingPolicy.default_account_id ?? null,
-      default_thread_id: routingPolicy.default_thread_id ?? null,
-      default_route: routingPolicy.default_route,
-      reason: routingResolution.reason ?? null
-    },
-    gateway_source_scope: {
-      channel: input.channel,
-      source_identity: sourceIdentity,
-      source_label: input.source_label ?? sourceIdentity,
-      account_id: routingResolution.account_id,
-      thread_id: routingResolution.thread_id,
-      requested_route: route,
-      route: routingResolution.route,
-      session_key: targetSessionKey
-    }
-  };
-}
-
-function gatewayPairingPolicyError(reason: ReturnType<typeof evaluateGatewayPairingPolicy>["reason"]): string {
-  if (reason === "policy_disabled") {
-    return "gateway_pairing_policy_disabled";
-  }
-  if (reason === "policy_blocked") {
-    return "gateway_pairing_policy_blocked";
-  }
-  return "gateway_source_not_allowed";
-}
-
-function createPendingPairing(input: {
-  channel: GatewayPairingRecord["channel"];
-  source_identity: string;
-  source_label?: string;
-  account_id?: string;
-  thread_id?: string;
-  route?: string;
-  metadata?: Record<string, JsonValue>;
-  pairing_ttl_ms?: number;
-}): GatewayPairingRecord {
-  const now = nowIso();
-  const route = normalizeGatewayRoute(input.route);
-  const sessionKey = sessionKeyForExternalSource({
-    channel: input.channel,
-    source_identity: input.source_identity,
-    source_label: input.source_label,
-    account_id: input.account_id,
-    thread_id: input.thread_id,
-    route,
-    metadata: input.metadata
-  });
-  return {
-    id: createId("pairing"),
-    channel: input.channel,
-    source_identity: input.source_identity,
-    source_label: input.source_label ?? input.source_identity,
-    status: "pending",
-    pairing_code: Math.random().toString(36).slice(2, 8).toUpperCase(),
-    session_key: sessionKey,
-    metadata: gatewayPairingRoutingMetadata(input, route),
-    requested_at: now,
-    expires_at: new Date(Date.parse(now) + (input.pairing_ttl_ms ?? 5 * 60_000)).toISOString(),
-    updated_at: now
-  };
-}
-
-function normalizeGatewaySourceIdentity(value: string): string {
-  const normalized = value.trim();
-  if (!normalized || normalized.length > 200 || /[\u0000-\u001F\u007F]/.test(normalized)) {
-    throw new RuntimeRequestError("conflict", "gateway_source_identity_invalid");
-  }
-  return normalized;
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function normalizeGatewayRoute(value: string | undefined): string {
-  const normalized = value?.trim() || "main";
-  if (!normalized || normalized.length > 80 || /[\u0000-\u001F\u007F]/.test(normalized)) {
-    return "main";
-  }
-  return normalized;
-}
-
-function gatewayPairingRoutingMetadata(input: {
-  source_identity: string;
-  account_id?: string;
-  thread_id?: string;
-  route?: string;
-  metadata?: Record<string, JsonValue>;
-}, route: string): Record<string, JsonValue> {
-  return {
-    ...(input.metadata ?? {}),
-    routing: {
-      account_id: input.account_id?.trim() || input.source_identity,
-      thread_id: input.thread_id?.trim() || route,
-      route
-    }
-  };
-}
 
 function gatewaySourceAllowlist(): string[] {
   return (process.env.SAMURAI_GATEWAY_SOURCE_ALLOWLIST ?? "")
@@ -14387,9 +10263,6 @@ function gatewayBoundaryActionId(providerToolName: string): string {
   }
   if (providerToolName === "request_external_send") {
     return "external.send.prepare";
-  }
-  if (providerToolName === "request_delete") {
-    return "workspace.delete";
   }
   return providerToolName || "unknown_tool";
 }
@@ -14881,7 +10754,7 @@ function normalizeGeneratedSurfaceCommandPayload(
       };
   return {
     ...args,
-    ...(commandId === "generated_surface.revise"
+    ...(isGeneratedSurfaceRevision(commandId)
       ? {
           surface_id: typeof args.surface_id === "string"
             ? args.surface_id
@@ -15014,7 +10887,7 @@ export const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
   provider_tool_name: "mcp__samurai__skill_view",
   title: "View Samurai Skill",
   description: "Read the body of a selected Skill or an allowed support file only when needed for the current run.",
-  input_schema: requireDomainCommandEntry("skill.view").input_schema
+  input_schema: requireDomainQueryEntry("skill.view").input_schema
 }, {
   name: "samurai.skill.search",
   provider_tool_name: "mcp__samurai__skill_search",
@@ -15046,7 +10919,7 @@ export const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
   provider_tool_name: "mcp__samurai__collection_manage",
   title: "Manage Samurai Collection",
   description: "Read and write Collection data through the host. Prefer this over raw file I/O for Collection records and schema edits; raw file I/O remains an escape hatch. getItems returns computed derived/embed values. putItems validates rows and returns written/rejected. patchSchema validates before saving.",
-  input_schema: requireDomainCommandEntry("collection.manage").input_schema
+  input_schema: collectionManageCompatibilityEntry.input_schema
 }, {
   name: "samurai.collection.schema.save",
   provider_tool_name: "mcp__samurai__collection_schema_save",
@@ -15064,7 +10937,7 @@ export const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
   provider_tool_name: "mcp__samurai__collection_view_present",
   title: "Present Samurai Collection",
   description: "Present an existing Collection as an interactive Workspace card without creating or overwriting its schema.",
-  input_schema: requireDomainCommandEntry("collection.view.present").input_schema
+  input_schema: requireDomainQueryEntry("collection.view.present").input_schema
 }];
 
 const samuraiToolBridgeTools = new Set(samuraiToolBridgeDescriptors.map((tool) => tool.name));
@@ -15691,29 +11564,6 @@ function rejectPairing(pairing: GatewayPairingRecord): GatewayPairingRecord {
   };
 }
 
-function createGatewayInboundMessage(input: {
-  channel: GatewayInboundMessageRecord["channel"];
-  source_identity: string;
-  body: string;
-  pairing?: GatewayPairingRecord;
-  metadata?: Record<string, JsonValue>;
-}): GatewayInboundMessageRecord {
-  const now = nowIso();
-  const trusted = input.pairing?.status === "approved";
-  return {
-    id: createId("gateway_inbound"),
-    channel: input.channel,
-    source_identity: input.source_identity,
-    body: input.body,
-    status: trusted ? "routed" : "blocked",
-    trusted,
-    session_key: trusted ? input.pairing?.session_key : undefined,
-    pairing_id: input.pairing?.id,
-    metadata: input.metadata ?? {},
-    created_at: now,
-    updated_at: now
-  };
-}
 
 function fileRollbackSnapshot(snapshot: RollbackPoint["before_snapshot"]): { path: string; content: string | null } | undefined {
   const snapshotPath = snapshot.path;
@@ -16697,97 +12547,6 @@ function collectionActionExecutionRef(collectionId: string, actionId: string, op
   };
 }
 
-function collectionTriggerDeliveryTarget(deliveryTarget: Record<string, JsonValue>): {
-  collectionId: string;
-  recordId: string;
-  actionId: string;
-  triggerId: string;
-  event: string;
-  actionKind: string;
-} | undefined {
-  if (collectionActionString(deliveryTarget, "channel") !== "collection_trigger") {
-    return undefined;
-  }
-  const collectionId = collectionActionString(deliveryTarget, "collection_id");
-  const recordId = collectionActionString(deliveryTarget, "record_id");
-  const actionId = collectionActionString(deliveryTarget, "action_id");
-  if (!collectionId || !recordId || !actionId) {
-    return undefined;
-  }
-  return {
-    collectionId,
-    recordId,
-    actionId,
-    triggerId: collectionActionString(deliveryTarget, "trigger_id") ?? actionId,
-    event: collectionActionString(deliveryTarget, "event") ?? "record.created",
-    actionKind: collectionActionString(deliveryTarget, "action_kind") ?? "custom_instruction"
-  };
-}
-
-function resourceTranslationDeliveryTarget(deliveryTarget: Record<string, JsonValue>): {
-  source_ref: ResourceRef;
-  source_locale?: SupportedLocale;
-  target_locale: SupportedLocale;
-  original_hash?: string;
-} | undefined {
-  if (collectionActionString(deliveryTarget, "channel") !== "resource_translation") {
-    return undefined;
-  }
-  const sourceRef = resourceRefFromJson(deliveryTarget.source_ref);
-  const targetLocale = localeFromJson(deliveryTarget.target_locale);
-  if (!sourceRef || !targetLocale) {
-    return undefined;
-  }
-  return {
-    source_ref: sourceRef,
-    source_locale: localeFromJson(deliveryTarget.source_locale),
-    target_locale: targetLocale,
-    original_hash: collectionActionString(deliveryTarget, "original_hash")
-  };
-}
-
-function translatableResource(ref: ResourceRef, sourceLocale: SupportedLocale, content: string): {
-  ref: ResourceRef;
-  source_locale: SupportedLocale;
-  content: string;
-  original_hash: string;
-} {
-  return {
-    ref,
-    source_locale: sourceLocale,
-    content,
-    original_hash: stableHash(content)
-  };
-}
-
-function resourceTranslationRef(translation: Pick<ResourceTranslationRecord, "id" | "source_ref" | "target_locale">): ResourceRef {
-  return {
-    kind: "resource_translation",
-    id: translation.id,
-    uri: `resource-translations/${translation.id}`,
-    label: `${translation.source_ref.kind}/${translation.source_ref.id} -> ${translation.target_locale}`
-  };
-}
-
-function resourceRefFromJson(value: JsonValue | undefined): ResourceRef | undefined {
-  if (!value || Array.isArray(value) || typeof value !== "object") {
-    return undefined;
-  }
-  const kind = typeof value.kind === "string" ? value.kind : undefined;
-  const id = typeof value.id === "string" ? value.id : undefined;
-  const uri = typeof value.uri === "string" ? value.uri : undefined;
-  if (!kind || !id || !uri) {
-    return undefined;
-  }
-  return {
-    kind,
-    id,
-    uri,
-    ...(typeof value.version === "string" ? { version: value.version } : {}),
-    ...(typeof value.label === "string" ? { label: value.label } : {})
-  };
-}
-
 function collectionRecordTargetFromRef(ref: ResourceRef): { collectionId: string; recordId: string } | undefined {
   const uriMatch = ref.uri.match(/^collections\/([^/]+)\/records\/([^/]+)\.json$/);
   if (uriMatch) {
@@ -16805,6 +12564,17 @@ function collectionRecordTargetFromRef(ref: ResourceRef): { collectionId: string
     }
   }
   return undefined;
+}
+
+function resourceRefFromJson(value: JsonValue | undefined): ResourceRef | undefined {
+  if (!value || Array.isArray(value) || typeof value !== "object") return undefined;
+  const kind = typeof value.kind === "string" ? value.kind : undefined;
+  const id = typeof value.id === "string" ? value.id : undefined;
+  const uri = typeof value.uri === "string" ? value.uri : undefined;
+  if (!kind || !id || !uri) return undefined;
+  return { kind, id, uri,
+    ...(typeof value.version === "string" ? { version: value.version } : {}),
+    ...(typeof value.label === "string" ? { label: value.label } : {}) };
 }
 
 function localeFromJson(value: JsonValue | undefined): SupportedLocale | undefined {
@@ -16826,24 +12596,6 @@ function isManagedCollectionWorkspacePath(relativePath: string): boolean {
   const normalized = relativePath.replaceAll("\\", "/").replace(/^\/+/, "");
   return /^collections\/[^/]+\/schema\.json$/.test(normalized)
     || /^collections\/[^/]+\/records\/[^/]+\.json$/.test(normalized);
-}
-
-function externalSendRef(send: ExternalSendRecord) {
-  return {
-    kind: "external_send",
-    id: send.id,
-    uri: `external-sends/${send.id}`,
-    label: send.title
-  };
-}
-
-function grantRef(grant: Pick<GrantRecord, "id" | "capability_id" | "operation" | "resource_scope">): ResourceRef {
-  return {
-    kind: "grant",
-    id: grant.id,
-    uri: `grants/${grant.id}`,
-    label: `${grant.capability_id}/${grant.operation}:${grant.resource_scope}`
-  };
 }
 
 function gatewayInboundRef(inbound: GatewayInboundMessageRecord) {
@@ -17064,23 +12816,6 @@ let smtpClientConnectionFactory: SmtpClientConnectionFactory = createNodeSmtpCli
 
 export function setExternalSendSmtpClientConnectionFactoryForTest(factory?: SmtpClientConnectionFactory): void {
   smtpClientConnectionFactory = factory ?? createNodeSmtpClientConnection;
-}
-
-function externalSendStatusFromDispatchResult(result: ExternalSendDispatchAdapterResult): ExternalSendRecord["status"] {
-  if (result.dispatched) {
-    return "dispatched";
-  }
-  return result.dry_run ? "approved" : "failed";
-}
-
-function externalSendDispatchSummary(send: ExternalSendRecord, result: ExternalSendDispatchAdapterResult): string {
-  if (result.dispatched) {
-    return `Dispatched external send ${send.title}.`;
-  }
-  if (result.dry_run) {
-    return `Prepared external send ${send.title}; dispatch dry-run recorded.`;
-  }
-  return `External send ${send.title} dispatch failed.`;
 }
 
 async function dispatchExternalSendAdapter(send: ExternalSendRecord, dryRun: boolean): Promise<ExternalSendDispatchAdapterResult> {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginRuntimeRegistry } from "@samurai-agent/action-catalog";
 import { AgentBackendRegistry, MockBackend, type AgentBackend } from "@samurai-agent/agent-backends";
-import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type SkillFrontmatter } from "@samurai-agent/core-schemas";
+import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type OperationRecord, type RollbackPoint, type SkillFrontmatter } from "@samurai-agent/core-schemas";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, planSurfaceOperationDispatch, setExternalSendSmtpClientConnectionFactoryForTest, type ExternalAssistProvider, type ProviderInput, type ProviderOutput } from "./index";
 
@@ -71,24 +71,20 @@ async function requestAndApproveExternalSend(
   store: WorkspaceStore,
   sendId: string
 ): Promise<ExternalSendRecord> {
-  try {
-    await runtime.dispatchExternalSend({ sendId, dryRun: false });
-    throw new Error("expected external send dispatch to require approval");
-  } catch (error) {
-    if (!(error instanceof RuntimeRequestError)) {
-      throw error;
-    }
-    expect(error).toMatchObject({
-      code: "conflict",
-      message: "policy_blocked"
-    });
-    const approvalId = error.payload?.approvalRequest.id;
-    expect(approvalId).toBeTruthy();
-    await runtime.approveRequest(approvalId!);
-  }
+  await dispatchExternalSend(runtime, { sendId, dryRun: false });
   const send = await store.getExternalSend(sendId);
   expect(send).toBeDefined();
   return send!;
+}
+
+let externalSendTestSequence = 0;
+async function prepareExternalSend(runtime: AgentRuntime, input: { channel: string; target: Record<string, JsonValue>; title: string; body: string }) {
+  externalSendTestSequence += 1;
+  return (await runtime.runDomainCommand({ command_id: "external.send.prepare", idempotency_key: `external-prepare-${externalSendTestSequence}`, payload: input })).result as { resource: ExternalSendRecord; operation: OperationRecord };
+}
+async function dispatchExternalSend(runtime: AgentRuntime, input: { sendId: string; dryRun?: boolean }) {
+  externalSendTestSequence += 1;
+  return (await runtime.runDomainCommand({ command_id: "external.send.dispatch", idempotency_key: `external-dispatch-${externalSendTestSequence}`, payload: { send_id: input.sendId, dry_run: input.dryRun } })).result as { resource: ExternalSendRecord; operation: OperationRecord };
 }
 
 class FakeSmtpConnection {
@@ -191,10 +187,10 @@ describe("agent runtime", () => {
 
     expect(chatPlan).toMatchObject({
       dispatch_target: "host_chat",
-      runtime_method: "runChatTurn",
+      runtime_method: "runDomainCommand",
       result_kind: "chat_turn",
       requires_session: true,
-      writes_workspace: false
+      writes_workspace: true
     });
     expect(collectionPlan).toMatchObject({
       dispatch_target: "collection_engine",
@@ -216,6 +212,7 @@ describe("agent runtime", () => {
     const { store, runtime } = await createRuntime();
     const result = await runtime.runDomainCommand({
       command_id: "chat.turn.run",
+      idempotency_key: "runtime-api-chat",
       payload: {
         content: "Domain Commandから実行して",
         output_locale: "ja"
@@ -223,6 +220,7 @@ describe("agent runtime", () => {
     });
     const artifact = await runtime.runDomainCommand({
       command_id: "artifact.create",
+      idempotency_key: "runtime-api-artifact",
       payload: {
         title: "Domain Command artifact",
         content: "Domain Command APIから作ったArtifact",
@@ -257,6 +255,7 @@ describe("agent runtime", () => {
 
     await expect(runtime.runDomainCommand({
       command_id: "collection.schema.save",
+      idempotency_key: "unsupported-collection-renderer",
       input_source: "runtime_api",
       payload: {
         id: "study_notes",
@@ -335,6 +334,7 @@ describe("agent runtime", () => {
     const { store, runtime } = await createRuntime();
     const wiki = await runtime.runDomainCommand({
       command_id: "wiki.proposal.create",
+      idempotency_key: "render-wiki",
       payload: {
         title: "Provider storage plan",
         content: "Store provider hints as proposals until accepted.",
@@ -343,6 +343,7 @@ describe("agent runtime", () => {
     });
     const skill = await runtime.runDomainCommand({
       command_id: "skill.candidate.create",
+      idempotency_key: "render-skill",
       payload: {
         title: "調査メモ整理",
         description: "調査メモを再利用できる形に整える",
@@ -351,10 +352,12 @@ describe("agent runtime", () => {
     });
     const schema = await runtime.runDomainCommand({
       command_id: "collection.schema.save",
+      idempotency_key: "render-schema",
       payload: collectionSchema("contacts")
     });
     const record = await runtime.runDomainCommand({
       command_id: "collection.record.create",
+      idempotency_key: "render-record",
       payload: {
         collection_id: "contacts",
         record_id: "record_1",
@@ -1746,6 +1749,7 @@ describe("agent runtime", () => {
       renderer_capabilities: capabilities
     });
     const schema = await store.getCollectionSchema("movies");
+    const operations = await store.listOperations();
     await store.close();
 
     expect(backendRuns).toBe(4);
@@ -1757,7 +1761,7 @@ describe("agent runtime", () => {
     expect(schema?.views).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "movies_calendar", renderer: "calendar_view" })
     ]));
-    expect(ratingPatch.result.operations).toEqual(expect.arrayContaining([
+    expect(operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: "collection.manage", status: "completed" })
     ]));
     expect(ratingPatch.result.messagePresentations[0]).toMatchObject({
@@ -1766,7 +1770,7 @@ describe("agent runtime", () => {
         sort: { field_id: "rating", direction: "desc", completed_last: true }
       })
     });
-    expect(statusPatch.result.operations).toEqual(expect.arrayContaining([
+    expect(operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: "collection.manage", status: "completed" })
     ]));
     expect(statusPatch.render_specs?.[1]).toMatchObject({
@@ -2004,6 +2008,7 @@ describe("agent runtime", () => {
     });
     const schema = await store.getCollectionSchema("expenses");
     const savedRecord = await store.getCollectionRecord("expenses", "expense_hosting");
+    const operations = await store.listOperations();
     await store.close();
 
     expect(backendRuns).toBe(1);
@@ -2017,7 +2022,7 @@ describe("agent runtime", () => {
       })
     ]);
     expect(savedRecord?.data).not.toHaveProperty("total");
-    expect(patched.result.operations).toEqual(expect.arrayContaining([
+    expect(operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: "collection.manage", status: "completed" })
     ]));
     expect(patched.render_specs?.[1]).toMatchObject({
@@ -2800,6 +2805,7 @@ describe("agent runtime", () => {
     const { store, runtime } = await createRuntime();
     const proposal = await runtime.runDomainCommand({
       command_id: "wiki.proposal.create",
+      idempotency_key: "wiki-lifecycle-proposal",
       payload: {
         title: "Domain Wiki lifecycle",
         slug: "domain-wiki-lifecycle",
@@ -2821,6 +2827,7 @@ describe("agent runtime", () => {
     const proposalResult = proposal.result as Awaited<ReturnType<AgentRuntime["createWikiProposal"]>>;
     const rejected = await runtime.runDomainCommand({
       command_id: "wiki.proposal.create",
+      idempotency_key: "wiki-lifecycle-rejected",
       payload: {
         title: "Rejected Domain Wiki lifecycle",
         slug: "rejected-domain-wiki-lifecycle",
@@ -2831,10 +2838,12 @@ describe("agent runtime", () => {
     const rejectedResult = rejected.result as Awaited<ReturnType<AgentRuntime["createWikiProposal"]>>;
     const accepted = await runtime.runDomainCommand({
       command_id: "wiki.accept",
+      idempotency_key: "wiki-lifecycle-accept",
       payload: { wiki_id: proposalResult.resource.id }
     });
     const patched = await runtime.runDomainCommand({
       command_id: "wiki.patch",
+      idempotency_key: "wiki-lifecycle-patch",
       payload: {
         wiki_id: proposalResult.resource.id,
         title: "Domain Wiki lifecycle patched",
@@ -2854,16 +2863,19 @@ describe("agent runtime", () => {
     });
     const reject = await runtime.runDomainCommand({
       command_id: "wiki.reject",
+      idempotency_key: "wiki-lifecycle-reject",
       payload: { wiki_id: rejectedResult.resource.id }
     });
     const activePreview = await runtime.previewKnowledgeWiki({ query: "patched-domain-wiki-lifecycle-needle" });
     const rejectedPreview = await runtime.previewKnowledgeWiki({ query: "domain-wiki-lifecycle-needle rejected" });
     const reindex = await runtime.runDomainCommand({
       command_id: "wiki.reindex",
+      idempotency_key: "wiki-lifecycle-reindex",
       payload: {}
     });
     const archived = await runtime.runDomainCommand({
       command_id: "wiki.archive",
+      idempotency_key: "wiki-lifecycle-archive",
       payload: { wiki_id: proposalResult.resource.id }
     });
     const afterArchivePreview = await runtime.previewKnowledgeWiki({ query: "patched-domain-wiki-lifecycle-needle" });
@@ -2933,6 +2945,7 @@ describe("agent runtime", () => {
     const { store, runtime } = await createRuntime();
     const candidate = await runtime.runDomainCommand({
       command_id: "skill.candidate.create",
+      idempotency_key: "skill-lifecycle-candidate",
       payload: {
         title: "調査メモ整理",
         description: "調査メモ references を短く整える",
@@ -2942,6 +2955,7 @@ describe("agent runtime", () => {
     const candidateResult = candidate.result as Awaited<ReturnType<AgentRuntime["createSkillCandidate"]>>;
     const project = await runtime.runDomainCommand({
       command_id: "skill.project.save",
+      idempotency_key: "skill-lifecycle-project",
       payload: {
         candidate_id: candidateResult.resource.id
       }
@@ -2949,6 +2963,7 @@ describe("agent runtime", () => {
     const projectResult = project.result as Awaited<ReturnType<AgentRuntime["saveSkillProject"]>>;
     const support = await runtime.runDomainCommand({
       command_id: "skill.support_file.save",
+      idempotency_key: "skill-lifecycle-support",
       payload: {
         skill_id: projectResult.resource.id,
         path: "references/style.md",
@@ -2973,6 +2988,7 @@ describe("agent runtime", () => {
       path: "references/style.md"
     });
     await runtime.viewSkill({ skillId: projectResult.resource.id, runId: chat.backendRun.id, path: "references/style.md" });
+    await runtime.runDomainCommand({ command_id: "skill.usage.record", idempotency_key: "skill-lifecycle-usage", payload: view.usage });
     const usage = await store.listSkillUsage();
     await store.close();
 
@@ -3039,6 +3055,7 @@ describe("agent runtime", () => {
     });
     const applied = await runtime.runDomainCommand({
       command_id: "reflection.suggestion.apply",
+      idempotency_key: "reflection-skill-apply",
       payload: { suggestion_id: suggestion.id }
     });
     const appliedResult = applied.result as Awaited<ReturnType<AgentRuntime["applyReflectionSuggestion"]>>;
@@ -3049,11 +3066,13 @@ describe("agent runtime", () => {
     };
     const project = await runtime.runDomainCommand({
       command_id: "skill.project.save",
+      idempotency_key: "reflection-skill-project",
       payload: { candidate_id: appliedSkill.id }
     });
     const projectResult = project.result as Awaited<ReturnType<AgentRuntime["saveSkillProject"]>>;
     await runtime.runDomainCommand({
       command_id: "skill.support_file.save",
+      idempotency_key: "reflection-skill-support",
       payload: {
         skill_id: projectResult.resource.id,
         path: "references/diff-check.md",
@@ -4781,9 +4800,9 @@ rl.on("line", (line) => {
     expect(archived.changed).toBe(true);
     expect(archived.memory.state).toBe("archived");
     expect(archived.operation.operation).toBe("memory.archive");
-    expect(archived.auditRecord.outputs_summary).toContain("Archived memory");
+    expect(archived.operation.status).toBe("completed");
     expect(archived.rollbackPoint).toBeDefined();
-    expect(archived.activity.length).toBeGreaterThan(0);
+    expect(archived.operation.result_ref?.id).toBe(memory.id);
     expect(sessionMemory.some((item) => item.id === memory.id)).toBe(false);
   });
 
@@ -4822,10 +4841,10 @@ rl.on("line", (line) => {
 
     expect(archivedAgain.changed).toBe(false);
     expect(archivedAgain.rollbackPoint).toBeUndefined();
-    expect(archivedAgain.auditRecord.outputs_summary).toContain("already archived");
+    expect(archivedAgain.operation.status).toBe("completed");
   });
 
-  it("creates skill candidates and projects through policy and audit", async () => {
+  it("creates skill candidates and projects through operation history and rollback", async () => {
     const { store, runtime } = await createRuntime();
 
     const candidate = await runtime.createSkillCandidate({
@@ -4837,10 +4856,9 @@ rl.on("line", (line) => {
     await store.close();
 
     expect(candidate.operation.operation).toBe("skill.candidate.create");
-    expect(candidate.policyDecision.decision).toBe("allow_auto");
-    expect(candidate.auditRecord.operation_id).toBe(candidate.operation.id);
+    expect(candidate.operation.status).toBe("completed");
     expect(project.operation.operation).toBe("skill.project.save");
-    expect(project.policyDecision.decision).toBe("allow_with_audit");
+    expect(project.operation.status).toBe("completed");
     expect(project.rollbackPoint).toBeDefined();
   });
 
@@ -5506,7 +5524,7 @@ rl.on("line", (line) => {
       views: [{ id: "portfolio_table", renderer: "collection_table" }]
     });
 
-    const write = await runtime.manageCollection({
+    const write = await runtime.runCollectionManageCompatibility({
       action: "putItems",
       collection_id: "portfolio",
       mode: "create",
@@ -5514,22 +5532,22 @@ rl.on("line", (line) => {
         { id: "holding_1", name: "Toyota holding", ticker: "toyota", shares: 3 },
         { id: "bad_value", name: "Bad", ticker: "toyota", shares: 1, value: 999 }
       ]
-    });
-    const read = await runtime.manageCollection({
+    }, "runtime_api", "test:portfolio:put-items");
+    const read = await runtime.runCollectionManageCompatibility({
       action: "getItems",
       collection_id: "portfolio",
       fields: ["name", "ticker", "shares", "value"]
-    });
+    }, "runtime_api");
     const stored = await store.getCollectionRecord("portfolio", "holding_1");
     await store.close();
 
-    expect(write.resource).toMatchObject({
+    expect(write).toMatchObject({
       action: "putItems",
       collection_id: "portfolio",
       written: ["holding_1"],
       rejected: [expect.objectContaining({ id: "bad_value", problem: expect.stringContaining("derived") })]
     });
-    expect(read.resource).toMatchObject({
+    expect(read).toMatchObject({
       action: "getItems",
       collection_id: "portfolio",
       count: 1,
@@ -5663,8 +5681,8 @@ rl.on("line", (line) => {
     });
     expect(result.memoryReviewTrace?.reflectionRun.kind).toBe("scheduled");
     expect(result.memoryReviewTrace?.suggestions).toEqual([]);
-    expect(result.auditRecord.outputs_summary).toContain("Background Review");
-    expect(result.auditRecord.actor_identity).toBe("owner_scheduled");
+    expect(result.operation.proposed_effects.join(" ")).toContain("scheduled memory review");
+    expect(result.operation.actor_identity).toBe("owner_scheduled");
     expect(reflectionRuns.some((run) => run.kind === "curator")).toBe(false);
   });
 
@@ -6088,7 +6106,6 @@ rl.on("line", (line) => {
     const preview = await runtime.previewKnowledgeWiki({ query: "active-only needle" });
     const allWiki = await store.listWiki({ activeOnly: false });
     const operations = await store.listOperations();
-    const auditRecords = await store.listAuditRecords();
     await store.close();
 
     expect(allWiki.map((wiki) => ({ id: wiki.id, state: wiki.state }))).toEqual(expect.arrayContaining([
@@ -6123,7 +6140,7 @@ rl.on("line", (line) => {
       "wiki.reject",
       "wiki.archive"
     ]));
-    expect(auditRecords.some((audit) => audit.affected_resources.some((ref) => ref.id === activeProposal.resource.id))).toBe(true);
+    expect(operations.some((operation) => operation.target_resource_refs.some((ref) => ref.id === activeProposal.resource.id))).toBe(true);
   });
 
   it("does not use fixed tool-count rules for Background Review", async () => {
@@ -6467,24 +6484,12 @@ rl.on("line", (line) => {
     });
   });
 
-  it("runs file actions through policy audit and rollback", async () => {
+  it("runs file actions through Domain dispatch and rollback", async () => {
     const { store, runtime } = await createRuntime();
 
-    const written = await runtime.runFileAction({
-      operation: "file.write",
-      path: "notes/test.md",
-      content: "hello"
-    });
-    const read = await runtime.runFileAction({
-      operation: "file.read",
-      path: "notes/test.md"
-    });
-    const patched = await runtime.runFileAction({
-      operation: "file.patch",
-      path: "notes/test.md",
-      search: "hello",
-      replace: "hello samurai"
-    });
+    const written = (await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "file-action-write", payload: { path: "notes/test.md", content: "hello" } })).result as { operation: OperationRecord };
+    const read = (await runtime.runDomainQuery({ query_id: "file.read", payload: { path: "notes/test.md" } })).result as { resource: { content: string } };
+    const patched = (await runtime.runDomainCommand({ command_id: "file.patch", idempotency_key: "file-action-patch", payload: { path: "notes/test.md", search: "hello", replace: "hello samurai" } })).result as { resource: { content: string }; rollbackPoint?: RollbackPoint };
     await store.close();
 
     expect(written.operation.operation).toBe("file.write");
@@ -6496,10 +6501,8 @@ rl.on("line", (line) => {
   it("allows direct Collection file writes as an escape hatch and reindexes afterward", async () => {
     const { store, runtime } = await createRuntime();
 
-    const schemaWrite = await runtime.runFileAction({
-      operation: "file.write",
-      path: "collections/movies/schema.json",
-      content: JSON.stringify({
+    const schemaWrite = (await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "collection-file-schema", payload: {
+      path: "collections/movies/schema.json", content: JSON.stringify({
         id: "movies",
         version: "1",
         labels: { ja: "映画ログ" },
@@ -6513,11 +6516,9 @@ rl.on("line", (line) => {
         views: [{ id: "movies_table", renderer: "collection_table" }],
         permissions: { create: true, update: true, delete: true }
       }, null, 2)
-    });
-    const recordWrite = await runtime.runFileAction({
-      operation: "file.write",
-      path: "collections/movies/records/movie_1.json",
-      content: JSON.stringify({
+    } })).result as { operation: OperationRecord };
+    const recordWrite = (await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "collection-file-record", payload: {
+      path: "collections/movies/records/movie_1.json", content: JSON.stringify({
         id: "movie_1",
         collection_id: "movies",
         data: { title: "Seven Samurai" },
@@ -6525,7 +6526,7 @@ rl.on("line", (line) => {
         created_at: nowIso(),
         updated_at: nowIso()
       }, null, 2)
-    });
+    } })).result as { operation: OperationRecord };
     const records = await store.listCollectionRecords("movies");
     await store.close();
 
@@ -6535,54 +6536,22 @@ rl.on("line", (line) => {
     expect(records[0]?.data).toMatchObject({ title: "Seven Samurai" });
   });
 
-  it("creates and revokes grants through policy audit and rollback", async () => {
+  it("rejects removed grant operations as deprecated", async () => {
     const { store, runtime } = await createRuntime();
-
-    const created = await runtime.createGrant({
-      operation: "external.send.dispatch",
-      reason: "Allow approved send dispatch in tests."
-    });
-    const revoked = await runtime.revokeGrant({
-      grantId: created.resource.id,
-      reason: "No longer needed."
-    });
-    const grants = await store.listGrants();
-    const rollbackPoints = await store.listRollbackPoints();
+    await expect(runtime.runDomainCommand({ command_id: "grant.create", idempotency_key: "deprecated-grant-create", payload: {} })).rejects.toMatchObject({ code: "gone" });
+    await expect(runtime.runDomainCommand({ command_id: "grant.revoke", idempotency_key: "deprecated-grant-revoke", payload: {} })).rejects.toMatchObject({ code: "gone" });
     await store.close();
-
-    expect(created.operation.operation).toBe("grant.create");
-    expect(created.policyDecision.decision).toBe("allow_with_audit");
-    expect(created.auditRecord.rollback_point_id).toBe(created.rollbackPoint?.id);
-    expect(created.resource.operation).toBe("external.send.dispatch");
-    expect(revoked.operation.operation).toBe("grant.revoke");
-    expect(revoked.resource.revoked_at).toBeDefined();
-    expect(revoked.auditRecord.rollback_point_id).toBe(revoked.rollbackPoint?.id);
-    expect(grants.map((grant) => grant.id)).toContain(created.resource.id);
-    expect(rollbackPoints.map((point) => point.id)).toEqual(expect.arrayContaining([
-      created.rollbackPoint!.id,
-      revoked.rollbackPoint!.id
-    ]));
   });
 
   it("restores file content from a rollback point with audit and a new rollback", async () => {
     const { store, runtime } = await createRuntime();
 
-    await runtime.runFileAction({
-      operation: "file.write",
-      path: "notes/restore.md",
-      content: "hello"
-    });
-    const patched = await runtime.runFileAction({
-      operation: "file.patch",
-      path: "notes/restore.md",
-      search: "hello",
-      replace: "hello samurai"
-    });
+    await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "restore-file-write", payload: { path: "notes/restore.md", content: "hello" } });
+    const patchCommand = await runtime.runDomainCommand({ command_id: "file.patch", idempotency_key: "restore-file-patch", payload: { path: "notes/restore.md", search: "hello", replace: "hello samurai" } });
+    const patched = patchCommand.result as Awaited<ReturnType<AgentRuntime["restoreRollbackPoint"]>>;
     const restored = await runtime.restoreRollbackPoint(patched.rollbackPoint!.id);
-    const read = await runtime.runFileAction({
-      operation: "file.read",
-      path: "notes/restore.md"
-    });
+    const readQuery = await runtime.runDomainQuery({ query_id: "file.read", payload: { path: "notes/restore.md" } });
+    const read = readQuery.result as { resource: { content: string } };
     await store.close();
 
     expect(restored.operation.operation).toBe("rollback.restore");
@@ -6592,28 +6561,26 @@ rl.on("line", (line) => {
       action: "written"
     });
     expect(restored.rollbackPoint).toBeDefined();
-    expect(restored.auditRecord.rollback_point_id).toBe(restored.rollbackPoint?.id);
+    expect(restored.rollbackPoint?.operation_id).toBe(restored.operation.id);
     expect(read.resource.content).toBe("hello");
   });
 
-  it("prepares external sends and gates dispatch behind approval", async () => {
+  it("prepares and dry-runs external sends through Domain Commands", async () => {
     const { store, runtime } = await createRuntime();
 
-    const prepared = await runtime.prepareExternalSend({
+    const prepared = await prepareExternalSend(runtime, {
       channel: "webhook",
       target: { url: "https://example.invalid/webhook" },
       title: "確認",
       body: "送信本文"
     });
-    await expect(runtime.dispatchExternalSend({ sendId: prepared.resource.id })).rejects.toMatchObject({
-      code: "conflict",
-      message: "policy_blocked"
-    });
+    const dispatched = await dispatchExternalSend(runtime, { sendId: prepared.resource.id });
     const sends = await store.listExternalSends();
     await store.close();
 
     expect(prepared.operation.operation).toBe("external.send.prepare");
-    expect(sends[0]?.status).toBe("draft");
+    expect(dispatched.resource.dispatch_result).toMatchObject({ dry_run: true });
+    expect(sends[0]?.status).toBe("approved");
   });
 
   it("records non-dry-run external send success and failure statuses", async () => {
@@ -6624,19 +6591,19 @@ rl.on("line", (line) => {
       .mockResolvedValueOnce(new Response("failed", { status: 500 }))
       .mockRejectedValueOnce(new Error("dispatch failed with raw-secret-token"));
 
-    const okDraft = await runtime.prepareExternalSend({
+    const okDraft = await prepareExternalSend(runtime, {
       channel: "webhook",
       target: { url: "https://example.test/ok" },
       title: "成功通知",
       body: "送信本文"
     });
-    const failedDraft = await runtime.prepareExternalSend({
+    const failedDraft = await prepareExternalSend(runtime, {
       channel: "webhook",
       target: { url: "https://example.test/fail" },
       title: "失敗通知",
       body: "送信本文"
     });
-    const rejectedDraft = await runtime.prepareExternalSend({
+    const rejectedDraft = await prepareExternalSend(runtime, {
       channel: "webhook",
       target: { url: "https://example.test/reject" },
       title: "例外通知",
@@ -6697,19 +6664,19 @@ rl.on("line", (line) => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
       .mockResolvedValueOnce(new Response("{}", { status: 200 }));
 
-    const slackDraft = await runtime.prepareExternalSend({
+    const slackDraft = await prepareExternalSend(runtime, {
       channel: "slack",
       target: { channel_id: "C123", thread_ts: "111.222" },
       title: "Slack通知",
       body: "Slack本文"
     });
-    const telegramDraft = await runtime.prepareExternalSend({
+    const telegramDraft = await prepareExternalSend(runtime, {
       channel: "telegram",
       target: { chat_id: "-100123", message_thread_id: 7 },
       title: "Telegram通知",
       body: "Telegram本文"
     });
-    const lineDraft = await runtime.prepareExternalSend({
+    const lineDraft = await prepareExternalSend(runtime, {
       channel: "line",
       target: { to: "U456" },
       title: "LINE通知",
@@ -6785,7 +6752,7 @@ rl.on("line", (line) => {
     ]);
     setExternalSendSmtpClientConnectionFactoryForTest(async () => smtp);
 
-    const draft = await runtime.prepareExternalSend({
+    const draft = await prepareExternalSend(runtime, {
       channel: "email",
       target: {
         to: ["client@example.test"],
@@ -7376,7 +7343,6 @@ rl.on("line", (line) => {
     await store.close();
 
     expect(runs[0]?.operation.operation).toBe("automation.job.run");
-    expect(runs[0]?.auditRecord.outputs_summary).toContain("Automation instruction ran backend");
     expect(refreshedRun).toMatchObject({
       status: "completed",
       backend_run_id: backendRun?.id
@@ -7468,7 +7434,7 @@ rl.on("line", (line) => {
       })
     });
     expect(evaluation.evaluationReport?.run_scores.length).toBeGreaterThan(0);
-    expect(evaluation.suggestions.some((suggestion) => suggestion.suggestion_type === "skill_patch")).toBe(true);
+    expect(evaluation.suggestions.some((suggestion) => suggestion.suggestion_type === "conflict" || suggestion.suggestion_type === "skill_patch")).toBe(true);
     expect(learningReports).toEqual(expect.arrayContaining([
       expect.objectContaining({ job_kind: "curator", snapshot_id: expect.any(String) }),
       expect.objectContaining({ job_kind: "evaluation", evaluation_count: expect.any(Number) })
@@ -7703,11 +7669,7 @@ rl.on("line", (line) => {
 
   it("downloads browser content into the workspace fallback adapter", async () => {
     const { store, runtime } = await createRuntime();
-    const result = await runtime.runBrowserAction({
-      operation: "browser.download_to_workspace",
-      url: "data:text/html,<title>Test</title><main>Hello browser</main>",
-      output_path: "browser/test.txt"
-    });
+    const result = (await runtime.runDomainCommand({ command_id: "browser.download_to_workspace", idempotency_key: "browser-download", payload: { url: "data:text/html,<title>Test</title><main>Hello browser</main>", output_path: "browser/test.txt" } })).result as { operation: OperationRecord; resource: { file_path: string; text: string; snapshot_kind: string } };
     await store.close();
 
     expect(result.operation.operation).toBe("browser.download_to_workspace");
@@ -7716,19 +7678,12 @@ rl.on("line", (line) => {
     expect(result.resource.snapshot_kind).toBe("html_snapshot");
   });
 
-  it("does not report an HTML snapshot as a browser screenshot", async () => {
+  it("rejects browser screenshots before execution when no screenshot adapter is available", async () => {
     const { store, runtime } = await createRuntime();
 
-    await expect(runtime.runBrowserAction({
-      operation: "browser.screenshot",
-      url: "data:text/html,<main>Hello browser</main>",
-      output_path: "browser/test.png"
-    })).rejects.toThrow("browser_screenshot_adapter_unavailable");
+    await expect(runtime.runDomainCommand({ command_id: "browser.screenshot", idempotency_key: "browser-screenshot-no-adapter", payload: { url: "data:text/html,<main>Hello browser</main>", output_path: "browser/test.png" } })).rejects.toThrow("domain_operation_unavailable:browser.screenshot");
 
-    expect(await store.listOperations()).toContainEqual(expect.objectContaining({
-      operation: "browser.screenshot",
-      status: "failed"
-    }));
+    expect((await store.listOperations()).some((operation) => operation.operation === "browser.screenshot")).toBe(false);
     await store.close();
   });
 

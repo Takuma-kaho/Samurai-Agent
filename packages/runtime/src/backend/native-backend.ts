@@ -219,9 +219,6 @@ function nativeToolActionId(toolName: string): string {
   if (toolName === "request_external_send") {
     return "external.send.prepare";
   }
-  if (toolName === "request_delete") {
-    return "workspace.delete";
-  }
   return toolName || "unknown_tool";
 }
 

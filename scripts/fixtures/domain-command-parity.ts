@@ -17,8 +17,11 @@ const normalize = (command: any) => {
   return {
     validation: { version: result.resource.version, data: result.resource.data },
     change: { operation: result.operation.operation, status: result.operation.status, before: result.before.data, after: result.resource.data },
-    policy: { decision: result.policyDecision.decision, approval: result.policyDecision.required_approval_level },
-    audit: { actor: result.auditRecord.actor_identity, capability: result.auditRecord.capability_id, instruction: result.auditRecord.instruction_source, affected_count: result.auditRecord.affected_resources.length, rollback: Boolean(result.auditRecord.rollback_point_id) },
+    history: {
+      operation: result.operation.operation,
+      status: result.operation.status,
+      rollback: Boolean(result.operation.rollback_point_id)
+    },
     render: command.render_specs.map((spec: any) => ({ kind: spec.kind, priority: spec.priority, state: spec.state, ref_kinds: spec.resource_refs.map((ref: any) => ref.kind) }))
   };
 };
@@ -37,7 +40,7 @@ try {
   }
   const executions = await store.listDomainCommandExecutions();
   for (const source of sources) assert.equal(executions.filter((item) => item.input_source === source && item.command_id === "collection.patch.apply").length, 10);
-  process.stdout.write(`${JSON.stringify({ status: "passed", representative_operations: 10, entrances: sources.length, executions: 50, validation_equal: true, change_equal: true, audit_equal: true, render_equal: true })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["IN02"], representative_operations: 10, entrances: sources.length, executions: 50, validation_equal: true, change_equal: true, history_equal: true, render_equal: true })}\n`);
 } finally {
   await runtime.shutdownMcpProcessPool().catch(() => undefined);
   await store.close();

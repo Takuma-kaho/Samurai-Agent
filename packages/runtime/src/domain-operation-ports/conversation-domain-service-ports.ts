@@ -1,0 +1,28 @@
+import type { DomainOperationPorts } from "@samurai-agent/domain-operations";
+import type { RuntimeDomainServices } from "../domain-operation-services.js";
+
+type Ports = Pick<DomainOperationPorts, "chat.turn.run" | "session.create" | "session.search.reindex">;
+
+export function createConversationDomainServicePorts(services: Pick<RuntimeDomainServices, "conversationDomainService">): Ports {
+  return {
+    "chat.turn.run": {
+      executeChatTurnRun: async (context, input) => ({
+        ok: true as const,
+        value: await services.conversationDomainService.runTurn(input)
+      })
+    },
+    "session.create": {
+      executeSessionCreate: async (context, input) => ({
+        ok: true as const,
+        value: await services.conversationDomainService.createSession(input)
+      })
+    },
+    "session.search.reindex": {
+      executeSessionSearchReindex: async (context, input) => ({
+        ok: true as const,
+        value: await services.conversationDomainService.reindexSearch()
+      })
+    }
+  };
+}
+
