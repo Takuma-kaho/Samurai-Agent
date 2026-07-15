@@ -25,12 +25,7 @@ try {
     throw new Error("domain_command_verification_assertion_mismatch");
   }
   const temporaryLedger = path.join(temporaryRoot, "domain-command-contract-ledger.json");
-  const ledgerGenerator = path.join(temporaryRoot, "generate-domain-contract-ledger.mjs");
-  execFileSync(esbuild, [
-    path.join(root, "scripts/generate-domain-contract-ledger.mjs"),
-    "--bundle", "--platform=node", "--format=esm", `--outfile=${ledgerGenerator}`
-  ], { cwd: root, stdio: "inherit" });
-  execFileSync(process.execPath, [ledgerGenerator], {
+  execFileSync(process.execPath, ["--import", "tsx", path.join(root, "scripts/generate-domain-contract-ledger.mjs")], {
     cwd: root,
     env: { ...process.env, SAMURAI_DOMAIN_LEDGER_OUTPUT: temporaryLedger },
     stdio: "inherit"
