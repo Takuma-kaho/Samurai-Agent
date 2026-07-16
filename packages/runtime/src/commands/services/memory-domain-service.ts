@@ -13,6 +13,7 @@ import {
   type SessionRecord,
   type SupportedLocale
 } from "@samurai-agent/core-schemas";
+import { jsonValue } from "./json-value.js";
 
 interface ArchivedMemorySnapshot {
   frontmatter: MemoryFrontmatter;
@@ -121,7 +122,7 @@ export class MemoryDomainService {
     const ref = this.dependencies.memories.memoryRef(archivedMemory);
     const rollbackPoint = archive.changed
       ? await this.dependencies.archive.createRollback(operation, [ref],
-        { memory: archive.before as unknown as JsonValue }, { memory: archive.after as unknown as JsonValue })
+        { memory: jsonValue(archive.before) }, { memory: jsonValue(archive.after) })
       : undefined;
     operation.status = "completed";
     operation.result_ref = ref;

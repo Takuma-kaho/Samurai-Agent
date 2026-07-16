@@ -1,4 +1,5 @@
 import { createId, nowIso, type ActivityInboxItem, type AutomationJobRecord, type CuratorLifecycleReport, type CuratorReviewReport, type EvaluationTraceReport, type JsonValue, type LearningEvaluationRecord, type MessageEnvelope, type OperationRecord, type ReflectionRunRecord, type ReflectionSuggestionRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
+import { jsonValue } from "./json-value.js";
 
 interface AutomationRunRecord { id: string; kind: string; source: string; session_id?: string; backend_run_id?: string; status: "started" | "completed" | "failed"; operation_id?: string; started_at: string; completed_at?: string; error?: string }
 interface ReflectionExecutionResult { reflectionRun: ReflectionRunRecord; suggestions: ReflectionSuggestionRecord[]; learningEvaluations?: LearningEvaluationRecord[]; curatorReport?: CuratorLifecycleReport; curatorReviewReport?: CuratorReviewReport; evaluationReport?: EvaluationTraceReport }
@@ -184,7 +185,7 @@ export class AutomationDomainService {
     };
     return this.dependencies.mutation.runMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, execute: async (operation) => {
       const saved = await this.dependencies.mutation.saveJob(job); const ref = this.dependencies.mutation.ref(saved);
-      const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], {}, { automation_job: saved as unknown as JsonValue });
+      const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], {}, { automation_job: jsonValue(saved) });
       return { resource: saved, ref, rollbackPoint, summary: `Saved automation job ${saved.title}.` };
     }});
   }
@@ -195,7 +196,7 @@ export class AutomationDomainService {
     const envelope = this.dependencies.mutation.createEnvelope(`${status === "enabled" ? "Resume" : "Pause"} automation: ${current.title}`);
     return this.dependencies.mutation.runMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [this.dependencies.mutation.ref(current)], execute: async (operation) => {
       const saved = await this.dependencies.mutation.saveJob({ ...current, status, locked_until: status === "disabled" ? undefined : current.locked_until, updated_at: nowIso() });
-      const ref = this.dependencies.mutation.ref(saved); const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], { automation_job: current as unknown as JsonValue }, { automation_job: saved as unknown as JsonValue });
+      const ref = this.dependencies.mutation.ref(saved); const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], { automation_job: jsonValue(current) }, { automation_job: jsonValue(saved) });
       return { resource: saved, ref, rollbackPoint, summary: `${status === "enabled" ? "Resumed" : "Paused"} automation ${saved.title}.` };
     }});
   }

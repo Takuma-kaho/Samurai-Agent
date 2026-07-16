@@ -229,18 +229,20 @@ export class LearningDomainService {
     for (const decision of memoryDecisions) {
       const relatedMemories = decision.resource_ids.map((id) => memories.find((memory) => memory.id === id)).filter((memory): memory is MemoryFrontmatter & { file_path: string } => Boolean(memory));
       if (!relatedMemories.length) continue;
+      const primaryMemory = relatedMemories[0];
+      if (!primaryMemory) continue;
       const suggestionId = createId("suggestion");
       if (decision.kind === "merge") {
-        memoryMergeGroups.push({ topic: relatedMemories[0]!.topic, memory_ids: decision.resource_ids, reason: decision.reason, suggestion_id: suggestionId });
+        memoryMergeGroups.push({ topic: primaryMemory.topic, memory_ids: decision.resource_ids, reason: decision.reason, suggestion_id: suggestionId });
       }
       suggestions.push({
         id: suggestionId,
         reflection_run_id: reflectionRun.id,
         suggestion_type: decision.kind === "merge" ? "conflict" : "memory_patch",
         status: "proposed",
-        title: decision.kind === "merge" ? `Merge or resolve memory topic: ${relatedMemories[0]!.topic}` : `Review memory: ${relatedMemories[0]!.topic}`,
+        title: decision.kind === "merge" ? `Merge or resolve memory topic: ${primaryMemory.topic}` : `Review memory: ${primaryMemory.topic}`,
         content: `${decision.reason}\n\n${relatedMemories.map((memory) => `- ${memory.id}: ${memory.state} / confidence ${memory.confidence}`).join("\n")}`,
-        target_ref: decision.kind === "merge" ? undefined : memoryRef(relatedMemories[0]!),
+        target_ref: decision.kind === "merge" ? undefined : memoryRef(primaryMemory),
         source_refs: relatedMemories.map(memoryRef),
         confidence: decision.kind === "merge" ? 0.68 : 0.62,
         created_at: now,

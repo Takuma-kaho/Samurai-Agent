@@ -12,6 +12,7 @@ import {
   type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
 import type { AutomationJobWriteResult } from "./automation-domain-service.js";
+import { jsonValue } from "./json-value.js";
 
 export interface TranslationJobInput {
   source_ref: ResourceRef;
@@ -100,7 +101,7 @@ export class TranslationDomainService {
       kind: "resource_translation", schedule,
       target_instruction: `Translate ${source.ref.kind}/${source.ref.id} from ${source.source_locale} to ${input.target_locale}.`,
       delivery_target: {
-        channel: "resource_translation", source_ref: source.ref as unknown as JsonValue,
+        channel: "resource_translation", source_ref: jsonValue(source.ref),
         source_locale: source.source_locale, target_locale: input.target_locale,
         original_hash: source.original_hash, source_label: source.ref.label ?? source.ref.id
       },
@@ -144,7 +145,7 @@ export class TranslationDomainService {
         "Return only the translated text. Keep names, code identifiers, paths, IDs, and structured keys unchanged.", "", source.content].join("\n"),
       metadata: { automation_job_id: job.id, automation_job_kind: job.kind, automation_job_title: job.title,
         automation_schedule: job.schedule, automation_delivery_target: job.delivery_target,
-        resource_translation_source_ref: source.ref as unknown as JsonValue,
+        resource_translation_source_ref: jsonValue(source.ref),
         resource_translation_original_hash: source.original_hash, resource_translation_target_locale: target.target_locale }
     });
     const translatedText = chat.messages.find((message) => message.role === "agent")?.content.trim() ?? "";

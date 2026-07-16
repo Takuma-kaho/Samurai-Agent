@@ -16,6 +16,7 @@ import {
   type SessionRecord
 } from "@samurai-agent/core-schemas";
 import { z } from "zod";
+import { jsonValue } from "./json-value.js";
 import type { SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import type { CollectionReindexResult } from "@samurai-agent/workspace-store";
 import type { ChatTurnResult } from "./conversation-domain-service.js";
@@ -118,7 +119,7 @@ export class CollectionDomainService {
           } catch (error) { throw this.dependencies.mutation.mapPatchError(error); }
           patchBefore = patched.before;
           const ref = collectionRecordRef(patched.after);
-          const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], { record: patched.before as unknown as JsonValue }, { record: patched.after as unknown as JsonValue });
+          const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], { record: jsonValue(patched.before) }, { record: jsonValue(patched.after) });
           return { resource: patched.after, ref, rollbackPoint, summary: `Ran collection action ${input.actionId} and patched ${input.collectionId}/${recordId}.` };
         }
         if (kind === "create_record" || kind === "create") {
@@ -238,8 +239,8 @@ export class CollectionDomainService {
           : await this.dependencies.mutation.saveSchema(schema);
         const ref = collectionSchemaRef(saved);
         const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref],
-          existing ? { collection_schema: existing as unknown as JsonValue } : {},
-          { collection_schema: saved as unknown as JsonValue });
+          existing ? { collection_schema: jsonValue(existing) } : {},
+          { collection_schema: jsonValue(saved) });
         return { resource: saved, ref, rollbackPoint, summary: `Saved collection schema ${saved.id}.` };
       }
     });
@@ -296,7 +297,7 @@ export class CollectionDomainService {
         }
         const ref = collectionRecordRef(patched.after);
         const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref],
-          { record: patched.before as unknown as JsonValue }, { record: patched.after as unknown as JsonValue });
+          { record: jsonValue(patched.before) }, { record: jsonValue(patched.after) });
         return { resource: patched.after, before: patched.before, ref, rollbackPoint, summary: `Applied collection patch ${patch.id}.` };
       }
     });
@@ -321,7 +322,7 @@ export class CollectionDomainService {
         const deleted = await this.dependencies.mutation.deleteRecord(input.collectionId, input.recordId);
         const ref = collectionRecordRef(deleted);
         const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref],
-          { record: record as unknown as JsonValue }, {});
+          { record: jsonValue(record) }, {});
         return { resource: deleted, ref, rollbackPoint, summary: `Deleted collection record ${deleted.collection_id}/${deleted.id}.` };
       }
     });

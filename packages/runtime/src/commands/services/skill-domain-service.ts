@@ -27,6 +27,7 @@ import {
   type SkillOptimizationSnapshot,
   type WorkItemRecord
 } from "@samurai-agent/core-schemas";
+import { jsonValue } from "./json-value.js";
 import {
   buildSkillOptimizationDataset,
   evaluateOptimizationGates,
@@ -183,8 +184,8 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
         const saved = await this.dependencies.mutation.updateState(input.skillId, targetState);
         if (!saved) throw this.dependencies.mutation.requestError("not_found", `Skill not found: ${input.skillId}`);
         const ref = skillRef(saved); const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref],
-          { skill: current as unknown as JsonValue, markdown: beforeMarkdown ?? "" },
-          { skill: saved as unknown as JsonValue, action: input.action, target_state: targetState });
+          { skill: jsonValue(current), markdown: beforeMarkdown ?? "" },
+          { skill: jsonValue(saved), action: input.action, target_state: targetState });
         return { resource: saved, ref, rollbackPoint, summary: `Applied curator lifecycle ${input.action} to Skill ${saved.title}.` };
       }
     });
@@ -549,8 +550,8 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
         const ref = skillRef(saved);
         const rollbackPoint = await this.dependencies.mutation.createRollback(
           operation, [ref],
-          { skill: current as unknown as JsonValue, markdown: beforeMarkdown ?? "" },
-          { skill: saved as unknown as JsonValue }
+          { skill: jsonValue(current), markdown: beforeMarkdown ?? "" },
+          { skill: jsonValue(saved) }
         );
         return { resource: saved, ref, rollbackPoint, summary: `Updated Skill ${saved.title}.` };
       }

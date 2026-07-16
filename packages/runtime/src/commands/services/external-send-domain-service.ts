@@ -1,4 +1,5 @@
 import { externalSendChannels, type ActivityInboxItem, type ExternalSendChannel, type ExternalSendRecord, type JsonValue, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
+import { jsonValue } from "./json-value.js";
 
 export interface ExternalDispatchResult { dispatched: boolean; adapter: string; transport?: string; status?: number; dry_run: boolean; message: string }
 interface ExternalSendWriteResult { resource: ExternalSendRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
@@ -25,7 +26,7 @@ export class ExternalSendDomainService {
     const draft: ExternalSendRecord = { id: this.host.createId(), channel: input.channel, status: "draft", target: input.target, title: input.title, body: input.body, created_at: now, updated_at: now };
     return this.host.runMutation({ session, envelope, operationName, proposedEffects: ["Create an outbound send draft without dispatching."], execute: async (operation) => {
       const saved = await this.sends.save({ ...draft, operation_id: operation.id }); const ref = sendRef(saved);
-      const rollbackPoint = await this.host.createRollback(operation, [ref], {}, { external_send: saved as unknown as JsonValue });
+      const rollbackPoint = await this.host.createRollback(operation, [ref], {}, { external_send: jsonValue(saved) });
       return { resource: saved, ref, rollbackPoint, summary: `Prepared external send draft ${saved.title}.` };
     }});
   }
@@ -35,7 +36,7 @@ export class ExternalSendDomainService {
     const session = await this.host.ensureSession(); const envelope = this.host.createEnvelope(session, `Dispatch external send: ${existing.title}`); const ref = sendRef(existing);
     return this.host.runMutation({ session, envelope, operationName: "external.send.dispatch", proposedEffects: ["Dispatch a prepared outbound send to an external channel."], inputRef: ref, targetResourceRefs: [ref], execute: async (operation) => {
       const result = await this.sends.dispatch(existing, dryRun ?? this.host.defaultDryRun()); const now = this.host.now();
-      const saved = await this.sends.save({ ...existing, status: result.dispatched ? "dispatched" : result.dry_run ? "approved" : "failed", operation_id: operation.id, dispatch_result: result as unknown as Record<string, JsonValue>, updated_at: now, dispatched_at: result.dispatched ? now : undefined });
+      const saved = await this.sends.save({ ...existing, status: result.dispatched ? "dispatched" : result.dry_run ? "approved" : "failed", operation_id: operation.id, dispatch_result: record(jsonValue(result)), updated_at: now, dispatched_at: result.dispatched ? now : undefined });
       return { resource: saved, ref: sendRef(saved), summary: result.dispatched ? `Dispatched external send ${saved.title}.` : result.dry_run ? `Prepared external send ${saved.title}; dispatch dry-run recorded.` : `External send ${saved.title} dispatch failed.` };
     }});
   }

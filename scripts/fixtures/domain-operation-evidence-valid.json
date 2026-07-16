@@ -1,0 +1,11 @@
+{
+  "status": "passed",
+  "assertions": [
+    { "name": "hard gate count", "actual": 81, "expected": 81 }
+  ],
+  "result": {
+    "gate_count": 81,
+    "repository_tests": 1,
+    "repository_passed_tests": 1
+  }
+}

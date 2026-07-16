@@ -1,8 +1,18 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-const root = process.cwd();
+const root = process.env.SAMURAI_REPO_ROOT
+  ? path.resolve(process.env.SAMURAI_REPO_ROOT)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const readSource = (file) => {
+  try {
+    return readFileSync(file, "utf8");
+  } catch (error) {
+    throw new Error(`domain_operation_source_read_failed:${path.relative(root, file)}`, { cause: error });
+  }
+};
 const sourceRoot = path.join(root, "packages/domain-operations/src");
 const operationsRoot = path.join(sourceRoot, "operations");
 const generatedRoot = path.join(sourceRoot, "generated");
@@ -54,7 +64,7 @@ const outputs = new Map([
 ]);
 if (process.argv.includes("--check")) {
   for (const [file, expected] of outputs) {
-    if (readFileSync(file, "utf8") !== expected) throw new Error(`generated_domain_operation_drift:${path.basename(file)}`);
+    if (readSource(file) !== expected) throw new Error(`generated_domain_operation_drift:${path.basename(file)}`);
   }
   process.stdout.write(`verified ${modules.length} generated domain operation bindings\n`);
 } else {
@@ -65,16 +75,24 @@ if (process.argv.includes("--check")) {
 function readOperationModule(file) {
   const relative = path.relative(sourceRoot, file).replaceAll(path.sep, "/").replace(/\.ts$/, ".js");
   const importPath = `../${relative.replace(/^operations\//, "operations/")}`;
-  const source = readFileSync(file, "utf8");
+  const source = readSource(file);
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const ports = ast.statements.find((statement) =>
     ts.isInterfaceDeclaration(statement)
       && statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
       && statement.name.text.endsWith("Ports"));
   if (!ports || !ts.isInterfaceDeclaration(ports)) throw new Error(`operation_ports_interface_missing:${relative}`);
-  const idMatch = source.match(/\n\s*"id"\s*:\s*"([^"]+)"/);
-  if (!idMatch) throw new Error(`operation_id_missing:${relative}`);
-  return { id: idMatch[1], importPath, portsType: ports.name.text };
+  let id;
+  const visit = (node) => {
+    if (ts.isPropertyAssignment(node)
+      && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name))
+      && node.name.text === "id"
+      && ts.isStringLiteral(node.initializer)) id = node.initializer.text;
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  if (!id) throw new Error(`operation_id_missing:${relative}`);
+  return { id, importPath, portsType: ports.name.text };
 }
 
 function filesUnder(directory) {

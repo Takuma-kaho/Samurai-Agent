@@ -54,12 +54,19 @@ try {
     "scripts/fixtures/domain-command-trusted-context.ts",
     "scripts/fixtures/domain-query-purity.ts",
     "scripts/check-domain-commands.mjs",
+    "scripts/generate-domain-operation-index.mjs",
     "scripts/generate-domain-contract-ledger.mjs",
     "scripts/run-domain-contract-ledger.mjs",
     "scripts/verify-domain-commands.mjs",
     "scripts/lib/core-evidence.mjs",
     "scripts/lib/domain-verifier-policy.mjs",
     "scripts/verify-domain-command-verifier-self-test.mjs",
+    "scripts/verify-domain-operation-evidence.mjs",
+    "scripts/verify-architecture-boundaries.mjs",
+    "scripts/fixtures/domain-operation-structure.ts",
+    "scripts/fixtures/domain-operation-evidence-valid.json",
+    "scripts/fixtures/domain-verifier-model-valid.json",
+    ".github/workflows/ci.yml",
     ...recursiveFiles(path.join(root, "packages/domain-operations/src")).map((file) => path.relative(root, file)),
     ...recursiveFiles(path.join(root, "packages/runtime/src/domain-operation-ports")).map((file) => path.relative(root, file)),
     ...recursiveFiles(path.join(root, "packages/runtime/src/commands/services")).map((file) => path.relative(root, file))
@@ -91,6 +98,7 @@ try {
     result
   }, null, 2)}\n`);
   renameSync(temporaryEvidence, evidencePath);
+  execFileSync(process.execPath, [path.join(root, "scripts/verify-domain-operation-evidence.mjs"), evidencePath], { cwd: root, stdio: "inherit" });
   process.stdout.write(`${JSON.stringify({ status: "passed", evidence: path.relative(root, evidencePath), commit_sha: sourceEvidence.commit_sha, source_sha256: sourceEvidence.source_sha256 })}\n`);
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });

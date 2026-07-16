@@ -7,6 +7,7 @@ import {
   type SessionRecord, type SupportedLocale, type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
 import type { SurfaceOperationResultKind, SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
+import { jsonValue } from "./json-value.js";
 
 export interface ArtifactCreateInput {
   sessionId?: string;
@@ -218,7 +219,7 @@ export class ArtifactDomainService {
   private async saveRevision(contract: { id: string; proposed_effects: string[] }, artifact: ArtifactRecord, message: string, input: ArtifactRevisionInputPort, extraRefs: ResourceRef[], summary: string, givenSession?: SessionRecord) {
     const session = givenSession ?? await this.artifacts.ensureSession(); const envelope = this.artifacts.createEnvelope(session, message);
     return this.artifacts.runMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref, ...extraRefs], execute: async (operation) => {
-      const created = await this.artifacts.createRevision(input); const rollbackPoint = await this.artifacts.createRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: artifact as unknown as JsonValue }, { artifact: created.artifact as unknown as JsonValue });
+      const created = await this.artifacts.createRevision(input); const rollbackPoint = await this.artifacts.createRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonValue(artifact) }, { artifact: jsonValue(created.artifact) });
       return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary, extra: { revision: created.revision } };
     }});
   }

@@ -3,18 +3,14 @@ import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "n
 import { createHash } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
+import ts from "typescript";
 
-const root = process.cwd();
-const mutationCall = /\bstore\.(save|update|delete|set|upsert|archive|apply|create|claim|revoke|rotate|repair|restore|reindex|prune|expire|requeue|release|mark|ack|fail|patch)[A-Z][A-Za-z0-9_]*\s*\(/g;
-const runtimeMutationCall = /\bruntime\.(save|create|patch|delete|archive|restore|apply|run|reindex|approve|deny|reject|rotate|revoke|expire|repair|recreate|sync|dispatch|prepare|handle)[A-Z][A-Za-z0-9_]*\s*\(/g;
+const root = process.env.SAMURAI_REPO_ROOT ? path.resolve(process.env.SAMURAI_REPO_ROOT) : process.cwd();
+const storeMutationVerbs = new Set(["save", "update", "delete", "set", "upsert", "archive", "apply", "create", "claim", "revoke", "rotate", "repair", "restore", "reindex", "prune", "expire", "requeue", "release", "mark", "ack", "fail", "patch"]);
+const runtimeMutationVerbs = new Set(["save", "create", "patch", "delete", "archive", "restore", "apply", "run", "reindex", "approve", "deny", "reject", "rotate", "revoke", "expire", "repair", "recreate", "sync", "dispatch", "prepare", "handle"]);
 const allowedRuntimeEntrances = new Set([
-  "runtime.runDomainCommand(",
-  "runtime.runDomainQuery(",
-  "runtime.runCollectionManageCompatibility(",
-  "runtime.runSurfaceOperation(",
-  "runtime.runBackendToolBridgeCall(",
-  "runtime.runDueAutomationJobs(",
-  "runtime.syncBackendStream("
+  "runDomainCommand", "runDomainQuery", "runCollectionManageCompatibility", "runSurfaceOperation",
+  "runBackendToolBridgeCall", "runDueAutomationJobs", "syncBackendStream"
 ]);
 const issues = [];
 
@@ -30,36 +26,30 @@ function sourceFiles(directory) {
   return files;
 }
 
-function lineNumber(source, index) {
-  return source.slice(0, index).split("\n").length;
-}
-
 const serverFiles = sourceFiles("apps/server/src");
 for (const server of serverFiles) {
   const serverSource = readFileSync(path.join(root, server), "utf8");
-  for (const match of serverSource.matchAll(mutationCall)) {
-    issues.push({ code: "server_route_direct_store_mutation", file: server, line: lineNumber(serverSource, match.index), value: match[0] });
-  }
-  for (const match of serverSource.matchAll(runtimeMutationCall)) {
-    if (!allowedRuntimeEntrances.has(match[0])) {
-      issues.push({ code: "server_direct_runtime_mutation_bypasses_command_bus", file: server, line: lineNumber(serverSource, match.index), value: match[0] });
-    }
-  }
+  const ast = parse(server, serverSource);
+  inspectMutationCalls(ast, server, "store", storeMutationVerbs, "server_route_direct_store_mutation");
+  inspectMutationCalls(ast, server, "runtime", runtimeMutationVerbs, "server_direct_runtime_mutation_bypasses_command_bus", allowedRuntimeEntrances);
 }
 
 for (const file of sourceFiles("packages/learning/src")) {
   const source = readFileSync(path.join(root, file), "utf8");
-  if (/@samurai-agent\/ui-protocol|apps\/web/.test(source)) issues.push({ code: "learning_depends_on_ui", file });
+  if (importsOf(parse(file, source)).some((specifier) => specifier === "@samurai-agent/ui-protocol" || specifier.startsWith("apps/web"))) issues.push({ code: "learning_depends_on_ui", file });
 }
 for (const file of [...sourceFiles("apps/web/src"), ...sourceFiles("packages/ui-protocol/src")]) {
   const source = readFileSync(path.join(root, file), "utf8");
-  if (/@samurai-agent\/workspace-store|better-sqlite3|workspace\.sqlite/.test(source)) issues.push({ code: "renderer_depends_on_store", file });
+  const ast = parse(file, source);
+  if (importsOf(ast).some((specifier) => specifier === "@samurai-agent/workspace-store" || specifier === "better-sqlite3")
+    || stringLiterals(ast).includes("workspace.sqlite")) issues.push({ code: "renderer_depends_on_store", file });
 }
 for (const directory of ["packages/ui-protocol/src", "packages/agent-backends/src", "packages/gateway/src"]) {
   for (const file of sourceFiles(directory)) {
     const source = readFileSync(path.join(root, file), "utf8");
-    if (/@samurai-agent\/workspace-store|\bWorkspaceStore\b/.test(source)) issues.push({ code: "adapter_depends_on_store", file });
-    for (const match of source.matchAll(mutationCall)) issues.push({ code: "adapter_direct_store_mutation", file, line: lineNumber(source, match.index), value: match[0] });
+    const ast = parse(file, source);
+    if (importsOf(ast).includes("@samurai-agent/workspace-store") || identifiers(ast).includes("WorkspaceStore")) issues.push({ code: "adapter_depends_on_store", file });
+    inspectMutationCalls(ast, file, "store", storeMutationVerbs, "adapter_direct_store_mutation");
   }
 }
 
@@ -99,3 +89,36 @@ writeFileSync(path.join(evidenceDir, "A07.json"), `${JSON.stringify({
   ], result
 }, null, 2)}\n`);
 process.stdout.write(`${JSON.stringify(result)}\n`);
+
+function parse(file, source) {
+  return ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true, file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+}
+
+function allNodes(rootNode) {
+  const result = [];
+  const visit = (node) => { result.push(node); ts.forEachChild(node, visit); };
+  visit(rootNode);
+  return result;
+}
+
+function importsOf(ast) {
+  return allNodes(ast).filter((node) => ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)).map((node) => node.moduleSpecifier.text);
+}
+
+function identifiers(ast) {
+  return allNodes(ast).filter(ts.isIdentifier).map((node) => node.text);
+}
+
+function stringLiterals(ast) {
+  return allNodes(ast).filter(ts.isStringLiteral).map((node) => node.text);
+}
+
+function inspectMutationCalls(ast, file, receiver, verbs, code, allowed = new Set()) {
+  for (const call of allNodes(ast).filter(ts.isCallExpression)) {
+    if (!ts.isPropertyAccessExpression(call.expression) || !ts.isIdentifier(call.expression.expression) || call.expression.expression.text !== receiver) continue;
+    const method = call.expression.name.text;
+    const verb = [...verbs].find((candidate) => method.startsWith(candidate) && method.length > candidate.length && /[A-Z]/.test(method[candidate.length]));
+    if (!verb || allowed.has(method)) continue;
+    issues.push({ code, file, line: ast.getLineAndCharacterOfPosition(call.getStart()).line + 1, value: `${receiver}.${method}` });
+  }
+}

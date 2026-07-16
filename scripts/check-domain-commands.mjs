@@ -2,9 +2,13 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { passingDomainVerifierModel, validateDomainVerifierModel } from "./lib/domain-verifier-policy.mjs";
 
-const root = process.cwd();
+const root = process.env.SAMURAI_REPO_ROOT
+  ? path.resolve(process.env.SAMURAI_REPO_ROOT)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const platformPrefix = process.platform === "darwin"
   ? `@esbuild+darwin-${process.arch === "arm64" ? "arm64" : "x64"}@`
   : `@esbuild+${process.platform}-${process.arch}@`;
@@ -19,8 +23,13 @@ const output = path.join(temporaryRoot, "check.mjs");
 const fixtureResults = new Map();
 
 function runJsonCheck(file, options = {}) {
-  const { nodeArgs = [], ...execOptions } = options;
-  const stdout = execFileSync(process.execPath, [...nodeArgs, file], { cwd: root, encoding: "utf8", ...execOptions });
+  const { nodeArgs = [], env = process.env, ...execOptions } = options;
+  const stdout = execFileSync(process.execPath, [...nodeArgs, file], {
+    cwd: root,
+    encoding: "utf8",
+    ...execOptions,
+    env: { ...env, SAMURAI_REPO_ROOT: root }
+  });
   process.stdout.write(stdout);
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
   const result = JSON.parse(lines.at(-1));
@@ -30,14 +39,9 @@ function runJsonCheck(file, options = {}) {
 
 try {
   execFileSync(process.execPath, [path.join(root, "scripts/generate-domain-operation-index.mjs"), "--check"], { cwd: root, stdio: "inherit" });
-  const queryWritePortNegative = spawnSync("pnpm", [
-    "exec", "tsc", "--noEmit", "--skipLibCheck", "--target", "ES2022", "--module", "NodeNext", "--moduleResolution", "NodeNext",
-    path.join(root, "scripts/fixtures/query-write-port-negative.ts")
-  ], { cwd: root, encoding: "utf8" });
-  const negativeDiagnostics = `${queryWritePortNegative.stdout ?? ""}${queryWritePortNegative.stderr ?? ""}`;
-  if (queryWritePortNegative.status === 0 || !negativeDiagnostics.includes("TS2559")) {
-    throw new Error(`query_write_port_negative_fixture_failed:${negativeDiagnostics}`);
-  }
+  const queryWritePortNegative = verifyQueryWritePortNegative();
+  const negativeDiagnostics = queryWritePortNegative.diagnostics;
+  if (queryWritePortNegative.status === 0 || !negativeDiagnostics.includes("TS2559")) throw new Error(`query_write_port_negative_fixture_failed:${negativeDiagnostics}`);
   process.stdout.write(`${JSON.stringify({ status: "passed", gate: "ST09", expected_diagnostic: "TS2559" })}\n`);
   fixtureResults.set("query-write-port-negative", { status: "passed", gates: ["QP01"] });
   const idempotencyWorker = path.join(temporaryRoot, "domain-command-idempotency-worker.mjs");
@@ -187,7 +191,7 @@ try {
     status: "passed",
     gates: expectedGateIds,
     gate_count: observedGateIds.size,
-    structure_gates: [...structure.gates, "ST09", "ST12"].sort(),
+    structure_gates: [...new Set([...structure.gates, "ST09", "ST12"])].sort(),
     operation_modules: structure.operation_modules,
     contracts: {
       commands: contracts.commands,
@@ -219,4 +223,25 @@ try {
   process.stdout.write(`${JSON.stringify(summary)}\n`);
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });
+}
+
+function verifyQueryWritePortNegative() {
+  const definitionFile = path.join(root, "packages/domain-operations/src/definition/index.ts");
+  const definitionAst = ts.createSourceFile(definitionFile, readFileSync(definitionFile, "utf8"), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+  const queryPorts = definitionAst.statements.find((statement) => ts.isInterfaceDeclaration(statement) && statement.name.text === "DomainQueryPorts");
+  if (!queryPorts || !ts.isInterfaceDeclaration(queryPorts)) throw new Error("domain_query_ports_missing");
+  const members = queryPorts.members.map((member) => member.getText(definitionAst)).join("\n");
+  const fixture = "query-write-port-negative.type-test.ts";
+  const source = `interface DomainQueryPorts { ${members} }\ninterface WriteOnlyPort { save(value: string): Promise<void> }\ndeclare const writeOnly: WriteOnlyPort;\nconst rejected: DomainQueryPorts = writeOnly;\nvoid rejected;\n`;
+  const sourceFile = ts.createSourceFile(fixture, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+  const host = {
+    getSourceFile: (name) => name === fixture ? sourceFile : undefined,
+    getDefaultLibFileName: () => "lib.d.ts",
+    writeFile: () => {}, getCurrentDirectory: () => "", getCanonicalFileName: (name) => name,
+    useCaseSensitiveFileNames: () => true, getNewLine: () => "\n",
+    fileExists: (name) => name === fixture, readFile: (name) => name === fixture ? source : undefined
+  };
+  const program = ts.createProgram([fixture], { noEmit: true, noLib: true, strict: true }, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program).filter((diagnostic) => diagnostic.code !== 2318);
+  return { status: diagnostics.length === 0 ? 0 : 1, diagnostics: diagnostics.map((diagnostic) => `TS${diagnostic.code}:${diagnostic.messageText}`).join("\n") };
 }

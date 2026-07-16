@@ -16,6 +16,7 @@ import {
 } from "@samurai-agent/core-schemas";
 import { z } from "zod";
 import type { WikiReindexResult } from "@samurai-agent/workspace-store";
+import { jsonValue } from "./json-value.js";
 
 type StoredWiki = WikiFrontmatter & { file_path: string };
 type WikiInput = {
@@ -101,7 +102,7 @@ export class WikiDomainService {
     return this.dependencies.wiki.runMutation({ session, envelope, operationName: "wiki.patch", proposedEffects: ["Edit wiki page frontmatter or markdown content."], execute: async (operation) => {
       const saved = await this.dependencies.wiki.update(input);
       if (!saved) throw this.dependencies.wiki.requestError("not_found", `Wiki page not found: ${input.id}`);
-      const ref = wikiRef(saved); const rollbackPoint = await this.dependencies.wiki.createRollback(operation, [ref], { wiki: current as unknown as JsonValue, content: beforeContent ?? "" }, { wiki: saved as unknown as JsonValue, content: input.content ?? beforeContent ?? "" });
+      const ref = wikiRef(saved); const rollbackPoint = await this.dependencies.wiki.createRollback(operation, [ref], { wiki: jsonValue(current), content: beforeContent ?? "" }, { wiki: jsonValue(saved), content: input.content ?? beforeContent ?? "" });
       return { resource: saved, ref, rollbackPoint, summary: `Updated wiki page ${saved.title}.` };
     }});
   }
@@ -117,7 +118,7 @@ export class WikiDomainService {
     return this.dependencies.wiki.runMutation({ session, envelope, operationName, proposedEffects: [effect], targetResourceRefs: [wikiRef(current)], execute: async (operation) => {
       const saved = await this.dependencies.wiki.setState(id, state);
       if (!saved) throw this.dependencies.wiki.requestError("not_found", `Wiki page not found: ${id}`);
-      const ref = wikiRef(saved); const rollbackPoint = await this.dependencies.wiki.createRollback(operation, [ref], { wiki: current as unknown as JsonValue }, { wiki: saved as unknown as JsonValue });
+      const ref = wikiRef(saved); const rollbackPoint = await this.dependencies.wiki.createRollback(operation, [ref], { wiki: jsonValue(current) }, { wiki: jsonValue(saved) });
       return { resource: saved, ref, rollbackPoint, summary: `${summaryPrefix} ${saved.title}.` };
     }});
   }
