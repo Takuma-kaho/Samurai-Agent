@@ -1,17 +1,19 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import type { ActivityInboxItem, CollectionSchema, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import { storedCollectionRecordSchema, storedCollectionSchema } from "../../../value-objects/collection.js";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { collectionRecordWriteValueSchema } from "../../../value-objects/collection.js";
 
 const Input = z.object({
-  "collection_id": z.string() .optional(),
+  "collection_id": z.string().trim().min(1),
   "envelope_id": z.string() .optional(),
   "input_locale": z.string() .optional(),
   "input_message_id": z.string() .optional(),
   "metadata": z.record(domainJsonValueSchema) .optional(),
   "output_locale": z.string() .optional(),
   "provider_tool_call": z.boolean() .optional(),
-  "record_id": z.string() .optional(),
+  "record_id": z.string().trim().min(1),
   "session_id": z.string() .optional(),
   "source_operation_id": z.string() .optional(),
   "surface_operation_id": z.string() .optional(),
@@ -20,7 +22,16 @@ const Input = z.object({
 const Output = collectionRecordWriteValueSchema;
 
 export interface CollectionRecordDeletePorts {
-  executeCollectionRecordDelete(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getCollectionSchemaForMutation(id: string): Promise<z.infer<typeof storedCollectionSchema> | undefined>;
+  collectionDeleteAllowed(schema: CollectionSchema, viewId?: string): boolean;
+  getCollectionRecord(collectionId: string, recordId: string): Promise<z.infer<typeof storedCollectionRecordSchema> | undefined>;
+  deleteCollectionRecord(collectionId: string, recordId: string): Promise<z.infer<typeof Output>["resource"]>;
+  collectionRecordRef(record: z.infer<typeof Output>["resource"]): ResourceRef;
+  collectionMutationError(code: "forbidden" | "not_found", message: string): Error;
+  ensureCollectionMutationSession(): Promise<SessionRecord>;
+  createCollectionMutationEnvelope(content: string): MessageEnvelope;
+  createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, z.infer<typeof domainJsonValueSchema>>, after: Record<string, z.infer<typeof domainJsonValueSchema>>): Promise<RollbackPoint>;
+  runCollectionMutation<T>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
@@ -70,7 +81,24 @@ const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionRecordDelete(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionRecordDelete(context, input);
+        const schema = await ports.getCollectionSchemaForMutation(input.collection_id);
+        if (!schema) throw ports.collectionMutationError("not_found", `Collection schema not found: ${input.collection_id}`);
+        if (!ports.collectionDeleteAllowed(schema, input.view_id)) throw ports.collectionMutationError("forbidden", "collection_record_delete_not_allowed");
+        const record = await ports.getCollectionRecord(input.collection_id, input.record_id);
+        if (!record) throw ports.collectionMutationError("not_found", `Collection record not found: ${input.collection_id}/${input.record_id}`);
+        const session = await ports.ensureCollectionMutationSession();
+        const envelope = ports.createCollectionMutationEnvelope(`Delete collection record: ${input.collection_id}/${input.record_id}`);
+        const result = await ports.runCollectionMutation({
+          session, envelope, operationName: "collection.record.delete",
+          proposedEffects: ["Delete a collection record file and SQLite index row."],
+          execute: async (operation) => {
+            const deleted = await ports.deleteCollectionRecord(input.collection_id, input.record_id);
+            const ref = ports.collectionRecordRef(deleted);
+            const rollbackPoint = await ports.createCollectionRollback(operation, [ref], { record: domainJsonValueSchema.parse(record) }, {});
+            return { resource: deleted, ref, rollbackPoint, summary: `Deleted collection record ${deleted.collection_id}/${deleted.id}.` };
+          }
+        });
+        return { ok: true, value: Output.parse(result) };
       }
     };
   }

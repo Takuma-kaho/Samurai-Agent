@@ -1,5 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import type { CollectionSchema } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { collectionSchemaGetValueSchema } from "../../../value-objects/collection.js";
 
@@ -19,7 +20,8 @@ const Input = z.object({
 const Output = collectionSchemaGetValueSchema;
 
 export interface CollectionSchemaGetPorts extends DomainQueryPorts {
-  executeCollectionSchemaGet(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getCollectionSchema(id: string): Promise<(CollectionSchema & { file_path: string }) | undefined>;
+  collectionSchemaQueryError(message: string): Error;
 }
 
 const collectionSchemaGet = defineQuery<CollectionSchemaGetPorts>()({
@@ -66,7 +68,9 @@ const collectionSchemaGet = defineQuery<CollectionSchemaGetPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionSchemaGet(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionSchemaGet(context, input);
+        const schema = await ports.getCollectionSchema(input.collection_id);
+        if (!schema) throw ports.collectionSchemaQueryError(`Collection schema not found: ${input.collection_id}`);
+        return { ok: true, value: Output.parse({ action: "getSchema", collection_id: schema.id, schema }) };
       }
     };
   }

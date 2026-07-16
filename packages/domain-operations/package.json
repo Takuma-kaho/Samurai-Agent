@@ -14,6 +14,8 @@
   },
   "dependencies": {
     "@samurai-agent/core-schemas": "workspace:*",
+    "@samurai-agent/gateway": "workspace:*",
+    "@samurai-agent/skills": "workspace:*",
     "zod": "^3.25.76"
   }
 }

@@ -12,40 +12,58 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       })
     },
     "collection.patch.apply": {
-      executeCollectionPatchApply: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.applyPatch(input)
-      })
+      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
+      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
+      applyCollectionRecordPatch: (input) => services.collectionDomainService.applyCollectionRecordPatch(input),
+      mapCollectionPatchError: (error) => services.collectionDomainService.mapCollectionPatchError(error),
+      collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
+      createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
+      queueCollectionTrigger: (input) => services.collectionDomainService.queueCollectionTrigger(input),
+      runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.record.create": {
-      executeCollectionRecordCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.createRecord(input)
-      })
+      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
+      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
+      saveCollectionRecord: (record) => services.collectionDomainService.saveCollectionRecord(record),
+      collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
+      createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
+      queueCollectionTrigger: (input) => services.collectionDomainService.queueCollectionTrigger(input),
+      runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.record.delete": {
-      executeCollectionRecordDelete: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.deleteRecord(input)
-      })
+      getCollectionSchemaForMutation: (id) => services.collectionDomainService.getCollectionSchemaForMutation(id),
+      collectionDeleteAllowed: (schema, viewId) => services.collectionDomainService.collectionDeleteAllowed(schema, viewId),
+      getCollectionRecord: (collectionId, recordId) => services.collectionDomainService.getCollectionRecord(collectionId, recordId),
+      deleteCollectionRecord: (collectionId, recordId) => services.collectionDomainService.deleteCollectionRecord(collectionId, recordId),
+      collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
+      collectionMutationError: (code, message) => services.collectionDomainService.collectionMutationError(code, message),
+      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
+      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
+      createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
+      runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.reindex": {
-      executeCollectionReindex: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.reindex()
-      })
+      collectionMutationContract: (id) => services.collectionDomainService.collectionMutationContract(id),
+      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
+      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
+      reindexCollectionStore: () => services.collectionDomainService.reindexCollectionStore(),
+      runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.schema.save": {
-      executeCollectionSchemaSave: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.saveSchema(input)
-      })
+      getCollectionSchemaForMutation: (id) => services.collectionDomainService.getCollectionSchemaForMutation(id),
+      saveCollectionSchema: (schema) => services.collectionDomainService.saveCollectionSchema(schema),
+      updateCollectionSchema: (schema) => services.collectionDomainService.updateCollectionSchema(schema),
+      collectionSchemaRef: (schema) => services.collectionDomainService.collectionSchemaRef(schema),
+      createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
+      collectionMutationContract: (id) => services.collectionDomainService.collectionMutationContract(id),
+      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
+      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
+      runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.records.list": {
-      executeCollectionRecordsList: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.listRecords(input)
-      })
+      getCollectionSchema: (id) => services.collectionDomainService.getCollectionSchema(id),
+      listCollectionRecords: (schema, input) => services.collectionDomainService.listCollectionRecords(schema, input),
+      collectionRecordsQueryError: (message) => services.collectionDomainService.collectionQueryError(message)
     },
     "collection.schema.docs": {
       executeCollectionSchemaDocs: async (context, input) => ({
@@ -54,17 +72,11 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       })
     },
     "collection.schema.get": {
-      executeCollectionSchemaGet: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.getSchema(input)
-      })
+      getCollectionSchema: (id) => services.collectionDomainService.getCollectionSchema(id),
+      collectionSchemaQueryError: (message) => services.collectionDomainService.collectionQueryError(message)
     },
     "collection.view.present": {
-      executeCollectionViewPresent: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.presentView(input)
-      })
+      presentCollectionView: (input) => services.collectionDomainService.presentCollectionView(input)
     }
   };
 }
-

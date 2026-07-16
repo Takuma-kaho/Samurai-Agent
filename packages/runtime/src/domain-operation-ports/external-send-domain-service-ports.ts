@@ -6,23 +6,33 @@ type Ports = Pick<DomainOperationPorts, "external.send" | "external.send.dispatc
 export function createExternalSendDomainServicePorts(services: Pick<RuntimeDomainServices, "externalSendDomainService">): Ports {
   return {
     "external.send": {
-      executeExternalSend: async (context, input) => ({
-        ok: true as const,
-        value: await services.externalSendDomainService.request(input)
-      })
+      ensureExternalSendSession: () => services.externalSendDomainService.ensureExternalSendSession(),
+      createExternalSendEnvelope: (session, content) => services.externalSendDomainService.createExternalSendEnvelope(session, content),
+      createExternalSendId: () => services.externalSendDomainService.createExternalSendId(),
+      externalSendNow: () => services.externalSendDomainService.externalSendNow(),
+      saveExternalSend: (record) => services.externalSendDomainService.saveExternalSend(record),
+      createExternalSendRollback: (operation, refs, before, after) => services.externalSendDomainService.createExternalSendRollback(operation, refs, before, after),
+      runExternalSendMutation: (input) => services.externalSendDomainService.runExternalSendMutation(input)
     },
     "external.send.dispatch": {
-      executeExternalSendDispatch: async (context, input) => ({
-        ok: true as const,
-        value: await services.externalSendDomainService.dispatch(input)
-      })
+      getExternalSend: (id) => services.externalSendDomainService.getExternalSend(id),
+      saveExternalSend: (record) => services.externalSendDomainService.saveExternalSend(record),
+      dispatchExternalSend: (record, dryRun) => services.externalSendDomainService.dispatchExternalSend(record, dryRun),
+      ensureExternalSendSession: () => services.externalSendDomainService.ensureExternalSendSession(),
+      createExternalSendEnvelope: (session, content) => services.externalSendDomainService.createExternalSendEnvelope(session, content),
+      externalSendNow: () => services.externalSendDomainService.externalSendNow(),
+      externalSendDefaultDryRun: () => services.externalSendDomainService.externalSendDefaultDryRun(),
+      externalSendNotFound: (id) => services.externalSendDomainService.externalSendNotFound(id),
+      runExternalSendMutation: (input) => services.externalSendDomainService.runExternalSendMutation(input)
     },
     "external.send.prepare": {
-      executeExternalSendPrepare: async (context, input) => ({
-        ok: true as const,
-        value: await services.externalSendDomainService.prepare(input)
-      })
+      ensureExternalSendSession: () => services.externalSendDomainService.ensureExternalSendSession(),
+      createExternalSendEnvelope: (session, content) => services.externalSendDomainService.createExternalSendEnvelope(session, content),
+      createExternalSendId: () => services.externalSendDomainService.createExternalSendId(),
+      externalSendNow: () => services.externalSendDomainService.externalSendNow(),
+      saveExternalSend: (record) => services.externalSendDomainService.saveExternalSend(record),
+      createExternalSendRollback: (operation, refs, before, after) => services.externalSendDomainService.createExternalSendRollback(operation, refs, before, after),
+      runExternalSendMutation: (input) => services.externalSendDomainService.runExternalSendMutation(input)
     }
   };
 }
-

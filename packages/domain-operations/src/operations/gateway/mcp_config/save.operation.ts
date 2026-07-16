@@ -1,19 +1,14 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import type { GatewayMcpConfigRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewayMcpConfigValueSchema } from "../../../value-objects/gateway.js";
 
-const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
-}).strict();
+const Input: z.ZodType<
+  GatewayMcpConfigRecord,
+  z.ZodTypeDef,
+  z.input<typeof gatewayMcpConfigValueSchema>
+> = gatewayMcpConfigValueSchema;
 const Output = gatewayMcpConfigValueSchema;
 
 export interface GatewayMcpConfigSavePorts {

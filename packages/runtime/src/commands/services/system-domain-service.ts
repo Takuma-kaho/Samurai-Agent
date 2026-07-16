@@ -91,6 +91,39 @@ export interface SystemDomainServiceDependencies {
 export class SystemDomainService {
   constructor(private readonly dependencies: SystemDomainServiceDependencies) {}
 
+  getRollbackPoint(id: string) { return this.dependencies.rollback.get(id); }
+  rollbackError(code: "not_found" | "conflict" | "forbidden", message: string) { return this.dependencies.rollback.requestError(code, message); }
+  resolveRollbackPath(path: string) { return this.dependencies.rollback.resolve(path); }
+  ensureRollbackSession() { return this.dependencies.rollback.ensureSession(); }
+  createRollbackEnvelope(content: string) { return this.dependencies.rollback.createEnvelope(content); }
+  rollbackFileRef(path: string) { return this.dependencies.rollback.fileRef(path); }
+  readRollbackFile(path: string) { return this.dependencies.rollback.read(path); }
+  removeRollbackFile(path: string) { return this.dependencies.rollback.remove(path); }
+  ensureRollbackParent(path: string) { return this.dependencies.rollback.ensureParent(path); }
+  writeRollbackFile(path: string, content: string) { return this.dependencies.rollback.write(path, content); }
+  createRestoreRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.rollback.createRollback(operation, refs, before, after); }
+  runRollbackMutation(input: Parameters<SystemDomainServiceDependencies["rollback"]["runMutation"]>[0]) { return this.dependencies.rollback.runMutation(input); }
+  currentTimeMillis() { return Date.now(); }
+  getReflectionSession(id: string) { return this.dependencies.operations.getSession(id); }
+  reflectionSessionNotFoundError(id: string) { return this.dependencies.rollback.requestError("not_found", `Session not found: ${id}`); }
+  listReflectionMessages(id: string) { return this.dependencies.operations.listMessages(id); }
+  listReflectionToolRuns(runId?: string) { return this.dependencies.operations.listToolRuns(runId); }
+  listReflectionWorkspaceChanges(sessionId?: string) { return this.dependencies.operations.listWorkspaceChanges(sessionId); }
+  listReflectionBackendEvents(input: { runId?: string; sessionId?: string }) { return this.dependencies.operations.listBackendEvents(input); }
+  loadReflectionArtifacts(input: { sessionId: string; sourceRunId?: string; workspaceChanges: unknown[] }) { return this.dependencies.operations.loadArtifacts(input); }
+  executeReflectionWorkflow(input: Record<string, unknown>) { return this.dependencies.operations.executeReflection(input); }
+  listReflectionSuggestions() { return this.dependencies.operations.listReflectionSuggestions(); }
+  reflectionSuggestionError(code: "not_found" | "conflict", message: string) { return this.dependencies.rollback.requestError(code, message); }
+  ensureReflectionMutationSession() { return this.dependencies.operations.ensureReflectionSession(); }
+  createReflectionMutationEnvelope(content: string) { return this.dependencies.operations.createReflectionEnvelope(content); }
+  runReflectionSuggestionMutation(input: Parameters<SystemOperationPort["runReflectionMutation"]>[0]) { return this.dependencies.operations.runReflectionMutation(input); }
+  createReflectionMemoryTarget(input: Parameters<SystemOperationPort["createMemoryTarget"]>[0]) { return this.dependencies.operations.createMemoryTarget(input); }
+  createReflectionWikiTarget(input: Parameters<SystemOperationPort["createWikiTarget"]>[0]) { return this.dependencies.operations.createWikiTarget(input); }
+  createReflectionSkillTarget(input: Parameters<SystemOperationPort["createSkillTarget"]>[0]) { return this.dependencies.operations.createSkillTarget(input); }
+  createReflectionTargetRollback(operation: OperationRecord, refs: ResourceRef[], after: Record<string, JsonValue>) { return this.dependencies.operations.createReflectionRollback(operation, refs, after); }
+  updateReflectionSuggestion(suggestion: ReflectionSuggestion) { return this.dependencies.operations.updateReflectionSuggestion(suggestion); }
+  reflectionNow() { return this.dependencies.operations.now(); }
+
   runReflection(payload: Record<string, JsonValue>) {
     return this.runReflectionInput({
       sessionId: requiredString(payload, "session_id"),

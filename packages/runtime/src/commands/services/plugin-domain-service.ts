@@ -1,5 +1,3 @@
-import type { JsonValue } from "@samurai-agent/core-schemas";
-
 export interface PluginStatusPort {
   setEnabled(pluginId: string, enabled: boolean): boolean;
   findStatus(pluginId: string): { manifest_id: string; version: string } | undefined;
@@ -14,29 +12,19 @@ export interface PluginDomainServiceDependencies {
 export class PluginDomainService {
   constructor(private readonly dependencies: PluginDomainServiceDependencies) {}
 
-  async setStatus(payload: Record<string, JsonValue>) {
-    const pluginId = requiredString(payload, "plugin_id");
-    const status = optionalString(payload.status);
-    if (status !== "enabled" && status !== "disabled") {
-      throw this.dependencies.requestError("conflict", "plugin_status_required");
-    }
-    const enabled = status === "enabled";
-    if (!this.dependencies.plugins.setEnabled(pluginId, enabled)) {
-      throw this.dependencies.requestError("not_found", "plugin_not_found");
-    }
-    const plugin = this.dependencies.plugins.findStatus(pluginId);
-    if (!plugin) throw this.dependencies.requestError("not_found", "plugin_not_found");
-    const state = await this.dependencies.plugins.saveState({ manifestId: pluginId, enabled, version: plugin.version });
-    return { plugin, state };
+  setEnabled(id: string, enabled: boolean) {
+    return this.dependencies.plugins.setEnabled(id, enabled);
   }
-}
 
-function optionalString(value: JsonValue | undefined): string {
-  return typeof value === "string" ? value.trim() : "";
-}
+  findStatus(id: string) {
+    return this.dependencies.plugins.findStatus(id);
+  }
 
-function requiredString(payload: Record<string, JsonValue>, key: string): string {
-  const value = optionalString(payload[key]);
-  if (!value) throw new Error(`domain_operation_required_field:${key}`);
-  return value;
+  saveState(input: { manifestId: string; enabled: boolean; version: string }) {
+    return this.dependencies.plugins.saveState(input);
+  }
+
+  notFoundError(): Error {
+    return this.dependencies.requestError("not_found", "plugin_not_found");
+  }
 }

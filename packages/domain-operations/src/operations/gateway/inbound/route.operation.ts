@@ -1,46 +1,38 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { GatewayChannelSchema, type GatewayChannel, type JsonValue } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewayInboundValueSchema } from "../../../value-objects/gateway-inbound.js";
 
 const Input = z.object({
   "account_id": z.string() .optional(),
-  "action_id": z.string() .optional(),
   "backend_id": z.string() .optional(),
-  "body": z.string() .optional(),
-  "channel": z.string() .optional(),
-  "content": z.string() .optional(),
-  "envelope_id": z.string() .optional(),
-  "error_code": z.string() .optional(),
-  "input": z.record(domainJsonValueSchema) .optional(),
+  "body": z.string().trim().min(1),
+  "channel": GatewayChannelSchema,
   "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "message": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "model": z.string() .optional(),
+  "metadata": z.record(domainJsonValueSchema).default({}),
   "output_locale": z.string() .optional(),
-  "output_summary": z.string() .optional(),
-  "provider": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "provider_tool_name": z.string() .optional(),
-  "reason": z.string() .optional(),
-  "retryable": z.boolean() .optional(),
   "route": z.string() .optional(),
-  "session_id": z.string() .optional(),
-  "source_identity": z.string() .optional(),
+  "source_identity": z.string().trim().min(1).max(200),
   "source_label": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "status": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "text": z.string() .optional(),
-  "thread_id": z.string() .optional(),
-  "tool_call_id": z.string() .optional(),
-  "user_intent": z.string() .optional()
+  "thread_id": z.string() .optional()
 }).strict();
 const Output = gatewayInboundValueSchema;
 
 export interface GatewayInboundRoutePorts {
-  executeGatewayInboundRoute(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  routeGatewayInbound(input: {
+    channel: GatewayChannel;
+    source_identity: string;
+    body: string;
+    source_label?: string;
+    account_id?: string;
+    thread_id?: string;
+    route?: string;
+    metadata: Record<string, JsonValue>;
+    backend_id?: string;
+    input_locale?: string;
+    output_locale?: string;
+  }): Promise<z.infer<typeof Output>>;
 }
 
 const gatewayInboundRoute = defineCommand<GatewayInboundRoutePorts>()({
@@ -85,7 +77,8 @@ const gatewayInboundRoute = defineCommand<GatewayInboundRoutePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGatewayInboundRoute(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGatewayInboundRoute(context, input);
+        const value = await ports.routeGatewayInbound(input);
+        return { ok: true, value };
       }
     };
   }

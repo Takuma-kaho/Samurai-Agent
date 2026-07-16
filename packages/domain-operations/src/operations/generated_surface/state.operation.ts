@@ -1,5 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { SurfaceInteractionRecordSchema, createId, nowIso, type GeneratedSurfaceDefinition, type SurfaceInteractionRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { generatedSurfaceStateValueSchema } from "../../value-objects/generated-surface.js";
 
@@ -8,6 +9,8 @@ const Input = z.object({
   "envelope_id": z.string() .optional(),
   "input_locale": z.string() .optional(),
   "input_message_id": z.string() .optional(),
+  "interaction_id": z.string().trim().min(1).optional(),
+  "message_id": z.string().trim().min(1).optional(),
   "metadata": z.record(domainJsonValueSchema) .optional(),
   "output_locale": z.string() .optional(),
   "provider_tool_call": z.boolean() .optional(),
@@ -19,7 +22,9 @@ const Input = z.object({
 const Output = generatedSurfaceStateValueSchema;
 
 export interface GeneratedSurfaceStatePorts {
-  executeGeneratedSurfaceState(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  updateGeneratedSurfaceState(id: string, state: "ephemeral" | "pinned" | "archived"): Promise<GeneratedSurfaceDefinition | undefined>;
+  saveGeneratedSurfaceInteraction(record: SurfaceInteractionRecord): Promise<SurfaceInteractionRecord>;
+  generatedSurfaceStateError(code: "conflict" | "not_found", message: string): Error;
 }
 
 const generatedSurfaceState = defineCommand<GeneratedSurfaceStatePorts>()({
@@ -64,7 +69,16 @@ const generatedSurfaceState = defineCommand<GeneratedSurfaceStatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGeneratedSurfaceState(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGeneratedSurfaceState(context, input);
+        const state = input.action === "pin" ? "pinned" : input.action === "unpin" ? "ephemeral" : "archived";
+        const surface = await ports.updateGeneratedSurfaceState(input.surface_id, state);
+        if (!surface) throw ports.generatedSurfaceStateError("not_found", "generated_surface_not_found");
+        const kind = input.action === "pin" ? "pinned" : input.action === "unpin" ? "unpinned" : "dismissed";
+        await ports.saveGeneratedSurfaceInteraction(SurfaceInteractionRecordSchema.parse({
+          id: input.interaction_id ?? createId("surface_interaction"), kind,
+          session_id: surface.session_id, message_id: input.message_id,
+          surface_id: surface.id, revision_id: surface.current_revision_id, created_at: nowIso()
+        }));
+        return { ok: true, value: Output.parse(surface) };
       }
     };
   }

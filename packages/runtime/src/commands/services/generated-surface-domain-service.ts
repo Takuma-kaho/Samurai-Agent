@@ -35,6 +35,16 @@ export class GeneratedSurfaceDomainService {
     requestError: (code: "conflict" | "forbidden" | "not_found", message: string) => Error;
   }) {}
 
+  getSurface(id: string) { return this.dependencies.surfaces.getSurface(id); }
+  getRevision(id: string) { return this.dependencies.surfaces.getRevision(id); }
+  readBundle(id: string) { return this.dependencies.surfaces.readBundle(id); }
+  saveInteractionRecord(record: SurfaceInteractionRecord) { return this.dependencies.surfaces.saveInteraction(record); }
+  updateSurfaceState(id: string, state: "ephemeral" | "pinned" | "archived") { return this.dependencies.surfaces.updateState(id, state); }
+  dispatchSurfaceCommand(input: Parameters<GeneratedSurfacePort["dispatchCommand"]>[0]) { return this.dependencies.surfaces.dispatchCommand(input); }
+  buildSurfaceRevision(input: Parameters<typeof buildGeneratedSurfaceRevision>[0]) { return buildGeneratedSurfaceRevision(input); }
+  saveSurfaceRevision(input: Parameters<GeneratedSurfacePort["saveRevision"]>[0]) { return this.dependencies.surfaces.saveRevision(input); }
+  surfaceError(code: "conflict" | "forbidden" | "not_found", message: string) { return this.dependencies.requestError(code, message); }
+
   async runAction(payload: Record<string, JsonValue>) {
     const surface = await this.requireSurface(payload);
     const revisionId = optionalString(payload.revision_id) || surface.current_revision_id;

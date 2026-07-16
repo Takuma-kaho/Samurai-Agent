@@ -1,18 +1,9 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "requested_kind": z.string() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "requested_kind": z.enum(["generated_surface", "built_in_surface"]).default("built_in_surface")
 }).strict();
 const Output = z.object({
   requested_kind: z.string().min(1),
@@ -21,9 +12,7 @@ const Output = z.object({
   fallback_chain: z.tuple([z.literal("built_in_surface"), z.literal("artifact"), z.literal("text")])
 }).strict();
 
-export interface PresentationPlanPorts extends DomainQueryPorts {
-  executePresentationPlan(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
-}
+export interface PresentationPlanPorts extends DomainQueryPorts {}
 
 const presentationPlan = defineQuery<PresentationPlanPorts>()({
   ...{
@@ -65,10 +54,21 @@ const presentationPlan = defineQuery<PresentationPlanPorts>()({
 },
   input: Input,
   output: Output,
-  createHandler(ports) {
+  createHandler() {
     return {
       execute: async function handlePresentationPlan(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executePresentationPlan(context, input);
+        const generated = input.requested_kind === "generated_surface";
+        return {
+          ok: true,
+          value: {
+            requested_kind: input.requested_kind,
+            selected_kind: generated ? "generated_surface" : "built_in_surface",
+            reason: generated
+              ? "User explicitly requested an independent UI."
+              : "A built-in Workspace renderer is preferred when it can represent the result.",
+            fallback_chain: ["built_in_surface", "artifact", "text"]
+          }
+        };
       }
     };
   }

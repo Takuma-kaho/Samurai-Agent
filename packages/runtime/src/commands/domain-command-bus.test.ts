@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import type { DomainCommandExecutionRecord } from "@samurai-agent/core-schemas";
 import { DomainCommandConflictError, DomainCommandOutcomeUnknownError, DomainCommandReplayError, DurableDomainCommandBus } from "./domain-command-bus";
@@ -19,6 +19,13 @@ async function createStore(): Promise<WorkspaceStore> {
 }
 
 describe("DurableDomainCommandBus", () => {
+  it("rejects commands without an idempotency key", async () => {
+    const store = {} as WorkspaceStore;
+    await expect(new DurableDomainCommandBus(store).execute({ commandId: "test.missing-key", inputSource: "test", payload: {} }, async () => null)).rejects.toMatchObject({
+      name: "DomainCommandIdempotencyKeyRequiredError", code: "idempotency_key_required"
+    });
+  });
+
   it("executes one side effect for 100 concurrent requests with the same key", async () => {
     const store = await createStore();
     const buses = Array.from({ length: 10 }, () => new DurableDomainCommandBus(store));
@@ -85,6 +92,11 @@ describe("DurableDomainCommandBus", () => {
     await expect(new DurableDomainCommandBus(store).execute({ commandId: "test.fallback", inputSource: "test", correlationId: "explicit-correlation", payload: {}, idempotencyKey: "fallback" }, async () => null)).rejects.toMatchObject({
       code: "domain_command_failed", message: "[object Object]", retryable: true
     });
+    const structuredError = { code: "fixture_error", message: "structured failure", retryable: true, details: { reason: "fixture" } };
+    await expect(bus.execute({ commandId: "test.structured", inputSource: "test", payload: {}, idempotencyKey: "structured", executionClass: "external" }, async () => { throw structuredError; })).rejects.toBe(structuredError);
+    await expect(new DurableDomainCommandBus(store).execute({ commandId: "test.structured", inputSource: "test", payload: {}, idempotencyKey: "structured", executionClass: "external" }, async () => null)).rejects.toMatchObject({
+      code: "fixture_error", message: "structured failure", retryable: true, details: { reason: "fixture" }
+    });
     await store.close();
   });
 
@@ -115,11 +127,34 @@ describe("DurableDomainCommandBus", () => {
 
     await expect(executeWith({ ...base, status: "outcome_unknown" }, undefined)).rejects.toBeInstanceOf(DomainCommandOutcomeUnknownError);
     await expect(executeWith({ ...base, phase: "external_running" }, undefined)).rejects.toThrow("domain_command_execution_missing");
+    await expect(executeWith({ ...base, phase: "external_running" }, undefined, true)).rejects.toBeInstanceOf(DomainCommandOutcomeUnknownError);
     await expect(executeWith(base, undefined)).rejects.toThrow("domain_command_execution_missing");
     await expect(executeWith({ ...base, phase: "external_running" }, { ...base, status: "completed", result: { replayed: true } })).resolves.toEqual({ replayed: true });
     await expect(executeWith(base, { ...base, status: "failed", error: undefined })).rejects.toBeInstanceOf(DomainCommandReplayError);
     await expect(executeWith({ ...base, phase: "claimed", heartbeat_at: undefined, updated_at: undefined }, undefined, true, "external")).resolves.toEqual({ recovered: true });
     const liveWithoutRefresh = { ...base, heartbeat_at: new Date().toISOString(), updated_at: undefined };
     await expect(executeWith(liveWithoutRefresh, undefined, true)).resolves.toEqual({ recovered: true });
+    await expect(executeWith({ ...base, heartbeat_at: "invalid", updated_at: "invalid", created_at: "invalid" }, undefined, true)).resolves.toEqual({ recovered: true });
+  });
+
+  it("heartbeats while a claimed handler is still running", async () => {
+    vi.useFakeTimers();
+    try {
+      const heartbeat = vi.fn(async () => true);
+      const store = {
+        claimDomainCommandExecution: async (record: DomainCommandExecutionRecord) => ({ claimed: true as const, record }),
+        updateDomainCommandExecution: async (record: DomainCommandExecutionRecord) => record,
+        heartbeatDomainCommandExecution: heartbeat
+      } as unknown as WorkspaceStore;
+      let finish!: () => void;
+      const running = new Promise<void>((resolve) => { finish = resolve; });
+      const execution = new DurableDomainCommandBus(store, 3_000).execute({ commandId: "test.heartbeat", inputSource: "test", payload: {}, idempotencyKey: "heartbeat" }, async () => running);
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(heartbeat).toHaveBeenCalledTimes(1);
+      finish();
+      await expect(execution).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

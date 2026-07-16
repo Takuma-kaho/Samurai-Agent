@@ -6,11 +6,10 @@ type Ports = Pick<DomainOperationPorts, "plugin.status.set">;
 export function createPluginDomainServicePorts(services: Pick<RuntimeDomainServices, "pluginDomainService">): Ports {
   return {
     "plugin.status.set": {
-      executePluginStatusSet: async (context, input) => ({
-        ok: true as const,
-        value: await services.pluginDomainService.setStatus(input)
-      })
+      setPluginEnabled: (id, enabled) => services.pluginDomainService.setEnabled(id, enabled),
+      findPluginStatus: (id) => services.pluginDomainService.findStatus(id),
+      savePluginState: (input) => services.pluginDomainService.saveState(input),
+      pluginNotFoundError: () => services.pluginDomainService.notFoundError()
     }
   };
 }
-

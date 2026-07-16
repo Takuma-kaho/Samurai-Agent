@@ -1,27 +1,36 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { ResourceRefSchema, SupportedLocaleSchema } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { chatTurnValueSchema } from "../../../value-objects/chat.js";
 
 const Input = z.object({
-  "attachments": z.array(z.record(domainJsonValueSchema)) .optional(),
-  "backend_id": z.string() .optional(),
-  "content": z.string(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "temporary_context": z.array(z.record(domainJsonValueSchema)) .optional()
+  "attachments": z.array(ResourceRefSchema.strict()).default([]),
+  "backend_id": z.string().trim().min(1).optional(),
+  "content": z.string().trim().min(1),
+  "input_locale": SupportedLocaleSchema.optional(),
+  "metadata": z.record(domainJsonValueSchema).default({}),
+  "output_locale": SupportedLocaleSchema.optional(),
+  "session_id": z.string().trim().min(1).optional(),
+  "surface_operation_id": z.string().trim().min(1).optional(),
+  "temporary_context": z.array(z.object({
+    id: z.string().trim().min(1), kind: z.literal("desktop_screenshot"), label: z.string().optional(),
+    source_name: z.string().optional(), mime_type: z.string().trim().min(1), data_url: z.string().optional(),
+    file_path: z.string().optional(), created_at: z.string().datetime(), expires_at: z.string().datetime(),
+    metadata: z.record(domainJsonValueSchema).optional()
+  }).strict()).default([])
 }).strict();
 const Output = chatTurnValueSchema;
+type InputValue = z.infer<typeof Input>;
+type OutputValue = z.infer<typeof Output>;
 
 export interface ChatTurnRunPorts {
-  executeChatTurnRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  createChatSession(input: { output_locale?: InputValue["output_locale"] }): Promise<OutputValue["session"]>;
+  runChatTurn(input: {
+    sessionId: string; content: string; backend_id?: string; input_locale?: InputValue["input_locale"];
+    output_locale?: InputValue["output_locale"]; attachments: InputValue["attachments"];
+    temporary_context: InputValue["temporary_context"]; metadata: InputValue["metadata"];
+  }): Promise<OutputValue>;
 }
 
 const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
@@ -72,7 +81,12 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleChatTurnRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeChatTurnRun(context, input);
+        const sessionId = input.session_id ?? (await ports.createChatSession({ output_locale: input.output_locale })).id;
+        return { ok: true, value: await ports.runChatTurn({
+          sessionId, content: input.content, backend_id: input.backend_id, input_locale: input.input_locale,
+          output_locale: input.output_locale, attachments: input.attachments,
+          temporary_context: input.temporary_context, metadata: input.metadata
+        }) };
       }
     };
   }

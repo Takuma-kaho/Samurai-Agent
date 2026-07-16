@@ -12,11 +12,15 @@ export function createTranslationDomainServicePorts(services: Pick<RuntimeDomain
       })
     },
     "resource.translation_job.save": {
-      executeResourceTranslationJobSave: async (context, input) => ({
-        ok: true as const,
-        value: await services.translationDomainService.saveJob(input)
-      })
+      loadArtifactTranslationSource: (id) => services.translationDomainService.loadArtifactSource(id),
+      loadMemoryTranslationSource: (id) => services.translationDomainService.loadMemorySource(id),
+      loadWikiTranslationSource: (id) => services.translationDomainService.loadWikiSource(id),
+      loadSkillTranslationSource: (id) => services.translationDomainService.loadSkillSource(id),
+      loadCollectionRecordTranslationSource: (ref) => services.translationDomainService.loadCollectionRecordSource(ref),
+      stripTranslationSkillFrontmatter: (content) => services.translationDomainService.stripSkillFrontmatter(content),
+      hashTranslationContent: (content) => services.translationDomainService.hashContent(content),
+      saveTranslationAutomationJob: (input) => services.translationDomainService.saveAutomationJob(input),
+      translationSourceNotFoundError: (ref) => services.translationDomainService.translationSourceNotFoundError(ref)
     }
   };
 }
-

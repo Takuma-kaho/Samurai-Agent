@@ -1,31 +1,24 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { WorkItemRecordSchema, createId, nowIso, stableHash, type ObjectiveRecord, type WorkItemRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { workItemValueSchema } from "../../value-objects/work.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "instruction": z.string() .optional(),
-  "max_attempts": z.number() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "objective_id": z.string(),
-  "output_locale": z.string() .optional(),
-  "parent_work_item_id": z.string() .optional(),
-  "priority": z.number() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "work_idempotency_key": z.string() .optional(),
-  "work_item_id": z.string() .optional()
+  "instruction": z.string().trim().min(1),
+  "max_attempts": z.number().int().positive().default(3),
+  "objective_id": z.string().trim().min(1),
+  "parent_work_item_id": z.string().trim().min(1).optional(),
+  "priority": z.number().int().default(0),
+  "work_idempotency_key": z.string().trim().min(1).optional(),
+  "work_item_id": z.string().trim().min(1).optional()
 }).strict();
 const Output = workItemValueSchema;
 
 export interface WorkItemCreatePorts {
-  executeWorkItemCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getWorkItemObjective(id: string): Promise<ObjectiveRecord | undefined>;
+  saveWorkItem(record: WorkItemRecord): Promise<WorkItemRecord>;
+  workItemObjectiveNotFoundError(): Error;
 }
 
 const workItemCreate = defineCommand<WorkItemCreatePorts>()({
@@ -71,7 +64,16 @@ const workItemCreate = defineCommand<WorkItemCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWorkItemCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeWorkItemCreate(context, input);
+        if (!await ports.getWorkItemObjective(input.objective_id)) throw ports.workItemObjectiveNotFoundError();
+        const now = nowIso();
+        const record = WorkItemRecordSchema.parse({
+          id: input.work_item_id ?? createId("work"), objective_id: input.objective_id,
+          parent_work_item_id: input.parent_work_item_id, instruction: input.instruction,
+          status: "ready", priority: input.priority, attempt: 0, max_attempts: input.max_attempts,
+          idempotency_key: input.work_idempotency_key ?? `${input.objective_id}:${stableHash(input)}`,
+          created_at: now, updated_at: now
+        });
+        return { ok: true, value: await ports.saveWorkItem(record) };
       }
     };
   }

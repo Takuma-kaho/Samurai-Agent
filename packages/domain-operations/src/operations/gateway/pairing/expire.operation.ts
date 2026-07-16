@@ -1,5 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { nowIso, type GatewayPairingRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewayPairingListValueSchema } from "../../../value-objects/gateway.js";
 
@@ -18,7 +19,8 @@ const Input = z.object({
 const Output = gatewayPairingListValueSchema;
 
 export interface GatewayPairingExpirePorts {
-  executeGatewayPairingExpire(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  expireGatewayPairings(now: string): Promise<GatewayPairingRecord[]>;
+  emitGatewayPairingUpdated(record: GatewayPairingRecord): Promise<void>;
 }
 
 const gatewayPairingExpire = defineCommand<GatewayPairingExpirePorts>()({
@@ -62,7 +64,9 @@ const gatewayPairingExpire = defineCommand<GatewayPairingExpirePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGatewayPairingExpire(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGatewayPairingExpire(context, input);
+        const expired = await ports.expireGatewayPairings(input.now?.trim() || nowIso());
+        for (const pairing of expired) await ports.emitGatewayPairingUpdated(pairing);
+        return { ok: true, value: expired };
       }
     };
   }

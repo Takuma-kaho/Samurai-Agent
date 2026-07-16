@@ -1,25 +1,17 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import type { ClientEventRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { clientEventValueSchema } from "../../../value-objects/client-event.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "error_code": z.string() .optional(),
-  "event_id": z.string(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "event_id": z.string().min(1)
 }).strict();
 const Output = clientEventValueSchema;
 
 export interface ClientEventDeliverPorts {
-  executeClientEventDeliver(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  deliverClientEvent(id: string): Promise<ClientEventRecord | undefined>;
+  clientEventNotFoundError(): Error;
 }
 
 const clientEventDeliver = defineCommand<ClientEventDeliverPorts>()({
@@ -62,7 +54,9 @@ const clientEventDeliver = defineCommand<ClientEventDeliverPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleClientEventDeliver(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeClientEventDeliver(context, input);
+        const event = await ports.deliverClientEvent(input.event_id);
+        if (!event) throw ports.clientEventNotFoundError();
+        return { ok: true, value: event };
       }
     };
   }

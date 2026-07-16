@@ -1,6 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import type { SettingsRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { settingsValueSchema } from "../../value-objects/system-records.js";
 
 const Input = z.object({
@@ -14,7 +15,7 @@ const Input = z.object({
 const Output = settingsValueSchema;
 
 export interface SettingsPatchPorts {
-  executeSettingsPatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  patchSettings(patch: Partial<SettingsRecord>): Promise<SettingsRecord>;
 }
 
 const settingsPatch = defineCommand<SettingsPatchPorts>()({
@@ -58,7 +59,7 @@ const settingsPatch = defineCommand<SettingsPatchPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleSettingsPatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeSettingsPatch(context, input);
+        return { ok: true, value: await ports.patchSettings(input) };
       }
     };
   }

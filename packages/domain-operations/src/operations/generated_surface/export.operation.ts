@@ -1,5 +1,5 @@
 // Domain operation module. Keep its contract and handler together.
-import { GeneratedSurfaceDefinitionSchema, GeneratedSurfaceRevisionRecordSchema } from "@samurai-agent/core-schemas";
+import { GeneratedSurfaceDefinitionSchema, GeneratedSurfaceRevisionRecordSchema, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord } from "@samurai-agent/core-schemas";
 import { z } from "zod";
 import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 
@@ -30,7 +30,10 @@ const Output = z.object({
 }).strict();
 
 export interface GeneratedSurfaceExportPorts extends DomainQueryPorts {
-  executeGeneratedSurfaceExport(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getGeneratedSurface(id: string): Promise<GeneratedSurfaceDefinition | undefined>;
+  getGeneratedSurfaceRevision(id: string): Promise<GeneratedSurfaceRevisionRecord | undefined>;
+  readGeneratedSurfaceBundle(id: string): Promise<{ html: string; css?: string; script?: string } | undefined>;
+  generatedSurfaceQueryError(message: string): Error;
 }
 
 const generatedSurfaceExport = defineQuery<GeneratedSurfaceExportPorts>()({
@@ -76,7 +79,16 @@ const generatedSurfaceExport = defineQuery<GeneratedSurfaceExportPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGeneratedSurfaceExport(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGeneratedSurfaceExport(context, input);
+        const surface = await ports.getGeneratedSurface(input.surface_id);
+        if (!surface) throw ports.generatedSurfaceQueryError("generated_surface_not_found");
+        const revisionId = input.revision_id ?? surface.current_revision_id;
+        const revision = await ports.getGeneratedSurfaceRevision(revisionId);
+        const bundle = revision ? await ports.readGeneratedSurfaceBundle(revision.id) : undefined;
+        if (!revision || revision.surface_id !== surface.id || !bundle) {
+          throw ports.generatedSurfaceQueryError("generated_surface_revision_not_found");
+        }
+        const format = input.format ?? "html";
+        return { ok: true, value: Output.parse({ surface, revision, bundle, format, file_name: `${surface.id}-revision-${revision.revision}.${format}` }) };
       }
     };
   }

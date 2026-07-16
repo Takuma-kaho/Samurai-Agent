@@ -1,5 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { revokePairing } from "@samurai-agent/gateway";
+import type { GatewayPairingRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewayPairingValueSchema } from "../../../value-objects/gateway.js";
 
@@ -18,7 +20,9 @@ const Input = z.object({
 const Output = gatewayPairingValueSchema;
 
 export interface GatewayPairingRevokePorts {
-  executeGatewayPairingRevoke(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  requireGatewayPairing(id: string): Promise<GatewayPairingRecord>;
+  saveGatewayPairing(record: GatewayPairingRecord): Promise<GatewayPairingRecord>;
+  emitGatewayPairingUpdated(record: GatewayPairingRecord): Promise<void>;
 }
 
 const gatewayPairingRevoke = defineCommand<GatewayPairingRevokePorts>()({
@@ -61,7 +65,9 @@ const gatewayPairingRevoke = defineCommand<GatewayPairingRevokePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGatewayPairingRevoke(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGatewayPairingRevoke(context, input);
+        const saved = await ports.saveGatewayPairing(revokePairing(await ports.requireGatewayPairing(input.pairing_id)));
+        await ports.emitGatewayPairingUpdated(saved);
+        return { ok: true, value: saved };
       }
     };
   }

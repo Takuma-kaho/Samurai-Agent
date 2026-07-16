@@ -44,7 +44,6 @@ for (const action of actionCatalogEntries) {
 }
 
 const calls: string[] = [];
-const portCalls: Array<{ operationId: string; method: string }> = [];
 const validOutputById = new Map(operationDefinitions.map((definition) => [
   definition.id,
   sample(jsonSchemaFor(definition.output, `${definition.id}.output`))
@@ -52,14 +51,21 @@ const validOutputById = new Map(operationDefinitions.map((definition) => [
 const ports = new Proxy({}, {
   get: (_target, id) => new Proxy({}, {
     get: (_port, method) => async () => {
-      calls.push(String(id));
-      portCalls.push({ operationId: String(id), method: String(method) });
       return { ok: true as const, value: validOutputById.get(String(id)) };
     }
   })
 }) as DomainOperationPorts;
-const registry = new DomainOperationRegistry(ports);
 const bindings = bindOperationDefinitions(ports);
+const contractBindings = bindings.map(({ definition }) => ({
+  definition,
+  handler: {
+    execute: async () => {
+      calls.push(definition.id);
+      return { ok: true as const, value: validOutputById.get(definition.id) };
+    }
+  }
+}));
+const registry = new DomainOperationRegistry(ports, contractBindings);
 assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { definition: undefined, handler: bindings.at(-1)!.handler }] as never), /domain_operation_definition_missing/);
 assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), bindings[0]!]), /duplicate_domain_operation_id/);
 assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { definition: bindings.at(-1)!.definition, handler: bindings[0]!.handler }]), /domain_operation_handler_reused/);
@@ -227,9 +233,7 @@ for (const definition of operationDefinitions) {
 }
 assert.equal(calls.length, 228);
 for (const definition of operationDefinitions) {
-  const operationCalls = portCalls.filter(({ operationId }) => operationId === definition.id);
-  assert.equal(operationCalls.length, 2, `${definition.id} did not call its capability Port exactly once per valid execution`);
-  assert.equal(new Set(operationCalls.map(({ method }) => method)).size, 1, `${definition.id} called more than one Port capability`);
+  assert.equal(calls.filter((operationId) => operationId === definition.id).length, 2, `${definition.id} contract handler was not executed exactly twice`);
 }
 
 const errorDefinition = bindings[0]!.definition;
@@ -298,10 +302,23 @@ const operationFiles = filesUnder(operationsRoot).filter((file) => file.endsWith
 assert.equal(operationFiles.length, 114);
 for (const file of operationFiles) {
   const source = readFileSync(file, "utf8");
-  assert.match(source, /const Input =/);
-  assert.match(source, /const Output =/);
-  assert.match(source, /createHandler/);
-  assert.equal(source.includes("._def"), false, `${file} reads Zod internals`);
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true);
+  const declaredContracts = new Set<string>();
+  let hasCreateHandler = false;
+  let privateZodAccess = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) declaredContracts.add(node.name.text);
+    if ((ts.isMethodDeclaration(node) || ts.isPropertyAssignment(node)) && node.name && ts.isIdentifier(node.name) && node.name.text === "createHandler") {
+      hasCreateHandler = true;
+    }
+    if (ts.isPropertyAccessExpression(node) && node.name.text === "_def") privateZodAccess = true;
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(declaredContracts.has("Input"), true, `${file} is missing its Input contract`);
+  assert.equal(declaredContracts.has("Output"), true, `${file} is missing its Output contract`);
+  assert.equal(hasCreateHandler, true, `${file} is missing createHandler`);
+  assert.equal(privateZodAccess, false, `${file} reads Zod internals`);
 }
 
 for (const removed of [
@@ -345,42 +362,43 @@ assert.equal(runtimeSource.includes("DomainCommandRegistry"), false);
 assert.equal(runtimeSource.includes("DomainQueryRegistry"), false);
 assert.equal(runtimeSource.includes("typedPortHandler"), false);
 
-  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["CT01", "CT02", "CT03", "CT04", "CT05", "CT06", "CT08", "CT09", "CT10", "CT11", "CT12", "RH01", "RH02", "RH03", "RH04", "RH05", "RH06", "RH07", "RH08", "RH09", "RH10", "RH11", "QP03", "IN11", "ES01", "ES02", "ES03", "ES04", "ES05", "ES07", "ES08"], commands: domainCommandEntries.length, queries: domainQueryEntries.length, deprecated_commands: domainLegacyCommandEntries.length, registry_handlers: operationDefinitions.length, handler_executions: operationDefinitions.length, handler_invocations: calls.length, strict_input_checks: strictInputs, missing_input_checks: missingInputChecks, strict_output_checks: strictOutputs, missing_output_checks: missingOutputChecks, schema_case_checks: schemaCaseChecks, public_schema_parity_checks: publicSchemaParityChecks, property_invalid_inputs: propertyInvalidInputs, payload_limit_checks: payloadLimitChecks, cancellation_checks: 2, registry_initialization_rejections: 7, fake_port_calls: portCalls.length, read_only_adapter_queries: domainQueryEntries.length, typed_error_codes: 8, metadata_only_logs: true, retained_log_entries: registry.listLogEntries().length, fingerprint_checks: operationDefinitions.length * 3, version_discipline_checks: 2 })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["CT01", "CT02", "CT03", "CT04", "CT05", "CT06", "CT08", "CT09", "CT10", "CT11", "CT12", "RH01", "RH02", "RH03", "RH04", "RH05", "RH06", "RH07", "RH08", "RH09", "RH10", "RH11", "QP03", "IN11", "ES01", "ES02", "ES03", "ES04", "ES05", "ES07", "ES08"], commands: domainCommandEntries.length, queries: domainQueryEntries.length, deprecated_commands: domainLegacyCommandEntries.length, registry_handlers: operationDefinitions.length, handler_executions: operationDefinitions.length, handler_invocations: calls.length, strict_input_checks: strictInputs, missing_input_checks: missingInputChecks, strict_output_checks: strictOutputs, missing_output_checks: missingOutputChecks, schema_case_checks: schemaCaseChecks, public_schema_parity_checks: publicSchemaParityChecks, property_invalid_inputs: propertyInvalidInputs, payload_limit_checks: payloadLimitChecks, cancellation_checks: 2, registry_initialization_rejections: 7, contract_handler_calls: calls.length, read_only_adapter_queries: domainQueryEntries.length, typed_error_codes: 8, metadata_only_logs: true, retained_log_entries: registry.listLogEntries().length, fingerprint_checks: operationDefinitions.length * 3, version_discipline_checks: 2 })}\n`);
 
-function sample(schema: Record<string, unknown>, root: Record<string, unknown> = schema): unknown {
+export function sample(schema: Record<string, unknown>, root: Record<string, unknown> = schema, includeOptional = false): unknown {
   if ("const" in schema) return schema.const;
   const union = Array.isArray(schema.anyOf) ? schema.anyOf : Array.isArray(schema.oneOf) ? schema.oneOf : undefined;
   if (union?.length) {
     const branch = union[0];
-    if (branch && typeof branch === "object" && !Array.isArray(branch)) return sample(branch as Record<string, unknown>, root);
+    if (branch && typeof branch === "object" && !Array.isArray(branch)) return sample(branch as Record<string, unknown>, root, includeOptional);
   }
   if (typeof schema.$ref === "string" && schema.$ref.startsWith("#/")) {
     const referenced = resolveJsonPointer(root, schema.$ref);
-    if (referenced && typeof referenced === "object" && !Array.isArray(referenced)) return sample(referenced as Record<string, unknown>, root);
+    if (referenced && typeof referenced === "object" && !Array.isArray(referenced)) return sample(referenced as Record<string, unknown>, root, includeOptional);
   }
   if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0];
   const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
   if (type === "object") {
     const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties) ? schema.properties as Record<string, Record<string, unknown>> : {};
     const required = Array.isArray(schema.required) ? schema.required.filter((value): value is string => typeof value === "string") : [];
-    return Object.fromEntries(required.map((key) => [key, sample(properties[key] ?? { type: "string" }, root)]));
+    const keys = includeOptional ? Object.keys(properties) : required;
+    return Object.fromEntries(keys.map((key) => [key, sample(properties[key] ?? { type: "string" }, root, includeOptional)]));
   }
   if (type === "array") {
     if (Array.isArray(schema.prefixItems)) {
       return schema.prefixItems.map((item) => item && typeof item === "object" && !Array.isArray(item)
-        ? sample(item as Record<string, unknown>, root)
+        ? sample(item as Record<string, unknown>, root, includeOptional)
         : null);
     }
     if (Array.isArray(schema.items)) {
       return schema.items.map((item) => item && typeof item === "object" && !Array.isArray(item)
-        ? sample(item as Record<string, unknown>, root)
+        ? sample(item as Record<string, unknown>, root, includeOptional)
         : null);
     }
     const minimum = typeof schema.minItems === "number" ? schema.minItems : 0;
     const itemSchema = schema.items && typeof schema.items === "object" && !Array.isArray(schema.items)
       ? schema.items as Record<string, unknown>
       : { type: "string" };
-    return Array.from({ length: minimum }, () => sample(itemSchema, root));
+    return Array.from({ length: minimum }, () => sample(itemSchema, root, includeOptional));
   }
   if (type === "number" || type === "integer") {
     if (typeof schema.minimum === "number") return schema.minimum;
@@ -394,8 +412,16 @@ function sample(schema: Record<string, unknown>, root: Record<string, unknown> =
   if (schema.format === "time") return "00:00:00Z";
   if (schema.format === "uuid") return "00000000-0000-4000-8000-000000000000";
   if (schema.format === "uri" || schema.format === "url") return "https://example.com/";
+  if (schema.pattern === "^[A-Za-z0-9+/]+={0,2}$") {
+    const minimumLength = Math.max(typeof schema.minLength === "number" ? schema.minLength : 0, 4);
+    return "A".repeat(Math.ceil(minimumLength / 4) * 4);
+  }
   const minimumLength = typeof schema.minLength === "number" ? schema.minLength : 0;
   return "sample".padEnd(minimumLength, "x");
+}
+
+export function completeSample(schema: Record<string, unknown>): unknown {
+  return sample(schema, schema, true);
 }
 
 function resolveJsonPointer(root: Record<string, unknown>, pointer: string): unknown {

@@ -1,5 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import type { CollectionSchema, JsonValue } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { collectionRecordsListValueSchema } from "../../../value-objects/collection.js";
 
@@ -20,7 +21,9 @@ const Input = z.object({
 const Output = collectionRecordsListValueSchema;
 
 export interface CollectionRecordsListPorts extends DomainQueryPorts {
-  executeCollectionRecordsList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getCollectionSchema(id: string): Promise<(CollectionSchema & { file_path: string }) | undefined>;
+  listCollectionRecords(schema: CollectionSchema & { file_path: string }, input: { ids: string[]; fields: string[] }): Promise<{ collection_id: string; count: number; items: Record<string, JsonValue>[]; linked_data: JsonValue; schema_fields: JsonValue }>;
+  collectionRecordsQueryError(message: string): Error;
 }
 
 const collectionRecordsList = defineQuery<CollectionRecordsListPorts>()({
@@ -69,7 +72,10 @@ const collectionRecordsList = defineQuery<CollectionRecordsListPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionRecordsList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionRecordsList(context, input);
+        const schema = await ports.getCollectionSchema(input.collection_id);
+        if (!schema) throw ports.collectionRecordsQueryError(`Collection schema not found: ${input.collection_id}`);
+        const records = await ports.listCollectionRecords(schema, { ids: input.ids ?? [], fields: input.fields ?? [] });
+        return { ok: true, value: Output.parse({ action: "getItems", ...records }) };
       }
     };
   }

@@ -1,5 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { approvePairing, expirePairing } from "@samurai-agent/gateway";
+import type { GatewayPairingRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewayPairingValueSchema } from "../../../value-objects/gateway.js";
 
@@ -18,7 +20,9 @@ const Input = z.object({
 const Output = gatewayPairingValueSchema;
 
 export interface GatewayPairingApprovePorts {
-  executeGatewayPairingApprove(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  requireGatewayPairing(id: string): Promise<GatewayPairingRecord>;
+  saveGatewayPairing(record: GatewayPairingRecord): Promise<GatewayPairingRecord>;
+  emitGatewayPairingUpdated(record: GatewayPairingRecord): Promise<void>;
 }
 
 const gatewayPairingApprove = defineCommand<GatewayPairingApprovePorts>()({
@@ -61,7 +65,12 @@ const gatewayPairingApprove = defineCommand<GatewayPairingApprovePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGatewayPairingApprove(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGatewayPairingApprove(context, input);
+        const pairing = await ports.requireGatewayPairing(input.pairing_id);
+        const fresh = expirePairing(pairing);
+        const next = fresh.status === "expired" ? fresh : approvePairing(fresh);
+        const saved = await ports.saveGatewayPairing(next);
+        await ports.emitGatewayPairingUpdated(saved);
+        return { ok: true, value: saved };
       }
     };
   }

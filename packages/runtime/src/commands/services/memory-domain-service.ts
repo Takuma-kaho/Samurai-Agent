@@ -86,6 +86,28 @@ export class MemoryDomainService {
     requestError: (code: "conflict" | "not_found", message: string) => Error;
   }) {}
 
+  getSession(id: string) { return this.dependencies.memories.getSession(id); }
+  getMemoryForArchive(id: string) { return this.dependencies.archive.getMemory(id); }
+  listMemoryForSession(id: string) { return this.dependencies.archive.listMemoryForSession(id); }
+  archiveMemoryRecord(id: string) { return this.dependencies.archive.archive(id); }
+  memoryArchiveError(code: "conflict" | "not_found", message: string) { return this.dependencies.requestError(code, message); }
+  memoryRef(memory: MemoryFrontmatter) { return this.dependencies.memories.memoryRef(memory); }
+  memoryArchiveCapabilityId() { return this.dependencies.archive.capabilityId; }
+  saveMemoryArchiveOperation(operation: OperationRecord) { return this.dependencies.archive.saveOperation(operation); }
+  updateMemoryArchiveOperation(operation: OperationRecord) { return this.dependencies.archive.updateOperation(operation); }
+  emitMemoryArchiveOperation(operation: OperationRecord) { return this.dependencies.archive.emitOperation(operation); }
+  createMemoryArchiveRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.archive.createRollback(operation, refs, before, after); }
+  rebuildMemoryActivity() { return this.dependencies.archive.rebuildActivity(); }
+  createMemorySession(input: { title?: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale }) { return this.dependencies.memories.createSession(input); }
+  ensureMemorySession() { return this.dependencies.memories.ensureSession(); }
+  memoryCreateError(message: string) { return this.dependencies.requestError("not_found", message); }
+  createMemoryEnvelope(input: Parameters<MemoryCommandPort["createEnvelope"]>[0]) { return this.dependencies.memories.createEnvelope(input); }
+  writeSessionMemory(envelope: MessageEnvelope, content: string) { return this.dependencies.memories.writeSessionMemory(envelope, content); }
+  writeTopicMemory(envelope: MessageEnvelope, topicKind: string, content: string) { return this.dependencies.memories.writeTopicMemory(envelope, topicKind, content); }
+  createMemoryRollback(operation: OperationRecord, refs: ResourceRef[], after: Record<string, JsonValue>) { return this.dependencies.memories.createRollback(operation, refs, after); }
+  emitMemoryCandidate(memory: MemoryFrontmatter) { return this.dependencies.memories.emitCandidate(memory); }
+  runMemoryMutation(input: Parameters<MemoryCommandPort["runMutation"]>[0]) { return this.dependencies.memories.runMutation(input); }
+
   archive(payload: Record<string, JsonValue>) {
     const sessionId = optionalString(payload.session_id);
     if (!sessionId) throw this.dependencies.requestError("conflict", "domain_command_memory_archive_session_id_required");

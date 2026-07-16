@@ -1,24 +1,20 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import type { ActivityInboxItem, ArtifactRecord, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactRepairWriteValueSchema } from "../../value-objects/artifact.js";
 
-const Input = z.object({
-  "artifact_id": z.string(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
-}).strict();
+const Input = z.object({ "artifact_id": z.string().trim().min(1) }).strict();
 const Output = artifactRepairWriteValueSchema;
 
 export interface ArtifactRepairPorts {
-  executeArtifactRepair(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  artifactContract(id: "artifact.repair"): { id: string; proposed_effects: string[] };
+  getArtifact(id: string): Promise<ArtifactRecord | undefined>;
+  ensureArtifactSession(): Promise<SessionRecord>;
+  createArtifactEnvelope(session: SessionRecord, content: string): MessageEnvelope;
+  repairArtifactRevisionSource(id: string): Promise<{ repaired: boolean }>;
+  artifactNotFoundError(): Error;
+  runArtifactMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { repair: { repaired: boolean } } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; repair: { repaired: boolean } }>;
 }
 
 const artifactRepair = defineCommand<ArtifactRepairPorts>()({
@@ -63,7 +59,16 @@ const artifactRepair = defineCommand<ArtifactRepairPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleArtifactRepair(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeArtifactRepair(context, input);
+        const contract = ports.artifactContract("artifact.repair");
+        const artifact = await ports.getArtifact(input.artifact_id);
+        if (!artifact) throw ports.artifactNotFoundError();
+        const session = await ports.ensureArtifactSession();
+        const envelope = ports.createArtifactEnvelope(session, `Repair artifact source: ${artifact.title}`);
+        const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async () => {
+          const repair = await ports.repairArtifactRevisionSource(input.artifact_id);
+          return { resource: artifact, ref: artifact.file_ref, summary: repair.repaired ? `Repaired artifact ${artifact.title}.` : `Artifact ${artifact.title} did not require repair.`, extra: { repair } };
+        }});
+        return { ok: true, value };
       }
     };
   }

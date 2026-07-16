@@ -1,29 +1,22 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { ExternalSendChannelSchema, type ActivityInboxItem, type ExternalSendRecord, type JsonValue, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { externalSendWriteValueSchema } from "../../../value-objects/external-send.js";
 
 const Input = z.object({
-  "body": z.string() .optional(),
-  "channel": z.string() .optional(),
-  "content": z.string() .optional(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "summary": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "target": z.record(domainJsonValueSchema) .optional(),
-  "title": z.string() .optional()
+  "body": z.string().default(""),
+  "channel": ExternalSendChannelSchema.default("webhook"),
+  "target": z.record(domainJsonValueSchema).default({}),
+  "title": z.string().default("")
 }).strict();
 const Output = externalSendWriteValueSchema;
 
 export interface ExternalSendPreparePorts {
-  executeExternalSendPrepare(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  ensureExternalSendSession(): Promise<SessionRecord>; createExternalSendEnvelope(session: SessionRecord, content: string): MessageEnvelope;
+  createExternalSendId(): string; externalSendNow(): string; saveExternalSend(record: ExternalSendRecord): Promise<ExternalSendRecord>;
+  createExternalSendRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
+  runExternalSendMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: "external.send.prepare"; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: ExternalSendRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: ExternalSendRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const externalSendPrepare = defineCommand<ExternalSendPreparePorts>()({
@@ -71,7 +64,17 @@ const externalSendPrepare = defineCommand<ExternalSendPreparePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleExternalSendPrepare(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeExternalSendPrepare(context, input);
+        const session = await ports.ensureExternalSendSession();
+        const envelope = ports.createExternalSendEnvelope(session, `Prepare external send: ${input.title}`);
+        const now = ports.externalSendNow();
+        const draft: ExternalSendRecord = { id: ports.createExternalSendId(), channel: input.channel, status: "draft", target: input.target, title: input.title, body: input.body, created_at: now, updated_at: now };
+        const value = await ports.runExternalSendMutation({ session, envelope, operationName: "external.send.prepare", proposedEffects: ["Create an outbound send draft without dispatching."], execute: async (operation) => {
+          const saved = await ports.saveExternalSend({ ...draft, operation_id: operation.id });
+          const ref: ResourceRef = { kind: "external_send", id: saved.id, uri: `external-sends/${saved.id}`, label: saved.title };
+          const rollbackPoint = await ports.createExternalSendRollback(operation, [ref], {}, { external_send: saved });
+          return { resource: saved, ref, rollbackPoint, summary: `Prepared external send draft ${saved.title}.` };
+        }});
+        return { ok: true, value };
       }
     };
   }

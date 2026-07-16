@@ -1,10 +1,17 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { GeneratedSurfaceActionDeclarationSchema, SurfaceGenerationRequestSchema, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { generatedSurfaceSavedValueSchema } from "../../value-objects/generated-surface.js";
 
+const Bundle = z.object({
+  title: z.string().trim().min(1), html: z.string().min(1), css: z.string().optional(), script: z.string().optional(),
+  actions: z.array(GeneratedSurfaceActionDeclarationSchema), input_data_schema: z.record(z.unknown()).optional(),
+  assets: z.array(z.object({ path: z.string().min(1), content: z.string(), encoding: z.enum(["utf8", "base64"]).optional(), mime_type: z.string().optional() }).strict()).optional()
+}).strict();
+const BundleInput = z.union([Bundle, z.object({ custom_view: Bundle }).strict()]);
 const Input = z.object({
-  "bundle": z.record(domainJsonValueSchema),
+  "bundle": BundleInput,
   "envelope_id": z.string() .optional(),
   "input_locale": z.string() .optional(),
   "input_message_id": z.string() .optional(),
@@ -13,7 +20,7 @@ const Input = z.object({
   "producer_run_id": z.string() .optional(),
   "prompt_fingerprint": z.string() .optional(),
   "provider_tool_call": z.boolean() .optional(),
-  "request": z.record(domainJsonValueSchema),
+  "request": SurfaceGenerationRequestSchema,
   "session_id": z.string() .optional(),
   "source_operation_id": z.string() .optional(),
   "surface_id": z.string(),
@@ -22,7 +29,10 @@ const Input = z.object({
 const Output = generatedSurfaceSavedValueSchema;
 
 export interface GeneratedSurfaceRevisePorts {
-  executeGeneratedSurfaceRevise(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getGeneratedSurface(id: string): Promise<GeneratedSurfaceDefinition | undefined>;
+  buildGeneratedSurfaceRevision(input: { request: z.infer<typeof SurfaceGenerationRequestSchema>; bundle: z.infer<typeof Bundle>; producerRunId?: string; promptFingerprint?: string; existing?: GeneratedSurfaceDefinition }): { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord };
+  saveGeneratedSurfaceRevision(input: { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; html: string; css?: string; script?: string; assets?: z.infer<typeof Bundle>["assets"] }): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord }>;
+  generatedSurfaceReviseError(message: string): Error;
 }
 
 const generatedSurfaceRevise = defineCommand<GeneratedSurfaceRevisePorts>()({
@@ -72,7 +82,12 @@ const generatedSurfaceRevise = defineCommand<GeneratedSurfaceRevisePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGeneratedSurfaceRevise(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGeneratedSurfaceRevise(context, input);
+        const existing = await ports.getGeneratedSurface(input.surface_id);
+        if (!existing) throw ports.generatedSurfaceReviseError("generated_surface_not_found");
+        const bundle = "custom_view" in input.bundle ? input.bundle.custom_view : input.bundle;
+        const built = ports.buildGeneratedSurfaceRevision({ request: input.request, bundle, existing, producerRunId: input.producer_run_id, promptFingerprint: input.prompt_fingerprint });
+        const saved = await ports.saveGeneratedSurfaceRevision({ definition: built.definition, revision: built.revision, html: bundle.html, css: bundle.css, script: bundle.script, assets: bundle.assets });
+        return { ok: true, value: Output.parse(saved) };
       }
     };
   }

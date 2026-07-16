@@ -1,5 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { SurfaceInteractionRecordSchema, createId, nowIso, type GeneratedSurfaceDefinition, type SurfaceInteractionRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { generatedSurfaceInteractionValueSchema } from "../../../value-objects/generated-surface.js";
 
@@ -9,7 +10,7 @@ const Input = z.object({
   "input_locale": z.string() .optional(),
   "input_message_id": z.string() .optional(),
   "interaction_id": z.string() .optional(),
-  "kind": z.string() .optional(),
+  "kind": SurfaceInteractionRecordSchema.shape.kind,
   "message_id": z.string() .optional(),
   "metadata": z.record(domainJsonValueSchema) .optional(),
   "output_locale": z.string() .optional(),
@@ -24,7 +25,9 @@ const Input = z.object({
 const Output = generatedSurfaceInteractionValueSchema;
 
 export interface GeneratedSurfaceInteractionRecordPorts {
-  executeGeneratedSurfaceInteractionRecord(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getGeneratedSurface(id: string): Promise<GeneratedSurfaceDefinition | undefined>;
+  saveGeneratedSurfaceInteraction(record: SurfaceInteractionRecord): Promise<SurfaceInteractionRecord>;
+  generatedSurfaceInteractionError(message: string): Error;
 }
 
 const generatedSurfaceInteractionRecord = defineCommand<GeneratedSurfaceInteractionRecordPorts>()({
@@ -70,7 +73,15 @@ const generatedSurfaceInteractionRecord = defineCommand<GeneratedSurfaceInteract
   createHandler(ports) {
     return {
       execute: async function handleGeneratedSurfaceInteractionRecord(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGeneratedSurfaceInteractionRecord(context, input);
+        const surface = await ports.getGeneratedSurface(input.surface_id);
+        if (!surface) throw ports.generatedSurfaceInteractionError("generated_surface_not_found");
+        const record = SurfaceInteractionRecordSchema.parse({
+          id: input.interaction_id ?? createId("surface_interaction"), kind: input.kind,
+          session_id: surface.session_id, message_id: input.message_id,
+          surface_id: surface.id, revision_id: input.revision_id ?? surface.current_revision_id,
+          command_id: input.command_id, user_feedback: input.user_feedback, created_at: nowIso()
+        });
+        return { ok: true, value: Output.parse(await ports.saveGeneratedSurfaceInteraction(record)) };
       }
     };
   }

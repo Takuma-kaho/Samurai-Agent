@@ -6,35 +6,22 @@ type Ports = Pick<DomainOperationPorts, "client.event.ack" | "client.event.deliv
 export function createClientEventDomainServicePorts(services: Pick<RuntimeDomainServices, "clientEventDomainService">): Ports {
   return {
     "client.event.ack": {
-      executeClientEventAck: async (context, input) => ({
-        ok: true as const,
-        value: await services.clientEventDomainService.acknowledge(input)
-      })
+      acknowledgeClientEvent: (id) => services.clientEventDomainService.acknowledge(id),
+      clientEventNotFoundError: () => services.clientEventDomainService.notFoundError()
     },
     "client.event.deliver": {
-      executeClientEventDeliver: async (context, input) => ({
-        ok: true as const,
-        value: await services.clientEventDomainService.deliver(input)
-      })
+      deliverClientEvent: (id) => services.clientEventDomainService.deliver(id),
+      clientEventNotFoundError: () => services.clientEventDomainService.notFoundError()
     },
     "client.event.expire": {
-      executeClientEventExpire: async (context, input) => ({
-        ok: true as const,
-        value: await services.clientEventDomainService.expire(input)
-      })
+      expireClientEvents: (now) => services.clientEventDomainService.expire(now)
     },
     "client.event.fail": {
-      executeClientEventFail: async (context, input) => ({
-        ok: true as const,
-        value: await services.clientEventDomainService.fail(input)
-      })
+      failClientEvent: (id, errorCode) => services.clientEventDomainService.fail(id, errorCode),
+      clientEventNotFoundError: () => services.clientEventDomainService.notFoundError()
     },
     "client.event.save": {
-      executeClientEventSave: async (context, input) => ({
-        ok: true as const,
-        value: await services.clientEventDomainService.save(input)
-      })
+      saveClientEvent: (event) => services.clientEventDomainService.save(event)
     }
   };
 }
-

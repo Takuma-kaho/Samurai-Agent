@@ -6,16 +6,30 @@ type Ports = Pick<DomainOperationPorts, "file.patch" | "file.write" | "file.insp
 export function createFileDomainServicePorts(services: Pick<RuntimeDomainServices, "fileDomainService">): Ports {
   return {
     "file.patch": {
-      executeFilePatch: async (context, input) => ({
-        ok: true as const,
-        value: await services.fileDomainService.patchFile(input)
-      })
+      resolveFilePath: (path) => services.fileDomainService.resolveFilePath(path),
+      ensureFileSession: () => services.fileDomainService.ensureFileSession(),
+      createFileEnvelope: (session, content) => services.fileDomainService.createFileEnvelope(session, content),
+      readFileTextIfExists: (path) => services.fileDomainService.readFileTextIfExists(path),
+      ensureFileParent: (path) => services.fileDomainService.ensureFileParent(path),
+      writeFileText: (path, content) => services.fileDomainService.writeFileText(path, content),
+      isManagedCollectionPath: (path) => services.fileDomainService.isManagedCollectionPath(path),
+      reindexManagedCollections: () => services.fileDomainService.reindexManagedCollections(),
+      fileNotFoundError: (path) => services.fileDomainService.fileNotFoundError(path),
+      filePatchConflictError: () => services.fileDomainService.filePatchConflictError(),
+      createFileRollback: (operation, refs, before, after) => services.fileDomainService.createFileRollback(operation, refs, before, after),
+      runFileMutation: (input) => services.fileDomainService.runFileMutation(input)
     },
     "file.write": {
-      executeFileWrite: async (context, input) => ({
-        ok: true as const,
-        value: await services.fileDomainService.writeFile(input)
-      })
+      resolveFilePath: (path) => services.fileDomainService.resolveFilePath(path),
+      ensureFileSession: () => services.fileDomainService.ensureFileSession(),
+      createFileEnvelope: (session, content) => services.fileDomainService.createFileEnvelope(session, content),
+      readFileTextIfExists: (path) => services.fileDomainService.readFileTextIfExists(path),
+      ensureFileParent: (path) => services.fileDomainService.ensureFileParent(path),
+      writeFileText: (path, content) => services.fileDomainService.writeFileText(path, content),
+      isManagedCollectionPath: (path) => services.fileDomainService.isManagedCollectionPath(path),
+      reindexManagedCollections: () => services.fileDomainService.reindexManagedCollections(),
+      createFileRollback: (operation, refs, before, after) => services.fileDomainService.createFileRollback(operation, refs, before, after),
+      runFileMutation: (input) => services.fileDomainService.runFileMutation(input)
     },
     "file.inspect": {
       executeFileInspect: async (context, input) => ({
@@ -37,4 +51,3 @@ export function createFileDomainServicePorts(services: Pick<RuntimeDomainService
     }
   };
 }
-

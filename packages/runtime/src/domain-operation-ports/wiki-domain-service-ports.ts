@@ -6,41 +6,43 @@ type Ports = Pick<DomainOperationPorts, "wiki.accept" | "wiki.archive" | "wiki.p
 export function createWikiDomainServicePorts(services: Pick<RuntimeDomainServices, "wikiDomainService">): Ports {
   return {
     "wiki.accept": {
-      executeWikiAccept: async (context, input) => ({
-        ok: true as const,
-        value: await services.wikiDomainService.accept(input)
-      })
+      getWikiPage: (id) => services.wikiDomainService.getWikiPage(id),
+      setWikiPageState: (id, state) => services.wikiDomainService.setWikiPageState(id, state),
+      ensureWikiSession: () => services.wikiDomainService.ensureWikiSession(), createWikiEnvelope: (content) => services.wikiDomainService.createWikiEnvelope(content),
+      wikiPageNotFoundError: (id) => services.wikiDomainService.wikiPageNotFoundError(id),
+      createWikiRollback: (operation, refs, before, after) => services.wikiDomainService.createWikiRollback(operation, refs, before, after),
+      runWikiMutation: (input) => services.wikiDomainService.runWikiMutation(input)
     },
     "wiki.archive": {
-      executeWikiArchive: async (context, input) => ({
-        ok: true as const,
-        value: await services.wikiDomainService.archive(input)
-      })
+      getWikiPage: (id) => services.wikiDomainService.getWikiPage(id), setWikiPageState: (id, state) => services.wikiDomainService.setWikiPageState(id, state),
+      ensureWikiSession: () => services.wikiDomainService.ensureWikiSession(), createWikiEnvelope: (content) => services.wikiDomainService.createWikiEnvelope(content),
+      wikiPageNotFoundError: (id) => services.wikiDomainService.wikiPageNotFoundError(id), createWikiRollback: (operation, refs, before, after) => services.wikiDomainService.createWikiRollback(operation, refs, before, after),
+      runWikiMutation: (input) => services.wikiDomainService.runWikiMutation(input)
     },
     "wiki.patch": {
-      executeWikiPatch: async (context, input) => ({
-        ok: true as const,
-        value: await services.wikiDomainService.patch(input)
-      })
+      getWikiPage: (id) => services.wikiDomainService.getWikiPage(id), readWikiContent: (id) => services.wikiDomainService.readWikiContent(id),
+      updateWikiPage: (input) => services.wikiDomainService.updateWikiPage(input),
+      ensureWikiSession: () => services.wikiDomainService.ensureWikiSession(), createWikiEnvelope: (content) => services.wikiDomainService.createWikiEnvelope(content),
+      wikiPageNotFoundError: (id) => services.wikiDomainService.wikiPageNotFoundError(id), createWikiRollback: (operation, refs, before, after) => services.wikiDomainService.createWikiRollback(operation, refs, before, after),
+      runWikiMutation: (input) => services.wikiDomainService.runWikiMutation(input)
     },
     "wiki.proposal.create": {
-      executeWikiProposalCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.wikiDomainService.createProposal(input)
-      })
+      ensureWikiSession: () => services.wikiDomainService.ensureWikiSession(), createWikiEnvelope: (content) => services.wikiDomainService.createWikiEnvelope(content),
+      saveWikiPage: (record, content) => services.wikiDomainService.saveWikiPage(record, content),
+      createWikiRollback: (operation, refs, before, after) => services.wikiDomainService.createWikiRollback(operation, refs, before, after),
+      runWikiMutation: (input) => services.wikiDomainService.runWikiMutation(input)
     },
     "wiki.reindex": {
-      executeWikiReindex: async (context, input) => ({
-        ok: true as const,
-        value: await services.wikiDomainService.reindex()
-      })
+      ensureWikiSession: () => services.wikiDomainService.ensureWikiSession(),
+      createWikiEnvelope: (content) => services.wikiDomainService.createWikiEnvelope(content),
+      reindexWikiPages: () => services.wikiDomainService.reindexWikiPages(),
+      runWikiMutation: (input) => services.wikiDomainService.runWikiMutation(input)
     },
     "wiki.reject": {
-      executeWikiReject: async (context, input) => ({
-        ok: true as const,
-        value: await services.wikiDomainService.reject(input)
-      })
+      getWikiPage: (id) => services.wikiDomainService.getWikiPage(id), setWikiPageState: (id, state) => services.wikiDomainService.setWikiPageState(id, state),
+      ensureWikiSession: () => services.wikiDomainService.ensureWikiSession(), createWikiEnvelope: (content) => services.wikiDomainService.createWikiEnvelope(content),
+      wikiPageNotFoundError: (id) => services.wikiDomainService.wikiPageNotFoundError(id), createWikiRollback: (operation, refs, before, after) => services.wikiDomainService.createWikiRollback(operation, refs, before, after),
+      runWikiMutation: (input) => services.wikiDomainService.runWikiMutation(input)
     }
   };
 }
-

@@ -82,17 +82,35 @@ function readOperationModule(file) {
       && statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
       && statement.name.text.endsWith("Ports"));
   if (!ports || !ts.isInterfaceDeclaration(ports)) throw new Error(`operation_ports_interface_missing:${relative}`);
-  let id;
+  const definitions = allNodes(ast).filter((node) => ts.isCallExpression(node)
+    && ts.isCallExpression(node.expression)
+    && ts.isIdentifier(node.expression.expression)
+    && ["defineCommand", "defineQuery"].includes(node.expression.expression.text));
+  if (definitions.length !== 1) throw new Error(`operation_definition_count:${relative}:${definitions.length}`);
+  const configuration = definitions[0].arguments[0];
+  if (!configuration || !ts.isObjectLiteralExpression(configuration)) throw new Error(`operation_definition_object_missing:${relative}`);
+  const metadataObjects = [configuration, ...configuration.properties.flatMap((property) =>
+    ts.isSpreadAssignment(property) && ts.isObjectLiteralExpression(property.expression) ? [property.expression] : [])];
+  const ids = metadataObjects.flatMap((object) => object.properties.flatMap((property) =>
+    ts.isPropertyAssignment(property)
+      && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))
+      && property.name.text === "id"
+      && ts.isStringLiteral(property.initializer)
+      ? [property.initializer.text]
+      : []));
+  if (ids.length !== 1) throw new Error(`operation_id_count:${relative}:${ids.length}`);
+  const id = ids[0];
+  return { id, importPath, portsType: ports.name.text };
+}
+
+function allNodes(rootNode) {
+  const result = [];
   const visit = (node) => {
-    if (ts.isPropertyAssignment(node)
-      && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name))
-      && node.name.text === "id"
-      && ts.isStringLiteral(node.initializer)) id = node.initializer.text;
+    result.push(node);
     ts.forEachChild(node, visit);
   };
-  visit(ast);
-  if (!id) throw new Error(`operation_id_missing:${relative}`);
-  return { id, importPath, portsType: ports.name.text };
+  visit(rootNode);
+  return result;
 }
 
 function filesUnder(directory) {

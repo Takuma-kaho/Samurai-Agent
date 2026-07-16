@@ -66,7 +66,30 @@ export class LearningDomainService {
   resume() { return this.dependencies.learning.saveCuratorState({ paused: false }); }
   runCurator() { return this.executeCurator(); }
   runEvaluation() { return this.executeEvaluation(); }
+  ensureEvaluationSession() { return this.dependencies.evaluation.ensureSession(); }
+  listEvaluationSkills() { return this.dependencies.evaluation.listSkills(); }
+  listEvaluationBackendRuns() { return this.dependencies.evaluation.listBackendRuns(); }
+  listEvaluationBackendEvents() { return this.dependencies.evaluation.listBackendEvents(); }
+  listEvaluationWorkspaceChanges() { return this.dependencies.evaluation.listWorkspaceChanges(); }
+  listEvaluationToolRuns() { return this.dependencies.evaluation.listToolRuns(); }
+  listEvaluationAuditRecords() { return this.dependencies.evaluation.listAuditRecords(); }
+  listLearningResourceUses() { return this.dependencies.evaluation.listLearningUses(); }
+  listExistingLearningEvaluations() { return this.dependencies.evaluation.listEvaluations(); }
+  createEvaluationReflectionRun(run: ReflectionRunRecord) { return this.dependencies.evaluation.createReflectionRun(run); }
+  updateEvaluationReflectionRun(run: ReflectionRunRecord) { return this.dependencies.evaluation.updateReflectionRun(run); }
+  createEvaluationSuggestions(run: ReflectionRunRecord, input: Parameters<LearningEvaluationPort["createSuggestions"]>[1]) { return this.dependencies.evaluation.createSuggestions(run, input); }
+  createEvaluationReport(input: Parameters<LearningEvaluationPort["createReport"]>[0]) { return this.dependencies.evaluation.createReport(input); }
+  actualLearningUses(records: LearningResourceUseRecord[]) { return actualLearningResourceUses(records); }
+  evaluateLearningEffect(input: Parameters<typeof evaluateLearningEffect>[0]) { return evaluateLearningEffect(input); }
+  saveLearningEvaluation(value: LearningEvaluationRecord) { return this.dependencies.evaluation.saveEvaluation(value); }
+  saveEvaluationSuggestion(value: ReflectionSuggestionRecord) { return this.dependencies.evaluation.saveSuggestion(value); }
+  saveEvaluationJobReport(value: LearningJobReportRecord) { return this.dependencies.evaluation.saveJobReport(value); }
+  nextEvaluationRunAt(fromMs: number) { return this.dependencies.evaluation.nextRunAt(fromMs); }
+  createEvaluationId(prefix: "reflection" | "learning_evaluation" | "suggestion" | "learning_job_report") { return createId(prefix); }
+  evaluationNow() { return nowIso(); }
   listSnapshots() { return this.dependencies.learning.listSnapshots(); }
+  restoreLearningSnapshot(id: string) { return this.dependencies.learning.restoreSnapshot(id); }
+  snapshotNotFoundError() { return this.dependencies.requestError("not_found", "curator_snapshot_not_found"); }
 
   pruneSnapshots(payload: Record<string, JsonValue>) {
     return this.dependencies.learning.pruneSnapshots(positiveInteger(payload.retain) ?? 20);
@@ -74,12 +97,6 @@ export class LearningDomainService {
 
   createSnapshot(payload: Record<string, JsonValue>) {
     return this.dependencies.learning.createSnapshot(optionalString(payload.run_id) || createId("curator_manual"));
-  }
-
-  async restoreSnapshot(payload: Record<string, JsonValue>) {
-    const restored = await this.dependencies.learning.restoreSnapshot(requiredString(payload, "snapshot_id"));
-    if (!restored) throw this.dependencies.requestError("not_found", "curator_snapshot_not_found");
-    return restored;
   }
 
   async executeCurator(input: { respectIdleGate?: boolean } = {}): Promise<{ reflectionRun: ReflectionRunRecord; suggestions: ReflectionSuggestionRecord[]; curatorReport: CuratorLifecycleReport; curatorReviewReport: CuratorReviewReport }> {
@@ -632,10 +649,4 @@ function positiveInteger(value: JsonValue | undefined): number | undefined {
 
 function optionalString(value: JsonValue | undefined): string {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function requiredString(payload: Record<string, JsonValue>, key: string): string {
-  const value = optionalString(payload[key]);
-  if (!value) throw new Error(`domain_operation_required_field:${key}`);
-  return value;
 }

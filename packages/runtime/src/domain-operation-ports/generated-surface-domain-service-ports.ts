@@ -6,41 +6,36 @@ type Ports = Pick<DomainOperationPorts, "generated_surface.action.run" | "genera
 export function createGeneratedSurfaceDomainServicePorts(services: Pick<RuntimeDomainServices, "generatedSurfaceDomainService">): Ports {
   return {
     "generated_surface.action.run": {
-      executeGeneratedSurfaceActionRun: async (context, input) => ({
-        ok: true as const,
-        value: await services.generatedSurfaceDomainService.runAction(input)
-      })
+      getGeneratedSurface: (id) => services.generatedSurfaceDomainService.getSurface(id),
+      dispatchGeneratedSurfaceCommand: (input) => services.generatedSurfaceDomainService.dispatchSurfaceCommand(input),
+      saveGeneratedSurfaceInteraction: (record) => services.generatedSurfaceDomainService.saveInteractionRecord(record),
+      generatedSurfaceActionError: (code, message) => services.generatedSurfaceDomainService.surfaceError(code, message)
     },
     "generated_surface.create": {
-      executeGeneratedSurfaceCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.generatedSurfaceDomainService.create(input)
-      })
+      buildGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.buildSurfaceRevision(input),
+      saveGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.saveSurfaceRevision(input)
     },
     "generated_surface.interaction.record": {
-      executeGeneratedSurfaceInteractionRecord: async (context, input) => ({
-        ok: true as const,
-        value: await services.generatedSurfaceDomainService.recordInteraction(input)
-      })
+      getGeneratedSurface: (id) => services.generatedSurfaceDomainService.getSurface(id),
+      saveGeneratedSurfaceInteraction: (record) => services.generatedSurfaceDomainService.saveInteractionRecord(record),
+      generatedSurfaceInteractionError: (message) => services.generatedSurfaceDomainService.surfaceError("not_found", message)
     },
     "generated_surface.revise": {
-      executeGeneratedSurfaceRevise: async (context, input) => ({
-        ok: true as const,
-        value: await services.generatedSurfaceDomainService.revise(input)
-      })
+      getGeneratedSurface: (id) => services.generatedSurfaceDomainService.getSurface(id),
+      buildGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.buildSurfaceRevision(input),
+      saveGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.saveSurfaceRevision(input),
+      generatedSurfaceReviseError: (message) => services.generatedSurfaceDomainService.surfaceError("not_found", message)
     },
     "generated_surface.state": {
-      executeGeneratedSurfaceState: async (context, input) => ({
-        ok: true as const,
-        value: await services.generatedSurfaceDomainService.setState(input)
-      })
+      updateGeneratedSurfaceState: (id, state) => services.generatedSurfaceDomainService.updateSurfaceState(id, state),
+      saveGeneratedSurfaceInteraction: (record) => services.generatedSurfaceDomainService.saveInteractionRecord(record),
+      generatedSurfaceStateError: (code, message) => services.generatedSurfaceDomainService.surfaceError(code, message)
     },
     "generated_surface.export": {
-      executeGeneratedSurfaceExport: async (context, input) => ({
-        ok: true as const,
-        value: await services.generatedSurfaceDomainService.export(input)
-      })
+      getGeneratedSurface: (id) => services.generatedSurfaceDomainService.getSurface(id),
+      getGeneratedSurfaceRevision: (id) => services.generatedSurfaceDomainService.getRevision(id),
+      readGeneratedSurfaceBundle: (id) => services.generatedSurfaceDomainService.readBundle(id),
+      generatedSurfaceQueryError: (message) => services.generatedSurfaceDomainService.surfaceError("not_found", message)
     }
   };
 }
-

@@ -1,24 +1,15 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { expiredClientEventsValueSchema } from "../../../value-objects/client-event.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "now": z.string() .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "now": z.string().datetime().optional()
 }).strict();
 const Output = expiredClientEventsValueSchema;
 
 export interface ClientEventExpirePorts {
-  executeClientEventExpire(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  expireClientEvents(now?: string): Promise<z.infer<typeof Output>["events"]>;
 }
 
 const clientEventExpire = defineCommand<ClientEventExpirePorts>()({
@@ -62,7 +53,8 @@ const clientEventExpire = defineCommand<ClientEventExpirePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleClientEventExpire(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeClientEventExpire(context, input);
+        const events = await ports.expireClientEvents(input.now);
+        return { ok: true, value: { expired_count: events.length, events } };
       }
     };
   }

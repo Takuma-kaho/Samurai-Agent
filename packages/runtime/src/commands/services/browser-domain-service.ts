@@ -1,9 +1,9 @@
 import type { ActivityInboxItem, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
 
-interface Page { url: string; title?: string; html: string; text: string; adapter: "playwright" | "fetch" }
+export interface Page { url: string; title?: string; html: string; text: string; adapter: "playwright" | "fetch" }
 type BrowserResource = object;
 interface BrowserMutationResult<T extends BrowserResource> { resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
-interface WorkspacePath { absolutePath: string; relativePath: string }
+export interface WorkspacePath { absolutePath: string; relativePath: string }
 
 export interface BrowserReadPort { readPage(url: string): Promise<Page> }
 export interface BrowserAdapterPort {
@@ -23,6 +23,21 @@ export interface BrowserMutationHost {
 
 export class BrowserDomainService {
   constructor(private readonly read: BrowserReadPort, private readonly adapter: BrowserAdapterPort, private readonly workspace: BrowserWorkspacePort, private readonly host: BrowserMutationHost) {}
+
+  readPage(url: string) { return this.read.readPage(url); }
+  interactPage(input: { url: string; action: "navigate" | "click" | "input"; selector?: string; value?: string }) { return this.adapter.interact(input); }
+  ensureSession() { return this.host.ensureSession(); }
+  createEnvelope(session: SessionRecord, content: string) { return this.host.createEnvelope(session, content); }
+  runRecordedMutation<T extends BrowserResource>(input: Parameters<BrowserMutationHost["runMutation"]>[0]) { return this.host.runMutation(input) as Promise<BrowserMutationResult<T>>; }
+  stableHash(value: unknown) { return this.host.stableHash(value); }
+  captureScreenshot(url: string) { return this.adapter.screenshot({ url }); }
+  resolveWorkspacePath(path: string) { return this.workspace.resolve(path); }
+  ensureWorkspaceParent(path: string) { return this.workspace.ensureParent(path); }
+  readWorkspaceBytesIfExists(path: string) { return this.workspace.readBytesIfExists(path); }
+  readWorkspaceTextIfExists(path: string) { return this.workspace.readTextIfExists(path); }
+  writeWorkspaceFile(path: string, content: string | Uint8Array) { return this.workspace.write(path, content); }
+  createBrowserRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.host.createRollback(operation, refs, before, after); }
+  browserBytesToBase64(bytes: Uint8Array) { return Buffer.from(bytes).toString("base64"); }
 
   async extract(payload: Record<string, JsonValue>) { const url = text(payload.url); const page = await this.read.readPage(url); return { resource: page }; }
 

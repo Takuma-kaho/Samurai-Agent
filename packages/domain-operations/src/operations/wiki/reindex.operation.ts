@@ -1,23 +1,18 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import type { ActivityInboxItem, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { wikiReindexValueSchema } from "../../value-objects/wiki.js";
 
-const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
-}).strict();
+const Input = z.object({}).strict();
 const Output = wikiReindexValueSchema;
+type OutputValue = z.infer<typeof Output>;
 
 export interface WikiReindexPorts {
-  executeWikiReindex(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  ensureWikiSession(): Promise<SessionRecord>;
+  createWikiEnvelope(content: string): MessageEnvelope;
+  reindexWikiPages(): Promise<OutputValue["resource"]>;
+  runWikiMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: "wiki.reindex"; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: OutputValue["resource"]; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: OutputValue["resource"]; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const wikiReindex = defineCommand<WikiReindexPorts>()({
@@ -62,7 +57,14 @@ const wikiReindex = defineCommand<WikiReindexPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiReindex(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeWikiReindex(context, input);
+        const session = await ports.ensureWikiSession();
+        const envelope = ports.createWikiEnvelope("Reindex wiki pages");
+        const value = await ports.runWikiMutation({ session, envelope, operationName: "wiki.reindex", proposedEffects: ["Refresh the SQLite wiki index from markdown files."], execute: async () => {
+          const resource = await ports.reindexWikiPages();
+          const ref: ResourceRef = { kind: "wiki_index", id: "active", uri: "wiki/pages", label: "Wiki index" };
+          return { resource, ref, summary: `Reindexed ${resource.active} active wiki pages.` };
+        }});
+        return { ok: true, value };
       }
     };
   }

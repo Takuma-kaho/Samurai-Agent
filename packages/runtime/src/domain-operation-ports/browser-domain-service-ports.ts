@@ -6,28 +6,43 @@ type Ports = Pick<DomainOperationPorts, "browser.download_to_workspace" | "brows
 export function createBrowserDomainServicePorts(services: Pick<RuntimeDomainServices, "browserDomainService">): Ports {
   return {
     "browser.download_to_workspace": {
-      executeBrowserDownloadToWorkspace: async (context, input) => ({
-        ok: true as const,
-        value: await services.browserDomainService.downloadToWorkspace(input)
-      })
+      readBrowserPage: (url) => services.browserDomainService.readPage(url),
+      ensureBrowserSession: () => services.browserDomainService.ensureSession(),
+      createBrowserEnvelope: (session, content) => services.browserDomainService.createEnvelope(session, content),
+      stableBrowserHash: (value) => services.browserDomainService.stableHash(value),
+      resolveBrowserWorkspacePath: (path) => services.browserDomainService.resolveWorkspacePath(path),
+      ensureBrowserWorkspaceParent: (path) => services.browserDomainService.ensureWorkspaceParent(path),
+      readBrowserWorkspaceText: (path) => services.browserDomainService.readWorkspaceTextIfExists(path),
+      writeBrowserWorkspaceFile: (path, content) => services.browserDomainService.writeWorkspaceFile(path, content),
+      createBrowserRollback: (operation, refs, before, after) => services.browserDomainService.createBrowserRollback(operation, refs, before, after),
+      runBrowserMutation: (input) => services.browserDomainService.runRecordedMutation(input)
     },
     "browser.interact": {
-      executeBrowserInteract: async (context, input) => ({
-        ok: true as const,
-        value: await services.browserDomainService.interact(input)
-      })
+      interactWithBrowser: (input) => services.browserDomainService.interactPage(input),
+      ensureBrowserSession: () => services.browserDomainService.ensureSession(),
+      createBrowserEnvelope: (session, content) => services.browserDomainService.createEnvelope(session, content),
+      stableBrowserHash: (value) => services.browserDomainService.stableHash(value),
+      runBrowserMutation: (input) => services.browserDomainService.runRecordedMutation(input)
     },
     "browser.navigate": {
-      executeBrowserNavigate: async (context, input) => ({
-        ok: true as const,
-        value: await services.browserDomainService.navigate(input)
-      })
+      readBrowserPage: (url) => services.browserDomainService.readPage(url),
+      ensureBrowserSession: () => services.browserDomainService.ensureSession(),
+      createBrowserEnvelope: (session, content) => services.browserDomainService.createEnvelope(session, content),
+      stableBrowserHash: (value) => services.browserDomainService.stableHash(value),
+      runBrowserMutation: (input) => services.browserDomainService.runRecordedMutation(input)
     },
     "browser.screenshot": {
-      executeBrowserScreenshot: async (context, input) => ({
-        ok: true as const,
-        value: await services.browserDomainService.screenshot(input)
-      })
+      captureBrowserScreenshot: (url) => services.browserDomainService.captureScreenshot(url),
+      ensureBrowserSession: () => services.browserDomainService.ensureSession(),
+      createBrowserEnvelope: (session, content) => services.browserDomainService.createEnvelope(session, content),
+      stableBrowserHash: (value) => services.browserDomainService.stableHash(value),
+      browserBytesToBase64: (bytes) => services.browserDomainService.browserBytesToBase64(bytes),
+      resolveBrowserWorkspacePath: (path) => services.browserDomainService.resolveWorkspacePath(path),
+      ensureBrowserWorkspaceParent: (path) => services.browserDomainService.ensureWorkspaceParent(path),
+      readBrowserWorkspaceBytes: (path) => services.browserDomainService.readWorkspaceBytesIfExists(path),
+      writeBrowserWorkspaceFile: (path, content) => services.browserDomainService.writeWorkspaceFile(path, content),
+      createBrowserRollback: (operation, refs, before, after) => services.browserDomainService.createBrowserRollback(operation, refs, before, after),
+      runBrowserMutation: (input) => services.browserDomainService.runRecordedMutation(input)
     },
     "browser.extract": {
       executeBrowserExtract: async (context, input) => ({
@@ -37,4 +52,3 @@ export function createBrowserDomainServicePorts(services: Pick<RuntimeDomainServ
     }
   };
 }
-

@@ -391,6 +391,7 @@ Ingress adapterが行ってよいのは、Transport認証、Raw Input変換、Tr
 実装方法。
 
 - TypeScript Compiler APIでAST、Symbol、Type、Import graphを検査する。
+- 固有Handlerから操作固有Serviceへ委譲することは許可する。Serviceの分岐数、await数、呼出数を違反条件にしない。ST06はOperation IDによる再配送、ST07はgeneric forwardingだけを検査する。
 - `rg`は補助診断だけに使い、合否の唯一の根拠にしない。
 - Type-level negative fixtureを`tsc --noEmit`で実行し、QueryへWrite Portを渡すコードなどが必ずcompile errorになることを確認する。
 
@@ -684,4 +685,3 @@ Coverage基準。
 12. 全Source、生成物、Evidence、Git SHAが一致しているか。
 
 **1項目でも「いいえ」なら、Core分類1は未完了と判定する。**
-

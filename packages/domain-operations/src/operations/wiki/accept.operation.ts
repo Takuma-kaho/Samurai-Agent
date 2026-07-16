@@ -1,25 +1,13 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { wikiWriteValueSchema } from "../../value-objects/wiki.js";
+import { executeWikiStateTransition, type WikiStateTransitionPorts } from "./state-transition.js";
 
-const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "wiki_id": z.string()
-}).strict();
+const Input = z.object({ "wiki_id": z.string().trim().min(1) }).strict();
 const Output = wikiWriteValueSchema;
 
-export interface WikiAcceptPorts {
-  executeWikiAccept(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
-}
+export interface WikiAcceptPorts extends WikiStateTransitionPorts {}
 
 const wikiAccept = defineCommand<WikiAcceptPorts>()({
   ...{
@@ -61,7 +49,7 @@ const wikiAccept = defineCommand<WikiAcceptPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiAccept(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeWikiAccept(context, input);
+        return { ok: true, value: await executeWikiStateTransition(ports, { id: input.wiki_id, state: "active", operationName: "wiki.accept", proposedEffect: "Accept a wiki proposal for active retrieval.", summaryPrefix: "Accepted wiki page" }) };
       }
     };
   }

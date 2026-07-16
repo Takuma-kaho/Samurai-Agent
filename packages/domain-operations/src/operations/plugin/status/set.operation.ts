@@ -1,25 +1,19 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { pluginStatusValueSchema } from "../../../value-objects/system-records.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "plugin_id": z.string(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
+  "plugin_id": z.string().trim().min(1),
   "status": z.enum(["enabled", "disabled"]),
-  "surface_operation_id": z.string() .optional()
 }).strict();
 const Output = pluginStatusValueSchema;
 
 export interface PluginStatusSetPorts {
-  executePluginStatusSet(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  setPluginEnabled(id: string, enabled: boolean): boolean;
+  findPluginStatus(id: string): { manifest_id: string; version: string } | undefined;
+  savePluginState(input: { manifestId: string; enabled: boolean; version: string }): Promise<z.infer<typeof Output>["state"]>;
+  pluginNotFoundError(): Error;
 }
 
 const pluginStatusSet = defineCommand<PluginStatusSetPorts>()({
@@ -65,7 +59,12 @@ const pluginStatusSet = defineCommand<PluginStatusSetPorts>()({
   createHandler(ports) {
     return {
       execute: async function handlePluginStatusSet(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executePluginStatusSet(context, input);
+        const enabled = input.status === "enabled";
+        if (!ports.setPluginEnabled(input.plugin_id, enabled)) throw ports.pluginNotFoundError();
+        const plugin = ports.findPluginStatus(input.plugin_id);
+        if (!plugin) throw ports.pluginNotFoundError();
+        const state = await ports.savePluginState({ manifestId: input.plugin_id, enabled, version: plugin.version });
+        return { ok: true, value: { plugin, state } };
       }
     };
   }

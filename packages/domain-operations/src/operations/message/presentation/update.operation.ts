@@ -4,22 +4,20 @@ import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDo
 import { messagePresentationUpdateValueSchema } from "../../../value-objects/presentation.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "presentation_id": z.string(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "view_state": z.record(domainJsonValueSchema) .optional()
+  "presentation_id": z.string().trim().min(1),
+  "surface_operation_id": z.string().trim().min(1).optional(),
+  "view_state": z.record(domainJsonValueSchema).default({})
 }).strict();
 const Output = messagePresentationUpdateValueSchema;
+type OutputValue = z.infer<typeof Output>;
 
 export interface MessagePresentationUpdatePorts {
-  executeMessagePresentationUpdate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getMessagePresentation(id: string): Promise<OutputValue["presentation"] | undefined>;
+  presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<{ render_spec: OutputValue["render_spec"] }>;
+  applyPresentationViewState(spec: OutputValue["render_spec"], viewState: z.infer<typeof Input>["view_state"]): OutputValue["render_spec"];
+  presentationViewStateFromSpec(spec: OutputValue["render_spec"]): z.infer<typeof Input>["view_state"];
+  updateMessagePresentationViewState(input: { id: string; viewState: z.infer<typeof Input>["view_state"] }): Promise<OutputValue["presentation"] | undefined>;
+  messagePresentationNotFoundError(id: string): Error;
 }
 
 const messagePresentationUpdate = defineCommand<MessagePresentationUpdatePorts>()({
@@ -68,7 +66,14 @@ const messagePresentationUpdate = defineCommand<MessagePresentationUpdatePorts>(
   createHandler(ports) {
     return {
       execute: async function handleMessagePresentationUpdate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeMessagePresentationUpdate(context, input);
+        const existing = await ports.getMessagePresentation(input.presentation_id);
+        if (!existing) throw ports.messagePresentationNotFoundError(input.presentation_id);
+        const requestedViewId = typeof input.view_state.view_id === "string" && input.view_state.view_id.trim() ? input.view_state.view_id.trim() : undefined;
+        const result = await ports.presentCollectionView({ collectionId: existing.collection_id, viewId: requestedViewId ?? existing.view_id });
+        const renderSpec = ports.applyPresentationViewState(result.render_spec, input.view_state);
+        const updated = await ports.updateMessagePresentationViewState({ id: input.presentation_id, viewState: ports.presentationViewStateFromSpec(renderSpec) });
+        if (!updated) throw ports.messagePresentationNotFoundError(input.presentation_id);
+        return { ok: true, value: { presentation: updated, render_spec: renderSpec, render_specs: [renderSpec] } };
       }
     };
   }

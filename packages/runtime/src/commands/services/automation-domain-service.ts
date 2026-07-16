@@ -57,15 +57,36 @@ export class AutomationDomainService {
     requestError: (code: "conflict" | "not_found", message: string) => Error;
   }) {}
 
-  async releaseLock(payload: Record<string, JsonValue>) {
-    const job = await this.dependencies.automation.releaseLock(requiredId(payload, "job_id"), optionalString(payload.now) || undefined);
-    return this.requireJob(job);
-  }
+  releaseLock(jobId: string, now?: string) { return this.dependencies.automation.releaseLock(jobId, now); }
 
-  async requeue(payload: Record<string, JsonValue>) {
-    const job = await this.dependencies.automation.requeue(requiredId(payload, "job_id"), optionalString(payload.next_run_at) || undefined);
-    return this.requireJob(job);
-  }
+  requeue(jobId: string, nextRunAt?: string) { return this.dependencies.automation.requeue(jobId, nextRunAt); }
+
+  notFoundError() { return this.dependencies.requestError("not_found", "automation_job_not_found"); }
+  jobContract(id: "automation.job.save" | "automation.job.set_status") { return this.dependencies.mutation.contract(id); }
+  ensureMutationSession() { return this.dependencies.mutation.ensureSession(); }
+  createMutationEnvelope(content: string) { return this.dependencies.mutation.createEnvelope(content); }
+  getJob(id: string) { return this.dependencies.automation.getJob(id); }
+  saveJobRecord(job: AutomationJobRecord) { return this.dependencies.mutation.saveJob(job); }
+  jobRef(job: AutomationJobRecord) { return this.dependencies.mutation.ref(job); }
+  createJobRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.mutation.createRollback(operation, refs, before, after); }
+  runJobMutation(input: Parameters<AutomationMutationPort["runMutation"]>[0]) { return this.dependencies.mutation.runMutation(input); }
+  jobError(code: "not_found" | "conflict", message: string) { return this.dependencies.requestError(code, message); }
+  createExecutionRun(input: Pick<AutomationRunRecord, "id" | "kind" | "source" | "status" | "started_at">) { return this.dependencies.execution.createRun(input); }
+  updateExecutionRun(record: AutomationRunRecord) { return this.dependencies.execution.updateRun(record); }
+  ensureExecutionSession(context: ScheduledContext, title: string) { return this.dependencies.execution.ensureSession(context, title); }
+  createExecutionEnvelope(context: ScheduledContext, content: string) { return this.dependencies.execution.createEnvelope(context, content); }
+  runExecutionMutation<T>(input: { session: ScheduledSession; envelope: MessageEnvelope; context: ScheduledContext; operationName: string; inputRef?: ResourceRef; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; summary: string; rollbackPoint?: RollbackPoint }> }) { return this.dependencies.execution.runMutation(input); }
+  runExecutionMemoryReview(session: ScheduledSession) { return this.dependencies.execution.runMemoryReview(session); }
+  executionErrorMessage(error: unknown) { return this.dependencies.execution.errorMessage(error); }
+  acquireAutomationJobLock(id: string, input: { lockedUntil: string; now: string }) { return this.dependencies.automation.acquireLock(id, input); }
+  reindexAutomationWiki() { return this.dependencies.execution.reindexWiki(); }
+  runAutomationCurator() { return this.dependencies.execution.runCurator(); }
+  runAutomationMemoryReview(session: ScheduledSession) { return this.dependencies.execution.runMemoryReview(session); }
+  runAutomationEvaluation() { return this.dependencies.execution.runEvaluation(); }
+  runAutomationTranslation(job: AutomationJobRecord, session: ScheduledSession, context: ScheduledContext) { return this.dependencies.execution.runTranslation(job, session, context); }
+  runAutomationCollectionTrigger(job: AutomationJobRecord) { return this.dependencies.execution.runCollectionTrigger(job); }
+  runAutomationInstruction(job: AutomationJobRecord, session: ScheduledSession, context: ScheduledContext) { return this.dependencies.execution.runInstruction(job, session, context); }
+  automationRetryAt(failureCount: number) { return this.dependencies.execution.retryAt(failureCount); }
 
   async run(payload: Record<string, JsonValue>) {
     const jobId = requiredId(payload, "job_id");
@@ -201,10 +222,6 @@ export class AutomationDomainService {
     }});
   }
 
-  private requireJob(job: AutomationJobRecord | undefined): AutomationJobRecord {
-    if (!job) throw this.dependencies.requestError("not_found", "automation_job_not_found");
-    return job;
-  }
 }
 
 function optionalString(value: JsonValue | undefined): string { return typeof value === "string" ? value.trim() : ""; }

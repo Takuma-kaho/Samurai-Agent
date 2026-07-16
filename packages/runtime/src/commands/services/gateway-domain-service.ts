@@ -1,8 +1,6 @@
 import {
-  GatewayMcpConfigRecordSchema,
   GatewayPairingPolicyRecordSchema,
   GatewayRoutingPolicyRecordSchema,
-  GatewaySandboxWorkspaceSyncDirectionSchema,
   nowIso,
   type GatewayBoundaryPolicy,
   type GatewayConcurrencyLockRecord,
@@ -63,7 +61,7 @@ export interface GatewayInboundPort {
 export interface GatewayCommandPort {
   expireConcurrencyLocks(now?: string): Promise<GatewayConcurrencyLockRecord[]>;
   routeInbound(input: {
-    channel: string;
+    channel: GatewayChannel;
     source_identity: string;
     body: string;
     source_label?: string;
@@ -95,7 +93,6 @@ export interface GatewayDomainServiceDependencies {
   gateway: GatewayCommandPort;
   pairing: GatewayPairingPort;
   inbound: GatewayInboundPort;
-  conflictError: (message: string) => Error;
   notFoundError: (message: string) => Error;
 }
 
@@ -107,25 +104,8 @@ export class GatewayDomainService {
     return { expired_count: locks.length, locks };
   }
 
-  routeInbound(payload: Record<string, JsonValue>) {
-    const sourceIdentity = optionalString(payload.source_identity);
-    const body = optionalString(payload.body) || optionalString(payload.content) || optionalString(payload.user_intent);
-    if (!sourceIdentity || !body) {
-      throw this.dependencies.conflictError("domain_command_gateway_inbound_source_body_required");
-    }
-    return this.dependencies.gateway.routeInbound({
-      channel: optionalString(payload.channel),
-      source_identity: sourceIdentity,
-      body,
-      source_label: optionalString(payload.source_label) || undefined,
-      account_id: optionalString(payload.account_id) || undefined,
-      thread_id: optionalString(payload.thread_id) || undefined,
-      route: optionalString(payload.route) || undefined,
-      metadata: recordValue(payload.metadata),
-      backend_id: optionalString(payload.backend_id) || undefined,
-      input_locale: optionalString(payload.input_locale) || undefined,
-      output_locale: optionalString(payload.output_locale) || undefined
-    });
+  routeInboundPrimitive(input: Parameters<GatewayCommandPort["routeInbound"]>[0]) {
+    return this.dependencies.gateway.routeInbound(input);
   }
 
   async executeInbound(input: GatewayInboundInput): Promise<GatewayInboundResult> {
@@ -200,8 +180,8 @@ export class GatewayDomainService {
     await this.dependencies.inbound.emit("gateway.inbound.blocked", inbound); return { inbound };
   }
 
-  saveMcpConfig(payload: Record<string, JsonValue>) {
-    return this.dependencies.gateway.saveMcpConfig(GatewayMcpConfigRecordSchema.parse(payload));
+  saveMcpConfig(record: GatewayMcpConfigRecord) {
+    return this.dependencies.gateway.saveMcpConfig(record);
   }
 
   savePairingPolicy(payload: Record<string, JsonValue>) {
@@ -242,10 +222,22 @@ export class GatewayDomainService {
     return expired;
   }
 
-  private async requirePairing(id: string): Promise<GatewayPairingRecord> {
+  async requirePairing(id: string): Promise<GatewayPairingRecord> {
     const pairing = await this.dependencies.pairing.get(id);
     if (!pairing) throw this.dependencies.notFoundError(`Gateway pairing not found: ${id}`);
     return pairing;
+  }
+
+  savePairing(record: GatewayPairingRecord): Promise<GatewayPairingRecord> {
+    return this.dependencies.pairing.save(record);
+  }
+
+  emitPairingUpdated(record: GatewayPairingRecord): Promise<void> {
+    return this.dependencies.pairing.emitUpdated(record);
+  }
+
+  expirePairingsPrimitive(now: string): Promise<GatewayPairingRecord[]> {
+    return this.dependencies.pairing.expireAll(now);
   }
 
   private async persistPairing(pairing: GatewayPairingRecord): Promise<GatewayPairingRecord> {
@@ -261,19 +253,12 @@ export class GatewayDomainService {
   deleteSandbox(payload: Record<string, JsonValue>) { return this.dependencies.gateway.deleteSandbox(requiredString(payload, "sandbox_id")); }
   recreateSandbox(payload: Record<string, JsonValue>) { return this.dependencies.gateway.recreateSandbox(requiredString(payload, "sandbox_id")); }
 
-  syncSandbox(payload: Record<string, JsonValue>) {
-    const direction = GatewaySandboxWorkspaceSyncDirectionSchema.safeParse(payload.direction);
-    return this.dependencies.gateway.syncSandbox(requiredString(payload, "sandbox_id"), {
-      direction: direction.success ? direction.data : undefined,
-      dryRun: payload.dry_run !== false
-    });
+  syncSandboxPrimitive(id: string, input: { direction?: GatewaySandboxWorkspaceSyncDirection; dryRun: boolean }) {
+    return this.dependencies.gateway.syncSandbox(id, input);
   }
 
-  repairState(payload: Record<string, JsonValue>) {
-    return this.dependencies.gateway.repairState({
-      dryRun: payload.dry_run !== false,
-      now: optionalString(payload.now) || undefined
-    });
+  repairStatePrimitive(input: { dryRun: boolean; now?: string }) {
+    return this.dependencies.gateway.repairState(input);
   }
 }
 
@@ -285,10 +270,6 @@ function requiredString(payload: Record<string, JsonValue>, key: string): string
   const value = optionalString(payload[key]);
   if (!value) throw new Error(`domain_operation_required_field:${key}`);
   return value;
-}
-
-function recordValue(value: JsonValue | undefined): Record<string, JsonValue> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, JsonValue> : {};
 }
 
 function normalizeSourceIdentity(value: string, conflict: (message: string) => Error): string {

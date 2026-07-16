@@ -6,10 +6,15 @@ type Ports = Pick<DomainOperationPorts, "skill.candidate.create" | "skill.lifecy
 export function createSkillDomainServicePorts(services: Pick<RuntimeDomainServices, "skillDomainService">): Ports {
   return {
     "skill.candidate.create": {
-      executeSkillCandidateCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.createCandidate(input)
-      })
+      saveSkillMarkdown: (input) => services.skillDomainService.saveSkillMarkdown(input),
+      skillMutationContract: (id) => services.skillDomainService.skillMutationContract(id),
+      ensureSkillMutationSession: () => services.skillDomainService.ensureSkillMutationSession(),
+      createSkillMutationEnvelope: (content) => services.skillDomainService.createSkillMutationEnvelope(content),
+      skillResourceRef: (skill) => services.skillDomainService.skillResourceRef(skill),
+      createSkillRollback: (operation, refs, before, after) => services.skillDomainService.createSkillRollback(operation, refs, before, after),
+      runSkillMutation: (input) => services.skillDomainService.runSkillMutation(input),
+      skillMutationNotFound: (message) => services.skillDomainService.skillMutationNotFound(message),
+      skillMutationConflict: (message) => services.skillDomainService.skillMutationConflict(message)
     },
     "skill.lifecycle.apply": {
       executeSkillLifecycleApply: async (context, input) => ({
@@ -48,22 +53,42 @@ export function createSkillDomainServicePorts(services: Pick<RuntimeDomainServic
       })
     },
     "skill.patch": {
-      executeSkillPatch: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.patch(input)
-      })
+      getSkillForMutation: (id) => services.skillDomainService.getSkillForMutation(id),
+      readSkillMarkdown: (id) => services.skillDomainService.readSkillMarkdown(id),
+      patchSkillRecord: (input) => services.skillDomainService.patchSkillRecord(input),
+      skillMutationContract: (id) => services.skillDomainService.skillMutationContract(id),
+      ensureSkillMutationSession: () => services.skillDomainService.ensureSkillMutationSession(),
+      createSkillMutationEnvelope: (content) => services.skillDomainService.createSkillMutationEnvelope(content),
+      skillResourceRef: (skill) => services.skillDomainService.skillResourceRef(skill),
+      createSkillRollback: (operation, refs, before, after) => services.skillDomainService.createSkillRollback(operation, refs, before, after),
+      runSkillMutation: (input) => services.skillDomainService.runSkillMutation(input),
+      skillMutationNotFound: (message) => services.skillDomainService.skillMutationNotFound(message),
+      skillMutationConflict: (message) => services.skillDomainService.skillMutationConflict(message)
     },
     "skill.project.save": {
-      executeSkillProjectSave: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.saveProject(input)
-      })
+      readSkillMarkdown: (id) => services.skillDomainService.readSkillMarkdown(id),
+      saveSkillMarkdown: (input) => services.skillDomainService.saveSkillMarkdown(input),
+      skillMutationContract: (id) => services.skillDomainService.skillMutationContract(id),
+      ensureSkillMutationSession: () => services.skillDomainService.ensureSkillMutationSession(),
+      createSkillMutationEnvelope: (content) => services.skillDomainService.createSkillMutationEnvelope(content),
+      skillResourceRef: (skill) => services.skillDomainService.skillResourceRef(skill),
+      createSkillRollback: (operation, refs, before, after) => services.skillDomainService.createSkillRollback(operation, refs, before, after),
+      runSkillMutation: (input) => services.skillDomainService.runSkillMutation(input),
+      skillMutationNotFound: (message) => services.skillDomainService.skillMutationNotFound(message),
+      skillMutationConflict: (message) => services.skillDomainService.skillMutationConflict(message)
     },
     "skill.support_file.save": {
-      executeSkillSupportFileSave: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.saveSupportFile(input)
-      })
+      getSkillForMutation: (id) => services.skillDomainService.getSkillForMutation(id),
+      listSkillSupportFiles: (id) => services.skillDomainService.listSkillSupportFiles(id),
+      writeSkillSupportFile: (input) => services.skillDomainService.writeSkillSupportFile(input),
+      skillMutationContract: (id) => services.skillDomainService.skillMutationContract(id),
+      ensureSkillMutationSession: () => services.skillDomainService.ensureSkillMutationSession(),
+      createSkillMutationEnvelope: (content) => services.skillDomainService.createSkillMutationEnvelope(content),
+      skillResourceRef: (skill) => services.skillDomainService.skillResourceRef(skill),
+      createSkillRollback: (operation, refs, before, after) => services.skillDomainService.createSkillRollback(operation, refs, before, after),
+      runSkillMutation: (input) => services.skillDomainService.runSkillMutation(input),
+      skillMutationNotFound: (message) => services.skillDomainService.skillMutationNotFound(message),
+      skillMutationConflict: (message) => services.skillDomainService.skillMutationConflict(message)
     },
     "skill.usage.record": {
       executeSkillUsageRecord: async (context, input) => ({
@@ -79,4 +104,3 @@ export function createSkillDomainServicePorts(services: Pick<RuntimeDomainServic
     }
   };
 }
-

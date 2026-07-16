@@ -1,5 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { createId, nowIso, type ActivityInboxItem, type CollectionPatch, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { collectionPatchWriteValueSchema } from "../../../value-objects/collection.js";
 
@@ -22,7 +23,14 @@ const Input = z.object({
 const Output = collectionPatchWriteValueSchema;
 
 export interface CollectionPatchApplyPorts {
-  executeCollectionPatchApply(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  ensureCollectionMutationSession(): Promise<SessionRecord>;
+  createCollectionMutationEnvelope(content: string): MessageEnvelope;
+  applyCollectionRecordPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<{ before: z.infer<typeof Output>["before"]; after: z.infer<typeof Output>["resource"] }>;
+  mapCollectionPatchError(error: unknown): Error;
+  collectionRecordRef(record: z.infer<typeof Output>["resource"]): ResourceRef;
+  createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, z.infer<typeof domainJsonValueSchema>>, after: Record<string, z.infer<typeof domainJsonValueSchema>>): Promise<RollbackPoint>;
+  queueCollectionTrigger(input: { collectionId: string; recordId: string; event: "record.patched" }): Promise<void>;
+  runCollectionMutation<T, Extra extends Record<string, unknown>>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & Extra> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] } & Extra>;
 }
 
 const collectionPatchApply = defineCommand<CollectionPatchApplyPorts>()({
@@ -77,7 +85,23 @@ const collectionPatchApply = defineCommand<CollectionPatchApplyPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionPatchApply(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionPatchApply(context, input);
+        const session = await ports.ensureCollectionMutationSession();
+        const envelope = ports.createCollectionMutationEnvelope(`Apply collection patch: ${input.collection_id}/${input.record_id}`);
+        const result = await ports.runCollectionMutation<z.infer<typeof Output>["resource"], { before: z.infer<typeof Output>["before"] }>({
+          session, envelope, operationName: "collection.patch.apply",
+          proposedEffects: ["Apply a collection patch to an existing local record."],
+          execute: async (operation) => {
+            const patch: CollectionPatch = { id: input.patch_id ?? createId("collection_patch"), record_id: input.record_id, changes: input.changes, expected_version: input.expected_version, source_operation_id: operation.id, created_at: nowIso() };
+            let patched;
+            try { patched = await ports.applyCollectionRecordPatch({ collectionId: input.collection_id, recordId: input.record_id, patch }); }
+            catch (error) { throw ports.mapCollectionPatchError(error); }
+            const ref = ports.collectionRecordRef(patched.after);
+            const rollbackPoint = await ports.createCollectionRollback(operation, [ref], { record: domainJsonValueSchema.parse(patched.before) }, { record: domainJsonValueSchema.parse(patched.after) });
+            return { resource: patched.after, before: patched.before, ref, rollbackPoint, summary: `Applied collection patch ${patch.id}.` };
+          }
+        });
+        await ports.queueCollectionTrigger({ collectionId: result.resource.collection_id, recordId: result.resource.id, event: "record.patched" });
+        return { ok: true, value: Output.parse(result) };
       }
     };
   }

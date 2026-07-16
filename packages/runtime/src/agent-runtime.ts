@@ -1,6 +1,7 @@
 import { createArtifactDraft, type ArtifactKind, type ArtifactPayload } from "@samurai-agent/artifacts";
 import { createTaskFingerprint } from "./learning/task-evaluation";
 import { routeGatewayInbound, runDueAutomation, type GatewayInboundInput } from "./domain-ingress-coordinator.js";
+import { runtimeApiOperationIds } from "./runtime-api-operation-ids.js";
 import {
   artifactCommandId,
   collectionPatchCommandId,
@@ -271,7 +272,7 @@ import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
 import { MemoryDomainService } from "./commands/services/memory-domain-service";
-import { ArtifactDomainService, type ArtifactCreateInput, type ArtifactMutationInput, type ArtifactRevisionInput, type ArtifactSurfaceResult } from "./commands/services/artifact-domain-service";
+import { ArtifactDomainService, type ArtifactMutationInput, type ArtifactSurfaceResult } from "./commands/services/artifact-domain-service";
 export {
   HttpExternalAssistProvider,
   LocalFileExternalAssistProvider,
@@ -889,8 +890,7 @@ export class AgentRuntime {
       objectives: {
         save: (record) => this.store.saveObjective(record),
         transition: (objectiveId, action) => this.durableWorkCoordinator.transitionObjective(objectiveId, action)
-      },
-      requestError: (code, message) => new RuntimeRequestError(code, message)
+      }
     });
     this.translationDomainService = new TranslationDomainService({
       translations: {
@@ -1091,7 +1091,6 @@ export class AgentRuntime {
         errorMessage: (error) => safeRuntimeErrorMessage(error, "gateway_inbound_failed"),
         conflictError: (message) => new RuntimeRequestError("conflict", message)
       },
-      conflictError: (message) => new RuntimeRequestError("conflict", message),
       notFoundError: (message) => new RuntimeRequestError("not_found", message)
     });
     this.wikiDomainService = new WikiDomainService({
@@ -1107,8 +1106,7 @@ export class AgentRuntime {
         runMutation: (input) => runWebMutation(input),
         createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs, before, after),
         requestError: (code, message) => new RuntimeRequestError(code, message)
-      },
-      conflictError: (message) => new RuntimeRequestError("conflict", message)
+      }
     });
     this.automationDomainService = new AutomationDomainService({
       automation: {
@@ -1591,7 +1589,8 @@ export class AgentRuntime {
   }
 
   async runReflection(input: { sessionId: string; sourceRunId?: string }): Promise<ReflectionRuntimeResult> {
-    return this.systemDomainService.runReflectionInput(input) as Promise<ReflectionRuntimeResult>;
+    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.reflectionRun, idempotency_key: createId("reflection_request"), payload: { session_id: input.sessionId, ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}) } });
+    return result.result as ReflectionRuntimeResult;
   }
 
   async runCuratorJob(input: { respectIdleGate?: boolean } = {}): Promise<ReflectionRuntimeResult> {
@@ -1603,7 +1602,8 @@ export class AgentRuntime {
   }
 
   async runEvaluationJob(): Promise<ReflectionRuntimeResult> {
-    return this.learningDomainService.executeEvaluation() as Promise<ReflectionRuntimeResult>;
+    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.evaluationRun, input_source: "automation", idempotency_key: createId("evaluation_request"), payload: {} });
+    return result.result as ReflectionRuntimeResult;
   }
 
   private async createEvaluationTraceReport(input: {
@@ -3107,7 +3107,6 @@ export class AgentRuntime {
       session_id: input.session_id,
       title: "title" in input && typeof input.title === "string" ? input.title : input.kind,
       content: surfaceOperationPrompt(input),
-      instruction: surfaceOperationPrompt(input),
       input_locale: input.input_locale,
       output_locale: input.output_locale,
       metadata: { surface_operation_kind: input.kind, surface_operation_payload: jsonSafe(input) }
@@ -3751,7 +3750,8 @@ export class AgentRuntime {
   }
 
   async archiveMemory(input: ArchiveMemoryInput): Promise<ArchiveMemoryRuntimeResult> {
-    return this.memoryDomainService.archiveMemory(input) as Promise<ArchiveMemoryRuntimeResult>;
+    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.memoryArchive, idempotency_key: createId("memory_archive_request"), payload: { memory_id: input.memoryId, session_id: input.sessionId } });
+    return result.result as ArchiveMemoryRuntimeResult;
   }
 
   async viewSkill(input: { skillId: string; runId: string; path?: string }): Promise<SkillViewRuntimeResult> {
@@ -3763,7 +3763,8 @@ export class AgentRuntime {
   }
 
   async restoreRollbackPoint(id: string): Promise<RollbackRestoreRuntimeResult> {
-    return this.systemDomainService.restoreRollbackPoint(id) as Promise<RollbackRestoreRuntimeResult>;
+    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.rollbackRestore, idempotency_key: `rollback.restore:${id}`, payload: { rollback_point_id: id } });
+    return result.result as RollbackRestoreRuntimeResult;
   }
 
   async approveGatewayPairing(id: string): Promise<GatewayPairingRecord> {
@@ -4191,7 +4192,8 @@ export class AgentRuntime {
   }
 
   async applyReflectionSuggestion(input: { suggestionId: string }): Promise<RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>> {
-    return this.systemDomainService.applyReflectionSuggestion(input) as Promise<RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>>;
+    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.reflectionSuggestionApply, idempotency_key: createId("reflection_apply_request"), payload: { suggestion_id: input.suggestionId } });
+    return result.result as RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>;
   }
 
   async createSkillCandidate(input: {
@@ -4223,19 +4225,23 @@ export class AgentRuntime {
     source_refs?: WikiFrontmatter["source_refs"];
     provenance?: WikiFrontmatter["provenance"];
   }): Promise<WikiRuntimeResult> {
-    return this.wikiDomainService.createProposalInput(input) as Promise<WikiRuntimeResult>;
+    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiProposalCreate, idempotency_key: createId("wiki_create"), payload: input });
+    return command.result as WikiRuntimeResult;
   }
 
   async acceptWikiPage(id: string): Promise<WikiRuntimeResult> {
-    return this.wikiDomainService.changeState(id, "active", "wiki.accept", "Accept a wiki proposal for active retrieval.", "Accepted wiki page") as Promise<WikiRuntimeResult>;
+    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiAccept, idempotency_key: createId("wiki_accept"), payload: { wiki_id: id } });
+    return command.result as WikiRuntimeResult;
   }
 
   async rejectWikiPage(id: string): Promise<WikiRuntimeResult> {
-    return this.wikiDomainService.changeState(id, "rejected", "wiki.reject", "Reject a wiki proposal without deleting its markdown.", "Rejected wiki page") as Promise<WikiRuntimeResult>;
+    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiReject, idempotency_key: createId("wiki_reject"), payload: { wiki_id: id } });
+    return command.result as WikiRuntimeResult;
   }
 
   async archiveWikiPage(id: string): Promise<WikiRuntimeResult> {
-    return this.wikiDomainService.changeState(id, "archived", "wiki.archive", "Archive a wiki page without deleting its markdown.", "Archived wiki page") as Promise<WikiRuntimeResult>;
+    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiArchive, idempotency_key: createId("wiki_archive"), payload: { wiki_id: id } });
+    return command.result as WikiRuntimeResult;
   }
 
   async patchWikiPage(input: {
@@ -4247,11 +4253,18 @@ export class AgentRuntime {
     source_refs?: WikiFrontmatter["source_refs"];
     provenance?: WikiFrontmatter["provenance"];
   }): Promise<WikiRuntimeResult> {
-    return this.wikiDomainService.patchInput(input) as Promise<WikiRuntimeResult>;
+    const { id, ...patch } = input;
+    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiPatch, idempotency_key: createId("wiki_patch"), payload: { wiki_id: id, ...patch } });
+    return command.result as WikiRuntimeResult;
   }
 
   async reindexWiki(): Promise<RuntimeWriteResult<WikiReindexResult>> {
-    return this.wikiDomainService.reindex() as Promise<RuntimeWriteResult<WikiReindexResult>>;
+    const command = await this.runDomainCommand({
+      command_id: runtimeApiOperationIds.wikiReindex,
+      idempotency_key: createId("wiki_reindex"),
+      payload: {}
+    });
+    return command.result as RuntimeWriteResult<WikiReindexResult>;
   }
 
   async saveCollectionSchema(schema: CollectionSchema, contextOverride?: { session: SessionRecord; envelope: MessageEnvelope }): Promise<CollectionSchemaRuntimeResult> {
@@ -5051,22 +5064,30 @@ export class AgentRuntime {
       const commandArgs = generatedSurfaceCommandId
         ? normalizeGeneratedSurfaceCommandPayload(generatedSurfaceCommandId, args, run, runInput)
         : args;
+      const effectiveCommand = requireDomainCommandEntry(effectiveCommandId);
+      const acceptedProperties = recordPayload(effectiveCommand.input_schema.properties);
+      const runtimeContextPayload = {
+        session_id: run.session_id,
+        envelope_id: runInput.input_message_id,
+        input_locale: runInput.input_locale,
+        output_locale: runInput.output_locale,
+        metadata: {
+          ...recordPayload(commandArgs.metadata),
+          backend_run_id: run.id,
+          provider_tool_name: providerToolName || toolName,
+          ...(toolCallId ? { tool_call_id: toolCallId } : {})
+        }
+      };
+      const acceptedRuntimeContext = Object.fromEntries(
+        Object.entries(runtimeContextPayload).filter(([key]) => Object.hasOwn(acceptedProperties, key))
+      );
       const domainResult = await this.runDomainCommandWithTrustedContext({
         command_id: effectiveCommandId,
         input_source: "provider_tool_call",
         idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, effectiveCommandId, commandArgs),
         payload: {
           ...commandArgs,
-          session_id: run.session_id,
-          envelope_id: runInput.input_message_id,
-          input_locale: runInput.input_locale,
-          output_locale: runInput.output_locale,
-          metadata: {
-            ...recordPayload(commandArgs.metadata),
-            backend_run_id: run.id,
-            provider_tool_name: providerToolName || toolName,
-            ...(toolCallId ? { tool_call_id: toolCallId } : {})
-          }
+          ...acceptedRuntimeContext
         }
       }, { runId: run.id });
       const directRuntimeTool = runtimeToolCallResult(domainResult.result);
@@ -5273,8 +5294,7 @@ export class AgentRuntime {
       args = {
         ...args,
         title,
-        content,
-        instruction: content
+        content
       };
     }
 
@@ -5303,7 +5323,6 @@ export class AgentRuntime {
         ...args,
         session_id: run.session_id,
         envelope_id: runInput.input_message_id,
-        provider_tool_call: true,
         input_locale: runInput.input_locale,
         output_locale: runInput.output_locale,
         metadata: {
@@ -5369,8 +5388,6 @@ export class AgentRuntime {
         envelope_id: input.runInput.input_message_id,
         title: input.title,
         content: input.content,
-        instruction: input.content,
-        provider_tool_call: true,
         input_locale: input.runInput.input_locale,
         output_locale: input.runInput.output_locale,
         metadata: {

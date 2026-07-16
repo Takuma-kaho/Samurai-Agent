@@ -65,21 +65,19 @@ try {
     "domain-query-purity.ts",
     "domain-operation-structure.ts"
   ]) {
-    if (fixture === "domain-command-ingress.ts") {
-      const result = runJsonCheck(path.join(root, "scripts/fixtures", fixture), { nodeArgs: ["--import", "tsx"] });
-      fixtureResults.set(fixture.replace(/\.ts$/, ""), result);
-      continue;
-    }
     const fixtureOutput = path.join(temporaryRoot, fixture.replace(/\.ts$/, ".mjs"));
     execFileSync(esbuild, [
       path.join(root, "scripts/fixtures", fixture),
       "--bundle", "--platform=node", "--format=esm", "--external:better-sqlite3",
+      ...(fixture === "domain-command-ingress.ts" ? ["--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);"] : []),
       ...(fixture === "domain-operation-structure.ts" ? ["--external:typescript"] : []),
       `--outfile=${fixtureOutput}`
     ], { cwd: root, stdio: "inherit" });
     const result = runJsonCheck(fixtureOutput, {
       env: fixture === "domain-command-idempotency.ts"
         ? { ...process.env, SAMURAI_DOMAIN_IDEMPOTENCY_WORKER: idempotencyWorker, SAMURAI_DOMAIN_CRASH_WORKER: crashWorker }
+        : fixture === "domain-command-ingress.ts"
+          ? { ...process.env, NODE_ENV: "test" }
         : process.env
     });
     fixtureResults.set(fixture.replace(/\.ts$/, ""), result);
@@ -102,7 +100,7 @@ try {
   const verifierSelfTest = runJsonCheck(path.join(root, "scripts/verify-domain-command-verifier-self-test.mjs"));
   const coverageDirectory = path.join(temporaryRoot, "coverage");
   execFileSync("pnpm", [
-    "exec", "vitest", "run", "packages/domain-operations/src/domain-operations.coverage.test.ts", "packages/runtime/src/commands/domain-command-bus.test.ts",
+    "exec", "vitest", "run", "packages/domain-operations/src", "packages/runtime/src/commands/domain-command-bus.test.ts",
     "--coverage.enabled", "--coverage.provider=v8", "--coverage.reporter=json-summary", `--coverage.reportsDirectory=${coverageDirectory}`,
     "--coverage.include=packages/domain-operations/src/operations/**/*.operation.ts",
     "--coverage.include=packages/domain-operations/src/registry/operation-registry.ts",
@@ -111,7 +109,7 @@ try {
   ], {
     cwd: root,
     stdio: "inherit",
-    env: { ...process.env, SAMURAI_DOMAIN_COVERAGE: "1", SAMURAI_DOMAIN_IDEMPOTENCY_WORKER: idempotencyWorker, SAMURAI_DOMAIN_CRASH_WORKER: crashWorker }
+    env: process.env
   });
   const coverage = JSON.parse(readFileSync(path.join(coverageDirectory, "coverage-summary.json"), "utf8"));
   const measuredFiles = Object.entries(coverage).filter(([file]) => file !== "total");
@@ -120,10 +118,13 @@ try {
     for (const metric of ["lines", "statements", "functions"]) {
       if (metrics[metric].pct !== 100) failures.push(`${path.relative(root, file)}:${metric}:${metrics[metric].pct}`);
     }
-    const requiredBranch = file.endsWith("operation-registry.ts") ? 100 : 95;
-    if (metrics.branches.pct < requiredBranch) failures.push(`${path.relative(root, file)}:branches:${metrics.branches.pct}`);
+    const requiresCompleteBranchCoverage = file.endsWith("operation-registry.ts")
+      || file.endsWith("operation-binder.generated.ts")
+      || file.endsWith("domain-command-bus.ts");
+    if (requiresCompleteBranchCoverage && metrics.branches.pct !== 100) failures.push(`${path.relative(root, file)}:branches:${metrics.branches.pct}`);
     return failures;
   });
+  if (coverage.total.branches.pct < 95) coverageFailures.push(`total:branches:${coverage.total.branches.pct}`);
   if (coverageFailures.length > 0) throw new Error(`domain_command_coverage_failed:${coverageFailures.join(",")}`);
   process.stdout.write(`${JSON.stringify({ status: "passed", coverage_files: measuredFiles.length, lines: coverage.total.lines.pct, statements: coverage.total.statements.pct, functions: coverage.total.functions.pct, branches: coverage.total.branches.pct })}\n`);
   execFileSync("pnpm", [

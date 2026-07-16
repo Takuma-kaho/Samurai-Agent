@@ -1,35 +1,23 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { CollectionSchemaSchema, type ActivityInboxItem, type CollectionSchema, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { storedCollectionSchema } from "../../../value-objects/collection.js";
 import { collectionSchemaWriteValueSchema } from "../../../value-objects/collection.js";
 
-const Input = z.object({
-  "actions": z.array(domainJsonValueSchema) .optional(),
-  "derived_fields": z.array(domainJsonValueSchema) .optional(),
-  "descriptions": z.record(domainJsonValueSchema) .optional(),
-  "embeds": z.array(domainJsonValueSchema) .optional(),
-  "envelope_id": z.string() .optional(),
-  "fields": z.array(domainJsonValueSchema),
-  "id": z.string(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "labels": z.record(domainJsonValueSchema) .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "permissions": z.record(domainJsonValueSchema),
-  "provider_tool_call": z.boolean() .optional(),
-  "refs": z.array(domainJsonValueSchema) .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "triggers": z.array(domainJsonValueSchema) .optional(),
-  "version": z.string(),
-  "views": z.array(domainJsonValueSchema) .optional()
-}).strict();
+const Input = CollectionSchemaSchema.strict();
 const Output = collectionSchemaWriteValueSchema;
 
 export interface CollectionSchemaSavePorts {
-  executeCollectionSchemaSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getCollectionSchemaForMutation(id: string): Promise<z.infer<typeof storedCollectionSchema> | undefined>;
+  saveCollectionSchema(schema: CollectionSchema): Promise<z.infer<typeof storedCollectionSchema>>;
+  updateCollectionSchema(schema: CollectionSchema): Promise<z.infer<typeof storedCollectionSchema>>;
+  collectionSchemaRef(schema: z.infer<typeof storedCollectionSchema>): ResourceRef;
+  createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, z.infer<typeof domainJsonValueSchema>>, after: Record<string, z.infer<typeof domainJsonValueSchema>>): Promise<RollbackPoint>;
+  collectionMutationContract(id: "collection.schema.save"): { id: string; proposed_effects: string[] };
+  ensureCollectionMutationSession(): Promise<SessionRecord>;
+  createCollectionMutationEnvelope(content: string): MessageEnvelope;
+  runCollectionMutation<T>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
@@ -79,7 +67,21 @@ const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionSchemaSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionSchemaSave(context, input);
+        const existing = await ports.getCollectionSchemaForMutation(input.id);
+        const contract = ports.collectionMutationContract("collection.schema.save");
+        const session = await ports.ensureCollectionMutationSession();
+        const envelope = ports.createCollectionMutationEnvelope(`Save collection schema: ${input.id}`);
+        const result = await ports.runCollectionMutation({
+          session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
+          targetResourceRefs: existing ? [ports.collectionSchemaRef(existing)] : [],
+          execute: async (operation) => {
+            const saved = existing ? await ports.updateCollectionSchema(input) : await ports.saveCollectionSchema(input);
+            const ref = ports.collectionSchemaRef(saved);
+            const rollbackPoint = await ports.createCollectionRollback(operation, [ref], existing ? { collection_schema: domainJsonValueSchema.parse(existing) } : {}, { collection_schema: domainJsonValueSchema.parse(saved) });
+            return { resource: saved, ref, rollbackPoint, summary: `Saved collection schema ${saved.id}.` };
+          }
+        });
+        return { ok: true, value: Output.parse(result) };
       }
     };
   }

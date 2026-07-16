@@ -211,6 +211,12 @@ importers:
       '@samurai-agent/core-schemas':
         specifier: workspace:*
         version: link:../core-schemas
+      '@samurai-agent/gateway':
+        specifier: workspace:*
+        version: link:../gateway
+      '@samurai-agent/skills':
+        specifier: workspace:*
+        version: link:../skills
       zod:
         specifier: ^3.25.76
         version: 3.25.76

@@ -120,7 +120,7 @@ function mutateGenericForwarder(edit) {
   edit("packages/runtime/src/domain-operation-ports/artifact-domain-service-ports.ts", (source) => `${source}\nexport const typedPortHandler = (ports: { execute(): unknown }) => ports.execute();\n`);
 }
 function mutateOperationRedispatch(edit) {
-  edit("packages/runtime/src/commands/services/artifact-domain-service.ts", (source) => `${source}\nexport function injectedRedispatch(id: string) { switch (id) { case "artifact.create": return true; default: return false; } }\n`);
+  edit("packages/runtime/src/commands/services/artifact-domain-service.ts", (source) => `${source}\nconst injectedOperationHandlers = new Map([["artifact.create", () => true]]);\nexport function injectedRedispatch(id: string) { return injectedOperationHandlers.get(id)?.() ?? false; }\n`);
 }
 function mutateQueryWritePort(edit) {
   edit("packages/domain-operations/src/definition/index.ts", (source) => source.replace('readonly domainPortKind?: "query";', 'readonly domainPortKind?: "query";\n  save(value: string): Promise<void>;'));

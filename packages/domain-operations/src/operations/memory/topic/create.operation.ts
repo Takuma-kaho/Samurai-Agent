@@ -1,27 +1,19 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { SupportedLocaleSchema } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { memoryWriteValueSchema } from "../../../value-objects/memory.js";
+import { createMemory, type MemoryCreatePorts } from "../create-memory.js";
 
 const Input = z.object({
-  "content": z.string(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "topic": z.string() .optional(),
-  "topic_kind": z.string() .optional()
+  "content": z.string().min(1), "envelope_id": z.string().trim().min(1).optional(),
+  "input_locale": SupportedLocaleSchema.optional(), "metadata": z.record(domainJsonValueSchema).default({}),
+  "output_locale": SupportedLocaleSchema.optional(), "session_id": z.string().trim().min(1).optional(),
+  "topic_kind": z.string().trim().min(1).default("preference")
 }).strict();
 const Output = memoryWriteValueSchema;
 
-export interface MemoryTopicCreatePorts {
-  executeMemoryTopicCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
-}
+export interface MemoryTopicCreatePorts extends MemoryCreatePorts {}
 
 const memoryTopicCreate = defineCommand<MemoryTopicCreatePorts>()({
   ...{
@@ -67,7 +59,7 @@ const memoryTopicCreate = defineCommand<MemoryTopicCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleMemoryTopicCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeMemoryTopicCreate(context, input);
+        return { ok: true, value: Output.parse(await createMemory(ports, { kind: "topic", content: input.content, sessionId: input.session_id, inputLocale: input.input_locale, outputLocale: input.output_locale, metadata: input.metadata, envelopeId: input.envelope_id, topicKind: input.topic_kind })) };
       }
     };
   }

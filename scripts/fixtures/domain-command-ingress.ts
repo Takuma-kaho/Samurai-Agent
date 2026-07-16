@@ -14,7 +14,7 @@ import {
 } from "../../packages/action-catalog/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
-import { closeApiServer, createApiServer } from "../../apps/server/src/index";
+import { closeApiServer, createApiServer } from "../../apps/server/src/api-server";
 
 const root = await mkdtemp(path.join(tmpdir(), "samurai-command-ingress-"));
 const store = await WorkspaceStore.create({ rootDir: root });

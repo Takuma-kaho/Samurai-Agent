@@ -1,24 +1,16 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { learningSnapshotValueSchema } from "../../value-objects/learning.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "snapshot_id": z.string(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "snapshot_id": z.string().trim().min(1)
 }).strict();
 const Output = learningSnapshotValueSchema;
 
 export interface CuratorRestorePorts {
-  executeCuratorRestore(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  restoreCuratorSnapshot(id: string): Promise<z.infer<typeof Output> | undefined>;
+  curatorSnapshotNotFoundError(): Error;
 }
 
 const curatorRestore = defineCommand<CuratorRestorePorts>()({
@@ -63,7 +55,9 @@ const curatorRestore = defineCommand<CuratorRestorePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCuratorRestore(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCuratorRestore(context, input);
+        const restored = await ports.restoreCuratorSnapshot(input.snapshot_id);
+        if (!restored) throw ports.curatorSnapshotNotFoundError();
+        return { ok: true, value: restored };
       }
     };
   }

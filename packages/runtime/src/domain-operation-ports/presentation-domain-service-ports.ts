@@ -6,17 +6,13 @@ type Ports = Pick<DomainOperationPorts, "message.presentation.update" | "present
 export function createPresentationDomainServicePorts(services: Pick<RuntimeDomainServices, "presentationDomainService">): Ports {
   return {
     "message.presentation.update": {
-      executeMessagePresentationUpdate: async (context, input) => ({
-        ok: true as const,
-        value: await services.presentationDomainService.update(input)
-      })
+      getMessagePresentation: (id) => services.presentationDomainService.getPresentation(id),
+      presentCollectionView: (input) => services.presentationDomainService.presentView(input),
+      applyPresentationViewState: (spec, state) => services.presentationDomainService.applyViewState(spec, state),
+      presentationViewStateFromSpec: (spec) => services.presentationDomainService.viewStateFromSpec(spec),
+      updateMessagePresentationViewState: (input) => services.presentationDomainService.updateViewState(input),
+      messagePresentationNotFoundError: (id) => services.presentationDomainService.presentationNotFound(id)
     },
-    "presentation.plan": {
-      executePresentationPlan: async (context, input) => ({
-        ok: true as const,
-        value: await services.presentationDomainService.plan(input)
-      })
-    }
+    "presentation.plan": {}
   };
 }
-

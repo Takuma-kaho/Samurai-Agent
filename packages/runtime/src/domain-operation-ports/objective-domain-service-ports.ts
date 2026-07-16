@@ -6,17 +6,10 @@ type Ports = Pick<DomainOperationPorts, "objective.create" | "objective.transiti
 export function createObjectiveDomainServicePorts(services: Pick<RuntimeDomainServices, "objectiveDomainService">): Ports {
   return {
     "objective.create": {
-      executeObjectiveCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.objectiveDomainService.create(input)
-      })
+      saveObjective: (record) => services.objectiveDomainService.save(record)
     },
     "objective.transition": {
-      executeObjectiveTransition: async (context, input) => ({
-        ok: true as const,
-        value: await services.objectiveDomainService.transition(input)
-      })
+      transitionObjective: (id, action) => services.objectiveDomainService.transition(id, action)
     }
   };
 }
-

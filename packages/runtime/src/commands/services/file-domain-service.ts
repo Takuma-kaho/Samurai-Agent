@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import type { ActivityInboxItem, ArtifactRecord, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord, WorkspaceChangeRecord } from "@samurai-agent/core-schemas";
 
-interface WorkspacePath { absolutePath: string; relativePath: string }
+export interface WorkspacePath { absolutePath: string; relativePath: string }
 interface FileInfo { size: number; modifiedAt: string }
 interface DirectoryEntry { path: string; kind: "file" | "directory"; size?: number }
-interface FileResource { path: string; content?: string; entries?: DirectoryEntry[]; metadata?: Record<string, JsonValue>; provenance?: Record<string, JsonValue> }
+export interface FileResource { path: string; content?: string; entries?: DirectoryEntry[]; metadata?: Record<string, JsonValue>; provenance?: Record<string, JsonValue> }
 interface FileMutationResult { resource: FileResource; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
 
 export interface FileReadPort {
@@ -33,6 +33,19 @@ export interface FileMutationHost {
 
 export class FileDomainService {
   constructor(private readonly read: FileReadPort, private readonly write: FileWritePort, private readonly host: FileMutationHost) {}
+
+  resolveFilePath(path: string) { return this.read.resolve(path); }
+  ensureFileSession() { return this.host.ensureSession(); }
+  createFileEnvelope(session: SessionRecord, content: string) { return this.host.createEnvelope(session, content); }
+  runFileMutation(input: Parameters<FileMutationHost["runMutation"]>[0]) { return this.host.runMutation(input); }
+  readFileTextIfExists(path: string) { return this.write.readTextIfExists(path); }
+  ensureFileParent(path: string) { return this.write.ensureParent(path); }
+  writeFileText(path: string, content: string) { return this.write.writeText(path, content); }
+  isManagedCollectionPath(path: string) { return this.write.isManagedCollectionPath(path); }
+  reindexManagedCollections() { return this.write.reindexCollections(); }
+  createFileRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.host.createRollback(operation, refs, before, after); }
+  fileNotFoundError(path: string) { return this.host.requestError("not_found", `File not found: ${path}`); }
+  filePatchConflictError() { return this.host.requestError("conflict", "file_patch_search_not_found"); }
 
   async readFile(payload: Record<string, JsonValue>): Promise<{ resource: FileResource }> {
     const workspacePath = this.read.resolve(text(payload.path));

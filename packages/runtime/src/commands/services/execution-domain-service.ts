@@ -1,8 +1,4 @@
 import {
-  WorkItemRecordSchema,
-  createId,
-  nowIso,
-  stableHash,
   type JsonValue,
   type ObjectiveRecord,
   type WorkDependencyRecord,
@@ -32,26 +28,9 @@ export interface ExecutionDomainServiceDependencies {
 export class ExecutionDomainService {
   constructor(private readonly dependencies: ExecutionDomainServiceDependencies) {}
 
-  async createWorkItem(payload: Record<string, JsonValue>) {
-    const objectiveId = requiredString(payload, "objective_id");
-    if (!await this.dependencies.store.getObjective(objectiveId)) {
-      throw this.dependencies.requestError("not_found", "objective_not_found");
-    }
-    const now = nowIso();
-    return this.dependencies.store.saveWorkItem(WorkItemRecordSchema.parse({
-      id: optionalString(payload.work_item_id) || optionalString(payload.id) || createId("work"),
-      objective_id: objectiveId,
-      parent_work_item_id: optionalString(payload.parent_work_item_id) || undefined,
-      instruction: optionalString(payload.instruction),
-      status: "ready",
-      priority: optionalNumber(payload.priority) ?? 0,
-      attempt: 0,
-      max_attempts: positiveInteger(payload.max_attempts) ?? 3,
-      idempotency_key: optionalString(payload.work_idempotency_key) || `${objectiveId}:${stableHash(payload)}`,
-      created_at: now,
-      updated_at: now
-    }));
-  }
+  getObjective(id: string) { return this.dependencies.store.getObjective(id); }
+  saveWorkItemRecord(record: WorkItemRecord) { return this.dependencies.store.saveWorkItem(record); }
+  objectiveNotFoundError() { return this.dependencies.requestError("not_found", "objective_not_found"); }
 
   followUpWorkItem(payload: Record<string, JsonValue>) {
     return this.dependencies.coordinator.followUp(requiredString(payload, "work_item_id"), optionalString(payload.instruction));
@@ -82,13 +61,4 @@ function requiredString(payload: Record<string, JsonValue>, key: string): string
   const value = optionalString(payload[key]);
   if (!value) throw new Error(`domain_operation_required_field:${key}`);
   return value;
-}
-
-function optionalNumber(value: JsonValue | undefined): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function positiveInteger(value: JsonValue | undefined): number | undefined {
-  const number = optionalNumber(value);
-  return number !== undefined && Number.isInteger(number) && number > 0 ? number : undefined;
 }

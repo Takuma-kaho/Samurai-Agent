@@ -12,10 +12,7 @@ export function createGatewayDomainServicePorts(services: Pick<RuntimeDomainServ
       })
     },
     "gateway.inbound.route": {
-      executeGatewayInboundRoute: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.routeInbound(input)
-      })
+      routeGatewayInbound: (input) => services.gatewayDomainService.routeInboundPrimitive(input)
     },
     "gateway.mcp_config.save": {
       executeGatewayMcpConfigSave: async (context, input) => ({
@@ -24,34 +21,28 @@ export function createGatewayDomainServicePorts(services: Pick<RuntimeDomainServ
       })
     },
     "gateway.pairing.approve": {
-      executeGatewayPairingApprove: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.approvePairing(input)
-      })
+      requireGatewayPairing: (id) => services.gatewayDomainService.requirePairing(id),
+      saveGatewayPairing: (record) => services.gatewayDomainService.savePairing(record),
+      emitGatewayPairingUpdated: (record) => services.gatewayDomainService.emitPairingUpdated(record)
     },
     "gateway.pairing.expire": {
-      executeGatewayPairingExpire: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.expirePairings(input)
-      })
+      expireGatewayPairings: (now) => services.gatewayDomainService.expirePairingsPrimitive(now),
+      emitGatewayPairingUpdated: (record) => services.gatewayDomainService.emitPairingUpdated(record)
     },
     "gateway.pairing.reject": {
-      executeGatewayPairingReject: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.rejectPairing(input)
-      })
+      requireGatewayPairing: (id) => services.gatewayDomainService.requirePairing(id),
+      saveGatewayPairing: (record) => services.gatewayDomainService.savePairing(record),
+      emitGatewayPairingUpdated: (record) => services.gatewayDomainService.emitPairingUpdated(record)
     },
     "gateway.pairing.revoke": {
-      executeGatewayPairingRevoke: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.revokePairing(input)
-      })
+      requireGatewayPairing: (id) => services.gatewayDomainService.requirePairing(id),
+      saveGatewayPairing: (record) => services.gatewayDomainService.savePairing(record),
+      emitGatewayPairingUpdated: (record) => services.gatewayDomainService.emitPairingUpdated(record)
     },
     "gateway.pairing.rotate": {
-      executeGatewayPairingRotate: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.rotatePairing(input)
-      })
+      requireGatewayPairing: (id) => services.gatewayDomainService.requirePairing(id),
+      saveGatewayPairing: (record) => services.gatewayDomainService.savePairing(record),
+      emitGatewayPairingUpdated: (record) => services.gatewayDomainService.emitPairingUpdated(record)
     },
     "gateway.pairing_policy.save": {
       executeGatewayPairingPolicySave: async (context, input) => ({
@@ -78,17 +69,10 @@ export function createGatewayDomainServicePorts(services: Pick<RuntimeDomainServ
       })
     },
     "gateway.sandbox.sync": {
-      executeGatewaySandboxSync: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.syncSandbox(input)
-      })
+      syncGatewaySandbox: (id, input) => services.gatewayDomainService.syncSandboxPrimitive(id, input)
     },
     "gateway.state.repair": {
-      executeGatewayStateRepair: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.repairState(input)
-      })
+      repairGatewayState: (input) => services.gatewayDomainService.repairStatePrimitive(input)
     }
   };
 }
-

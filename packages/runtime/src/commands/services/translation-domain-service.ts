@@ -72,6 +72,22 @@ export class TranslationDomainService {
     return this.dependencies.translations.saveTranslation(ResourceTranslationRecordSchema.parse(payload));
   }
 
+  saveAutomationJob(input: Parameters<TranslationWritePort["saveAutomationJob"]>[0]) {
+    return this.dependencies.translations.saveAutomationJob(input);
+  }
+
+  translationSourceNotFoundError(ref: ResourceRef) {
+    return this.dependencies.requestError("not_found", `Translatable resource not found: ${ref.kind}/${ref.id}`);
+  }
+
+  loadArtifactSource(id: string) { return this.dependencies.sources.loadArtifact(id); }
+  loadMemorySource(id: string) { return this.dependencies.sources.loadMemory(id); }
+  loadWikiSource(id: string) { return this.dependencies.sources.loadWiki(id); }
+  loadSkillSource(id: string) { return this.dependencies.sources.loadSkill(id); }
+  loadCollectionRecordSource(ref: ResourceRef) { return this.dependencies.sources.loadCollectionRecord(ref); }
+  stripSkillFrontmatter(content: string) { return stripFrontmatter(content); }
+  hashContent(content: string) { return stableHash(content); }
+
   saveJob(payload: Record<string, JsonValue>) {
     const sourceRef = resourceRef(payload.source_ref);
     const targetLocale = locale(payload.target_locale);

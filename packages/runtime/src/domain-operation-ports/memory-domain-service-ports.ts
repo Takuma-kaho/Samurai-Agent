@@ -6,23 +6,34 @@ type Ports = Pick<DomainOperationPorts, "memory.archive" | "memory.session.creat
 export function createMemoryDomainServicePorts(services: Pick<RuntimeDomainServices, "memoryDomainService">): Ports {
   return {
     "memory.archive": {
-      executeMemoryArchive: async (context, input) => ({
-        ok: true as const,
-        value: await services.memoryDomainService.archive(input)
-      })
+      getMemorySession: (id) => services.memoryDomainService.getSession(id),
+      getMemoryForArchive: (id) => services.memoryDomainService.getMemoryForArchive(id),
+      listMemoryForSession: (id) => services.memoryDomainService.listMemoryForSession(id),
+      archiveMemoryRecord: (id) => services.memoryDomainService.archiveMemoryRecord(id),
+      memoryArchiveError: (code, message) => services.memoryDomainService.memoryArchiveError(code, message),
+      memoryResourceRef: (memory) => services.memoryDomainService.memoryRef(memory),
+      memoryArchiveCapabilityId: () => services.memoryDomainService.memoryArchiveCapabilityId(),
+      saveMemoryArchiveOperation: (operation) => services.memoryDomainService.saveMemoryArchiveOperation(operation),
+      updateMemoryArchiveOperation: (operation) => services.memoryDomainService.updateMemoryArchiveOperation(operation),
+      emitMemoryArchiveOperation: (operation) => services.memoryDomainService.emitMemoryArchiveOperation(operation),
+      createMemoryArchiveRollback: (operation, refs, before, after) => services.memoryDomainService.createMemoryArchiveRollback(operation, refs, before, after),
+      rebuildMemoryActivity: () => services.memoryDomainService.rebuildMemoryActivity()
     },
     "memory.session.create": {
-      executeMemorySessionCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.memoryDomainService.createSession(input)
-      })
+      getMemorySession: (id) => services.memoryDomainService.getSession(id), createMemorySession: (input) => services.memoryDomainService.createMemorySession(input),
+      ensureMemorySession: () => services.memoryDomainService.ensureMemorySession(), memoryCreateError: (message) => services.memoryDomainService.memoryCreateError(message),
+      createMemoryEnvelope: (input) => services.memoryDomainService.createMemoryEnvelope(input), writeSessionMemory: (envelope, content) => services.memoryDomainService.writeSessionMemory(envelope, content),
+      writeTopicMemory: (envelope, topicKind, content) => services.memoryDomainService.writeTopicMemory(envelope, topicKind, content), memoryResourceRef: (memory) => services.memoryDomainService.memoryRef(memory),
+      createMemoryRollback: (operation, refs, after) => services.memoryDomainService.createMemoryRollback(operation, refs, after), emitMemoryCandidate: (memory) => services.memoryDomainService.emitMemoryCandidate(memory),
+      runMemoryMutation: (input) => services.memoryDomainService.runMemoryMutation(input)
     },
     "memory.topic.create": {
-      executeMemoryTopicCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.memoryDomainService.createTopic(input)
-      })
+      getMemorySession: (id) => services.memoryDomainService.getSession(id), createMemorySession: (input) => services.memoryDomainService.createMemorySession(input),
+      ensureMemorySession: () => services.memoryDomainService.ensureMemorySession(), memoryCreateError: (message) => services.memoryDomainService.memoryCreateError(message),
+      createMemoryEnvelope: (input) => services.memoryDomainService.createMemoryEnvelope(input), writeSessionMemory: (envelope, content) => services.memoryDomainService.writeSessionMemory(envelope, content),
+      writeTopicMemory: (envelope, topicKind, content) => services.memoryDomainService.writeTopicMemory(envelope, topicKind, content), memoryResourceRef: (memory) => services.memoryDomainService.memoryRef(memory),
+      createMemoryRollback: (operation, refs, after) => services.memoryDomainService.createMemoryRollback(operation, refs, after), emitMemoryCandidate: (memory) => services.memoryDomainService.emitMemoryCandidate(memory),
+      runMemoryMutation: (input) => services.memoryDomainService.runMemoryMutation(input)
     }
   };
 }
-

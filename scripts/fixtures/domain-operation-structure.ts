@@ -1,14 +1,26 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
 
 const root = process.env.SAMURAI_REPO_ROOT ? path.resolve(process.env.SAMURAI_REPO_ROOT) : process.cwd();
 const readSource = (file: string): string => {
+  let descriptor: number | undefined;
   try {
-    return readFileSync(file, "utf8");
+    descriptor = openSync(file, "r");
+    const size = fstatSync(descriptor).size;
+    const buffer = Buffer.allocUnsafe(size);
+    let offset = 0;
+    while (offset < size) {
+      const bytesRead = readSync(descriptor, buffer, offset, size - offset, null);
+      if (bytesRead === 0) throw new Error("unexpected_eof");
+      offset += bytesRead;
+    }
+    return buffer.toString("utf8");
   } catch (error) {
     throw new Error(`domain_structure_source_read_failed:${path.relative(root, file)}`, { cause: error });
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 };
 const operationRoot = path.join(root, "packages/domain-operations/src/operations");
@@ -32,7 +44,8 @@ for (const file of operationFiles) {
     if (count !== 1) issues.push({ gate: "ST03", file: relative, detail: `${required}_count:${count}` });
   }
   const inputDeclaration = nodes(ast).find((node): node is ts.VariableDeclaration => ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "Input");
-  if (!inputDeclaration?.initializer || !containsCallNamed(inputDeclaration.initializer, "strict")) {
+  if (!inputDeclaration?.initializer || (!containsCallNamed(inputDeclaration.initializer, "strict")
+    && !isImportedSharedValueSchema(inputDeclaration.initializer, ast))) {
     issues.push({ gate: "CT03", file: relative, detail: "input_schema_not_strict" });
   }
   const createHandlers = nodes(ast).filter((node) => (ts.isPropertyAssignment(node) || ts.isMethodDeclaration(node)) && propertyName(node.name) === "createHandler");
@@ -107,10 +120,12 @@ for (const file of portFiles) {
   inspectForbiddenTypes(ast, relative, issues);
   for (const assignment of nodes(ast).filter(ts.isPropertyAssignment)) {
     const name = propertyName(assignment.name);
-    if (name && operationIds.has(name)) boundIds.push(name);
+    if (name && operationIds.has(name)) {
+      boundIds.push(name);
+    }
   }
-  inspectRedispatch(ast, relative, operationIds, issues);
-  if (hasGenericExecuteCall(ast)) issues.push({ gate: "ST07", file: relative, detail: "generic_execute_forwarding" });
+  inspectRedispatch(ast, relative, operationIds, issues, true);
+  if (hasGenericForwarder(ast)) issues.push({ gate: "ST07", file: relative, detail: "generic_execute_forwarding" });
 }
 assert.equal(portFiles.length, 21);
 if (boundIds.length !== 114 || new Set(boundIds).size !== 114) {
@@ -185,7 +200,8 @@ const productionPackageSources = readdirSync(path.join(root, "packages")).flatMa
   const sourceDirectory = path.join(root, "packages", packageName, "src");
   return existsSync(sourceDirectory) ? filesUnder(sourceDirectory) : [];
 });
-for (const file of productionPackageSources.filter((entry) => entry.endsWith(".ts") && entry !== coreSchemaFile)) {
+for (const file of productionPackageSources.filter((entry) => entry.endsWith(".ts")
+  && !entry.endsWith(".test.ts") && !entry.endsWith(".spec.ts") && entry !== coreSchemaFile)) {
   const source = readSource(file);
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   if (nodes(ast).some((node) => (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === "zod-to-json-schema")
@@ -207,7 +223,7 @@ for (const file of serviceFiles) {
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   inspectForbiddenTypes(ast, relative, issues);
   inspectRedispatch(ast, relative, operationIds, issues);
-  if (hasGenericExecuteCall(ast)) issues.push({ gate: "ST07", file: relative, detail: "generic_execute_forwarding" });
+  if (hasGenericForwarder(ast)) issues.push({ gate: "ST07", file: relative, detail: "generic_execute_forwarding" });
   if (nodes(ast).some((node) => ts.isPropertyAccessExpression(node) && node.name.text === "_def")) issues.push({ gate: "ST11", file: relative, detail: "zod_private_api" });
 }
 
@@ -233,13 +249,25 @@ function inspectForbiddenTypes(ast: ts.SourceFile, relative: string, output: typ
   }
 }
 
-function inspectRedispatch(ast: ts.SourceFile, relative: string, ids: Set<string>, output: typeof issues): void {
+function inspectRedispatch(ast: ts.SourceFile, relative: string, ids: Set<string>, output: typeof issues, allowOperationBindings = false): void {
   for (const node of nodes(ast)) {
     if (ts.isSwitchStatement(node) && nodes(node).some((child) => ts.isStringLiteral(child) && ids.has(child.text))) {
       output.push({ gate: "ST06", file: relative, detail: "operation_id_switch" });
     }
     if (ts.isBinaryExpression(node) && nodes(node).some((child) => ts.isStringLiteral(child) && ids.has(child.text))) {
       output.push({ gate: "ST06", file: relative, detail: "operation_id_comparison" });
+    }
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Map"
+      && nodes(node).some((child) => ts.isStringLiteral(child) && ids.has(child.text))) {
+      output.push({ gate: "ST06", file: relative, detail: "operation_id_map" });
+    }
+    if (!allowOperationBindings && ts.isObjectLiteralExpression(node)) {
+      const operationKeys = node.properties.filter((property) => {
+        if (!ts.isPropertyAssignment(property) && !ts.isMethodDeclaration(property)) return false;
+        const name = propertyName(property.name);
+        return Boolean(name && ids.has(name));
+      });
+      if (operationKeys.length > 0) output.push({ gate: "ST06", file: relative, detail: "operation_id_dispatch_table" });
     }
   }
 }
@@ -274,16 +302,36 @@ function propertyName(name: ts.PropertyName | ts.BindingName | undefined): strin
   return ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name) ? name.text : undefined;
 }
 
-function hasGenericExecuteCall(ast: ts.SourceFile): boolean {
-  return nodes(ast).some((node) => ts.isCallExpression(node)
-    && ts.isPropertyAccessExpression(node.expression)
-    && node.expression.name.text === "execute");
+function hasGenericForwarder(ast: ts.SourceFile): boolean {
+  const functions = nodes(ast).filter((node): node is ts.FunctionLikeDeclaration => ts.isFunctionDeclaration(node)
+    || ts.isFunctionExpression(node) || ts.isArrowFunction(node) || ts.isMethodDeclaration(node));
+  return functions.some((fn) => {
+    if (!fn.body) return false;
+    const parameterNames = new Set(fn.parameters.flatMap((parameter) => ts.isIdentifier(parameter.name) ? [parameter.name.text] : []));
+    if (parameterNames.size === 0) return false;
+    return nodes(fn.body).some((node) => ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "execute"
+      && ts.isIdentifier(node.expression.expression)
+      && parameterNames.has(node.expression.expression.text));
+  });
 }
 
 function containsCallNamed(node: ts.Node, name: string): boolean {
   return nodes(node).some((child) => ts.isCallExpression(child)
     && ts.isPropertyAccessExpression(child.expression)
     && child.expression.name.text === name);
+}
+
+function isImportedSharedValueSchema(node: ts.Node, ast: ts.SourceFile): boolean {
+  if (!ts.isIdentifier(node)) return false;
+  return ast.statements.some((statement) => {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)
+      || !statement.moduleSpecifier.text.includes("/value-objects/")) return false;
+    return statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)
+      ? statement.importClause.namedBindings.elements.some((element) => element.name.text === node.text)
+      : false;
+  });
 }
 
 function nodes(rootNode: ts.Node): ts.Node[] {

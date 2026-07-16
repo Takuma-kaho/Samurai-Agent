@@ -1,25 +1,21 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import type { ObjectiveRecord, WorkItemRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { objectiveTransitionValueSchema } from "../../value-objects/work.js";
 
 const Input = z.object({
   "action": z.enum(["pause", "resume", "cancel"]),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "objective_id": z.string(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "objective_id": z.string().trim().min(1)
 }).strict();
 const Output = objectiveTransitionValueSchema;
 
 export interface ObjectiveTransitionPorts {
-  executeObjectiveTransition(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  transitionObjective(id: string, action: z.infer<typeof Input>["action"]): Promise<{
+    objective: ObjectiveRecord;
+    workItems: WorkItemRecord[];
+    cancelBackendRunIds: string[];
+  }>;
 }
 
 const objectiveTransition = defineCommand<ObjectiveTransitionPorts>()({
@@ -65,7 +61,7 @@ const objectiveTransition = defineCommand<ObjectiveTransitionPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleObjectiveTransition(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeObjectiveTransition(context, input);
+        return { ok: true, value: await ports.transitionObjective(input.objective_id, input.action) };
       }
     };
   }

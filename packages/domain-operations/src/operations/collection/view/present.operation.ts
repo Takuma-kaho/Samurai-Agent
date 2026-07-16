@@ -21,7 +21,7 @@ const Input = z.object({
 const Output = collectionViewValueSchema;
 
 export interface CollectionViewPresentPorts extends DomainQueryPorts {
-  executeCollectionViewPresent(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<z.infer<typeof Output>>;
 }
 
 const collectionViewPresent = defineQuery<CollectionViewPresentPorts>()({
@@ -76,7 +76,7 @@ const collectionViewPresent = defineQuery<CollectionViewPresentPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionViewPresent(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionViewPresent(context, input);
+        return { ok: true, value: Output.parse(await ports.presentCollectionView({ collectionId: input.collection_id, viewId: input.view_id })) };
       }
     };
   }

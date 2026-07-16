@@ -1,5 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import type { ActivityInboxItem, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { collectionReindexWriteValueSchema } from "../../value-objects/collection.js";
 
@@ -17,7 +18,11 @@ const Input = z.object({
 const Output = collectionReindexWriteValueSchema;
 
 export interface CollectionReindexPorts {
-  executeCollectionReindex(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  collectionMutationContract(id: "collection.reindex"): { id: string; proposed_effects: string[] };
+  ensureCollectionMutationSession(): Promise<SessionRecord>;
+  createCollectionMutationEnvelope(content: string): MessageEnvelope;
+  reindexCollectionStore(): Promise<z.infer<typeof Output>["resource"]>;
+  runCollectionMutation<T>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const collectionReindex = defineCommand<CollectionReindexPorts>()({
@@ -63,7 +68,21 @@ const collectionReindex = defineCommand<CollectionReindexPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionReindex(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionReindex(context, input);
+        const contract = ports.collectionMutationContract("collection.reindex");
+        const session = await ports.ensureCollectionMutationSession();
+        const envelope = ports.createCollectionMutationEnvelope("Reindex collections");
+        const result = await ports.runCollectionMutation({
+          session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
+          execute: async () => {
+            const resource = await ports.reindexCollectionStore();
+            return {
+              resource,
+              ref: { kind: "collection_index", id: "collections", uri: "collections", label: "Collection index" },
+              summary: `Reindexed ${resource.schemas.indexed} collection schema(s) and ${resource.records.indexed} record(s).`
+            };
+          }
+        });
+        return { ok: true, value: Output.parse(result) };
       }
     };
   }

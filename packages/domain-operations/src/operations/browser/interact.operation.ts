@@ -1,29 +1,30 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import type { ActivityInboxItem, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { browserInteractionSchema } from "../../value-objects/browser.js";
 import { runtimeWriteValueSchema } from "../../value-objects/runtime-write.js";
 
 const Input = z.object({
-  "action": z.string() .optional(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "output_path": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "selector": z.string() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "url": z.string() .optional(),
-  "value": z.string() .optional()
+  "action": z.enum(["navigate", "click", "input"]).default("navigate"),
+  "selector": z.string().trim().min(1).optional(),
+  "url": z.string().url(),
+  "value": z.string().optional()
 }).strict();
 const Output = runtimeWriteValueSchema(browserInteractionSchema);
 
 export interface BrowserInteractPorts {
-  executeBrowserInteract(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  interactWithBrowser(input: z.infer<typeof Input>): Promise<z.infer<typeof browserInteractionSchema>>;
+  ensureBrowserSession(): Promise<SessionRecord>;
+  createBrowserEnvelope(session: SessionRecord, content: string): MessageEnvelope;
+  stableBrowserHash(value: unknown): string;
+  runBrowserMutation(input: {
+    session: SessionRecord;
+    envelope: MessageEnvelope;
+    operationName: string;
+    proposedEffects: string[];
+    execute(operation: OperationRecord): Promise<{ resource: z.infer<typeof browserInteractionSchema>; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }>;
+  }): Promise<{ resource: z.infer<typeof browserInteractionSchema>; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const browserInteract = defineCommand<BrowserInteractPorts>()({
@@ -71,7 +72,25 @@ const browserInteract = defineCommand<BrowserInteractPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleBrowserInteract(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeBrowserInteract(context, input);
+        const session = await ports.ensureBrowserSession();
+        const envelope = ports.createBrowserEnvelope(session, `browser.interact: ${input.url}`);
+        const value = await ports.runBrowserMutation({
+          session,
+          envelope,
+          operationName: "browser.interact",
+          proposedEffects: [`browser.interact ${input.url} without mutating external state.`],
+          execute: async () => {
+            const resource = await ports.interactWithBrowser(input);
+            const ref: ResourceRef = {
+              kind: "browser_page",
+              id: ports.stableBrowserHash(resource.url),
+              uri: resource.url,
+              label: resource.title || resource.url
+            };
+            return { resource, ref, summary: `Completed browser ${input.action} through ${resource.adapterId}.` };
+          }
+        });
+        return { ok: true, value };
       }
     };
   }

@@ -1,25 +1,27 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import type { JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { reflectionSuggestionApplyValueSchema } from "../../../value-objects/reflection.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "suggestion_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "suggestion_id": z.string().trim().min(1)
 }).strict();
 const Output = reflectionSuggestionApplyValueSchema;
+type ReflectionTarget = z.infer<typeof Output>["resource"];
 
 export interface ReflectionSuggestionApplyPorts {
-  executeReflectionSuggestionApply(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  listReflectionSuggestions(): Promise<Array<{ id: string; status: string; suggestion_type: string; title: string; content: string; source_refs: ResourceRef[]; target_ref?: ResourceRef; updated_at: string }>>;
+  reflectionSuggestionError(code: "not_found" | "conflict", message: string): Error;
+  ensureReflectionMutationSession(): Promise<SessionRecord>;
+  createReflectionMutationEnvelope(content: string): MessageEnvelope;
+  runReflectionSuggestionMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ReflectionTarget; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<z.infer<typeof Output>>;
+  createReflectionMemoryTarget(input: { title: string; content: string; envelope: MessageEnvelope }): Promise<{ resource: ReflectionTarget; ref: ResourceRef; rollbackPoint?: RollbackPoint }>;
+  createReflectionWikiTarget(input: { title: string; content: string; sourceRefs: ResourceRef[] }): Promise<{ resource: ReflectionTarget; ref: ResourceRef; rollbackPoint?: RollbackPoint }>;
+  createReflectionSkillTarget(input: { title: string; content: string; sourceRefs: ResourceRef[] }): Promise<{ resource: ReflectionTarget; ref: ResourceRef; rollbackPoint?: RollbackPoint }>;
+  createReflectionTargetRollback(operation: OperationRecord, refs: ResourceRef[], after: Record<string, JsonValue>): Promise<RollbackPoint>;
+  updateReflectionSuggestion(suggestion: { id: string; status: string; suggestion_type: string; title: string; content: string; source_refs: ResourceRef[]; target_ref?: ResourceRef; updated_at: string }): Promise<unknown>;
+  reflectionNow(): string;
 }
 
 const reflectionSuggestionApply = defineCommand<ReflectionSuggestionApplyPorts>()({
@@ -71,7 +73,31 @@ const reflectionSuggestionApply = defineCommand<ReflectionSuggestionApplyPorts>(
   createHandler(ports) {
     return {
       execute: async function handleReflectionSuggestionApply(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeReflectionSuggestionApply(context, input);
+        const suggestion = (await ports.listReflectionSuggestions()).find((item) => item.id === input.suggestion_id);
+        if (!suggestion) throw ports.reflectionSuggestionError("not_found", `Reflection suggestion not found: ${input.suggestion_id}`);
+        if (suggestion.status !== "proposed") throw ports.reflectionSuggestionError("conflict", "reflection_suggestion_already_settled");
+        const session = await ports.ensureReflectionMutationSession();
+        const envelope = ports.createReflectionMutationEnvelope(`Apply reflection suggestion: ${suggestion.title}`);
+        const value = Output.parse(await ports.runReflectionSuggestionMutation({ session, envelope, operationName: "reflection.suggestion.apply",
+          proposedEffects: [`Apply ${suggestion.suggestion_type} reflection suggestion.`], targetResourceRefs: suggestion.source_refs,
+          execute: async (operation) => {
+            const now = ports.reflectionNow();
+            if (suggestion.suggestion_type === "memory") {
+              const target = await ports.createReflectionMemoryTarget({ title: suggestion.title || "reflection", content: suggestion.content, envelope });
+              const rollbackPoint = await ports.createReflectionTargetRollback(operation, [target.ref], { memory: target.resource as JsonValue });
+              await ports.updateReflectionSuggestion({ ...suggestion, status: "applied", updated_at: now });
+              return { ...target, rollbackPoint, summary: `Applied reflection suggestion as Memory ${suggestion.title}.` };
+            }
+            if (suggestion.suggestion_type === "knowledge_wiki" || suggestion.suggestion_type === "skill") {
+              const target = suggestion.suggestion_type === "knowledge_wiki"
+                ? await ports.createReflectionWikiTarget({ title: suggestion.title, content: suggestion.content, sourceRefs: suggestion.source_refs })
+                : await ports.createReflectionSkillTarget({ title: suggestion.title, content: suggestion.content, sourceRefs: suggestion.source_refs });
+              await ports.updateReflectionSuggestion({ ...suggestion, status: "applied", target_ref: target.ref, updated_at: now });
+              return { ...target, summary: `Applied reflection suggestion as ${suggestion.suggestion_type === "skill" ? "Skill candidate" : "Knowledge Wiki proposal"} ${suggestion.title}.` };
+            }
+            throw ports.reflectionSuggestionError("conflict", "reflection_suggestion_type_not_applyable");
+          }}));
+        return { ok: true, value };
       }
     };
   }

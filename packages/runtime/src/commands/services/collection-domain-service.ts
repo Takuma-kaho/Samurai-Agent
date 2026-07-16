@@ -82,6 +82,30 @@ export class CollectionDomainService {
     requestError: (code: "conflict" | "not_found" | "forbidden", message: string) => Error;
   }) {}
 
+  getCollectionSchema(id: string) { return this.dependencies.queries.getSchema(id); }
+  listCollectionRecords(schema: CollectionSchema & { file_path: string }, input: { ids: string[]; fields: string[] }) { return this.dependencies.queries.listRecords(schema, input); }
+  presentCollectionView(input: { collectionId: string; viewId?: string }) { return this.dependencies.queries.presentView(input); }
+  collectionQueryError(message: string) { return this.dependencies.requestError("not_found", message); }
+  collectionMutationContract(id: "collection.schema.save" | "collection.reindex") { return this.dependencies.mutation.contract(id); }
+  ensureCollectionMutationSession() { return this.dependencies.mutation.ensureSession(); }
+  createCollectionMutationEnvelope(content: string) { return this.dependencies.mutation.createEnvelope(content); }
+  runCollectionMutation<T, Extra extends Record<string, unknown> = {}>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & Extra> }) { return this.dependencies.mutation.runMutation<T, Extra>(input); }
+  reindexCollectionStore() { return this.dependencies.mutation.reindex(); }
+  getCollectionSchemaForMutation(id: string) { return this.dependencies.mutation.getSchema(id); }
+  saveCollectionSchema(schema: CollectionSchema) { return this.dependencies.mutation.saveSchema(schema); }
+  updateCollectionSchema(schema: CollectionSchema) { return this.dependencies.mutation.updateSchema(schema); }
+  collectionSchemaRef(schema: StoredCollectionSchema) { return collectionSchemaRef(schema); }
+  createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.mutation.createRollback(operation, refs, before, after); }
+  saveCollectionRecord(record: CollectionRecord) { return this.dependencies.mutation.saveRecord(record); }
+  collectionRecordRef(record: StoredCollectionRecord) { return collectionRecordRef(record); }
+  queueCollectionTrigger(input: { collectionId: string; recordId: string; event: "record.created" | "record.patched" }) { return this.dependencies.mutation.queueTrigger(input); }
+  applyCollectionRecordPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }) { return this.dependencies.mutation.applyRecordPatch(input); }
+  mapCollectionPatchError(error: unknown) { return this.dependencies.mutation.mapPatchError(error); }
+  collectionDeleteAllowed(schema: CollectionSchema, viewId?: string) { return collectionDeleteAllowed(schema, viewId); }
+  getCollectionRecord(collectionId: string, recordId: string) { return this.dependencies.mutation.getRecord(collectionId, recordId); }
+  deleteCollectionRecord(collectionId: string, recordId: string) { return this.dependencies.mutation.deleteRecord(collectionId, recordId); }
+  collectionMutationError(code: "forbidden" | "not_found", message: string) { return this.dependencies.requestError(code, message); }
+
   runAction(payload: Record<string, JsonValue>) {
     return this.runActionInput({
       collectionId: optionalString(payload.collection_id), actionId: optionalString(payload.action_id),

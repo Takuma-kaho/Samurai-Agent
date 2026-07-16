@@ -149,6 +149,21 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     conflictError: (message: string) => Error;
   }) {}
 
+  getSkillForMutation(id: string) { return this.dependencies.mutation.getSkill(id); }
+  readSkillMarkdown(id: string) { return this.dependencies.mutation.readMarkdown(id); }
+  saveSkillMarkdown(input: { state: "candidate" | "project"; skillId: string; markdown: string }) { return this.dependencies.mutation.saveMarkdown(input); }
+  listSkillSupportFiles(id: string) { return this.dependencies.mutation.listSupportFiles(id); }
+  writeSkillSupportFile(input: { skillId: string; path: string; content: string }) { return this.dependencies.mutation.writeSupportFile(input); }
+  skillMutationContract(id: "skill.patch" | "skill.candidate.create" | "skill.project.save" | "skill.support_file.save") { return this.dependencies.mutation.contract(id); }
+  ensureSkillMutationSession() { return this.dependencies.mutation.ensureSession(); }
+  createSkillMutationEnvelope(content: string) { return this.dependencies.mutation.createEnvelope(content); }
+  skillResourceRef(skill: StoredSkill) { return skillRef(skill); }
+  createSkillRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.mutation.createRollback(operation, refs, before, after); }
+  runSkillMutation<T>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }) { return this.dependencies.mutation.runMutation<T>(input); }
+  skillMutationNotFound(message: string) { return this.dependencies.mutation.requestError("not_found", message); }
+  skillMutationConflict(message: string) { return this.dependencies.conflictError(message); }
+  patchSkillRecord(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string }) { return this.dependencies.mutation.patchSkill(input); }
+
   createCandidate(payload: Record<string, JsonValue>) {
     const title = optionalString(payload.title);
     const content = optionalString(payload.content);

@@ -4,12 +4,12 @@ import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDo
 import { gatewayRepairValueSchema } from "../../../value-objects/gateway.js";
 
 const Input = z.object({
-  "dry_run": z.boolean() .optional(),
+  "dry_run": z.boolean().default(true),
   "envelope_id": z.string() .optional(),
   "input_locale": z.string() .optional(),
   "input_message_id": z.string() .optional(),
   "metadata": z.record(domainJsonValueSchema) .optional(),
-  "now": z.string() .optional(),
+  "now": z.string().datetime().optional(),
   "output_locale": z.string() .optional(),
   "provider_tool_call": z.boolean() .optional(),
   "session_id": z.string() .optional(),
@@ -19,7 +19,7 @@ const Input = z.object({
 const Output = gatewayRepairValueSchema;
 
 export interface GatewayStateRepairPorts {
-  executeGatewayStateRepair(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  repairGatewayState(input: { dryRun: boolean; now?: string }): Promise<z.infer<typeof Output>>;
 }
 
 const gatewayStateRepair = defineCommand<GatewayStateRepairPorts>()({
@@ -62,7 +62,8 @@ const gatewayStateRepair = defineCommand<GatewayStateRepairPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGatewayStateRepair(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGatewayStateRepair(context, input);
+        const value = await ports.repairGatewayState({ dryRun: input.dry_run, now: input.now?.trim() || undefined });
+        return { ok: true, value };
       }
     };
   }

@@ -1,31 +1,31 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { ResourceRefSchema, SupportedLocaleSchema, type JsonValue, type ResourceRef } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { resourceTranslationJobValueSchema } from "../../../value-objects/translation.js";
 
 const Input = z.object({
-  "enabled": z.boolean() .optional(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "max_attempts": z.number() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "next_run_at": z.string() .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "schedule": z.string() .optional(),
-  "session_id": z.string() .optional(),
-  "source_locale": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "source_ref": z.record(domainJsonValueSchema) .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "target_locale": z.string() .optional(),
-  "title": z.string() .optional()
+  "enabled": z.boolean().optional(),
+  "max_attempts": z.number().int().positive().optional(),
+  "next_run_at": z.string().datetime().optional(),
+  "schedule": z.string().optional(),
+  "source_locale": SupportedLocaleSchema.optional(),
+  "source_ref": ResourceRefSchema,
+  "target_locale": SupportedLocaleSchema,
+  "title": z.string().optional()
 }).strict();
 const Output = resourceTranslationJobValueSchema;
 
 export interface ResourceTranslationJobSavePorts {
-  executeResourceTranslationJobSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  loadArtifactTranslationSource(id: string): Promise<{ ref: ResourceRef; source_locale?: z.infer<typeof SupportedLocaleSchema>; content: string } | undefined>;
+  loadMemoryTranslationSource(id: string): Promise<{ ref: ResourceRef; source_locale?: z.infer<typeof SupportedLocaleSchema>; content: string } | undefined>;
+  loadWikiTranslationSource(id: string): Promise<{ ref: ResourceRef; source_locale?: z.infer<typeof SupportedLocaleSchema>; content: string } | undefined>;
+  loadSkillTranslationSource(id: string): Promise<{ ref: ResourceRef; source_locale?: z.infer<typeof SupportedLocaleSchema>; content: string } | undefined>;
+  loadCollectionRecordTranslationSource(ref: ResourceRef): Promise<{ ref: ResourceRef; source_locale?: z.infer<typeof SupportedLocaleSchema>; content: string } | undefined>;
+  stripTranslationSkillFrontmatter(content: string): string;
+  hashTranslationContent(content: string): string;
+  saveTranslationAutomationJob(input: { title: string; kind: "resource_translation"; schedule: string; target_instruction: string; delivery_target: Record<string, JsonValue>; enabled?: boolean; next_run_at?: string; max_attempts?: number }): Promise<z.infer<typeof Output>>;
+  translationSourceNotFoundError(ref: ResourceRef): Error;
 }
 
 const resourceTranslationJobSave = defineCommand<ResourceTranslationJobSavePorts>()({
@@ -70,7 +70,40 @@ const resourceTranslationJobSave = defineCommand<ResourceTranslationJobSavePorts
   createHandler(ports) {
     return {
       execute: async function handleResourceTranslationJobSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeResourceTranslationJobSave(context, input);
+        const loaded = input.source_ref.kind === "artifact" ? await ports.loadArtifactTranslationSource(input.source_ref.id)
+          : input.source_ref.kind === "memory" ? await ports.loadMemoryTranslationSource(input.source_ref.id)
+          : input.source_ref.kind === "wiki" ? await ports.loadWikiTranslationSource(input.source_ref.id)
+          : input.source_ref.kind === "skill" ? await ports.loadSkillTranslationSource(input.source_ref.id)
+          : input.source_ref.kind === "collection_record" ? await ports.loadCollectionRecordTranslationSource(input.source_ref)
+          : undefined;
+        if (!loaded) throw ports.translationSourceNotFoundError(input.source_ref);
+        const content = input.source_ref.kind === "skill" ? ports.stripTranslationSkillFrontmatter(loaded.content) : loaded.content;
+        const source = {
+          ref: loaded.ref,
+          source_locale: input.source_ref.kind === "collection_record"
+            ? input.source_locale ?? loaded.source_locale ?? "ja"
+            : loaded.source_locale ?? input.source_locale ?? "ja",
+          original_hash: ports.hashTranslationContent(content)
+        };
+        const schedule = input.schedule?.trim() || "once";
+        const value = await ports.saveTranslationAutomationJob({
+          title: input.title?.trim() || `Translate ${source.ref.kind}/${source.ref.id} to ${input.target_locale}`,
+          kind: "resource_translation",
+          schedule,
+          target_instruction: `Translate ${source.ref.kind}/${source.ref.id} from ${source.source_locale} to ${input.target_locale}.`,
+          delivery_target: {
+            channel: "resource_translation",
+            source_ref: domainJsonValueSchema.parse(source.ref),
+            source_locale: source.source_locale,
+            target_locale: input.target_locale,
+            original_hash: source.original_hash,
+            source_label: source.ref.label ?? source.ref.id
+          },
+          enabled: input.enabled,
+          next_run_at: input.next_run_at,
+          max_attempts: input.max_attempts
+        });
+        return { ok: true, value };
       }
     };
   }

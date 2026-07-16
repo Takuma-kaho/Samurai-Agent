@@ -1,25 +1,23 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { reflectionRunValueSchema } from "../../value-objects/reflection.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string(),
-  "source_operation_id": z.string() .optional(),
-  "source_run_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "text": z.string() .optional()
+  "session_id": z.string().trim().min(1),
+  "source_run_id": z.string().trim().min(1).optional()
 }).strict();
 const Output = reflectionRunValueSchema;
 
 export interface ReflectionRunPorts {
-  executeReflectionRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  getReflectionSession(id: string): Promise<unknown | undefined>;
+  reflectionSessionNotFoundError(id: string): Error;
+  listReflectionMessages(sessionId: string): Promise<Array<{ role: string; session_id: string; created_at: string }>>;
+  listReflectionToolRuns(runId?: string): Promise<unknown[]>;
+  listReflectionWorkspaceChanges(sessionId?: string): Promise<unknown[]>;
+  listReflectionBackendEvents(input: { runId?: string; sessionId?: string }): Promise<unknown[]>;
+  loadReflectionArtifacts(input: { sessionId: string; sourceRunId?: string; workspaceChanges: unknown[] }): Promise<unknown[]>;
+  executeReflectionWorkflow(input: Record<string, unknown>): Promise<z.infer<typeof Output>>;
 }
 
 const reflectionRun = defineCommand<ReflectionRunPorts>()({
@@ -67,7 +65,18 @@ const reflectionRun = defineCommand<ReflectionRunPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleReflectionRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeReflectionRun(context, input);
+        const session = await ports.getReflectionSession(input.session_id);
+        if (!session) throw ports.reflectionSessionNotFoundError(input.session_id);
+        const messages = await ports.listReflectionMessages(input.session_id);
+        const userMessage = [...messages].reverse().find((message) => message.role === "user");
+        const agentMessage = [...messages].reverse().find((message) => message.role === "agent");
+        const [toolRuns, workspaceChanges, backendEvents] = await Promise.all([
+          ports.listReflectionToolRuns(input.source_run_id), ports.listReflectionWorkspaceChanges(input.session_id),
+          ports.listReflectionBackendEvents(input.source_run_id ? { runId: input.source_run_id } : { sessionId: input.session_id })
+        ]);
+        const artifacts = await ports.loadReflectionArtifacts({ sessionId: input.session_id, sourceRunId: input.source_run_id, workspaceChanges });
+        const value = await ports.executeReflectionWorkflow({ kind: "manual", session, sourceRunId: input.source_run_id, userMessage, agentMessage, backendEvents, workspaceChanges, toolRuns, transcriptMessages: messages, artifacts });
+        return { ok: true, value };
       }
     };
   }

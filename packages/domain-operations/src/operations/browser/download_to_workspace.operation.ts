@@ -1,29 +1,30 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import type { ActivityInboxItem, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { browserDownloadSchema } from "../../value-objects/browser.js";
 import { runtimeWriteValueSchema } from "../../value-objects/runtime-write.js";
 
 const Input = z.object({
-  "action": z.string() .optional(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "output_path": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "selector": z.string() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "url": z.string() .optional(),
-  "value": z.string() .optional()
+  "output_path": z.string().trim().min(1).optional(),
+  "url": z.string().url()
 }).strict();
 const Output = runtimeWriteValueSchema(browserDownloadSchema);
 
 export interface BrowserDownloadToWorkspacePorts {
-  executeBrowserDownloadToWorkspace(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  readBrowserPage(url: string): Promise<Omit<z.infer<typeof browserDownloadSchema>, "file_path" | "snapshot_kind">>;
+  ensureBrowserSession(): Promise<SessionRecord>;
+  createBrowserEnvelope(session: SessionRecord, content: string): MessageEnvelope;
+  stableBrowserHash(value: unknown): string;
+  resolveBrowserWorkspacePath(path: string): { absolutePath: string; relativePath: string };
+  ensureBrowserWorkspaceParent(path: string): Promise<void>;
+  readBrowserWorkspaceText(path: string): Promise<string | undefined>;
+  writeBrowserWorkspaceFile(path: string, content: string): Promise<void>;
+  createBrowserRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
+  runBrowserMutation(input: {
+    session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[];
+    execute(operation: OperationRecord): Promise<{ resource: z.infer<typeof browserDownloadSchema>; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }>;
+  }): Promise<{ resource: z.infer<typeof browserDownloadSchema>; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const browserDownloadToWorkspace = defineCommand<BrowserDownloadToWorkspacePorts>()({
@@ -71,7 +72,23 @@ const browserDownloadToWorkspace = defineCommand<BrowserDownloadToWorkspacePorts
   createHandler(ports) {
     return {
       execute: async function handleBrowserDownloadToWorkspace(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeBrowserDownloadToWorkspace(context, input);
+        const session = await ports.ensureBrowserSession();
+        const envelope = ports.createBrowserEnvelope(session, `browser.download_to_workspace: ${input.url}`);
+        const value = await ports.runBrowserMutation({
+          session, envelope, operationName: "browser.download_to_workspace",
+          proposedEffects: [`browser.download_to_workspace ${input.url} without mutating external state.`],
+          execute: async (operation) => {
+            const page = await ports.readBrowserPage(input.url);
+            const target = ports.resolveBrowserWorkspacePath(input.output_path ?? `browser/${ports.stableBrowserHash(input.url)}.txt`);
+            await ports.ensureBrowserWorkspaceParent(target.absolutePath);
+            const before = await ports.readBrowserWorkspaceText(target.absolutePath);
+            await ports.writeBrowserWorkspaceFile(target.absolutePath, page.text);
+            const ref: ResourceRef = { kind: "file", id: target.relativePath, uri: target.relativePath, label: target.relativePath };
+            const rollbackPoint = await ports.createBrowserRollback(operation, [ref], { path: target.relativePath, content: before ?? null }, { path: target.relativePath, content: page.text });
+            return { resource: { ...page, file_path: target.relativePath, snapshot_kind: "html_snapshot" }, ref, rollbackPoint, summary: `Saved an HTML/text snapshot from ${input.url} into the workspace.` };
+          }
+        });
+        return { ok: true, value };
       }
     };
   }
