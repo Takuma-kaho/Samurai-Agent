@@ -32,7 +32,7 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
   ...{
   "kind": "command",
   "id": "artifact.revise",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Revise artifact",
   "description": "Create an immutable Artifact revision with content hash and lineage.",

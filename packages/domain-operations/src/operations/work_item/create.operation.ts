@@ -25,7 +25,7 @@ const workItemCreate = defineCommand<WorkItemCreatePorts>()({
   ...{
   "kind": "command",
   "id": "work_item.create",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Create work item",
   "description": "Create a durable work item under an objective.",

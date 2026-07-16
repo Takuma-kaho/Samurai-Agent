@@ -19,7 +19,7 @@ const gatewayMcpConfigSave = defineCommand<GatewayMcpConfigSavePorts>()({
   ...{
   "kind": "command",
   "id": "gateway.mcp_config.save",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Save Gateway MCP config",
   "description": "Save a validated Gateway MCP server configuration.",

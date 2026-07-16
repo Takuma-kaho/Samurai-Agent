@@ -29,7 +29,7 @@ const memoryArchive = defineCommand<MemoryArchivePorts>()({
   ...{
   "kind": "command",
   "id": "memory.archive",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Archive memory",
   "description": "Archive a memory item without physically deleting it.",

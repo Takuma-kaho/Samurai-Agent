@@ -18,7 +18,7 @@ const automationJobRequeue = defineCommand<AutomationJobRequeuePorts>()({
   ...{
   "kind": "command",
   "id": "automation.job.requeue",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Requeue automation job",
   "description": "Requeue an Automation job after an operational failure.",

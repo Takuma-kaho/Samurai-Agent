@@ -18,7 +18,7 @@ const clientEventAck = defineCommand<ClientEventAckPorts>()({
   ...{
   "kind": "command",
   "id": "client.event.ack",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Acknowledge client event",
   "description": "Acknowledge a delivered client event.",

@@ -24,7 +24,7 @@ const objectiveCreate = defineCommand<ObjectiveCreatePorts>()({
   ...{
   "kind": "command",
   "id": "objective.create",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Create objective",
   "description": "Create a durable objective with explicit completion criteria.",

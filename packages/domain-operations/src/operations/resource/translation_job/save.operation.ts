@@ -32,7 +32,7 @@ const resourceTranslationJobSave = defineCommand<ResourceTranslationJobSavePorts
   ...{
   "kind": "command",
   "id": "resource.translation_job.save",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Save resource translation job",
   "description": "Save a scheduled resource translation job.",

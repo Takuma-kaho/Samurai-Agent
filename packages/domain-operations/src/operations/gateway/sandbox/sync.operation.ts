@@ -28,7 +28,7 @@ const gatewaySandboxSync = defineCommand<GatewaySandboxSyncPorts>()({
   ...{
   "kind": "command",
   "id": "gateway.sandbox.sync",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Sync Gateway sandbox",
   "description": "Synchronize Workspace data with a Gateway sandbox.",

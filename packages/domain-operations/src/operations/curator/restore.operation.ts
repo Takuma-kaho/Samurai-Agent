@@ -17,7 +17,7 @@ const curatorRestore = defineCommand<CuratorRestorePorts>()({
   ...{
   "kind": "command",
   "id": "curator.restore",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Restore Curator Snapshot",
   "description": "Restore Memory and Skill resources from a Curator snapshot.",

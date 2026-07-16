@@ -18,7 +18,7 @@ const presentationPlan = defineQuery<PresentationPlanPorts>()({
   ...{
   "kind": "query",
   "id": "presentation.plan",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Plan presentation",
   "description": "Choose the best built-in or Generated Surface presentation for a result.",

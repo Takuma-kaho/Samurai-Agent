@@ -39,7 +39,7 @@ const generatedSurfaceRevise = defineCommand<GeneratedSurfaceRevisePorts>()({
   ...{
   "kind": "command",
   "id": "generated_surface.revise",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Revise generated surface",
   "description": "Create a new immutable revision of a Generated Surface.",

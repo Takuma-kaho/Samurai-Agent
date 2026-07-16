@@ -18,7 +18,7 @@ const automationJobReleaseLock = defineCommand<AutomationJobReleaseLockPorts>()(
   ...{
   "kind": "command",
   "id": "automation.job.release_lock",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Release automation lock",
   "description": "Release a stale Automation job lock.",

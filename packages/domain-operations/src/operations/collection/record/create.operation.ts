@@ -36,7 +36,7 @@ const collectionRecordCreate = defineCommand<CollectionRecordCreatePorts>()({
   ...{
   "kind": "command",
   "id": "collection.record.create",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Create collection record",
   "description": "Create a schema-validated Collection record.",

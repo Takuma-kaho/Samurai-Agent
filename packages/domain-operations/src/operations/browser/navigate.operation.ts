@@ -28,7 +28,7 @@ const browserNavigate = defineCommand<BrowserNavigatePorts>()({
   ...{
   "kind": "command",
   "id": "browser.navigate",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "runtimeRequirements": ["browser_adapter"],
   "title": "Navigate browser page",

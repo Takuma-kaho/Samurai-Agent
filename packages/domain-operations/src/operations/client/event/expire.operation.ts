@@ -16,7 +16,7 @@ const clientEventExpire = defineCommand<ClientEventExpirePorts>()({
   ...{
   "kind": "command",
   "id": "client.event.expire",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Expire client events",
   "description": "Expire client events after their delivery deadline.",

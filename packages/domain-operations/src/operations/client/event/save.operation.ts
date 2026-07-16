@@ -15,7 +15,7 @@ const clientEventSave = defineCommand<ClientEventSavePorts>()({
   ...{
   "kind": "command",
   "id": "client.event.save",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Save client event",
   "description": "Save a durable client delivery event.",

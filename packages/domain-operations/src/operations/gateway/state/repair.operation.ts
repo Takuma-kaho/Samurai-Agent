@@ -26,7 +26,7 @@ const gatewayStateRepair = defineCommand<GatewayStateRepairPorts>()({
   ...{
   "kind": "command",
   "id": "gateway.state.repair",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Repair Gateway state",
   "description": "Repair recoverable Gateway state inconsistencies.",

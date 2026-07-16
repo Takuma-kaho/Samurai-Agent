@@ -22,7 +22,7 @@ const objectiveTransition = defineCommand<ObjectiveTransitionPorts>()({
   ...{
   "kind": "command",
   "id": "objective.transition",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Transition objective",
   "description": "Pause, resume, or cancel an objective and propagate the transition.",

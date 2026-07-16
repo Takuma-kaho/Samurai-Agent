@@ -20,7 +20,7 @@ const pluginStatusSet = defineCommand<PluginStatusSetPorts>()({
   ...{
   "kind": "command",
   "id": "plugin.status.set",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "runtimeRequirements": ["plugin_runtime"],
   "title": "Set plugin status",

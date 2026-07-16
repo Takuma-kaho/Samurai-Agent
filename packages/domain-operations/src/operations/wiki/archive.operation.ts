@@ -13,7 +13,7 @@ const wikiArchive = defineCommand<WikiArchivePorts>()({
   ...{
   "kind": "command",
   "id": "wiki.archive",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Archive Knowledge Wiki page",
   "description": "Archive a Knowledge Wiki page without deleting its markdown.",

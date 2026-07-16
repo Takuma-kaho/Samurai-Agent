@@ -38,7 +38,7 @@ const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
   ...{
   "kind": "command",
   "id": "collection.record.delete",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Delete collection record",
   "description": "Delete a Collection record through Runtime permission checks.",

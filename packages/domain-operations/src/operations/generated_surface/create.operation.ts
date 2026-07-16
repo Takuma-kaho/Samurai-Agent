@@ -36,7 +36,7 @@ const generatedSurfaceCreate = defineCommand<GeneratedSurfaceCreatePorts>()({
   ...{
   "kind": "command",
   "id": "generated_surface.create",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Create generated surface",
   "description": "Validate and persist a versioned Generated Surface bundle.",

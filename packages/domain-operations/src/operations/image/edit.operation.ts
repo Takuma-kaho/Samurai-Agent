@@ -33,7 +33,7 @@ const imageEdit = defineCommand<ImageEditPorts>()({
   ...{
   "kind": "command",
   "id": "image.edit",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Save edited image",
   "description": "Save an edited image provider result as a new immutable Artifact revision.",

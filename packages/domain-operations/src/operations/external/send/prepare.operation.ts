@@ -23,7 +23,7 @@ const externalSendPrepare = defineCommand<ExternalSendPreparePorts>()({
   ...{
   "kind": "command",
   "id": "external.send.prepare",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Prepare external send draft",
   "description": "Prepare an outbound send draft without dispatching it.",

@@ -28,7 +28,7 @@ const reflectionSuggestionApply = defineCommand<ReflectionSuggestionApplyPorts>(
   ...{
   "kind": "command",
   "id": "reflection.suggestion.apply",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Apply reflection suggestion",
   "description": "Apply a visible reflection suggestion to Memory, Knowledge Wiki, or Skill.",

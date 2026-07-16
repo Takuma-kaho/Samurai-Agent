@@ -19,7 +19,7 @@ const memorySessionCreate = defineCommand<MemorySessionCreatePorts>()({
   ...{
   "kind": "command",
   "id": "memory.session.create",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Create session memory",
   "description": "Keep the current turn as session-scoped memory.",

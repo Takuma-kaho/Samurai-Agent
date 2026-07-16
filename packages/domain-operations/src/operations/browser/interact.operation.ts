@@ -31,7 +31,7 @@ const browserInteract = defineCommand<BrowserInteractPorts>()({
   ...{
   "kind": "command",
   "id": "browser.interact",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "runtimeRequirements": ["browser_adapter"],
   "title": "Interact with browser",

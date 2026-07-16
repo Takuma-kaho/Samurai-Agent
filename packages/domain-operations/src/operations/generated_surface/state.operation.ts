@@ -31,7 +31,7 @@ const generatedSurfaceState = defineCommand<GeneratedSurfaceStatePorts>()({
   ...{
   "kind": "command",
   "id": "generated_surface.state",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Change generated surface state",
   "description": "Pin, unpin, or archive a Generated Surface.",

@@ -34,7 +34,7 @@ const generatedSurfaceInteractionRecord = defineCommand<GeneratedSurfaceInteract
   ...{
   "kind": "command",
   "id": "generated_surface.interaction.record",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Record surface interaction",
   "description": "Record a Generated Surface open, dismiss, correction, or regeneration signal.",

@@ -24,7 +24,7 @@ const messagePresentationUpdate = defineCommand<MessagePresentationUpdatePorts>(
   ...{
   "kind": "command",
   "id": "message.presentation.update",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Update message presentation state",
   "description": "Persist card-local UI state for a chat message presentation.",

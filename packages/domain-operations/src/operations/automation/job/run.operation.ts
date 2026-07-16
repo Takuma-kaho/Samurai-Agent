@@ -16,7 +16,7 @@ const automationJobRun = defineCommand<AutomationJobRunPorts>()({
   ...{
   "kind": "command",
   "id": "automation.job.run",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Run automation job",
   "description": "Run an enabled automation job through scheduled context.",

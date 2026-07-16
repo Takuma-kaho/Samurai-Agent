@@ -18,7 +18,7 @@ const clientEventDeliver = defineCommand<ClientEventDeliverPorts>()({
   ...{
   "kind": "command",
   "id": "client.event.deliver",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Mark client event delivered",
   "description": "Mark a client event as delivered.",

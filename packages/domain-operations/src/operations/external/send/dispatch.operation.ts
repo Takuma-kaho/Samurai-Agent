@@ -22,7 +22,7 @@ const externalSendDispatch = defineCommand<ExternalSendDispatchPorts>()({
   ...{
   "kind": "command",
   "id": "external.send.dispatch",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Dispatch external send",
   "description": "Dispatch a prepared outbound send after approval.",

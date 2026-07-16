@@ -27,7 +27,7 @@ const wikiProposalCreate = defineCommand<WikiProposalCreatePorts>()({
   ...{
   "kind": "command",
   "id": "wiki.proposal.create",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Create Knowledge Wiki proposal",
   "description": "Create a proposed Knowledge Wiki page with provenance.",

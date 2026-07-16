@@ -31,7 +31,7 @@ const browserDownloadToWorkspace = defineCommand<BrowserDownloadToWorkspacePorts
   ...{
   "kind": "command",
   "id": "browser.download_to_workspace",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Download browser page",
   "description": "Download browser-readable content into the local workspace.",

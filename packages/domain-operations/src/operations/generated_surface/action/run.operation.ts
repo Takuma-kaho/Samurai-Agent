@@ -34,7 +34,7 @@ const generatedSurfaceActionRun = defineCommand<GeneratedSurfaceActionRunPorts>(
   ...{
   "kind": "command",
   "id": "generated_surface.action.run",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Run generated surface action",
   "description": "Execute a declared Generated Surface action through its Domain Command.",

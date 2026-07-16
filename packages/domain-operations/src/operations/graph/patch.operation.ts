@@ -32,7 +32,7 @@ const graphPatch = defineCommand<GraphPatchPorts>()({
   ...{
   "kind": "command",
   "id": "graph.patch",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Edit graph",
   "description": "Apply node and edge edits to a graph through a new immutable Artifact revision.",

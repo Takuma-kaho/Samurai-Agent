@@ -31,7 +31,7 @@ const wikiPatch = defineCommand<WikiPatchPorts>()({
   ...{
   "kind": "command",
   "id": "wiki.patch",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Patch Knowledge Wiki page",
   "description": "Edit Knowledge Wiki frontmatter or markdown content.",

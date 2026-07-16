@@ -34,7 +34,7 @@ const imageGenerate = defineCommand<ImageGeneratePorts>()({
   ...{
   "kind": "command",
   "id": "image.generate",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Save generated image",
   "description": "Save an image provider result as a provenance-backed Artifact.",

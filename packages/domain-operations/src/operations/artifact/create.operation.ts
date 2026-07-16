@@ -34,7 +34,7 @@ const artifactCreate = defineCommand<ArtifactCreatePorts>()({
   ...{
   "kind": "command",
   "id": "artifact.create",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Create artifact",
   "description": "Create a local workspace artifact from backend, UI, or generated surface output.",
