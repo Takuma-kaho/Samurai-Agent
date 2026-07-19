@@ -7,6 +7,7 @@ export const runtimeOperationIds = Object.freeze({
   skillLifecycleApply: domainOperationIdFor("skillLifecycleApply"),
   evaluationRun: domainOperationIdFor("evaluationRun"),
   artifactCreate: domainOperationIdFor("artifactCreate"),
+  gatewayPairingApprove: domainOperationIdFor("gatewayPairingApprove"),
   collectionSchemaSave: domainOperationIdFor("collectionSchemaSave"),
   sandboxExec: domainOperationIdFor("sandboxExec"),
   mcpCall: domainOperationIdFor("mcpCall"),

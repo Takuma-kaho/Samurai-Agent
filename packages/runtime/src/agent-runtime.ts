@@ -1,4 +1,4 @@
-import { createArtifactDraft, type ArtifactKind, type ArtifactPayload } from "@samurai-agent/artifacts";
+import { createArtifactDraft, type ArtifactKind } from "@samurai-agent/artifacts";
 import { createTaskFingerprint } from "./learning/task-evaluation";
 import {
   isSamuraiToolBridgeObservedProviderTool,
@@ -4016,8 +4016,8 @@ export class AgentRuntime {
     return this.gatewayDomainService.getPairingPolicy(channel);
   }
 
-  async saveGatewayPairingPolicy(policy: Parameters<GatewayDomainService["savePairingPolicy"]>[0]): Promise<GatewayPairingPolicyRecord> {
-    return this.gatewayDomainService.savePairingPolicy(policy);
+  async saveGatewayPairingPolicy(policy: GatewayPairingPolicySaveInput): Promise<GatewayPairingPolicyRecord> {
+    return this.gatewayDomainService.savePairingPolicy(normalizeGatewayPairingPolicyRequest(policy));
   }
 
   async listGatewayRoutingPolicies(): Promise<GatewayRoutingPolicyRecord[]> {
@@ -4028,8 +4028,18 @@ export class AgentRuntime {
     return this.gatewayDomainService.getRoutingPolicy(channel);
   }
 
-  async saveGatewayRoutingPolicy(policy: Parameters<GatewayDomainService["saveRoutingPolicy"]>[0]): Promise<GatewayRoutingPolicyRecord> {
-    return this.gatewayDomainService.saveRoutingPolicy(policy);
+  async saveGatewayRoutingPolicy(policy: GatewayRoutingPolicySaveInput): Promise<GatewayRoutingPolicyRecord> {
+    return this.gatewayDomainService.saveRoutingPolicy(normalizeGatewayRoutingPolicyRequest(policy));
+  }
+
+  async approveGatewayPairing(pairingId: string): Promise<GatewayPairingRecord> {
+    const result = await this.runDomainCommand({
+      command_id: runtimeOperationIds.gatewayPairingApprove,
+      input_source: "runtime_api",
+      idempotency_key: `gateway-pairing-approve:${pairingId}`,
+      payload: { pairing_id: pairingId }
+    });
+    return result.result as GatewayPairingRecord;
   }
 
   async repairGatewayState(input: { dryRun?: boolean; now?: string } = {}): Promise<GatewayRepairResult> {
@@ -7012,45 +7022,83 @@ function surfaceOperationArtifactTitle(operation: StructuredSurfaceOperation, so
   return "Artifact request";
 }
 
+type GatewayPairingPolicySaveRequest = Parameters<GatewayDomainService["savePairingPolicy"]>[0];
+type GatewayRoutingPolicySaveRequest = Parameters<GatewayDomainService["saveRoutingPolicy"]>[0];
+type GatewayPairingPolicySaveInput = GatewayPairingPolicySaveRequest | GatewayPairingPolicyRecord;
+type GatewayRoutingPolicySaveInput = GatewayRoutingPolicySaveRequest | GatewayRoutingPolicyRecord;
+
+function normalizeGatewayPairingPolicyRequest(input: GatewayPairingPolicySaveInput): GatewayPairingPolicySaveRequest {
+  if ("trust_mode" in input) {
+    return {
+      channel: input.channel,
+      status: input.status,
+      trustMode: input.trust_mode,
+      allowlist: input.allowlist,
+      allowedTools: input.allowed_tools,
+      pairingTtlMs: input.pairing_ttl_ms,
+      duplicateWindowMs: input.duplicate_window_ms,
+      rateLimitWindowMs: input.rate_limit_window_ms,
+      rateLimitMax: input.rate_limit_max,
+      metadata: input.metadata
+    };
+  }
+  return input;
+}
+
+function normalizeGatewayRoutingPolicyRequest(input: GatewayRoutingPolicySaveInput): GatewayRoutingPolicySaveRequest {
+  if ("session_key_strategy" in input) {
+    return {
+      channel: input.channel,
+      status: input.status,
+      sessionKeyStrategy: input.session_key_strategy,
+      defaultAccountId: input.default_account_id,
+      defaultThreadId: input.default_thread_id,
+      defaultRoute: input.default_route,
+      metadata: input.metadata
+    };
+  }
+  return input;
+}
+
 function surfaceOperationArtifactContent(
   operation: StructuredSurfaceOperation,
   sourceArtifact?: ArtifactRecord,
   sourceContent?: string
-): ArtifactPayload {
+): string {
   if (operation.kind === "form.submit") {
-    return {
+    return JSON.stringify({
       kind: "form_submission",
       form_id: operation.form_id,
       submit_label: operation.submit_label ?? null,
       values: operation.values
-    };
+    }, null, 2);
   }
   if (operation.kind === "table.patch") {
-    return {
+    return JSON.stringify({
       kind: "table_patch",
       table_id: operation.table_id,
       row_id: operation.row_id ?? null,
       changes: operation.changes,
       rows: [{ ...operation.changes, id: operation.row_id ?? "pending" }]
-    };
+    }, null, 2);
   }
   if (operation.kind === "chart.request") {
-    return {
+    return JSON.stringify({
       kind: "chart_request",
       chart_id: operation.chart_id ?? createId("chart"),
       title: operation.title,
       query: operation.query,
       data_refs: operation.data_refs,
       data: []
-    };
+    }, null, 2);
   }
   if (operation.kind === "custom_view.action") {
-    return {
+    return JSON.stringify({
       kind: "custom_view_action",
       view_id: operation.view_id,
       action_id: operation.action_id,
       payload: operation.payload
-    };
+    }, null, 2);
   }
 
   const title = surfaceOperationArtifactTitle(operation, sourceArtifact);
@@ -7076,11 +7124,21 @@ function surfaceOperationArtifactMetadata(
   sourceArtifact?: ArtifactRecord,
   sourceContent?: string
 ): Record<string, JsonValue> {
+  const structuredPayload = operation.kind === "form.submit"
+    ? { kind: "form_submission", form_id: operation.form_id, submit_label: operation.submit_label ?? null, values: operation.values }
+    : operation.kind === "table.patch"
+      ? { kind: "table_patch", table_id: operation.table_id, row_id: operation.row_id ?? null, changes: operation.changes, rows: [{ ...operation.changes, id: operation.row_id ?? "pending" }] }
+      : operation.kind === "chart.request"
+        ? { kind: "chart_request", chart_id: operation.chart_id ?? "", title: operation.title, query: operation.query, data_refs: operation.data_refs, data: [] }
+        : operation.kind === "custom_view.action"
+          ? { kind: "custom_view_action", view_id: operation.view_id, action_id: operation.action_id, payload: operation.payload }
+          : undefined;
   return jsonRecord({
     ...(operation.metadata ?? {}),
     source_artifact_id: sourceArtifact?.id,
     source_artifact_uri: sourceArtifact?.file_ref.uri,
-    source_artifact_hash: sourceContent ? stableHash(sourceContent) : undefined
+    source_artifact_hash: sourceContent ? stableHash(sourceContent) : undefined,
+    structured_payload: structuredPayload
   });
 }
 
