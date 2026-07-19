@@ -26,10 +26,15 @@ coverage/
 workspace-data/
 *.timestamp-*.mjs
 
+# Temporary bundles produced by domain-command verification
+/domain-command-ingress-fixed.mjs
+/domain-command-schema-matrix.mjs
+
 # Editor / local tooling
 .idea/
 .vscode/
 *.swp
+/awesome-design-skills/
 
 # Python cache
 __pycache__/

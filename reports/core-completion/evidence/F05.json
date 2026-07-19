@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "test_id": "F05",
+  "command": "pnpm core:test:signed-gateway-sandbox",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "02c12925471a51797e719abf1993bf8772f64f92bc6cb488d7e7a023a62afa0f",
+  "source_files": [
+    "apps/server/src/api-server.ts",
+    "apps/server/src/index.ts",
+    "apps/server/src/middleware/security.ts",
+    "apps/server/src/routes/backend-events.ts",
+    "apps/server/src/streams/backend-events.ts",
+    "apps/server/src/workers/automation-scheduler.ts",
+    "packages/gateway/src/index.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/signed-gateway-sandbox-flow.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-signed-gateway-sandbox-flow.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-12T03:49:24.725Z",
+  "completed_at": "2026-07-12T03:49:24.871Z",
+  "assertions": [
+    {
+      "name": "Signed webhook verifies and invalid signature rejects",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Sandbox policy crosses configured adapter boundary",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Gateway crosses Domain Command, saves Workspace and delivers reply",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "release_certification": {
+    "real_docker_required_for_core": false,
+    "real_docker_executed": false
+  },
+  "result": {
+    "status": "passed",
+    "signature_verified": true,
+    "invalid_signature_rejected": true,
+    "docker_policy_executed": true,
+    "real_docker_executed": false,
+    "domain_command_executions": 1,
+    "workspace_inbound_saved": 1,
+    "session_saved": true,
+    "reply_delivered": true
+  }
+}

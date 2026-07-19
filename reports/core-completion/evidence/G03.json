@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "test_id": "G03",
+  "command": "pnpm core:test:privacy",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "8f7a2358bf2ead5b9afffbef4e31c6cc180baa033cd05fb12eeb64d79e7a0438",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/privacy-redaction.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-privacy-redaction.mjs"
+  ],
+  "started_at": "2026-07-11T12:12:41.099Z",
+  "completed_at": "2026-07-11T12:12:41.183Z",
+  "assertions": [
+    {
+      "name": "event_redacted",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "artifact_metadata_redacted",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "learning_source_redacted",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "gateway_error_redacted",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "display_redacted",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "body_preserved",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "event_redacted": true,
+    "artifact_metadata_redacted": true,
+    "learning_source_redacted": true,
+    "gateway_error_redacted": true,
+    "display_redacted": true,
+    "body_preserved": true
+  }
+}

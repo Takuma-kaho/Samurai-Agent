@@ -156,8 +156,8 @@ Host builds context
 Backend cassette runs
 Backend events return
 Workspace / Artifact updates
-Memory suggestion / Skill candidate appears
-Reflection improves future runs
+Background Review updates reusable Memory / Skill
+Evaluation measures whether the learning helped
 ```
 
 実装判断。
@@ -168,8 +168,9 @@ Reflection improves future runs
 - SQLiteは検索、履歴、index、状態管理に限定する。
 - External Provider由来の内容は、参照元付きの提案として扱い、acceptedされるまで正本にしない。
 - 参照元不明のProvider情報は保存せず、診断上の未検証ヒントに留める。
-- 自動改善は、ユーザーが理解できる候補として表示する。
-- 初期v1では、候補生成と表示を優先し、高度な自動整理は後回しにする。
+- Background ReviewによるMemory / Skill更新は自動保存を標準にし、source run、変更前後version、根拠を履歴へ残す。
+- 承認待ちqueueや確認画面はLearning Coreの依存条件にしない。将来の任意モードとして追加できる境界だけを残す。
+- Evaluationは正式Outcomeを作らず、既存のrun、tool、workspace change、実利用記録から効果量を再計算できるread modelとして扱う。
 
 ---
 

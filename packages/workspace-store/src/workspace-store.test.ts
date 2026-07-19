@@ -1,6 +1,7 @@
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createId,
@@ -64,9 +65,9 @@ describe("workspace store", () => {
     await store.close();
 
     expect(settings).toMatchObject({
-      memory_capture_mode: "suggest",
-      knowledge_wiki_capture_mode: "suggest",
-      skill_capture_mode: "suggest",
+      memory_capture_mode: "auto",
+      knowledge_wiki_capture_mode: "auto",
+      skill_capture_mode: "auto",
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
@@ -435,6 +436,19 @@ describe("workspace store", () => {
     expect(auditResults).toContainEqual(expect.objectContaining({ kind: "audit", id: audit.id, session_id: session.id, operation_id: operation.id }));
   });
 
+  it("indexes Japanese session text with FTS when SQLite supports it", async () => {
+    const store = await createTempStore();
+    const session = await createSessionRecord(store, "設計レビュー");
+    await saveUserMessage(store, session, "Workspaceの責務を整理してから実装する");
+
+    const reindex = await store.reindexSessionSearch();
+    const results = await store.search("責務を整理");
+    await store.close();
+
+    expect(["fts5_trigram", "fts5", "like"]).toContain(reindex.mode);
+    expect(results).toContainEqual(expect.objectContaining({ kind: "message", session_id: session.id }));
+  });
+
   it("does not overwrite a settled session title with later user messages", async () => {
     const store = await createTempStore();
     const session = await createSessionRecord(store, "New chat");
@@ -499,6 +513,27 @@ describe("workspace store", () => {
     expect(staleMarkdown).toContain('"state": "stale"');
     expect(listed[0]?.last_used_at).toBe("2026-01-02T00:00:00.000Z");
     expect(curatorState).toMatchObject({ id: "default", run_count: 1, stale_after_days: 14 });
+  });
+
+  it("restores Skill body, support files, and lifecycle state from a learning snapshot", async () => {
+    const store = await createTempStore();
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_snapshot",
+      markdown: skillMarkdown({ id: "skill_snapshot", state: "project", title: "Snapshot skill" })
+    });
+    await store.writeSkillSupportFile({ skillId: "skill_snapshot", path: "references/check.md", content: "before" });
+    const snapshot = await store.createLearningSnapshot("curator_run_1");
+    await store.updateSkillState("skill_snapshot", "archived");
+    await store.writeSkillSupportFile({ skillId: "skill_snapshot", path: "references/check.md", content: "after" });
+
+    const restored = await store.restoreLearningSnapshot(snapshot.id);
+    const [skill, support] = await Promise.all([store.getSkill("skill_snapshot"), store.readSkillSupportFile({ skillId: "skill_snapshot", path: "references/check.md" })]);
+    await store.close();
+
+    expect(restored?.restored_at).toBeDefined();
+    expect(skill?.state).toBe("project");
+    expect(support?.content).toBe("before");
   });
 
   it("builds workspace read models from indexes and history tables", async () => {
@@ -680,6 +715,86 @@ describe("workspace store", () => {
     });
     expect(diagnostics.repeated_ignored_provider_tools).toHaveLength(1);
     expect(diagnostics.repeated_ignored_provider_tools[0]?.provider_tool_name).toBe("create_artifact");
+  });
+
+  it("migrates legacy tool runs and preserves their typed failure code", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-store-legacy-tool-run-"));
+    roots.push(root);
+    const legacyDatabase = new Database(path.join(root, "workspace.sqlite"));
+    legacyDatabase.exec(`
+      CREATE TABLE tool_runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        tool_call_id TEXT,
+        provider_tool_name TEXT NOT NULL,
+        action_id TEXT,
+        status TEXT NOT NULL,
+        input_summary TEXT NOT NULL,
+        output_summary TEXT NOT NULL,
+        resource_refs_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    `);
+    legacyDatabase.exec(`
+      CREATE TABLE gateway_pairing_policies (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        trust_mode TEXT NOT NULL,
+        allowlist_json TEXT NOT NULL,
+        pairing_ttl_ms INTEGER,
+        duplicate_window_ms INTEGER,
+        rate_limit_window_ms INTEGER,
+        rate_limit_max INTEGER,
+        metadata_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    legacyDatabase.close();
+
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const session = await createSessionRecord(store, "Legacy tool run migration");
+    const now = nowIso();
+    const run: BackendRunRecord = {
+      id: createId("run"),
+      session_id: session.id,
+      input_message_id: createId("message"),
+      backend_id: "samurai-native",
+      backend_kind: "samurai_native",
+      status: "completed",
+      started_at: now,
+      completed_at: now,
+      input_summary: "legacy migration",
+      output_summary: "done",
+      metadata: {}
+    };
+    await store.saveBackendRun(run);
+    const failed = toolRunRecord(run, "tool_legacy", "samurai.artifact.create", "artifact.create", "failed", "runtime_tool_failed:validation", now);
+    failed.error_code = "validation";
+    await store.saveToolRun(failed);
+    const persisted = await store.listToolRuns({ runId: run.id });
+    const pairingPolicy: GatewayPairingPolicyRecord = {
+      id: "gateway_pairing_policy_webhook",
+      channel: "webhook",
+      status: "enabled",
+      trust_mode: "pairing_required",
+      allowlist: ["*"],
+      allowed_tools: ["artifact.create"],
+      metadata: {},
+      created_at: now,
+      updated_at: now
+    };
+    await store.saveGatewayPairingPolicy(pairingPolicy);
+    const persistedPairingPolicy = await store.getGatewayPairingPolicy("webhook");
+    const migrations = await store.listSchemaMigrations();
+    await store.close();
+
+    expect(migrations).toContainEqual(expect.objectContaining({ version: 4, name: "tool_run_error_code" }));
+    expect(migrations).toContainEqual(expect.objectContaining({ version: 5, name: "gateway_pairing_policy_allowed_tools" }));
+    expect(persisted).toContainEqual(expect.objectContaining({ id: failed.id, status: "failed", error_code: "validation" }));
+    expect(persistedPairingPolicy).toMatchObject({ id: pairingPolicy.id, allowed_tools: ["artifact.create"] });
   });
 
   it("stores wiki markdown and indexes only active pages for active lookups", async () => {
@@ -1397,6 +1512,7 @@ describe("workspace store", () => {
       status: "enabled",
       trust_mode: "pairing_required",
       allowlist: ["webhook:external-source-1"],
+      allowed_tools: ["artifact.create"],
       pairing_ttl_ms: 300_000,
       duplicate_window_ms: 60_000,
       rate_limit_window_ms: 60_000,

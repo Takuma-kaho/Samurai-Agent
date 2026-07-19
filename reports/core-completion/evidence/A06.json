@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "test_id": "A06",
+  "command": "pnpm core:test:command-contract",
+  "status": "passed",
+  "commit_sha": "6682f514733b19b8b23f70654271e693bad532b5",
+  "worktree_clean": false,
+  "source_sha256": "275747fc013eb7c497bf772029e033d1b40790bf0adf5dc3e172bdaad3a49793",
+  "source_files": [
+    "packages/action-catalog/src/index.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/runtime/src/provider-profiles.ts",
+    "scripts/fixtures/domain-command-contract.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-domain-command-contract.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-18T03:51:26.401Z",
+  "completed_at": "2026-07-18T03:51:56.060Z",
+  "assertions": [
+    {
+      "name": "Action Catalog generated from command schema",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Backend bridge mappings",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Provider mappings",
+      "actual": 3,
+      "expected": 4
+    },
+    {
+      "name": "Surface mappings",
+      "actual": 6,
+      "expected": 6
+    },
+    {
+      "name": "Patch version contract",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "commands": 102,
+    "action_catalog_matches": true,
+    "bridge_mappings": 17,
+    "provider_mappings": 3,
+    "surface_mappings": 6,
+    "expected_version_in_patch_schema": true,
+    "schema_fingerprint": "0e74681a"
+  }
+}

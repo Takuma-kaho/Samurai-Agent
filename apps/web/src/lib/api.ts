@@ -1,12 +1,21 @@
 import type {
   ActivityInboxItem,
   ApprovalRequest,
+  AutomationJobRecord,
   ArtifactRecord,
   AuditRecord,
   BackendEventRecord,
   BackendRunRecord,
   CollectionRecord,
   CollectionSchema,
+  GeneratedSurfaceDefinition,
+  GeneratedSurfaceRevisionRecord,
+  OptimizationCandidate,
+  OptimizationEvaluation,
+  OptimizationPromotion,
+  SkillOptimizationDataset,
+  SkillOptimizationRun,
+  SkillOptimizationSnapshot,
   JsonValue,
   MemoryFrontmatter,
   MessageRecord,
@@ -77,6 +86,21 @@ export interface ChatTurnResult {
   activity: ActivityInboxItem[];
 }
 
+export interface GeneratedSurfaceDetail {
+  surface: GeneratedSurfaceDefinition;
+  revisions: GeneratedSurfaceRevisionRecord[];
+  interactions: Array<Record<string, JsonValue>>;
+}
+
+export interface SkillOptimizationDetail {
+  run: SkillOptimizationRun;
+  dataset?: SkillOptimizationDataset;
+  candidates: OptimizationCandidate[];
+  evaluations: OptimizationEvaluation[];
+  promotions: OptimizationPromotion[];
+  snapshots: SkillOptimizationSnapshot[];
+}
+
 export interface AgentBackendStatus {
   id: string;
   kind: "mock" | "samurai_native" | "claude_code" | "codex" | "external";
@@ -91,6 +115,7 @@ export type DomainCommandInputSource =
   | "runtime_api"
   | "gateway_inbound"
   | "automation"
+  | "generated_surface"
   | "scheduled_context";
 
 export interface SurfaceCommandEntry {
@@ -196,6 +221,18 @@ export interface SkillIndexEntry {
   file_path: string;
 }
 
+export interface AutomationRunSummary {
+  id: string;
+  kind: string;
+  source: string;
+  status: "started" | "completed" | "failed";
+  session_id?: string;
+  backend_run_id?: string;
+  started_at: string;
+  completed_at?: string;
+  error?: string;
+}
+
 export interface RuntimeWritePayload<TResource> {
   resource: TResource;
   operation: OperationRecord;
@@ -250,11 +287,11 @@ export function getApiBaseUrl(): string | undefined {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiEndpoint(path), {
+    ...init,
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {})
-    },
-    ...init
+    }
   });
 
   const body = await readJson(response);
@@ -294,6 +331,31 @@ export const api = {
   },
   getSurfaceContract(source?: DomainCommandInputSource) {
     return request<SurfaceContractPayload>(source ? `/api/surface/contract?source=${encodeURIComponent(source)}` : "/api/surface/contract");
+  },
+  runDomainCommand<T = unknown>(commandId: string, payload: Record<string, JsonValue>, idempotencyKey = crypto.randomUUID()) {
+    return request<{ command: SurfaceCommandEntry; result: T; render_spec?: unknown; render_specs?: unknown[] }>(`/api/domain/commands/${encodeURIComponent(commandId)}/run`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ payload })
+    });
+  },
+  getGeneratedSurface(surfaceId: string) {
+    return request<GeneratedSurfaceDetail>(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}`);
+  },
+  runGeneratedSurfaceAction(surfaceId: string, actionId: string, payload: { revision_id?: string; interaction_id?: string; message_id?: string; action_payload?: Record<string, JsonValue> }) {
+    return request(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}/actions/${encodeURIComponent(actionId)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ payload })
+    });
+  },
+  getGeneratedSurfaceBundle(surfaceId: string, revisionId: string) {
+    return request<{ revision: GeneratedSurfaceRevisionRecord; bundle: { html: string; css?: string; script?: string }; csp: string }>(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}/revisions/${encodeURIComponent(revisionId)}/bundle`);
+  },
+  listSkillOptimizationRuns(skillId?: string) {
+    return request<SkillOptimizationRun[]>(skillId ? `/api/skill-optimizations?skill_id=${encodeURIComponent(skillId)}` : "/api/skill-optimizations");
+  },
+  getSkillOptimization(runId: string) {
+    return request<SkillOptimizationDetail>(`/api/skill-optimizations/${encodeURIComponent(runId)}`);
   },
   runSurfaceOperation<T>(operation: SurfaceOperation) {
     return request<SurfaceOperationResultEnvelope<T>>("/api/surface/operations", {
@@ -401,6 +463,12 @@ export const api = {
   getSkill(id: string) {
     return request<{ skill: SkillIndexEntry; markdown: string }>(`/api/skills/${id}`);
   },
+  patchSkill(id: string, input: { title?: string; description?: string; content?: string; tags?: string[] }) {
+    return request<RuntimeWritePayload<SkillIndexEntry>>(`/api/skills/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+  },
+  setSkillActive(id: string, active: boolean) {
+    return request<RuntimeWritePayload<SkillIndexEntry>>(`/api/skills/${id}/state`, { method: "POST", body: JSON.stringify({ state: active ? "active" : "disabled" }) });
+  },
   listWiki() {
     return request<Array<WikiFrontmatter & { file_path: string }>>("/api/wiki");
   },
@@ -442,6 +510,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({})
     });
+  },
+  getWikiGraph(query?: string) {
+    return request<Record<string, unknown>>(`/api/wiki/graph${query ? `?query=${encodeURIComponent(query)}` : ""}`);
+  },
+  getWikiDiagnostics() {
+    return request<Record<string, unknown>>("/api/wiki/lint");
+  },
+  getWikiBacklinks(id: string) {
+    return request<Array<{ from_wiki_id: string; label: string }>>(`/api/wiki/${id}/backlinks`);
   },
   createSkillCandidate(input: { title: string; description: string; content?: string; tags?: string[]; required_capabilities?: string[] }) {
     return request<RuntimeWritePayload<SkillIndexEntry>>("/api/skills/candidates", {
@@ -498,6 +575,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({})
     });
+  },
+  listAutomationJobs() {
+    return request<AutomationJobRecord[]>("/api/automation/jobs");
+  },
+  listAutomationRuns() {
+    return request<AutomationRunSummary[]>("/api/automation/runs");
+  },
+  setAutomationStatus(id: string, status: "enabled" | "disabled") {
+    return request<RuntimeWritePayload<AutomationJobRecord>>(`/api/automation/jobs/${id}/status`, { method: "POST", body: JSON.stringify({ status }) });
   },
   getSettings() {
     return request<SettingsRecord>("/api/settings");

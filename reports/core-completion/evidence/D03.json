@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "test_id": "D03",
+  "command": "pnpm core:test:surface-lifecycle",
+  "status": "passed",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "worktree_clean": false,
+  "source_sha256": "4368b675c7ad2ad7dd147bb57e67b87aafa1a40fa47799ee2a2f084fe1a15675",
+  "source_files": [
+    "apps/server/src/api-server.ts",
+    "apps/server/src/index.ts",
+    "apps/server/src/middleware/security.ts",
+    "apps/server/src/routes/backend-events.ts",
+    "apps/server/src/streams/backend-events.ts",
+    "apps/server/src/workers/automation-scheduler.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/runtime/src/presentation/generated-surface.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/generated-surface-lifecycle.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-generated-surface-lifecycle.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-13T15:15:11.803Z",
+  "completed_at": "2026-07-13T15:15:12.517Z",
+  "assertions": [
+    {
+      "name": "Generated, Human, and Agent command parity",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "Generated action is audited",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Generated action uses normal version validation",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "command_parity": [
+      {
+        "operation": "collection.patch.apply",
+        "status": "completed",
+        "decision": "allow_with_audit",
+        "version": 2,
+        "data": {
+          "name": "done"
+        },
+        "audited": true
+      },
+      {
+        "operation": "collection.patch.apply",
+        "status": "completed",
+        "decision": "allow_with_audit",
+        "version": 2,
+        "data": {
+          "name": "done"
+        },
+        "audited": true
+      },
+      {
+        "operation": "collection.patch.apply",
+        "status": "completed",
+        "decision": "allow_with_audit",
+        "version": 2,
+        "data": {
+          "name": "done"
+        },
+        "audited": true
+      }
+    ],
+    "generated_action_audited": true,
+    "stale_validation_rejected": true,
+    "reload_same_hash": true,
+    "same_surface_id": true,
+    "revisions": 2,
+    "parent_lineage": true,
+    "pinned": true,
+    "cross_client_resource_state": {
+      "name": "done"
+    },
+    "export_import_hash_equal": true,
+    "interactions": [
+      "action",
+      "pinned"
+    ]
+  }
+}

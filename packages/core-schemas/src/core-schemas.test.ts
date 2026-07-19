@@ -346,6 +346,7 @@ describe("core schemas", () => {
       status: "enabled",
       trust_mode: "pairing_required",
       allowlist: ["line:*"],
+      allowed_tools: [],
       metadata: {},
       created_at: now,
       updated_at: now
@@ -1124,9 +1125,9 @@ describe("core schemas", () => {
     const response = SettingsResponseSchema.parse({
       ui_locale: "ja",
       output_locale: "ja",
-      memory_capture_mode: "suggest",
-      knowledge_wiki_capture_mode: "suggest",
-      skill_capture_mode: "suggest",
+        memory_capture_mode: "auto",
+        knowledge_wiki_capture_mode: "auto",
+        skill_capture_mode: "auto",
       external_provider_role: "assistive",
       updated_at: now,
       external_assist_config: diagnostics

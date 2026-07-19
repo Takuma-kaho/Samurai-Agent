@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "test_id": "E08",
+  "command": "pnpm core:test:task-evaluation",
+  "status": "passed",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "worktree_clean": true,
+  "source_sha256": "a904b14f015ed83e0bbd07427e34947d2a4d03e0a9b3a80250621ddf3eb6c64d",
+  "source_files": [
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/runtime/src/learning/task-evaluation.ts",
+    "scripts/fixtures/task-evaluation.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-task-evaluation.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-13T08:14:13.393Z",
+  "completed_at": "2026-07-13T08:14:13.437Z",
+  "assertions": [
+    {
+      "name": "Comparable work shares fingerprint, incompatible output differs",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Correction and UI/resource signals attach to cohort",
+      "actual": [
+        "correction",
+        "undo",
+        "rerun",
+        "artifact_revision",
+        "surface_revision",
+        "dismiss",
+        "pin",
+        "explicit_feedback"
+      ],
+      "expected": [
+        "correction",
+        "undo",
+        "rerun",
+        "artifact_revision",
+        "surface_revision",
+        "dismiss",
+        "pin",
+        "explicit_feedback"
+      ]
+    },
+    {
+      "name": "Insufficient samples are inconclusive",
+      "actual": "inconclusive",
+      "expected": "inconclusive"
+    },
+    {
+      "name": "Comparable sufficient cohort can be assessed",
+      "actual": "helpful",
+      "expected": "helpful"
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "same_work_same_fingerprint": true,
+    "different_output_different_fingerprint": true,
+    "signal_kinds": [
+      "correction",
+      "undo",
+      "rerun",
+      "artifact_revision",
+      "surface_revision",
+      "dismiss",
+      "pin",
+      "explicit_feedback"
+    ],
+    "insufficient_assessment": "inconclusive",
+    "comparable_assessment": "helpful",
+    "effect": 42,
+    "confidence": 0.83
+  }
+}

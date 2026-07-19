@@ -1,0 +1,156 @@
+// Domain operation module. Keep its contract and handler together.
+import { z } from "zod";
+import { ResourceRefSchema, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord, type SurfaceGenerationRequest } from "@samurai-agent/core-schemas";
+import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { generatedSurfaceSavedValueSchema } from "../../value-objects/generated-surface.js";
+
+const boundedJsonObjectSchema = z.record(domainJsonValueSchema)
+  .refine((value) => Object.keys(value).length <= 128, "generated_surface_json_object_too_large");
+const generatedSurfaceRequestSchema = z.object({
+  user_intent: z.string().trim().min(1).max(100_000),
+  source_resource_refs: z.array(ResourceRefSchema).max(128),
+  allowed_domain_commands: z.array(z.string().trim().min(1).max(256)).max(128),
+  selected_knowledge_refs: z.array(ResourceRefSchema).max(128),
+  selected_skill_refs: z.array(ResourceRefSchema).max(128),
+  client_capabilities: boundedJsonObjectSchema,
+  expected_lifetime: z.enum(["message", "session", "pinned"]),
+  fallback_chain: z.array(z.enum(["built_in_surface", "artifact", "text"])).min(1).max(3)
+}).strict();
+const actionSchema = z.object({
+  id: z.string().trim().min(1).max(256),
+  label: z.string().trim().min(1).max(512),
+  command_id: z.string().trim().min(1).max(256),
+  input_schema: boundedJsonObjectSchema,
+  payload_template: boundedJsonObjectSchema.default({}),
+  requires_confirmation: z.boolean().default(false)
+}).strict();
+const assetPathSchema = z.string().trim().min(1).max(1_024).refine((value) => {
+  const normalized = value.replaceAll("\\", "/");
+  return !normalized.startsWith("/")
+    && normalized.split("/").every((part) => part !== "" && part !== "." && part !== "..")
+    && /^[A-Za-z0-9._~/-]+$/.test(normalized);
+}, "generated_surface_asset_path_invalid");
+const assetSchema = z.object({
+  path: assetPathSchema,
+  content: z.string().max(2_000_000),
+  encoding: z.enum(["utf8", "base64"]).optional(),
+  mime_type: z.string().trim().min(1).max(255).regex(/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/).optional()
+}).strict();
+const Bundle = z.object({
+  title: z.string().trim().min(1).max(512),
+  html: z.string().min(1).max(200_000),
+  css: z.string().max(100_000).optional(),
+  script: z.string().max(50_000).optional(),
+  actions: z.array(actionSchema).max(20),
+  input_data_schema: boundedJsonObjectSchema.optional(),
+  assets: z.array(assetSchema).max(50)
+    .refine((assets) => assets.reduce((size, asset) => size + asset.content.length, 0) <= 2_700_000, "generated_surface_assets_too_large")
+    .optional()
+}).strict();
+const BundleInput = z.union([Bundle, z.object({ custom_view: Bundle }).strict()]);
+const Input = z.object({
+  bundle: BundleInput,
+  request: generatedSurfaceRequestSchema,
+  surface_id: z.string().trim().min(1).max(256)
+}).strict();
+const Output = generatedSurfaceSavedValueSchema;
+
+export type GeneratedSurfaceReviseBundleInput = z.infer<typeof Bundle>;
+export type GeneratedSurfaceReviseInput = z.infer<typeof Input>;
+
+export interface GeneratedSurfaceRevisePorts {
+  getGeneratedSurface(id: string): Promise<GeneratedSurfaceDefinition | undefined>;
+  createGeneratedSurfaceRequestId(): string;
+  generatedSurfaceNow(): string;
+  generatedSurfaceFingerprint(value: string): string;
+  buildGeneratedSurfaceRevision(input: { request: SurfaceGenerationRequest; bundle: GeneratedSurfaceReviseBundleInput; producerRunId?: string; promptFingerprint?: string; existing?: GeneratedSurfaceDefinition }): { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord };
+  saveGeneratedSurfaceRevision(input: { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; html: string; css?: string; script?: string; assets?: GeneratedSurfaceReviseBundleInput["assets"] }): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord }>;
+  generatedSurfaceReviseError(message: string): Error;
+}
+
+const generatedSurfaceRevise = defineCommand<GeneratedSurfaceRevisePorts>()({
+  ...{
+  "kind": "command",
+  "id": "generated_surface.revise",
+  "version": "4.0",
+  "availability": "active",
+  "title": "Revise generated surface",
+  "description": "Create a new immutable revision of a Generated Surface.",
+  "sources": [
+    "runtime_api",
+    "provider_tool_call",
+    "generated_surface"
+  ],
+  "effect": "workspace_mutation",
+  "idempotency": "required",
+  "concurrency": "optimistic_version",
+  "render": [
+    "custom_view"
+  ],
+  "resourceKinds": [
+    "generated_surface"
+  ],
+  "proposedEffects": [
+    "Create a new immutable Generated Surface revision."
+  ],
+  "outputResourceKind": "generated_surface",
+  "uiDisplayCategory": "generated_surface",
+  "providerToolNames": [
+    "generated_surface.revise",
+    "samurai.generated_surface.revise",
+    "mcp__samurai__generated_surface_revise"
+  ],
+  "provenance": [
+    {
+      "source": "samurai",
+      "commit_sha": "workspace-design-v1",
+      "reference_file": "ARCHITECTURE.md",
+      "decision": "adapted",
+      "reason": "Use a server-owned contract and a shared Runtime boundary for Workspace state."
+    }
+  ]
+},
+  input: Input,
+  output: Output,
+  createHandler(ports) {
+    return {
+      execute: async function handleGeneratedSurfaceRevise(context: TrustedDomainContext, input: GeneratedSurfaceReviseInput): Promise<DomainResult<z.infer<typeof Output>>> {
+        if (!context.sessionId) throw ports.generatedSurfaceReviseError("generated_surface_session_required");
+        const existing = await ports.getGeneratedSurface(input.surface_id);
+        if (!existing) throw ports.generatedSurfaceReviseError("generated_surface_not_found");
+        const bundle = "custom_view" in input.bundle ? input.bundle.custom_view : input.bundle;
+        const request: SurfaceGenerationRequest = {
+          id: ports.createGeneratedSurfaceRequestId(),
+          session_id: context.sessionId,
+          user_intent: input.request.user_intent,
+          source_resource_refs: input.request.source_resource_refs,
+          allowed_domain_commands: input.request.allowed_domain_commands,
+          selected_knowledge_refs: input.request.selected_knowledge_refs,
+          selected_skill_refs: input.request.selected_skill_refs,
+          client_capabilities: input.request.client_capabilities,
+          expected_lifetime: input.request.expected_lifetime,
+          fallback_chain: input.request.fallback_chain,
+          created_at: ports.generatedSurfaceNow()
+        };
+        const built = ports.buildGeneratedSurfaceRevision({
+          request,
+          bundle,
+          existing,
+          producerRunId: context.runId,
+          promptFingerprint: ports.generatedSurfaceFingerprint(input.request.user_intent)
+        });
+        const saved = await ports.saveGeneratedSurfaceRevision({
+          definition: built.definition,
+          revision: built.revision,
+          html: bundle.html,
+          css: bundle.css,
+          script: bundle.script,
+          assets: bundle.assets
+        });
+        return { ok: true, value: Output.parse(saved) };
+      }
+    };
+  }
+});
+
+export default generatedSurfaceRevise;

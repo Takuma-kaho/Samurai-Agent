@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "test_id": "E06",
+  "command": "pnpm core:test:background-review",
+  "status": "passed",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "worktree_clean": true,
+  "source_sha256": "0ed689d4049619b3997bcffe691fa941c1b8f0f9f1291e3823c669ba615fccfa",
+  "source_files": [
+    "packages/learning/src/background-review.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/background-review-atomicity.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-background-review-atomicity.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-13T08:14:13.819Z",
+  "completed_at": "2026-07-13T08:14:14.026Z",
+  "assertions": [
+    {
+      "name": "Malformed and prohibited mutations are rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Version conflict changes nothing",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Injected mid-write failure rolls back all resources and metadata",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Valid mutation applies exactly once",
+      "actual": {
+        "valid": 1,
+        "duplicate": 0
+      },
+      "expected": {
+        "valid": 1,
+        "duplicate": 0
+      }
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "malformed_rejected": true,
+    "prohibited_shell_removed": true,
+    "version_conflict_rolled_back": true,
+    "mid_write_failure_rolled_back": true,
+    "partial_metadata": 0,
+    "valid_mutations": 1,
+    "duplicate_mutations": 0
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "test_id": "D07",
+  "command": "pnpm core:test:artifact",
+  "status": "passed",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "worktree_clean": true,
+  "source_sha256": "3b49e6f44d82bc795596a0665ab73e60d83de7f11b685016011f42bc4105467c",
+  "source_files": [
+    "packages/action-catalog/src/index.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/artifact-revisions.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-artifact-revisions.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-13T07:14:55.077Z",
+  "completed_at": "2026-07-13T07:15:28.699Z",
+  "assertions": [
+    {
+      "name": "Immutable revision lineage",
+      "actual": 3,
+      "expected": 3
+    },
+    {
+      "name": "Stale base revision is rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Earlier revision restores as a new revision",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Revision hashes differ and old revision redisplays",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Missing source repaired from verified blob",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Every revision and repair audited",
+      "actual": 4,
+      "expected": 4
+    },
+    {
+      "name": "Export/import preserves hashes",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "revisions": 3,
+    "lineage": [
+      "artifact_revision_f18eddb25f734492",
+      "artifact_revision_f18eddb25f734492",
+      "artifact_revision_9ff73e74003c4687"
+    ],
+    "hashes_unique": true,
+    "conflict_rejected": true,
+    "restored_revision": true,
+    "old_revision_redisplay": true,
+    "missing_source_repaired": true,
+    "audit_records": 4,
+    "export_import_hash_equal": true
+  }
+}

@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { createUserModel, deleteUserModelFact, upsertUserModelFact, userModelPrompt, USER_MODEL_MAX_FACTS, USER_MODEL_PROMPT_MAX_CHARS } from "../../packages/runtime/src/context/user-model";
+let model = createUserModel(); const now = new Date(0).toISOString();
+for (let index = 0; index < 80; index += 1) model = upsertUserModelFact(model, { id: `fact-${index}`, key: `key-${index}`, value: `value-${index}`, confidence: index / 100, source_refs: [{ kind: "message", id: `message-${index}`, uri: `sessions/s/messages/${index}` }], updated_at: now });
+assert.equal(model.facts.length, USER_MODEL_MAX_FACTS); assert.ok(model.facts.every((fact) => fact.source_refs.length > 0));
+const previousVersion = model.version; model = upsertUserModelFact(model, { id: "replacement", key: "key-79", value: "updated", confidence: 1, source_refs: [{ kind: "message", id: "correction", uri: "sessions/s/messages/correction" }], updated_at: new Date(1).toISOString() });
+assert.equal(model.version, previousVersion + 1); assert.equal(model.facts.filter((fact) => fact.key === "key-79").length, 1);
+model = deleteUserModelFact(model, "replacement"); assert.equal(model.facts.some((fact) => fact.id === "replacement"), false);
+const prompt = userModelPrompt(model); assert.ok(prompt.text.length <= USER_MODEL_PROMPT_MAX_CHARS); assert.equal(prompt.text.includes("long transcript"), false); assert.ok(prompt.source_refs.length > 0);
+process.stdout.write(`${JSON.stringify({ status: "passed", fact_count: model.facts.length, max_facts: USER_MODEL_MAX_FACTS, prompt_chars: prompt.text.length, prompt_max_chars: USER_MODEL_PROMPT_MAX_CHARS, all_source_backed: true, update_replaced_key: true, deletion_applied: true, raw_history_injected: false })}\n`);

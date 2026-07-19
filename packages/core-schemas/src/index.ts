@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 export const supportedLocales = ["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"] as const;
 export const translationStatuses = ["verified", "draft", "missing"] as const;
@@ -62,7 +63,7 @@ export const approvalStatuses = ["pending", "approved", "denied", "expired", "ca
 export const memoryStates = ["session", "provisional", "active", "sensitive", "archived", "topic"] as const;
 export const skillStates = ["candidate", "project", "active", "stale", "archived", "pinned"] as const;
 export const wikiStates = ["proposed", "active", "archived", "rejected"] as const;
-export const captureModes = ["manual", "suggest", "off"] as const;
+export const captureModes = ["auto", "manual", "off"] as const;
 export const externalProviderRoles = ["assistive", "disabled"] as const;
 export const activityTypes = [
   "auto_run",
@@ -104,11 +105,18 @@ export const clientEventTypes = [
   "client.status.refresh_requested"
 ] as const;
 export const workspaceChangeTypes = ["artifact_created", "memory_suggested", "skill_candidate_created", "collection_changed", "settings_changed", "other"] as const;
-export const reflectionRunKinds = ["chat_turn", "manual", "scheduled", "curator", "evaluation"] as const;
+export const reflectionRunKinds = ["chat_turn", "background_review", "manual", "scheduled", "curator", "evaluation"] as const;
 export const reflectionRunStatuses = ["started", "completed", "failed"] as const;
 export const reflectionSuggestionTypes = ["memory", "knowledge_wiki", "skill", "memory_patch", "skill_patch", "conflict"] as const;
 export const reflectionSuggestionStatuses = ["proposed", "applied", "rejected", "archived"] as const;
 export const toolRunStatuses = ["completed", "ignored", "failed"] as const;
+export const learningResourceKinds = ["memory", "wiki", "skill", "skill_support", "session_result"] as const;
+export const learningResourceUseStages = ["selected", "body_loaded", "support_loaded"] as const;
+export const learningAssessments = ["helpful", "neutral", "harmful", "insufficient_evidence"] as const;
+export const skillOptimizationRunStatuses = ["queued", "running", "completed", "failed", "cancelled"] as const;
+export const skillOptimizationCandidateStatuses = ["proposed", "passed", "rejected", "promoted", "rolled_back"] as const;
+export const skillOptimizationDatasetSources = ["real", "golden", "synthetic"] as const;
+export const skillOptimizationDatasetSplits = ["train", "validation", "holdout"] as const;
 export const automationJobStatuses = ["enabled", "disabled", "archived"] as const;
 export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed"] as const;
 export const externalSendChannels = ["webhook", "email", "slack", "telegram", "line"] as const;
@@ -163,6 +171,9 @@ export const ReflectionRunStatusSchema = z.enum(reflectionRunStatuses);
 export const ReflectionSuggestionTypeSchema = z.enum(reflectionSuggestionTypes);
 export const ReflectionSuggestionStatusSchema = z.enum(reflectionSuggestionStatuses);
 export const ToolRunStatusSchema = z.enum(toolRunStatuses);
+export const LearningResourceKindSchema = z.enum(learningResourceKinds);
+export const LearningResourceUseStageSchema = z.enum(learningResourceUseStages);
+export const LearningAssessmentSchema = z.enum(learningAssessments);
 export const AutomationJobStatusSchema = z.enum(automationJobStatuses);
 export const ExternalSendStatusSchema = z.enum(externalSendStatuses);
 export const ExternalSendChannelSchema = z.enum(externalSendChannels);
@@ -249,13 +260,35 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+/**
+ * Contract schemas are authored in Zod and published as strict JSON Schema.
+ * Keeping this conversion at the shared schema boundary prevents each caller
+ * from inventing a different JSON Schema dialect or reference strategy.
+ */
+export function toStrictJsonSchema(schema: z.ZodTypeAny, _name: string): Record<string, JsonValue> {
+  const converted: unknown = JSON.parse(JSON.stringify(zodToJsonSchema(schema, { $refStrategy: "root" })));
+  if (!isJsonRecord(converted)) throw new Error("zod_json_schema_conversion_invalid");
+  return converted;
+}
+
+function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && Object.values(value).every(isJsonValue);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isJsonRecord(value);
+}
+
 export const ResourceRefSchema = z.object({
   kind: z.string().min(1),
   id: z.string().min(1),
   uri: z.string().min(1),
   version: z.string().optional(),
   label: z.string().optional()
-});
+}).strict();
 export type ResourceRef = z.infer<typeof ResourceRefSchema>;
 
 export const ProvenanceSchema = z.object({
@@ -265,7 +298,7 @@ export const ProvenanceSchema = z.object({
   model: z.string().optional(),
   confidence: z.number().min(0).max(1).optional(),
   verified: z.boolean()
-});
+}).strict();
 export type Provenance = z.infer<typeof ProvenanceSchema>;
 
 export const LocalizedTextSchema = z.object({
@@ -286,7 +319,7 @@ export const ResourceTranslationRecordSchema = z.object({
   provenance: ProvenanceSchema.optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type ResourceTranslationRecord = z.infer<typeof ResourceTranslationRecordSchema>;
 
 export const MessageEnvelopeSchema = z.object({
@@ -300,7 +333,7 @@ export const MessageEnvelopeSchema = z.object({
   output_locale: SupportedLocaleSchema,
   metadata: z.record(jsonValueSchema),
   received_at: z.string().datetime()
-});
+}).strict();
 export type MessageEnvelope = z.infer<typeof MessageEnvelopeSchema>;
 
 export const AgentBackendConfigSchema = z.object({
@@ -311,6 +344,38 @@ export const AgentBackendConfigSchema = z.object({
   metadata: z.record(jsonValueSchema)
 });
 export type AgentBackendConfig = z.infer<typeof AgentBackendConfigSchema>;
+
+export const BackendCapabilityIdSchema = z.enum([
+  "web_search",
+  "web_fetch",
+  "browser_read",
+  "browser_interact",
+  "browser_screenshot",
+  "subagent_delegate",
+  "mcp_tools"
+]);
+export type BackendCapabilityId = z.infer<typeof BackendCapabilityIdSchema>;
+
+export const BackendCapabilityStateSchema = z.enum([
+  "available",
+  "unavailable",
+  "misconfigured",
+  "unverified"
+]);
+export type BackendCapabilityState = z.infer<typeof BackendCapabilityStateSchema>;
+
+export const BackendCapabilityStatusSchema = z.object({
+  backend_id: z.string().min(1),
+  capability_id: BackendCapabilityIdSchema,
+  state: BackendCapabilityStateSchema,
+  source: z.enum(["backend_native", "mcp_adapter", "samurai_adapter"]),
+  mode: z.string().min(1).optional(),
+  reason: z.string().min(1).optional(),
+  checked_at: z.string().datetime(),
+  probe_version: z.string().min(1),
+  evidence_summary: z.string().min(1)
+});
+export type BackendCapabilityStatus = z.infer<typeof BackendCapabilityStatusSchema>;
 
 export const BackendRunRecordSchema = z.object({
   id: z.string().min(1),
@@ -326,7 +391,7 @@ export const BackendRunRecordSchema = z.object({
   output_summary: z.string().optional(),
   error_code: z.string().optional(),
   metadata: z.record(jsonValueSchema)
-});
+}).strict();
 export type BackendRunRecord = z.infer<typeof BackendRunRecordSchema>;
 
 export const BackendEventRecordSchema = z.object({
@@ -338,7 +403,7 @@ export const BackendEventRecordSchema = z.object({
   payload: z.record(jsonValueSchema),
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime()
-});
+}).strict();
 export type BackendEventRecord = z.infer<typeof BackendEventRecordSchema>;
 
 export const ClientEventRecordSchema = z.object({
@@ -354,7 +419,7 @@ export const ClientEventRecordSchema = z.object({
   acked_at: z.string().datetime().optional(),
   expires_at: z.string().datetime().optional(),
   error_code: z.string().optional()
-});
+}).strict();
 export type ClientEventRecord = z.infer<typeof ClientEventRecordSchema>;
 
 export const WorkspaceChangeRecordSchema = z.object({
@@ -365,8 +430,9 @@ export const WorkspaceChangeRecordSchema = z.object({
   change_type: WorkspaceChangeTypeSchema,
   summary: z.string(),
   legacy_operation_id: z.string().optional(),
+  correlation_id: z.string().optional(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type WorkspaceChangeRecord = z.infer<typeof WorkspaceChangeRecordSchema>;
 
 export const SkillIndexEntryReadModelSchema = z.object({
@@ -669,6 +735,16 @@ export const KnowledgeWikiGraphSchema = z.object({
 });
 export type KnowledgeWikiGraph = z.infer<typeof KnowledgeWikiGraphSchema>;
 
+export const KnowledgeWikiLintReportSchema = z.object({
+  generated_at: z.string().datetime(),
+  active_pages: z.number().int().nonnegative(),
+  broken_links: z.array(z.object({ from_wiki_id: z.string(), target: z.string() })),
+  duplicate_groups: z.array(z.object({ key: z.string(), wiki_ids: z.array(z.string()).min(2) })),
+  orphan_wiki_ids: z.array(z.string()),
+  backlinks: z.record(z.string(), z.array(z.object({ from_wiki_id: z.string(), label: z.string() })))
+});
+export type KnowledgeWikiLintReport = z.infer<typeof KnowledgeWikiLintReportSchema>;
+
 export const KnowledgeWikiDiagnosticsIssueSchema = z.object({
   code: z.enum([
     "active_wiki_empty_content",
@@ -926,7 +1002,7 @@ export const ReflectionRunRecordSchema = z.object({
   started_at: z.string().datetime(),
   completed_at: z.string().datetime().optional(),
   error: z.string().optional()
-});
+}).strict();
 export type ReflectionRunRecord = z.infer<typeof ReflectionRunRecordSchema>;
 
 export const ReflectionSuggestionRecordSchema = z.object({
@@ -941,7 +1017,7 @@ export const ReflectionSuggestionRecordSchema = z.object({
   confidence: z.number().min(0).max(1),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type ReflectionSuggestionRecord = z.infer<typeof ReflectionSuggestionRecordSchema>;
 
 export const ReflectionDiagnosticsIssueSchema = z.object({
@@ -1004,6 +1080,233 @@ export const SkillUsageRecordSchema = z.object({
 });
 export type SkillUsageRecord = z.infer<typeof SkillUsageRecordSchema>;
 
+export const LearningResourceUseRecordSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  session_id: z.string().min(1),
+  resource_kind: LearningResourceKindSchema,
+  resource_id: z.string().min(1),
+  resource_version: z.string().min(1).optional(),
+  content_hash: z.string().min(1).optional(),
+  stage: LearningResourceUseStageSchema,
+  source_operation_id: z.string().min(1).optional(),
+  metadata: z.record(z.string(), z.unknown()),
+  created_at: z.string().datetime()
+});
+export type LearningResourceUseRecord = z.infer<typeof LearningResourceUseRecordSchema>;
+
+export const LearningEvaluationRecordSchema = z.object({
+  id: z.string().min(1),
+  learning_resource_ref: ResourceRefSchema,
+  learning_resource_version: z.string().min(1).optional(),
+  task_class: z.string().min(1),
+  compared_run_ids: z.array(z.string().min(1)),
+  before_metrics: z.record(z.string(), z.number()),
+  after_metrics: z.record(z.string(), z.number()),
+  effect_estimate: z.number(),
+  confidence: z.number().min(0).max(1),
+  assessment: LearningAssessmentSchema,
+  evidence_refs: z.array(ResourceRefSchema),
+  evaluator: z.string().min(1),
+  created_at: z.string().datetime()
+}).strict();
+export type LearningEvaluationRecord = z.infer<typeof LearningEvaluationRecordSchema>;
+
+export const SkillOptimizationExampleSchema = z.object({
+  id: z.string().min(1),
+  skill_id: z.string().min(1),
+  prompt: z.string().min(1),
+  expected_behavior: z.string().min(1),
+  feedback: z.string().min(1),
+  source: z.enum(skillOptimizationDatasetSources),
+  split: z.enum(skillOptimizationDatasetSplits),
+  skill_body_read_run_id: z.string().min(1).optional(),
+  trace_refs: z.array(ResourceRefSchema),
+  metadata: z.record(jsonValueSchema),
+  created_at: z.string().datetime()
+}).superRefine((value, ctx) => {
+  if (value.source !== "synthetic" && !value.skill_body_read_run_id) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["skill_body_read_run_id"], message: "real_or_golden_example_requires_skill_body_read_run" });
+  }
+});
+export type SkillOptimizationExample = z.infer<typeof SkillOptimizationExampleSchema>;
+
+export const SkillOptimizationDatasetSchema = z.object({
+  id: z.string().min(1),
+  skill_id: z.string().min(1),
+  examples: z.array(SkillOptimizationExampleSchema).min(20),
+  split_counts: z.object({ train: z.number().int().nonnegative(), validation: z.number().int().nonnegative(), holdout: z.number().int().nonnegative() }),
+  holdout_non_synthetic_count: z.number().int().nonnegative(),
+  created_at: z.string().datetime()
+}).superRefine((value, ctx) => {
+  const total = value.split_counts.train + value.split_counts.validation + value.split_counts.holdout;
+  if (total !== value.examples.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["split_counts"], message: "dataset_split_counts_mismatch" });
+  }
+  if (value.split_counts.train < 12 || value.split_counts.validation < 4 || value.split_counts.holdout < 4) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["split_counts"], message: "dataset_split_minimum_not_met" });
+  }
+  if (value.holdout_non_synthetic_count < 1 || !value.examples.some((example) => example.split === "holdout" && example.source !== "synthetic")) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["holdout_non_synthetic_count"], message: "holdout_must_include_real_or_golden_example" });
+  }
+});
+export type SkillOptimizationDataset = z.infer<typeof SkillOptimizationDatasetSchema>;
+
+export const SkillOptimizationRunSchema = z.object({
+  id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  target_skill_id: z.string().min(1),
+  baseline_content_hash: z.string().min(1),
+  baseline_version: z.string().min(1),
+  dataset_id: z.string().min(1),
+  objective_id: z.string().min(1),
+  work_item_id: z.string().min(1),
+  optimizer: z.literal("gepa"),
+  optimizer_version: z.string().min(1),
+  status: z.enum(skillOptimizationRunStatuses),
+  phase: z.enum(["dataset", "optimizing", "evaluating", "awaiting_confirmation", "promoting", "completed", "failed", "cancelled"]),
+  progress: z.number().min(0).max(1),
+  candidate_ids: z.array(z.string().min(1)),
+  trace_refs: z.array(ResourceRefSchema),
+  provenance: z.record(jsonValueSchema),
+  error: z.string().optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  started_at: z.string().datetime().optional(),
+  completed_at: z.string().datetime().optional()
+});
+export type SkillOptimizationRun = z.infer<typeof SkillOptimizationRunSchema>;
+
+export const OptimizationCandidateSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  skill_id: z.string().min(1),
+  parent_candidate_id: z.string().min(1).optional(),
+  body: z.string().min(1),
+  content_hash: z.string().min(1),
+  baseline_holdout_score: z.number().min(0).max(100),
+  holdout_score: z.number().min(0).max(100),
+  holdout_delta: z.number(),
+  feedback: z.array(z.string().min(1)),
+  dataset_id: z.string().min(1),
+  trace_refs: z.array(ResourceRefSchema),
+  safety: z.object({ related_tests_passed: z.boolean(), safety_checks_passed: z.boolean(), important_regression: z.boolean() }),
+  status: z.enum(skillOptimizationCandidateStatuses),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type OptimizationCandidate = z.infer<typeof OptimizationCandidateSchema>;
+
+export const OptimizationEvaluationSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  candidate_id: z.string().min(1),
+  split: z.enum(skillOptimizationDatasetSplits),
+  score: z.number().min(0).max(100),
+  feedback: z.array(z.string().min(1)),
+  important_regression: z.boolean(),
+  related_tests_passed: z.boolean(),
+  safety_checks_passed: z.boolean(),
+  trace_refs: z.array(ResourceRefSchema),
+  created_at: z.string().datetime()
+});
+export type OptimizationEvaluation = z.infer<typeof OptimizationEvaluationSchema>;
+
+export const SkillOptimizationSnapshotSchema = z.object({
+  id: z.string().min(1),
+  skill_id: z.string().min(1),
+  run_id: z.string().min(1),
+  candidate_id: z.string().min(1),
+  content_hash: z.string().min(1),
+  markdown: z.string().min(1),
+  created_at: z.string().datetime(),
+  restored_at: z.string().datetime().optional()
+});
+export type SkillOptimizationSnapshot = z.infer<typeof SkillOptimizationSnapshotSchema>;
+
+export const OptimizationPromotionSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  candidate_id: z.string().min(1),
+  skill_id: z.string().min(1),
+  snapshot_id: z.string().min(1),
+  expected_content_hash: z.string().min(1),
+  promoted_content_hash: z.string().min(1),
+  status: z.enum(["promoted", "rejected", "rolled_back", "conflict"]),
+  provenance: z.record(jsonValueSchema),
+  created_at: z.string().datetime()
+});
+export type OptimizationPromotion = z.infer<typeof OptimizationPromotionSchema>;
+
+export const BackgroundReviewProvenanceSchema = z.object({
+  origin: z.literal("background_review"),
+  source_run_id: z.string().min(1),
+  source_session_id: z.string().min(1),
+  review_run_id: z.string().min(1),
+  before_version: z.string().optional(),
+  after_version: z.string().min(1),
+  reason_summary: z.string(),
+  evidence_refs: z.array(ResourceRefSchema)
+});
+export type BackgroundReviewProvenance = z.infer<typeof BackgroundReviewProvenanceSchema>;
+
+export const BackgroundReviewChangeRecordSchema = BackgroundReviewProvenanceSchema.extend({
+  id: z.string().min(1),
+  mutation_kind: z.enum(["memory_add", "memory_replace", "memory_remove", "skill_create", "skill_patch", "skill_support_write", "wiki_create", "wiki_patch", "wiki_archive", "wiki_merge"]),
+  resource_ref: ResourceRefSchema,
+  created_at: z.string().datetime()
+});
+export type BackgroundReviewChangeRecord = z.infer<typeof BackgroundReviewChangeRecordSchema>;
+
+export const LearningSnapshotRecordSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  path: z.string().min(1),
+  resource_counts: z.object({ memory: z.number().int().nonnegative(), skills: z.number().int().nonnegative(), support_files: z.number().int().nonnegative(), wiki: z.number().int().nonnegative().default(0) }),
+  created_at: z.string().datetime(),
+  restored_at: z.string().datetime().optional()
+});
+export type LearningSnapshotRecord = z.infer<typeof LearningSnapshotRecordSchema>;
+
+export const LearningResourceEdgeRecordSchema = z.object({
+  id: z.string().min(1),
+  from_ref: ResourceRefSchema,
+  to_ref: ResourceRefSchema,
+  relation: z.enum(["duplicate", "overlaps", "conflicts", "supersedes", "derived_from"]),
+  confidence: z.number().min(0).max(1),
+  evidence: z.array(z.string().min(1)),
+  curator_run_id: z.string().min(1),
+  created_at: z.string().datetime()
+});
+export type LearningResourceEdgeRecord = z.infer<typeof LearningResourceEdgeRecordSchema>;
+
+export const LearningJobReportRecordSchema = z.object({
+  id: z.string().min(1),
+  job_kind: z.enum(["background_review", "evaluation", "curator"]),
+  run_id: z.string().min(1),
+  target_resource_count: z.number().int().nonnegative(),
+  mutation_count: z.number().int().nonnegative(),
+  archive_count: z.number().int().nonnegative(),
+  restore_count: z.number().int().nonnegative(),
+  patch_count: z.number().int().nonnegative(),
+  merge_count: z.number().int().nonnegative(),
+  skipped_reasons: z.record(z.string(), z.number().int().nonnegative()),
+  evaluation_count: z.number().int().nonnegative(),
+  snapshot_id: z.string().optional(),
+  duration_ms: z.number().int().nonnegative(),
+  failure: z.string().optional(),
+  next_run_at: z.string().datetime().optional(),
+  created_at: z.string().datetime()
+});
+export type LearningJobReportRecord = z.infer<typeof LearningJobReportRecordSchema>;
+
+export const SkillViewInputSchema = z.object({
+  skill_id: z.string().min(1),
+  path: z.string().min(1).optional(),
+  run_id: z.string().min(1)
+});
+export type SkillViewInput = z.infer<typeof SkillViewInputSchema>;
+
 export const SkillDiagnosticsIssueSchema = z.object({
   code: z.enum([
     "selectable_skill_empty_markdown",
@@ -1032,6 +1335,10 @@ export const SkillDiagnosticsReportSchema = z.object({
   selectable_with_source_refs: z.number().int().nonnegative(),
   selectable_with_support_files: z.number().int().nonnegative(),
   selectable_with_usage: z.number().int().nonnegative(),
+  selected_resource_uses: z.number().int().nonnegative().optional(),
+  body_loaded_resource_uses: z.number().int().nonnegative().optional(),
+  support_loaded_resource_uses: z.number().int().nonnegative().optional(),
+  session_search_mode: z.enum(["fts5_trigram", "fts5", "like"]).optional(),
   empty_support_files: z.number().int().nonnegative(),
   issues: z.array(SkillDiagnosticsIssueSchema),
   recommendation: z.string()
@@ -1060,19 +1367,22 @@ export const CuratorLifecycleReportSchema = z.object({
   checked_at: z.string().datetime(),
   dry_run: z.boolean(),
   paused: z.boolean(),
+  snapshot_id: z.string().min(1).optional(),
+  evaluation_count: z.number().int().nonnegative().optional(),
+  applied_mutation_count: z.number().int().nonnegative().optional(),
   skipped_reason: z.string().optional(),
   thresholds: z.object({
     stale_after_days: z.number().int().positive(),
     archive_after_days: z.number().int().positive(),
     min_idle_hours: z.number().nonnegative()
-  }),
+  }).strict(),
   counts: z.object({
     memory_items: z.number().int().nonnegative(),
     wiki_pages: z.number().int().nonnegative(),
     skill_items: z.number().int().nonnegative(),
     skill_usage_rows: z.number().int().nonnegative(),
     suggestions: z.number().int().nonnegative()
-  }),
+  }).strict(),
   skill_actions: z.array(z.object({
     skill_id: z.string().min(1),
     title: z.string(),
@@ -1084,14 +1394,14 @@ export const CuratorLifecycleReportSchema = z.object({
     last_activity_at: z.string().datetime().optional(),
     owner_pinned: z.boolean(),
     suggestion_id: z.string().optional()
-  })),
+  }).strict()),
   protected_skills: z.array(z.object({
     skill_id: z.string().min(1),
     title: z.string(),
     state: SkillStateSchema,
     reason: z.literal("owner_pinned")
-  }))
-});
+  }).strict())
+}).strict();
 export type CuratorLifecycleReport = z.infer<typeof CuratorLifecycleReportSchema>;
 
 export const CuratorReviewReportSchema = z.object({
@@ -1103,40 +1413,40 @@ export const CuratorReviewReportSchema = z.object({
     patch_candidates: z.number().int().nonnegative(),
     consolidate_candidates: z.number().int().nonnegative(),
     archive_candidates: z.number().int().nonnegative()
-  }),
+  }).strict(),
   keep_candidates: z.array(z.object({
     kind: z.enum(["memory", "knowledge_wiki", "skill"]),
     id: z.string().min(1),
     title: z.string(),
     reason: z.string()
-  })),
+  }).strict()),
   memory_merge_groups: z.array(z.object({
     topic: z.string(),
     memory_ids: z.array(z.string().min(1)),
     reason: z.string(),
     suggestion_id: z.string().optional()
-  })),
+  }).strict()),
   skill_consolidation_groups: z.array(z.object({
     group_key: z.string().min(1),
     skill_ids: z.array(z.string().min(1)),
     suggested_umbrella_title: z.string(),
     reason: z.string(),
     suggestion_id: z.string().optional()
-  })),
+  }).strict()),
   wiki_patch_proposals: z.array(z.object({
     wiki_id: z.string().min(1),
     title: z.string(),
     reason: z.string(),
     suggestion_id: z.string().optional()
-  })),
+  }).strict()),
   archive_candidates: z.array(z.object({
     kind: z.enum(["memory", "knowledge_wiki", "skill"]),
     id: z.string().min(1),
     title: z.string(),
     reason: z.string(),
     suggestion_id: z.string().optional()
-  }))
-});
+  }).strict())
+}).strict();
 export type CuratorReviewReport = z.infer<typeof CuratorReviewReportSchema>;
 
 export const EvaluationFindingKindSchema = z.enum([
@@ -1158,7 +1468,7 @@ export const EvaluationTraceReportSchema = z.object({
     external_status: z.enum(["not_configured", "completed", "failed"]),
     provider_id: z.string().optional(),
     summary: z.string()
-  }),
+  }).strict(),
   counts: z.object({
     backend_runs: z.number().int().nonnegative(),
     backend_events: z.number().int().nonnegative(),
@@ -1167,7 +1477,7 @@ export const EvaluationTraceReportSchema = z.object({
     audit_records: z.number().int().nonnegative(),
     findings: z.number().int().nonnegative(),
     comparisons: z.number().int().nonnegative()
-  }),
+  }).strict(),
   run_scores: z.array(z.object({
     run_id: z.string().min(1),
     backend_id: z.string(),
@@ -1179,16 +1489,16 @@ export const EvaluationTraceReportSchema = z.object({
       severity: z.enum(["info", "warning", "critical"]),
       reason: z.string(),
       resource_refs: z.array(ResourceRefSchema)
-    })),
+    }).strict()),
     suggested_improvements: z.array(z.string())
-  })),
+  }).strict()),
   comparisons: z.array(z.object({
     current_run_id: z.string().min(1),
     baseline_run_id: z.string().min(1).optional(),
     result: z.enum(["no_baseline", "same", "improved", "regressed"]),
     reason: z.string()
-  }))
-});
+  }).strict())
+}).strict();
 export type EvaluationTraceReport = z.infer<typeof EvaluationTraceReportSchema>;
 
 export const EvaluationDiagnosticsIssueSchema = z.object({
@@ -1248,9 +1558,11 @@ export const ToolRunRecordSchema = z.object({
   status: ToolRunStatusSchema,
   input_summary: z.string(),
   output_summary: z.string(),
+  /** Stable machine-readable failure code when status is failed. */
+  error_code: z.string().optional(),
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime()
-});
+}).strict();
 export type ToolRunRecord = z.infer<typeof ToolRunRecordSchema>;
 
 export const ToolRunDiagnosticsReasonSchema = z.object({
@@ -1301,7 +1613,7 @@ export type ToolRunDiagnosticsReport = z.infer<typeof ToolRunDiagnosticsReportSc
 export const AutomationJobRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
-  kind: z.enum(["memory_review", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"]),
+  kind: z.enum(["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"]),
   status: AutomationJobStatusSchema,
   schedule: z.string().min(1),
   target_instruction: z.string().min(1),
@@ -1315,7 +1627,7 @@ export const AutomationJobRecordSchema = z.object({
   last_error: z.string().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type AutomationJobRecord = z.infer<typeof AutomationJobRecordSchema>;
 
 export const ExternalSendRecordSchema = z.object({
@@ -1404,6 +1716,8 @@ export const GatewayPairingPolicyRecordSchema = z.object({
   status: GatewayPairingPolicyStatusSchema,
   trust_mode: GatewayPairingTrustModeSchema,
   allowlist: z.array(z.string().min(1)),
+  /** Server-owned allowlist for Backend tools reached through this channel. */
+  allowed_tools: z.array(z.string().min(1)),
   pairing_ttl_ms: z.number().int().positive().optional(),
   duplicate_window_ms: z.number().int().positive().optional(),
   rate_limit_window_ms: z.number().int().positive().optional(),
@@ -1445,6 +1759,14 @@ export const GatewayInboundMessageRecordSchema = z.object({
 });
 export type GatewayInboundMessageRecord = z.infer<typeof GatewayInboundMessageRecordSchema>;
 
+export const GatewayDeliveryRecordSchema = z.object({
+  id:z.string().min(1),inbound_id:z.string().min(1).optional(),session_key:z.string().min(1),channel:GatewayChannelSchema,
+  status:z.enum(["pending","delivering","retry_wait","delivered","failed"]),idempotency_key:z.string().min(1),payload:z.record(jsonValueSchema),
+  attempt:z.number().int().nonnegative(),max_attempts:z.number().int().positive(),next_attempt_at:z.string().datetime().optional(),lease_until:z.string().datetime().optional(),
+  receipt:z.record(jsonValueSchema).optional(),last_error:z.string().optional(),created_at:z.string().datetime(),updated_at:z.string().datetime(),delivered_at:z.string().datetime().optional()
+});
+export type GatewayDeliveryRecord=z.infer<typeof GatewayDeliveryRecordSchema>;
+
 export const SecretRefSchema = z.object({
   id: z.string().min(1),
   source: SecretRefSourceSchema,
@@ -1485,35 +1807,21 @@ export const GatewayMcpHttpConfigSchema = z.object({
 }).strict();
 export type GatewayMcpHttpConfig = z.infer<typeof GatewayMcpHttpConfigSchema>;
 
-export const GatewayMcpConfigRecordSchema = z.object({
+const GatewayMcpConfigRecordBaseShape = {
   id: z.string().min(1),
   server_name: z.string().min(1),
-  transport: GatewayMcpTransportSchema,
   enabled: z.boolean(),
   allowed_tools: z.array(z.string().min(1)),
   config_ref: ResourceRefSchema.optional(),
   secret_refs: z.array(SecretRefSchema),
-  stdio: GatewayMcpStdioConfigSchema.optional(),
-  http: GatewayMcpHttpConfigSchema.optional(),
   metadata: z.record(jsonValueSchema),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-}).strict().superRefine((record, ctx) => {
-  if (record.transport === "stdio" && !record.stdio) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["stdio"],
-      message: "stdio_config_required"
-    });
-  }
-  if (record.transport === "http" && !record.http) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["http"],
-      message: "http_config_required"
-    });
-  }
-});
+};
+export const GatewayMcpConfigRecordSchema = z.discriminatedUnion("transport", [
+  z.object({ ...GatewayMcpConfigRecordBaseShape, transport: z.literal("stdio"), stdio: GatewayMcpStdioConfigSchema, http: z.never().optional() }).strict(),
+  z.object({ ...GatewayMcpConfigRecordBaseShape, transport: z.literal("http"), http: GatewayMcpHttpConfigSchema, stdio: z.never().optional() }).strict()
+]);
 export type GatewayMcpConfigRecord = z.infer<typeof GatewayMcpConfigRecordSchema>;
 
 export const GatewayMcpConfigSummarySchema = z.object({
@@ -1757,15 +2065,35 @@ export const GatewayRepairResultSchema = z.object({
 }).strict();
 export type GatewayRepairResult = z.infer<typeof GatewayRepairResultSchema>;
 
+export const DomainContractProvenanceSchema = z.object({
+  source: z.enum(["mulmoclaude", "hermes", "openclaw", "samurai"]),
+  commit_sha: z.string().min(1),
+  reference_file: z.string().min(1),
+  decision: z.enum(["adopted", "adapted", "not_adopted"]),
+  reason: z.string().min(1)
+}).strict();
+export type DomainContractProvenance = z.infer<typeof DomainContractProvenanceSchema>;
+
 export const ActionCatalogEntrySchema = z.object({
   id: z.string().min(1),
+  kind: z.enum(["command", "query"]).default("command"),
+  contract_version: z.string().min(1).default("1.0"),
+  contract_fingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  availability: z.enum(["active", "deprecated_command"]).default("active"),
+  runtime_requirements: z.array(z.enum(["agent_backend", "pdf_export", "browser_adapter", "plugin_runtime"])).default([]),
   title: z.string().min(1),
   display_name: z.string().optional(),
   description: z.string(),
   input_schema: z.record(jsonValueSchema),
   output_schema: z.record(jsonValueSchema),
+  allowed_sources: z.array(z.string().min(1)).default([]),
+  effect_kind: z.enum(["workspace_mutation", "external_effect", "runtime_control", "read_only"]).default("runtime_control"),
+  idempotency_policy: z.enum(["required", "optional", "none", "external"]).default("optional"),
+  concurrency_policy: z.enum(["optimistic_version", "state_transition", "append_or_unique", "external_idempotency", "none"]).default("none"),
+  render_kinds: z.array(z.string().min(1)).default([]),
+  provenance: z.array(DomainContractProvenanceSchema).default([]),
   resource_kinds: z.array(z.string()),
-  handler_id: z.string().min(1),
+  handler_id: z.string().min(1).optional(),
   implementation_target: z.string().optional(),
   ui_display_category: z.string().optional()
 });
@@ -1783,7 +2111,10 @@ export const DomainCommandCatalogDiagnosticIssueSchema = z.object({
     "empty_resource_kinds",
     "empty_proposed_effects",
     "missing_provider_tool_mapping",
-    "missing_surface_operation_mapping"
+    "missing_surface_operation_mapping",
+    "missing_handler",
+    "strict_schema_violation",
+    "deprecated_command_executable"
   ]),
   command_id: z.string().min(1).optional(),
   reference: z.string().min(1).optional(),
@@ -1793,11 +2124,15 @@ export type DomainCommandCatalogDiagnosticIssue = z.infer<typeof DomainCommandCa
 
 export const DomainCommandCatalogCoverageSchema = z.object({
   commands: z.number().int().nonnegative(),
+  queries: z.number().int().nonnegative().default(0),
+  legacy_commands: z.number().int().nonnegative().default(0),
   action_catalog_entries: z.number().int().nonnegative(),
   provider_tool_mappings: z.number().int().nonnegative(),
   surface_operation_mappings: z.number().int().nonnegative(),
   render_kinds: z.array(z.string().min(1)),
-  input_sources: z.array(z.string().min(1))
+  input_sources: z.array(z.string().min(1)),
+  strict_schema_rate: z.number().min(0).max(1).default(0),
+  generic_schema_count: z.number().int().nonnegative().default(0)
 }).strict();
 export type DomainCommandCatalogCoverage = z.infer<typeof DomainCommandCatalogCoverageSchema>;
 
@@ -1901,7 +2236,7 @@ export const PolicyEvaluationInputSchema = z.object({
   prior_grants: z.array(z.string()),
   recent_history: z.array(z.string()),
   input_hash: z.string().min(1)
-});
+}).strict();
 export type PolicyEvaluationInput = z.infer<typeof PolicyEvaluationInputSchema>;
 
 export const CapabilityOperationSchema = z.object({
@@ -1956,8 +2291,35 @@ export const MemoryFrontmatterSchema = z.object({
   sensitive_level: z.enum(["none", "low", "high"]),
   source_refs: z.array(ResourceRefSchema).optional(),
   provenance: ProvenanceSchema.optional()
-});
+}).strict();
 export type MemoryFrontmatter = z.infer<typeof MemoryFrontmatterSchema>;
+
+export const UserModelFactSchema = z.object({
+  id: z.string().min(1),
+  key: z.string().min(1),
+  value: z.string().min(1).max(500),
+  confidence: z.number().min(0).max(1),
+  source_refs: z.array(ResourceRefSchema).min(1).max(5),
+  updated_at: z.string().datetime()
+});
+export type UserModelFact = z.infer<typeof UserModelFactSchema>;
+
+export const UserModelSchema = z.object({
+  version: z.number().int().positive(),
+  facts: z.array(UserModelFactSchema).max(50)
+});
+export type UserModel = z.infer<typeof UserModelSchema>;
+
+export const ProfileRecordSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/),
+  name: z.string().min(1).max(100),
+  workspace_root: z.string().min(1),
+  user_model_file: z.string().min(1).default("USER_PROFILE.json"),
+  secret_ref_ids: z.array(z.string().min(1)),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type ProfileRecord = z.input<typeof ProfileRecordSchema>;
 
 export const SkillFrontmatterSchema = z.object({
   id: z.string().min(1),
@@ -1995,7 +2357,7 @@ export type WikiFrontmatter = z.infer<typeof WikiFrontmatterSchema>;
 export const ArtifactRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
-  kind: z.enum(["markdown", "document", "table", "chart", "image", "pdf", "structured_draft", "generated_report", "note"]),
+  kind: z.enum(["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"]),
   locale: SupportedLocaleSchema,
   source_locales: z.array(SupportedLocaleSchema),
   file_ref: ResourceRefSchema,
@@ -2004,8 +2366,42 @@ export const ArtifactRecordSchema = z.object({
   created_by: z.string().min(1),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
+
+export const GraphNodeSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  body: z.string().optional(),
+  position: z.object({ x: z.number(), y: z.number() }).optional(),
+  metadata: z.record(jsonValueSchema).optional()
+});
+export type GraphNode = z.infer<typeof GraphNodeSchema>;
+
+export const GraphEdgeSchema = z.object({
+  id: z.string().min(1),
+  source: z.string().min(1),
+  target: z.string().min(1),
+  label: z.string().optional(),
+  metadata: z.record(jsonValueSchema).optional()
+});
+export type GraphEdge = z.infer<typeof GraphEdgeSchema>;
+
+export const GraphDocumentSchema = z.object({
+  version: z.literal("1"),
+  nodes: z.array(GraphNodeSchema),
+  edges: z.array(GraphEdgeSchema)
+}).superRefine((graph, context) => {
+  const nodeIds = new Set(graph.nodes.map((node) => node.id));
+  if (nodeIds.size !== graph.nodes.length) context.addIssue({ code: "custom", message: "graph_duplicate_node_id" });
+  const edgeIds = new Set<string>();
+  for (const edge of graph.edges) {
+    if (edgeIds.has(edge.id)) context.addIssue({ code: "custom", message: "graph_duplicate_edge_id" });
+    edgeIds.add(edge.id);
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) context.addIssue({ code: "custom", message: "graph_edge_node_missing" });
+  }
+});
+export type GraphDocument = z.infer<typeof GraphDocumentSchema>;
 
 export const CollectionSchemaSchema = z.object({
   id: z.string().min(1),
@@ -2026,17 +2422,19 @@ export type CollectionSchema = z.infer<typeof CollectionSchemaSchema>;
 export const CollectionRecordSchema = z.object({
   id: z.string().min(1),
   collection_id: z.string().min(1),
+  version: z.number().int().positive().default(1),
   data: z.record(jsonValueSchema),
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 });
-export type CollectionRecord = z.infer<typeof CollectionRecordSchema>;
+export type CollectionRecord = z.input<typeof CollectionRecordSchema>;
 
 export const CollectionPatchSchema = z.object({
   id: z.string().min(1),
   record_id: z.string().min(1),
   changes: z.record(jsonValueSchema),
+  expected_version: z.number().int().positive().optional(),
   source_operation_id: z.string().min(1),
   created_at: z.string().datetime()
 });
@@ -2080,10 +2478,245 @@ export const OperationRecordSchema = z.object({
   approval_request_id: z.string().optional(),
   result_ref: ResourceRefSchema.optional(),
   error: z.string().optional(),
+  correlation_id: z.string().optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+}).strict();
+export type OperationRecord = z.infer<typeof OperationRecordSchema>;
+
+export const DomainCommandExecutionRecordSchema = z.object({
+  id: z.string().min(1),
+  idempotency_key: z.string().min(1),
+  command_id: z.string().min(1),
+  input_source: z.string().min(1),
+  correlation_id: z.string().min(1),
+  payload_hash: z.string().min(1),
+  phase: z.enum(["claimed", "internal_running", "external_running"]),
+  status: z.enum(["running", "completed", "failed", "outcome_unknown"]),
+  result: jsonValueSchema.optional(),
+  error: z.object({
+    code: z.string().min(1),
+    message: z.string(),
+    retryable: z.boolean(),
+    details: jsonValueSchema.optional()
+  }).optional(),
+  heartbeat_at: z.string().datetime(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 });
-export type OperationRecord = z.infer<typeof OperationRecordSchema>;
+export type DomainCommandExecutionRecord = z.infer<typeof DomainCommandExecutionRecordSchema>;
+
+export const ObjectiveStatusSchema = z.enum(["active", "paused", "blocked", "completed", "cancelled", "failed"]);
+export type ObjectiveStatus = z.infer<typeof ObjectiveStatusSchema>;
+
+export const WorkItemStatusSchema = z.enum(["queued", "ready", "running", "waiting", "blocked", "completed", "failed", "cancelled"]);
+export type WorkItemStatus = z.infer<typeof WorkItemStatusSchema>;
+
+export const WorkFailureKindSchema = z.enum(["retryable", "non_retryable", "cancelled"]);
+export type WorkFailureKind = z.infer<typeof WorkFailureKindSchema>;
+
+export const ObjectiveRecordSchema = z.object({
+  id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  title: z.string().min(1),
+  objective: z.string().min(1),
+  completion_criteria: z.array(z.string().min(1)).min(1),
+  status: ObjectiveStatusSchema,
+  token_budget: z.number().int().positive().optional(),
+  time_budget_ms: z.number().int().positive().optional(),
+  max_attempts: z.number().int().positive().optional(),
+  current_checkpoint_id: z.string().min(1).optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  completed_at: z.string().datetime().optional()
+});
+export type ObjectiveRecord = z.infer<typeof ObjectiveRecordSchema>;
+
+export const WorkItemRecordSchema = z.object({
+  id: z.string().min(1),
+  objective_id: z.string().min(1),
+  parent_work_item_id: z.string().min(1).optional(),
+  instruction: z.string().min(1),
+  status: WorkItemStatusSchema,
+  priority: z.number().int(),
+  attempt: z.number().int().nonnegative(),
+  max_attempts: z.number().int().positive(),
+  idempotency_key: z.string().min(1),
+  lease_owner: z.string().min(1).optional(),
+  lease_expires_at: z.string().datetime().optional(),
+  heartbeat_at: z.string().datetime().optional(),
+  retry_after_at: z.string().datetime().optional(),
+  backend_run_id: z.string().min(1).optional(),
+  current_checkpoint_id: z.string().min(1).optional(),
+  failure_kind: WorkFailureKindSchema.optional(),
+  error: z.string().optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  started_at: z.string().datetime().optional(),
+  completed_at: z.string().datetime().optional()
+});
+export type WorkItemRecord = z.infer<typeof WorkItemRecordSchema>;
+
+export const WorkDependencyRecordSchema = z.object({
+  id: z.string().min(1),
+  objective_id: z.string().min(1),
+  predecessor_work_item_id: z.string().min(1),
+  successor_work_item_id: z.string().min(1),
+  kind: z.enum(["blocks", "requires"]),
+  created_at: z.string().datetime()
+});
+export type WorkDependencyRecord = z.infer<typeof WorkDependencyRecordSchema>;
+
+export const RunCheckpointRecordSchema = z.object({
+  id: z.string().min(1),
+  objective_id: z.string().min(1),
+  work_item_id: z.string().min(1),
+  sequence: z.number().int().positive(),
+  phase: z.enum(["before_side_effect", "after_side_effect", "progress", "completed"]),
+  idempotency_key: z.string().min(1),
+  backend_run_id: z.string().min(1).optional(),
+  backend_session_id: z.string().min(1).optional(),
+  event_cursor: z.number().int().nonnegative().optional(),
+  summary: z.string(),
+  generated_resource_refs: z.array(ResourceRefSchema),
+  pending_operation_ids: z.array(z.string().min(1)),
+  state: z.record(jsonValueSchema),
+  created_at: z.string().datetime()
+});
+export type RunCheckpointRecord = z.infer<typeof RunCheckpointRecordSchema>;
+
+export const GeneratedSurfaceStateSchema = z.enum(["ephemeral", "pinned", "archived"]);
+export type GeneratedSurfaceState = z.infer<typeof GeneratedSurfaceStateSchema>;
+
+export const GeneratedSurfaceActionDeclarationSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  command_id: z.string().min(1),
+  input_schema: z.record(jsonValueSchema),
+  payload_template: z.record(jsonValueSchema).default({}),
+  requires_confirmation: z.boolean().default(false)
+});
+export type GeneratedSurfaceActionDeclaration = z.infer<typeof GeneratedSurfaceActionDeclarationSchema>;
+
+export const SurfaceGenerationRequestSchema = z.object({
+  id: z.string().min(1),
+  session_id: z.string().min(1),
+  user_intent: z.string().min(1),
+  source_resource_refs: z.array(ResourceRefSchema),
+  allowed_domain_commands: z.array(z.string().min(1)),
+  selected_knowledge_refs: z.array(ResourceRefSchema),
+  selected_skill_refs: z.array(ResourceRefSchema),
+  client_capabilities: z.record(jsonValueSchema),
+  expected_lifetime: z.enum(["message", "session", "pinned"]),
+  fallback_chain: z.array(z.enum(["built_in_surface", "artifact", "text"])),
+  created_at: z.string().datetime()
+});
+export type SurfaceGenerationRequest = z.infer<typeof SurfaceGenerationRequestSchema>;
+
+export const GeneratedSurfaceValidationReportSchema = z.object({
+  valid: z.boolean(),
+  issues: z.array(z.object({ code: z.string().min(1), message: z.string().min(1) })),
+  html_bytes: z.number().int().nonnegative(),
+  css_bytes: z.number().int().nonnegative(),
+  script_bytes: z.number().int().nonnegative(),
+  action_count: z.number().int().nonnegative(),
+  csp: z.string().min(1),
+  fallback: z.enum(["built_in_surface", "artifact", "text"]).optional()
+});
+export type GeneratedSurfaceValidationReport = z.infer<typeof GeneratedSurfaceValidationReportSchema>;
+
+export const GeneratedSurfaceDefinitionSchema = z.object({
+  id: z.string().min(1),
+  state: GeneratedSurfaceStateSchema,
+  session_id: z.string().min(1),
+  title: z.string().min(1),
+  input_data_schema: z.record(jsonValueSchema),
+  actions: z.array(GeneratedSurfaceActionDeclarationSchema),
+  capability_manifest: z.object({ allowed_domain_commands: z.array(z.string().min(1)), network_access: z.literal("none"), workspace_write: z.literal("domain_commands_only") }),
+  source_refs: z.array(ResourceRefSchema),
+  generation_run_id: z.string().min(1).optional(),
+  content_hash: z.string().min(1),
+  current_revision_id: z.string().min(1),
+  current_revision: z.number().int().positive(),
+  preview_url: z.string().min(1),
+  fallback_chain: z.array(z.enum(["built_in_surface", "artifact", "text"])),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+export type GeneratedSurfaceDefinition = z.infer<typeof GeneratedSurfaceDefinitionSchema>;
+
+export const GeneratedSurfaceRevisionRecordSchema = z.object({
+  id: z.string().min(1),
+  surface_id: z.string().min(1),
+  revision: z.number().int().positive(),
+  parent_revision_id: z.string().min(1).optional(),
+  producer_run_id: z.string().min(1).optional(),
+  prompt_fingerprint: z.string().min(1),
+  knowledge_refs: z.array(ResourceRefSchema),
+  skill_refs: z.array(ResourceRefSchema),
+  html_ref: ResourceRefSchema,
+  css_ref: ResourceRefSchema.optional(),
+  script_ref: ResourceRefSchema.optional(),
+  asset_refs: z.array(ResourceRefSchema).default([]),
+  bundle_hash: z.string().min(1),
+  validation_report: GeneratedSurfaceValidationReportSchema,
+  created_at: z.string().datetime()
+});
+export type GeneratedSurfaceRevisionRecord = z.infer<typeof GeneratedSurfaceRevisionRecordSchema>;
+
+export const SurfaceInteractionRecordSchema = z.object({
+  id: z.string().min(1),
+  kind: z.enum(["opened", "action", "corrected", "regenerated", "pinned", "unpinned", "dismissed"]),
+  session_id: z.string().min(1),
+  message_id: z.string().min(1).optional(),
+  surface_id: z.string().min(1),
+  revision_id: z.string().min(1),
+  command_id: z.string().min(1).optional(),
+  command_result: jsonValueSchema.optional(),
+  user_feedback: z.string().optional(),
+  created_at: z.string().datetime()
+});
+export type SurfaceInteractionRecord = z.infer<typeof SurfaceInteractionRecordSchema>;
+
+export const AttachmentIngestionRecordSchema = z.object({
+  id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  source_ref: ResourceRefSchema,
+  file_name: z.string().min(1),
+  media_type: z.enum(["image", "pdf", "text", "docx", "xlsx", "pptx"]),
+  mime_type: z.string().min(1),
+  source_hash: z.string().min(1),
+  source_bytes: z.number().int().nonnegative(),
+  extracted_text: z.string(),
+  extracted_characters: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  attempts: z.number().int().positive(),
+  status: z.enum(["completed", "failed"]),
+  trace: z.array(z.object({ part: z.string().min(1), characters: z.number().int().nonnegative(), hash: z.string().min(1) })),
+  metadata: z.record(jsonValueSchema),
+  error: z.string().optional(),
+  created_at: z.string().datetime()
+});
+export type AttachmentIngestionRecord = z.infer<typeof AttachmentIngestionRecordSchema>;
+
+export const ArtifactRevisionRecordSchema = z.object({
+  id: z.string().min(1),
+  artifact_id: z.string().min(1),
+  revision: z.number().int().positive(),
+  parent_revision_id: z.string().min(1).optional(),
+  producer_run_id: z.string().min(1).optional(),
+  base_revision_id: z.string().min(1).optional(),
+  editor_source: z.enum(["chat", "surface", "provider", "image_provider", "restore", "system"]).optional(),
+  change_summary: z.string().optional(),
+  provenance: z.record(jsonValueSchema).default({}),
+  source_ref: ResourceRefSchema.optional(),
+  file_ref: ResourceRefSchema,
+  blob_ref: ResourceRefSchema,
+  content_hash: z.string().min(1),
+  content_bytes: z.number().int().nonnegative(),
+  created_at: z.string().datetime()
+}).strict();
+export type ArtifactRevisionRecord = z.infer<typeof ArtifactRevisionRecordSchema>;
 
 export const FileBrowserActionKindSchema = z.enum(["file", "browser"]);
 export type FileBrowserActionKind = z.infer<typeof FileBrowserActionKindSchema>;
@@ -2144,7 +2777,7 @@ export const ApprovalRequestSchema = z.object({
   created_at: z.string().datetime(),
   expires_at: z.string().datetime(),
   decided_at: z.string().datetime().optional()
-});
+}).strict();
 export type ApprovalRequest = z.infer<typeof ApprovalRequestSchema>;
 
 export const PolicyDecisionRecordSchema = z.object({
@@ -2159,7 +2792,7 @@ export const PolicyDecisionRecordSchema = z.object({
   required_approval_level: z.enum(["none", "first_time_confirm", "approval", "strong_approval"]),
   grant_id: z.string().optional(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type PolicyDecisionRecord = z.infer<typeof PolicyDecisionRecordSchema>;
 
 export const AuditRecordSchema = z.object({
@@ -2174,7 +2807,7 @@ export const AuditRecordSchema = z.object({
   affected_resources: z.array(ResourceRefSchema),
   rollback_point_id: z.string().optional(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type AuditRecord = z.infer<typeof AuditRecordSchema>;
 
 export const RollbackPointSchema = z.object({
@@ -2187,7 +2820,7 @@ export const RollbackPointSchema = z.object({
   irreversible_effects: z.array(z.string()),
   created_at: z.string().datetime(),
   expires_at: z.string().datetime()
-});
+}).strict();
 export type RollbackPoint = z.infer<typeof RollbackPointSchema>;
 
 export const ActivityInboxItemSchema = z.object({
@@ -2201,7 +2834,7 @@ export const ActivityInboxItemSchema = z.object({
   audit_record_id: z.string().optional(),
   rollback_point_id: z.string().optional(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type ActivityInboxItem = z.infer<typeof ActivityInboxItemSchema>;
 
 export interface SettingsRecord {
@@ -2211,6 +2844,7 @@ export interface SettingsRecord {
   knowledge_wiki_capture_mode: CaptureMode;
   skill_capture_mode: CaptureMode;
   external_provider_role: ExternalProviderRole;
+  default_backend_id?: string;
   updated_at: string;
 }
 
@@ -2235,17 +2869,36 @@ export interface MessageRecord {
   created_at: string;
 }
 
+export const SessionCompactionRecordSchema = z.object({
+  session_id: z.string().min(1),
+  source_message_count: z.number().int().nonnegative(),
+  source_last_message_id: z.string().min(1),
+  objectives: z.array(z.string().min(1)),
+  decisions: z.array(z.string().min(1)),
+  open_work: z.array(z.string().min(1)),
+  constraints: z.array(z.string().min(1)),
+  recent_messages: z.array(z.object({ id: z.string(), role: z.enum(["user", "agent", "system"]), content: z.string() })),
+  estimated_tokens: z.number().int().nonnegative(),
+  token_budget: z.number().int().positive(),
+  omitted_message_count: z.number().int().nonnegative(),
+  created_at: z.string().datetime()
+});
+export type SessionCompactionRecord = z.infer<typeof SessionCompactionRecordSchema>;
+
 export interface MessagePresentationRecord {
   id: string;
   session_id: string;
   message_id: string;
-  kind: "collection_app";
+  kind: "collection_app" | "generated_surface" | "skill_optimization";
   title: string;
   subtitle: string;
   collection_id: string;
   view_id: string;
   renderer: string;
   view_state?: Record<string, JsonValue>;
+  surface_id?: string;
+  revision_id?: string;
+  preview_url?: string;
   created_at: string;
   updated_at: string;
 }
@@ -2261,6 +2914,44 @@ export function stableHash(value: unknown): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export type PrivacyRedactionOptions = {
+  redactPii?: boolean;
+};
+
+const sensitivePrivacyKey = /(?:^|[_-])(secret|token|api[_-]?key|password|credential|authorization|cookie|private[_-]?key)(?:$|[_-])/i;
+
+export function redactPrivateData<T>(value: T, options: PrivacyRedactionOptions = {}, key = ""): T {
+  if (sensitivePrivacyKey.test(key)) {
+    return "[redacted]" as T;
+  }
+  if (typeof value === "string") {
+    let redacted = value
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+      .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
+      .replace(/\bAKIA[A-Z0-9]{16}\b/g, "[redacted]")
+      .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted]")
+      .replace(/\b(api[_-]?key|authorization|token|secret|password|credential|cookie|private[_-]?key)\s*[:=]\s*["']?[^"',\s}]+/gi, "$1=[redacted]");
+    if (options.redactPii) {
+      redacted = redacted
+        .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]")
+        .replace(/(?<!\d)(?:\+?81[-\s]?)?(?:0\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4})(?!\d)/g, "[redacted-phone]");
+    }
+    return redacted as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactPrivateData(entry, options)) as T;
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([entryKey, entry]) => [
+        entryKey,
+        redactPrivateData(entry, options, entryKey)
+      ])
+    ) as T;
+  }
+  return value;
 }
 
 export function stableStringify(value: unknown): string {
@@ -2287,9 +2978,9 @@ function createRandomId(): string {
 export const defaultSettings = (): SettingsRecord => ({
   ui_locale: "ja",
   output_locale: "ja",
-  memory_capture_mode: "suggest",
-  knowledge_wiki_capture_mode: "suggest",
-  skill_capture_mode: "suggest",
+  memory_capture_mode: "auto",
+  knowledge_wiki_capture_mode: "auto",
+  skill_capture_mode: "auto",
   external_provider_role: "assistive",
   updated_at: nowIso()
 });

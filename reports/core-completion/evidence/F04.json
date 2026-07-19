@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "test_id": "F04",
+  "command": "pnpm core:test:owner-security",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "7c5823de4aa22c8a1b1c7729e4537e0afa347239006aeaaf154ed91e8d5e908d",
+  "source_files": [
+    "apps/server/src/index.ts",
+    "apps/server/src/middleware/security.ts",
+    "scripts/fixtures/owner-access-security.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-owner-access-security.mjs"
+  ],
+  "started_at": "2026-07-11T13:01:26.609Z",
+  "completed_at": "2026-07-11T13:01:26.655Z",
+  "assertions": [
+    {
+      "name": "Local and remote API use the same owner token policy with rotation grace",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "CORS, rate and request size controls reject abuse",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "SSRF blocks private, metadata and rebinding targets",
+      "actual": 5,
+      "expected": 5
+    },
+    {
+      "name": "Secrets are recursively redacted",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "local_token_required": true,
+    "remote_token_policy_same": true,
+    "rotation_and_grace": true,
+    "cors_blocked": true,
+    "rate_limited": true,
+    "size_limited": true,
+    "ssrf_private_targets_blocked": 5,
+    "ssrf_public_allowed": true,
+    "secret_redacted": true,
+    "http_integration_verified": false
+  }
+}

@@ -1,5 +1,7 @@
 import {
   type AgentBackendKind,
+  type BackendCapabilityId,
+  type BackendCapabilityStatus,
   type BackendEventType,
   type ExternalAssistContext,
   type FreezeSnapshot,
@@ -114,7 +116,7 @@ export interface BackendRunInput {
   temporary_context?: TemporaryContextAttachment[];
   metadata: Record<string, JsonValue>;
   context_intent?: "light_chat" | "contextual_chat" | "workspace_task";
-  expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view">;
+  expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view" | "generated_surface">;
   tool_bridge?: BackendToolBridge;
 }
 
@@ -180,6 +182,7 @@ export interface AgentBackendStatus {
     cancel_run: boolean;
     stream_events: boolean;
   };
+  capabilities?: BackendCapabilityStatus[];
   reason?: string;
   active_run_count?: number;
   metadata?: Record<string, JsonValue>;
@@ -259,6 +262,7 @@ function normalizeBackendStatus(backend: AgentBackend, status?: AgentBackendStat
     enabled,
     connection_state: status?.connection_state ?? (configured && enabled ? "ready" : configured ? "disabled" : "unconfigured"),
     supports: status?.supports ?? backendSupports(backend),
+    capabilities: status?.capabilities ?? unavailableCapabilities(backend.id, "capability_probe_not_configured"),
     ...(status?.reason ? { reason: status.reason } : {}),
     ...(status?.active_run_count !== undefined ? { active_run_count: status.active_run_count } : {}),
     ...(status?.metadata ? { metadata: status.metadata } : {})
@@ -272,6 +276,30 @@ function backendSupports(backend: AgentBackend): AgentBackendStatus["supports"] 
     cancel_run: typeof backend.cancelRun === "function",
     stream_events: typeof backend.streamEvents === "function"
   };
+}
+
+const backendCapabilityIds: BackendCapabilityId[] = [
+  "web_search",
+  "web_fetch",
+  "browser_read",
+  "browser_interact",
+  "browser_screenshot",
+  "subagent_delegate",
+  "mcp_tools"
+];
+
+function unavailableCapabilities(backendId: string, reason: string): BackendCapabilityStatus[] {
+  const checkedAt = new Date().toISOString();
+  return backendCapabilityIds.map((capabilityId) => ({
+    backend_id: backendId,
+    capability_id: capabilityId,
+    state: "unverified",
+    source: "backend_native",
+    reason,
+    checked_at: checkedAt,
+    probe_version: "static-v1",
+    evidence_summary: "This capability has not been verified by backend diagnostics."
+  }));
 }
 
 export class MockBackend implements AgentBackend {
@@ -319,6 +347,7 @@ export interface ExternalCliBackendOptions {
   streamProbeArgs?: string[];
   streamProbeTimeoutMs?: number;
   resumeArgs?: string[];
+  capabilityProbeResults?: Array<Omit<BackendCapabilityStatus, "backend_id" | "checked_at"> & { checked_at?: string }>;
 }
 
 export class ExternalCliBackend implements AgentBackend {
@@ -331,6 +360,7 @@ export class ExternalCliBackend implements AgentBackend {
   private readonly streamProbeArgs?: string[];
   private readonly streamProbeTimeoutMs: number;
   private readonly resumeArgs?: string[];
+  private readonly capabilityProbeResults: ExternalCliBackendOptions["capabilityProbeResults"];
   private readonly backendSessionIds = new Map<string, string>();
   private readonly activeRuns = new Map<string, { child: ChildProcessWithoutNullStreams; cancelled: boolean }>();
   private readonly eventStreams = new Map<string, BackendEventStreamState>();
@@ -345,6 +375,7 @@ export class ExternalCliBackend implements AgentBackend {
     this.streamProbeArgs = options.streamProbeArgs && options.streamProbeArgs.length > 0 ? options.streamProbeArgs : undefined;
     this.streamProbeTimeoutMs = options.streamProbeTimeoutMs ?? 5_000;
     this.resumeArgs = options.resumeArgs && options.resumeArgs.length > 0 ? options.resumeArgs : undefined;
+    this.capabilityProbeResults = options.capabilityProbeResults;
   }
 
   async startSession(input: BackendSessionInput): Promise<BackendSessionHandle> {
@@ -380,6 +411,7 @@ export class ExternalCliBackend implements AgentBackend {
         ...backendSupports(this),
         resume_run: !!this.resumeArgs
       },
+      capabilities: this.capabilityStatuses(commandProbe),
       active_run_count: this.activeRuns.size,
       metadata: {
         args_count: this.args.length,
@@ -388,6 +420,50 @@ export class ExternalCliBackend implements AgentBackend {
       },
       ...(!available ? { reason: commandProbe.reason ?? (configured ? "command_not_found" : "command_not_configured") } : {})
     };
+  }
+
+  private capabilityStatuses(commandProbe: ExternalCommandProbe): BackendCapabilityStatus[] {
+    const checkedAt = new Date().toISOString();
+    const supplied = new Map((this.capabilityProbeResults ?? []).map((item) => [item.capability_id, item]));
+    return backendCapabilityIds.map((capabilityId) => {
+      const result = supplied.get(capabilityId);
+      if (result) {
+        if (!commandProbe.resolved) {
+          return {
+            backend_id: this.id,
+            capability_id: capabilityId,
+            state: "unavailable",
+            source: result.source,
+            reason: commandProbe.reason ?? "backend_command_unavailable",
+            checked_at: result.checked_at ?? checkedAt,
+            probe_version: result.probe_version,
+            evidence_summary: "The backend command is unavailable, so supplied capability evidence cannot make it available."
+          };
+        }
+        return {
+          ...result,
+          backend_id: this.id,
+          checked_at: result.checked_at ?? checkedAt
+        };
+      }
+      const reason = !commandProbe.configured
+        ? "backend_not_configured"
+        : !commandProbe.resolved
+          ? commandProbe.reason ?? "backend_command_unavailable"
+          : "capability_not_probed";
+      return {
+        backend_id: this.id,
+        capability_id: capabilityId,
+        state: commandProbe.resolved ? "unverified" : "unavailable",
+        source: "backend_native",
+        reason,
+        checked_at: checkedAt,
+        probe_version: "static-v1",
+        evidence_summary: commandProbe.resolved
+          ? "Backend command is available, but this capability has not been executed by diagnostics."
+          : "Backend command is unavailable, so this capability cannot be used."
+      };
+    });
   }
 
   async *runTurn(input: BackendRunInput): AsyncIterable<BackendOutputEvent> {
@@ -761,6 +837,9 @@ export function buildExternalBackendPrompt(input: BackendRunInput): string {
     "",
     "Selected skill commands/refs:",
     selectedSkills || "(none)",
+    "",
+    "Skill retrieval rule:",
+    "Selected Skills are catalog pointers only. Do not assume their body is in context. When a procedure is needed, call samurai.skill.view with skill_id (and optional path for a support file).",
     "",
     "Recent messages:",
     recentMessages || "(none)",
@@ -1491,6 +1570,7 @@ function claudeStreamJsonToBackendEvents(value: Record<string, unknown>): Backen
           provider_event_type: "assistant",
           provider_tool_name: toolName,
           input: jsonSafe(block.input),
+          ...delegatedCapabilityMetadata(toolName, block.input),
           ...mcpToolMetadata(toolName)
         }
       });
@@ -1691,14 +1771,33 @@ function codexItemToBackendEvents(
             provider_tool_name: toolName,
             status: codexToolStatus(item),
             output: codexToolOutput(item),
+            ...delegatedCapabilityMetadata(toolName, item),
             ...codexToolMetadata(toolName, item)
           }
         : {
             ...providerPayload,
             provider_tool_name: toolName,
             input: codexToolInput(item),
+            ...delegatedCapabilityMetadata(toolName, item),
             ...codexToolMetadata(toolName, item)
           }
+    }];
+  }
+
+  if (itemType === "web_search" || itemType === "web_search_call" || itemType === "web_search_result") {
+    const isOutput = type === "item.completed";
+    return [{
+      event_type: isOutput ? "tool_call_output" : "tool_call_started",
+      ...(callId ? { tool_call_id: callId } : {}),
+      payload: {
+        ...providerPayload,
+        provider_tool_name: "web_search",
+        capability_id: "web_search",
+        status: isOutput ? "completed" : "running",
+        search_mode: stringValue(item.mode) || stringValue(value.mode) || "unreported",
+        source_urls: collectHttpUrls(item),
+        provider_payload: jsonSafe(item)
+      }
     }];
   }
 
@@ -2044,6 +2143,33 @@ function mcpToolMetadata(toolName: string): Record<string, JsonValue> {
     server_name: serverName,
     tool_name: mcpToolName
   };
+}
+
+function delegatedCapabilityMetadata(toolName: string, value: unknown): Record<string, JsonValue> {
+  const normalized = toolName.toLowerCase();
+  if (normalized === "websearch" || normalized === "web_search" || normalized.includes("web_search")) {
+    return { capability_id: "web_search", source_urls: collectHttpUrls(value) };
+  }
+  if (normalized === "webfetch" || normalized === "web_fetch" || normalized.includes("web_fetch")) {
+    return { capability_id: "web_fetch", source_urls: collectHttpUrls(value) };
+  }
+  if (normalized === "agent" || normalized === "task" || normalized.includes("subagent")) {
+    const record = isRecord(value) ? value : {};
+    return {
+      capability_id: "subagent_delegate",
+      child_task_summary: stringValue(record.description) || stringValue(record.prompt) || stringValue(record.task) || "Delegated backend task",
+      parent_relation: "backend_internal"
+    };
+  }
+  return {};
+}
+
+function collectHttpUrls(value: unknown, depth = 0): string[] {
+  if (depth > 5) return [];
+  if (typeof value === "string") return /^https?:\/\//i.test(value) ? [value] : [];
+  if (Array.isArray(value)) return [...new Set(value.flatMap((item) => collectHttpUrls(item, depth + 1)))];
+  if (!isRecord(value)) return [];
+  return [...new Set(Object.values(value).flatMap((item) => collectHttpUrls(item, depth + 1)))];
 }
 
 function normalizeCliEventType(eventType: string, value: Record<string, unknown>): BackendOutputEvent["event_type"] | undefined {

@@ -1331,6 +1331,10 @@ rl.on("line", (line) => {
       adapter,
       { env: { CALENDAR_TOKEN: "calendar-secret" } }
     );
+    const [third, fourth] = await Promise.all([
+      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "week" } }, adapter, { env: { CALENDAR_TOKEN: "calendar-secret" } }),
+      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "month" } }, adapter, { env: { CALENDAR_TOKEN: "calendar-secret" } })
+    ]);
     const firstOutput = first.output as { pid?: number; calls?: number };
     const secondOutput = second.output as { pid?: number; calls?: number };
 
@@ -1339,6 +1343,8 @@ rl.on("line", (line) => {
     expect(firstOutput.pid).toBe(secondOutput.pid);
     expect(firstOutput.calls).toBe(1);
     expect(secondOutput.calls).toBe(2);
+    expect((third.output as { pid?: number }).pid).toBe(firstOutput.pid);
+    expect((fourth.output as { pid?: number }).pid).toBe(firstOutput.pid);
     expect(adapter.stats()).toMatchObject({
       process_count: 1,
       max_processes: 2,
@@ -1349,6 +1355,61 @@ rl.on("line", (line) => {
 
     await adapter.closeAll();
     expect(adapter.stats().process_count).toBe(0);
+  });
+
+  it("rejects pending MCP requests and refuses invocation after pool shutdown", async () => {
+    const tmpRoot = await mkdtemp(path.join(tmpdir(), "samurai-mcp-pool-close-"));
+    const serverPath = path.join(tmpRoot, "mcp-server.cjs");
+    await writeFile(serverPath, `
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
+process.on("SIGTERM", () => {});
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2024-11-05", capabilities: {} } });
+  }
+});
+`);
+    const adapter = createPooledStdioMcpToolAdapter({
+      env: { PATH: process.env.PATH },
+      resolveConfig() {
+        return {
+          server_name: "calendar",
+          command: process.execPath,
+          args: [serverPath],
+          framing: "json_lines",
+          timeout_ms: 60_000
+        };
+      }
+    });
+    const pending = adapter.invoke({
+      server_name: "calendar",
+      tool_name: "calendar.read",
+      input: {},
+      sandbox: createSandboxExecutionPlan(createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-1",
+        session_key: "webhook:source-1:main"
+      }).sandbox),
+      secrets: []
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const closing = adapter.closeAll();
+    await expect(pending).rejects.toThrow("mcp_process_closed");
+    await closing;
+    await expect(adapter.invoke({
+      server_name: "calendar",
+      tool_name: "calendar.read",
+      input: {},
+      sandbox: createSandboxExecutionPlan(createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-1",
+        session_key: "webhook:source-1:main"
+      }).sandbox),
+      secrets: []
+    })).rejects.toThrow("mcp_process_pool_closed");
   });
 
   it("reports SecretRef ids without marking them unresolved when an MCP tool is blocked before resolution", async () => {

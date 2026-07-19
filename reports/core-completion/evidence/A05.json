@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "test_id": "A05",
+  "command": "pnpm core:test:command-version",
+  "status": "passed",
+  "commit_sha": "6682f514733b19b8b23f70654271e693bad532b5",
+  "worktree_clean": false,
+  "source_sha256": "03099669f71b69f8897d5fee93b67b54112e82f3b40dc221aa20cfef2aa9548b",
+  "source_graph_sha256": "db3e67ee81a4a571542c533b72c05121d68da6f6b28da0a8706801123f23330c",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/ui-protocol/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/domain-command-version.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-domain-command-version.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-18T14:17:37.755Z",
+  "completed_at": "2026-07-18T14:17:38.752Z",
+  "assertions": [
+    {
+      "name": "stale update rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "latest resource returned",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "retry version returned",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "one concurrent update",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "monotonic final version",
+      "actual": 3,
+      "expected": 3
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "stale_update_rejected": true,
+    "latest_resource_returned": true,
+    "retry_version_returned": true,
+    "parallel_updates": 100,
+    "successful_updates": 1,
+    "rejected_updates": 99,
+    "final_version": 3,
+    "sqlite_settings": {
+      "foreign_keys": 1,
+      "journal_mode": "wal",
+      "busy_timeout": 5000,
+      "synchronous": 1
+    }
+  }
+}

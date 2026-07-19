@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "test_id": "B06",
+  "command": "pnpm core:test:execution-model",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "0754df3a727ef32f2f610a7bbd79550d60c3f3bbe8423b02b5126a7f005717b6",
+  "source_files": [
+    "packages/agent-backends/src/index.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/execution/durable-work-coordinator.ts",
+    "packages/runtime/src/execution/work-state-machine.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/work-state-machine.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-work-state-machine.mjs"
+  ],
+  "started_at": "2026-07-11T08:01:57.126Z",
+  "completed_at": "2026-07-11T08:02:17.435Z",
+  "assertions": [
+    {
+      "name": "Pause and resume model",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Cancel propagates to child work",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Cancel identifies Backend runs",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "Steer updates current work",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Follow-up creates dependent child",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Terminal transition guards",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "State transitions persist",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Cancel propagates to Backend",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "pause_resume": true,
+    "cancel_propagation": true,
+    "backend_cancel_ids": [
+      "backend-running"
+    ],
+    "steer_is_current_item": true,
+    "follow_up_is_dependent_child": true,
+    "terminal_state_guards": true,
+    "persisted_state_transitions": true,
+    "backend_cancel_propagated": true
+  }
+}

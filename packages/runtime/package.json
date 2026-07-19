@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit --rootDir ../.."
   },
   "dependencies": {
     "@samurai-agent/action-catalog": "workspace:*",
@@ -19,8 +19,11 @@
     "@samurai-agent/audit": "workspace:*",
     "@samurai-agent/capability-registry": "workspace:*",
     "@samurai-agent/core-schemas": "workspace:*",
+    "@samurai-agent/domain-operations": "workspace:*",
     "@samurai-agent/gateway": "workspace:*",
     "@samurai-agent/localization": "workspace:*",
+    "@samurai-agent/learning": "workspace:*",
+    "@samurai-agent/skill-optimization": "workspace:*",
     "@samurai-agent/memory": "workspace:*",
     "@samurai-agent/policy-engine": "workspace:*",
     "@samurai-agent/ui-protocol": "workspace:*",

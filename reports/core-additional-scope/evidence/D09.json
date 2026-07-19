@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "test_id": "D09",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-new-contracts.mjs",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "source_sha256": "1eceefd16acff969a9e197d87d18a255751d849fe2c7a2cf5443af8ba84d273f",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/capability-registry/src/index.ts",
+    "packages/artifacts/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/ui-protocol/src/index.ts",
+    "scripts/fixtures/artifact-revisions.ts",
+    "scripts/fixtures/artifact-pdf-export.ts",
+    "scripts/fixtures/backend-delegated-capabilities.ts",
+    "scripts/fixtures/browser-capability-boundary.ts",
+    "scripts/fixtures/image-artifact.ts",
+    "scripts/fixtures/graph-artifact.ts",
+    "scripts/fixtures/management-surfaces-core.ts"
+  ],
+  "assertions": [
+    {
+      "name": "Graph creates and edits",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Dangling edge is rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Graph reload and restore work",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "graph_created": true,
+    "graph_edited": true,
+    "invalid_reference_rejected": true,
+    "reload_equal": true,
+    "restore_revision": true
+  }
+}

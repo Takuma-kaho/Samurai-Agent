@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "test_id": "C01",
+  "command": "pnpm core:test:migration",
+  "status": "passed",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "worktree_clean": false,
+  "source_sha256": "12039746ac45e70b77cb5560f211aa8af8ac543fd5624f334e6f66b3b61495e8",
+  "source_files": [
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/workspace-migration.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-workspace-migration.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-13T15:15:14.089Z",
+  "completed_at": "2026-07-13T15:15:14.235Z",
+  "assertions": [
+    {
+      "name": "Fresh install reaches latest schema",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "All supported legacy versions upgrade",
+      "actual": 2,
+      "expected": 2
+    },
+    {
+      "name": "Fresh and upgraded checksums match",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Migration checksum tampering rejected",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "fresh_install": true,
+    "supported_legacy_versions": [
+      "unversioned_baseline",
+      "v1"
+    ],
+    "upgraded_versions": 2,
+    "checksum_equal": true,
+    "checksum_tamper_rejected": true,
+    "latest_version": 3,
+    "checksums": [
+      "66ae2c8877e02d61acb47b77131149f5152c392c7434bc005c14fbe8d2b1b505",
+      "9ca7054dfb37369ebafa0ce3452918e6048f2629c3f71602a8e3f3812f9713d1",
+      "106ed93c492c08b93dfb60f7aaf3256f961fb5c9905efdb3dfd1d6cbeb274110"
+    ]
+  }
+}

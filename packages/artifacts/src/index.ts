@@ -87,14 +87,14 @@ function serializeArtifactContent(kind: ArtifactKind, content: ArtifactPayload):
   if (typeof content === "string") {
     return content;
   }
-  if (kind === "table" || kind === "chart" || kind === "structured_draft") {
+  if (kind === "table" || kind === "chart" || kind === "graph" || kind === "structured_draft") {
     return `${JSON.stringify(content, null, 2)}\n`;
   }
   return `${JSON.stringify({ kind, content }, null, 2)}\n`;
 }
 
 function artifactContentType(kind: ArtifactKind): string {
-  if (kind === "table" || kind === "chart" || kind === "structured_draft") {
+  if (kind === "table" || kind === "chart" || kind === "graph" || kind === "structured_draft") {
     return "application/json";
   }
   if (kind === "pdf") {

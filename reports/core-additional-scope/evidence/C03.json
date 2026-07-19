@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "test_id": "C03",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-regression.mjs",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "source_sha256": "6569e750e14fbb64e5fcef8c0f8f9728d2e83fa12d67c9bee6f957a4ab4dfb78",
+  "source_files": [
+    "scripts/fixtures/core-additions-learning-gateway.ts",
+    "scripts/fixtures/core-additions-workspace-plugin.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "apps/server/src/api-server.ts",
+    "apps/web/src/components/ManagementSurfaces.vue",
+    "apps/web/src/AppWorkspace.vue"
+  ],
+  "assertions": [
+    {
+      "name": "Allowlist applies on next input",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "web_backend": "selected-backend",
+    "gateway_backend": "selected-backend",
+    "automation_backend": "selected-backend",
+    "consistent": true,
+    "unapproved_pairing_blocked": true,
+    "allowlist_change_applied_next_input": true
+  }
+}

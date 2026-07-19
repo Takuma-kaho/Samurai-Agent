@@ -1,0 +1,18 @@
+{
+  "activeIdsComplete": true,
+  "handlersUnique": true,
+  "genericForwarderAbsent": true,
+  "operationRedispatchAbsent": true,
+  "queryWriteCompileRejected": true,
+  "forbiddenStoreImportsAbsent": true,
+  "strictInputs": true,
+  "outputValidationPresent": true,
+  "explicitEffects": true,
+  "zodPrivateApiAbsent": true,
+  "directStoreMutationAbsent": true,
+  "catalogSchemaMatches": true,
+  "generatedIndexMatches": true,
+  "evidenceActualMatches": true,
+  "allGatesPassed": true,
+  "reportedPassed": true
+}

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
 import { stableHash, type JsonValue } from "@samurai-agent/core-schemas";
 import { createDefaultAgentBackendRegistry, FakeProviderAdapter, ProviderRequestError, type ExternalAssistProvider, type ProviderAdapter, type ProviderInput, type ProviderOutput } from "@samurai-agent/runtime";
-import { closeApiServer, createApiServer, loadServerEnv, resolveWorkspaceRoot, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
+import { closeApiServer, createApiServer, installServerSignalHandlers, loadServerEnv, resolveWorkspaceRoot, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
 
 const roots: string[] = [];
 const servers: ApiServer[] = [];
@@ -222,7 +222,7 @@ describe("server env loading", () => {
     expect(repair).toMatchObject({ dry_run: true, health: { ok: true } });
     expect(backup.id.startsWith("backup_")).toBe(true);
     expect(backups.map((item) => item.id)).toContain(backup.id);
-  });
+  }, 60_000);
 
   it("bootstraps the managed Workspace as an execution root", async () => {
     const { root } = await startTestServer();
@@ -298,6 +298,64 @@ describe("server env loading", () => {
       expect.objectContaining({ code: "plugin_missing_handlers", manifest_id: "broken-plugin", severity: "critical", missing_handler_ids: ["broken.echo.handler"] })
     ]));
     expect(diagnostics.recommendation).toContain("critical plugin");
+  });
+});
+
+describe("server shutdown", () => {
+  it("shares closeApiServer, completes every cleanup, and closes WorkspaceStore last", async () => {
+    const calls: string[] = [];
+    let runtimeAttempts = 0;
+    const lifecycle = { started_at: new Date().toISOString(), closing: false };
+    const server = {
+      lifecycle,
+      scheduler: undefined,
+      io: { close: () => calls.push("io") },
+      httpServer: {
+        listening: true,
+        close: (callback: (error?: Error) => void) => {
+          calls.push("http");
+          callback();
+        }
+      },
+      temporaryContexts: { close: async () => calls.push("temporary") },
+      runtime: { shutdownMcpProcessPool: async () => {
+        calls.push("runtime");
+        runtimeAttempts += 1;
+        if (runtimeAttempts === 1) throw new Error("runtime_shutdown_failed");
+      } },
+      store: { close: async () => calls.push("store") }
+    } as unknown as ApiServer;
+
+    const first = closeApiServer(server);
+    const second = closeApiServer(server);
+    expect(second).toBe(first);
+    await expect(first).rejects.toBeInstanceOf(AggregateError);
+    expect(calls).not.toContain("store");
+    expect(server.lifecycle.closed_at).toBeUndefined();
+    expect(server.lifecycle).toMatchObject({ closing: true, close_error: "api_server_close_failed" });
+    const retry = closeApiServer(server);
+    expect(retry).not.toBe(first);
+    await retry;
+    expect(calls.at(-1)).toBe("store");
+    expect(server.lifecycle).toMatchObject({ closing: false, closed_at: expect.any(String) });
+  });
+
+  it("routes SIGINT and SIGTERM through the same shared shutdown", async () => {
+    const calls: string[] = [];
+    const server = {
+      lifecycle: { started_at: new Date().toISOString(), closing: false },
+      io: { close: () => calls.push("io") },
+      httpServer: { listening: false },
+      temporaryContexts: { close: async () => calls.push("temporary") },
+      runtime: { shutdownMcpProcessPool: async () => calls.push("runtime") },
+      store: { close: async () => calls.push("store") }
+    } as unknown as ApiServer;
+    const remove = installServerSignalHandlers(server);
+    process.emit("SIGINT");
+    process.emit("SIGTERM");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    remove();
+    expect(calls).toEqual(["io", "temporary", "runtime", "store"]);
   });
 });
 
@@ -600,7 +658,7 @@ describe("backend run API", () => {
       path: "notes/missing-file-browser-diagnostics.md",
       search: "missing",
       replace: "patched"
-    }, 409);
+    }, 404);
 
     const diagnostics = await getJson<{
       total_operations: number;
@@ -941,6 +999,7 @@ describe("backend run API", () => {
         collection_id: "movies",
         record_id: "movie_1",
         patch_id: "movie_api_patch_1",
+        expected_version: 1,
         changes: { status: "視聴中" },
         renderer_capabilities: capabilities
       },
@@ -2066,7 +2125,6 @@ describe("backend run API", () => {
     expect(diagnostics.recommendation).toContain("internally consistent");
     expect(command).toMatchObject({
       id: "chat.turn.run",
-      runtime_method: "runChatTurn",
       output_render_kinds: ["chat"]
     });
     expect(command?.input_sources).toContain("runtime_api");
@@ -2163,67 +2221,151 @@ describe("backend run API", () => {
     }));
 
     const blockedGateway = await postJson<{
-      command: { id: string };
-      input_source: string;
-      render_spec: { kind: string; props: { status?: string } };
-      result: { inbound: { status: string; trusted: boolean }; pairing: { id: string; status: string } };
+      inbound: { status: string; trusted: boolean };
+      pairing: { id: string; status: string };
     }>(
-      `${baseUrl}/api/domain/commands/gateway.inbound.route/run`,
+      `${baseUrl}/api/gateway/inbound`,
       {
-        input_source: "gateway_inbound",
-        payload: {
-          channel: "webhook",
-          source_identity: "domain-gateway-1",
-          body: "接続確認",
-          output_locale: "ja"
-        }
+        channel: "webhook",
+        source_identity: "domain-gateway-1",
+        body: "接続確認",
+        output_locale: "ja"
       },
-      201
+      202
     );
     await postJson<{ id: string; status: string }>(
-      `${baseUrl}/api/gateway/pairings/${blockedGateway.result.pairing.id}/approve`,
+      `${baseUrl}/api/gateway/pairings/${blockedGateway.pairing.id}/approve`,
       {}
     );
     const routedGateway = await postJson<{
-      command: { id: string };
-      input_source: string;
-      render_spec: { kind: string; props: { backend_status?: string } };
-      render_specs: Array<{ kind: string }>;
-      result: {
-        inbound: { status: string; session_key?: string };
-        chat: { backendRun: { status: string }; messages: Array<{ role: string }> };
-      };
+      inbound: { status: string; session_key?: string };
+      chat: { backendRun: { status: string }; messages: Array<{ role: string }> };
     }>(
-      `${baseUrl}/api/domain/commands/gateway.inbound.route/run`,
+      `${baseUrl}/api/gateway/inbound`,
       {
-        input_source: "gateway_inbound",
-        payload: {
-          channel: "webhook",
-          source_identity: "domain-gateway-1",
-          body: "Domain Command Gateway から提案書を作って",
-          output_locale: "ja"
-        }
+        channel: "webhook",
+        source_identity: "domain-gateway-1",
+        body: "Domain Command Gateway から提案書を作って",
+        output_locale: "ja"
       },
       201
     );
 
     expect(blockedGateway).toMatchObject({
-      command: { id: "gateway.inbound.route" },
-      input_source: "gateway_inbound",
-      render_spec: { kind: "gateway", props: { status: "blocked" } },
-      result: { inbound: { status: "blocked", trusted: false }, pairing: { status: "pending" } }
+      inbound: { status: "blocked", trusted: false }, pairing: { status: "pending" }
     });
     expect(routedGateway).toMatchObject({
-      command: { id: "gateway.inbound.route" },
-      input_source: "gateway_inbound",
-      render_spec: { kind: "chat", props: { backend_status: "completed" } },
-      result: {
-        inbound: { status: "processed", session_key: "webhook:domain-gateway-1:main" },
-        chat: { backendRun: { status: "completed" } }
-      }
+      inbound: { status: "processed", session_key: "webhook:domain-gateway-1:main" },
+      chat: { backendRun: { status: "completed" } }
     });
-    expect(routedGateway.render_specs.map((spec) => spec.kind)).toEqual(["chat", "gateway"]);
-    expect(routedGateway.result.chat.messages.some((message) => message.role === "agent")).toBe(true);
+    expect(routedGateway.chat.messages.some((message) => message.role === "agent")).toBe(true);
+  });
+
+  it("resolves BackendRun identity outside skill Domain payloads", async () => {
+    const { baseUrl, server } = await startTestServer();
+    const now = "2026-07-18T00:00:00.000Z";
+    const session = await server.store.createSession({
+      id: "domain-trusted-run-session",
+      session_key: "domain-trusted-run-session",
+      title: "Domain trusted run",
+      ui_locale: "en",
+      output_locale: "en",
+      created_at: now,
+      updated_at: now
+    });
+    const backendRunId = "domain-trusted-backend-run";
+    await server.store.saveBackendRun({
+      id: backendRunId,
+      session_id: session.id,
+      input_message_id: "domain-trusted-input",
+      backend_id: "samurai-native",
+      backend_kind: "samurai_native",
+      status: "completed",
+      started_at: now,
+      completed_at: now,
+      input_summary: "trusted Domain run fixture",
+      output_summary: "trusted Domain run fixture",
+      metadata: {}
+    });
+    const skill = await server.store.saveSkillMarkdown({
+      state: "project",
+      skillId: "domain-trusted-skill",
+      markdown: [
+        "---",
+        JSON.stringify({
+          id: "domain-trusted-skill",
+          state: "project",
+          title: "Trusted Domain Skill",
+          description: "A fixture for Runtime-owned BackendRun context.",
+          tags: [],
+          provenance: "fixture",
+          trust_level: "user_authored",
+          allowed_scopes: ["skill"],
+          required_capabilities: [],
+          schedule_policy: {},
+          secret_policy: {},
+          owner_pinned: false
+        }),
+        "---",
+        "# Trusted Domain Skill",
+        "",
+        "Read through a trusted BackendRun context."
+      ].join("\n")
+    });
+
+    const view = await postJson<{
+      payload: { skill_id: string };
+      result: { usage: { run_id: string } };
+    }>(`${baseUrl}/api/domain/queries/skill.view/run`, {
+      backend_run_id: backendRunId,
+      payload: { skill_id: skill.id }
+    });
+    const forgedPayload = await postJson<{
+      ok: boolean;
+      error: { code: string; message: string };
+    }>(`${baseUrl}/api/domain/queries/skill.view/run`, {
+      backend_run_id: backendRunId,
+      payload: { skill_id: skill.id, run_id: "forged-backend-run" }
+    }, 400);
+    const forgedSessionPayload = await postJson<{
+      ok: boolean;
+      error: { code: string; message: string };
+    }>(`${baseUrl}/api/domain/queries/skill.view/run`, {
+      backend_run_id: backendRunId,
+      payload: { skill_id: skill.id, session_id: "forged-session" }
+    }, 400);
+    const otherSession = await server.store.createSession({
+      id: "domain-trusted-other-session",
+      session_key: "domain-trusted-other-session",
+      title: "Other session",
+      ui_locale: "en",
+      output_locale: "en",
+      created_at: now,
+      updated_at: now
+    });
+    const mismatchedTransport = await postJson<{
+      ok: boolean;
+      error: { code: string; message: string };
+    }>(`${baseUrl}/api/domain/queries/skill.view/run`, {
+      session_id: otherSession.id,
+      backend_run_id: backendRunId,
+      payload: { skill_id: skill.id }
+    }, 400);
+
+    expect(view.payload).toEqual({ skill_id: skill.id });
+    expect(view.result.usage.run_id).toBe(backendRunId);
+    expect(forgedPayload).toMatchObject({
+      ok: false,
+      error: { code: "bad_request", message: "untrusted_domain_context:run_id" }
+    });
+    expect(forgedSessionPayload).toMatchObject({
+      ok: false,
+      error: { code: "bad_request", message: "untrusted_domain_context:session_id" }
+    });
+    expect(mismatchedTransport).toMatchObject({
+      ok: false,
+      error: { code: "bad_request", message: "domain_transport_session_mismatch:backend_run_id" }
+    });
   });
 
   it("exposes gateway pairing approval and inbound routing diagnostics", async () => {
@@ -2419,7 +2561,7 @@ describe("backend run API", () => {
       })
     }));
     expect(routed.chat.backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
-    expect(routed.chat.reflectionRuns.some((run) => run.status === "completed")).toBe(true);
+    expect(routed.chat.reflectionRuns).toEqual([]);
     expect(processedInbound.map((inbound) => inbound.id)).toContain(routed.inbound.id);
     expect(boundaryPolicies.map((policy) => policy.id)).toContain(routed.boundaryPolicy.id);
     expect(releasedLocks.map((lock) => lock.lock_key)).toContain("webhook:external-api-1:main");
@@ -2434,12 +2576,14 @@ describe("backend run API", () => {
   });
 
   it("routes dedicated webhook payloads through Gateway inbound", async () => {
+    const webhookSecret = "test-gateway-webhook-secret";
+    setManagedEnv("SAMURAI_GATEWAY_WEBHOOK_SECRET", webhookSecret);
     const { baseUrl } = await startTestServer();
     const webhookUrl = `${baseUrl}/api/gateway/webhooks/external-webhook-1`;
-    const invalid = await postJson<{ error: string }>(webhookUrl, {
+    const invalid = await postSignedSamuraiJson<{ error: string }>(webhookUrl, {
       metadata: { request_id: "req_missing_body" }
-    }, 400);
-    const blocked = await postJson<{
+    }, webhookSecret, 400);
+    const blocked = await postSignedSamuraiJson<{
       adapter: { channel: string; source_identity: string; body_field: string };
       inbound: { id: string; status: string; trusted: boolean; metadata: Record<string, unknown> };
       pairing: { id: string; status: string; pairing_code?: string };
@@ -2450,12 +2594,12 @@ describe("backend run API", () => {
         request_id: "req_1",
         token: "raw-secret-token"
       }
-    }, 202);
+    }, webhookSecret, 202);
     await postJson<{ id: string; status: string }>(
       `${baseUrl}/api/gateway/pairings/${blocked.pairing.id}/approve`,
       {}
     );
-    const routed = await postJson<{
+    const routed = await postSignedSamuraiJson<{
       adapter: { channel: string; source_identity: string; body_field: string };
       inbound: { id: string; status: string; trusted: boolean; body: string; metadata: Record<string, unknown>; session_key?: string };
       pairing: { id: string; status: string };
@@ -2473,7 +2617,7 @@ describe("backend run API", () => {
         request_id: "req_2",
         authorization: "Bearer raw-secret-token"
       }
-    }, 201);
+    }, webhookSecret, 201);
 
     expect(invalid).toEqual({ error: "invalid_gateway_webhook" });
     expect(blocked.adapter).toEqual({
@@ -3076,8 +3220,8 @@ describe("backend run API", () => {
         authorization: "[redacted]",
         gateway_email_adapter: true,
         gateway_email_body_field: "text",
-        gateway_email_from: "sender@example.test",
-        gateway_email_to: "assistant@example.test",
+          gateway_email_from: "[redacted-email]",
+          gateway_email_to: "[redacted-email]",
         gateway_email_subject: "初回メール",
         gateway_email_message_id: "msg-1"
       }
@@ -3108,8 +3252,8 @@ describe("backend run API", () => {
         cookie: "[redacted]",
         gateway_email_adapter: true,
         gateway_email_body_field: "text",
-        gateway_email_from: "sender@example.test",
-        gateway_email_to: "assistant@example.test",
+          gateway_email_from: "[redacted-email]",
+          gateway_email_to: "[redacted-email]",
         gateway_email_subject: "提案書メール",
         gateway_email_message_id: "msg-1"
       }
@@ -3318,8 +3462,8 @@ describe("backend run API", () => {
         gateway_email_adapter: true,
         gateway_email_provider_webhook: true,
         gateway_email_provider: "postmark",
-        gateway_email_from: "sender@example.test",
-        gateway_email_to: "assistant@example.test",
+        gateway_email_from: "[redacted-email]",
+        gateway_email_to: "[redacted-email]",
         gateway_email_subject: "Provider初回",
         gateway_email_message_id: "provider-thread"
       }
@@ -3807,7 +3951,7 @@ describe("backend run API", () => {
     const badRequest = await postJson<Record<string, unknown>>(`${baseUrl}/api/memory/${memory.id}/archive`, {}, 400);
 
     expect(archived).toHaveProperty("operation");
-    expect(archived).toHaveProperty("auditRecord");
+    expect(archived).not.toHaveProperty("auditRecord");
     expect(archived).toHaveProperty("activity");
     expect(archived).toHaveProperty("rollbackPoint");
     expect(allMemory.some((item) => item.id === memory.id)).toBe(false);
@@ -3847,7 +3991,7 @@ describe("backend run API", () => {
       path: "notes/api-restore.md",
       action: "written"
     });
-    expect(restored.auditRecord.rollback_point_id).toBe(restored.rollbackPoint.id);
+    expect(restored).not.toHaveProperty("auditRecord");
     expect(read.resource.content).toBe("hello");
   });
 
@@ -3929,7 +4073,7 @@ describe("backend run API", () => {
     });
     const priorityPatched = await patchJson<{ knowledge_wiki_capture_mode: string }>(`${baseUrl}/api/settings`, {
       llm_wiki_capture_mode: "off",
-      knowledge_wiki_capture_mode: "suggest"
+      knowledge_wiki_capture_mode: "auto"
     });
     const persisted = await getJson<{
       ui_locale: string;
@@ -3949,7 +4093,7 @@ describe("backend run API", () => {
       400
     );
 
-    expect(initial).toMatchObject({ ui_locale: "ja", output_locale: "ja", memory_capture_mode: "suggest", knowledge_wiki_capture_mode: "suggest" });
+    expect(initial).toMatchObject({ ui_locale: "ja", output_locale: "ja", memory_capture_mode: "auto", knowledge_wiki_capture_mode: "auto" });
     expect(initial.external_assist_config).toMatchObject({
       configured: false,
       source: "none",
@@ -3968,12 +4112,12 @@ describe("backend run API", () => {
       source: "none"
     });
     expect(legacyPatched).toMatchObject({ knowledge_wiki_capture_mode: "off" });
-    expect(priorityPatched).toMatchObject({ knowledge_wiki_capture_mode: "suggest" });
+    expect(priorityPatched).toMatchObject({ knowledge_wiki_capture_mode: "auto" });
     expect(persisted).toMatchObject({
       ui_locale: "en",
       output_locale: "fr",
       memory_capture_mode: "manual",
-      knowledge_wiki_capture_mode: "suggest",
+      knowledge_wiki_capture_mode: "auto",
       external_provider_role: "disabled"
     });
     expect(invalidPatch).toMatchObject({ ui_locale: "en", output_locale: "fr" });
@@ -4049,7 +4193,7 @@ describe("backend run API", () => {
 
   it("serves minimal skill collection and automation backend routes", async () => {
     const { baseUrl } = await startTestServer();
-    const candidate = await postJson<{ resource: { id: string }; operation: { operation: string }; auditRecord: unknown; rollbackPoint?: unknown }>(
+    const candidate = await postJson<{ resource: { id: string }; operation: { operation: string }; rollbackPoint?: unknown }>(
       `${baseUrl}/api/skills/candidates`,
       {
         title: "調査メモ",
@@ -4090,7 +4234,7 @@ describe("backend run API", () => {
     );
     const patched = await postJson<{ resource: { data: { name: string } }; operation: { operation: string } }>(
       `${baseUrl}/api/collections/contacts/records/record_1/patches`,
-      { changes: { name: "Samurai" } }
+      { expected_version: 1, changes: { name: "Samurai" } }
     );
     const action = await postJson<{ resource: { data: { name: string } }; operation: { operation: string } }>(
       `${baseUrl}/api/collections/contacts/actions/rename/run`,
@@ -4179,7 +4323,7 @@ describe("backend run API", () => {
     const translations = await getJson<Array<{ translated_text: string }>>(
       `${baseUrl}/api/resource-translations?source_kind=artifact&source_id=artifact_translation&source_uri=artifacts/artifact_translation.md&target_locale=en`
     );
-    const automation = await postJson<{ automationRun: { status: string }; operation: { actor_identity: string; channel: string; input_ref: { kind: string } }; auditRecord: unknown }>(
+    const automation = await postJson<{ automationRun: { status: string }; operation: { actor_identity: string; channel: string; input_ref: { kind: string } }; memoryReviewTrace: unknown }>(
       `${baseUrl}/api/automation/memory-review/run`,
       {},
       201
@@ -4227,8 +4371,6 @@ describe("backend run API", () => {
     const proposal = await postJson<{
       resource: { id: string; state: string; file_path: string; source_refs: Array<{ kind: string; id: string }> };
       operation: { operation: string };
-      policyDecision: { decision: string };
-      auditRecord: { outputs_summary: string; affected_resources: Array<{ kind: string; id: string }>; rollback_point_id?: string };
       rollbackPoint: { id: string };
       activity: unknown[];
     }>(
@@ -4303,7 +4445,6 @@ describe("backend run API", () => {
     const reindex = await postJson<{
       resource: { active: number; total: number; files: number; indexed: number; errors: unknown[] };
       operation: { operation: string };
-      auditRecord: { outputs_summary: string; affected_resources: Array<{ kind: string; id: string }> };
     }>(`${baseUrl}/api/wiki/reindex`, {});
     const archived = await postJson<{
       resource: { state: string };
@@ -4319,12 +4460,11 @@ describe("backend run API", () => {
     }>(`${baseUrl}/api/wiki/active-retrieval?q=patched-contract-needle`);
 
     expect(proposal.operation.operation).toBe("wiki.proposal.create");
-    expect(proposal.policyDecision.decision).toMatch(/^allow_/);
+    expect(proposal).not.toHaveProperty("policyDecision");
     expect(proposal.resource).toMatchObject({ state: "proposed", file_path: "wiki/pages/provider-storage-plan.md" });
     expect(proposal.resource.source_refs).toContainEqual(expect.objectContaining({ kind: "memory", id: "memory_provider_policy" }));
-    expect(proposal.auditRecord.affected_resources).toContainEqual(expect.objectContaining({ kind: "wiki", id: proposal.resource.id }));
-    expect(proposal.auditRecord.rollback_point_id).toBe(proposal.rollbackPoint.id);
-    expect(proposal.activity.length).toBeGreaterThan(0);
+    expect(proposal).not.toHaveProperty("auditRecord");
+    expect(proposal.activity).toEqual([]);
     expect(listed.map((item) => item.id)).toEqual(expect.arrayContaining([proposal.resource.id, rejectedProposal.resource.id]));
     expect(detail.content).toBe("# Provider保存設計\n\npatched-contract-needle");
     expect(accepted).toMatchObject({ resource: { state: "active" }, operation: { operation: "wiki.accept" } });
@@ -4342,7 +4482,7 @@ describe("backend run API", () => {
     expect(activeRetrieval.graph.edges).toContainEqual(expect.objectContaining({ from_wiki_id: proposal.resource.id, relation: "source_ref" }));
     expect(reindex.resource).toMatchObject({ active: 1, total: 2, files: 2, indexed: 2, errors: [] });
     expect(reindex).toMatchObject({ operation: { operation: "wiki.reindex" } });
-    expect(reindex.auditRecord.affected_resources).toContainEqual(expect.objectContaining({ kind: "wiki_index", id: "active" }));
+    expect(reindex).not.toHaveProperty("auditRecord");
     expect(archived).toMatchObject({ resource: { state: "archived" }, operation: { operation: "wiki.archive" } });
     expect(afterArchiveRetrieval.knowledge_wiki).toEqual([]);
     expect(afterArchiveRetrieval.report.excluded).toEqual(expect.arrayContaining([
@@ -4482,7 +4622,7 @@ describe("backend run API", () => {
       severity: "warning"
     }));
     expect(beforeDiagnostics.recommendation).toContain("Run Reflection / Curator jobs");
-    expect(curator.curatorReport).toMatchObject({ dry_run: true });
+    expect(curator.curatorReport).toMatchObject({ dry_run: false });
     expect(curator.curatorReviewReport).toMatchObject({ dry_run: true });
     expect(curator.curatorReport.skill_actions).toContainEqual(expect.objectContaining({
       skill_id: project.resource.id,
@@ -4610,6 +4750,7 @@ describe("backend run API", () => {
     expect(sessions.map((item) => item.title)).not.toContain("Workspace operations");
     expect(sessions.map((item) => item.id)).toContain(session.id);
   });
+
 });
 
 async function startTestServer(
@@ -4730,11 +4871,14 @@ function restoreManagedEnv(): void {
   managedEnv.clear();
 }
 
+let postJsonSequence = 0;
+
 async function postJson<T>(url: string, body: unknown, expectedStatus = 200): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Idempotency-Key": `server-test-${++postJsonSequence}`
     },
     body: JSON.stringify(body)
   });
@@ -4765,6 +4909,16 @@ async function postRawJson<T>(
 async function postSignedSlackJson<T>(url: string, body: unknown, signingSecret: string, expectedStatus = 200): Promise<T> {
   const rawBody = JSON.stringify(body);
   return postRawJson<T>(url, rawBody, slackSignatureHeaders(rawBody, signingSecret), expectedStatus);
+}
+
+async function postSignedSamuraiJson<T>(url: string, body: unknown, secret: string, expectedStatus = 200): Promise<T> {
+  const rawBody = JSON.stringify(body);
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const signature = createHmac("sha256", secret).update(`${timestamp}.`).update(rawBody).digest("hex");
+  return postRawJson<T>(url, rawBody, {
+    "X-Samurai-Timestamp": timestamp,
+    "X-Samurai-Signature": signature
+  }, expectedStatus);
 }
 
 async function postSignedLineJson<T>(url: string, body: unknown, channelSecret: string, expectedStatus = 200): Promise<T> {
@@ -4802,7 +4956,8 @@ async function patchJson<T>(url: string, body: unknown, expectedStatus = 200): P
   const response = await fetch(url, {
     method: "PATCH",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Idempotency-Key": `server-test-${++postJsonSequence}`
     },
     body: JSON.stringify(body)
   });
@@ -4815,7 +4970,8 @@ async function putJson<T>(url: string, body: unknown, expectedStatus = 200): Pro
   const response = await fetch(url, {
     method: "PUT",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Idempotency-Key": `server-test-${++postJsonSequence}`
     },
     body: JSON.stringify(body)
   });

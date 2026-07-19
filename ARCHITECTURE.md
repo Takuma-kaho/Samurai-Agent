@@ -330,13 +330,13 @@ MemoryとSkillは、Samurai Agentの育つ体験の中心である。
 ```text
 Backend run completes
 ↓
-Reflection reads transcript + artifacts + backend events
+Background Review reads transcript + artifacts + backend events + actual learning-resource use
 ↓
-Memory suggestion / Skill candidate appears
+Memory / Skill changes are saved automatically with provenance
 ↓
-User can inspect / edit / keep / ignore
+Evaluation measures the effect from existing run evidence
 ↓
-Accepted Memory / Skill improves future backend runs
+Curator maintains lifecycle after a restorable snapshot
 ```
 
 MemoryやSkillは、外部Backendの中に閉じ込めない。
@@ -628,13 +628,11 @@ Memory flow。
 ```text
 Backend run completes
 ↓
-Reflection job reads transcript + artifacts + backend events
+Background Review reads transcript + artifacts + backend events
 ↓
-Memory suggestion appears
+Reusable Memory changes are saved automatically with provenance
 ↓
-User can inspect / edit / keep / ignore
-↓
-Active Memory retrieval uses accepted memory
+Active Memory retrieval uses the updated Memory
 ```
 
 ### 8.2 Skill
@@ -655,11 +653,9 @@ Skill flow。
 ```text
 Backend run produces repeated pattern
 ↓
-Reflection job detects reusable procedure
+Background Review detects a reusable class-level procedure
 ↓
-Skill candidate appears
-↓
-User can inspect / edit / keep / ignore
+Skill is created or patched automatically with provenance
 ↓
 Skill index makes it searchable
 ↓
@@ -680,8 +676,8 @@ Curatorは、増えすぎたMemoryやSkillを整理する。
 - 使われないSkillの整理候補。
 - 古いMemoryの見直し候補。
 
-ReflectionやCuratorは、外部Backendの内部状態として閉じない。
-Workspace上で、人間が見える候補として扱う。
+Background ReviewやCuratorは、外部Backendの内部状態として閉じない。
+自動変更はWorkspace上へ保存し、source run、version、根拠、snapshotから後で理解・復元できるようにする。
 
 ---
 

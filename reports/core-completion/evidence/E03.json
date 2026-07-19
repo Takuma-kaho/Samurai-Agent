@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "test_id": "E03",
+  "command": "pnpm core:test:session-compaction",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "7fa7c3dd7e1c740eacc90498740e289ef4866bf04bb25aa36d0e05e28add3977",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/context/session-compaction.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/session-compaction.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-session-compaction.mjs"
+  ],
+  "started_at": "2026-07-11T13:18:48.592Z",
+  "completed_at": "2026-07-11T13:19:08.733Z",
+  "assertions": [
+    {
+      "name": "10,000 messages fit hard token budget",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "100 embedded decisions retain at least 95",
+      "actual": {
+        "embedded": 100,
+        "preserved": 100,
+        "recall": 1
+      },
+      "expected": {
+        "embedded": 100,
+        "preserved": ">=95",
+        "recall": ">=0.95"
+      }
+    },
+    {
+      "name": "Objective, decisions, open work, and constraints survive",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Summary survives Store close and reopen",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Impossible budget rejects without silent truncation",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "source_messages": 10000,
+    "embedded_important_decisions": 100,
+    "preserved_important_decisions": 100,
+    "decision_recall": 1,
+    "estimated_tokens": 951,
+    "token_budget": 2000,
+    "objective_preserved": true,
+    "decision_preserved": true,
+    "open_work_preserved": true,
+    "constraint_preserved": true,
+    "persisted_after_reopen": true,
+    "hard_limit_rejected": true,
+    "omitted_messages": 9970
+  }
+}

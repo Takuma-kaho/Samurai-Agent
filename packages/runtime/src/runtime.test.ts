@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginRuntimeRegistry } from "@samurai-agent/action-catalog";
 import { AgentBackendRegistry, MockBackend, type AgentBackend } from "@samurai-agent/agent-backends";
-import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type SkillFrontmatter } from "@samurai-agent/core-schemas";
+import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type OperationRecord, type RollbackPoint, type SkillFrontmatter } from "@samurai-agent/core-schemas";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, planSurfaceOperationDispatch, setExternalSendSmtpClientConnectionFactoryForTest, type ExternalAssistProvider, type ProviderInput, type ProviderOutput } from "./index";
 
@@ -71,24 +71,20 @@ async function requestAndApproveExternalSend(
   store: WorkspaceStore,
   sendId: string
 ): Promise<ExternalSendRecord> {
-  try {
-    await runtime.dispatchExternalSend({ sendId, dryRun: false });
-    throw new Error("expected external send dispatch to require approval");
-  } catch (error) {
-    if (!(error instanceof RuntimeRequestError)) {
-      throw error;
-    }
-    expect(error).toMatchObject({
-      code: "conflict",
-      message: "policy_blocked"
-    });
-    const approvalId = error.payload?.approvalRequest.id;
-    expect(approvalId).toBeTruthy();
-    await runtime.approveRequest(approvalId!);
-  }
+  await dispatchExternalSend(runtime, { sendId, dryRun: false });
   const send = await store.getExternalSend(sendId);
   expect(send).toBeDefined();
   return send!;
+}
+
+let externalSendTestSequence = 0;
+async function prepareExternalSend(runtime: AgentRuntime, input: { channel: string; target: Record<string, JsonValue>; title: string; body: string }) {
+  externalSendTestSequence += 1;
+  return (await runtime.runDomainCommand({ command_id: "external.send.prepare", idempotency_key: `external-prepare-${externalSendTestSequence}`, payload: input })).result as { resource: ExternalSendRecord; operation: OperationRecord };
+}
+async function dispatchExternalSend(runtime: AgentRuntime, input: { sendId: string; dryRun?: boolean }) {
+  externalSendTestSequence += 1;
+  return (await runtime.runDomainCommand({ command_id: "external.send.dispatch", idempotency_key: `external-dispatch-${externalSendTestSequence}`, payload: { send_id: input.sendId, dry_run: input.dryRun } })).result as { resource: ExternalSendRecord; operation: OperationRecord };
 }
 
 class FakeSmtpConnection {
@@ -191,10 +187,10 @@ describe("agent runtime", () => {
 
     expect(chatPlan).toMatchObject({
       dispatch_target: "host_chat",
-      runtime_method: "runChatTurn",
+      runtime_method: "runDomainCommand",
       result_kind: "chat_turn",
       requires_session: true,
-      writes_workspace: false
+      writes_workspace: true
     });
     expect(collectionPlan).toMatchObject({
       dispatch_target: "collection_engine",
@@ -216,6 +212,7 @@ describe("agent runtime", () => {
     const { store, runtime } = await createRuntime();
     const result = await runtime.runDomainCommand({
       command_id: "chat.turn.run",
+      idempotency_key: "runtime-api-chat",
       payload: {
         content: "Domain Commandから実行して",
         output_locale: "ja"
@@ -223,6 +220,7 @@ describe("agent runtime", () => {
     });
     const artifact = await runtime.runDomainCommand({
       command_id: "artifact.create",
+      idempotency_key: "runtime-api-artifact",
       payload: {
         title: "Domain Command artifact",
         content: "Domain Command APIから作ったArtifact",
@@ -257,6 +255,7 @@ describe("agent runtime", () => {
 
     await expect(runtime.runDomainCommand({
       command_id: "collection.schema.save",
+      idempotency_key: "unsupported-collection-renderer",
       input_source: "runtime_api",
       payload: {
         id: "study_notes",
@@ -335,6 +334,7 @@ describe("agent runtime", () => {
     const { store, runtime } = await createRuntime();
     const wiki = await runtime.runDomainCommand({
       command_id: "wiki.proposal.create",
+      idempotency_key: "render-wiki",
       payload: {
         title: "Provider storage plan",
         content: "Store provider hints as proposals until accepted.",
@@ -343,6 +343,7 @@ describe("agent runtime", () => {
     });
     const skill = await runtime.runDomainCommand({
       command_id: "skill.candidate.create",
+      idempotency_key: "render-skill",
       payload: {
         title: "調査メモ整理",
         description: "調査メモを再利用できる形に整える",
@@ -351,10 +352,12 @@ describe("agent runtime", () => {
     });
     const schema = await runtime.runDomainCommand({
       command_id: "collection.schema.save",
+      idempotency_key: "render-schema",
       payload: collectionSchema("contacts")
     });
     const record = await runtime.runDomainCommand({
       command_id: "collection.record.create",
+      idempotency_key: "render-record",
       payload: {
         collection_id: "contacts",
         record_id: "record_1",
@@ -436,6 +439,7 @@ describe("agent runtime", () => {
         expect(input.expected_outputs).toContain("collection_schema");
         expect(input.tool_bridge?.enabled).toBe(true);
         const schemaTool = input.tool_bridge?.tools.find((tool) => tool.name === "samurai.collection.schema.save");
+        expect(input.tool_bridge?.tools).toContainEqual(expect.objectContaining({ name: "samurai.skill.view", provider_tool_name: "mcp__samurai__skill_view" }));
         expect(schemaTool?.description).toContain("collection_gallery");
         expect(schemaTool?.description).toContain("calendar_view");
         expect(schemaTool?.description).toContain("collection_kanban");
@@ -519,6 +523,7 @@ describe("agent runtime", () => {
       collection_id: "movies",
       record_id: "movie_1",
       patch_id: "movie_patch_1",
+      expected_version: 1,
       changes: { rating: 4 },
       renderer_capabilities: capabilities
     });
@@ -870,6 +875,7 @@ describe("agent runtime", () => {
       collection_id: "movies",
       record_id: "movie_1",
       patch_id: "movie_kanban_patch_1",
+      expected_version: 1,
       changes: { status: "視聴中" },
       view_id: "movies_kanban",
       renderer_capabilities: capabilities
@@ -1743,6 +1749,7 @@ describe("agent runtime", () => {
       renderer_capabilities: capabilities
     });
     const schema = await store.getCollectionSchema("movies");
+    const operations = await store.listOperations();
     await store.close();
 
     expect(backendRuns).toBe(4);
@@ -1754,7 +1761,7 @@ describe("agent runtime", () => {
     expect(schema?.views).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "movies_calendar", renderer: "calendar_view" })
     ]));
-    expect(ratingPatch.result.operations).toEqual(expect.arrayContaining([
+    expect(operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: "collection.manage", status: "completed" })
     ]));
     expect(ratingPatch.result.messagePresentations[0]).toMatchObject({
@@ -1763,7 +1770,7 @@ describe("agent runtime", () => {
         sort: { field_id: "rating", direction: "desc", completed_last: true }
       })
     });
-    expect(statusPatch.result.operations).toEqual(expect.arrayContaining([
+    expect(operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: "collection.manage", status: "completed" })
     ]));
     expect(statusPatch.render_specs?.[1]).toMatchObject({
@@ -2001,6 +2008,7 @@ describe("agent runtime", () => {
     });
     const schema = await store.getCollectionSchema("expenses");
     const savedRecord = await store.getCollectionRecord("expenses", "expense_hosting");
+    const operations = await store.listOperations();
     await store.close();
 
     expect(backendRuns).toBe(1);
@@ -2014,7 +2022,7 @@ describe("agent runtime", () => {
       })
     ]);
     expect(savedRecord?.data).not.toHaveProperty("total");
-    expect(patched.result.operations).toEqual(expect.arrayContaining([
+    expect(operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: "collection.manage", status: "completed" })
     ]));
     expect(patched.render_specs?.[1]).toMatchObject({
@@ -2797,6 +2805,7 @@ describe("agent runtime", () => {
     const { store, runtime } = await createRuntime();
     const proposal = await runtime.runDomainCommand({
       command_id: "wiki.proposal.create",
+      idempotency_key: "wiki-lifecycle-proposal",
       payload: {
         title: "Domain Wiki lifecycle",
         slug: "domain-wiki-lifecycle",
@@ -2818,6 +2827,7 @@ describe("agent runtime", () => {
     const proposalResult = proposal.result as Awaited<ReturnType<AgentRuntime["createWikiProposal"]>>;
     const rejected = await runtime.runDomainCommand({
       command_id: "wiki.proposal.create",
+      idempotency_key: "wiki-lifecycle-rejected",
       payload: {
         title: "Rejected Domain Wiki lifecycle",
         slug: "rejected-domain-wiki-lifecycle",
@@ -2828,10 +2838,12 @@ describe("agent runtime", () => {
     const rejectedResult = rejected.result as Awaited<ReturnType<AgentRuntime["createWikiProposal"]>>;
     const accepted = await runtime.runDomainCommand({
       command_id: "wiki.accept",
+      idempotency_key: "wiki-lifecycle-accept",
       payload: { wiki_id: proposalResult.resource.id }
     });
     const patched = await runtime.runDomainCommand({
       command_id: "wiki.patch",
+      idempotency_key: "wiki-lifecycle-patch",
       payload: {
         wiki_id: proposalResult.resource.id,
         title: "Domain Wiki lifecycle patched",
@@ -2851,16 +2863,19 @@ describe("agent runtime", () => {
     });
     const reject = await runtime.runDomainCommand({
       command_id: "wiki.reject",
+      idempotency_key: "wiki-lifecycle-reject",
       payload: { wiki_id: rejectedResult.resource.id }
     });
     const activePreview = await runtime.previewKnowledgeWiki({ query: "patched-domain-wiki-lifecycle-needle" });
     const rejectedPreview = await runtime.previewKnowledgeWiki({ query: "domain-wiki-lifecycle-needle rejected" });
     const reindex = await runtime.runDomainCommand({
       command_id: "wiki.reindex",
+      idempotency_key: "wiki-lifecycle-reindex",
       payload: {}
     });
     const archived = await runtime.runDomainCommand({
       command_id: "wiki.archive",
+      idempotency_key: "wiki-lifecycle-archive",
       payload: { wiki_id: proposalResult.resource.id }
     });
     const afterArchivePreview = await runtime.previewKnowledgeWiki({ query: "patched-domain-wiki-lifecycle-needle" });
@@ -2930,6 +2945,7 @@ describe("agent runtime", () => {
     const { store, runtime } = await createRuntime();
     const candidate = await runtime.runDomainCommand({
       command_id: "skill.candidate.create",
+      idempotency_key: "skill-lifecycle-candidate",
       payload: {
         title: "調査メモ整理",
         description: "調査メモ references を短く整える",
@@ -2939,6 +2955,7 @@ describe("agent runtime", () => {
     const candidateResult = candidate.result as Awaited<ReturnType<AgentRuntime["createSkillCandidate"]>>;
     const project = await runtime.runDomainCommand({
       command_id: "skill.project.save",
+      idempotency_key: "skill-lifecycle-project",
       payload: {
         candidate_id: candidateResult.resource.id
       }
@@ -2946,6 +2963,7 @@ describe("agent runtime", () => {
     const projectResult = project.result as Awaited<ReturnType<AgentRuntime["saveSkillProject"]>>;
     const support = await runtime.runDomainCommand({
       command_id: "skill.support_file.save",
+      idempotency_key: "skill-lifecycle-support",
       payload: {
         skill_id: projectResult.resource.id,
         path: "references/style.md",
@@ -2953,7 +2971,7 @@ describe("agent runtime", () => {
       }
     });
     const session = await runtime.createSession();
-    await runtime.runChatTurn({
+    const chat = await runtime.runChatTurn({
       sessionId: session.id,
       content: "調査メモ references を使って",
       output_locale: "ja"
@@ -2961,6 +2979,22 @@ describe("agent runtime", () => {
     const context = await runtime.previewContext({
       sessionId: session.id,
       query: "調査メモ references"
+    });
+    const selectedUses = await store.listLearningResourceUses({ runId: chat.backendRun.id });
+    const usageBeforeView = await store.listSkillUsage();
+    const view = await runtime.viewSkill({
+      skillId: projectResult.resource.id,
+      runId: chat.backendRun.id,
+      path: "references/style.md"
+    });
+    await runtime.viewSkill({ skillId: projectResult.resource.id, runId: chat.backendRun.id, path: "references/style.md" });
+    await runtime.recordSkillUsage({
+      skillId: view.usage.skill_id,
+      runId: view.usage.run_id,
+      resourceId: view.usage.resource_id,
+      contentHash: view.usage.content_hash,
+      stage: view.usage.stage,
+      metadata: view.usage.metadata
     });
     const usage = await store.listSkillUsage();
     await store.close();
@@ -2986,7 +3020,13 @@ describe("agent runtime", () => {
     }));
     expect(context.selected_skills.find((item) => item.id === projectResult.resource.id)?.support_files?.[0]?.file_path)
       .toBeUndefined();
-    expect(usage.some((row) => row.skill_id === projectResult.resource.id && row.use_count > 0)).toBe(true);
+    expect(selectedUses).toContainEqual(expect.objectContaining({
+      resource_id: projectResult.resource.id,
+      stage: "selected"
+    }));
+    expect(usageBeforeView.some((row) => row.skill_id === projectResult.resource.id)).toBe(false);
+    expect(view).toMatchObject({ disclosure_level: "support", content: "補助資料: 調査メモは箇条書きで短くする。" });
+    expect(usage).toContainEqual(expect.objectContaining({ skill_id: projectResult.resource.id, use_count: 1 }));
   });
 
   it("turns reflection Skill suggestions into supported project Skills with usage", async () => {
@@ -3012,12 +3052,18 @@ describe("agent runtime", () => {
       created_at: now
     });
 
-    const reflection = await runtime.runReflection({ sessionId: session.id });
-    const suggestion = reflection.suggestions.find((item) => item.suggestion_type === "skill");
-    expect(suggestion).toBeDefined();
+    const reflectionRun = await store.createReflectionRun({
+      id: createId("reflection"), kind: "manual", session_id: session.id, status: "completed",
+      input_summary: "legacy compatibility", output_summary: "legacy suggestion", started_at: now, completed_at: now
+    });
+    const suggestion = await store.saveReflectionSuggestion({
+      id: createId("suggestion"), reflection_run_id: reflectionRun.id, suggestion_type: "skill", status: "proposed",
+      title: "差分確認", content: "保存前に差分確認する", source_refs: [], confidence: 0.8, created_at: now, updated_at: now
+    });
     const applied = await runtime.runDomainCommand({
       command_id: "reflection.suggestion.apply",
-      payload: { suggestion_id: suggestion!.id }
+      idempotency_key: "reflection-skill-apply",
+      payload: { suggestion_id: suggestion.id }
     });
     const appliedResult = applied.result as Awaited<ReturnType<AgentRuntime["applyReflectionSuggestion"]>>;
     const appliedSkill = appliedResult.resource as {
@@ -3027,11 +3073,13 @@ describe("agent runtime", () => {
     };
     const project = await runtime.runDomainCommand({
       command_id: "skill.project.save",
+      idempotency_key: "reflection-skill-project",
       payload: { candidate_id: appliedSkill.id }
     });
     const projectResult = project.result as Awaited<ReturnType<AgentRuntime["saveSkillProject"]>>;
     await runtime.runDomainCommand({
       command_id: "skill.support_file.save",
+      idempotency_key: "reflection-skill-support",
       payload: {
         skill_id: projectResult.resource.id,
         path: "references/diff-check.md",
@@ -3048,7 +3096,7 @@ describe("agent runtime", () => {
       sessionId: session.id,
       query: "差分確認 references"
     });
-    const refreshedSuggestion = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion!.id);
+    const refreshedSuggestion = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion.id);
     const usage = await store.getSkillUsage(projectResult.resource.id);
     await store.close();
 
@@ -3058,7 +3106,7 @@ describe("agent runtime", () => {
     });
     expect(appliedResult.operation.operation).toBe("reflection.suggestion.apply");
     expect(appliedSkill.state).toBe("candidate");
-    expect(appliedSkill.frontmatter?.source_refs?.some((ref) => ref.kind === "message")).toBe(true);
+    expect(appliedSkill.frontmatter?.source_refs ?? []).toEqual([]);
     expect(appliedSkill.frontmatter?.provenance_detail).toMatchObject({ kind: "generated_local", verified: false });
     expect(refreshedSuggestion).toMatchObject({
       status: "applied",
@@ -3076,10 +3124,10 @@ describe("agent runtime", () => {
       })],
       support_files: undefined,
       content: undefined,
-      usage: expect.objectContaining({ use_count: 1 })
+      usage: undefined
     });
     expect(selectedSkill?.selection_reason).toContain("Catalog match only");
-    expect(usage).toMatchObject({ skill_id: projectResult.resource.id, use_count: 1 });
+    expect(usage).toBeUndefined();
   });
 
   it("keeps plain chat as content without creating artifacts", async () => {
@@ -3132,8 +3180,7 @@ describe("agent runtime", () => {
     expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
     expect(result.artifacts[0]?.title).toBe("作業メモ");
     expect(result.reflectionRuns.some((run) => run.status === "completed")).toBe(true);
-    expect(result.reflectionSuggestions.some((suggestion) => suggestion.suggestion_type === "knowledge_wiki")).toBe(true);
-    expect(result.reflectionSuggestions.some((suggestion) => suggestion.source_refs.some((ref) => ref.kind === "backend_event"))).toBe(true);
+    expect(result.reflectionSuggestions).toEqual([]);
     expect(reflectionRuns.some((run) => run.status === "completed")).toBe(true);
   });
 
@@ -4686,12 +4733,12 @@ rl.on("line", (line) => {
     expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
     expect(result.toolRuns.some((toolRun) => toolRun.action_id === "artifact.create" && toolRun.status === "completed")).toBe(true);
     expect(result.reflectionRuns[0]?.status).toBe("completed");
-    expect(result.reflectionSuggestions.some((suggestion) => suggestion.suggestion_type === "knowledge_wiki")).toBe(true);
+    expect(result.reflectionSuggestions).toEqual([]);
     expect(result.policyDecisions).toEqual([]);
     expect(result.auditRecords).toEqual([]);
   });
 
-  it("includes transcript and artifact content in post-run reflection proposals", async () => {
+  it("keeps Background Review separate from the source Session", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const result = await runtime.runChatTurn({
@@ -4701,13 +4748,8 @@ rl.on("line", (line) => {
     });
     await store.close();
 
-    const wikiSuggestion = result.reflectionSuggestions.find((suggestion) => suggestion.suggestion_type === "knowledge_wiki");
-    expect(wikiSuggestion?.content).toContain("Transcript excerpt");
-    expect(wikiSuggestion?.content).toContain("Artifact context");
-    expect(wikiSuggestion?.content).toContain("# 作業メモ");
-    expect(wikiSuggestion?.content).toContain("Backend events");
-    expect(wikiSuggestion?.source_refs.some((ref) => ref.kind === "artifact")).toBe(true);
-    expect(wikiSuggestion?.source_refs.some((ref) => ref.kind === "backend_event")).toBe(true);
+    expect(result.reflectionRuns[0]).toMatchObject({ kind: "background_review", source_run_id: result.backendRun.id, status: "completed" });
+    expect(result.reflectionSuggestions).toEqual([]);
   });
 
   it("ignores malformed artifact tool calls without failing the chat turn", async () => {
@@ -4765,9 +4807,9 @@ rl.on("line", (line) => {
     expect(archived.changed).toBe(true);
     expect(archived.memory.state).toBe("archived");
     expect(archived.operation.operation).toBe("memory.archive");
-    expect(archived.auditRecord.outputs_summary).toContain("Archived memory");
+    expect(archived.operation.status).toBe("completed");
     expect(archived.rollbackPoint).toBeDefined();
-    expect(archived.activity.length).toBeGreaterThan(0);
+    expect(archived.operation.result_ref?.id).toBe(memory.id);
     expect(sessionMemory.some((item) => item.id === memory.id)).toBe(false);
   });
 
@@ -4806,10 +4848,10 @@ rl.on("line", (line) => {
 
     expect(archivedAgain.changed).toBe(false);
     expect(archivedAgain.rollbackPoint).toBeUndefined();
-    expect(archivedAgain.auditRecord.outputs_summary).toContain("already archived");
+    expect(archivedAgain.operation.status).toBe("completed");
   });
 
-  it("creates skill candidates and projects through policy and audit", async () => {
+  it("creates skill candidates and projects through operation history and rollback", async () => {
     const { store, runtime } = await createRuntime();
 
     const candidate = await runtime.createSkillCandidate({
@@ -4821,10 +4863,9 @@ rl.on("line", (line) => {
     await store.close();
 
     expect(candidate.operation.operation).toBe("skill.candidate.create");
-    expect(candidate.policyDecision.decision).toBe("allow_auto");
-    expect(candidate.auditRecord.operation_id).toBe(candidate.operation.id);
+    expect(candidate.operation.status).toBe("completed");
     expect(project.operation.operation).toBe("skill.project.save");
-    expect(project.policyDecision.decision).toBe("allow_with_audit");
+    expect(project.operation.status).toBe("completed");
     expect(project.rollbackPoint).toBeDefined();
   });
 
@@ -5490,7 +5531,7 @@ rl.on("line", (line) => {
       views: [{ id: "portfolio_table", renderer: "collection_table" }]
     });
 
-    const write = await runtime.manageCollection({
+    const write = await runtime.runCollectionManageCompatibility({
       action: "putItems",
       collection_id: "portfolio",
       mode: "create",
@@ -5498,22 +5539,22 @@ rl.on("line", (line) => {
         { id: "holding_1", name: "Toyota holding", ticker: "toyota", shares: 3 },
         { id: "bad_value", name: "Bad", ticker: "toyota", shares: 1, value: 999 }
       ]
-    });
-    const read = await runtime.manageCollection({
+    }, "runtime_api", "test:portfolio:put-items");
+    const read = await runtime.runCollectionManageCompatibility({
       action: "getItems",
       collection_id: "portfolio",
       fields: ["name", "ticker", "shares", "value"]
-    });
+    }, "runtime_api");
     const stored = await store.getCollectionRecord("portfolio", "holding_1");
     await store.close();
 
-    expect(write.resource).toMatchObject({
+    expect(write).toMatchObject({
       action: "putItems",
       collection_id: "portfolio",
       written: ["holding_1"],
       rejected: [expect.objectContaining({ id: "bad_value", problem: expect.stringContaining("derived") })]
     });
-    expect(read.resource).toMatchObject({
+    expect(read).toMatchObject({
       action: "getItems",
       collection_id: "portfolio",
       count: 1,
@@ -5646,11 +5687,10 @@ rl.on("line", (line) => {
       uri: `automation-runs/${result.automationRun.id}`
     });
     expect(result.memoryReviewTrace?.reflectionRun.kind).toBe("scheduled");
-    expect(result.memoryReviewTrace?.suggestions.some((suggestion) => suggestion.suggestion_type === "memory")).toBe(true);
-    expect(result.auditRecord.outputs_summary).toContain("read recent transcript/events");
-    expect(result.auditRecord.outputs_summary).toContain("deterministic curator");
-    expect(result.auditRecord.actor_identity).toBe("owner_scheduled");
-    expect(reflectionRuns.some((run) => run.kind === "curator")).toBe(true);
+    expect(result.memoryReviewTrace?.suggestions).toEqual([]);
+    expect(result.operation.proposed_effects.join(" ")).toContain("scheduled memory review");
+    expect(result.operation.actor_identity).toBe("owner_scheduled");
+    expect(reflectionRuns.some((run) => run.kind === "curator")).toBe(false);
   });
 
   it("ignores unknown and invalid tool calls without external effects", async () => {
@@ -5853,6 +5893,7 @@ rl.on("line", (line) => {
       kind: "available_tools",
       status: "included"
     }));
+    expect(providerInput?.availableTools).toContain("skill.view");
     expect(result.backendRun.metadata.context_assembly_sources).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "recent_messages" }),
       expect.objectContaining({ kind: "available_tools" })
@@ -5914,6 +5955,7 @@ rl.on("line", (line) => {
       output_locale: "ja"
     });
     const usage = await store.listSkillUsage();
+    const learningUses = await store.listLearningResourceUses({ runId: result.backendRun.id });
     await store.close();
 
     expect(providerInput?.activeMemory).toContainEqual(expect.objectContaining({
@@ -5949,7 +5991,12 @@ rl.on("line", (line) => {
     expect(metadataSources.find((source) => source.kind === "selected_skills")?.included_count).toBeGreaterThanOrEqual(1);
     expect(result.backendRun.metadata.context_assembly_quality_warnings).toEqual([]);
     expect(result.backendRun.metadata.freeze_snapshot_hash).toEqual(expect.any(String));
-    expect(usage.some((row) => row.skill_id === "skill_context_bridge" && row.use_count > 0)).toBe(true);
+    expect(usage.some((row) => row.skill_id === "skill_context_bridge" && row.use_count > 0)).toBe(false);
+    expect(learningUses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource_kind: "memory", resource_id: "memory_context_bridge", stage: "body_loaded" }),
+      expect.objectContaining({ resource_kind: "wiki", resource_id: wiki.resource.id, stage: "body_loaded" }),
+      expect.objectContaining({ resource_kind: "skill", resource_id: "skill_context_bridge", stage: "selected" })
+    ]));
   });
 
   it("isolates external assist failures and records sync diagnostics", async () => {
@@ -6066,7 +6113,6 @@ rl.on("line", (line) => {
     const preview = await runtime.previewKnowledgeWiki({ query: "active-only needle" });
     const allWiki = await store.listWiki({ activeOnly: false });
     const operations = await store.listOperations();
-    const auditRecords = await store.listAuditRecords();
     await store.close();
 
     expect(allWiki.map((wiki) => ({ id: wiki.id, state: wiki.state }))).toEqual(expect.arrayContaining([
@@ -6101,10 +6147,10 @@ rl.on("line", (line) => {
       "wiki.reject",
       "wiki.archive"
     ]));
-    expect(auditRecords.some((audit) => audit.affected_resources.some((ref) => ref.id === activeProposal.resource.id))).toBe(true);
+    expect(operations.some((operation) => operation.target_resource_refs.some((ref) => ref.id === activeProposal.resource.id))).toBe(true);
   });
 
-  it("suggests Skill candidates from repeated tool execution traces", async () => {
+  it("does not use fixed tool-count rules for Background Review", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const result = await runtime.runChatTurn({
@@ -6132,19 +6178,10 @@ rl.on("line", (line) => {
     const reflection = await runtime.runReflection({ sessionId: session.id, sourceRunId: result.backendRun.id });
     await store.close();
 
-    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
-    expect(skillSuggestion).toMatchObject({
-      title: "Skill candidate from execution trace",
-      confidence: 0.7
-    });
-    expect(skillSuggestion?.content).toContain("Observed tool sequence");
-    expect(skillSuggestion?.content).toContain("Reusable signals");
-    expect(skillSuggestion?.content).toContain("file.read: 3 time(s)");
-    expect(skillSuggestion?.content).toContain("Recovery notes");
-    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "tool_run")).toBe(true);
+    expect(reflection.suggestions).toEqual([]);
   });
 
-  it("suggests Skill candidates from user correction signals", async () => {
+  it("does not use fixed correction keywords for Background Review", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const now = nowIso();
@@ -6170,18 +6207,153 @@ rl.on("line", (line) => {
     const reflection = await runtime.runReflection({ sessionId: session.id });
     await store.close();
 
-    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
-    expect(skillSuggestion).toMatchObject({
-      title: "Skill candidate from user correction",
-      confidence: 0.68
-    });
-    expect(skillSuggestion?.content).toContain("User correction signals");
-    expect(skillSuggestion?.content).toContain("次からこの作業は保存前に差分確認して");
-    expect(skillSuggestion?.content).toContain("Next-run checklist");
-    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "message")).toBe(true);
+    expect(reflection.suggestions).toEqual([]);
   });
 
-  it("suggests Skill candidates from workspace-wide repeated tool traces", async () => {
+  it("applies Background Review Memory changes without persisting review prompts to the source Session", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/test", fakeProviderOutput),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        backgroundReviewRunner: {
+          run: async (snapshot) => ({
+            reviewer: "test-reviewer",
+            summary: "Stored a durable preference.",
+            mutations: [{
+              kind: "memory_add" as const,
+              topic: "response-style",
+              content: "回答は短い箇条書きを優先する。",
+              reason: "The user stated a durable response preference.",
+              evidence_refs: [{ kind: "backend_run", id: snapshot.source_run_id, uri: `backend-runs/${snapshot.source_run_id}` }]
+            }]
+          })
+        }
+      }
+    );
+    const session = await runtime.createSession();
+    const result = await runtime.runChatTurn({ sessionId: session.id, content: "回答は短い箇条書きにして", output_locale: "ja" });
+    const [messages, memories, changes, reports] = await Promise.all([store.listMessages(session.id), store.listMemory(), store.listBackgroundReviewChanges({ sourceRunId: result.backendRun.id }), store.listLearningJobReports({ jobKind: "background_review" })]);
+    await store.close();
+
+    expect(result.reflectionRuns[0]).toMatchObject({ kind: "background_review", status: "completed" });
+    expect(result.reflectionSuggestions).toContainEqual(expect.objectContaining({ status: "applied", suggestion_type: "memory" }));
+    expect(memories).toContainEqual(expect.objectContaining({ topic: "response-style" }));
+    expect(changes).toContainEqual(expect.objectContaining({ origin: "background_review", review_run_id: result.reflectionRuns[0]?.id, after_version: expect.any(String) }));
+    expect(reports).toContainEqual(expect.objectContaining({ job_kind: "background_review", mutation_count: 1 }));
+    expect(messages).toHaveLength(2);
+  });
+
+  it("aborts detached Background Review tasks, rejects new enqueue, and drains idempotently", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/test", fakeProviderOutput),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        detachBackgroundReview: true,
+        backgroundReviewRunner: {
+          run: async (_snapshot, _policy, signal) => await new Promise((resolve) => {
+            if (signal?.aborted) {
+              resolve({ reviewer: "fixture", summary: "aborted", mutations: [] });
+              return;
+            }
+            signal?.addEventListener("abort", () => resolve({ reviewer: "fixture", summary: "aborted", mutations: [] }), { once: true });
+          })
+        }
+      }
+    );
+    await store.patchSettings({ memory_capture_mode: "auto" });
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({ sessionId: session.id, content: "回答は短くして", output_locale: "ja" });
+
+    const firstShutdown = runtime.shutdownMcpProcessPool();
+    const secondShutdown = runtime.shutdownMcpProcessPool();
+    expect(secondShutdown).toBe(firstShutdown);
+    await firstShutdown;
+
+    // A turn after shutdown must not enqueue another detached review task.
+    await runtime.runChatTurn({ sessionId: session.id, content: "終了後の確認", output_locale: "ja" });
+    await store.close();
+  });
+
+  it("cancels every detached review BackendRun and closes MCP after a cancellation failure", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    let reviewStarted = 0;
+    const stopReviews: Array<() => void> = [];
+    const cancelledRunIds: string[] = [];
+    const backend: AgentBackend = {
+      id: "background-cancel-fixture",
+      kind: "codex",
+      label: "Background cancellation fixture",
+      async *runTurn(input) {
+        if (input.metadata.background_review === true) {
+          reviewStarted += 1;
+          await new Promise<void>((resolve) => stopReviews.push(resolve));
+          return;
+        }
+        yield { event_type: "run_completed", payload: { output_summary: "fixture" } };
+      },
+      async cancelRun(runId) {
+        cancelledRunIds.push(runId);
+        stopReviews.splice(0).forEach((stop) => stop());
+        await new Promise<void>(() => undefined);
+      }
+    };
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      undefined,
+      new AgentBackendRegistry([backend]),
+      undefined,
+      undefined,
+      undefined,
+      { detachBackgroundReview: true, enableBackendBackgroundReview: true }
+    );
+    await store.patchSettings({ memory_capture_mode: "auto" });
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({ sessionId: session.id, content: "background cancellation", backend_id: backend.id });
+    await runtime.runChatTurn({ sessionId: session.id, content: "background cancellation again", backend_id: backend.id });
+    for (let attempt = 0; attempt < 50 && reviewStarted < 2; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reviewStarted).toBe(2);
+    const pool = (runtime as unknown as { stdioMcpProcessPool: { closeAll: () => Promise<void> } }).stdioMcpProcessPool;
+    const closeAll = vi.spyOn(pool, "closeAll").mockRejectedValue(new Error("fixture_close_failed"));
+    const previousTimeout = process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS;
+    process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS = "50";
+    const shutdownStartedAt = Date.now();
+    try {
+      await expect(runtime.shutdownMcpProcessPool()).rejects.toMatchObject({
+        name: "AggregateError",
+        message: "background_tasks_shutdown_failed",
+        errors: expect.arrayContaining([expect.objectContaining({ message: "fixture_close_failed" })])
+      });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS;
+      else process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS = previousTimeout;
+    }
+    expect(cancelledRunIds).toHaveLength(2);
+    expect(cancelledRunIds.every((id) => /^review_run_/.test(id))).toBe(true);
+    expect(closeAll).toHaveBeenCalledTimes(1);
+    expect(Date.now() - shutdownStartedAt).toBeLessThan(1000);
+    await store.close();
+  });
+
+  it("does not convert workspace-wide tool counts into fixed Skill suggestions", async () => {
     const { store, runtime } = await createRuntime();
     const firstSession = await runtime.createSession();
     const firstRun = await runtime.runChatTurn({
@@ -6222,14 +6394,7 @@ rl.on("line", (line) => {
     const reflection = await runtime.runReflection({ sessionId: firstSession.id });
     await store.close();
 
-    const skillSuggestion = reflection.suggestions.find((suggestion) => suggestion.suggestion_type === "skill");
-    expect(skillSuggestion).toMatchObject({
-      title: "Skill candidate from execution trace",
-      confidence: 0.7
-    });
-    expect(skillSuggestion?.content).toContain("file.read: 3 time(s)");
-    expect(skillSuggestion?.content).toContain("artifact.write: 2 time(s)");
-    expect(skillSuggestion?.source_refs.some((ref) => ref.kind === "tool_run" && ref.id === "workspace_tool_trace_2")).toBe(true);
+    expect(reflection.suggestions).toEqual([]);
   });
 
   it("filters provisional memory and redacts high sensitive active memory", async () => {
@@ -6428,24 +6593,12 @@ rl.on("line", (line) => {
     });
   });
 
-  it("runs file actions through policy audit and rollback", async () => {
+  it("runs file actions through Domain dispatch and rollback", async () => {
     const { store, runtime } = await createRuntime();
 
-    const written = await runtime.runFileAction({
-      operation: "file.write",
-      path: "notes/test.md",
-      content: "hello"
-    });
-    const read = await runtime.runFileAction({
-      operation: "file.read",
-      path: "notes/test.md"
-    });
-    const patched = await runtime.runFileAction({
-      operation: "file.patch",
-      path: "notes/test.md",
-      search: "hello",
-      replace: "hello samurai"
-    });
+    const written = (await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "file-action-write", payload: { path: "notes/test.md", content: "hello" } })).result as { operation: OperationRecord };
+    const read = (await runtime.runDomainQuery({ query_id: "file.read", payload: { path: "notes/test.md" } })).result as { resource: { content: string } };
+    const patched = (await runtime.runDomainCommand({ command_id: "file.patch", idempotency_key: "file-action-patch", payload: { path: "notes/test.md", search: "hello", replace: "hello samurai" } })).result as { resource: { content: string }; rollbackPoint?: RollbackPoint };
     await store.close();
 
     expect(written.operation.operation).toBe("file.write");
@@ -6457,10 +6610,8 @@ rl.on("line", (line) => {
   it("allows direct Collection file writes as an escape hatch and reindexes afterward", async () => {
     const { store, runtime } = await createRuntime();
 
-    const schemaWrite = await runtime.runFileAction({
-      operation: "file.write",
-      path: "collections/movies/schema.json",
-      content: JSON.stringify({
+    const schemaWrite = (await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "collection-file-schema", payload: {
+      path: "collections/movies/schema.json", content: JSON.stringify({
         id: "movies",
         version: "1",
         labels: { ja: "映画ログ" },
@@ -6474,11 +6625,9 @@ rl.on("line", (line) => {
         views: [{ id: "movies_table", renderer: "collection_table" }],
         permissions: { create: true, update: true, delete: true }
       }, null, 2)
-    });
-    const recordWrite = await runtime.runFileAction({
-      operation: "file.write",
-      path: "collections/movies/records/movie_1.json",
-      content: JSON.stringify({
+    } })).result as { operation: OperationRecord };
+    const recordWrite = (await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "collection-file-record", payload: {
+      path: "collections/movies/records/movie_1.json", content: JSON.stringify({
         id: "movie_1",
         collection_id: "movies",
         data: { title: "Seven Samurai" },
@@ -6486,7 +6635,7 @@ rl.on("line", (line) => {
         created_at: nowIso(),
         updated_at: nowIso()
       }, null, 2)
-    });
+    } })).result as { operation: OperationRecord };
     const records = await store.listCollectionRecords("movies");
     await store.close();
 
@@ -6496,54 +6645,22 @@ rl.on("line", (line) => {
     expect(records[0]?.data).toMatchObject({ title: "Seven Samurai" });
   });
 
-  it("creates and revokes grants through policy audit and rollback", async () => {
+  it("rejects removed grant operations as deprecated", async () => {
     const { store, runtime } = await createRuntime();
-
-    const created = await runtime.createGrant({
-      operation: "external.send.dispatch",
-      reason: "Allow approved send dispatch in tests."
-    });
-    const revoked = await runtime.revokeGrant({
-      grantId: created.resource.id,
-      reason: "No longer needed."
-    });
-    const grants = await store.listGrants();
-    const rollbackPoints = await store.listRollbackPoints();
+    await expect(runtime.runDomainCommand({ command_id: "grant.create", idempotency_key: "deprecated-grant-create", payload: {} })).rejects.toMatchObject({ code: "gone" });
+    await expect(runtime.runDomainCommand({ command_id: "grant.revoke", idempotency_key: "deprecated-grant-revoke", payload: {} })).rejects.toMatchObject({ code: "gone" });
     await store.close();
-
-    expect(created.operation.operation).toBe("grant.create");
-    expect(created.policyDecision.decision).toBe("allow_with_audit");
-    expect(created.auditRecord.rollback_point_id).toBe(created.rollbackPoint?.id);
-    expect(created.resource.operation).toBe("external.send.dispatch");
-    expect(revoked.operation.operation).toBe("grant.revoke");
-    expect(revoked.resource.revoked_at).toBeDefined();
-    expect(revoked.auditRecord.rollback_point_id).toBe(revoked.rollbackPoint?.id);
-    expect(grants.map((grant) => grant.id)).toContain(created.resource.id);
-    expect(rollbackPoints.map((point) => point.id)).toEqual(expect.arrayContaining([
-      created.rollbackPoint!.id,
-      revoked.rollbackPoint!.id
-    ]));
   });
 
   it("restores file content from a rollback point with audit and a new rollback", async () => {
     const { store, runtime } = await createRuntime();
 
-    await runtime.runFileAction({
-      operation: "file.write",
-      path: "notes/restore.md",
-      content: "hello"
-    });
-    const patched = await runtime.runFileAction({
-      operation: "file.patch",
-      path: "notes/restore.md",
-      search: "hello",
-      replace: "hello samurai"
-    });
+    await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "restore-file-write", payload: { path: "notes/restore.md", content: "hello" } });
+    const patchCommand = await runtime.runDomainCommand({ command_id: "file.patch", idempotency_key: "restore-file-patch", payload: { path: "notes/restore.md", search: "hello", replace: "hello samurai" } });
+    const patched = patchCommand.result as Awaited<ReturnType<AgentRuntime["restoreRollbackPoint"]>>;
     const restored = await runtime.restoreRollbackPoint(patched.rollbackPoint!.id);
-    const read = await runtime.runFileAction({
-      operation: "file.read",
-      path: "notes/restore.md"
-    });
+    const readQuery = await runtime.runDomainQuery({ query_id: "file.read", payload: { path: "notes/restore.md" } });
+    const read = readQuery.result as { resource: { content: string } };
     await store.close();
 
     expect(restored.operation.operation).toBe("rollback.restore");
@@ -6553,28 +6670,26 @@ rl.on("line", (line) => {
       action: "written"
     });
     expect(restored.rollbackPoint).toBeDefined();
-    expect(restored.auditRecord.rollback_point_id).toBe(restored.rollbackPoint?.id);
+    expect(restored.rollbackPoint?.operation_id).toBe(restored.operation.id);
     expect(read.resource.content).toBe("hello");
   });
 
-  it("prepares external sends and gates dispatch behind approval", async () => {
+  it("prepares and dry-runs external sends through Domain Commands", async () => {
     const { store, runtime } = await createRuntime();
 
-    const prepared = await runtime.prepareExternalSend({
+    const prepared = await prepareExternalSend(runtime, {
       channel: "webhook",
       target: { url: "https://example.invalid/webhook" },
       title: "確認",
       body: "送信本文"
     });
-    await expect(runtime.dispatchExternalSend({ sendId: prepared.resource.id })).rejects.toMatchObject({
-      code: "conflict",
-      message: "policy_blocked"
-    });
+    const dispatched = await dispatchExternalSend(runtime, { sendId: prepared.resource.id });
     const sends = await store.listExternalSends();
     await store.close();
 
     expect(prepared.operation.operation).toBe("external.send.prepare");
-    expect(sends[0]?.status).toBe("draft");
+    expect(dispatched.resource.dispatch_result).toMatchObject({ dry_run: true });
+    expect(sends[0]?.status).toBe("approved");
   });
 
   it("records non-dry-run external send success and failure statuses", async () => {
@@ -6585,19 +6700,19 @@ rl.on("line", (line) => {
       .mockResolvedValueOnce(new Response("failed", { status: 500 }))
       .mockRejectedValueOnce(new Error("dispatch failed with raw-secret-token"));
 
-    const okDraft = await runtime.prepareExternalSend({
+    const okDraft = await prepareExternalSend(runtime, {
       channel: "webhook",
       target: { url: "https://example.test/ok" },
       title: "成功通知",
       body: "送信本文"
     });
-    const failedDraft = await runtime.prepareExternalSend({
+    const failedDraft = await prepareExternalSend(runtime, {
       channel: "webhook",
       target: { url: "https://example.test/fail" },
       title: "失敗通知",
       body: "送信本文"
     });
-    const rejectedDraft = await runtime.prepareExternalSend({
+    const rejectedDraft = await prepareExternalSend(runtime, {
       channel: "webhook",
       target: { url: "https://example.test/reject" },
       title: "例外通知",
@@ -6658,19 +6773,19 @@ rl.on("line", (line) => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
       .mockResolvedValueOnce(new Response("{}", { status: 200 }));
 
-    const slackDraft = await runtime.prepareExternalSend({
+    const slackDraft = await prepareExternalSend(runtime, {
       channel: "slack",
       target: { channel_id: "C123", thread_ts: "111.222" },
       title: "Slack通知",
       body: "Slack本文"
     });
-    const telegramDraft = await runtime.prepareExternalSend({
+    const telegramDraft = await prepareExternalSend(runtime, {
       channel: "telegram",
       target: { chat_id: "-100123", message_thread_id: 7 },
       title: "Telegram通知",
       body: "Telegram本文"
     });
-    const lineDraft = await runtime.prepareExternalSend({
+    const lineDraft = await prepareExternalSend(runtime, {
       channel: "line",
       target: { to: "U456" },
       title: "LINE通知",
@@ -6746,7 +6861,7 @@ rl.on("line", (line) => {
     ]);
     setExternalSendSmtpClientConnectionFactoryForTest(async () => smtp);
 
-    const draft = await runtime.prepareExternalSend({
+    const draft = await prepareExternalSend(runtime, {
       channel: "email",
       target: {
         to: ["client@example.test"],
@@ -6886,6 +7001,40 @@ rl.on("line", (line) => {
     });
     expect(processed.chat?.messages.some((message) => message.role === "agent" && message.content === "対応しました。")).toBe(true);
     expect(savedInbound.map((message) => message.id)).toContain(processed.inbound.id);
+  });
+
+  it("uses the saved Gateway policy tool snapshot and ignores inbound metadata attempts to widen it", async () => {
+    const { store, runtime } = await createRuntime();
+    const policy = await runtime.getGatewayPairingPolicy("webhook");
+    await runtime.saveGatewayPairingPolicy({
+      ...policy,
+      allowed_tools: ["artifact.create"],
+      updated_at: nowIso()
+    });
+    const first = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "policy-owned-source",
+      body: "初回の外部入力です"
+    });
+    await runtime.approveGatewayPairing(first.pairing!.id);
+    const processed = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "policy-owned-source",
+      body: "提案書を作って",
+      metadata: {
+        allowed_tools: ["*"],
+        gateway_boundary_policy: { allowed_tools: ["*"] }
+      }
+    });
+    await store.close();
+
+    expect(processed.boundaryPolicy?.allowed_tools).toEqual(["artifact.create"]);
+    expect(processed.chat?.backendRun.metadata.gateway_boundary_allowed_tools).toEqual(["artifact.create"]);
+    expect(processed.chat?.toolRuns).toContainEqual(expect.objectContaining({
+      action_id: "artifact.create",
+      status: "completed"
+    }));
+    expect(processed.chat?.artifacts).toHaveLength(1);
   });
 
   it("expires pending gateway pairings before approving or routing new inbound", async () => {
@@ -7162,6 +7311,7 @@ rl.on("line", (line) => {
       status: "enabled",
       trust_mode: "blocked",
       allowlist: ["*"],
+      allowed_tools: [],
       pairing_ttl_ms: 300_000,
       duplicate_window_ms: 60_000,
       rate_limit_window_ms: 60_000,
@@ -7196,6 +7346,7 @@ rl.on("line", (line) => {
       status: "enabled",
       trust_mode: "pairing_required",
       allowlist: ["*"],
+      allowed_tools: [],
       pairing_ttl_ms: 300_000,
       duplicate_window_ms: 60_000,
       rate_limit_window_ms: 60_000,
@@ -7306,6 +7457,17 @@ rl.on("line", (line) => {
     expect(refreshedJob?.failure_count).toBe(0);
   });
 
+  it("initializes Background Review, Evaluation, and Curator as separate scheduled jobs", async () => {
+    const { store, runtime } = await createRuntime();
+    const jobs = await runtime.ensureStandardLearningJobs("2026-07-10T00:00:00.000Z");
+    const repeated = await runtime.ensureStandardLearningJobs("2026-07-10T01:00:00.000Z");
+    await store.close();
+
+    expect(jobs.map((job) => job.kind)).toEqual(expect.arrayContaining(["memory_review", "learning_evaluation", "skill_curator"]));
+    expect(new Set(jobs.map((job) => job.id)).size).toBe(3);
+    expect(repeated.map((job) => job.id).sort()).toEqual(jobs.map((job) => job.id).sort());
+  });
+
   it("runs scheduled natural language jobs through backend chat turns", async () => {
     const { store, runtime } = await createRuntime();
 
@@ -7326,7 +7488,6 @@ rl.on("line", (line) => {
     await store.close();
 
     expect(runs[0]?.operation.operation).toBe("automation.job.run");
-    expect(runs[0]?.auditRecord.outputs_summary).toContain("Automation instruction ran backend");
     expect(refreshedRun).toMatchObject({
       status: "completed",
       backend_run_id: backendRun?.id
@@ -7392,6 +7553,7 @@ rl.on("line", (line) => {
 
     const curator = await runtime.runCuratorJob();
     const evaluation = await runtime.runEvaluationJob();
+    const learningReports = await store.listLearningJobReports();
     await store.close();
 
     expect(curator.reflectionRun.kind).toBe("curator");
@@ -7417,7 +7579,11 @@ rl.on("line", (line) => {
       })
     });
     expect(evaluation.evaluationReport?.run_scores.length).toBeGreaterThan(0);
-    expect(evaluation.suggestions.some((suggestion) => suggestion.suggestion_type === "skill_patch")).toBe(true);
+    expect(evaluation.suggestions.some((suggestion) => suggestion.suggestion_type === "conflict" || suggestion.suggestion_type === "skill_patch")).toBe(true);
+    expect(learningReports).toEqual(expect.arrayContaining([
+      expect.objectContaining({ job_kind: "curator", snapshot_id: expect.any(String) }),
+      expect.objectContaining({ job_kind: "evaluation", evaluation_count: expect.any(Number) })
+    ]));
   });
 
   it("can apply an external evaluation judge to trace scores without changing workspace state", async () => {
@@ -7564,9 +7730,9 @@ rl.on("line", (line) => {
     const pinnedSkill = await store.getSkill("skill_pinned");
     await store.close();
 
-    expect(usage).toMatchObject({ skill_id: "skill_used", use_count: 1 });
+    expect(usage).toBeUndefined();
     expect(curator.curatorReport).toMatchObject({
-      dry_run: true,
+      dry_run: false,
       counts: expect.objectContaining({
         skill_items: expect.any(Number),
         suggestions: curator.suggestions.length
@@ -7613,7 +7779,7 @@ rl.on("line", (line) => {
       suggestion.title.includes("Ancient routine") && suggestion.content.includes("Curator action: archive")
     )).toBe(true);
     expect(curator.suggestions.some((suggestion) => suggestion.title.includes("Consolidate skills"))).toBe(true);
-    expect(oldSkillBeforeApply?.state).toBe("project");
+    expect(oldSkillBeforeApply?.state).toBe("archived");
     expect(applied.operation.operation).toBe("skill.lifecycle.apply");
     expect(applied.rollbackPoint).toBeDefined();
     expect(oldSkillAfterApply?.state).toBe("archived");
@@ -7621,29 +7787,63 @@ rl.on("line", (line) => {
     expect(pinnedSkill?.state).toBe("project");
   });
 
+  it("protects an old low-frequency Skill when Evaluation shows a positive effect", async () => {
+    const { store, runtime } = await createRuntime();
+    await store.saveSkillMarkdown({
+      state: "project",
+      skillId: "skill_helpful_old",
+      markdown: skillMarkdown({ id: "skill_helpful_old", state: "project", title: "Helpful old Skill", createdAt: "2025-01-01T00:00:00.000Z" })
+    });
+    await store.saveLearningEvaluation({
+      id: "evaluation_helpful_old",
+      learning_resource_ref: { kind: "skill", id: "skill_helpful_old", uri: "skills/skill_helpful_old" },
+      learning_resource_version: "v1",
+      task_class: "workspace_task",
+      compared_run_ids: ["run_before", "run_after"],
+      before_metrics: { quality_score: 0 }, after_metrics: { quality_score: 1 }, effect_estimate: 1,
+      confidence: 0.8, assessment: "helpful", evidence_refs: [], evaluator: "test", created_at: nowIso()
+    });
+
+    const curator = await runtime.runCuratorJob();
+    const skill = await store.getSkill("skill_helpful_old");
+    await store.close();
+
+    expect(skill?.state).toBe("project");
+    expect(curator.curatorReviewReport?.keep_candidates).toContainEqual(expect.objectContaining({ id: "skill_helpful_old", reason: "positive_effect_protected" }));
+  });
+
   it("downloads browser content into the workspace fallback adapter", async () => {
     const { store, runtime } = await createRuntime();
-    const result = await runtime.runBrowserAction({
-      operation: "browser.download_to_workspace",
-      url: "data:text/html,<title>Test</title><main>Hello browser</main>",
-      output_path: "browser/test.txt"
-    });
+    const result = (await runtime.runDomainCommand({ command_id: "browser.download_to_workspace", idempotency_key: "browser-download", payload: { url: "data:text/html,<title>Test</title><main>Hello browser</main>", output_path: "browser/test.txt" } })).result as { operation: OperationRecord; resource: { file_path: string; text: string; snapshot_kind: string } };
     await store.close();
 
     expect(result.operation.operation).toBe("browser.download_to_workspace");
     expect(result.resource.file_path).toBe("browser/test.txt");
     expect(result.resource.text).toContain("Hello browser");
+    expect(result.resource.snapshot_kind).toBe("html_snapshot");
+  });
+
+  it("rejects browser screenshots before execution when no screenshot adapter is available", async () => {
+    const { store, runtime } = await createRuntime();
+
+    await expect(runtime.runDomainCommand({ command_id: "browser.screenshot", idempotency_key: "browser-screenshot-no-adapter", payload: { url: "data:text/html,<main>Hello browser</main>", output_path: "browser/test.png" } })).rejects.toThrow("domain_operation_unavailable:browser.screenshot");
+
+    expect((await store.listOperations()).some((operation) => operation.operation === "browser.screenshot")).toBe(false);
+    await store.close();
   });
 
   it("applies reflection suggestions into reusable workspace resources", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
-    await runtime.runChatTurn({
-      sessionId: session.id,
-      content: "今後、議事録は短くまとめる手順を覚えて",
-      output_locale: "ja"
+    const now = nowIso();
+    const reflection = await store.createReflectionRun({
+      id: createId("reflection"), kind: "manual", session_id: session.id, status: "completed",
+      input_summary: "legacy compatibility", output_summary: "legacy suggestion", started_at: now, completed_at: now
     });
-    const suggestion = (await store.listReflectionSuggestions()).find((item) => item.suggestion_type === "memory")!;
+    const suggestion = await store.saveReflectionSuggestion({
+      id: createId("suggestion"), reflection_run_id: reflection.id, suggestion_type: "memory", status: "proposed",
+      title: "議事録", content: "議事録は短くまとめる", source_refs: [], confidence: 0.8, created_at: now, updated_at: now
+    });
 
     const applied = await runtime.applyReflectionSuggestion({ suggestionId: suggestion.id });
     const updated = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion.id);

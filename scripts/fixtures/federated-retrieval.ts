@@ -1,0 +1,14 @@
+import assert from "node:assert/strict"; import { rankRetrievedResources, type RetrievalCandidate } from "../../packages/runtime/src/context/federated-retrieval";
+const now="2026-01-01T00:00:00.000Z"; const candidates:RetrievalCandidate[]=[
+  item("memory","m-ja","請求書の承認手順","経理担当の確認後に承認する。外部送信は承認後。",1,true,"work"), item("wiki","w-ja","経費精算ガイド","領収書を添付し経理へ提出する。",0.9,false,"work"), item("session","s-ja","昨日の相談","請求書の承認手順を確認した。",0.7,false,"work"), item("artifact","a-ja","請求書テンプレート","顧客名と金額を記載する。",0.8,false,"work"), item("collection","c-ja","請求書一覧","承認状態を管理する。",0.8,false,"work"),
+  item("memory","m-en","Invoice approval","Finance approval is required before sending.",1,false,"work"), item("wiki","noise1","旅行","京都の観光地"), item("session","noise2","雑談","今日の天気"), item("artifact","noise3","料理","カレーの作り方"), item("collection","noise4","映画","視聴記録")
+];
+const kinds:RetrievalCandidate["kind"][]=["memory","wiki","session","artifact","collection"];
+const benchmarkCandidates:RetrievalCandidate[]=Array.from({length:100},(_,index)=>index<50
+  ?item(kinds[index%kinds.length],`ja-${index}`,`案件${index}承認手順`,`案件 ${index} は担当者確認後に承認する。`,0.7+index%3/10,index%17===0,"work")
+  :item(kinds[index%kinds.length],`en-${index}`,`Invoice case ${index} approval`,`Invoice ${index} requires finance approval before delivery.`,0.7+index%3/10,index%17===0,"work"));
+candidates.push(...benchmarkCandidates);
+const cases=benchmarkCandidates.map((candidate,index)=>({q:index<50?`案件 ${index} 承認`:`invoice ${index} approval`,expected:candidate.ref.id,japanese:index<50}));let hits=0,japaneseHits=0,reciprocalRank=0;
+for(const test of cases){const result=rankRetrievedResources(test.q,candidates,{limit:10,scope:"work",now});assert.ok(result.length);assert.ok(result[0]?.reasons.length);assert.ok(result[0]?.source.updated_at);const rank=result.findIndex(entry=>entry.ref.id===test.expected);if(rank>=0&&rank<5){hits++;if(test.japanese)japaneseHits++;}if(rank>=0)reciprocalRank+=1/(rank+1);const repeat=rankRetrievedResources(test.q,[...candidates].reverse(),{limit:10,scope:"work",now});assert.deepEqual(repeat.map(x=>x.ref.id),result.map(x=>x.ref.id));}
+const recall=hits/cases.length,japaneseRecall=japaneseHits/cases.filter(test=>test.japanese).length,mrr=reciprocalRank/cases.length;assert.ok(recall>=0.9);assert.ok(japaneseRecall>=0.85);assert.ok(mrr>=0.8);process.stdout.write(`${JSON.stringify({status:"passed",benchmark_cases:cases.length,hits,recall,recall_at_5:recall,mrr_at_10:mrr,threshold:0.9,japanese_cases:50,japanese_recall_at_5:japaneseRecall,japanese_threshold:0.85,deterministic:true,reasons_present:true,sources_present:true,resource_kinds:[...new Set(candidates.map(x=>x.kind))]})}\n`);
+function item(kind:RetrievalCandidate["kind"],id:string,title:string,content:string,trust=0.5,pinned=false,scope="personal"):RetrievalCandidate{return{kind,ref:{kind,id,uri:`${kind}/${id}`},title,content,trust,pinned,scope,updated_at:now}}

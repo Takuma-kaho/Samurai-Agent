@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "test_id": "B07",
+  "command": "pnpm core:test:event-replay",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "a5e30fa22f1c96cd37b6895a9c8748ed1c02f2459be11eda8422419ae92ae289",
+  "source_files": [
+    "apps/server/src/backend-event-routes.ts",
+    "apps/server/src/index.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/backend-event-replay.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-backend-event-replay.mjs"
+  ],
+  "started_at": "2026-07-11T12:33:53.154Z",
+  "completed_at": "2026-07-11T12:33:53.333Z",
+  "assertions": [
+    {
+      "name": "Events survive restart",
+      "actual": 100,
+      "expected": 100
+    },
+    {
+      "name": "Replay after_sequence has no missing events",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "Replay after_sequence has no duplicates",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "Final cursor",
+      "actual": 100,
+      "expected": 100
+    },
+    {
+      "name": "API Server restarted during HTTP replay",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "api_server_restarted": true,
+    "http_transport": "unix_socket",
+    "persisted_events": 100,
+    "replayed_events": 100,
+    "pages": 6,
+    "missing": 0,
+    "duplicates": 0,
+    "final_cursor": 100
+  }
+}

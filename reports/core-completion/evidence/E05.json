@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "test_id": "E05",
+  "command": "pnpm core:test:progressive-skills",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "bae054fedba88483119171ca8230de01f082e30505619c905e989771ee0cf7e6",
+  "source_files": [
+    "packages/runtime/src/context/progressive-skills.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/progressive-skills.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-progressive-skills.mjs"
+  ],
+  "started_at": "2026-07-11T09:27:46.070Z",
+  "completed_at": "2026-07-11T09:28:06.992Z",
+  "assertions": [
+    {
+      "name": "Disclosure order list to body to support is enforced",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Backend capabilities change selectable skills",
+      "actual": {
+        "restricted": [
+          "basic"
+        ],
+        "capable": [
+          "basic",
+          "shell"
+        ]
+      },
+      "expected": {
+        "restricted": [
+          "basic"
+        ],
+        "capable": [
+          "basic",
+          "shell"
+        ]
+      }
+    },
+    {
+      "name": "Every disclosure stage is traced",
+      "actual": [
+        "selected",
+        "body_loaded",
+        "support_loaded"
+      ],
+      "expected": [
+        "selected",
+        "body_loaded",
+        "support_loaded"
+      ]
+    },
+    {
+      "name": "Actual use and selected-but-unused are distinguished",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "restricted_skills": [
+      "basic"
+    ],
+    "capable_skills": [
+      "basic",
+      "shell"
+    ],
+    "stage_order_enforced": true,
+    "trace_stages": [
+      "selected",
+      "body_loaded",
+      "support_loaded"
+    ],
+    "usage_recorded": true,
+    "unused_detected": true
+  }
+}

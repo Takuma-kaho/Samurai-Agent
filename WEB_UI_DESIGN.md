@@ -149,6 +149,8 @@ collapse 時も New Chat、Search、Settings の主要導線はアイコンと�
 
 Settings に置く保存方針。
 
+Learning Coreの標準は自動保存であり、Memory / Skill変更の確認画面や承認待ちqueueは追加しない。Context Drawerに出す場合も、変更履歴・根拠・復元導線として扱い、保存前の必須確認にはしない。
+
 | ブロック | 役割 |
 | --- | --- |
 | Memory | 毎回効かせる短い個人理解の保存方針 |

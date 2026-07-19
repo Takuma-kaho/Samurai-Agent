@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "test_id": "A04",
+  "command": "pnpm core:test:command-race",
+  "status": "passed",
+  "commit_sha": "6682f514733b19b8b23f70654271e693bad532b5",
+  "worktree_clean": false,
+  "source_sha256": "2829c8df54f0fa6be08b6c48f6ba59601700cdb5a02d76b66a8c5463bfdd9216",
+  "source_graph_sha256": "bbeac8b446bc0450d12d8fc6ae19ebc7365c134b749a3486408e1152c33bc67b",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/domain-operations/src/registry/operation-registry.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/commands/domain-command-bus.ts",
+    "packages/runtime/src/commands/services/artifact-domain-service.ts",
+    "packages/runtime/src/commands/services/automation-domain-service.ts",
+    "packages/runtime/src/commands/services/browser-domain-service.ts",
+    "packages/runtime/src/commands/services/client-event-domain-service.ts",
+    "packages/runtime/src/commands/services/collection-domain-service.ts",
+    "packages/runtime/src/commands/services/conversation-domain-service.ts",
+    "packages/runtime/src/commands/services/domain-operation-telemetry-service.ts",
+    "packages/runtime/src/commands/services/execution-domain-service.ts",
+    "packages/runtime/src/commands/services/external-send-domain-service.ts",
+    "packages/runtime/src/commands/services/file-domain-service.ts",
+    "packages/runtime/src/commands/services/gateway-domain-service.ts",
+    "packages/runtime/src/commands/services/generated-surface-domain-service.ts",
+    "packages/runtime/src/commands/services/json-value.ts",
+    "packages/runtime/src/commands/services/learning-domain-service.ts",
+    "packages/runtime/src/commands/services/memory-domain-service.ts",
+    "packages/runtime/src/commands/services/objective-domain-service.ts",
+    "packages/runtime/src/commands/services/plugin-domain-service.ts",
+    "packages/runtime/src/commands/services/presentation-domain-service.ts",
+    "packages/runtime/src/commands/services/search-domain-service.ts",
+    "packages/runtime/src/commands/services/settings-domain-service.ts",
+    "packages/runtime/src/commands/services/skill-domain-service.ts",
+    "packages/runtime/src/commands/services/system-domain-service.ts",
+    "packages/runtime/src/commands/services/translation-domain-service.ts",
+    "packages/runtime/src/commands/services/wiki-domain-service.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/domain-command-crash-worker.ts",
+    "scripts/fixtures/domain-command-idempotency-worker.ts",
+    "scripts/fixtures/domain-command-idempotency.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-domain-command-idempotency.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-18T09:57:03.350Z",
+  "completed_at": "2026-07-18T09:57:08.443Z",
+  "assertions": [
+    {
+      "name": "100 parallel requests",
+      "actual": 100,
+      "expected": 100
+    },
+    {
+      "name": "one side effect",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "one result id",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "durable replay",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "payload mismatch rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "crash during production transaction replays without partial state",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "gates": [
+      "ID01",
+      "ID02",
+      "ID03",
+      "ID04",
+      "ID05",
+      "ID06",
+      "ID07",
+      "ID08",
+      "ID09",
+      "ID10",
+      "ID11",
+      "ID12",
+      "ID13",
+      "ID14",
+      "ID15"
+    ],
+    "commands_requiring_key": 102,
+    "parallel_requests": 100,
+    "workers": 10,
+    "side_effects": 1,
+    "result_ids": [
+      "result-1"
+    ],
+    "durable_replay": true,
+    "mismatched_payload_rejected": true,
+    "scope_and_version_reuse_rejected": true,
+    "typed_failure_replayed": true,
+    "live_heartbeat_not_marked_unknown": true,
+    "internal_stale_reclaimed": true,
+    "external_stale_outcome_unknown": true,
+    "stale_cas_protected": true,
+    "multi_process_workers": 10,
+    "multi_process_side_effects": 1,
+    "crash_before_reclaimed": true,
+    "crash_during_transaction_partial_rows": 0,
+    "crash_during_transaction_replayed": true,
+    "crash_after_external_outcome_unknown": true,
+    "legacy_migration_outcome_unknown": true
+  }
+}

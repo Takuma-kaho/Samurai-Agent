@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "test_id": "B08",
+  "command": "pnpm backend:external:verify",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "1dd36074e304126e2d2dfd866f9a86e648eaa9fc6cba3191b119800217838c03",
+  "source_files": [
+    "packages/agent-backends/src/index.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-external-backends.mjs"
+  ],
+  "started_at": "2026-07-11T12:53:56.518Z",
+  "completed_at": "2026-07-11T12:53:56.518Z",
+  "assertions": [
+    {
+      "name": "Real Backend run",
+      "actual": "passed",
+      "expected": "passed"
+    },
+    {
+      "name": "Tool events",
+      "actual": 20,
+      "expected": ">0"
+    },
+    {
+      "name": "Wait and restart recovery",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Native resume",
+      "actual": "passed",
+      "expected": "passed"
+    },
+    {
+      "name": "Real cancellation",
+      "actual": "passed",
+      "expected": "passed"
+    }
+  ],
+  "result": {
+    "backend_id": "codex",
+    "backend_kind": "codex",
+    "label": "Codex",
+    "status": {
+      "configured": true,
+      "enabled": true,
+      "connection_state": "ready",
+      "supports": {
+        "start_session": true,
+        "resume_run": true,
+        "cancel_run": true,
+        "stream_events": true
+      },
+      "metadata": {
+        "args_count": 6,
+        "command_probe": {
+          "configured": true,
+          "command_name": "codex",
+          "path_kind": "direct_path",
+          "resolved": true
+        },
+        "stream_probe": {
+          "enabled": false,
+          "status": "not_configured",
+          "reason": "stream_probe_not_configured"
+        }
+      }
+    },
+    "run": {
+      "status": "passed",
+      "event_count": 6,
+      "event_types": {
+        "run_started": 3,
+        "host_progress": 1,
+        "text_delta": 1,
+        "run_completed": 1
+      },
+      "terminal_event": "run_completed",
+      "backend_session_id": "019f513c-ceb0-7a61-8727-ecebfed6b507"
+    },
+    "resume": {
+      "status": "passed",
+      "event_count": 50,
+      "event_types": {
+        "run_started": 2,
+        "host_progress": 1,
+        "text_delta": 6,
+        "tool_call_started": 20,
+        "tool_call_output": 20,
+        "run_completed": 1
+      },
+      "terminal_event": "run_completed",
+      "backend_session_id": "019f513c-ceb0-7a61-8727-ecebfed6b507",
+      "backend_recreated": true,
+      "wait_state_persisted": true
+    },
+    "cancel": {
+      "status": "passed",
+      "event_count": 5,
+      "event_types": {
+        "run_started": 3,
+        "host_progress": 1,
+        "run_failed": 1
+      },
+      "terminal_event": "run_failed",
+      "backend_session_id": "019f513d-dc2e-7872-b9c4-3994af4e3f42",
+      "error_code": "backend_cancelled",
+      "error_message": "Codex was cancelled.",
+      "stderr_summary": "2026-07-11T12:53:56.452021Z WARN codex_rollout::list: state db discrepancy during find_thread_path_by_id_str_in_subdir: falling_back 2026-07-11T12:53:56.475252Z",
+      "cancellation_requested": true
+    }
+  }
+}

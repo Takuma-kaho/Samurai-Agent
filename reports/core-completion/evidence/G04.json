@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "test_id": "G04",
+  "command": "pnpm core:soak",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "7f28f12fb436a3da6fe46a49e9a639c8266be9b628bca42e5658a3ea35b67a8e",
+  "source_files": [
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/core-soak.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/run-core-soak.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-12T03:49:34.494Z",
+  "completed_at": "2026-07-12T03:49:36.209Z",
+  "assertions": [
+    {
+      "name": "stuck",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "orphan",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "duplicate",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "data_loss",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "scale",
+      "actual": {
+        "objectives": 100,
+        "jobs": 1000
+      },
+      "expected": {
+        "objectives": 100,
+        "jobs": 1000
+      }
+    }
+  ],
+  "release_certification": {
+    "required_for_core": false,
+    "wall_clock_24_hours": false
+  },
+  "result": {
+    "status": "passed",
+    "mode": "accelerated",
+    "duration_hours": 0.0004413888888888889,
+    "requested_duration_hours": 0,
+    "objectives": 100,
+    "jobs": 1000,
+    "gateway_deliveries": 1000,
+    "curator_cycles": 14,
+    "restart_count": 14,
+    "injected_kills": 20,
+    "stuck": 0,
+    "orphan": 0,
+    "duplicate": 0,
+    "data_loss": 0
+  }
+}

@@ -1,0 +1,492 @@
+{
+  "schema_version": 1,
+  "generated_from": "plans/core-reference-integration-plan.md",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "counts": {
+    "core_candidates": 39,
+    "contracts": 4
+  },
+  "items": [
+    {
+      "id": "H01",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/lib/api.ts"
+      ],
+      "evidence_ids": [
+        "B01"
+      ]
+    },
+    {
+      "id": "H06",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/workspace-store/src/workspace-store.ts"
+      ],
+      "evidence_ids": [
+        "B02"
+      ]
+    },
+    {
+      "id": "H07",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "scripts/fixtures/curator-resource-graph.ts"
+      ],
+      "evidence_ids": [
+        "B03"
+      ]
+    },
+    {
+      "id": "H08",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "B04",
+        "E06"
+      ]
+    },
+    {
+      "id": "H12",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/agent-backends/src/index.ts"
+      ],
+      "evidence_ids": [
+        "X03"
+      ]
+    },
+    {
+      "id": "H13",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/action-catalog/src/index.ts"
+      ],
+      "evidence_ids": [
+        "X04"
+      ]
+    },
+    {
+      "id": "H14",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/agent-backends/src/index.ts"
+      ],
+      "evidence_ids": [
+        "X01",
+        "X02"
+      ]
+    },
+    {
+      "id": "H17",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts"
+      ],
+      "evidence_ids": [
+        "B06"
+      ]
+    },
+    {
+      "id": "H18",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/action-catalog/src/index.ts",
+        "apps/server/src/api-server.ts"
+      ],
+      "evidence_ids": [
+        "E07",
+        "E08",
+        "E09"
+      ]
+    },
+    {
+      "id": "O02",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts"
+      ],
+      "evidence_ids": [
+        "C01"
+      ]
+    },
+    {
+      "id": "O03",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts"
+      ],
+      "evidence_ids": [
+        "C02"
+      ]
+    },
+    {
+      "id": "O04",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts"
+      ],
+      "evidence_ids": [
+        "C03"
+      ]
+    },
+    {
+      "id": "O07",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts"
+      ],
+      "evidence_ids": [
+        "C04"
+      ]
+    },
+    {
+      "id": "O10",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts"
+      ],
+      "evidence_ids": [
+        "C05",
+        "C06"
+      ]
+    },
+    {
+      "id": "O12",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/action-catalog/src/index.ts"
+      ],
+      "evidence_ids": [
+        "X04"
+      ]
+    },
+    {
+      "id": "O14",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "B04",
+        "E06"
+      ]
+    },
+    {
+      "id": "O15",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/workspace-store/src/workspace-store.ts"
+      ],
+      "evidence_ids": [
+        "B05"
+      ]
+    },
+    {
+      "id": "O17",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/workspace-store/src/workspace-store.ts"
+      ],
+      "evidence_ids": [
+        "B02"
+      ]
+    },
+    {
+      "id": "O18",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/action-catalog/src/index.ts",
+        "apps/server/src/api-server.ts"
+      ],
+      "evidence_ids": [
+        "E07",
+        "E08",
+        "E09"
+      ]
+    },
+    {
+      "id": "O21",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts"
+      ],
+      "evidence_ids": [
+        "C07",
+        "C08"
+      ]
+    },
+    {
+      "id": "O28",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/workspace-store/src/workspace-store.ts",
+        "apps/server/src/api-server.ts"
+      ],
+      "evidence_ids": [
+        "G05"
+      ]
+    },
+    {
+      "id": "M01",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "apps/web/src/AppWorkspace.vue",
+        "packages/ui-protocol/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D01"
+      ]
+    },
+    {
+      "id": "M02",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/artifacts/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D02"
+      ]
+    },
+    {
+      "id": "M03",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/artifacts/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D03"
+      ]
+    },
+    {
+      "id": "M04",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/artifacts/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D06"
+      ]
+    },
+    {
+      "id": "M05",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/ui-protocol/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D04"
+      ]
+    },
+    {
+      "id": "M06",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/artifacts/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D07",
+        "D08"
+      ]
+    },
+    {
+      "id": "M07",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/core-schemas/src/index.ts",
+        "packages/ui-protocol/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D09"
+      ]
+    },
+    {
+      "id": "M11",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "B04",
+        "E06"
+      ]
+    },
+    {
+      "id": "M12",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/ui-protocol/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D05"
+      ]
+    },
+    {
+      "id": "M13",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "E02",
+        "E03",
+        "E04"
+      ]
+    },
+    {
+      "id": "M14",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "E02",
+        "E03",
+        "E04"
+      ]
+    },
+    {
+      "id": "M15",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "E02",
+        "E03",
+        "E04"
+      ]
+    },
+    {
+      "id": "M18",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts"
+      ],
+      "evidence_ids": [
+        "E01"
+      ]
+    },
+    {
+      "id": "M19",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "E05"
+      ]
+    },
+    {
+      "id": "M21",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/artifacts/src/index.ts"
+      ],
+      "evidence_ids": [
+        "D10"
+      ]
+    },
+    {
+      "id": "M22",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/action-catalog/src/index.ts",
+        "apps/server/src/api-server.ts"
+      ],
+      "evidence_ids": [
+        "E07",
+        "E08",
+        "E09"
+      ]
+    },
+    {
+      "id": "M23",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/action-catalog/src/index.ts",
+        "apps/server/src/api-server.ts"
+      ],
+      "evidence_ids": [
+        "E07",
+        "E08",
+        "E09"
+      ]
+    },
+    {
+      "id": "M27",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/workspace-store/src/workspace-store.ts"
+      ],
+      "evidence_ids": [
+        "G01",
+        "G05"
+      ]
+    },
+    {
+      "id": "M28",
+      "classification": "verified_existing",
+      "implementation_paths": [
+        "packages/workspace-store/src/workspace-store.ts",
+        "apps/server/src/api-server.ts"
+      ],
+      "evidence_ids": [
+        "G05"
+      ]
+    },
+    {
+      "id": "M29",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "E02",
+        "E03",
+        "E04"
+      ]
+    },
+    {
+      "id": "M30",
+      "classification": "implemented",
+      "implementation_paths": [
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "E05"
+      ]
+    },
+    {
+      "id": "M31",
+      "classification": "implemented",
+      "implementation_paths": [
+        "packages/runtime/src/agent-runtime.ts",
+        "apps/web/src/components/ManagementSurfaces.vue"
+      ],
+      "evidence_ids": [
+        "B04",
+        "E06"
+      ]
+    }
+  ]
+}

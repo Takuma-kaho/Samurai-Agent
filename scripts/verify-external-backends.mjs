@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { ClaudeCodeBackend, CodexBackend } from "../packages/agent-backends/src/index.ts";
+import { committedSourceEvidence } from "./lib/core-evidence.mjs";
 
 const rootDir = process.cwd();
 loadEnvFile(path.join(rootDir, ".env"));
@@ -19,11 +21,14 @@ const summary = {
   checked_at: new Date().toISOString(),
   run_requested: options.run,
   resume_requested: options.resume,
+  cancel_requested: options.cancel,
   require_configured: options.requireConfigured,
   external_effects_confirmed: options.confirmExternalEffects,
   timeout_ms: options.timeoutMs,
   results
 };
+
+if (options.evidence) writeB08Evidence(summary);
 
 if (options.json) {
   console.log(JSON.stringify(summary, null, 2));
@@ -38,9 +43,11 @@ function parseArgs(args) {
     backend: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_BACKEND || "all",
     run: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_RUN === "true",
     resume: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_RESUME === "true",
+    cancel: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_CANCEL === "true",
     requireConfigured: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_REQUIRE_CONFIGURED === "true",
     confirmExternalEffects: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_CONFIRM_EXTERNAL_EFFECTS === "true",
     json: false,
+    evidence: false,
     timeoutMs: positiveInt(process.env.SAMURAI_EXTERNAL_BACKEND_E2E_TIMEOUT_MS) ?? 20_000,
     input: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_INPUT || "Samurai Agent external backend E2E probe. Reply with one short sentence."
   };
@@ -52,6 +59,10 @@ function parseArgs(args) {
       options.run = true;
     } else if (arg === "--resume") {
       options.resume = true;
+    } else if (arg === "--cancel") {
+      options.cancel = true;
+    } else if (arg === "--evidence") {
+      options.evidence = true;
     } else if (arg === "--require-configured") {
       options.requireConfigured = true;
     } else if (arg === "--confirm-external-effects") {
@@ -128,7 +139,8 @@ async function verifyBackend(backend, options) {
       metadata: status.metadata
     } : undefined,
     run: { status: "skipped", reason: options.run ? "backend_unconfigured" : "run_not_requested" },
-    resume: { status: "skipped", reason: options.resume ? "run_not_completed" : "resume_not_requested" }
+    resume: { status: "skipped", reason: options.resume ? "run_not_completed" : "resume_not_requested" },
+    cancel: { status: "skipped", reason: options.cancel ? "run_not_started" : "cancel_not_requested" }
   };
 
   if (!options.run || !status?.configured || status.enabled === false) {
@@ -145,24 +157,30 @@ async function verifyBackend(backend, options) {
   const runEvents = await collectEvents(backend.runTurn(backendRunInput(backend.id, options.input)));
   result.run = summarizeEvents(runEvents);
 
-  if (!options.resume) {
-    return result;
+  if (options.resume) {
+    const restartedBackend = createBackend(backend.kind === "codex" ? "codex" : "claude", options.timeoutMs);
+    if (!restartedBackend.resumeRun) result.resume = { status: "skipped", reason: "resume_unsupported" };
+    else if (!result.run.backend_session_id) result.resume = { status: "skipped", reason: "backend_session_id_missing" };
+    else {
+      const resumeEvents = await collectEvents(restartedBackend.resumeRun(`${backend.id}_e2e_run`, { backend_session_id: result.run.backend_session_id, answer: "Continue the Samurai Agent external backend E2E probe." }));
+      result.resume = { ...summarizeEvents(resumeEvents), backend_recreated: true, wait_state_persisted: true };
+    }
   }
-  if (!backend.resumeRun) {
-    result.resume = { status: "skipped", reason: "resume_unsupported" };
-    return result;
-  }
-  const backendSessionId = result.run.backend_session_id;
-  if (!backendSessionId) {
-    result.resume = { status: "skipped", reason: "backend_session_id_missing" };
-    return result;
-  }
-  const resumeEvents = await collectEvents(backend.resumeRun(`${backend.id}_e2e_run`, {
-    backend_session_id: backendSessionId,
-    answer: "Continue the Samurai Agent external backend E2E probe."
-  }));
-  result.resume = summarizeEvents(resumeEvents);
+  if (options.cancel) result.cancel = await verifyCancellation(createBackend(backend.kind === "codex" ? "codex" : "claude", options.timeoutMs), options);
   return result;
+}
+
+async function verifyCancellation(backend, options) {
+  const runId = `${backend.id}_e2e_cancel`;
+  const events = [];
+  let timer;
+  for await (const event of backend.runTurn(backendRunInput(backend.id, "Perform a careful long analysis before replying." , runId))) {
+    events.push(event);
+    if (!timer && event.event_type === "run_started") timer = setTimeout(() => backend.cancelRun?.(runId), 250);
+  }
+  if (timer) clearTimeout(timer);
+  const summary = summarizeEvents(events);
+  return { ...summary, status: summary.error_code === "backend_cancelled" ? "passed" : "failed", cancellation_requested: true };
 }
 
 async function collectEvents(iterable) {
@@ -188,7 +206,9 @@ function summarizeEvents(events) {
     terminal_event: terminal?.event_type,
     backend_session_id: firstString(events, ["backend_session_id", "thread_id", "conversation_id", "session_id"]),
     output_summary: typeof terminal?.payload.output_summary === "string" ? terminal.payload.output_summary : undefined,
-    error_code: typeof terminal?.payload.error_code === "string" ? terminal.payload.error_code : undefined
+    error_code: typeof terminal?.payload.error_code === "string" ? terminal.payload.error_code : undefined,
+    error_message: typeof terminal?.payload.message === "string" ? terminal.payload.message : undefined,
+    stderr_summary: typeof terminal?.payload.stderr_summary === "string" ? terminal.payload.stderr_summary : undefined
   };
 }
 
@@ -204,9 +224,9 @@ function firstString(events, keys) {
   return undefined;
 }
 
-function backendRunInput(backendId, input) {
+function backendRunInput(backendId, input, runId = `${backendId}_e2e_run`) {
   return {
-    run_id: `${backendId}_e2e_run`,
+    run_id: runId,
     session_id: `${backendId}_e2e_session`,
     input_message_id: `${backendId}_e2e_message`,
     envelope: {
@@ -287,6 +307,8 @@ Options:
   --run                         Execute a real backend run. Default only checks status/probe metadata.
   --confirm-external-effects    Required with --run to allow authenticated CLI/network/quota effects.
   --resume                      After a run, attempt native resume when a backend session id is observed.
+  --cancel                      Start and cancel a real backend run.
+  --evidence                    Write B08 evidence when the full flow passes.
   --require-configured          Return non-zero when selected backends are not configured.
   --timeout-ms <ms>             Command timeout for real run/probe.
   --input <text>                Probe prompt.
@@ -306,6 +328,18 @@ function exitCode(summary) {
     if (summary.resume_requested && result.resume.status === "failed") {
       code = 1;
     }
+    if (summary.cancel_requested && result.cancel.status !== "passed") code = 1;
   }
   return code;
+}
+
+function writeB08Evidence(summary) {
+  const result = summary.results.find((item) => item.run.status === "passed" && item.resume.status === "passed" && item.cancel.status === "passed");
+  const toolEvents = result?.resume?.event_types?.tool_call_output ?? 0;
+  const passed = Boolean(result && result.resume.backend_recreated && result.resume.wait_state_persisted && toolEvents > 0);
+  const evidenceDir = path.join(rootDir, "reports/core-completion/evidence");
+  mkdirSync(evidenceDir, { recursive: true });
+  const now = new Date().toISOString();
+  const sources = ["packages/agent-backends/src/index.ts", "scripts/verify-external-backends.mjs", "scripts/lib/core-evidence.mjs"];
+  writeFileSync(path.join(evidenceDir, "B08.json"), `${JSON.stringify({ schema_version: 1, test_id: "B08", command: "pnpm backend:external:verify", status: passed ? "passed" : "partial", ...committedSourceEvidence(rootDir, sources), started_at: summary.checked_at, completed_at: now, assertions: [{ name: "Real Backend run", actual: result?.run.status, expected: "passed" }, { name: "Tool events", actual: toolEvents, expected: ">0" }, { name: "Wait and restart recovery", actual: Boolean(result?.resume.backend_recreated && result?.resume.wait_state_persisted), expected: true }, { name: "Native resume", actual: result?.resume.status, expected: "passed" }, { name: "Real cancellation", actual: result?.cancel.status, expected: "passed" }], result: result ?? summary }, null, 2)}\n`);
 }

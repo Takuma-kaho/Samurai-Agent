@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "test_id": "G04",
+  "status": "passed",
+  "command": "node scripts/verify-core-additions-tests.mjs",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "source_sha256": "dfe8ab62a58e93f223b70f1b74cf892226533d2b7b0d113fecb48cc8bc4e3438",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/agent-backends/src/index.ts",
+    "packages/action-catalog/src/index.ts",
+    "packages/capability-registry/src/index.ts",
+    "packages/ui-protocol/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "scripts/verify-core-additions-tests.mjs"
+  ],
+  "assertions": [
+    {
+      "name": "Affected Core packages typecheck",
+      "actual": 7,
+      "expected": 7
+    },
+    {
+      "name": "Targeted integration checks",
+      "actual": 3,
+      "expected": 3
+    }
+  ],
+  "result": {
+    "checks": 10
+  }
+}

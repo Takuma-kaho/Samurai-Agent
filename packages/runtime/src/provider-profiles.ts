@@ -2,6 +2,7 @@ import type { SupportedLocale } from "@samurai-agent/core-schemas";
 import type { MemoryCandidate } from "@samurai-agent/memory";
 import type { MessageRecord } from "@samurai-agent/core-schemas";
 import type { ProviderDiagnostics, ProviderId, ProviderInput, ProviderOutput, ProviderToolCall } from "./provider";
+import { requireDomainCommandEntry } from "@samurai-agent/action-catalog";
 
 export interface ProviderCredential {
   apiKey: string;
@@ -173,7 +174,6 @@ function stablePrompt(locale: SupportedLocale): string {
     "Use tools only for state-changing or boundary-crossing intents.",
     "Use create_artifact only when the user asks to create a durable local artifact or draft.",
     "Use request_external_send when the user asks to send, publish, post, or otherwise affect an external channel.",
-    "Use request_delete when the user asks to delete or remove a workspace resource.",
     "Use remember_topic only when the user explicitly asks you to remember a preference or reusable fact.",
     "You must not claim that external sends, publishing, deletion, or destructive actions were executed.",
     "You do not decide risk, scope, reversibility, approval level, or operation names.",
@@ -448,42 +448,9 @@ function gatewayBoundarySummary(input: ProviderInput): string {
   ].join("\n");
 }
 
-const artifactParameters = {
-  type: "object",
-  additionalProperties: false,
-  required: ["title", "content"],
-  properties: {
-    title: { type: "string" },
-    content: { type: "string" },
-    preview: { type: "string" }
-  }
-} as const;
-
-const externalSendParameters = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    summary: { type: "string" }
-  }
-} as const;
-
-const deleteParameters = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    target: { type: "string" },
-    reason: { type: "string" }
-  }
-} as const;
-
-const rememberTopicParameters = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    topic: { type: "string" },
-    content: { type: "string" }
-  }
-} as const;
+const artifactParameters = requireDomainCommandEntry("artifact.create").input_schema;
+const externalSendParameters = requireDomainCommandEntry("external.send.prepare").input_schema;
+const rememberTopicParameters = requireDomainCommandEntry("memory.topic.create").input_schema;
 
 function toolDefinitions() {
   return [
@@ -496,11 +463,6 @@ function toolDefinitions() {
       name: "request_external_send",
       description: "Request an approval-gated external send, publish, post, or mail operation.",
       parameters: externalSendParameters
-    },
-    {
-      name: "request_delete",
-      description: "Request an approval-gated workspace delete operation.",
-      parameters: deleteParameters
     },
     {
       name: "remember_topic",
@@ -662,9 +624,6 @@ function normalizeLegacyProviderOutput(value: Record<string, unknown>): Provider
   }
   if (value.outboundIntent === true) {
     toolCalls.push({ name: "request_external_send", arguments: {} });
-  }
-  if (value.deleteIntent === true) {
-    toolCalls.push({ name: "request_delete", arguments: {} });
   }
   return { content, toolCalls };
 }

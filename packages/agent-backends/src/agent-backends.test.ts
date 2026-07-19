@@ -111,6 +111,52 @@ describe("agent backend registry", () => {
     });
   });
 
+  it("keeps task capabilities unverified until diagnostics supplies evidence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-capability-probe-"));
+    roots.push(root);
+    const executable = path.join(root, "backend-capability");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(executable, 0o755);
+
+    const unverified = new ExternalCliBackend({
+      id: "capability-unverified",
+      kind: "external",
+      label: "Capability Unverified",
+      command: executable
+    }).getStatus();
+    const verified = new ExternalCliBackend({
+      id: "capability-verified",
+      kind: "codex",
+      label: "Capability Verified",
+      command: executable,
+      capabilityProbeResults: [{
+        capability_id: "web_search",
+        state: "available",
+        source: "backend_native",
+        mode: "live",
+        probe_version: "fixture-v1",
+        evidence_summary: "Fixture emitted a normalized search source event."
+      }]
+    }).getStatus();
+
+    expect(unverified.capabilities).toContainEqual(expect.objectContaining({
+      capability_id: "web_search",
+      state: "unverified",
+      reason: "capability_not_probed"
+    }));
+    expect(verified.capabilities).toContainEqual(expect.objectContaining({
+      backend_id: "capability-verified",
+      capability_id: "web_search",
+      state: "available",
+      mode: "live",
+      probe_version: "fixture-v1"
+    }));
+    expect(verified.capabilities).toContainEqual(expect.objectContaining({
+      capability_id: "browser_screenshot",
+      state: "unverified"
+    }));
+  });
+
   it("runs external CLI turns from the requested working directory", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cwd-"));
     roots.push(root);
@@ -377,6 +423,24 @@ describe("agent backend registry", () => {
         output_summary: "done"
       }
     });
+  });
+
+  it("normalizes delegated search and subagent tool metadata", () => {
+    const claude = parseCliOutputEvents(JSON.stringify({
+      type: "assistant",
+      message: { content: [
+        { type: "tool_use", id: "search_1", name: "WebSearch", input: { query: "Samurai", source: "https://example.test/source" } },
+        { type: "tool_use", id: "agent_1", name: "Agent", input: { description: "Inspect tests" } }
+      ] }
+    }));
+    const codex = parseCliOutputEvents(JSON.stringify({
+      type: "item.completed",
+      item: { type: "web_search", id: "search_2", mode: "live", sources: [{ url: "https://example.test/result" }] }
+    }));
+
+    expect(claude[0]).toMatchObject({ event_type: "tool_call_started", payload: { capability_id: "web_search", source_urls: ["https://example.test/source"] } });
+    expect(claude[1]).toMatchObject({ event_type: "tool_call_started", payload: { capability_id: "subagent_delegate", child_task_summary: "Inspect tests", parent_relation: "backend_internal" } });
+    expect(codex[0]).toMatchObject({ event_type: "tool_call_output", payload: { capability_id: "web_search", search_mode: "live", source_urls: ["https://example.test/result"] } });
   });
 
   it("runs configured Claude-style native resume commands with backend session ids", async () => {

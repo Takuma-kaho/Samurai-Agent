@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "test_id": "E01",
+  "command": "pnpm core:test:user-model",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "a6fed3dbab7da836829e8d0a806b81fdd87abb8667baacb39d0d178d37ae2231",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/context/user-model.ts",
+    "scripts/fixtures/user-model.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-user-model.mjs"
+  ],
+  "started_at": "2026-07-11T09:10:54.538Z",
+  "completed_at": "2026-07-11T09:10:54.637Z",
+  "assertions": [
+    {
+      "name": "Fact count and prompt size are bounded",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Every fact preserves source references",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Same-key update replaces and versions",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Fact deletion works",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Long raw history is not injected",
+      "actual": false,
+      "expected": false
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "fact_count": 49,
+    "max_facts": 50,
+    "prompt_chars": 3159,
+    "prompt_max_chars": 4000,
+    "all_source_backed": true,
+    "update_replaced_key": true,
+    "deletion_applied": true,
+    "raw_history_injected": false
+  }
+}

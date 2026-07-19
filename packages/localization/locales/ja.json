@@ -121,7 +121,7 @@
   "settings.language": "Language",
   "settings.capture.manual": "手動",
   "settings.capture.off": "停止",
-  "settings.capture.suggest": "提案",
+  "settings.capture.auto": "自動",
   "settings.external_provider.assistive": "補助",
   "settings.external_provider.disabled": "無効",
   "settings.external_provider_policy": "外部Memory補助",

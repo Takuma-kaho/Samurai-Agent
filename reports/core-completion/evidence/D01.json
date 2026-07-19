@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "test_id": "D01",
+  "command": "pnpm core:test:presentation",
+  "status": "passed",
+  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "worktree_clean": true,
+  "source_sha256": "9b64a17605a9f268c7f7cd47833fc4124d3d1c7e40c387fe81ef471684bde7a0",
+  "source_files": [
+    "packages/runtime/src/presentation/planner.ts",
+    "scripts/fixtures/presentation-planner.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-presentation-planner.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-13T08:14:11.553Z",
+  "completed_at": "2026-07-13T08:14:11.582Z",
+  "assertions": [
+    {
+      "name": "Fixed benchmark prompt count",
+      "actual": 100,
+      "expected": 100
+    },
+    {
+      "name": "Fixed benchmark macro F1",
+      "actual": 1,
+      "expected": ">=0.90"
+    },
+    {
+      "name": "All five presentation modes covered",
+      "actual": 5,
+      "expected": 5
+    },
+    {
+      "name": "Unnecessary UI rate",
+      "actual": 0,
+      "expected": 0
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "cases": 100,
+    "correct": 100,
+    "accuracy": 1,
+    "macro_f1": 1,
+    "unnecessary_ui": 0,
+    "unnecessary_ui_rate": 0,
+    "modes": [
+      "artifact",
+      "built_in_surface",
+      "generated_surface",
+      "none",
+      "text"
+    ]
+  }
+}

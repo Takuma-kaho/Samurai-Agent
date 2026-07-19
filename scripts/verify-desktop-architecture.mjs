@@ -228,7 +228,7 @@ function checkDesktopResidentBehavior() {
 function checkClientEventQueue() {
   const schema = read("packages/core-schemas/src/index.ts");
   const store = read("packages/workspace-store/src/index.ts");
-  const server = read("apps/server/src/index.ts");
+  const server = read("apps/server/src/api-server.ts");
   const desktop = read("apps/desktop/src/main.ts");
   const schemaTest = read("packages/core-schemas/src/core-schemas.test.ts");
   const storeTest = read("packages/workspace-store/src/workspace-store.test.ts");
@@ -259,7 +259,7 @@ function checkClientEventQueue() {
 }
 
 function checkOsNotificationHandling() {
-  const server = read("apps/server/src/index.ts");
+  const server = read("apps/server/src/api-server.ts");
   const desktop = read("apps/desktop/src/main.ts");
   const required = [
     [server, "client.notification.requested"],
@@ -282,7 +282,7 @@ function checkGatewayExternalClientBoundary() {
   const schema = read("packages/core-schemas/src/index.ts");
   const gateway = read("packages/gateway/src/index.ts");
   const runtime = read("packages/runtime/src/index.ts");
-  const server = read("apps/server/src/index.ts");
+  const server = read("apps/server/src/api-server.ts");
   const serverTest = read("apps/server/src/index.test.ts");
   const gatewayServerRegion = regionBetween(
     server,
@@ -333,7 +333,7 @@ function checkGatewayExternalClientBoundary() {
 }
 
 function checkAppShotTemporaryContext() {
-  const server = read("apps/server/src/index.ts");
+  const server = read("apps/server/src/api-server.ts");
   const desktop = read("apps/desktop/src/main.ts");
   const runtime = read("packages/runtime/src/index.ts");
   const provider = read("packages/runtime/src/provider-profiles.ts");
@@ -365,7 +365,7 @@ function checkAppShotTemporaryContext() {
 
 function checkDeepLinkHandling() {
   const desktop = read("apps/desktop/src/main.ts");
-  const server = read("apps/server/src/index.ts");
+  const server = read("apps/server/src/api-server.ts");
   const required = [
     [desktop, "parseDeepLink"],
     [desktop, "pendingDeepLink = undefined"],

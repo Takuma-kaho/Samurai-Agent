@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "test_id": "D02",
+  "command": "pnpm core:test:generated-surface",
+  "status": "passed",
+  "commit_sha": "6682f514733b19b8b23f70654271e693bad532b5",
+  "worktree_clean": false,
+  "source_sha256": "cbe6bb068f102c74f8117f5748f0cc5d25884d2863a049db9062c555cf6722a6",
+  "source_files": [
+    "packages/action-catalog/src/index.ts",
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/presentation/generated-surface.ts",
+    "scripts/fixtures/generated-surface-validation.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-generated-surface-validation.mjs"
+  ],
+  "source_read_errors": [],
+  "started_at": "2026-07-17T14:54:45.101Z",
+  "completed_at": "2026-07-17T14:54:45.544Z",
+  "assertions": [
+    {
+      "name": "Valid HTML/CSS/script/action bundle",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Fixed generated task benchmark",
+      "actual": {
+        "tasks": 30,
+        "success_rate": 1
+      },
+      "expected": {
+        "tasks": 30,
+        "success_rate": ">=0.90"
+      }
+    },
+    {
+      "name": "Schema and action validation rate",
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "name": "CSP denies network and parent authority",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Capability and malformed matrix",
+      "actual": 7,
+      "expected": 7
+    },
+    {
+      "name": "Fallback chain",
+      "actual": [
+        "built_in_surface",
+        "artifact",
+        "text"
+      ],
+      "expected": [
+        "built_in_surface",
+        "artifact",
+        "text"
+      ]
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "benchmark_tasks": 30,
+    "generated_tasks": 30,
+    "generation_success_rate": 1,
+    "schema_action_validation_rate": 1,
+    "valid_bundle": true,
+    "csp": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "invalid_cases": [
+      "surface_html_forbidden_element",
+      "surface_html_inline_handler",
+      "surface_external_url",
+      "surface_script_forbidden_capability",
+      "surface_html_too_large",
+      "surface_action_not_allowed",
+      "surface_action_duplicate"
+    ],
+    "malformed_fallback": true,
+    "fallback_chain": [
+      "built_in_surface",
+      "artifact",
+      "text"
+    ],
+    "revision_hash": "d48fd7f6f293c53de0d872578ba5a8fc47c9035a6eb23afde1f1e5b47455178a"
+  }
+}

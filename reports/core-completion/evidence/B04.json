@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "test_id": "B04",
+  "command": "pnpm core:test:durable-work",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "9d4d74d88ca2f12a0f3ba19dfbcc52cf4c78c27f8f598e87157ccfd9d1eb0a5c",
+  "source_files": [
+    "packages/core-schemas/src/index.ts",
+    "packages/runtime/src/commands/domain-command-bus.ts",
+    "packages/workspace-store/src/index.ts",
+    "scripts/fixtures/durable-work-execution.ts",
+    "scripts/fixtures/durable-work-kill-worker.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-durable-work-execution.mjs"
+  ],
+  "started_at": "2026-07-11T12:27:40.063Z",
+  "completed_at": "2026-07-11T12:27:40.279Z",
+  "assertions": [
+    {
+      "name": "Retry increments attempt",
+      "actual": 2,
+      "expected": 2
+    },
+    {
+      "name": "Non-retryable failure is terminal",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Attempt budget exhaustion is terminal",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "parallel_claims": 100,
+    "claim_winners": 1,
+    "claim_side_effects": 1,
+    "dependency_blocked": true,
+    "heartbeat_owner_enforced": true,
+    "restart_checkpoint_recovered": true,
+    "restart_completion_criteria_recovered": true,
+    "checkpoint_idempotent": true,
+    "side_effect_replay_count": 1,
+    "stale_lease_reconciled": true,
+    "retry_attempt": 2,
+    "non_retryable_terminal": true,
+    "attempt_budget_terminal": true,
+    "objective_requires_explicit_completion": true,
+    "actual_process_killed": true,
+    "kill_checkpoint_recovered": true,
+    "kill_lease_reconciled": true,
+    "post_kill_completed": true
+  }
+}

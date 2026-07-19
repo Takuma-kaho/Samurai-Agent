@@ -1,0 +1,17 @@
+await import("./task-evaluation");
+await import("./curator-resource-graph");
+await import("./automation-worker-race");
+await import("./automation-schedule");
+await import("./learning-guardrails");
+await import("./privacy-redaction");
+await import("./gateway-delivery-restart");
+await import("./signed-gateway-sandbox-flow");
+await import("./presentation-planner");
+await import("./generated-surface-lifecycle");
+await import("./attachment-ingestion");
+await import("./plugin-isolation");
+await import("./correlation-trace");
+await import("./workspace-doctor");
+await import("./domain-command-parity");
+await import("./gateway-delivery-payload");
+await import("./backend-selection-consistency");

@@ -2,19 +2,20 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { AgentRuntime } from "../packages/runtime/src/index.ts";
 import { WorkspaceStore } from "../packages/workspace-store/src/index.ts";
 
-const options = parseArgs(process.argv.slice(2));
-const summary = await verifyGatewayRecovery(options);
-
-if (options.json) {
-  console.log(JSON.stringify(summary, null, 2));
-} else {
-  printSummary(summary);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const options = parseArgs(process.argv.slice(2));
+  const summary = await verifyGatewayRecovery(options);
+  if (options.json) {
+    console.log(JSON.stringify(summary, null, 2));
+  } else {
+    printSummary(summary);
+  }
+  process.exitCode = summary.ok ? 0 : 1;
 }
-
-process.exitCode = summary.ok ? 0 : 1;
 
 function parseArgs(args) {
   const options = {
@@ -47,7 +48,13 @@ function parseArgs(args) {
   return options;
 }
 
-async function verifyGatewayRecovery(options) {
+export async function verifyGatewayRecovery(options = {}) {
+  const normalizedOptions = {
+    json: options.json ?? false,
+    dryRunOnly: options.dryRunOnly ?? false,
+    keepWorkspace: options.keepWorkspace ?? false,
+    expiredAgeMs: options.expiredAgeMs ?? 60_000
+  };
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-gateway-recovery-"));
   let store;
   let closed = false;
@@ -55,7 +62,7 @@ async function verifyGatewayRecovery(options) {
     store = await WorkspaceStore.create({ rootDir: workspaceRoot });
     const runtime = new AgentRuntime(store);
     const checkedAt = new Date().toISOString();
-    const expiredAt = new Date(Date.parse(checkedAt) - options.expiredAgeMs).toISOString();
+    const expiredAt = new Date(Date.parse(checkedAt) - normalizedOptions.expiredAgeMs).toISOString();
     const sourceIdentity = "gateway-recovery-probe";
     const lockKey = `webhook:${sourceIdentity}:main`;
 
@@ -90,7 +97,7 @@ async function verifyGatewayRecovery(options) {
     const preview = await runtime.repairGatewayState({ dryRun: true, now: checkedAt });
     const previewPairing = await store.getGatewayPairing(blocked.pairing.id);
     const previewLock = await store.getGatewayConcurrencyLock(lockKey);
-    const applied = options.dryRunOnly
+    const applied = normalizedOptions.dryRunOnly
       ? undefined
       : await runtime.repairGatewayState({ dryRun: false, now: checkedAt });
     const finalPairing = await store.getGatewayPairing(blocked.pairing.id);
@@ -107,9 +114,9 @@ async function verifyGatewayRecovery(options) {
       dry_run_planned_expire_concurrency_lock: previewActions.expire_concurrency_lock.planned === 1,
       dry_run_preserved_pairing: previewPairing?.status === "pending",
       dry_run_preserved_lock: previewLock?.status === "acquired",
-      apply_expired_pairing: options.dryRunOnly || finalPairing?.status === "expired",
-      apply_expired_lock: options.dryRunOnly || finalLock?.status === "expired",
-      apply_count: options.dryRunOnly || applied?.applied_count === 2,
+      apply_expired_pairing: normalizedOptions.dryRunOnly || finalPairing?.status === "expired",
+      apply_expired_lock: normalizedOptions.dryRunOnly || finalLock?.status === "expired",
+      apply_count: normalizedOptions.dryRunOnly || applied?.applied_count === 2,
       external_effects_confirmed: false
     };
 
@@ -118,10 +125,10 @@ async function verifyGatewayRecovery(options) {
       ok: Object.values(checks).every((value) => value === true || value === false) && Object.entries(checks)
         .filter(([key]) => key !== "external_effects_confirmed")
         .every(([, value]) => value === true),
-      dry_run_only: options.dryRunOnly,
+      dry_run_only: normalizedOptions.dryRunOnly,
       external_effects_confirmed: false,
       temporary_workspace: true,
-      workspace_root: options.keepWorkspace ? workspaceRoot : undefined,
+      workspace_root: normalizedOptions.keepWorkspace ? workspaceRoot : undefined,
       probe: {
         channel: "webhook",
         source_identity: sourceIdentity,
@@ -151,7 +158,7 @@ async function verifyGatewayRecovery(options) {
     if (store && !closed) {
       await store.close().catch(() => undefined);
     }
-    if (!options.keepWorkspace) {
+    if (!normalizedOptions.keepWorkspace) {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
   }

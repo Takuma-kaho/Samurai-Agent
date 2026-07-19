@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "test_id": "E10",
+  "command": "pnpm core:test:learning-guardrails",
+  "status": "passed",
+  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "worktree_clean": false,
+  "source_sha256": "128ddc2621ac407d7b442f1e465f8db4f935d54b2b4b99aa090f1558bb08e0de",
+  "source_files": [
+    "packages/learning/src/guardrail-evaluation.ts",
+    "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "scripts/fixtures/learning-guardrails.ts",
+    "scripts/lib/core-evidence.mjs",
+    "scripts/verify-learning-guardrails.mjs"
+  ],
+  "started_at": "2026-07-11T13:20:42.492Z",
+  "completed_at": "2026-07-11T13:20:42.574Z",
+  "assertions": [
+    {
+      "name": "Same-fingerprint work quality and Generated Surface outcome improve",
+      "actual": {
+        "quality_delta": 12,
+        "ui_success_delta": 0.25
+      },
+      "expected": {
+        "quality_delta": ">=5",
+        "ui_success_delta": ">=0.1"
+      }
+    },
+    {
+      "name": "Safety, correction, misapplication, cost and latency guardrails all pass",
+      "actual": {
+        "safety": true,
+        "correction": true,
+        "misapplication": true,
+        "cost": true,
+        "latency": true
+      },
+      "expected": {
+        "safety": true,
+        "correction": true,
+        "misapplication": true,
+        "cost": true,
+        "latency": true
+      }
+    },
+    {
+      "name": "Unsafe, expensive and incompatible candidates are rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Insufficient samples hold and successful Evaluation persists",
+      "actual": true,
+      "expected": true
+    }
+  ],
+  "result": {
+    "status": "passed",
+    "samples": 30,
+    "decision": "promote",
+    "quality_delta": 12,
+    "ui_success_delta": 0.25,
+    "guardrails": {
+      "safety": {
+        "baseline": 0,
+        "candidate": 0,
+        "passed": true
+      },
+      "correction": {
+        "baseline": 0.2000000000000001,
+        "candidate": 0.10000000000000005,
+        "passed": true
+      },
+      "misapplication": {
+        "baseline": 0.050000000000000024,
+        "candidate": 0.03000000000000002,
+        "passed": true
+      },
+      "cost": {
+        "baseline": 1,
+        "candidate": 1.1000000000000005,
+        "passed": true
+      },
+      "latency": {
+        "baseline": 1000,
+        "candidate": 1050,
+        "passed": true
+      }
+    },
+    "unsafe_rejected": true,
+    "cost_regression_rejected": true,
+    "incompatible_rejected": true,
+    "insufficient_held": true,
+    "evaluation_persisted": true
+  }
+}
