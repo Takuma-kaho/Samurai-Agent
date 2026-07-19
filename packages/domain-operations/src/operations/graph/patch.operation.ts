@@ -75,7 +75,7 @@ const graphPatch = defineCommand<GraphPatchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGraphPatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleGraphPatch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const artifact = await ports.getArtifact(input.artifact_id);
         if (!artifact || artifact.kind !== "graph") throw ports.graphArtifactNotFoundError();
         const content = await ports.readArtifactContent(input.artifact_id);
@@ -85,7 +85,7 @@ const graphPatch = defineCommand<GraphPatchPorts>()({
         const session = await ports.ensureArtifactSession();
         const envelope = ports.createArtifactEnvelope(session, `Edit graph: ${artifact.title}`);
         const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async (operation) => {
-          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: `${JSON.stringify(next, null, 2)}\n`, extension: "json", baseRevisionId: input.base_revision_id ?? currentRevisionId(artifact), editorSource: input.editor_source ?? editorSourceFor(context.inputSource), changeSummary: input.change_summary ?? "Updated graph nodes and edges.", provenance: input.provenance });
+          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: `${JSON.stringify(next, null, 2)}\n`, extension: "json", baseRevisionId: input.base_revision_id ?? currentRevisionId(artifact), editorSource: input.editor_source ?? "system", changeSummary: input.change_summary ?? "Updated graph nodes and edges.", provenance: input.provenance });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonRecord(artifact) }, { artifact: jsonRecord(created.artifact) });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Updated graph ${artifact.title}.`, extra: { revision: created.revision } };
         }});
@@ -112,5 +112,4 @@ function applyPatch(current: GraphDocument, patch: GraphPatchInput, ports: Pick<
   } catch { throw ports.graphDocumentInvalidError(); }
 }
 function currentRevisionId(artifact: ArtifactRecord): string | undefined { return typeof artifact.metadata.current_revision_id === "string" ? artifact.metadata.current_revision_id : undefined; }
-function editorSourceFor(source: TrustedDomainContext["inputSource"]): "surface" | "provider" | "system" { if (source === "surface_operation" || source === "generated_surface") return "surface"; return source === "provider_tool_call" ? "provider" : "system"; }
 function jsonRecord(artifact: ArtifactRecord): Record<string, JsonValue> { return JSON.parse(JSON.stringify(artifact)) as Record<string, JsonValue>; }

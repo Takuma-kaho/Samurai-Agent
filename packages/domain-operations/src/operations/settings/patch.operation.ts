@@ -14,15 +14,24 @@ const Input = z.object({
 }).strict();
 const Output = settingsValueSchema;
 
+export interface SettingsPatchRequest {
+  externalProviderRole?: z.infer<typeof Input>["external_provider_role"];
+  knowledgeWikiCaptureMode?: z.infer<typeof Input>["knowledge_wiki_capture_mode"];
+  memoryCaptureMode?: z.infer<typeof Input>["memory_capture_mode"];
+  outputLocale?: z.infer<typeof Input>["output_locale"];
+  skillCaptureMode?: z.infer<typeof Input>["skill_capture_mode"];
+  uiLocale?: z.infer<typeof Input>["ui_locale"];
+}
+
 export interface SettingsPatchPorts {
-  patchSettings(patch: Partial<SettingsRecord>): Promise<SettingsRecord>;
+  applySettingsPatch(input: SettingsPatchRequest): Promise<SettingsRecord>;
 }
 
 const settingsPatch = defineCommand<SettingsPatchPorts>()({
   ...{
   "kind": "command",
   "id": "settings.patch",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Update settings",
   "description": "Update validated owner Workspace settings.",
@@ -58,8 +67,16 @@ const settingsPatch = defineCommand<SettingsPatchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleSettingsPatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: await ports.patchSettings(input) };
+      execute: async function handleSettingsPatch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        const value = await ports.applySettingsPatch({
+          ...(input.external_provider_role === undefined ? {} : { externalProviderRole: input.external_provider_role }),
+          ...(input.knowledge_wiki_capture_mode === undefined ? {} : { knowledgeWikiCaptureMode: input.knowledge_wiki_capture_mode }),
+          ...(input.memory_capture_mode === undefined ? {} : { memoryCaptureMode: input.memory_capture_mode }),
+          ...(input.output_locale === undefined ? {} : { outputLocale: input.output_locale }),
+          ...(input.skill_capture_mode === undefined ? {} : { skillCaptureMode: input.skill_capture_mode }),
+          ...(input.ui_locale === undefined ? {} : { uiLocale: input.ui_locale })
+        });
+        return { ok: true, value: Output.parse(value) };
       }
     };
   }

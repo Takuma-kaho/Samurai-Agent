@@ -12,31 +12,34 @@ import {
   getDomainCommandCatalogDiagnostics
 } from "../../packages/action-catalog/src/index";
 import {
+  DomainContractError,
   DomainOperationError,
   DomainOperationRegistry,
+  bindOperationDefinition,
   bindOperationDefinitions,
   domainInputSources,
   fingerprintDefinition,
   jsonSchemaFor,
   operationDefinitions,
+  type BoundOperationDefinition,
   type DomainOperationPorts
 } from "../../packages/domain-operations/src/index";
 import { assertContractVersionDiscipline } from "../lib/domain-contract-version.mjs";
 
 const root = process.cwd();
 const expectedCommandCount = Number(process.env.SAMURAI_EXPECT_COMMAND_COUNT ?? "102");
-const expectedQueries = ["browser.extract", "collection.records.list", "collection.schema.docs", "collection.schema.get", "collection.view.present", "curator.snapshot.list", "file.inspect", "file.list", "file.read", "generated_surface.export", "presentation.plan", "skill.view"];
+const expectedQueries = ["browser.extract", "collection.records.list", "collection.schema.docs", "collection.schema.get", "collection.search", "collection.view.present", "curator.snapshot.list", "file.inspect", "file.list", "file.read", "generated_surface.export", "memory.search", "presentation.plan", "session.search", "skill.search", "skill.view", "wiki.search"];
 const expectedLegacy = ["approval.approve", "approval.deny", "grant.create", "grant.revoke", "workspace.delete"];
 
 assert.equal(domainCommandEntries.length, expectedCommandCount);
-assert.equal(domainQueryEntries.length, 12);
+assert.equal(domainQueryEntries.length, 17);
 assert.equal(domainLegacyCommandEntries.length, 5);
-assert.equal(operationDefinitions.length, 114);
+assert.equal(operationDefinitions.length, 119);
 assert.deepEqual(domainQueryEntries.map((entry) => entry.id).sort(), expectedQueries);
 assert.deepEqual(domainLegacyCommandEntries.map((entry) => entry.id).sort(), expectedLegacy);
 assert.equal(actionCatalogEntries.length, 102);
 assert.equal(getDomainCommandCatalogDiagnostics().ok, true);
-assert.equal(new Set(operationDefinitions.map((definition) => definition.id)).size, 114);
+assert.equal(new Set(operationDefinitions.map((definition) => definition.id)).size, 119);
 
 for (const action of actionCatalogEntries) {
   assert.equal("handler_id" in action, false, `${action.id} leaked handler_id into Action Catalog`);
@@ -56,22 +59,37 @@ const ports = new Proxy({}, {
   })
 }) as DomainOperationPorts;
 const bindings = bindOperationDefinitions(ports);
-const contractBindings = bindings.map(({ definition }) => ({
+// Registry contract checks use a narrow synthetic Handler so every operation
+// can be exercised without pretending one generic Port return value satisfies
+// every concrete Handler's domain-specific Port shape. Concrete Handler/Port
+// behavior is covered by the three static handler matrices below.
+const contractBindings: readonly BoundOperationDefinition[] = operationDefinitions.map((definition) => Object.freeze({
   definition,
-  handler: {
-    execute: async () => {
-      calls.push(definition.id);
-      return { ok: true as const, value: validOutputById.get(definition.id) };
-    }
+  handlerName: `contract_${definition.id}`,
+  execute: async (_context: Parameters<BoundOperationDefinition["execute"]>[0], rawInput: unknown) => {
+    const input = definition.input.safeParse(rawInput);
+    if (!input.success) throw new DomainContractError("input", definition.id, input.error.issues[0]);
+    const output = definition.output.safeParse(validOutputById.get(definition.id));
+    if (!output.success) throw new DomainContractError("output", definition.id, output.error.issues[0]);
+    return { ok: true as const, value: output.data };
   }
 }));
-const registry = new DomainOperationRegistry(ports, contractBindings);
-assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { definition: undefined, handler: bindings.at(-1)!.handler }] as never), /domain_operation_definition_missing/);
+const instrumentedBindings = contractBindings.map((binding) => ({
+  ...binding,
+  execute: async (context: Parameters<typeof binding.execute>[0], input: Parameters<typeof binding.execute>[1]) => {
+    // Count only inputs that pass the operation contract. Invalid DTOs must be
+    // rejected before the Handler/Port boundary, so they are not invocations.
+    if (binding.definition.input.safeParse(input).success) calls.push(binding.definition.id);
+    return binding.execute(context, input);
+  }
+}));
+const registry = new DomainOperationRegistry(ports, instrumentedBindings);
+assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { ...bindings.at(-1)!, definition: undefined }] as never), /domain_operation_definition_missing/);
 assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), bindings[0]!]), /duplicate_domain_operation_id/);
-assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { definition: bindings.at(-1)!.definition, handler: bindings[0]!.handler }]), /domain_operation_handler_reused/);
-assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { definition: { ...bindings.at(-1)!.definition, input: undefined }, handler: bindings.at(-1)!.handler }] as never), /domain_operation_input_schema_missing/);
-assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { definition: { ...bindings.at(-1)!.definition, output: undefined }, handler: bindings.at(-1)!.handler }] as never), /domain_operation_output_schema_missing/);
-assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { definition: bindings.at(-1)!.definition, handler: undefined }] as never), /domain_operation_handler_missing/);
+assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { ...bindings.at(-1)!, handlerName: bindings[0]!.handlerName }] as never), /domain_operation_handler_reused/);
+assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { ...bindings.at(-1)!, definition: { ...bindings.at(-1)!.definition, input: undefined } }] as never), /domain_operation_input_schema_missing/);
+assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { ...bindings.at(-1)!, definition: { ...bindings.at(-1)!.definition, output: undefined } }] as never), /domain_operation_output_schema_missing/);
+assert.throws(() => new DomainOperationRegistry(ports, [...bindings.slice(0, -1), { ...bindings.at(-1)!, execute: undefined }] as never), /domain_operation_handler_missing/);
 assert.throws(() => new DomainOperationRegistry(ports, bindings.slice(0, -1)), /domain_operation_registry_incomplete/);
 assert.equal(Object.isFrozen(registry), true);
 assert.deepEqual(registry.list().map(({ id }) => id), registry.list().map(({ id }) => id));
@@ -150,7 +168,13 @@ for (const context of [
 for (const definition of operationDefinitions) {
   const catalog = [...domainCommandEntries, ...domainQueryEntries].find((entry) => entry.id === definition.id);
   assert.ok(catalog, `missing catalog projection: ${definition.id}`);
-  const input = sample(catalog.input_schema as Record<string, unknown>) as Record<string, unknown>;
+  const sampledInput = sample(catalog.input_schema as Record<string, unknown>) as Record<string, unknown>;
+  // The static JSON Schema cannot express this cross-field refinement, so add
+  // one representative discriminator value for the contract fixture.
+  const input = definition.id === "skill.optimization.rollback"
+    ? { ...sampledInput, promotion_id: "promotion_fixture" }
+    : sampledInput;
+  assert.equal(definition.input.safeParse(input).success, true, `${definition.id} contract fixture sample is rejected by Zod`);
   const validatePublicInput = ajv.compile(catalog.input_schema);
   assert.equal(validatePublicInput(input), true, `${definition.id} public input schema rejects its sample`);
   assert.equal(validatePublicInput(null), definition.input.safeParse(null).success, `${definition.id} input parity differs for root type`);
@@ -197,12 +221,18 @@ for (const definition of operationDefinitions) {
   assert.equal(validatePublicOutput(null), definition.output.safeParse(null).success, `${definition.id} output parity differs for root type`);
   publicSchemaParityChecks += 2;
   schemaCaseChecks += 2;
-  validOutputById.set(definition.id, undefined);
+  const invalidOutputBinding = bindOperationDefinition(definition as never, {
+    execute: async function invalidOutputHandler() {
+      return { ok: true as const, value: undefined };
+    }
+  } as never);
+  const invalidOutputRegistry = new DomainOperationRegistry(ports, contractBindings.map((binding) =>
+    binding.definition.id === definition.id ? invalidOutputBinding : binding
+  ));
   await assert.rejects(
-    registry.execute(context, definition.id, input),
+    invalidOutputRegistry.execute(context, definition.id, input),
     (error: unknown) => error instanceof Error && "code" in error && error.code === "invalid_output"
   );
-  validOutputById.set(definition.id, generatedOutput);
   const result = await registry.execute(context, definition.id, input);
   assert.equal(result.ok, true);
   assert.equal(calls.at(-1), definition.id);
@@ -231,9 +261,9 @@ for (const definition of operationDefinitions) {
     strictOutputs += 1;
   }
 }
-assert.equal(calls.length, 228);
+assert.equal(calls.length, operationDefinitions.length);
 for (const definition of operationDefinitions) {
-  assert.equal(calls.filter((operationId) => operationId === definition.id).length, 2, `${definition.id} contract handler was not executed exactly twice`);
+  assert.equal(calls.filter((operationId) => operationId === definition.id).length, 1, `${definition.id} contract handler was not executed exactly once`);
 }
 
 const errorDefinition = bindings[0]!.definition;
@@ -241,7 +271,11 @@ const errorEntry = [...domainCommandEntries, ...domainQueryEntries].find(({ id }
 const errorInput = sample(errorEntry.input_schema);
 const errorContext = { inputSource: errorDefinition.sources[0]!, workspaceId: "workspace", actorId: "actor", correlationId: "error-correlation" };
 const registryWithHandler = (execute: () => Promise<never>) => new DomainOperationRegistry(ports, [
-  { definition: errorDefinition, handler: { execute } },
+  bindOperationDefinition(errorDefinition, {
+    execute: async function registryErrorHandler() {
+      return execute();
+    }
+  } as never),
   ...bindings.slice(1)
 ]);
 const secretError = "token=raw-secret /Users/private/workspace/file.txt";
@@ -254,19 +288,21 @@ assert.equal(JSON.stringify(unknownLog).includes("/Users/"), false);
 const domainErrorRegistry = registryWithHandler(async () => { throw new DomainOperationError("conflict", "domain_conflict"); });
 await assert.rejects(domainErrorRegistry.execute(errorContext, errorDefinition.id, errorInput), (error: unknown) => error instanceof DomainOperationError && error.message === "domain_conflict");
 const invalidEnvelopeRegistry = new DomainOperationRegistry(ports, [
-  { definition: errorDefinition, handler: { execute: async () => undefined } },
+  bindOperationDefinition(errorDefinition, {
+    execute: async function invalidEnvelopeHandler() {
+      return undefined;
+    }
+  } as never),
   ...bindings.slice(1)
 ] as never);
 await assert.rejects(invalidEnvelopeRegistry.execute(errorContext, errorDefinition.id, errorInput), (error: unknown) => error instanceof Error && "code" in error && error.code === "invalid_output");
-const throwingSchema = { safeParse: () => { throw new Error(secretError); } };
 const throwingSchemaRegistry = new DomainOperationRegistry(ports, [
-  { definition: { ...errorDefinition, input: throwingSchema }, handler: bindings[0]!.handler },
+  { ...bindings[0]!, execute: async () => { throw new Error(secretError); } },
   ...bindings.slice(1)
 ] as never);
 await assert.rejects(throwingSchemaRegistry.execute(errorContext, errorDefinition.id, errorInput), (error: unknown) => error instanceof Error && "code" in error && error.code === "internal");
-const issueLessSchema = { safeParse: () => ({ success: false as const, error: { issues: [] } }) };
 const issueLessSchemaRegistry = new DomainOperationRegistry(ports, [
-  { definition: { ...errorDefinition, input: issueLessSchema }, handler: bindings[0]!.handler },
+  { ...bindings[0]!, execute: async () => { throw new DomainContractError("input", errorDefinition.id, undefined); } },
   ...bindings.slice(1)
 ] as never);
 await assert.rejects(issueLessSchemaRegistry.execute(errorContext, errorDefinition.id, errorInput), (error: unknown) => error instanceof Error && error.message.endsWith("$:invalid_value"));
@@ -299,7 +335,7 @@ assert.doesNotThrow(() => assertContractVersionDiscipline([versionFixture], [{ .
 
 const operationsRoot = path.join(root, "packages/domain-operations/src/operations");
 const operationFiles = filesUnder(operationsRoot).filter((file) => file.endsWith(".operation.ts"));
-assert.equal(operationFiles.length, 114);
+assert.equal(operationFiles.length, 119);
 for (const file of operationFiles) {
   const source = readFileSync(file, "utf8");
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true);
@@ -330,11 +366,11 @@ for (const removed of [
 ]) assert.equal(existsSync(path.join(root, removed)), false, `legacy source remains: ${removed}`);
 
 const indexSource = readFileSync(path.join(root, "packages/domain-operations/src/generated/operation-index.generated.ts"), "utf8");
-assert.equal((indexSource.match(/import operation\d+/g) ?? []).length, 114);
+assert.equal((indexSource.match(/import operation\d+/g) ?? []).length, 119);
 assert.equal(indexSource.includes("handler_id"), false);
 assert.equal(indexSource.includes("runtime_method"), false);
 const binderSource = readFileSync(path.join(root, "packages/domain-operations/src/generated/operation-binder.generated.ts"), "utf8");
-assert.equal((binderSource.match(/import operation\d+/g) ?? []).length, 114);
+assert.equal((binderSource.match(/import operation\d+/g) ?? []).length, 119);
 
 const checkedSources = [
   "packages/action-catalog/src/index.ts",

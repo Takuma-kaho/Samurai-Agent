@@ -5,8 +5,7 @@ import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDo
 import { memoryArchiveValueSchema } from "../../value-objects/memory.js";
 
 const Input = z.object({
-  "memory_id": z.string().trim().min(1),
-  "session_id": z.string().trim().min(1)
+  "memory_id": z.string().trim().min(1)
 }).strict();
 const Output = memoryArchiveValueSchema;
 
@@ -29,7 +28,7 @@ const memoryArchive = defineCommand<MemoryArchivePorts>()({
   ...{
   "kind": "command",
   "id": "memory.archive",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Archive memory",
   "description": "Archive a memory item without physically deleting it.",
@@ -65,8 +64,9 @@ const memoryArchive = defineCommand<MemoryArchivePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleMemoryArchive(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const session = await ports.getMemorySession(input.session_id);
-        if (!session) throw ports.memoryArchiveError("not_found", `Session not found: ${input.session_id}`);
+        if (!context.sessionId) throw ports.memoryArchiveError("conflict", "trusted_context_session_required");
+        const session = await ports.getMemorySession(context.sessionId);
+        if (!session) throw ports.memoryArchiveError("not_found", `Session not found: ${context.sessionId}`);
         const memory = await ports.getMemoryForArchive(input.memory_id);
         if (!memory) throw ports.memoryArchiveError("not_found", `Memory not found: ${input.memory_id}`);
         const sessionMemory = await ports.listMemoryForSession(session.id);

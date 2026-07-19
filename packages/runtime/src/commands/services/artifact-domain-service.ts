@@ -3,9 +3,8 @@ import {
   GraphDocumentSchema,
   type ActivityInboxItem, type ArtifactRecord, type ArtifactRevisionRecord, type GraphDocument, type JsonValue,
   type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint,
-  type SessionRecord, type SupportedLocale, type WorkspaceChangeRecord
+  type SessionRecord, type SupportedLocale
 } from "@samurai-agent/core-schemas";
-import type { SurfaceOperationResultKind, SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 
 interface ArtifactDraftInput {
   operation: OperationRecord; title: string; content: string | { bytes: Uint8Array; mime_type: string; extension: string; preview?: string };
@@ -20,14 +19,6 @@ interface MutationExecution<TExtra extends Record<string, unknown>> {
   extra: TExtra;
 }
 interface ArtifactWriteResult { resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
-interface SurfaceArtifactWriteResult extends ArtifactWriteResult { sourceArtifact?: ArtifactRecord; workspaceChange: WorkspaceChangeRecord }
-export interface ArtifactSurfaceResult {
-  operation: Record<string, JsonValue>;
-  result_kind: SurfaceOperationResultKind;
-  render_spec: SurfaceRenderSpec;
-  render_specs?: SurfaceRenderSpec[];
-  result: SurfaceArtifactWriteResult;
-}
 export type ArtifactMutationInput<TExtra extends Record<string, unknown>> = { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<MutationExecution<TExtra>> };
 export interface ArtifactExecutionPort {
   contract(id: string): { id: string; proposed_effects: string[] };
@@ -36,7 +27,6 @@ export interface ArtifactExecutionPort {
   ensureSession(): Promise<SessionRecord>;
   createEnvelope(session: SessionRecord, content: string, inputLocale?: SupportedLocale, outputLocale?: SupportedLocale, metadata?: Record<string, JsonValue>, envelopeId?: string): MessageEnvelope;
   runMutation<TExtra extends Record<string, unknown>>(input: ArtifactMutationInput<TExtra>): Promise<ArtifactWriteResult & TExtra>;
-  runSurface(input: Record<string, unknown>): Promise<ArtifactSurfaceResult>;
   getArtifact(id: string): Promise<ArtifactRecord | undefined>;
   readContent(id: string): Promise<string | undefined>;
   getRevision(id: string): Promise<ArtifactRevisionRecord | undefined>;
@@ -79,8 +69,6 @@ export class ArtifactDomainService {
   graphArtifactNotFoundError() { return this.artifacts.requestError("not_found", "graph_artifact_not_found"); }
   graphDocumentContentNotFoundError() { return this.artifacts.requestError("not_found", "graph_document_content_not_found"); }
   graphDocumentInvalidError() { return this.artifacts.requestError("conflict", "graph_document_invalid"); }
-  runArtifactSurface(input: Record<string, unknown>) { return this.artifacts.runSurface(input); }
-
 }
 
 function parseGraph(content: string, port: ArtifactExecutionPort): GraphDocument {

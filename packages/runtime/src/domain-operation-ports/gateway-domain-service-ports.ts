@@ -6,19 +6,27 @@ type Ports = Pick<DomainOperationPorts, "gateway.concurrency_lock.expire" | "gat
 export function createGatewayDomainServicePorts(services: Pick<RuntimeDomainServices, "gatewayDomainService">): Ports {
   return {
     "gateway.concurrency_lock.expire": {
-      executeGatewayConcurrencyLockExpire: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.expireConcurrencyLocks(input)
+      expireGatewayConcurrencyLocks: (request) => services.gatewayDomainService.expireConcurrencyLocks({
+        now: request.now
       })
     },
     "gateway.inbound.route": {
-      routeGatewayInbound: (input) => services.gatewayDomainService.routeInboundPrimitive(input)
+      routeGatewayInbound: (request) => services.gatewayDomainService.routeInboundPrimitive({
+        channel: request.channel,
+        source_identity: request.sourceIdentity,
+        body: request.body,
+        source_label: request.sourceLabel,
+        account_id: request.accountId,
+        thread_id: request.threadId,
+        route: request.route,
+        metadata: request.metadata,
+        backend_id: request.backendId,
+        input_locale: request.inputLocale,
+        output_locale: request.outputLocale
+      })
     },
     "gateway.mcp_config.save": {
-      executeGatewayMcpConfigSave: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.saveMcpConfig(input)
-      })
+      saveGatewayMcpConfig: (request) => services.gatewayDomainService.saveMcpConfig(request)
     },
     "gateway.pairing.approve": {
       requireGatewayPairing: (id) => services.gatewayDomainService.requirePairing(id),
@@ -45,28 +53,16 @@ export function createGatewayDomainServicePorts(services: Pick<RuntimeDomainServ
       emitGatewayPairingUpdated: (record) => services.gatewayDomainService.emitPairingUpdated(record)
     },
     "gateway.pairing_policy.save": {
-      executeGatewayPairingPolicySave: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.savePairingPolicy(input)
-      })
+      saveGatewayPairingPolicy: (request) => services.gatewayDomainService.savePairingPolicy(request)
     },
     "gateway.routing_policy.save": {
-      executeGatewayRoutingPolicySave: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.saveRoutingPolicy(input)
-      })
+      saveGatewayRoutingPolicy: (request) => services.gatewayDomainService.saveRoutingPolicy(request)
     },
     "gateway.sandbox.delete": {
-      executeGatewaySandboxDelete: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.deleteSandbox(input)
-      })
+      deleteGatewaySandbox: (request) => services.gatewayDomainService.deleteSandbox(request.sandboxId)
     },
     "gateway.sandbox.recreate": {
-      executeGatewaySandboxRecreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.gatewayDomainService.recreateSandbox(input)
-      })
+      recreateGatewaySandbox: (request) => services.gatewayDomainService.recreateSandbox(request.sandboxId)
     },
     "gateway.sandbox.sync": {
       syncGatewaySandbox: (id, input) => services.gatewayDomainService.syncSandboxPrimitive(id, input)

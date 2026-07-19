@@ -1,7 +1,5 @@
 import {
   type ActivityInboxItem,
-  CollectionSchemaSchema,
-  ResourceRefSchema,
   createId,
   nowIso,
   type AutomationJobRecord,
@@ -15,7 +13,6 @@ import {
   type RollbackPoint,
   type SessionRecord
 } from "@samurai-agent/core-schemas";
-import { z } from "zod";
 import { jsonValue } from "./json-value.js";
 import type { SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import type { CollectionReindexResult } from "@samurai-agent/workspace-store";
@@ -38,6 +35,15 @@ export interface CollectionActionPort {
   resolveRecordData(schema: StoredCollectionSchema, record: StoredCollectionRecord): Promise<Record<string, JsonValue> | undefined>;
   runInstruction(input: { session: CollectionActionSession; prompt: string; backendId?: string; metadata: Record<string, JsonValue>; customView: boolean }): Promise<CollectionActionChat>;
   runPlugin(input: { catalogActionId: string; payload: Record<string, JsonValue>; context: Record<string, JsonValue> }): Promise<CollectionPluginExecution>;
+}
+
+export interface CollectionActionRunInput {
+  collectionId: string;
+  actionId: string;
+  backendId?: string;
+  recordId?: string;
+  sessionId?: string;
+  payload: Record<string, JsonValue>;
 }
 
 interface StoredCollectionSchema extends CollectionSchema { file_path: string }
@@ -106,15 +112,7 @@ export class CollectionDomainService {
   deleteCollectionRecord(collectionId: string, recordId: string) { return this.dependencies.mutation.deleteRecord(collectionId, recordId); }
   collectionMutationError(code: "forbidden" | "not_found", message: string) { return this.dependencies.requestError(code, message); }
 
-  runAction(payload: Record<string, JsonValue>) {
-    return this.runActionInput({
-      collectionId: optionalString(payload.collection_id), actionId: optionalString(payload.action_id),
-      backendId: optionalString(payload.backend_id) || undefined, recordId: optionalString(payload.record_id) || undefined,
-      sessionId: optionalString(payload.session_id) || undefined, payload: recordValue(payload.payload)
-    });
-  }
-
-  async runActionInput(input: { collectionId: string; actionId: string; backendId?: string; recordId?: string; sessionId?: string; payload: Record<string, JsonValue> }): Promise<CollectionWriteResult<CollectionActionResource> & { chat?: CollectionActionChat; before?: StoredCollectionRecord }> {
+  async runAction(input: CollectionActionRunInput): Promise<CollectionWriteResult<CollectionActionResource> & { chat?: CollectionActionChat; before?: StoredCollectionRecord }> {
     const schema = await this.dependencies.mutation.getSchema(input.collectionId);
     if (!schema) throw this.dependencies.requestError("not_found", `Collection schema not found: ${input.collectionId}`);
     const action = findAction(schema, input.actionId);
@@ -210,187 +208,16 @@ export class CollectionDomainService {
     if (!target) return undefined;
     const schema = await this.dependencies.mutation.getSchema(target.collectionId);
     if (!schema || !findAction(schema, target.actionId)) return undefined;
-    await this.runActionInput({ collectionId: target.collectionId, actionId: target.actionId, recordId: target.recordId,
+    await this.runAction({ collectionId: target.collectionId, actionId: target.actionId, recordId: target.recordId,
       payload: { trigger_id: target.triggerId, event: target.event, action_kind: target.actionKind, automation_job_id: job.id } });
     return `Collection trigger ${target.triggerId} ran action ${target.collectionId}/${target.actionId}.`;
   }
 
-  applyPatch(payload: Record<string, JsonValue>) {
-    const collectionId = optionalString(payload.collection_id);
-    const recordId = optionalString(payload.record_id);
-    if (!collectionId || !recordId) throw this.dependencies.requestError("conflict", "domain_command_collection_patch_target_required");
-    const expectedVersion = positiveInteger(payload.expected_version);
-    if (expectedVersion === undefined) throw this.dependencies.requestError("conflict", "domain_command_collection_patch_expected_version_required");
-    return this.applyPatchInput({ collectionId, recordId, patch: {
-      id: optionalString(payload.patch_id) || optionalString(payload.id) || createId("collection_patch"),
-      record_id: recordId, changes: recordValue(payload.changes), expected_version: expectedVersion,
-      source_operation_id: optionalString(payload.source_operation_id) || createId("domain_command"), created_at: nowIso()
-    }});
-  }
-
-  createRecord(payload: Record<string, JsonValue>) {
-    const collectionId = optionalString(payload.collection_id);
-    if (!collectionId) throw this.dependencies.requestError("conflict", "domain_command_collection_id_required");
-    const now = nowIso();
-    return this.createRecordInput({
-      id: optionalString(payload.record_id) || optionalString(payload.id) || createId("collection_record"),
-      collection_id: collectionId, version: 1, data: recordValue(payload.data),
-      resource_refs: resourceRefs(payload.resource_refs), created_at: now, updated_at: now
-    });
-  }
-
-  deleteRecord(payload: Record<string, JsonValue>) {
-    const collectionId = optionalString(payload.collection_id);
-    const recordId = optionalString(payload.record_id);
-    if (!collectionId || !recordId) throw this.dependencies.requestError("conflict", "domain_command_collection_delete_target_required");
-    return this.deleteRecordInput({ collectionId, recordId, viewId: optionalString(payload.view_id) || undefined });
-  }
-
-  reindex() { return this.reindexCollections(); }
-  saveSchema(payload: Record<string, JsonValue>) { return this.saveSchemaInput(CollectionSchemaSchema.parse(payload)); }
-
-  async saveSchemaInput(schema: CollectionSchema, context?: { session: SessionRecord; envelope: MessageEnvelope }) {
-    const existing = await this.dependencies.mutation.getSchema(schema.id);
-    const contract = this.dependencies.mutation.contract("collection.schema.save");
-    const session = context?.session ?? await this.dependencies.mutation.ensureSession();
-    const envelope = context?.envelope ?? this.dependencies.mutation.createEnvelope(`Save collection schema: ${schema.id}`);
-    return this.dependencies.mutation.runMutation({
-      session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
-      targetResourceRefs: existing ? [collectionSchemaRef(existing)] : [],
-      execute: async (operation) => {
-        const saved = existing
-          ? await this.dependencies.mutation.updateSchema(schema)
-          : await this.dependencies.mutation.saveSchema(schema);
-        const ref = collectionSchemaRef(saved);
-        const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref],
-          existing ? { collection_schema: jsonValue(existing) } : {},
-          { collection_schema: jsonValue(saved) });
-        return { resource: saved, ref, rollbackPoint, summary: `Saved collection schema ${saved.id}.` };
-      }
-    });
-  }
-
-  async reindexCollections(): Promise<CollectionWriteResult<CollectionReindexResult>> {
-    const contract = this.dependencies.mutation.contract("collection.reindex");
-    const session = await this.dependencies.mutation.ensureSession();
-    const envelope = this.dependencies.mutation.createEnvelope("Reindex collections");
-    return this.dependencies.mutation.runMutation({
-      session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
-      execute: async () => {
-        const result = await this.dependencies.mutation.reindex();
-        const ref = { kind: "collection_index", id: "collections", uri: "collections", label: "Collection index" };
-        return { resource: result, ref,
-          summary: `Reindexed ${result.schemas.indexed} collection schema(s) and ${result.records.indexed} record(s).` };
-      }
-    });
-  }
-
-  async createRecordInput(record: CollectionRecord) {
-    const session = await this.dependencies.mutation.ensureSession();
-    const envelope = this.dependencies.mutation.createEnvelope(`Create collection record: ${record.collection_id}/${record.id}`);
-    const result = await this.dependencies.mutation.runMutation({
-      session, envelope, operationName: "collection.record.create",
-      proposedEffects: ["Create a collection record file and SQLite index row."],
-      execute: async (operation) => {
-        const saved = await this.dependencies.mutation.saveRecord(record);
-        const ref = collectionRecordRef(saved);
-        const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], {},
-          { collection_id: saved.collection_id, record_id: saved.id });
-        return { resource: saved, ref, rollbackPoint, summary: `Created collection record ${saved.collection_id}/${saved.id}.` };
-      }
-    });
-    await this.dependencies.mutation.queueTrigger({
-      collectionId: result.resource.collection_id, recordId: result.resource.id, event: "record.created"
-    });
-    return result;
-  }
-
-  async applyPatchInput(input: { collectionId: string; recordId: string; patch: CollectionPatch }) {
-    const session = await this.dependencies.mutation.ensureSession();
-    const envelope = this.dependencies.mutation.createEnvelope(`Apply collection patch: ${input.collectionId}/${input.recordId}`);
-    const result = await this.dependencies.mutation.runMutation({
-      session, envelope, operationName: "collection.patch.apply",
-      proposedEffects: ["Apply a collection patch to an existing local record."],
-      execute: async (operation) => {
-        const patch = { ...input.patch, source_operation_id: operation.id };
-        let patched: { before: StoredCollectionRecord; after: StoredCollectionRecord };
-        try {
-          patched = await this.dependencies.mutation.applyRecordPatch({ ...input, patch });
-        } catch (error) {
-          throw this.dependencies.mutation.mapPatchError(error);
-        }
-        const ref = collectionRecordRef(patched.after);
-        const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref],
-          { record: jsonValue(patched.before) }, { record: jsonValue(patched.after) });
-        return { resource: patched.after, before: patched.before, ref, rollbackPoint, summary: `Applied collection patch ${patch.id}.` };
-      }
-    });
-    await this.dependencies.mutation.queueTrigger({
-      collectionId: result.resource.collection_id, recordId: result.resource.id, event: "record.patched"
-    });
-    return result;
-  }
-
-  async deleteRecordInput(input: { collectionId: string; recordId: string; viewId?: string }) {
-    const schema = await this.dependencies.mutation.getSchema(input.collectionId);
-    if (!schema) throw this.dependencies.requestError("not_found", `Collection schema not found: ${input.collectionId}`);
-    if (!collectionDeleteAllowed(schema, input.viewId)) throw this.dependencies.requestError("forbidden", "collection_record_delete_not_allowed");
-    const record = await this.dependencies.mutation.getRecord(input.collectionId, input.recordId);
-    if (!record) throw this.dependencies.requestError("not_found", `Collection record not found: ${input.collectionId}/${input.recordId}`);
-    const session = await this.dependencies.mutation.ensureSession();
-    const envelope = this.dependencies.mutation.createEnvelope(`Delete collection record: ${input.collectionId}/${input.recordId}`);
-    return this.dependencies.mutation.runMutation({
-      session, envelope, operationName: "collection.record.delete",
-      proposedEffects: ["Delete a collection record file and SQLite index row."],
-      execute: async (operation) => {
-        const deleted = await this.dependencies.mutation.deleteRecord(input.collectionId, input.recordId);
-        const ref = collectionRecordRef(deleted);
-        const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref],
-          { record: jsonValue(record) }, {});
-        return { resource: deleted, ref, rollbackPoint, summary: `Deleted collection record ${deleted.collection_id}/${deleted.id}.` };
-      }
-    });
-  }
-
-  async listRecords(payload: Record<string, JsonValue>) {
-    const collectionId = optionalString(payload.collection_id);
-    if (!collectionId) throw this.dependencies.requestError("conflict", "domain_query_collection_id_required");
-    const schema = await this.requireSchema(collectionId);
-    return { action: "getItems" as const, ...(await this.dependencies.queries.listRecords(schema, { ids: stringArray(payload.ids), fields: stringArray(payload.fields) })) };
-  }
-
   schemaDocs() { return { action: "schemaDocs" as const, schema_docs: this.dependencies.queries.schemaDocs() }; }
-
-  async getSchema(payload: Record<string, JsonValue>) {
-    const schema = await this.requireSchema(optionalString(payload.collection_id) || optionalString(payload.slug) || optionalString(payload.id), "domain_query_collection_id_required");
-    return { action: "getSchema" as const, collection_id: schema.id, schema };
-  }
-
-  presentView(payload: Record<string, JsonValue>) {
-    const collectionId = optionalString(payload.collection_id);
-    if (!collectionId) throw this.dependencies.requestError("conflict", "domain_command_collection_id_required");
-    return this.dependencies.queries.presentView({
-      collectionId,
-      viewId: optionalString(payload.view_id) || undefined
-    });
-  }
-
-  private async requireSchema(id: string, missingMessage?: string): Promise<CollectionSchema & { file_path: string }> {
-    if (!id) throw this.dependencies.requestError("conflict", missingMessage ?? "domain_query_collection_id_required");
-    const schema = await this.dependencies.queries.getSchema(id);
-    if (!schema) throw this.dependencies.requestError("not_found", `Collection schema not found: ${id}`);
-    return schema;
-  }
 }
 
 function optionalString(value: JsonValue | undefined): string { return typeof value === "string" ? value.trim() : ""; }
-function recordValue(value: JsonValue | undefined): Record<string, JsonValue> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, JsonValue> : {}; }
 function positiveInteger(value: JsonValue | undefined): number | undefined { return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined; }
-function stringArray(value: JsonValue | undefined): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
-function resourceRefs(value: JsonValue | undefined): CollectionRecord["resource_refs"] {
-  const parsed = z.array(ResourceRefSchema).safeParse(value);
-  return parsed.success ? parsed.data : [];
-}
 function collectionSchemaRef(schema: StoredCollectionSchema) {
   return { kind: "collection_schema", id: schema.id, uri: schema.file_path, version: schema.version, label: schema.labels.en ?? schema.id };
 }

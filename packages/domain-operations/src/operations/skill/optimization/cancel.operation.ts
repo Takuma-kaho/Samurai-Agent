@@ -1,31 +1,25 @@
 // Domain operation module. Keep its contract and handler together.
 import { SkillOptimizationRunSchema } from "@samurai-agent/core-schemas";
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "run_id": z.string(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "optimization_run_id": z.string().trim().min(1).max(256)
 }).strict();
 const Output = SkillOptimizationRunSchema.strict();
 
+export type SkillOptimizationCancelInput = z.infer<typeof Input>;
+export type SkillOptimizationCancelOutput = z.infer<typeof Output>;
+
 export interface SkillOptimizationCancelPorts {
-  executeSkillOptimizationCancel(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  cancelSkillOptimization(input: { optimizationRunId: string }): Promise<SkillOptimizationCancelOutput> | SkillOptimizationCancelOutput;
 }
 
 const skillOptimizationCancel = defineCommand<SkillOptimizationCancelPorts>()({
   ...{
   "kind": "command",
   "id": "skill.optimization.cancel",
-  "version": "1.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Cancel Skill improvement",
   "description": "Cancel a running Skill improvement work item.",
@@ -69,7 +63,7 @@ const skillOptimizationCancel = defineCommand<SkillOptimizationCancelPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleSkillOptimizationCancel(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeSkillOptimizationCancel(context, input);
+        return { ok: true, value: Output.parse(await ports.cancelSkillOptimization({ optimizationRunId: input.optimization_run_id })) };
       }
     };
   }

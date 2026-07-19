@@ -1152,11 +1152,9 @@ async function runGeneratedSurfaceAction(spec: SurfaceRenderSpec, action: { id: 
   const surfaceId = typeof spec.props.surface_id === "string" ? spec.props.surface_id : "";
   const revisionId = typeof spec.props.revision_id === "string" ? spec.props.revision_id : "";
   if (!surfaceId || !revisionId) return;
-  await api.runDomainCommand("generated_surface.action.run", {
-    surface_id: surfaceId,
+  await api.runGeneratedSurfaceAction(surfaceId, action.id, {
     revision_id: revisionId,
     interaction_id: `surface_interaction_${Date.now()}`,
-    action_id: action.id,
     action_payload: payload
   });
   await reloadActiveSession();

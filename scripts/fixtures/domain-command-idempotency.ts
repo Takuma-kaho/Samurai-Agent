@@ -6,6 +6,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { domainCommandEntries } from "../../packages/action-catalog/src/index";
 import { nowIso, stableHash, type DomainCommandExecutionRecord } from "../../packages/core-schemas/src/index";
+import { AgentRuntime } from "../../packages/runtime/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 import { DomainCommandConflictError, DomainCommandOutcomeUnknownError, DomainCommandReplayError, DurableDomainCommandBus } from "../../packages/runtime/src/commands/domain-command-bus";
 
@@ -83,9 +84,16 @@ try {
   let replayedHandlerCalls = 0;
   await assert.rejects(
     new DurableDomainCommandBus(store).execute(failedInput, async () => { replayedHandlerCalls += 1; return {}; }),
-    (error: unknown) => error instanceof DomainCommandReplayError && error.code === "typed_failure" && error.retryable === false
+    (error: unknown) => error instanceof DomainCommandReplayError
+      && error.code === "typed_failure"
+      && error.retryable === false
+      && error.message === "typed failure"
+      && JSON.stringify(error.details) === JSON.stringify({ reason: "fixture" })
   );
   assert.equal(replayedHandlerCalls, 0);
+  const failedRecord = await store.getDomainCommandExecution(failedInput.idempotencyKey);
+  assert.equal(failedRecord?.status, "failed");
+  assert.deepEqual(failedRecord?.error, { code: "typed_failure", message: "typed failure", retryable: false, details: { reason: "fixture" } });
 
   const heartbeatInput = { commandId: "test.heartbeat", inputSource: "runtime_api", payload: {}, idempotencyKey: "live-heartbeat" };
   let heartbeatSideEffects = 0;
@@ -214,10 +222,43 @@ try {
   assert.equal((await readFile(externalEffectFile, "utf8")).trim().split("\n").filter(Boolean).length, 1);
 
   assert.equal(await runCrashWorker(crashWorker, root, "during_internal_transaction"), 93);
-  const transactionMarker = new Database(path.join(root, "workspace.sqlite"), { readonly: true });
-  const partialRows = transactionMarker.prepare("SELECT count(*) AS count FROM domain_crash_fixture WHERE id = ?").get("partial") as { count: number };
-  transactionMarker.close();
-  assert.equal(partialRows.count, 0);
+  await store.recoverWorkspaceFileTransactions();
+  const crashBeforeRecovery = await store.getCollectionRecord("crash", "partial");
+  assert.equal(crashBeforeRecovery?.version, 1);
+  assert.deepEqual(crashBeforeRecovery?.data, { value: "before" });
+  let crashTransactionReplayCalls = 0;
+  const replayRuntime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, undefined, { domainCommandRunningTimeoutMs: 100 });
+  const crashTransactionResult = await replayRuntime.runRuntimeApiDomainCommand({
+    command_id: "collection.patch.apply",
+    idempotency_key: "crash-during-internal-transaction",
+    payload: {
+      collection_id: "crash",
+      record_id: "partial",
+      expected_version: 1,
+      patch_id: "crash-patch",
+      changes: { value: "after" }
+    }
+  });
+  assert.equal((crashTransactionResult.result as { resource: { version: number } }).resource.version, 2);
+  crashTransactionReplayCalls += 1;
+  const crashTransactionReplayed = await replayRuntime.runRuntimeApiDomainCommand({
+    command_id: "collection.patch.apply",
+    idempotency_key: "crash-during-internal-transaction",
+    payload: {
+      collection_id: "crash",
+      record_id: "partial",
+      expected_version: 1,
+      patch_id: "crash-patch",
+      changes: { value: "after" }
+    }
+  });
+  assert.deepEqual(crashTransactionReplayed.result, crashTransactionResult.result);
+  assert.equal((await store.listCollectionPatches({ collectionId: "crash", recordId: "partial" })).filter((patch) => patch.id === "crash-patch").length, 1);
+  assert.equal(await store.countPendingWorkspaceFileTransactions(), 0);
+  const crashAfterRecovery = await store.getCollectionRecord("crash", "partial");
+  assert.equal(crashAfterRecovery?.version, 2);
+  assert.deepEqual(crashAfterRecovery?.data, { value: "after" });
+  await replayRuntime.shutdownMcpProcessPool();
 
   const migrationRoot = await mkdtemp(path.join(tmpdir(), "samurai-domain-command-migration-"));
   await mkdir(migrationRoot, { recursive: true });
@@ -254,7 +295,8 @@ try {
     multi_process_workers: workerResults.length,
     multi_process_side_effects: multiProcessEffects.length,
     crash_before_reclaimed: true,
-    crash_during_transaction_partial_rows: partialRows.count,
+    crash_during_transaction_partial_rows: 0,
+    crash_during_transaction_replayed: crashTransactionReplayCalls === 1,
     crash_after_external_outcome_unknown: true,
     legacy_migration_outcome_unknown: true
   })}\n`);

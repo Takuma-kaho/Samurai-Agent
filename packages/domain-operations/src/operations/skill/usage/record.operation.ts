@@ -1,35 +1,36 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { domainJsonValueSchema, defineCommand, TrustedDomainContextError, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillUsageRecordValueSchema } from "../../../value-objects/skill.js";
 
 const Input = z.object({
-  "content_hash": z.string(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "resource_id": z.string(),
-  "run_id": z.string(),
-  "session_id": z.string() .optional(),
-  "skill_id": z.string(),
-  "source_operation_id": z.string() .optional(),
+  "skill_id": z.string().trim().min(1).max(256),
+  "resource_id": z.string().trim().min(1).max(512),
+  "content_hash": z.string().trim().min(1).max(256),
   "stage": z.enum(["body_loaded", "support_loaded"]),
-  "surface_operation_id": z.string() .optional()
+  "metadata": z.record(domainJsonValueSchema).default({})
 }).strict();
 const Output = skillUsageRecordValueSchema;
 
+export type SkillUsageRecordInput = z.infer<typeof Input>;
+export type SkillUsageRecordOutput = z.infer<typeof Output>;
+
 export interface SkillUsageRecordPorts {
-  executeSkillUsageRecord(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  recordSkillUsage(input: {
+    skillId: string;
+    runId: string;
+    resourceId: string;
+    contentHash: string;
+    stage: SkillUsageRecordInput["stage"];
+    metadata: Record<string, z.infer<typeof domainJsonValueSchema>>;
+  }): Promise<SkillUsageRecordOutput> | SkillUsageRecordOutput;
 }
 
 const skillUsageRecord = defineCommand<SkillUsageRecordPorts>()({
   ...{
   "kind": "command",
   "id": "skill.usage.record",
-  "version": "1.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Record Skill usage",
   "description": "Record that a Backend run used a Skill body or declared support file.",
@@ -68,7 +69,15 @@ const skillUsageRecord = defineCommand<SkillUsageRecordPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleSkillUsageRecord(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeSkillUsageRecord(context, input);
+        if (!context.runId) throw new TrustedDomainContextError("skill.usage.record", "runId");
+        return { ok: true, value: Output.parse(await ports.recordSkillUsage({
+          skillId: input.skill_id,
+          runId: context.runId,
+          resourceId: input.resource_id,
+          contentHash: input.content_hash,
+          stage: input.stage,
+          metadata: input.metadata
+        })) };
       }
     };
   }

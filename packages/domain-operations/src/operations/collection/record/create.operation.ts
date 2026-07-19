@@ -5,20 +5,10 @@ import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDo
 import { collectionRecordWriteValueSchema } from "../../../value-objects/collection.js";
 
 const Input = z.object({
-  "collection_id": z.string(),
+  "collection_id": z.string().trim().min(1).max(256),
   "data": z.record(domainJsonValueSchema),
-  "envelope_id": z.string() .optional(),
-  "id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "record_id": z.string() .optional(),
-  "resource_refs": z.array(ResourceRefSchema) .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "record_id": z.string().trim().min(1).max(256).optional(),
+  "resource_refs": z.array(ResourceRefSchema).max(1_000).default([])
 }).strict();
 const Output = collectionRecordWriteValueSchema;
 
@@ -36,7 +26,7 @@ const collectionRecordCreate = defineCommand<CollectionRecordCreatePorts>()({
   ...{
   "kind": "command",
   "id": "collection.record.create",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Create collection record",
   "description": "Create a schema-validated Collection record.",
@@ -84,11 +74,11 @@ const collectionRecordCreate = defineCommand<CollectionRecordCreatePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionRecordCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleCollectionRecordCreate(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const now = nowIso();
         const record: CollectionRecord = {
-          id: input.record_id ?? input.id ?? createId("collection_record"), collection_id: input.collection_id,
-          version: 1, data: input.data, resource_refs: input.resource_refs ?? [], created_at: now, updated_at: now
+          id: input.record_id ?? createId("collection_record"), collection_id: input.collection_id,
+          version: 1, data: input.data, resource_refs: input.resource_refs, created_at: now, updated_at: now
         };
         const session = await ports.ensureCollectionMutationSession();
         const envelope = ports.createCollectionMutationEnvelope(`Create collection record: ${record.collection_id}/${record.id}`);

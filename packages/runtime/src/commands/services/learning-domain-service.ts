@@ -16,6 +16,10 @@ export interface LearningDomainServiceDependencies {
   requestError: (code: "not_found", message: string) => Error;
 }
 
+export interface LearningSnapshotPruneInput {
+  retain: number;
+}
+
 type StoredMemory = MemoryFrontmatter & { file_path: string };
 type StoredWiki = WikiFrontmatter & { file_path: string };
 interface StoredSkill { id: string; title: string; description: string; tags: string[]; allowed_scopes: SkillFrontmatter["allowed_scopes"]; required_capabilities: string[]; owner_pinned: boolean; state: SkillState; file_path: string; frontmatter: SkillFrontmatter }
@@ -28,13 +32,13 @@ export interface CuratorWorkflowPort {
   listSkillUsage(): Promise<SkillUsageRecord[]>; listWiki(): Promise<StoredWiki[]>; listBackendRuns(): Promise<BackendRunRecord[]>;
   listEvaluations(): Promise<LearningEvaluationRecord[]>; listReflectionRuns(): Promise<ReflectionRunRecord[]>;
   createReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord>; updateReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord>;
-  createSnapshot(runId: string): Promise<LearningSnapshotRecord>; restoreSnapshot(id: string): Promise<unknown>;
-  saveState(input: Partial<CuratorStateRecord>): Promise<CuratorStateRecord>; saveSuggestion(value: ReflectionSuggestionRecord): Promise<unknown>;
-  saveJobReport(value: LearningJobReportRecord): Promise<unknown>; readMemory(id: string): Promise<string | undefined>;
-  replaceMemory(id: string, content: string): Promise<unknown>; archiveMemory(id: string): Promise<unknown>; readWiki(id: string): Promise<string | undefined>;
+  createSnapshot(runId: string): Promise<LearningSnapshotRecord>; restoreSnapshot(id: string): Promise<void>;
+  saveState(input: Partial<CuratorStateRecord>): Promise<CuratorStateRecord>; saveSuggestion(value: ReflectionSuggestionRecord): Promise<void>;
+  saveJobReport(value: LearningJobReportRecord): Promise<void>; readMemory(id: string): Promise<string | undefined>;
+  replaceMemory(id: string, content: string): Promise<void>; archiveMemory(id: string): Promise<void>; readWiki(id: string): Promise<string | undefined>;
   readSkill(id: string): Promise<string | undefined>; listSkillSupport(id: string): Promise<Array<{ path: string; content: string }>>;
-  replaceSkill(id: string, markdown: string): Promise<unknown>; writeSkillSupport(input: { skillId: string; path: string; content: string }): Promise<unknown>;
-  updateSkillState(id: string, state: SkillState): Promise<unknown>; applySkillLifecycle(input: { skillId: string; action: Exclude<CuratorLifecycleAction, "review"> }): Promise<unknown>;
+  replaceSkill(id: string, markdown: string): Promise<void>; writeSkillSupport(input: { skillId: string; path: string; content: string }): Promise<void>;
+  updateSkillState(id: string, state: SkillState): Promise<void>; applySkillLifecycle(input: { skillId: string; action: Exclude<CuratorLifecycleAction, "review"> }): Promise<void>;
   consolidate(input: { group_key: string; packages: SkillPackage[] }, session: { id: string }): Promise<ConsolidationResult | undefined>;
   errorMessage(error: unknown): string; nextRunAt(fromMs: number): string;
 }
@@ -51,9 +55,9 @@ export interface LearningEvaluationPort {
   listEvaluations(): Promise<LearningEvaluationRecord[]>;
   createReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord>;
   updateReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord>;
-  saveSuggestion(suggestion: ReflectionSuggestionRecord): Promise<unknown>;
-  saveEvaluation(evaluation: LearningEvaluationRecord): Promise<unknown>;
-  saveJobReport(report: LearningJobReportRecord): Promise<unknown>;
+  saveSuggestion(suggestion: ReflectionSuggestionRecord): Promise<ReflectionSuggestionRecord>;
+  saveEvaluation(evaluation: LearningEvaluationRecord): Promise<LearningEvaluationRecord>;
+  saveJobReport(report: LearningJobReportRecord): Promise<LearningJobReportRecord>;
   createSuggestions(run: ReflectionRunRecord, input: { skills: StoredSkill[]; backendRuns: BackendRunRecord[]; backendEvents: BackendEventRecord[]; workspaceChanges: WorkspaceChangeRecord[]; toolRuns: ToolRunRecord[]; auditRecords: AuditRecord[]; now: string }): ReflectionSuggestionRecord[];
   createReport(input: { backendRuns: BackendRunRecord[]; backendEvents: BackendEventRecord[]; workspaceChanges: WorkspaceChangeRecord[]; toolRuns: ToolRunRecord[]; auditRecords: AuditRecord[]; now: string }): Promise<EvaluationTraceReport>;
   nextRunAt(fromMs: number): string;
@@ -64,7 +68,7 @@ export class LearningDomainService {
 
   pause() { return this.dependencies.learning.saveCuratorState({ paused: true }); }
   resume() { return this.dependencies.learning.saveCuratorState({ paused: false }); }
-  runCurator() { return this.executeCurator(); }
+  runCurator(input: { respectIdleGate?: boolean } = {}) { return this.executeCurator(input); }
   runEvaluation() { return this.executeEvaluation(); }
   ensureEvaluationSession() { return this.dependencies.evaluation.ensureSession(); }
   listEvaluationSkills() { return this.dependencies.evaluation.listSkills(); }
@@ -91,12 +95,12 @@ export class LearningDomainService {
   restoreLearningSnapshot(id: string) { return this.dependencies.learning.restoreSnapshot(id); }
   snapshotNotFoundError() { return this.dependencies.requestError("not_found", "curator_snapshot_not_found"); }
 
-  pruneSnapshots(payload: Record<string, JsonValue>) {
-    return this.dependencies.learning.pruneSnapshots(positiveInteger(payload.retain) ?? 20);
+  pruneSnapshots(input: LearningSnapshotPruneInput) {
+    return this.dependencies.learning.pruneSnapshots(input.retain);
   }
 
-  createSnapshot(payload: Record<string, JsonValue>) {
-    return this.dependencies.learning.createSnapshot(optionalString(payload.run_id) || createId("curator_manual"));
+  createSnapshot() {
+    return this.dependencies.learning.createSnapshot(createId("curator_manual"));
   }
 
   async executeCurator(input: { respectIdleGate?: boolean } = {}): Promise<{ reflectionRun: ReflectionRunRecord; suggestions: ReflectionSuggestionRecord[]; curatorReport: CuratorLifecycleReport; curatorReviewReport: CuratorReviewReport }> {
@@ -641,12 +645,4 @@ function curatorActionReason(input: { action: CuratorLifecycleAction; usageCount
   if (input.action === "mark_stale") return `No recent activity since ${input.inactiveSince}; exceeds stale threshold of ${input.staleAfterDays} day(s).`;
   if (input.action === "reactivate") return `Recent usage detected (${input.usageCount} run(s)); restore from stale to project state.`;
   return "Needs human review before lifecycle transition.";
-}
-
-function positiveInteger(value: JsonValue | undefined): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
-}
-
-function optionalString(value: JsonValue | undefined): string {
-  return typeof value === "string" ? value.trim() : "";
 }

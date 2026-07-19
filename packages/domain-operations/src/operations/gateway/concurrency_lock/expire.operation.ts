@@ -1,31 +1,29 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewayExpiredLocksValueSchema } from "../../../value-objects/gateway.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "now": z.string() .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  now: z.string().datetime().optional()
 }).strict();
 const Output = gatewayExpiredLocksValueSchema;
 
+export type GatewayConcurrencyLockExpireInput = z.infer<typeof Input>;
+
+/** The runtime request deliberately excludes transport-only envelope fields. */
+export interface GatewayConcurrencyLockExpireRequest {
+  now?: string;
+}
+
 export interface GatewayConcurrencyLockExpirePorts {
-  executeGatewayConcurrencyLockExpire(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  expireGatewayConcurrencyLocks(request: GatewayConcurrencyLockExpireRequest): Promise<z.infer<typeof Output>>;
 }
 
 const gatewayConcurrencyLockExpire = defineCommand<GatewayConcurrencyLockExpirePorts>()({
   ...{
   "kind": "command",
   "id": "gateway.concurrency_lock.expire",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Expire Gateway locks",
   "description": "Expire stale Gateway concurrency locks.",
@@ -61,8 +59,10 @@ const gatewayConcurrencyLockExpire = defineCommand<GatewayConcurrencyLockExpireP
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGatewayConcurrencyLockExpire(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGatewayConcurrencyLockExpire(context, input);
+      execute: async function handleGatewayConcurrencyLockExpire(_context: TrustedDomainContext, input: GatewayConcurrencyLockExpireInput): Promise<DomainResult<z.infer<typeof Output>>> {
+        const request: GatewayConcurrencyLockExpireRequest = input.now === undefined ? {} : { now: input.now };
+        const value = await ports.expireGatewayConcurrencyLocks(request);
+        return { ok: true, value };
       }
     };
   }

@@ -5,20 +5,11 @@ import { skillWriteValueSchema } from "../../value-objects/skill.js";
 import type { SkillPatchMutationPorts } from "./skill-mutation.js";
 
 const Input = z.object({
-  "content": z.string() .optional(),
-  "description": z.string() .optional(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "skill_id": z.string(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "tags": z.array(z.string()) .optional(),
-  "title": z.string() .optional()
+  "content": z.string().max(1_000_000).optional(),
+  "description": z.string().max(10_000).optional(),
+  "skill_id": z.string().trim().min(1).max(256),
+  "tags": z.array(z.string().max(128)).max(100).optional(),
+  "title": z.string().max(512).optional()
 }).strict();
 const Output = skillWriteValueSchema;
 
@@ -28,7 +19,7 @@ const skillPatch = defineCommand<SkillPatchPorts>()({
   ...{
   "kind": "command",
   "id": "skill.patch",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Edit Skill",
   "description": "Edit a Skill body and metadata through the Runtime boundary.",
@@ -65,7 +56,7 @@ const skillPatch = defineCommand<SkillPatchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleSkillPatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleSkillPatch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const current = await ports.getSkillForMutation(input.skill_id);
         if (!current) throw ports.skillMutationNotFound("skill_not_found");
         const beforeMarkdown = await ports.readSkillMarkdown(input.skill_id);

@@ -1,18 +1,47 @@
 import { appendFile } from "node:fs/promises";
-import path from "node:path";
-import Database from "better-sqlite3";
-import { WorkspaceStore } from "../../packages/workspace-store/src/index";
+import { nowIso } from "../../packages/core-schemas/src/index";
+import { WorkspaceStore, type CollectionSchema, type CollectionRecord } from "../../packages/workspace-store/src/index";
+import { AgentRuntime } from "../../packages/runtime/src/index";
 import { DurableDomainCommandBus, type DomainCommandCheckpoint } from "../../packages/runtime/src/commands/domain-command-bus";
 
 const root = requiredEnvironment("SAMURAI_WORKER_ROOT");
 const mode = requiredEnvironment("SAMURAI_CRASH_MODE");
 const sideEffectFile = process.env.SAMURAI_WORKER_SIDE_EFFECT_FILE;
 if (mode === "during_internal_transaction") {
-  const database = new Database(path.join(root, "workspace.sqlite"));
-  database.exec("CREATE TABLE IF NOT EXISTS domain_crash_fixture (id TEXT PRIMARY KEY)");
-  database.exec("BEGIN IMMEDIATE");
-  database.prepare("INSERT INTO domain_crash_fixture(id) VALUES (?)").run("partial");
-  process.exit(93);
+  const store = await WorkspaceStore.create({
+    rootDir: root,
+    fileTransactionFailureInjector(phase) {
+      if (phase === "db_transaction") process.exit(93);
+    }
+  });
+  const schema: CollectionSchema = {
+    id: "crash",
+    version: "1.0",
+    labels: { en: "Crash fixture" },
+    descriptions: { en: "Crash fixture" },
+    fields: [{ id: "value", type: "string" }], refs: [], embeds: [], derived_fields: [], triggers: [], actions: [], views: [], permissions: {}
+  };
+  if (!await store.getCollectionSchema(schema.id)) await store.saveCollectionSchema(schema);
+  const now = nowIso();
+  const record: CollectionRecord = {
+    id: "partial", collection_id: schema.id, version: 1, data: { value: "before" }, resource_refs: [], created_at: now, updated_at: now
+  };
+  if (!await store.getCollectionRecord(record.collection_id, record.id)) await store.saveCollectionRecord(record);
+  const runtime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, undefined, { domainCommandRunningTimeoutMs: 100 });
+  await runtime.runRuntimeApiDomainCommand({
+    command_id: "collection.patch.apply",
+    idempotency_key: "crash-during-internal-transaction",
+    payload: {
+      collection_id: record.collection_id,
+      record_id: record.id,
+      expected_version: 1,
+      patch_id: "crash-patch",
+      changes: { value: "after" }
+    }
+  });
+  await runtime.shutdownMcpProcessPool();
+  await store.close();
+  process.exit(0);
 }
 const crashCheckpoint: DomainCommandCheckpoint = mode === "before_handler" ? "claimed" : "handler_succeeded";
 const executionClass = mode === "before_handler" ? "internal" : "external";

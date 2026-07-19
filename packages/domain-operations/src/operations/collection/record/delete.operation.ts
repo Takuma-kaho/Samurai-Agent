@@ -6,18 +6,9 @@ import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDo
 import { collectionRecordWriteValueSchema } from "../../../value-objects/collection.js";
 
 const Input = z.object({
-  "collection_id": z.string().trim().min(1),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "record_id": z.string().trim().min(1),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "view_id": z.string() .optional()
+  "collection_id": z.string().trim().min(1).max(256),
+  "record_id": z.string().trim().min(1).max(256),
+  "view_id": z.string().trim().min(1).max(256).optional()
 }).strict();
 const Output = collectionRecordWriteValueSchema;
 
@@ -38,7 +29,7 @@ const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
   ...{
   "kind": "command",
   "id": "collection.record.delete",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Delete collection record",
   "description": "Delete a Collection record through Runtime permission checks.",
@@ -80,7 +71,7 @@ const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionRecordDelete(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleCollectionRecordDelete(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const schema = await ports.getCollectionSchemaForMutation(input.collection_id);
         if (!schema) throw ports.collectionMutationError("not_found", `Collection schema not found: ${input.collection_id}`);
         if (!ports.collectionDeleteAllowed(schema, input.view_id)) throw ports.collectionMutationError("forbidden", "collection_record_delete_not_allowed");

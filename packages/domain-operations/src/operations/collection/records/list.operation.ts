@@ -1,36 +1,27 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
 import type { CollectionSchema, JsonValue } from "@samurai-agent/core-schemas";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../../definition/index.js";
 import { collectionRecordsListValueSchema } from "../../../value-objects/collection.js";
 
 const Input = z.object({
-  "collection_id": z.string(),
-  "envelope_id": z.string() .optional(),
-  "fields": z.array(z.string()) .optional(),
-  "ids": z.array(z.string()) .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "collection_id": z.string().trim().min(1).max(256),
+  "fields": z.array(z.string().trim().min(1).max(256)).max(1_000).default([]),
+  "ids": z.array(z.string().trim().min(1).max(256)).max(1_000).default([])
 }).strict();
 const Output = collectionRecordsListValueSchema;
 
 export interface CollectionRecordsListPorts extends DomainQueryPorts {
-  getCollectionSchema(id: string): Promise<(CollectionSchema & { file_path: string }) | undefined>;
-  listCollectionRecords(schema: CollectionSchema & { file_path: string }, input: { ids: string[]; fields: string[] }): Promise<{ collection_id: string; count: number; items: Record<string, JsonValue>[]; linked_data: JsonValue; schema_fields: JsonValue }>;
-  collectionRecordsQueryError(message: string): Error;
+  getCollectionSchema: ReadCapability<(id: string) => Promise<(CollectionSchema & { file_path: string }) | undefined>>;
+  listCollectionRecords: ReadCapability<(schema: CollectionSchema & { file_path: string }, input: { ids: string[]; fields: string[] }) => Promise<{ collection_id: string; count: number; items: Record<string, JsonValue>[]; linked_data: JsonValue; schema_fields: JsonValue }>>;
+  collectionRecordsQueryError: ReadCapability<(message: string) => Error>;
 }
 
 const collectionRecordsList = defineQuery<CollectionRecordsListPorts>()({
   ...{
   "kind": "query",
   "id": "collection.records.list",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "List Collection records",
   "description": "Read computed Collection records and linked data.",
@@ -71,10 +62,10 @@ const collectionRecordsList = defineQuery<CollectionRecordsListPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionRecordsList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleCollectionRecordsList(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const schema = await ports.getCollectionSchema(input.collection_id);
         if (!schema) throw ports.collectionRecordsQueryError(`Collection schema not found: ${input.collection_id}`);
-        const records = await ports.listCollectionRecords(schema, { ids: input.ids ?? [], fields: input.fields ?? [] });
+        const records = await ports.listCollectionRecords(schema, { ids: input.ids, fields: input.fields });
         return { ok: true, value: Output.parse({ action: "getItems", ...records }) };
       }
     };

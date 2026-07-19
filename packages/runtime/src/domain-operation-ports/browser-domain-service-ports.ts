@@ -1,5 +1,6 @@
 import type { DomainOperationPorts } from "@samurai-agent/domain-operations";
 import type { RuntimeDomainServices } from "../domain-operation-services.js";
+import { readOnlyQueryPort } from "./read-only-query-port.js";
 
 type Ports = Pick<DomainOperationPorts, "browser.download_to_workspace" | "browser.interact" | "browser.navigate" | "browser.screenshot" | "browser.extract">;
 
@@ -44,11 +45,8 @@ export function createBrowserDomainServicePorts(services: Pick<RuntimeDomainServ
       createBrowserRollback: (operation, refs, before, after) => services.browserDomainService.createBrowserRollback(operation, refs, before, after),
       runBrowserMutation: (input) => services.browserDomainService.runRecordedMutation(input)
     },
-    "browser.extract": {
-      executeBrowserExtract: async (context, input) => ({
-        ok: true as const,
-        value: await services.browserDomainService.extract(input)
-      })
-    }
+    "browser.extract": readOnlyQueryPort<Ports["browser.extract"]>({
+      extractBrowserPage: (input) => services.browserDomainService.extract(input)
+    })
   };
 }

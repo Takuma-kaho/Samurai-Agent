@@ -2,21 +2,10 @@
 import { z } from "zod";
 import { expirePairing, rotatePairingCode } from "@samurai-agent/gateway";
 import type { GatewayPairingRecord } from "@samurai-agent/core-schemas";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewayPairingValueSchema } from "../../../value-objects/gateway.js";
 
-const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "pairing_id": z.string(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
-}).strict();
+const Input = z.object({ "pairing_id": z.string() }).strict();
 const Output = gatewayPairingValueSchema;
 
 export interface GatewayPairingRotatePorts {
@@ -29,7 +18,7 @@ const gatewayPairingRotate = defineCommand<GatewayPairingRotatePorts>()({
   ...{
   "kind": "command",
   "id": "gateway.pairing.rotate",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Rotate Gateway pairing",
   "description": "Rotate a Gateway pairing code.",

@@ -14,6 +14,7 @@
     "@samurai-agent/audit": "workspace:*",
     "@samurai-agent/capability-registry": "workspace:*",
     "@samurai-agent/core-schemas": "workspace:*",
+    "@samurai-agent/domain-operations": "workspace:*",
     "@samurai-agent/gateway": "workspace:*",
     "@samurai-agent/policy-engine": "workspace:*",
     "@samurai-agent/runtime": "workspace:*",

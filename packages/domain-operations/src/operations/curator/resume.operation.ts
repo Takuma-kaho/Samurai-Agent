@@ -1,30 +1,20 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { curatorStateValueSchema } from "../../value-objects/learning.js";
 
-const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
-}).strict();
+const Input = z.object({}).strict();
 const Output = curatorStateValueSchema;
 
 export interface CuratorResumePorts {
-  executeCuratorResume(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  resumeCurator(): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const curatorResume = defineCommand<CuratorResumePorts>()({
   ...{
   "kind": "command",
   "id": "curator.resume",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Resume Curator",
   "description": "Resume scheduled Curator runs.",
@@ -59,8 +49,8 @@ const curatorResume = defineCommand<CuratorResumePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCuratorResume(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCuratorResume(context, input);
+      execute: async function handleCuratorResume(_context: TrustedDomainContext, _input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        return { ok: true, value: Output.parse(await ports.resumeCurator()) };
       }
     };
   }

@@ -6,19 +6,12 @@ import { collectionPatchWriteValueSchema } from "../../../value-objects/collecti
 
 const Input = z.object({
   "changes": z.record(domainJsonValueSchema),
-  "collection_id": z.string(),
-  "envelope_id": z.string() .optional(),
+  "collection_id": z.string().trim().min(1).max(256),
+  // Optimistic concurrency is part of this command's public contract.  A
+  // patch without the caller's observed version cannot be safely applied.
   "expected_version": z.number().int().min(1),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "patch_id": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "record_id": z.string(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "patch_id": z.string().trim().min(1).max(256).optional(),
+  "record_id": z.string().trim().min(1).max(256)
 }).strict();
 const Output = collectionPatchWriteValueSchema;
 
@@ -37,7 +30,7 @@ const collectionPatchApply = defineCommand<CollectionPatchApplyPorts>()({
   ...{
   "kind": "command",
   "id": "collection.patch.apply",
-  "version": "2.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Apply collection patch",
   "description": "Patch a schema-validated Collection record.",
@@ -84,7 +77,7 @@ const collectionPatchApply = defineCommand<CollectionPatchApplyPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionPatchApply(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleCollectionPatchApply(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const session = await ports.ensureCollectionMutationSession();
         const envelope = ports.createCollectionMutationEnvelope(`Apply collection patch: ${input.collection_id}/${input.record_id}`);
         const result = await ports.runCollectionMutation<z.infer<typeof Output>["resource"], { before: z.infer<typeof Output>["before"] }>({

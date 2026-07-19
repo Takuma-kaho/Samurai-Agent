@@ -8,6 +8,23 @@ import { collectionSchemaWriteValueSchema } from "../../../value-objects/collect
 const Input = CollectionSchemaSchema.strict();
 const Output = collectionSchemaWriteValueSchema;
 
+function toCollectionSchema(input: z.infer<typeof Input>): CollectionSchema {
+  return {
+    id: input.id,
+    version: input.version,
+    labels: input.labels,
+    descriptions: input.descriptions,
+    fields: input.fields,
+    refs: input.refs,
+    embeds: input.embeds,
+    derived_fields: input.derived_fields,
+    triggers: input.triggers,
+    actions: input.actions,
+    ...(input.views === undefined ? {} : { views: input.views }),
+    permissions: input.permissions
+  };
+}
+
 export interface CollectionSchemaSavePorts {
   getCollectionSchemaForMutation(id: string): Promise<z.infer<typeof storedCollectionSchema> | undefined>;
   saveCollectionSchema(schema: CollectionSchema): Promise<z.infer<typeof storedCollectionSchema>>;
@@ -24,7 +41,7 @@ const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
   ...{
   "kind": "command",
   "id": "collection.schema.save",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Save collection schema",
   "description": "Save a Collection schema with validated fields and Workspace view definitions.",
@@ -66,16 +83,17 @@ const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionSchemaSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const existing = await ports.getCollectionSchemaForMutation(input.id);
+      execute: async function handleCollectionSchemaSave(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        const schema = toCollectionSchema(input);
+        const existing = await ports.getCollectionSchemaForMutation(schema.id);
         const contract = ports.collectionMutationContract("collection.schema.save");
         const session = await ports.ensureCollectionMutationSession();
-        const envelope = ports.createCollectionMutationEnvelope(`Save collection schema: ${input.id}`);
+        const envelope = ports.createCollectionMutationEnvelope(`Save collection schema: ${schema.id}`);
         const result = await ports.runCollectionMutation({
           session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
           targetResourceRefs: existing ? [ports.collectionSchemaRef(existing)] : [],
           execute: async (operation) => {
-            const saved = existing ? await ports.updateCollectionSchema(input) : await ports.saveCollectionSchema(input);
+            const saved = existing ? await ports.updateCollectionSchema(schema) : await ports.saveCollectionSchema(schema);
             const ref = ports.collectionSchemaRef(saved);
             const rollbackPoint = await ports.createCollectionRollback(operation, [ref], existing ? { collection_schema: domainJsonValueSchema.parse(existing) } : {}, { collection_schema: domainJsonValueSchema.parse(saved) });
             return { resource: saved, ref, rollbackPoint, summary: `Saved collection schema ${saved.id}.` };

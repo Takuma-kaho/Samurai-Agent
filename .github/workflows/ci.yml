@@ -58,6 +58,19 @@ jobs:
           node scripts/generate-domain-operation-index.mjs --check
           node --import tsx scripts/fixtures/domain-command-contract.ts
           node --import tsx scripts/fixtures/domain-operation-structure.ts
+          node --import tsx scripts/fixtures/domain-query-purity.ts
+          node --import tsx scripts/fixtures/domain-command-compatibility.ts
+          node --import tsx scripts/fixtures/domain-command-version.ts
+          node --import tsx scripts/fixtures/domain-command-parity.ts
+          node --import tsx scripts/fixtures/domain-command-trusted-context.ts
+          node --import tsx scripts/fixtures/domain-command-schema-matrix.ts
+          node --import tsx scripts/fixtures/domain-operation-handler-matrix.ts
+          node --import tsx scripts/fixtures/domain-operation-handler-matrix-shard-a.ts
+          node --import tsx scripts/fixtures/domain-operation-handler-matrix-shard-b.ts
+          node --import tsx scripts/fixtures/domain-operation-handler-matrix-c.ts
+          node --import tsx scripts/fixtures/domain-operation-handler-matrix-aggregate.ts
+          node scripts/verify-architecture-boundaries.mjs
+          node scripts/verify-domain-command-verifier-self-test.mjs
 
       - name: Run Linux integration and verifier gates
         if: runner.os == 'Linux'

@@ -1,31 +1,22 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { learningSnapshotPruneValueSchema } from "../../../value-objects/learning.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "retain": z.number() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "retain": z.number().int().min(1).default(20)
 }).strict();
 const Output = learningSnapshotPruneValueSchema;
 
 export interface LearningSnapshotPrunePorts {
-  executeLearningSnapshotPrune(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  pruneLearningSnapshots(input: { retain: number }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const learningSnapshotPrune = defineCommand<LearningSnapshotPrunePorts>()({
   ...{
   "kind": "command",
   "id": "learning.snapshot.prune",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Prune learning snapshots",
   "description": "Apply the configured retention limit to Learning snapshots.",
@@ -61,8 +52,8 @@ const learningSnapshotPrune = defineCommand<LearningSnapshotPrunePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleLearningSnapshotPrune(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeLearningSnapshotPrune(context, input);
+      execute: async function handleLearningSnapshotPrune(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        return { ok: true, value: Output.parse(await ports.pruneLearningSnapshots({ retain: input.retain })) };
       }
     };
   }

@@ -10,16 +10,10 @@ export function createConversationDomainServicePorts(services: Pick<RuntimeDomai
       runChatTurn: (input) => services.conversationDomainService.executeChatTurn(input)
     },
     "session.create": {
-      executeSessionCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.conversationDomainService.createSession(input)
-      })
+      createSession: (input) => services.conversationDomainService.createSession(input)
     },
     "session.search.reindex": {
-      executeSessionSearchReindex: async (context, input) => ({
-        ok: true as const,
-        value: await services.conversationDomainService.reindexSearch()
-      })
+      reindexSessionSearch: () => services.conversationDomainService.reindexSearch()
     }
   };
 }

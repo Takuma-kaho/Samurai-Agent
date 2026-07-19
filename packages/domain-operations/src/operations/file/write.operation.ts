@@ -6,8 +6,8 @@ import { fileResourceSchema } from "../../value-objects/file.js";
 import { runtimeWriteValueSchema } from "../../value-objects/runtime-write.js";
 
 const Input = z.object({
-  "content": z.string(),
-  "path": z.string().trim().min(1)
+  "content": z.string().max(1_000_000),
+  "path": z.string().trim().min(1).max(4_096)
 }).strict();
 const Output = runtimeWriteValueSchema(fileResourceSchema);
 
@@ -19,7 +19,7 @@ export interface FileWritePorts {
   ensureFileParent(path: string): Promise<void>;
   writeFileText(path: string, content: string): Promise<void>;
   isManagedCollectionPath(path: string): boolean;
-  reindexManagedCollections(): Promise<unknown>;
+  reindexManagedCollections(): Promise<void>;
   createFileRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   runFileMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: z.infer<typeof fileResourceSchema>; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: z.infer<typeof fileResourceSchema>; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
@@ -28,7 +28,7 @@ const fileWrite = defineCommand<FileWritePorts>()({
   ...{
   "kind": "command",
   "id": "file.write",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Write workspace file",
   "description": "Write a file inside the local workspace.",
@@ -67,7 +67,7 @@ const fileWrite = defineCommand<FileWritePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleFileWrite(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleFileWrite(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const path = ports.resolveFilePath(input.path);
         const session = await ports.ensureFileSession();
         const envelope = ports.createFileEnvelope(session, `file.write: ${path.relativePath}`);

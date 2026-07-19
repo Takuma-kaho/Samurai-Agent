@@ -4,47 +4,35 @@ import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDo
 import { collectionActionWriteValueSchema } from "../../../value-objects/collection.js";
 
 const Input = z.object({
-  "action_id": z.string(),
-  "backend_id": z.string() .optional(),
-  "changes": z.record(domainJsonValueSchema) .optional(),
-  "collection_id": z.string(),
-  "data": z.record(domainJsonValueSchema) .optional(),
-  "envelope_id": z.string() .optional(),
-  "error_code": z.string() .optional(),
-  "input": z.record(domainJsonValueSchema) .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "message": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "model": z.string() .optional(),
-  "output_locale": z.string() .optional(),
-  "output_summary": z.string() .optional(),
-  "payload": z.record(domainJsonValueSchema) .optional(),
-  "provider": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "provider_tool_name": z.string() .optional(),
-  "reason": z.string() .optional(),
-  "record_id": z.string() .optional(),
-  "retryable": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "status": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "text": z.string() .optional(),
-  "tool_call_id": z.string() .optional(),
-  "view_id": z.string() .optional()
+  "collection_id": z.string().trim().min(1).max(256),
+  "action_id": z.string().trim().min(1).max(256),
+  "record_id": z.string().trim().min(1).max(256).optional(),
+  "backend_id": z.string().trim().min(1).max(256).optional(),
+  "payload": z.record(domainJsonValueSchema).default({})
 }).strict();
 const Output = collectionActionWriteValueSchema;
 
+export type CollectionActionRunInput = z.infer<typeof Input>;
+export type CollectionActionRunOutput = z.infer<typeof Output>;
+
+export interface CollectionActionRunRequest {
+  collectionId: string;
+  actionId: string;
+  recordId?: string;
+  backendId?: string;
+  sessionId?: string;
+  payload: Record<string, z.infer<typeof domainJsonValueSchema>>;
+}
+
 export interface CollectionActionRunPorts {
-  executeCollectionActionRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  runCollectionAction(input: CollectionActionRunRequest): Promise<CollectionActionRunOutput> | CollectionActionRunOutput;
 }
 
 const collectionActionRun = defineCommand<CollectionActionRunPorts>()({
   ...{
   "kind": "command",
   "id": "collection.action.run",
-  "version": "2.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Run collection action",
   "description": "Run a schema-defined Collection action such as patch, create, or reindex.",
@@ -90,7 +78,15 @@ const collectionActionRun = defineCommand<CollectionActionRunPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionActionRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionActionRun(context, input);
+        const value = await ports.runCollectionAction({
+          collectionId: input.collection_id,
+          actionId: input.action_id,
+          ...(input.record_id ? { recordId: input.record_id } : {}),
+          ...(input.backend_id ? { backendId: input.backend_id } : {}),
+          ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+          payload: input.payload
+        });
+        return { ok: true, value: Output.parse(value) };
       }
     };
   }

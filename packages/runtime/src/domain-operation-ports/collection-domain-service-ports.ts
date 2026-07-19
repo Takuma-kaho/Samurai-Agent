@@ -1,15 +1,13 @@
 import type { DomainOperationPorts } from "@samurai-agent/domain-operations";
 import type { RuntimeDomainServices } from "../domain-operation-services.js";
+import { readOnlyQueryPort } from "./read-only-query-port.js";
 
 type Ports = Pick<DomainOperationPorts, "collection.action.run" | "collection.patch.apply" | "collection.record.create" | "collection.record.delete" | "collection.reindex" | "collection.schema.save" | "collection.records.list" | "collection.schema.docs" | "collection.schema.get" | "collection.view.present">;
 
 export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainServices, "collectionDomainService">): Ports {
   return {
     "collection.action.run": {
-      executeCollectionActionRun: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.runAction(input)
-      })
+      runCollectionAction: (input) => services.collectionDomainService.runAction(input)
     },
     "collection.patch.apply": {
       ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
@@ -60,23 +58,20 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
       runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
-    "collection.records.list": {
+    "collection.records.list": readOnlyQueryPort<Ports["collection.records.list"]>({
       getCollectionSchema: (id) => services.collectionDomainService.getCollectionSchema(id),
       listCollectionRecords: (schema, input) => services.collectionDomainService.listCollectionRecords(schema, input),
       collectionRecordsQueryError: (message) => services.collectionDomainService.collectionQueryError(message)
-    },
-    "collection.schema.docs": {
-      executeCollectionSchemaDocs: async (context, input) => ({
-        ok: true as const,
-        value: await services.collectionDomainService.schemaDocs()
-      })
-    },
-    "collection.schema.get": {
+    }),
+    "collection.schema.docs": readOnlyQueryPort<Ports["collection.schema.docs"]>({
+      readCollectionSchemaDocs: () => services.collectionDomainService.schemaDocs()
+    }),
+    "collection.schema.get": readOnlyQueryPort<Ports["collection.schema.get"]>({
       getCollectionSchema: (id) => services.collectionDomainService.getCollectionSchema(id),
       collectionSchemaQueryError: (message) => services.collectionDomainService.collectionQueryError(message)
-    },
-    "collection.view.present": {
+    }),
+    "collection.view.present": readOnlyQueryPort<Ports["collection.view.present"]>({
       presentCollectionView: (input) => services.collectionDomainService.presentCollectionView(input)
-    }
+    })
   };
 }

@@ -3,6 +3,7 @@ import type { TrustedDomainContext } from "../../../definition/index.js";
 import chatTurnRun from "./run.operation.js";
 
 const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test" };
+const contextWithSession: TrustedDomainContext = { ...context, sessionId: "session_1" };
 const session = { id: "session_1", session_key: "session_1", title: "Chat", ui_locale: "ja", output_locale: "ja", created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" } as const;
 const result = { session, messages: [] } as never;
 
@@ -11,9 +12,9 @@ describe("chat.turn.run handler", () => {
     const createChatSession = vi.fn(async () => session);
     const runChatTurn = vi.fn(async () => result);
     const handler = chatTurnRun.createHandler({ createChatSession, runChatTurn });
-    const input = chatTurnRun.input.parse({ session_id: session.id, content: "Hello" });
+    const input = chatTurnRun.input.parse({ content: "Hello" });
 
-    await handler.execute(context, input);
+    await handler.execute(contextWithSession, input);
 
     expect(createChatSession).not.toHaveBeenCalled();
     expect(runChatTurn).toHaveBeenCalledWith({ sessionId: session.id, content: "Hello", backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   actionCatalogEntries,
+  collectionManageCompatibilityEntry,
   getDomainCommandEntry,
   getDomainCommandForProviderToolName,
   getDomainCommandForSurfaceOperationKind,
@@ -25,11 +26,12 @@ for (const tool of samuraiToolBridgeDescriptors) {
     ?? getDomainCommandForProviderToolName(tool.name)
     ?? getDomainQueryForProviderToolName(tool.provider_tool_name)
     ?? getDomainQueryForProviderToolName(tool.name);
-  if (!entry) continue;
+  const mappedEntry = entry ?? (tool.name === "samurai.collection.manage" ? collectionManageCompatibilityEntry : undefined);
+  assert.ok(mappedEntry, `bridge tool is not mapped: ${tool.provider_tool_name}`);
   bridgeMappings += 1;
-  assert.deepEqual(tool.input_schema, entry.input_schema, `${tool.name} schema drifted from ${entry.id}`);
+  assert.deepEqual(tool.input_schema, mappedEntry.input_schema, `${tool.name} schema drifted from ${mappedEntry.id}`);
 }
-assert.ok(bridgeMappings >= 6);
+assert.equal(bridgeMappings, samuraiToolBridgeDescriptors.length);
 
 const openAiTools = providerTools("openai") as Array<{ name: string; parameters: Record<string, unknown> }>;
 let providerMappings = 0;
@@ -42,14 +44,14 @@ for (const tool of openAiTools) {
 }
 assert.equal(providerMappings, 3);
 
-const surfaceKinds = ["message.submit", "artifact.request", "collection.record.create", "collection.record.patch", "collection.view.present", "collection.action.run"];
+const surfaceKinds = [...new Set([...actionCatalogEntries, ...listDomainQueryEntries()].flatMap((entry) => entry.surface_operation_kinds ?? []))].sort();
 for (const kind of surfaceKinds) {
   const entry = getDomainCommandForSurfaceOperationKind(kind)
     ?? getDomainQueryForSurfaceOperationKind(kind);
   assert.ok(entry, `surface operation is not mapped: ${kind}`);
   assert.deepEqual(catalogById.get(entry.id)?.input_schema ?? queryById.get(entry.id)?.input_schema, entry.input_schema);
 }
-assert.equal(surfaceKinds.length, 6);
+assert.ok(surfaceKinds.length > 0);
 const patchSchema = getDomainCommandEntry("collection.patch.apply")?.input_schema;
 assert.ok(Array.isArray(patchSchema?.required) && patchSchema.required.includes("expected_version"));
 
@@ -57,6 +59,7 @@ process.stdout.write(`${JSON.stringify({
   status: "passed",
   commands: listDomainCommandEntries().length,
   action_catalog_matches: true,
+  gates: ["CT11"],
   bridge_mappings: bridgeMappings,
   provider_mappings: providerMappings,
   surface_mappings: surfaceKinds.length,

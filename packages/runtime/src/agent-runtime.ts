@@ -1,23 +1,27 @@
 import { createArtifactDraft, type ArtifactKind, type ArtifactPayload } from "@samurai-agent/artifacts";
 import { createTaskFingerprint } from "./learning/task-evaluation";
-import { routeGatewayInbound, runDueAutomation, type GatewayInboundInput } from "./domain-ingress-coordinator.js";
-import { runtimeApiOperationIds } from "./runtime-api-operation-ids.js";
 import {
-  artifactCommandId,
-  collectionPatchCommandId,
-  effectiveProviderCommandId,
-  generatedSurfaceWriteCommandId,
-  isArtifactCommand,
-  isGeneratedSurfaceRevision,
-  isMcpCallCommand,
-  isMemoryCommand,
-  memoryCommandId,
-  mcpCallCommandId,
-  sandboxExecCommandId,
-  isProviderSkillView,
-  providerCapturedWriteCommandId,
-  type ProviderCapturedWriteCommandId
-} from "./provider-operation-dispatch.js";
+  isSamuraiToolBridgeObservedProviderTool,
+  normalizeSamuraiToolBridgeName,
+  samuraiToolBridgeActionId,
+  samuraiToolBridgeDescriptors,
+  samuraiToolBridgeTools,
+  samuraiToolBridgeWriteTools
+} from "./provider-tool-bridge-composition.js";
+import { RuntimeDomainApi } from "./runtime-domain-api.js";
+import { runtimeOperationIds } from "./runtime-operation-composition.js";
+import { executeGeneratedSurfaceAction } from "./generated-surface-action-ingress.js";
+import {
+  isArtifactRecordResource,
+  isMemoryFrontmatterResource,
+  operationAuditRuntimeResult,
+  runtimeToolCallResult,
+  runtimeToolWorkspaceEvents,
+  runtimeWriteResource,
+  type RuntimeToolCallResult,
+  type RuntimeToolQueryResult
+} from "./provider-result-projector.js";
+import { routeGatewayInbound, runDueAutomation, type GatewayInboundInput } from "./domain-ingress-coordinator.js";
 import {
   collectionRecordCreateCommandId,
   collectionRecordPatchCommandId,
@@ -60,7 +64,12 @@ import {
 import {
   DomainOperationError,
   DomainOperationRegistry,
+  type DomainCommandId,
+  type DomainOperationId,
+  type DomainOperationInput,
+  type DomainOperationOutput,
   type DomainRuntimeCapability,
+  type DomainQueryId,
   type TrustedDomainContext
 } from "@samurai-agent/domain-operations";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -72,6 +81,7 @@ import {
   AgentBackendRegistry,
   ClaudeCodeBackend,
   CodexBackend,
+  type AgentBackend,
   type AgentBackendStatus,
   type BackendOutputEvent,
   type BackendToolBridge,
@@ -110,9 +120,7 @@ import {
   type GrantRecord,
   type GeneratedSurfaceDefinition,
   type GeneratedSurfaceActionDeclaration,
-  SurfaceGenerationRequestSchema,
   SurfaceInteractionRecordSchema,
-  type SurfaceGenerationRequest,
   type GatewayChannel,
   type HostContextAssembly,
   type ContextHandoff,
@@ -191,8 +199,6 @@ import {
   createSandboxCommandAdapter,
   createSandboxLifecycleAdapter,
   createSandboxWorkspaceSyncAdapter,
-  createDefaultGatewayPairingPolicy,
-  createDefaultGatewayRoutingPolicy,
   createHttpMcpToolAdapter,
   createPooledStdioMcpToolAdapter,
   cronMemoryReviewGatewayContext,
@@ -235,7 +241,7 @@ import {
 import { handleBackendToolCall, type BackendToolBoundaryFeedback } from "./backend/feedback";
 import { BackendEventBridge, normalizeBackendOutputEvent } from "./backend/event-bridge";
 import { SamuraiNativeBackend } from "./backend/native-backend";
-import { DomainCommandConflictError, DomainCommandIdempotencyKeyRequiredError, DurableDomainCommandBus } from "./commands/domain-command-bus";
+import { DomainCommandConflictError, DomainCommandIdempotencyKeyRequiredError, DomainCommandOutcomeUnknownError, DomainCommandReplayError, DurableDomainCommandBus } from "./commands/domain-command-bus";
 import { createDomainOperationPorts } from "./domain-operation-composition";
 import {
   commandIdForSurfaceOperation,
@@ -259,11 +265,17 @@ import { ObjectiveDomainService } from "./commands/services/objective-domain-ser
 import { PresentationDomainService } from "./commands/services/presentation-domain-service";
 import { TranslationDomainService } from "./commands/services/translation-domain-service";
 import { LearningDomainService } from "./commands/services/learning-domain-service";
-import { SystemDomainService, type ReflectionTarget } from "./commands/services/system-domain-service";
+import {
+  SystemDomainService,
+  type ReflectionTarget,
+  type SystemMcpCallRequest,
+  type SystemSandboxExecRequest
+} from "./commands/services/system-domain-service";
 import { ClientEventDomainService } from "./commands/services/client-event-domain-service";
 import { GatewayDomainService } from "./commands/services/gateway-domain-service";
 import { WikiDomainService } from "./commands/services/wiki-domain-service";
-import { AutomationDomainService } from "./commands/services/automation-domain-service";
+import { AutomationDomainService, type ScheduledAutomationContext } from "./commands/services/automation-domain-service";
+import { DomainOperationTelemetryService } from "./commands/services/domain-operation-telemetry-service";
 import { GeneratedSurfaceDomainService } from "./commands/services/generated-surface-domain-service";
 import { SkillDomainService } from "./commands/services/skill-domain-service";
 import { CollectionDomainService } from "./commands/services/collection-domain-service";
@@ -272,7 +284,8 @@ import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
 import { MemoryDomainService } from "./commands/services/memory-domain-service";
-import { ArtifactDomainService, type ArtifactMutationInput, type ArtifactSurfaceResult } from "./commands/services/artifact-domain-service";
+import { ArtifactDomainService, type ArtifactMutationInput } from "./commands/services/artifact-domain-service";
+import { createSearchReadStore, SearchDomainService } from "./commands/services/search-domain-service";
 export {
   HttpExternalAssistProvider,
   LocalFileExternalAssistProvider,
@@ -303,7 +316,7 @@ export {
   type ProviderToolCall
 } from "./backend/provider";
 export { generatedSurfaceCsp } from "./presentation/generated-surface";
-import { ProviderRequestError, type ProviderAdapter, type ProviderDiagnostics, type ProviderInput, type ProviderOutput, type ProviderToolCall } from "./backend/provider";
+import { ProviderRequestError, type ProviderAdapter, type ProviderDiagnostics, type ProviderInput, type ProviderOutput } from "./backend/provider";
 export type { GatewayContext } from "@samurai-agent/gateway";
 
 export interface RunChatTurnInput {
@@ -339,17 +352,11 @@ export interface RunChatTurnResult {
   toolRuns: ToolRunRecord[];
 }
 
-interface RuntimeToolCallResult {
-  operation: OperationRecord;
-  toolRun: ToolRunRecord;
-  outputPayload?: Record<string, JsonValue>;
-  resourceRefs?: ResourceRef[];
-  artifacts?: ArtifactRecord[];
-  memories?: MemoryFrontmatter[];
-  collectionSchemas?: CollectionSchemaWithFilePath[];
-  workspaceChanges?: WorkspaceChangeRecord[];
-  events?: BackendOutputEvent[];
-}
+type RuntimeToolDispatchOutcome =
+  | { kind: "unhandled" }
+  | { kind: "handled"; value: RuntimeToolCallResult | RuntimeToolQueryResult }
+  | { kind: "query_failed"; failure: RuntimeToolFailure }
+  | { kind: "failed"; toolRun: ToolRunRecord };
 
 interface BackendToolEventHandlingResult {
   operations: OperationRecord[];
@@ -358,6 +365,15 @@ interface BackendToolEventHandlingResult {
   collectionSchemas: CollectionSchemaWithFilePath[];
   toolRuns: ToolRunRecord[];
   workspaceChanges: WorkspaceChangeRecord[];
+}
+
+type RuntimeToolFailureCode = RuntimeRequestError["code"] | DomainOperationError["code"] | "internal_error";
+
+interface RuntimeToolFailure {
+  code: RuntimeToolFailureCode;
+  reason: "runtime_tool_failed";
+  retryable: boolean;
+  summary: string;
 }
 
 type BackendEventRecorder = (event: BackendOutputEvent) => Promise<BackendEventRecord>;
@@ -526,7 +542,7 @@ type StructuredSurfaceOperation = Extract<SurfaceOperation, {
 
 export interface SurfaceArtifactRuntimeResult extends RuntimeWriteResult<ArtifactRecord> {
   sourceArtifact?: ArtifactRecord;
-  workspaceChange: WorkspaceChangeRecord;
+  workspaceChange?: WorkspaceChangeRecord;
 }
 
 export type SurfaceOperationRuntimeResult = SurfaceOperationResultEnvelope<
@@ -542,16 +558,58 @@ export interface CollectionViewRuntimeResult {
 
 export interface DomainCommandRuntimeInput {
   command_id: string;
-  payload?: Record<string, unknown>;
+  /** Dynamic transport input. The registry owns object and schema validation. */
+  payload?: unknown;
   input_source?: DomainCommandInputSource;
   idempotency_key?: string;
 }
 
 export interface DomainQueryRuntimeInput {
   query_id: string;
-  payload?: Record<string, unknown>;
+  /** Dynamic transport input. The registry owns object and schema validation. */
+  payload?: unknown;
   input_source?: DomainCommandInputSource;
 }
+
+/** A fixed Runtime API command keeps its generated operation DTO through dispatch. */
+export interface TypedDomainCommandRuntimeInput<Id extends DomainCommandId> {
+  command_id: Id;
+  payload: DomainOperationInput<Id>;
+  idempotency_key?: string;
+}
+
+/** A fixed Runtime API query keeps its generated operation DTO through dispatch. */
+export interface TypedDomainQueryRuntimeInput<Id extends DomainQueryId> {
+  query_id: Id;
+  payload: DomainOperationInput<Id>;
+}
+
+/**
+ * Values selected by a trusted ingress after transport authentication and
+ * resource lookup. They are intentionally separate from an operation payload.
+ */
+export interface TrustedDomainRuntimeContext {
+  /**
+   * Optional assertion supplied by a trusted ingress.  The effective actor is
+   * always selected from the input source below; an ingress can never inject
+   * an arbitrary actor id into a Domain handler.
+   */
+  actorIdentity?: TrustedActorIdentity;
+  /** Server-created correlation root shared by a multi-command ingress chain. */
+  correlationId?: string;
+  sessionId?: string;
+  runId?: string;
+  envelopeId?: string;
+  surfaceOperation?: {
+    id: string;
+    kind: string;
+  };
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}
+
+/** Actors that the Runtime can assign without consulting a user payload. */
+export type TrustedActorIdentity = Extract<ActorIdentity, "owner" | "owner_scheduled" | "paired_contact">;
 
 export interface DomainCommandRuntimeResult<TResult = unknown> {
   command: DomainCommandEntry;
@@ -636,7 +694,7 @@ export interface ResourceVersionConflictPayload {
   actual_version: number;
   latest_resource: CollectionRecordWithFilePath;
   retry: {
-    command_id: "collection.patch.apply";
+      command_id: DomainOperationId;
     expected_version: number;
   };
 }
@@ -675,9 +733,9 @@ export interface EvaluationJudgeProvider {
 
 export class RuntimeRequestError extends Error {
   constructor(
-    readonly code: "bad_request" | "gone" | "not_found" | "conflict" | "forbidden" | "provider_not_configured" | "provider_failed" | "backend_cancelled" | "backend_execution_root_not_ready",
+    readonly code: RuntimeRequestErrorCode,
     message: string,
-    readonly payload?: ArchiveMemoryRuntimeResult | BackendRunErrorPayload | ResourceVersionConflictPayload | DeprecatedOperationPayload,
+    readonly payload?: ArchiveMemoryRuntimeResult | BackendRunErrorPayload | ResourceVersionConflictPayload | DeprecatedOperationPayload | DomainCommandReplayPayload,
     readonly diagnostics?: ProviderDiagnostics
   ) {
     super(message);
@@ -685,23 +743,25 @@ export class RuntimeRequestError extends Error {
   }
 }
 
+export type RuntimeRequestErrorCode =
+  | "bad_request" | "validation" | "gone" | "not_found" | "conflict" | "forbidden" | "unavailable"
+  | "outcome_unknown" | "internal" | "provider_not_configured" | "provider_failed" | "backend_cancelled"
+  | "backend_execution_root_not_ready" | "domain_command_failed";
+
 export interface DeprecatedOperationPayload {
   deprecated_operation_id: string;
   replacement: { kind: "effective_inventory"; target: "/api/domain/commands/effective" };
 }
 
-interface OperationPlan {
-  operation: string;
-  proposedEffects: string[];
-  toolCall?: ProviderToolCall;
-  artifact?: {
-    title: string;
-    content: string;
-    preview?: string;
-  };
+export interface DomainCommandReplayPayload {
+  conflict: "domain_command_replay";
+  code: string;
+  retryable: boolean;
+  details?: JsonValue;
 }
 
 interface AgentRuntimeWorkspaceOptions {
+  domainCommandRunningTimeoutMs?: number;
   backendWorkingDirectoryMode?: "workspace" | "repo";
   repoRoot?: string;
   resolveTemporaryContextRef?: (ref: ResourceRef) => Promise<TemporaryContextAttachment | undefined> | TemporaryContextAttachment | undefined;
@@ -803,6 +863,12 @@ function parseTimeout(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function isRuntimeToolQueryResult(
+  value: RuntimeToolCallResult | RuntimeToolQueryResult
+): value is RuntimeToolQueryResult {
+  return "queryOnly" in value && value.queryOnly === true;
+}
+
 export class AgentRuntime {
   private readonly backendRegistry: AgentBackendRegistry;
   private readonly stdioMcpProcessPool: PooledMcpToolAdapter;
@@ -811,8 +877,15 @@ export class AgentRuntime {
   private readonly backendToolBridgeTokens = new Map<string, string>();
   private readonly backendEventSequences = new Map<string, number>();
   private readonly backgroundTasks = new Set<Promise<unknown>>();
+  private readonly backgroundTaskAbortController = new AbortController();
+  private readonly backgroundTaskFailures: Array<{ error: unknown; runId?: string }> = [];
+  private readonly backgroundReviewBackends = new Map<string, AgentBackend>();
+  private backgroundTasksClosing = false;
+  private backgroundShutdownPromise: Promise<void> | undefined;
   private readonly domainCommandBus: DurableDomainCommandBus;
+  private readonly domainOperationTelemetry: DomainOperationTelemetryService;
   private readonly domainOperationRegistry: DomainOperationRegistry;
+  private readonly runtimeDomainApi: RuntimeDomainApi;
   private readonly durableWorkCoordinator: DurableWorkCoordinator;
   private readonly executionDomainService: ExecutionDomainService;
   private readonly pluginDomainService: PluginDomainService;
@@ -849,7 +922,17 @@ export class AgentRuntime {
     const runWebMutation = <TResource, TExtra extends Record<string, unknown> = {}>(
       input: Omit<RecordedMutationInput<TResource, TExtra>, "context">
     ) => this.runRecordedMutation<TResource, TExtra>({ ...input, context: webGatewayContext });
-    this.domainCommandBus = new DurableDomainCommandBus(this.store);
+    this.domainCommandBus = new DurableDomainCommandBus(this.store, workspaceOptions.domainCommandRunningTimeoutMs);
+    this.domainOperationTelemetry = new DomainOperationTelemetryService({
+      getBackendRun: (id) => this.store.getBackendRun(id),
+      listWorkspaceChanges: (sessionId) => this.store.listWorkspaceChanges(sessionId),
+      saveWorkspaceChange: (change) => this.store.saveWorkspaceChange(change),
+      emitWorkspaceChange: async (change) => { await this.emit("workspace.change.created", change); }
+    });
+    this.runtimeDomainApi = new RuntimeDomainApi({
+      command: (input, trusted) => this.runDomainCommandWithTrustedContext(input as DomainCommandRuntimeInput, trusted as TrustedDomainRuntimeContext),
+      query: (input, trusted) => this.runRuntimeApiDomainQuery(input, trusted as TrustedDomainRuntimeContext)
+    });
     this.presentationDomainService = new PresentationDomainService({
       getPresentation: (id) => this.store.getMessagePresentation(id),
       presentView: (input) => this.presentCollectionView(input),
@@ -958,18 +1041,18 @@ export class AgentRuntime {
         listBackendRuns: () => this.store.listBackendRuns(), listEvaluations: () => this.store.listLearningEvaluations(),
         listReflectionRuns: () => this.store.listReflectionRuns(), createReflectionRun: (run) => this.store.createReflectionRun(run),
         updateReflectionRun: (run) => this.store.updateReflectionRun(run), createSnapshot: (runId) => this.store.createLearningSnapshot(runId),
-        restoreSnapshot: (id) => this.store.restoreLearningSnapshot(id), saveState: (input) => this.store.saveCuratorState(input),
-        saveSuggestion: (value) => this.store.saveReflectionSuggestion(value), saveJobReport: (value) => this.store.saveLearningJobReport(value),
-        readMemory: (id) => this.store.readMemoryContent(id), replaceMemory: (id, content) => this.store.replaceMemoryContent(id, content),
-        archiveMemory: (id) => this.store.archiveMemory(id), readWiki: (id) => this.store.readWikiContent(id),
+        restoreSnapshot: async (id) => { await this.store.restoreLearningSnapshot(id); }, saveState: (input) => this.store.saveCuratorState(input),
+        saveSuggestion: async (value) => { await this.store.saveReflectionSuggestion(value); }, saveJobReport: async (value) => { await this.store.saveLearningJobReport(value); },
+        readMemory: (id) => this.store.readMemoryContent(id), replaceMemory: async (id, content) => { await this.store.replaceMemoryContent(id, content); },
+        archiveMemory: async (id) => { await this.store.archiveMemory(id); }, readWiki: (id) => this.store.readWikiContent(id),
         readSkill: (id) => this.store.readSkillMarkdown(id), listSkillSupport: (id) => this.store.listSkillSupportFiles(id),
-        replaceSkill: (id, markdown) => this.store.replaceSkillContent(id, markdown), writeSkillSupport: (input) => this.store.writeSkillSupportFile(input),
-        updateSkillState: (id, state) => this.store.updateSkillState(id, state),
-        applySkillLifecycle: (input) => this.skillDomainService.applyLifecycleInput(input),
+        replaceSkill: async (id, markdown) => { await this.store.replaceSkillContent(id, markdown); }, writeSkillSupport: async (input) => { await this.store.writeSkillSupportFile(input); },
+        updateSkillState: async (id, state) => { await this.store.updateSkillState(id, state); },
+        applySkillLifecycle: async (input) => { await this.skillDomainService.applyLifecycleInput(input); },
         consolidate: async (input, session) => this.workspaceOptions.skillConsolidationRunner
           ? this.workspaceOptions.skillConsolidationRunner.consolidate(input)
           : this.workspaceOptions.enableBackendBackgroundReview
-            ? this.runSkillConsolidationWithBackend(input, session as SessionRecord)
+            ? this.runSkillConsolidationWithBackend(input, session)
             : undefined,
         errorMessage: (error) => errorMessage(error), nextRunAt: (fromMs) => nextRunFromSchedule("weekly", fromMs)
       },
@@ -987,7 +1070,7 @@ export class AgentRuntime {
         loadArtifacts: (input) => this.loadReflectionArtifacts(input as Parameters<AgentRuntime["loadReflectionArtifacts"]>[0]),
         executeReflection: (input) => this.runReflectionForCompletedTurn(input as Parameters<AgentRuntime["runReflectionForCompletedTurn"]>[0]),
         listReflectionSuggestions: () => this.store.listReflectionSuggestions(),
-        updateReflectionSuggestion: (suggestion) => this.store.updateReflectionSuggestion(suggestion as ReflectionSuggestionRecord),
+        updateReflectionSuggestion: (suggestion) => this.store.updateReflectionSuggestion(suggestion),
         ensureReflectionSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
         createReflectionEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
         runReflectionMutation: (input) => this.runRecordedMutation<ReflectionTarget>({ ...input, context: webGatewayContext }),
@@ -1010,7 +1093,7 @@ export class AgentRuntime {
           });
           return { resource: result.resource, ref: result.operation.result_ref!, rollbackPoint: result.rollbackPoint };
         },
-        createReflectionRollback: (operation, refs, after) => this.createRollbackPoint(operation as OperationRecord, refs, {}, after),
+        createReflectionRollback: (operation, refs, after) => this.createRollbackPoint(operation, refs, {}, after),
         now: () => nowIso()
       },
       rollback: {
@@ -1023,7 +1106,7 @@ export class AgentRuntime {
         ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
         createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
         runMutation: (input) => runWebMutation(input),
-        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs, before, after),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         fileRef: (value) => fileRef(value),
         requestError: (code, message) => new RuntimeRequestError(code, message)
       },
@@ -1046,19 +1129,22 @@ export class AgentRuntime {
     this.gatewayDomainService = new GatewayDomainService({
       gateway: {
         expireConcurrencyLocks: (now) => this.store.expireGatewayConcurrencyLocks(now),
-        routeInbound: (input) => this.gatewayDomainService.executeInbound({
-          ...input,
-          channel: gatewayChannelPayload(input.channel),
-          input_locale: supportedLocalePayload(input.input_locale),
-          output_locale: supportedLocalePayload(input.output_locale)
-        }),
-        saveMcpConfig: (record) => this.store.saveGatewayMcpConfig(record),
-        savePairingPolicy: (record) => this.saveGatewayPairingPolicy(record),
-        saveRoutingPolicy: (record) => this.saveGatewayRoutingPolicy(record),
         deleteSandbox: (id) => this.deleteGatewaySandboxInstance(id),
         recreateSandbox: (id) => this.recreateGatewaySandboxInstance(id),
         syncSandbox: (id, input) => this.syncGatewaySandboxWorkspace(id, input),
         repairState: (input) => this.repairGatewayState(input)
+      },
+      policy: {
+        getMcpConfig: (id) => this.store.getGatewayMcpConfig(id),
+        saveMcpConfig: (record) => this.store.saveGatewayMcpConfig(record),
+        listPairingPolicies: () => this.store.listGatewayPairingPolicies(),
+        getPairingPolicy: (channel) => this.store.getGatewayPairingPolicy(channel),
+        savePairingPolicy: (record) => this.store.saveGatewayPairingPolicy(record),
+        emitPairingPolicySaved: async (record) => { await this.emit("gateway.pairing_policy.saved", record); },
+        listRoutingPolicies: () => this.store.listGatewayRoutingPolicies(),
+        getRoutingPolicy: (channel) => this.store.getGatewayRoutingPolicy(channel),
+        saveRoutingPolicy: (record) => this.store.saveGatewayRoutingPolicy(record),
+        emitRoutingPolicySaved: async (record) => { await this.emit("gateway.routing_policy.saved", record); }
       },
       pairing: {
         get: (id) => this.store.getGatewayPairing(id),
@@ -1067,9 +1153,9 @@ export class AgentRuntime {
         emitUpdated: async (record) => { await this.emit("gateway.pairing.updated", record); }
       },
       inbound: {
-        expirePairings: () => this.expireGatewayPairings(),
-        getRoutingPolicy: (channel) => this.getGatewayRoutingPolicy(channel),
-        getPairingPolicy: (channel) => this.getGatewayPairingPolicy(channel),
+        expirePairings: () => this.gatewayDomainService.expirePairingsPrimitive(nowIso()),
+        getRoutingPolicy: (channel) => this.gatewayDomainService.getRoutingPolicy(channel),
+        getPairingPolicy: (channel) => this.gatewayDomainService.getPairingPolicy(channel),
         saveInbound: (record) => this.store.saveGatewayInboundMessage(record),
         emit: async (name, payload) => { await this.emit(
           name as Parameters<AgentRuntime["emit"]>[0],
@@ -1082,7 +1168,7 @@ export class AgentRuntime {
         savePairing: (record) => this.store.saveGatewayPairing(record),
         saveBoundaryPolicy: (policy) => this.store.saveGatewayBoundaryPolicy(policy),
         acquireLock: (policy, inbound) => this.acquireGatewayConcurrencyLock(policy, inbound),
-        releaseLock: (lockKey) => this.store.releaseGatewayConcurrencyLock(lockKey),
+        releaseLock: async (lockKey) => { await this.store.releaseGatewayConcurrencyLock(lockKey); },
         ensureSession: (context, title) => this.ensureSessionForContext(context, title),
         runChat: (input) => this.runChatTurn({ sessionId: input.sessionId, content: input.body, backend_id: input.backendId,
           input_locale: input.inputLocale as SupportedLocale | undefined, output_locale: input.outputLocale as SupportedLocale | undefined,
@@ -1104,7 +1190,7 @@ export class AgentRuntime {
         ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
         createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
         runMutation: (input) => runWebMutation(input),
-        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs, before, after),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         requestError: (code, message) => new RuntimeRequestError(code, message)
       }
     });
@@ -1113,15 +1199,14 @@ export class AgentRuntime {
         releaseLock: (jobId, now) => this.store.releaseAutomationJobLock(jobId, now),
         requeue: (jobId, nextRunAt) => this.store.requeueAutomationJob(jobId, { nextRunAt }),
         getJob: (jobId) => this.store.getAutomationJob(jobId),
-        acquireLock: (jobId, input) => this.store.acquireAutomationJobLock(jobId, input),
-        runJob: (job, now) => this.automationDomainService.execute(job, now)
+        acquireLock: (jobId, input) => this.store.acquireAutomationJobLock(jobId, input)
       },
       mutation: {
         saveJob: (job) => this.store.saveAutomationJob(job),
         ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
         createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
         runMutation: (input) => runWebMutation(input),
-        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs, before, after),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         ref: (job) => automationJobRef(job),
         contract: (id) => requireDomainCommandEntry(id)
       },
@@ -1132,12 +1217,12 @@ export class AgentRuntime {
         createEnvelope: (context, content) => createGatewayEnvelope(context, content),
         runMutation: <T>(input: RecordedMutationInput<T>) => this.runRecordedMutation<T>(input),
         reindexWiki: () => this.store.reindexWiki(),
-        runCurator: () => this.learningDomainService.executeCurator() as Promise<ReflectionRuntimeResult>,
-        runMemoryReview: (session) => this.systemDomainService.runScheduledReflection(session as SessionRecord) as Promise<ReflectionRuntimeResult>,
-        runEvaluation: () => this.learningDomainService.executeEvaluation() as Promise<ReflectionRuntimeResult>,
-        runTranslation: (job, session, context) => this.runResourceTranslationJob(job, session as SessionRecord, context),
+        runCurator: () => this.learningDomainService.executeCurator(),
+        runMemoryReview: (session) => this.systemDomainService.runScheduledReflection(session),
+        runEvaluation: () => this.learningDomainService.executeEvaluation(),
+        runTranslation: (job, session, context) => this.runResourceTranslationJob(job, session, context),
         runCollectionTrigger: (job) => this.collectionDomainService.executeTriggerJob(job),
-        runInstruction: (job, session, context) => this.runAutomationInstructionJob(job, session as SessionRecord, context),
+        runInstruction: (job, session, context) => this.runAutomationInstructionJob(job, session, context),
         errorMessage: (error) => safeRuntimeErrorMessage(error),
         retryAt: (failureCount) => nextRetryAt(failureCount)
       },
@@ -1151,7 +1236,6 @@ export class AgentRuntime {
         saveRevision: (input) => this.store.saveGeneratedSurfaceRevision(input),
         saveInteraction: (record) => this.store.saveSurfaceInteraction(record),
         updateState: (id, state) => this.store.updateGeneratedSurfaceState(id, state),
-        dispatchCommand: (input) => this.runDomainCommand(input)
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
@@ -1224,7 +1308,7 @@ export class AgentRuntime {
         ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
         createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
         runMutation: (input) => runWebMutation(input),
-        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs as ResourceRef[], before, after),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         requestError: (code, message) => new RuntimeRequestError(code, message),
         contract: (id) => requireDomainCommandEntry(id)
       },
@@ -1248,7 +1332,7 @@ export class AgentRuntime {
       readTextIfExists: (absolutePath) => readFile(absolutePath, "utf8").catch(() => undefined),
       writeText: (absolutePath, content) => writeFile(absolutePath, content),
       ensureParent: (absolutePath) => mkdir(path.dirname(absolutePath), { recursive: true }).then(() => undefined),
-      reindexCollections: () => this.store.reindexCollections(),
+      reindexCollections: async () => { await this.store.reindexCollections(); },
       isManagedCollectionPath: (relativePath) => isManagedCollectionWorkspacePath(relativePath)
     }, {
       ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
@@ -1333,7 +1417,7 @@ export class AgentRuntime {
         ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
         createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
         runMutation: <T, Extra extends Record<string, unknown>>(input: Omit<RecordedMutationInput<T, Extra>, "context">) => runWebMutation<T, Extra>(input),
-        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation as OperationRecord, refs as ResourceRef[], before, after),
+        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         contract: (id) => requireDomainCommandEntry(id),
         queueTrigger: async (input) => { await this.queueCollectionTriggerAutomations(input); }
       },
@@ -1390,12 +1474,6 @@ export class AgentRuntime {
           return { ...base, ...extra };
         }
       }),
-      runSurface: async (input): Promise<ArtifactSurfaceResult> => {
-        const result = await this.runStructuredSurfaceOperation({ ...input, id: typeof input.id === "string" && input.id ? input.id : createId("surface") } as StructuredSurfaceOperation);
-        const operation = jsonSafe(result.operation);
-        if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new Error("surface_operation_not_json_object");
-        return { ...result, operation };
-      },
       getArtifact: (id) => this.store.getArtifact(id),
       readContent: (id) => this.store.readArtifactContent(id),
       getRevision: (id) => this.store.getArtifactRevision(id),
@@ -1411,6 +1489,7 @@ export class AgentRuntime {
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
+    const searchDomainService = new SearchDomainService(createSearchReadStore(this.store));
     this.domainOperationRegistry = new DomainOperationRegistry(createDomainOperationPorts({
       artifactDomainService: this.artifactDomainService,
       automationDomainService: this.automationDomainService,
@@ -1432,7 +1511,8 @@ export class AgentRuntime {
       skillDomainService: this.skillDomainService,
       systemDomainService: this.systemDomainService,
       translationDomainService: this.translationDomainService,
-      wikiDomainService: this.wikiDomainService
+      wikiDomainService: this.wikiDomainService,
+      searchDomainService
     }));
     this.externalAssistProviders = normalizeExternalAssistProviders(externalAssistProvider);
     this.stdioMcpProcessPool = createPooledStdioMcpToolAdapter({
@@ -1443,9 +1523,55 @@ export class AgentRuntime {
     });
   }
 
-  async shutdownMcpProcessPool(): Promise<void> {
-    await Promise.allSettled([...this.backgroundTasks]);
-    await this.stdioMcpProcessPool.closeAll();
+  shutdownMcpProcessPool(): Promise<void> {
+    if (this.backgroundShutdownPromise) {
+      return this.backgroundShutdownPromise;
+    }
+    this.backgroundTasksClosing = true;
+    this.backgroundTaskAbortController.abort();
+    this.backgroundShutdownPromise = (async () => {
+      const tasks = [...this.backgroundTasks];
+      const timeoutMs = parseTimeout(process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS) ?? 30_000;
+      const deadline = Date.now() + timeoutMs;
+      const cancellationEntries = [...this.backgroundReviewBackends.entries()];
+      const settledRunIds = new Set<string>();
+      const cancellationTasks = cancellationEntries.map(([runId, backend]) => Promise.resolve()
+        .then(() => backend.cancelRun?.(runId))
+        .catch((error) => {
+          const failure = new Error(`background_cancel_failed:${runId}`);
+          Object.assign(failure, { cause: error, runId });
+          this.backgroundTaskFailures.push({ error: failure, runId });
+        })
+        .finally(() => settledRunIds.add(runId)));
+      const cancellationSettled = await settleWithin(cancellationTasks, Math.max(0, deadline - Date.now()));
+      if (!cancellationSettled) {
+        const pendingRunIds = cancellationEntries.map(([runId]) => runId).filter((runId) => !settledRunIds.has(runId));
+        const timeoutError = new Error(`background_cancel_timeout:${timeoutMs}ms`);
+        Object.assign(timeoutError, { run_ids: pendingRunIds });
+        this.backgroundTaskFailures.push({ error: timeoutError });
+      }
+      let drainError: unknown;
+      if (!await settleWithin(tasks, Math.max(0, deadline - Date.now()))) {
+        drainError = new Error(`background_tasks_shutdown_timeout:${timeoutMs}ms`);
+      }
+      const cleanupErrors: unknown[] = [];
+      if (drainError) cleanupErrors.push(drainError);
+      if (this.backgroundTaskFailures.length > 0) {
+        const failure = new Error(`background_tasks_failed:${this.backgroundTaskFailures.length}`);
+        Object.assign(failure, { failures: [...this.backgroundTaskFailures] });
+        cleanupErrors.push(failure);
+      }
+      let closeError: unknown;
+      try {
+        await this.stdioMcpProcessPool.closeAll();
+      } catch (error) {
+        closeError = error;
+      }
+      if (closeError) cleanupErrors.push(closeError);
+      if (cleanupErrors.length === 1) throw cleanupErrors[0];
+      if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "background_tasks_shutdown_failed");
+    })();
+    return this.backgroundShutdownPromise;
   }
 
   getDomainOperationBindingIdentity(id: string) {
@@ -1589,20 +1715,34 @@ export class AgentRuntime {
   }
 
   async runReflection(input: { sessionId: string; sourceRunId?: string }): Promise<ReflectionRuntimeResult> {
-    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.reflectionRun, idempotency_key: createId("reflection_request"), payload: { session_id: input.sessionId, ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}) } });
+    const result = await this.runDomainCommandWithTrustedContext({
+      command_id: runtimeOperationIds.reflectionRun,
+      idempotency_key: createId("reflection_request"),
+      payload: input.sourceRunId ? { source_run_id: input.sourceRunId } : {}
+    }, { sessionId: input.sessionId });
     return result.result as ReflectionRuntimeResult;
   }
 
   async runCuratorJob(input: { respectIdleGate?: boolean } = {}): Promise<ReflectionRuntimeResult> {
-    return this.learningDomainService.executeCurator(input) as Promise<ReflectionRuntimeResult>;
+    const result = await this.runDomainCommand({
+      command_id: runtimeOperationIds.curatorRun,
+      idempotency_key: createId("curator_run_request"),
+      payload: input.respectIdleGate === undefined ? {} : { respect_idle_gate: input.respectIdleGate }
+    });
+    return result.result as ReflectionRuntimeResult;
   }
 
   async applyCuratorSkillAction(input: { skillId: string; action: Exclude<CuratorLifecycleAction, "review"> }): Promise<SkillRuntimeResult> {
-    return this.skillDomainService.applyLifecycleInput(input) as Promise<SkillRuntimeResult>;
+    const result = await this.runDomainCommand({
+      command_id: runtimeOperationIds.skillLifecycleApply,
+      idempotency_key: createId("skill_lifecycle_request"),
+      payload: { skill_id: input.skillId, action: input.action }
+    });
+    return result.result as SkillRuntimeResult;
   }
 
   async runEvaluationJob(): Promise<ReflectionRuntimeResult> {
-    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.evaluationRun, input_source: "automation", idempotency_key: createId("evaluation_request"), payload: {} });
+    const result = await this.runDomainCommand({ command_id: runtimeOperationIds.evaluationRun, input_source: "automation", idempotency_key: createId("evaluation_request"), payload: {} });
     return result.result as ReflectionRuntimeResult;
   }
 
@@ -1711,15 +1851,19 @@ export class AgentRuntime {
         input: input.toolInput
       }
     });
-    await recordEvent(startedEvent);
+    // Query bridge execution is a pure read: do not persist a BackendEvent
+    // for either the request or its result. The surrounding chat turn owns
+    // persistence of the original provider event when applicable.
+    if (!getDomainQueryForProviderToolName(providerToolName)) {
+      await recordEvent(startedEvent);
+    }
     if (samuraiToolBridgeWriteTools.has(providerToolName)) {
       const feedback = await this.handleRuntimeToolCall(run, runInput, startedEvent, undefined, undefined);
       if (!feedback) {
         throw new RuntimeRequestError("conflict", "tool_bridge_write_tool_failed");
       }
-      for (const change of feedback.workspaceChanges ?? []) {
-        await this.store.saveWorkspaceChange(change);
-        await this.emit("workspace.change.created", change);
+      if (isRuntimeToolQueryResult(feedback)) {
+        throw new RuntimeRequestError("conflict", "tool_bridge_write_tool_returned_query");
       }
       await recordEvent({
         event_type: "tool_call_output",
@@ -1746,7 +1890,19 @@ export class AgentRuntime {
       };
     }
     if (providerToolName !== "samurai.artifact.create") {
-      const output = await this.runReadOnlyBackendTool(providerToolName, { ...input.toolInput, run_id: input.runId });
+      const providerQuery = getDomainQueryForProviderToolName(providerToolName);
+      if (providerQuery) {
+        const feedback = await this.handleProviderDomainQueryToolCall(run, runInput, startedEvent, providerQuery.id, input.toolInput);
+        if (!feedback) throw new RuntimeRequestError("conflict", "tool_bridge_query_failed");
+        const output = feedback.outputPayload?.result ?? feedback.outputPayload;
+        return {
+          status: "completed",
+          output,
+          resource_ref: feedback.resourceRefs?.[0],
+          tool_run_ids: []
+        };
+      }
+      const output = await this.runReadOnlyBackendTool(providerToolName, input.toolInput, { runId: input.runId });
       await recordEvent({
         event_type: "tool_call_output",
         tool_call_id: toolCallId,
@@ -1777,84 +1933,20 @@ export class AgentRuntime {
     };
   }
 
-  private async runReadOnlyBackendTool(toolName: string, input: Record<string, JsonValue>): Promise<JsonValue> {
-    const query = typeof input.query === "string" ? input.query : "";
-    const limit = typeof input.limit === "number" && Number.isFinite(input.limit) ? Math.max(1, Math.min(Math.floor(input.limit), 8)) : 5;
-    if (toolName === "samurai.session.search") {
-      return (await this.store.search(query)).slice(0, limit).map((item) => ({
-        kind: item.kind,
-        id: item.id,
-        title: item.title,
-        summary: item.summary,
-        ...(item.session_id ? { session_id: item.session_id } : {})
-      }));
-    }
-    if (toolName === "samurai.memory.search") {
-      return (await this.store.searchMemory(query, limit, { includeArchived: false })).map((item) => ({
-        id: item.id,
-        topic: item.topic,
-        state: item.state,
-        file_path: item.file_path
-      }));
-    }
-    if (toolName === "samurai.wiki.search") {
-      return (await this.store.searchWiki(query, limit, { activeOnly: true })).map((item) => ({
-        id: item.id,
-        slug: item.slug,
-        title: item.title,
-        file_path: item.file_path
-      }));
-    }
-    if (toolName === "samurai.skill.search") {
-      return (await this.store.searchSkills(query, limit, { states: ["active", "pinned", "project"] })).map((item) => ({
-        id: item.id,
-        title: item.title,
-        description: item.description,
-        tags: item.tags,
-        file_path: item.file_path
-      }));
-    }
-    if (toolName === "samurai.skill.view") {
-      const runId = stringPayload(input.run_id);
-      if (!runId) throw new RuntimeRequestError("conflict", "skill_view_run_id_required");
-      const queryId = getDomainQueryForProviderToolName(toolName)?.id;
-      if (!queryId) throw new RuntimeRequestError("not_found", `provider_query_mapping_missing:${toolName}`);
-      const queryResult = await this.runDomainQuery({
-        query_id: queryId,
+  private async runReadOnlyBackendTool(
+    toolName: string,
+    input: Record<string, JsonValue>,
+    trusted: Pick<TrustedDomainRuntimeContext, "runId">
+  ): Promise<JsonValue> {
+    const query = getDomainQueryForProviderToolName(toolName);
+    if (query) {
+      if (!trusted.runId) throw new RuntimeRequestError("internal", "provider_query_trusted_run_id_required");
+      const queryResult = await this.runDomainQueryWithTrustedContext({
+        query_id: query.id,
         input_source: "provider_tool_call",
-        payload: input
-      });
+        payload: normalizeProviderDomainQueryPayload(query.id, input)
+      }, trusted);
       return jsonSafe(queryResult.result);
-    }
-    if (toolName === "samurai.collection.search") {
-      const collectionId = typeof input.collection_id === "string" && input.collection_id.trim() ? input.collection_id.trim() : "";
-      if (!collectionId) {
-        const schemas = await this.store.listCollectionSchemas();
-        return matchCollectionSchemas(schemas, query)
-          .slice(0, limit)
-          .map((schema) => collectionSchemaSearchResult(schema));
-      }
-      const [schema, records] = await Promise.all([
-        this.store.getCollectionSchema(collectionId),
-        this.store.listCollectionRecords(collectionId)
-      ]);
-      const normalizedQuery = query.trim().toLowerCase();
-      const recordResults = records
-        .filter((record) => !normalizedQuery || JSON.stringify(record.data).toLowerCase().includes(normalizedQuery))
-        .slice(0, limit)
-        .map((record) => ({
-          kind: "collection_record",
-          collection_id: record.collection_id,
-          id: record.id,
-          file_path: record.file_path,
-          summary: summarize(JSON.stringify(record.data), 180),
-          data: record.data
-        }));
-      return schema ? [collectionSchemaSearchResult(schema), ...recordResults] : recordResults;
-    }
-    if (toolName === "samurai.collection.view.present") {
-      const descriptor = await this.resolveCollectionPresentationDescriptor(input);
-      return descriptor;
     }
     if (toolName === "samurai.collection.manage") {
       return this.runCollectionManageCompatibility(input, "provider_tool_call");
@@ -2476,14 +2568,18 @@ export class AgentRuntime {
       workspaceChanges,
       toolRuns,
       transcriptMessages: await this.store.listMessages(session.id),
-      artifacts: await this.loadReflectionArtifacts({ sessionId: session.id, sourceRunId: backendRun.id, workspaceChanges })
+      artifacts: await this.loadReflectionArtifacts({ sessionId: session.id, sourceRunId: backendRun.id, workspaceChanges }),
+      abortSignal: this.backgroundTaskAbortController.signal
     });
     const autoLearningEnabled = settings.memory_capture_mode === "auto" || settings.skill_capture_mode === "auto";
     const reflection = autoLearningEnabled && !this.workspaceOptions.detachBackgroundReview ? await runBackgroundReview() : undefined;
-    if (autoLearningEnabled && this.workspaceOptions.detachBackgroundReview) {
-      const task = runBackgroundReview().catch(() => undefined);
+    if (autoLearningEnabled && this.workspaceOptions.detachBackgroundReview && !this.backgroundTasksClosing) {
+      const task = runBackgroundReview().catch((error) => {
+        this.backgroundTaskFailures.push({ error });
+        throw error;
+      });
       this.backgroundTasks.add(task);
-      void task.finally(() => this.backgroundTasks.delete(task));
+      void task.finally(() => this.backgroundTasks.delete(task)).catch(() => undefined);
     }
 
     const messagePresentations = await this.saveGeneratedSurfacePresentations({
@@ -2845,16 +2941,14 @@ export class AgentRuntime {
   async runSurfaceOperation(input: SurfaceOperation): Promise<SurfaceOperationRuntimeResult> {
     const query = getDomainQueryForSurfaceOperationKind(input.kind);
     if (query && isCollectionViewPresentSurface(input)) {
-      const queryResult = await this.runDomainQuery({
+      const queryResult = await this.runDomainQueryWithTrustedContext({
         query_id: query.id,
         input_source: "surface_operation",
         payload: {
           collection_id: input.collection_id,
-          view_id: input.view_id,
-          surface_operation_id: input.id,
-          ...(input.session_id ? { session_id: input.session_id } : {})
+          view_id: input.view_id
         }
-      });
+      }, surfaceOperationTrustedContext(input));
       const result = queryResult.result as CollectionViewRuntimeResult & { render_spec?: SurfaceRenderSpec };
       const renderSpec = result.render_spec ?? queryResult.render_specs[0];
       if (!renderSpec) {
@@ -2873,10 +2967,17 @@ export class AgentRuntime {
     return this.executeSurfaceOperation(input);
   }
 
-  private async runSurfaceDomainCommand<TResult>(commandId: string, payload: Record<string, unknown>): Promise<TResult> {
-    const surfaceId = typeof payload.surface_operation_id === "string" ? payload.surface_operation_id : "";
-    if (!surfaceId) throw new RuntimeRequestError("conflict", "surface_operation_id_required");
-    const output = await this.runDomainCommand({ command_id: commandId, input_source: "surface_operation", idempotency_key: surfaceId, payload });
+  private async runSurfaceDomainCommand<TResult>(
+    commandId: string,
+    surfaceOperation: SurfaceOperation,
+    payload: Record<string, unknown>
+  ): Promise<TResult> {
+    const output = await this.runDomainCommandWithTrustedContext({
+      command_id: commandId,
+      input_source: "surface_operation",
+      idempotency_key: surfaceOperation.id,
+      payload
+    }, surfaceOperationTrustedContext(surfaceOperation));
     return output.result as TResult;
   }
 
@@ -2886,20 +2987,13 @@ export class AgentRuntime {
         throw new RuntimeRequestError("conflict", "surface_operation_session_required");
       }
       const collectionSchemasBefore = await this.store.listCollectionSchemas();
-      const result = await this.runSurfaceDomainCommand<RunChatTurnResult>(commandIdForSurfaceOperation(input.kind), {
-        surface_operation_id: input.id,
-        session_id: input.session_id,
+      const result = await this.runSurfaceDomainCommand<RunChatTurnResult>(commandIdForSurfaceOperation(input.kind), input, {
         content: input.content,
         backend_id: input.backend_id,
         input_locale: input.input_locale,
         output_locale: input.output_locale,
         attachments: input.attachments,
-        metadata: {
-          ...(input.metadata ?? {}),
-          surface_operation_id: input.id,
-          surface_operation_kind: input.kind,
-          surface_operation_payload: jsonSafe(input)
-        }
+        metadata: input.metadata ?? {}
       });
       const chatRender = negotiatedRenderSpec(input, chatTurnRenderSpec(result));
       const renderSpecs = [chatRender];
@@ -2975,8 +3069,7 @@ export class AgentRuntime {
     }
 
     if (isCollectionRecordCreateSurface(input)) {
-      const result = await this.runSurfaceDomainCommand<CollectionRecordRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
-        surface_operation_id: input.id,
+      const result = await this.runSurfaceDomainCommand<CollectionRecordRuntimeResult>(commandIdForSurfaceOperation(input.kind), input, {
         record_id: input.record_id,
         collection_id: input.collection_id,
         data: input.data,
@@ -3014,8 +3107,7 @@ export class AgentRuntime {
     }
 
     if (isMessagePresentationUpdateSurface(input)) {
-      const domainResult = await this.runSurfaceDomainCommand<{ presentation: MessagePresentationRecord; render_spec: SurfaceRenderSpec; render_specs: SurfaceRenderSpec[] }>(commandIdForSurfaceOperation(input.kind), {
-        surface_operation_id: input.id,
+      const domainResult = await this.runSurfaceDomainCommand<{ presentation: MessagePresentationRecord; render_spec: SurfaceRenderSpec; render_specs: SurfaceRenderSpec[] }>(commandIdForSurfaceOperation(input.kind), input, {
         presentation_id: input.presentation_id,
         view_state: input.view_state
       });
@@ -3033,8 +3125,7 @@ export class AgentRuntime {
       if (input.expected_version === undefined) {
         throw new RuntimeRequestError("conflict", "collection_patch_expected_version_required");
       }
-      const result = await this.runSurfaceDomainCommand<CollectionPatchRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
-        surface_operation_id: input.id,
+      const result = await this.runSurfaceDomainCommand<CollectionPatchRuntimeResult>(commandIdForSurfaceOperation(input.kind), input, {
         collection_id: input.collection_id,
         record_id: input.record_id,
         patch_id: input.patch_id,
@@ -3053,8 +3144,7 @@ export class AgentRuntime {
     }
 
     if (isCollectionRecordDeleteSurface(input)) {
-      const result = await this.runSurfaceDomainCommand<CollectionDeleteRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
-        surface_operation_id: input.id,
+      const result = await this.runSurfaceDomainCommand<CollectionDeleteRuntimeResult>(commandIdForSurfaceOperation(input.kind), input, {
         collection_id: input.collection_id,
         record_id: input.record_id,
         view_id: input.view_id
@@ -3074,13 +3164,11 @@ export class AgentRuntime {
     }
 
     if (isCollectionActionRunSurface(input)) {
-      const result = await this.runSurfaceDomainCommand<CollectionActionRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
-        surface_operation_id: input.id,
+      const result = await this.runSurfaceDomainCommand<CollectionActionRuntimeResult>(commandIdForSurfaceOperation(input.kind), input, {
         collection_id: input.collection_id,
         action_id: input.action_id,
         backend_id: input.backend_id,
         record_id: input.record_id,
-        session_id: input.session_id,
         payload: input.payload,
         view_id: input.view_id
       });
@@ -3102,15 +3190,7 @@ export class AgentRuntime {
       };
     }
 
-    return this.runSurfaceDomainCommand<SurfaceOperationRuntimeResult>(commandIdForSurfaceOperation(input.kind), {
-      surface_operation_id: input.id,
-      session_id: input.session_id,
-      title: "title" in input && typeof input.title === "string" ? input.title : input.kind,
-      content: surfaceOperationPrompt(input),
-      input_locale: input.input_locale,
-      output_locale: input.output_locale,
-      metadata: { surface_operation_kind: input.kind, surface_operation_payload: jsonSafe(input) }
-    });
+    return this.runStructuredSurfaceOperation(input as StructuredSurfaceOperation);
   }
 
   private async saveMessagePresentationsForRenderSpecs(input: {
@@ -3416,13 +3496,131 @@ export class AgentRuntime {
     return renderSpecs;
   }
 
-  async runDomainCommand(input: DomainCommandRuntimeInput): Promise<DomainCommandRuntimeResult> {
-    return this.runDomainCommandWithTrustedContext(input, {});
+  async runDomainCommand(
+    input: DomainCommandRuntimeInput,
+    trusted: TrustedDomainRuntimeContext = {}
+  ): Promise<DomainCommandRuntimeResult> {
+    return this.runDomainCommandWithTrustedContext(input, trusted);
+  }
+
+  /** Runtime API adapters use this after they have resolved trusted resources. */
+  async runRuntimeApiDomainCommand(
+    input: Omit<DomainCommandRuntimeInput, "input_source">,
+    trusted: TrustedDomainRuntimeContext = {}
+  ): Promise<DomainCommandRuntimeResult> {
+    return this.runDomainCommandWithTrustedContext({ ...input, input_source: "runtime_api" }, trusted);
+  }
+
+  /** Generated Surface ingress resolves the declared target, dispatches it once, then records interaction. */
+  async runGeneratedSurfaceAction(input: {
+    surfaceId: string;
+    revisionId?: string;
+    actionId: string;
+    interactionId: string;
+    messageId?: string;
+    actionPayload?: Record<string, JsonValue>;
+  }, trusted: TrustedDomainRuntimeContext = {}): Promise<{ surface: GeneratedSurfaceDefinition; action: GeneratedSurfaceActionDeclaration; command: unknown; interaction: unknown }> {
+    const ingressTrusted: TrustedDomainRuntimeContext = {
+      ...trusted,
+      correlationId: trusted.correlationId ?? stableHash({
+        ingress: "generated_surface_action",
+        surface_id: input.surfaceId,
+        revision_id: input.revisionId ?? null,
+        action_id: input.actionId,
+        interaction_id: input.interactionId
+      })
+    };
+    const resolvedResult = await this.runDomainCommandWithTrustedContext({
+      command_id: runtimeOperationIds.generatedSurfaceActionRun,
+      input_source: "generated_surface",
+      idempotency_key: `generated_surface_action:${stableHash({
+        surface_id: input.surfaceId,
+        revision_id: input.revisionId ?? null,
+        action_id: input.actionId,
+        interaction_id: input.interactionId,
+        phase: "resolve"
+      })}`,
+      payload: {
+        surface_id: input.surfaceId,
+        revision_id: input.revisionId,
+        action_id: input.actionId
+      }
+    }, ingressTrusted);
+    const resolvedRecord = unknownRecord(resolvedResult.result);
+    const surface = resolvedRecord.surface as GeneratedSurfaceDefinition | undefined;
+    const action = unknownRecord(resolvedRecord.action);
+    const command = unknownRecord(resolvedRecord.command);
+    const targetCommandId = typeof command.result === "object" && command.result !== null
+      ? stringRecordValue(command.result, "command_id")
+      : undefined;
+    const payloadTemplate = typeof command.result === "object" && command.result !== null
+      ? recordPayload(unknownRecord(command.result).payload_template as JsonValue | undefined)
+      : {};
+    if (!surface || !targetCommandId || typeof action.id !== "string") {
+      throw new RuntimeRequestError("internal", "generated_surface_action_resolution_invalid");
+    }
+    const revisionId = input.revisionId ?? surface.current_revision_id;
+    const ingressResult = await executeGeneratedSurfaceAction({
+      resolved: {
+        surface,
+        revisionId,
+        action: action as GeneratedSurfaceActionDeclaration,
+        payloadTemplate
+      },
+      interactionId: input.interactionId,
+      actionPayload: input.actionPayload ?? {},
+      dispatch: async (request) => this.runDomainCommandWithTrustedContext({
+        command_id: request.commandId,
+        input_source: "generated_surface",
+        idempotency_key: request.idempotencyKey,
+        payload: request.payload
+      }, { ...ingressTrusted, sessionId: surface.session_id }),
+      recordInteraction: async (request) => this.runDomainCommandWithTrustedContext({
+        command_id: runtimeOperationIds.generatedSurfaceInteractionRecord,
+        input_source: "generated_surface",
+        idempotency_key: `${surface.id}:${revisionId}:${input.interactionId}:interaction`,
+        payload: {
+          surface_id: surface.id,
+          revision_id: revisionId,
+          interaction_id: input.interactionId,
+          message_id: input.messageId,
+          kind: "action",
+          command_id: request.commandId,
+          command_result: request.error
+            ? { status: "failed", error: safeRuntimeErrorMessage(request.error, "generated_surface_action_failed") }
+            : jsonSafe((request.result as DomainCommandRuntimeResult | undefined)?.result),
+          user_feedback: request.error
+            ? safeRuntimeErrorMessage(request.error, "generated_surface_action_failed")
+            : undefined
+        }
+      }, { ...ingressTrusted, sessionId: surface.session_id })
+    });
+    return {
+      surface,
+      action: action as GeneratedSurfaceActionDeclaration,
+      command: (ingressResult.command as DomainCommandRuntimeResult).result,
+      interaction: (ingressResult.interaction as DomainCommandRuntimeResult).result
+    };
+  }
+
+  /**
+   * Fixed Runtime API adapters use this after parsing the DTO from the generated
+   * operation contract. Dynamic `/api/domain` dispatch intentionally uses the
+   * untyped method above because its operation id is transport data.
+   */
+  async runTypedRuntimeApiDomainCommand<Id extends DomainCommandId>(
+    input: TypedDomainCommandRuntimeInput<Id>,
+    trusted: TrustedDomainRuntimeContext = {}
+  ): Promise<DomainCommandRuntimeResult<DomainOperationOutput<Id>>> {
+    const result = await this.runRuntimeApiDomainCommand(input, trusted);
+    // The same literal id selected the generated input/output schemas in the
+    // registry, which validated both before this dynamic-boundary type recovery.
+    return result as DomainCommandRuntimeResult<DomainOperationOutput<Id>>;
   }
 
   private async runDomainCommandWithTrustedContext(
     input: DomainCommandRuntimeInput,
-    trusted: { runId?: string }
+    trusted: TrustedDomainRuntimeContext
   ): Promise<DomainCommandRuntimeResult> {
     const deprecated = getDeprecatedDomainCommandEntry(input.command_id);
     if (deprecated) {
@@ -3431,24 +3629,31 @@ export class AgentRuntime {
         replacement: deprecated.replacement
       });
     }
-    const command = requireDomainCommandEntry(input.command_id);
+    const command = getDomainCommandEntry(input.command_id);
+    if (!command) {
+      throw new RuntimeRequestError("not_found", `domain_command_not_found:${input.command_id}`);
+    }
     if (command.availability !== "active" || command.id === "collection.manage") {
-      throw new RuntimeRequestError("conflict", `deprecated_command:${command.id}`);
+      throw new RuntimeRequestError("unavailable", `domain_command_unavailable:${command.id}`);
     }
     if (!this.domainOperationAvailable(command)) {
-      throw new RuntimeRequestError("conflict", `domain_operation_unavailable:${command.id}`);
+      throw new RuntimeRequestError("unavailable", `domain_operation_unavailable:${command.id}`);
     }
     const inputSource = input.input_source ?? "runtime_api";
     if (!command.allowed_sources.includes(inputSource)) {
-      throw new RuntimeRequestError("conflict", `domain_command_source_not_allowed:${command.id}:${inputSource}`);
+      throw new RuntimeRequestError("forbidden", `domain_command_source_not_allowed:${command.id}:${inputSource}`);
     }
-    const payload = jsonDefinedRecord(input.payload ?? {});
+    const payload = jsonDefinedRecord(input.payload === undefined ? {} : input.payload);
+    assertNoTrustedContextPayloadFields(payload);
     const inputIssue = validateDomainCommandInput(command, payload);
     if (inputIssue) {
-      throw new RuntimeRequestError("conflict", `domain_command_input_invalid:${command.id}:${inputIssue.path}:${inputIssue.message}`);
+      throw new RuntimeRequestError("validation", `domain_command_input_invalid:${command.id}:${inputIssue.path}:${inputIssue.message}`);
     }
     let result: unknown;
-    const trustedContext = this.trustedDomainContext(inputSource, payload, trusted);
+    const trustedContext = await this.trustedDomainContext(inputSource, payload, trusted);
+    if (!this.domainOperationAvailable(command)) {
+      throw new RuntimeRequestError("unavailable", `domain_operation_unavailable:${command.id}`);
+    }
     try {
       result = await this.domainCommandBus.execute({
         commandId: command.id,
@@ -3457,8 +3662,8 @@ export class AgentRuntime {
         payload,
         idempotencyKey: input.idempotency_key,
         workspaceId: stableHash(this.store.rootDir),
-        sessionId: stringPayload(payload.session_id) || undefined,
-        actorId: `trusted:${inputSource}`,
+        sessionId: trustedContext.sessionId,
+        actorId: trustedContext.actorId,
         correlationId: trustedContext.correlationId,
         executionClass: command.idempotency_policy === "external" ? "external" : "internal"
       }, () => this.executeDomainCommand(command, payload, trustedContext));
@@ -3466,15 +3671,27 @@ export class AgentRuntime {
       if (error instanceof DomainCommandIdempotencyKeyRequiredError) {
         throw new RuntimeRequestError("bad_request", error.code);
       }
+      if (error instanceof DomainCommandOutcomeUnknownError) {
+        throw new RuntimeRequestError("outcome_unknown", error.message);
+      }
+      if (error instanceof DomainCommandReplayError) {
+        throw new RuntimeRequestError(parseRuntimeRequestErrorCode(error.code), error.message, {
+          conflict: "domain_command_replay",
+          code: error.code,
+          retryable: error.retryable,
+          ...(error.details === undefined ? {} : { details: error.details })
+        });
+      }
       if (error instanceof DomainCommandConflictError) {
         throw new RuntimeRequestError("conflict", error.message);
       }
       if (error instanceof DomainOperationError) {
         if (error.handlerCause instanceof RuntimeRequestError) throw error.handlerCause;
-        throw new RuntimeRequestError(error.code === "not_found" ? "not_found" : "conflict", error.message);
+        throw runtimeRequestErrorFromDomainOperationError(error);
       }
       throw error;
     }
+    await this.recordBackendDomainOperationTelemetry(result, trustedContext);
     await this.attachDomainCorrelation(result, trustedContext.correlationId);
     const renderSpecs = assertDomainCommandRenderSpecs(command, await this.domainCommandRenderSpecs(command, result));
     const output: DomainCommandRuntimeResult = {
@@ -3489,35 +3706,67 @@ export class AgentRuntime {
       result
     };
     const outputIssue = validateDomainOutput(command, output);
-    if (outputIssue) throw new RuntimeRequestError("conflict", `domain_command_output_invalid:${command.id}:${outputIssue.path}:${outputIssue.message}`);
+    if (outputIssue) throw new RuntimeRequestError("internal", `domain_command_output_invalid:${command.id}:${outputIssue.path}:${outputIssue.message}`);
     return output;
   }
 
-  async runDomainQuery(input: DomainQueryRuntimeInput): Promise<DomainQueryRuntimeResult> {
-    const query = requireDomainQueryEntry(input.query_id);
+  async runDomainQuery(
+    input: DomainQueryRuntimeInput,
+    trusted: TrustedDomainRuntimeContext = {}
+  ): Promise<DomainQueryRuntimeResult> {
+    return this.runDomainQueryWithTrustedContext(input, trusted);
+  }
+
+  /** Runtime API adapters use this after they have resolved trusted resources. */
+  async runRuntimeApiDomainQuery(
+    input: Omit<DomainQueryRuntimeInput, "input_source">,
+    trusted: TrustedDomainRuntimeContext = {}
+  ): Promise<DomainQueryRuntimeResult> {
+    return this.runDomainQueryWithTrustedContext({ ...input, input_source: "runtime_api" }, trusted);
+  }
+
+  /** Fixed Runtime API query adapters use a generated operation DTO. */
+  async runTypedRuntimeApiDomainQuery<Id extends DomainQueryId>(
+    input: TypedDomainQueryRuntimeInput<Id>,
+    trusted: TrustedDomainRuntimeContext = {}
+  ): Promise<DomainQueryRuntimeResult<DomainOperationOutput<Id>>> {
+    const result = await this.runRuntimeApiDomainQuery(input, trusted);
+    // See the command variant: registry validation is the sole dynamic boundary.
+    return result as DomainQueryRuntimeResult<DomainOperationOutput<Id>>;
+  }
+
+  private async runDomainQueryWithTrustedContext(
+    input: DomainQueryRuntimeInput,
+    trusted: TrustedDomainRuntimeContext
+  ): Promise<DomainQueryRuntimeResult> {
+    const query = getDomainQueryEntry(input.query_id);
+    if (!query) {
+      throw new RuntimeRequestError("not_found", `domain_query_not_found:${input.query_id}`);
+    }
     if (!this.domainOperationAvailable(query)) {
-      throw new RuntimeRequestError("conflict", `domain_operation_unavailable:${query.id}`);
+      throw new RuntimeRequestError("unavailable", `domain_operation_unavailable:${query.id}`);
     }
     const inputSource = input.input_source ?? "runtime_api";
     if (!query.allowed_sources.includes(inputSource)) {
-      throw new RuntimeRequestError("conflict", `domain_query_source_not_allowed:${query.id}:${inputSource}`);
+      throw new RuntimeRequestError("forbidden", `domain_query_source_not_allowed:${query.id}:${inputSource}`);
     }
-    const payload = jsonDefinedRecord(input.payload ?? {});
+    const payload = jsonDefinedRecord(input.payload === undefined ? {} : input.payload);
+    assertNoTrustedContextPayloadFields(payload);
     const inputIssue = validateDomainQueryInput(query, payload);
     if (inputIssue) {
-      throw new RuntimeRequestError("conflict", `domain_query_input_invalid:${query.id}:${inputIssue.path}:${inputIssue.message}`);
+      throw new RuntimeRequestError("validation", `domain_query_input_invalid:${query.id}:${inputIssue.path}:${inputIssue.message}`);
     }
     let result: unknown;
     try {
       result = (await this.domainOperationRegistry.execute(
-        this.trustedDomainContext(inputSource, payload),
+        await this.trustedDomainContext(inputSource, payload, trusted),
         query.id,
         payload
       )).value;
     } catch (error) {
       if (error instanceof DomainOperationError) {
         if (error.handlerCause instanceof RuntimeRequestError) throw error.handlerCause;
-        throw new RuntimeRequestError(error.code === "not_found" ? "not_found" : "conflict", error.message);
+        throw runtimeRequestErrorFromDomainOperationError(error);
       }
       throw error;
     }
@@ -3534,7 +3783,7 @@ export class AgentRuntime {
       result
     };
     const outputIssue = validateDomainOutput(query, output);
-    if (outputIssue) throw new RuntimeRequestError("conflict", `domain_query_output_invalid:${query.id}:${outputIssue.path}:${outputIssue.message}`);
+    if (outputIssue) throw new RuntimeRequestError("internal", `domain_query_output_invalid:${query.id}:${outputIssue.path}:${outputIssue.message}`);
     return output;
   }
 
@@ -3556,7 +3805,11 @@ export class AgentRuntime {
     if (this.backendRegistry.statuses().some((status) => status.enabled && status.configured && status.connection_state === "ready")) capabilities.add("agent_backend");
     if (this.workspaceOptions.pdfExportAdapter) capabilities.add("pdf_export");
     if (this.workspaceOptions.browserAdapter) capabilities.add("browser_adapter");
-    if (this.pluginRegistry.listPluginStatuses().length > 0) capabilities.add("plugin_runtime");
+    if (this.pluginRegistry.listPluginStatuses().some((status) => status.enabled
+      && status.missing_handler_ids.length === 0
+      && (status.source === "built_in" || status.entrypoint_status === "ready"))) {
+      capabilities.add("plugin_runtime");
+    }
     return capabilities;
   }
 
@@ -3612,20 +3865,70 @@ export class AgentRuntime {
     }
   }
 
-  private trustedDomainContext(
+  private async recordBackendDomainOperationTelemetry(result: unknown, context: TrustedDomainContext): Promise<void> {
+    if (!context.runId || !context.sessionId) return;
+    const write = operationAuditRuntimeResult(result);
+    const resourceRef = write?.resourceRefs[0] ?? write?.operation.result_ref;
+    if (!write || !resourceRef) return;
+    await this.domainOperationTelemetry.record({
+      runId: context.runId,
+      sessionId: context.sessionId,
+      correlationId: context.correlationId,
+      operation: write.operation,
+      resourceRef
+    });
+  }
+
+  private async backendWorkspaceChangesForOperation(runId: string, sessionId: string, operationId: string): Promise<WorkspaceChangeRecord[]> {
+    return (await this.store.listWorkspaceChanges(sessionId)).filter((change) =>
+      change.run_id === runId && change.legacy_operation_id === operationId
+    );
+  }
+
+  private async trustedDomainContext(
     inputSource: DomainCommandInputSource,
     payload: Record<string, JsonValue>,
-    trusted: { runId?: string } = {}
-  ): TrustedDomainContext {
-    const sessionId = stringPayload(payload.session_id) || undefined;
-    const runId = trusted.runId;
+    trusted: TrustedDomainRuntimeContext = {}
+  ): Promise<TrustedDomainContext> {
+    assertNoTrustedContextPayloadFields(payload);
+    const { runId, envelopeId, surfaceOperation, signal, deadlineAt } = trusted;
+    assertTrustedRuntimeContextActive({ signal, deadlineAt });
+    const actorIdentity = trustedActorIdentityForSource(inputSource);
+    if (trusted.actorIdentity !== undefined && trusted.actorIdentity !== actorIdentity) {
+      throw new RuntimeRequestError("forbidden", `domain_actor_source_mismatch:${inputSource}`);
+    }
+    let sessionId = trusted.sessionId;
+    if (runId) {
+      const run = await this.store.getBackendRun(runId);
+      if (!run) throw new RuntimeRequestError("not_found", `Backend run not found: ${runId}`);
+      if (sessionId && run.session_id !== sessionId) {
+        throw new RuntimeRequestError("conflict", `domain_run_session_mismatch:${runId}`);
+      }
+      sessionId = run.session_id;
+    }
+    if (sessionId && !await this.store.getSession(sessionId)) {
+      throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
+    }
     return {
       inputSource,
       workspaceId: stableHash(this.store.rootDir),
-      actorId: `trusted:${inputSource}`,
+      actorId: actorIdentity,
       ...(sessionId ? { sessionId } : {}),
       ...(runId ? { runId } : {}),
-      correlationId: stableHash({ input_source: inputSource, session_id: sessionId ?? null, run_id: runId ?? null, payload })
+      ...(envelopeId ? { envelopeId } : {}),
+      ...(surfaceOperation ? { surfaceOperation } : {}),
+      ...(signal ? { signal } : {}),
+      ...(deadlineAt !== undefined ? { deadlineAt } : {}),
+      correlationId: trusted.correlationId ?? stableHash({
+        input_source: inputSource,
+        session_id: sessionId ?? null,
+        run_id: runId ?? null,
+        envelope_id: envelopeId ?? null,
+        surface_operation_id: surfaceOperation?.id ?? null,
+        surface_operation_kind: surfaceOperation?.kind ?? null,
+        actor_id: actorIdentity,
+        payload
+      })
     };
   }
 
@@ -3664,151 +3967,69 @@ export class AgentRuntime {
       throw new RuntimeRequestError("not_found", `Artifact not found: ${input.artifact_id}`);
     }
     const sourceContent = sourceArtifact ? await this.store.readArtifactContent(sourceArtifact.id) : undefined;
-    const envelope = createGatewayEnvelope(webGatewayContext, surfaceOperationPrompt(input), inputLocale, outputLocale, {
-      ...(input.metadata ?? {}),
-      surface_operation_id: input.id,
-      surface_operation_kind: input.kind,
-      surface_operation_payload: jsonSafe(input),
-      ...(sourceArtifact ? { source_artifact_id: sourceArtifact.id, source_artifact_uri: sourceArtifact.file_ref.uri } : {})
-    });
-
-    const result = await this.runRecordedMutation<ArtifactRecord, { sourceArtifact?: ArtifactRecord; workspaceChange: WorkspaceChangeRecord }>({
-      session,
-      envelope,
-      context: webGatewayContext,
-      operationName: "artifact.create",
-      proposedEffects: [surfaceOperationEffect(input)],
-      inputRef: surfaceOperationRef(input),
-      targetResourceRefs: sourceArtifact ? [sourceArtifact.file_ref] : [],
-      execute: async (operation) => {
-        const artifact = await createArtifactDraft({
-          store: this.store,
-          operation,
-          title: surfaceOperationArtifactTitle(input, sourceArtifact),
-          content: surfaceOperationArtifactContent(input, sourceArtifact, sourceContent),
-          kind: surfaceOperationArtifactKind(input),
-          locale: outputLocale,
-          sourceLocales: [inputLocale],
-          createdBy: "surface_operation",
-          metadata: surfaceOperationArtifactMetadata(input, sourceArtifact, sourceContent)
-        });
-        const rollbackPoint = await this.createRollbackPoint(
-          operation,
-          [artifact.file_ref],
-          sourceArtifact ? { source_artifact: sourceArtifact as unknown as JsonValue } : {},
-          {
-            artifact_id: artifact.id,
-            surface_operation_id: input.id,
-            surface_operation_kind: input.kind
-          }
-        );
-        const surfaceRun = await this.store.saveBackendRun({
-          id: createId("run"),
-          session_id: session.id,
-          input_message_id: input.id,
-          backend_id: "surface-operation",
-          backend_kind: "samurai_native",
-          status: "completed",
-          started_at: operation.created_at,
-          completed_at: nowIso(),
-          input_summary: summarize(surfaceOperationPrompt(input), 220),
-          output_summary: surfaceOperationWorkspaceSummary(input, artifact),
-          metadata: {
-            surface_operation_id: input.id,
-            surface_operation_kind: input.kind,
-            operation_id: operation.id
-          }
-        });
-        const workspaceChange: WorkspaceChangeRecord = {
-          id: createId("change"),
-          run_id: surfaceRun.id,
-          session_id: session.id,
-          resource_ref: artifact.file_ref,
-          change_type: "artifact_created",
-          summary: surfaceOperationWorkspaceSummary(input, artifact),
-          legacy_operation_id: operation.id,
-          created_at: nowIso()
-        };
-        await this.store.saveWorkspaceChange(workspaceChange);
-        return {
-          resource: artifact,
-          ref: artifact.file_ref,
-          rollbackPoint,
-          workspaceChange,
-          ...(sourceArtifact ? { sourceArtifact } : {}),
-          summary: surfaceOperationWorkspaceSummary(input, artifact)
-        };
+    const result = await this.runSurfaceDomainCommand<RuntimeWriteResult<ArtifactRecord>>(
+      runtimeOperationIds.artifactCreate,
+      input,
+      {
+        title: surfaceOperationArtifactTitle(input, sourceArtifact),
+        content: surfaceOperationArtifactContent(input, sourceArtifact, sourceContent),
+        kind: surfaceOperationArtifactKind(input),
+        input_locale: inputLocale,
+        output_locale: outputLocale,
+        metadata: surfaceOperationArtifactMetadata(input, sourceArtifact, sourceContent)
       }
-    });
+    );
+    const surfaceResult: SurfaceArtifactRuntimeResult = {
+      ...result,
+      ...(sourceArtifact ? { sourceArtifact } : {})
+    };
 
     return {
       operation: input,
       result_kind: surfaceOperationResultKind(input),
-      render_spec: negotiatedRenderSpec(input, surfaceArtifactRenderSpec(input, result.resource, result)),
-      result
+      render_spec: negotiatedRenderSpec(input, surfaceArtifactRenderSpec(input, surfaceResult.resource, surfaceResult)),
+      result: surfaceResult
     };
   }
 
   async archiveMemory(input: ArchiveMemoryInput): Promise<ArchiveMemoryRuntimeResult> {
-    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.memoryArchive, idempotency_key: createId("memory_archive_request"), payload: { memory_id: input.memoryId, session_id: input.sessionId } });
-    return result.result as ArchiveMemoryRuntimeResult;
+    return await this.runtimeDomainApi.archiveMemory(input) as ArchiveMemoryRuntimeResult;
   }
 
   async viewSkill(input: { skillId: string; runId: string; path?: string }): Promise<SkillViewRuntimeResult> {
-    return this.skillDomainService.viewSkill(input) as Promise<SkillViewRuntimeResult>;
+    return await this.runtimeDomainApi.viewSkill(input) as SkillViewRuntimeResult;
   }
 
   async recordSkillUsage(input: { skillId: string; runId: string; resourceId: string; contentHash: string; stage: "body_loaded" | "support_loaded"; metadata: Record<string, JsonValue> }): Promise<{ use_record: Awaited<ReturnType<WorkspaceStore["recordLearningResourceUse"]>> }> {
-    return this.skillDomainService.recordUsageInput(input) as Promise<{ use_record: Awaited<ReturnType<WorkspaceStore["recordLearningResourceUse"]>> }>;
+    return await this.runtimeDomainApi.recordSkillUsage(input) as { use_record: Awaited<ReturnType<WorkspaceStore["recordLearningResourceUse"]>> };
   }
 
   async restoreRollbackPoint(id: string): Promise<RollbackRestoreRuntimeResult> {
-    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.rollbackRestore, idempotency_key: `rollback.restore:${id}`, payload: { rollback_point_id: id } });
-    return result.result as RollbackRestoreRuntimeResult;
-  }
-
-  async approveGatewayPairing(id: string): Promise<GatewayPairingRecord> {
-    return this.gatewayDomainService.approvePairingById(id);
-  }
-
-  async rejectGatewayPairing(id: string): Promise<GatewayPairingRecord> {
-    return this.gatewayDomainService.rejectPairingById(id);
-  }
-
-  async expireGatewayPairings(now = nowIso()): Promise<GatewayPairingRecord[]> {
-    return this.gatewayDomainService.expirePairingsAt(now);
+    return await this.runtimeDomainApi.restoreRollbackPoint(id) as RollbackRestoreRuntimeResult;
   }
 
   async listGatewayPairingPolicies(): Promise<GatewayPairingPolicyRecord[]> {
-    const saved = await this.store.listGatewayPairingPolicies();
-    const byChannel = new Map(saved.map((policy) => [policy.channel, policy]));
-    return gatewayPairingPolicyChannels.map((channel) => byChannel.get(channel) ?? createDefaultRuntimeGatewayPairingPolicy(channel));
+    return this.gatewayDomainService.listPairingPolicies();
   }
 
   async getGatewayPairingPolicy(channel: GatewayPairingPolicyRecord["channel"]): Promise<GatewayPairingPolicyRecord> {
-    return (await this.store.getGatewayPairingPolicy(channel)) ?? createDefaultRuntimeGatewayPairingPolicy(channel);
+    return this.gatewayDomainService.getPairingPolicy(channel);
   }
 
-  async saveGatewayPairingPolicy(policy: GatewayPairingPolicyRecord): Promise<GatewayPairingPolicyRecord> {
-    const saved = await this.store.saveGatewayPairingPolicy(policy);
-    await this.emit("gateway.pairing_policy.saved", saved);
-    return saved;
+  async saveGatewayPairingPolicy(policy: Parameters<GatewayDomainService["savePairingPolicy"]>[0]): Promise<GatewayPairingPolicyRecord> {
+    return this.gatewayDomainService.savePairingPolicy(policy);
   }
 
   async listGatewayRoutingPolicies(): Promise<GatewayRoutingPolicyRecord[]> {
-    const saved = await this.store.listGatewayRoutingPolicies();
-    const byChannel = new Map(saved.map((policy) => [policy.channel, policy]));
-    return gatewayRoutingPolicyChannels.map((channel) => byChannel.get(channel) ?? createDefaultGatewayRoutingPolicy(channel));
+    return this.gatewayDomainService.listRoutingPolicies();
   }
 
   async getGatewayRoutingPolicy(channel: GatewayRoutingPolicyRecord["channel"]): Promise<GatewayRoutingPolicyRecord> {
-    return (await this.store.getGatewayRoutingPolicy(channel)) ?? createDefaultGatewayRoutingPolicy(channel);
+    return this.gatewayDomainService.getRoutingPolicy(channel);
   }
 
-  async saveGatewayRoutingPolicy(policy: GatewayRoutingPolicyRecord): Promise<GatewayRoutingPolicyRecord> {
-    const saved = await this.store.saveGatewayRoutingPolicy(policy);
-    await this.emit("gateway.routing_policy.saved", saved);
-    return saved;
+  async saveGatewayRoutingPolicy(policy: Parameters<GatewayDomainService["saveRoutingPolicy"]>[0]): Promise<GatewayRoutingPolicyRecord> {
+    return this.gatewayDomainService.saveRoutingPolicy(policy);
   }
 
   async repairGatewayState(input: { dryRun?: boolean; now?: string } = {}): Promise<GatewayRepairResult> {
@@ -3836,7 +4057,7 @@ export class AgentRuntime {
     }
 
     const [appliedPairings, appliedLocks] = await Promise.all([
-      this.expireGatewayPairings(checkedAt),
+      this.gatewayDomainService.expirePairingsPrimitive(checkedAt),
       this.store.expireGatewayConcurrencyLocks(checkedAt)
     ]);
     const appliedPairingIds = new Set(appliedPairings.map((pairing) => pairing.id));
@@ -4001,14 +4222,6 @@ export class AgentRuntime {
     });
   }
 
-  async rotateGatewayPairing(id: string): Promise<GatewayPairingRecord> {
-    return this.gatewayDomainService.rotatePairingById(id);
-  }
-
-  async revokeGatewayPairing(id: string): Promise<GatewayPairingRecord> {
-    return this.gatewayDomainService.revokePairingById(id);
-  }
-
   async handleGatewayInbound(input: GatewayInboundInput): Promise<GatewayInboundRuntimeResult> {
     return routeGatewayInbound<GatewayInboundRuntimeResult>({ run: (request) => this.runDomainCommand(request) }, input);
   }
@@ -4126,20 +4339,7 @@ export class AgentRuntime {
     next_run_at?: string;
     max_attempts?: number;
   }): Promise<AutomationJobRuntimeResult> {
-    return this.automationDomainService.saveInput(input) as Promise<AutomationJobRuntimeResult>;
-  }
-
-  async saveResourceTranslationJob(input: {
-    source_ref: ResourceRef;
-    target_locale: SupportedLocale;
-    source_locale?: SupportedLocale;
-    schedule?: string;
-    title?: string;
-    enabled?: boolean;
-    next_run_at?: string;
-    max_attempts?: number;
-  }): Promise<AutomationJobRuntimeResult> {
-    return this.translationDomainService.saveTranslationJob(input) as Promise<AutomationJobRuntimeResult>;
+    return await this.runtimeDomainApi.saveAutomationJob(input) as AutomationJobRuntimeResult;
   }
 
   previewAutomationSchedule(schedule: string, from = nowIso()): AutomationSchedulePreview {
@@ -4181,19 +4381,25 @@ export class AgentRuntime {
     return records;
   }
 
-  async runDueAutomationJobs(now = nowIso()): Promise<AutomationRunRuntimeResult[]> {
+  async runDueAutomationJobs(
+    now = nowIso(),
+    context: Pick<TrustedDomainRuntimeContext, "signal" | "deadlineAt"> = {}
+  ): Promise<AutomationRunRuntimeResult[]> {
+    assertTrustedRuntimeContextActive(context);
     const jobs = await this.store.listAutomationJobs({ dueAt: now, enabledOnly: true });
+    assertTrustedRuntimeContextActive(context);
     return runDueAutomation<AutomationRunRuntimeResult>({
-      dispatcher: { run: (request) => this.runDomainCommand(request) },
+      dispatcher: { run: (request, ingress) => this.runDomainCommandWithTrustedContext(request, ingress ?? context) },
       jobs,
       now,
+      signal: context.signal,
+      deadlineAt: context.deadlineAt,
       isLockedError: (error) => error instanceof RuntimeRequestError && error.message === "automation_job_locked"
     });
   }
 
   async applyReflectionSuggestion(input: { suggestionId: string }): Promise<RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>> {
-    const result = await this.runDomainCommand({ command_id: runtimeApiOperationIds.reflectionSuggestionApply, idempotency_key: createId("reflection_apply_request"), payload: { suggestion_id: input.suggestionId } });
-    return result.result as RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>;
+    return await this.runtimeDomainApi.applyReflectionSuggestion(input) as RuntimeWriteResult<MemoryFrontmatter | WikiWithFilePath | SkillWithFilePath>;
   }
 
   async createSkillCandidate(input: {
@@ -4205,15 +4411,15 @@ export class AgentRuntime {
     source_refs?: SkillFrontmatter["source_refs"];
     provenance_detail?: SkillFrontmatter["provenance_detail"];
   }): Promise<SkillRuntimeResult> {
-    return this.skillDomainService.createCandidateInput(input) as Promise<SkillRuntimeResult>;
+    return await this.runtimeDomainApi.createSkillCandidate(input) as SkillRuntimeResult;
   }
 
   async saveSkillProject(input: { candidateId: string }): Promise<SkillRuntimeResult> {
-    return this.skillDomainService.saveProjectInput(input) as Promise<SkillRuntimeResult>;
+    return await this.runtimeDomainApi.saveSkillProject(input) as SkillRuntimeResult;
   }
 
   async saveSkillSupportFile(input: { skillId: string; path: string; content: string }): Promise<SkillSupportRuntimeResult> {
-    return this.skillDomainService.saveSupportFileInput(input) as Promise<SkillSupportRuntimeResult>;
+    return await this.runtimeDomainApi.saveSkillSupportFile(input) as SkillSupportRuntimeResult;
   }
 
   async createWikiProposal(input: {
@@ -4225,23 +4431,19 @@ export class AgentRuntime {
     source_refs?: WikiFrontmatter["source_refs"];
     provenance?: WikiFrontmatter["provenance"];
   }): Promise<WikiRuntimeResult> {
-    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiProposalCreate, idempotency_key: createId("wiki_create"), payload: input });
-    return command.result as WikiRuntimeResult;
+    return await this.runtimeDomainApi.createWikiProposal(input) as WikiRuntimeResult;
   }
 
   async acceptWikiPage(id: string): Promise<WikiRuntimeResult> {
-    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiAccept, idempotency_key: createId("wiki_accept"), payload: { wiki_id: id } });
-    return command.result as WikiRuntimeResult;
+    return await this.runtimeDomainApi.wikiAction("accept", id) as WikiRuntimeResult;
   }
 
   async rejectWikiPage(id: string): Promise<WikiRuntimeResult> {
-    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiReject, idempotency_key: createId("wiki_reject"), payload: { wiki_id: id } });
-    return command.result as WikiRuntimeResult;
+    return await this.runtimeDomainApi.wikiAction("reject", id) as WikiRuntimeResult;
   }
 
   async archiveWikiPage(id: string): Promise<WikiRuntimeResult> {
-    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiArchive, idempotency_key: createId("wiki_archive"), payload: { wiki_id: id } });
-    return command.result as WikiRuntimeResult;
+    return await this.runtimeDomainApi.wikiAction("archive", id) as WikiRuntimeResult;
   }
 
   async patchWikiPage(input: {
@@ -4253,30 +4455,28 @@ export class AgentRuntime {
     source_refs?: WikiFrontmatter["source_refs"];
     provenance?: WikiFrontmatter["provenance"];
   }): Promise<WikiRuntimeResult> {
-    const { id, ...patch } = input;
-    const command = await this.runDomainCommand({ command_id: runtimeApiOperationIds.wikiPatch, idempotency_key: createId("wiki_patch"), payload: { wiki_id: id, ...patch } });
-    return command.result as WikiRuntimeResult;
+    return await this.runtimeDomainApi.patchWikiPage(input) as WikiRuntimeResult;
   }
 
   async reindexWiki(): Promise<RuntimeWriteResult<WikiReindexResult>> {
-    const command = await this.runDomainCommand({
-      command_id: runtimeApiOperationIds.wikiReindex,
-      idempotency_key: createId("wiki_reindex"),
-      payload: {}
-    });
-    return command.result as RuntimeWriteResult<WikiReindexResult>;
+    return await this.runtimeDomainApi.reindexWiki() as RuntimeWriteResult<WikiReindexResult>;
   }
 
-  async saveCollectionSchema(schema: CollectionSchema, contextOverride?: { session: SessionRecord; envelope: MessageEnvelope }): Promise<CollectionSchemaRuntimeResult> {
-    return this.collectionDomainService.saveSchemaInput(schema, contextOverride) as Promise<CollectionSchemaRuntimeResult>;
+  async saveCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaRuntimeResult> {
+    const result = await this.runDomainCommand({
+      command_id: runtimeOperationIds.collectionSchemaSave,
+      idempotency_key: createId("collection_schema_save_request"),
+      payload: schema
+    });
+    return result.result as CollectionSchemaRuntimeResult;
   }
 
   async reindexCollections(): Promise<CollectionReindexRuntimeResult> {
-    return this.collectionDomainService.reindexCollections();
+    return await this.runtimeDomainApi.reindexCollections() as CollectionReindexRuntimeResult;
   }
 
   async createCollectionRecord(record: CollectionRecord): Promise<CollectionRecordRuntimeResult> {
-    return this.collectionDomainService.createRecordInput(record) as Promise<CollectionRecordRuntimeResult>;
+    return await this.runtimeDomainApi.createCollectionRecord(record) as CollectionRecordRuntimeResult;
   }
 
   private async collectionManageGetItems(schema: CollectionSchemaWithFilePath, options: { ids?: string[]; fields?: string[] } = {}): Promise<{
@@ -4559,11 +4759,11 @@ export class AgentRuntime {
   }
 
   async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
-    return this.collectionDomainService.applyPatchInput(input) as Promise<CollectionPatchRuntimeResult>;
+    return await this.runtimeDomainApi.applyCollectionPatch(input) as CollectionPatchRuntimeResult;
   }
 
   async deleteCollectionRecord(input: { collectionId: string; recordId: string; viewId?: string }): Promise<CollectionDeleteRuntimeResult> {
-    return this.collectionDomainService.deleteRecordInput(input) as Promise<CollectionDeleteRuntimeResult>;
+    return await this.runtimeDomainApi.deleteCollectionRecord(input) as CollectionDeleteRuntimeResult;
   }
 
   async listCollectionActions(collectionId?: string): Promise<CollectionActionDescriptor[]> {
@@ -4582,22 +4782,26 @@ export class AgentRuntime {
     sessionId?: string;
     payload?: Record<string, unknown>;
   }): Promise<CollectionActionRuntimeResult> {
-    return this.collectionDomainService.runActionInput({
-      ...input,
+    return await this.runtimeDomainApi.runCollectionAction({
+      collection_id: input.collectionId,
+      action_id: input.actionId,
+      ...(input.backendId === undefined ? {} : { backend_id: input.backendId }),
+      ...(input.recordId === undefined ? {} : { record_id: input.recordId }),
+      ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }),
       payload: jsonRecord(input.payload ?? {})
-    }) as Promise<CollectionActionRuntimeResult>;
+    }) as CollectionActionRuntimeResult;
   }
 
 
   async runMemoryReviewAutomation(): Promise<AutomationRunRuntimeResult> {
-    return this.automationDomainService.executeMemoryReview() as Promise<AutomationRunRuntimeResult>;
+    return await this.runtimeDomainApi.runMemoryReviewAutomation() as AutomationRunRuntimeResult;
   }
 
 
   private async runResourceTranslationJob(
     job: AutomationJobRecord,
     session: SessionRecord,
-    context: GatewayContext
+    context: ScheduledAutomationContext
   ): Promise<ResourceTranslationJobRuntimeDetails> {
     return this.translationDomainService.executeJob(job, session, context);
   }
@@ -4605,7 +4809,7 @@ export class AgentRuntime {
   private async runAutomationInstructionJob(
     job: AutomationJobRecord,
     session: SessionRecord,
-    context: GatewayContext
+    context: ScheduledAutomationContext
   ): Promise<{ summary: string; backendRunId: string }> {
     const chat = await this.runChatTurn({
       sessionId: session.id,
@@ -4875,50 +5079,65 @@ export class AgentRuntime {
       return result;
     }
 
-    const runtimeTool = await this.handleRuntimeToolCall(input.run, input.runInput, input.event, boundaryFeedback, input.gatewayBoundaryPolicy).catch(async (error) => {
-      const generatedSurfaceFailure = /generated[._]surface/i.test(`${providerToolName} ${requestedActionId} ${boundaryDecision.action_id}`);
-      const retryCount = typeof input.run.metadata.generated_surface_retry_count === "number"
-        ? input.run.metadata.generated_surface_retry_count
-        : 0;
-      const retryable = generatedSurfaceFailure && retryCount < 1;
-      if (retryable) {
-        const updatedRun = {
-          ...input.run,
-          metadata: {
-            ...input.run.metadata,
-            generated_surface_retry_count: retryCount + 1
-          }
-        };
-        Object.assign(input.run, updatedRun);
-        await this.store.updateBackendRun(updatedRun);
-        await this.emit("backend.run.updated", updatedRun);
-      }
+    const runtimeToolAttempt = await this.dispatchRuntimeToolCall({
+      run: input.run,
+      runInput: input.runInput,
+      event: input.event,
+      providerToolName,
+      requestedActionId,
+      boundaryDecision,
+      boundary: boundaryFeedback,
+      gatewayBoundaryPolicy: input.gatewayBoundaryPolicy,
+      recordEvent: input.recordEvent
+    });
+    if (runtimeToolAttempt.kind === "failed") {
+      result.toolRuns.push(runtimeToolAttempt.toolRun);
+      return result;
+    }
+    if (runtimeToolAttempt.kind === "query_failed") {
+      // Queries remain read-only: they do not create Operations or ToolRuns.
+      // A normal Provider event still needs one terminal result so the caller
+      // can observe a typed rejection instead of losing the tool call.
       await input.recordEvent({
         event_type: "tool_call_output",
         payload: {
           status: "failed",
           provider_tool_name: providerToolName,
           action_id: boundaryDecision.action_id,
-          reason: safeRuntimeErrorMessage(error, "runtime_tool_failed"),
-          retryable,
-          retry_count: retryCount,
+          error_code: runtimeToolAttempt.failure.code,
+          reason: runtimeToolAttempt.failure.reason,
+          retryable: runtimeToolAttempt.failure.retryable,
           gateway_boundary: boundaryFeedback.payload
         },
         resource_refs: boundaryFeedback.resourceRefs,
         tool_call_id: input.event.tool_call_id
       });
-      return undefined;
-    });
-    if (runtimeTool) {
+      return result;
+    }
+    if (runtimeToolAttempt.kind === "handled") {
+      const runtimeTool = runtimeToolAttempt.value;
+      if (isRuntimeToolQueryResult(runtimeTool)) {
+        // Query results are persisted as the Provider terminal event only;
+        // unlike Commands, they intentionally produce no Operation or ToolRun.
+        await input.recordEvent({
+          event_type: "tool_call_output",
+          payload: runtimeTool.outputPayload ?? {
+            status: "completed",
+            action_id: boundaryDecision.action_id,
+            gateway_boundary: boundaryFeedback.payload
+          },
+          resource_refs: withGatewayBoundaryRefs(runtimeTool.resourceRefs ?? [], boundaryFeedback),
+          tool_call_id: input.event.tool_call_id
+        });
+        return result;
+      }
       result.operations.push(runtimeTool.operation);
       result.toolRuns.push(runtimeTool.toolRun);
       result.artifacts.push(...(runtimeTool.artifacts ?? []));
       result.memories.push(...(runtimeTool.memories ?? []));
       result.collectionSchemas.push(...(runtimeTool.collectionSchemas ?? []));
       for (const change of runtimeTool.workspaceChanges ?? []) {
-        await this.store.saveWorkspaceChange(change);
         result.workspaceChanges.push(change);
-        await this.emit("workspace.change.created", change);
       }
       const resourceRefs = runtimeTool.resourceRefs ?? (runtimeTool.operation.result_ref ? [runtimeTool.operation.result_ref] : []);
       for (const runtimeEvent of runtimeTool.events ?? []) {
@@ -4960,13 +5179,97 @@ export class AgentRuntime {
     return result;
   }
 
+  /**
+   * A provider tool call has exactly one terminal outcome. In particular, a
+   * failed Runtime dispatch is handled here and cannot fall through to the
+   * legacy feedback adapter for the same tool-call id.
+   */
+  private async dispatchRuntimeToolCall(input: {
+    run: BackendRunRecord;
+    runInput: BackendRunInput;
+    event: BackendOutputEvent;
+    providerToolName: string;
+    requestedActionId: string;
+    boundaryDecision: GatewayBoundaryToolDecision;
+    boundary: BackendToolBoundaryFeedback;
+    gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
+    recordEvent: BackendEventRecorder;
+  }): Promise<RuntimeToolDispatchOutcome> {
+    try {
+      const value = await this.handleRuntimeToolCall(
+        input.run,
+        input.runInput,
+        input.event,
+        input.boundary,
+        input.gatewayBoundaryPolicy
+      );
+      return value ? { kind: "handled", value } : { kind: "unhandled" };
+    } catch (error) {
+      const failure = normalizeRuntimeToolFailure(error);
+      const mappedQuery = getDomainQueryEntry(input.requestedActionId)
+        ?? getDomainQueryForProviderToolName(input.providerToolName);
+      if (mappedQuery) {
+        return { kind: "query_failed", failure };
+      }
+      const generatedSurfaceFailure = /generated[._]surface/i.test(
+        `${input.providerToolName} ${input.requestedActionId} ${input.boundaryDecision.action_id}`
+      );
+      const retryCount = typeof input.run.metadata.generated_surface_retry_count === "number"
+        ? input.run.metadata.generated_surface_retry_count
+        : 0;
+      const retryable = generatedSurfaceFailure && retryCount < 1;
+      if (retryable) {
+        const updatedRun = {
+          ...input.run,
+          metadata: {
+            ...input.run.metadata,
+            generated_surface_retry_count: retryCount + 1
+          }
+        };
+        Object.assign(input.run, updatedRun);
+        await this.store.updateBackendRun(updatedRun);
+        await this.emit("backend.run.updated", updatedRun);
+      }
+      const toolRun = await this.store.saveToolRun({
+        id: createId("toolrun"),
+        run_id: input.run.id,
+        session_id: input.run.session_id,
+        tool_call_id: stringPayload(input.event.payload.tool_call_id) || input.event.tool_call_id,
+        provider_tool_name: input.providerToolName || "unknown_tool",
+        action_id: input.boundaryDecision.action_id,
+        status: "failed",
+        input_summary: summarize(JSON.stringify(input.event.payload.input ?? {}), 220),
+        output_summary: failure.summary,
+        error_code: failure.code,
+        resource_refs: input.boundary.resourceRefs,
+        created_at: nowIso()
+      });
+      await input.recordEvent({
+        event_type: "tool_call_output",
+        payload: {
+          status: "failed",
+          provider_tool_name: input.providerToolName,
+          action_id: input.boundaryDecision.action_id,
+          error_code: failure.code,
+          reason: failure.reason,
+          retryable,
+          retry_count: retryCount,
+          gateway_boundary: input.boundary.payload
+        },
+        resource_refs: input.boundary.resourceRefs,
+        tool_call_id: input.event.tool_call_id
+      });
+      return { kind: "failed", toolRun };
+    }
+  }
+
   private async handleRuntimeToolCall(
     run: BackendRunRecord,
     runInput: BackendRunInput,
     event: BackendOutputEvent,
     boundary?: BackendToolBoundaryFeedback,
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy
-  ): Promise<RuntimeToolCallResult | undefined> {
+  ): Promise<RuntimeToolCallResult | RuntimeToolQueryResult | undefined> {
     const providerToolName = stringPayload(event.payload.provider_tool_name);
     const providerCommand = providerToolName ? getDomainCommandForProviderToolName(providerToolName) : undefined;
     const providerQuery = providerToolName ? getDomainQueryForProviderToolName(providerToolName) : undefined;
@@ -5007,89 +5310,32 @@ export class AgentRuntime {
     if (mappedQuery && mappedQuery.allowed_sources.includes("provider_tool_call")) {
       return this.handleProviderDomainQueryToolCall(run, runInput, event, mappedQuery.id, args, boundary);
     }
-    const capturedWriteCommandId = providerCapturedWriteCommandId(toolName);
-    if (capturedWriteCommandId) {
-      return this.handleProviderDomainCommandToolCall(run, runInput, event, capturedWriteCommandId, args, boundary);
-    }
-    if (isProviderSkillView(toolName) || isProviderSkillView(normalizeSamuraiToolBridgeName(toolName))) {
-      const view = await this.viewSkill({
-        skillId: stringPayload(args.skill_id),
-        runId: run.id,
-        path: stringPayload(args.path) || undefined
-      });
-      const session = await this.store.getSession(run.session_id);
-      if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
-      const operation = await this.createOperation(session, runInput.envelope, mappedQuery?.id ?? toolName, ["Read a selected Skill on demand."], {
-        targetResourceRefs: [skillRef(view.skill)]
-      });
-      operation.status = "completed";
-      operation.result_ref = skillRef(view.skill);
-      operation.updated_at = nowIso();
-      await this.store.updateOperation(operation);
-      const toolRun = await this.store.saveToolRun({
-        id: createId("toolrun"),
-        run_id: run.id,
-        session_id: run.session_id,
-        tool_call_id: event.tool_call_id,
-        provider_tool_name: providerToolName || toolName,
-        action_id: "skill.view",
-        status: "completed",
-        input_summary: summarize(JSON.stringify(args), 220),
-        output_summary: `Loaded ${view.disclosure_level} for Skill ${view.skill.id}.`,
-        resource_refs: [skillRef(view.skill)],
-        created_at: nowIso()
-      });
-      return {
-        operation,
-        toolRun,
-        outputPayload: {
-          status: "completed",
-          skill_id: view.skill.id,
-          content: view.content,
-          file_refs: view.file_refs,
-          disclosure_level: view.disclosure_level
-        },
-        resourceRefs: [skillRef(view.skill)]
-      };
-    }
     const normalizedToolName = normalizeSamuraiToolBridgeName(toolName);
     const mappedCommand = getDomainCommandEntry(toolName)
       ?? providerCommand
       ?? getDomainCommandForProviderToolName(toolName)
       ?? getDomainCommandForProviderToolName(normalizedToolName);
     if (mappedCommand && mappedCommand.input_sources.includes("provider_tool_call")) {
-      const activeSurfaceId = stringRecordValue(runInput.metadata.active_app_context, "generated_surface_id");
-      const effectiveCommandId = effectiveProviderCommandId(mappedCommand.id, activeSurfaceId, shouldReviseGeneratedSurfaceOutput(runInput.user_input));
-      const generatedSurfaceCommandId = generatedSurfaceWriteCommandId(effectiveCommandId);
-      const commandArgs = generatedSurfaceCommandId
-        ? normalizeGeneratedSurfaceCommandPayload(generatedSurfaceCommandId, args, run, runInput)
-        : args;
+      const effectiveCommandId = mappedCommand.id;
       const effectiveCommand = requireDomainCommandEntry(effectiveCommandId);
-      const acceptedProperties = recordPayload(effectiveCommand.input_schema.properties);
-      const runtimeContextPayload = {
-        session_id: run.session_id,
-        envelope_id: runInput.input_message_id,
-        input_locale: runInput.input_locale,
-        output_locale: runInput.output_locale,
-        metadata: {
-          ...recordPayload(commandArgs.metadata),
-          backend_run_id: run.id,
-          provider_tool_name: providerToolName || toolName,
-          ...(toolCallId ? { tool_call_id: toolCallId } : {})
-        }
-      };
-      const acceptedRuntimeContext = Object.fromEntries(
-        Object.entries(runtimeContextPayload).filter(([key]) => Object.hasOwn(acceptedProperties, key))
-      );
+      if (effectiveCommand.output_resource_kind === "memory" && (await this.store.getSettings()).memory_capture_mode === "off") {
+        return undefined;
+      }
+      const commandArgs = effectiveCommand.output_resource_kind === "generated_surface"
+        ? normalizeGeneratedSurfaceCommandPayload(effectiveCommand, args, runInput)
+        : normalizeProviderDomainCommandPayload(effectiveCommand, args, {
+          inputLocale: runInput.input_locale,
+          outputLocale: runInput.output_locale,
+          runId: run.id,
+          providerToolName: providerToolName || toolName,
+          toolCallId
+        });
       const domainResult = await this.runDomainCommandWithTrustedContext({
         command_id: effectiveCommandId,
         input_source: "provider_tool_call",
         idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, effectiveCommandId, commandArgs),
-        payload: {
-          ...commandArgs,
-          ...acceptedRuntimeContext
-        }
-      }, { runId: run.id });
+        payload: commandArgs
+      }, { runId: run.id, sessionId: run.session_id, envelopeId: runInput.input_message_id });
       const directRuntimeTool = runtimeToolCallResult(domainResult.result);
       if (directRuntimeTool) return directRuntimeTool;
       const generatedSurface = unknownRecord(unknownRecord(domainResult.result).definition);
@@ -5103,7 +5349,7 @@ export class AgentRuntime {
           label: typeof generatedSurface.title === "string" ? generatedSurface.title : "Generated Surface"
         };
         const operation = await this.createOperation(session, runInput.envelope, effectiveCommandId, [
-          isGeneratedSurfaceRevision(effectiveCommandId) ? "Create a new Generated Surface revision." : "Create a Generated Surface revision."
+          "Create a Generated Surface revision."
         ], { targetResourceRefs: [generatedRef] });
         const completedOperation = { ...operation, status: "completed" as const, result_ref: generatedRef, updated_at: nowIso() };
         await this.store.updateOperation(completedOperation);
@@ -5133,49 +5379,6 @@ export class AgentRuntime {
           }
         };
       }
-      const optimizationRecord = unknownRecord(domainResult.result);
-      const optimizationRun = unknownRecord(optimizationRecord.run);
-      const optimizationCandidate = unknownRecord(optimizationRecord.candidate);
-      const optimizationSkill = unknownRecord(optimizationRecord.skill);
-      const optimizationResource: ResourceRef | undefined = typeof optimizationRun.id === "string"
-        ? { kind: "skill_optimization_run", id: optimizationRun.id, uri: `skill-optimizations/${optimizationRun.id}`, label: "Skill改善" }
-        : typeof optimizationSkill.id === "string"
-          ? { kind: "skill", id: optimizationSkill.id, uri: `skills/${optimizationSkill.id}.md`, label: "Skill" }
-          : undefined;
-      if (effectiveCommandId.startsWith("skill.optimization.") && optimizationResource) {
-        const session = await this.store.getSession(run.session_id);
-        if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
-        const operation = await this.createOperation(session, runInput.envelope, effectiveCommandId, ["Save Skill改善の実行結果をWorkspaceへ記録する。"], {
-          targetResourceRefs: [optimizationResource]
-        });
-        const completedOperation = { ...operation, status: "completed" as const, result_ref: optimizationResource, updated_at: nowIso() };
-        await this.store.updateOperation(completedOperation);
-        const toolRun = await this.store.saveToolRun({
-          id: createId("toolrun"),
-          run_id: run.id,
-          session_id: run.session_id,
-          tool_call_id: toolCallId,
-          provider_tool_name: providerToolName || toolName,
-          action_id: effectiveCommandId,
-          status: "completed",
-          input_summary: summarize(JSON.stringify(args), 220),
-          output_summary: "Skill改善結果を記録しました。",
-          resource_refs: [optimizationResource],
-          created_at: nowIso()
-        });
-        return {
-          operation: completedOperation,
-          toolRun,
-          resourceRefs: [optimizationResource],
-          outputPayload: {
-            status: "completed",
-            action_id: effectiveCommandId,
-            run_id: typeof optimizationRun.id === "string" ? optimizationRun.id : "",
-            candidate_id: typeof optimizationCandidate.id === "string" ? optimizationCandidate.id : "",
-            skill_id: typeof optimizationSkill.id === "string" ? optimizationSkill.id : ""
-          }
-        };
-      }
       const writeResult = operationAuditRuntimeResult(domainResult.result);
       if (!writeResult) {
         return undefined;
@@ -5194,6 +5397,8 @@ export class AgentRuntime {
         created_at: nowIso()
       });
       const resource = runtimeWriteResource(domainResult.result);
+      const artifacts = isArtifactRecordResource(resource) ? [resource] : [];
+      const memories = isMemoryFrontmatterResource(resource) ? [resource] : [];
       const collectionSchema = resource && typeof resource === "object" && isCollectionSchemaRenderResource(resource as Record<string, unknown>)
         ? resource as CollectionSchemaWithFilePath
         : undefined;
@@ -5206,25 +5411,17 @@ export class AgentRuntime {
             output: resource
           }
         : undefined;
-      const workspaceChanges = collectionSchema && writeResult.operation.result_ref
-        ? [{
-            id: createId("change"),
-            run_id: run.id,
-            session_id: run.session_id,
-            resource_ref: writeResult.operation.result_ref,
-            change_type: "collection_changed" as const,
-            summary: `Saved collection schema ${collectionSchema.id}.`,
-            legacy_operation_id: writeResult.operation.id,
-            created_at: nowIso()
-          }]
-        : undefined;
+      const workspaceChanges = await this.backendWorkspaceChangesForOperation(run.id, run.session_id, writeResult.operation.id);
       return {
         operation: writeResult.operation,
         toolRun,
         resourceRefs: writeResult.resourceRefs,
+        ...(artifacts.length > 0 ? { artifacts } : {}),
+        ...(memories.length > 0 ? { memories } : {}),
+        events: runtimeToolWorkspaceEvents(resource, withGatewayBoundaryRefs(writeResult.resourceRefs, boundary), toolCallId),
         ...(collectionSchema ? { collectionSchemas: [collectionSchema] } : {}),
         ...(collectionManageOutput ? { outputPayload: collectionManageOutput } : {}),
-        ...(workspaceChanges ? { workspaceChanges } : {})
+        ...(workspaceChanges.length > 0 ? { workspaceChanges } : {})
       };
     }
     return undefined;
@@ -5237,33 +5434,14 @@ export class AgentRuntime {
     queryId: string,
     args: Record<string, JsonValue>,
     boundary?: BackendToolBoundaryFeedback
-  ): Promise<RuntimeToolCallResult | undefined> {
-    const queryResult = await this.runDomainQuery({
+  ): Promise<RuntimeToolQueryResult | undefined> {
+    const queryResult = await this.runDomainQueryWithTrustedContext({
       query_id: queryId,
       input_source: "provider_tool_call",
-      payload: { ...args, run_id: run.id, session_id: run.session_id }
-    });
-    const session = await this.store.getSession(run.session_id);
-    if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
-    const operation = await this.createOperation(session, runInput.envelope, queryId, ["Read Workspace state through the Domain Query registry."]);
-    const completedOperation = { ...operation, status: "completed" as const, updated_at: nowIso() };
-    await this.store.updateOperation(completedOperation);
-    const toolRun = await this.store.saveToolRun({
-      id: createId("toolrun"),
-      run_id: run.id,
-      session_id: run.session_id,
-      tool_call_id: stringPayload(event.payload.tool_call_id) || event.tool_call_id,
-      provider_tool_name: stringPayload(event.payload.provider_tool_name) || queryId,
-      action_id: queryId,
-      status: "completed",
-      input_summary: summarize(JSON.stringify(args), 220),
-      output_summary: summarize(JSON.stringify(queryResult.result), 220),
-      resource_refs: [],
-      created_at: nowIso()
-    });
+      payload: normalizeProviderDomainQueryPayload(queryId, args)
+    }, { runId: run.id, sessionId: run.session_id, envelopeId: runInput.input_message_id });
     return {
-      operation: completedOperation,
-      toolRun,
+      queryOnly: true,
       outputPayload: {
         status: "completed",
         query_id: queryId,
@@ -5271,104 +5449,6 @@ export class AgentRuntime {
         render_specs: jsonSafe(queryResult.render_specs)
       },
       resourceRefs: withGatewayBoundaryRefs([], boundary)
-    };
-  }
-
-  private async handleProviderDomainCommandToolCall(
-    run: BackendRunRecord,
-    runInput: BackendRunInput,
-    event: BackendOutputEvent,
-    commandId: ProviderCapturedWriteCommandId,
-    args: Record<string, JsonValue>,
-    boundary?: BackendToolBoundaryFeedback
-  ): Promise<RuntimeToolCallResult | undefined> {
-    const providerToolName = stringPayload(event.payload.provider_tool_name) || commandId;
-    const toolCallId = stringPayload(event.payload.tool_call_id) || event.tool_call_id;
-
-    if (isArtifactCommand(commandId)) {
-      const title = stringPayload(args.title).trim();
-      const content = stringPayload(args.content).trim() || stringPayload(args.instruction).trim();
-      if (!title || !content) {
-        return undefined;
-      }
-      args = {
-        ...args,
-        title,
-        content
-      };
-    }
-
-    if (isMemoryCommand(commandId)) {
-      const settings = await this.store.getSettings();
-      if (settings.memory_capture_mode === "off") {
-        return undefined;
-      }
-      const topic = stringPayload(args.topic).trim() || stringPayload(args.topic_kind).trim() || "preference";
-      const content = stringPayload(args.content).trim() || runInput.user_input;
-      if (!content) {
-        return undefined;
-      }
-      args = {
-        ...args,
-        topic_kind: topic,
-        content
-      };
-    }
-
-    const domainResult = await this.runDomainCommandWithTrustedContext({
-      command_id: commandId,
-      input_source: "provider_tool_call",
-      idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, commandId, args),
-      payload: {
-        ...args,
-        session_id: run.session_id,
-        envelope_id: runInput.input_message_id,
-        input_locale: runInput.input_locale,
-        output_locale: runInput.output_locale,
-        metadata: {
-          ...recordPayload(args.metadata),
-          backend_run_id: run.id,
-          provider_tool_name: providerToolName,
-          ...(toolCallId ? { tool_call_id: toolCallId } : {})
-        }
-      }
-    }, { runId: run.id });
-    const writeResult = operationAuditRuntimeResult(domainResult.result);
-    if (!writeResult) {
-      return undefined;
-    }
-
-    const resourceRefs = uniqueResourceRefs(writeResult.resourceRefs);
-    const boundedResourceRefs = withGatewayBoundaryRefs(resourceRefs, boundary);
-    const resource = runtimeWriteResource(domainResult.result);
-    const artifacts = isArtifactRecordResource(resource) ? [resource] : [];
-    const memories = isMemoryFrontmatterResource(resource) ? [resource] : [];
-    const primaryResourceRef = resourceRefs[0] ?? writeResult.operation.result_ref;
-    const workspaceChanges = primaryResourceRef
-      ? [runtimeToolWorkspaceChange(run, writeResult.operation, primaryResourceRef, commandId, resource)]
-      : [];
-    const toolRun = await this.store.saveToolRun({
-      id: createId("toolrun"),
-      run_id: run.id,
-      session_id: run.session_id,
-      tool_call_id: toolCallId,
-      provider_tool_name: providerToolName,
-      action_id: writeResult.operation.operation,
-      status: writeResult.operation.status === "denied" ? "ignored" : "completed",
-      input_summary: summarize(JSON.stringify(args), 220),
-      output_summary: writeResult.auditRecord?.outputs_summary ?? `Completed ${writeResult.operation.operation}.`,
-      resource_refs: boundedResourceRefs,
-      created_at: nowIso()
-    });
-
-    return {
-      operation: writeResult.operation,
-      toolRun,
-      resourceRefs,
-      artifacts,
-      memories,
-      workspaceChanges,
-      events: runtimeToolWorkspaceEvents(commandId, resource, boundedResourceRefs, toolCallId)
     };
   }
 
@@ -5380,12 +5460,10 @@ export class AgentRuntime {
     recordEvent: (event: BackendOutputEvent) => Promise<BackendEventRecord>;
   }): Promise<{ operations: OperationRecord[]; artifacts: ArtifactRecord[]; workspaceChanges: WorkspaceChangeRecord[] }> {
     const domainResult = await this.runDomainCommandWithTrustedContext({
-      command_id: artifactCommandId(),
+      command_id: runtimeOperationIds.artifactCreate,
       input_source: "provider_tool_call",
       idempotency_key: `${input.run.id}:expected-output-fallback:artifact.create`,
       payload: {
-        session_id: input.run.session_id,
-        envelope_id: input.runInput.input_message_id,
         title: input.title,
         content: input.content,
         input_locale: input.runInput.input_locale,
@@ -5395,7 +5473,7 @@ export class AgentRuntime {
           expected_output_fallback: true
         }
       }
-    }, { runId: input.run.id });
+    }, { runId: input.run.id, sessionId: input.run.session_id, envelopeId: input.runInput.input_message_id });
     const writeResult = operationAuditRuntimeResult(domainResult.result);
     if (!writeResult) {
       return { operations: [], artifacts: [], workspaceChanges: [] };
@@ -5403,21 +5481,14 @@ export class AgentRuntime {
     const resourceRefs = uniqueResourceRefs(writeResult.resourceRefs);
     const resource = runtimeWriteResource(domainResult.result);
     const artifacts = isArtifactRecordResource(resource) ? [resource] : [];
-    const primaryResourceRef = resourceRefs[0] ?? writeResult.operation.result_ref;
-    const workspaceChanges = primaryResourceRef
-      ? [runtimeToolWorkspaceChange(input.run, writeResult.operation, primaryResourceRef, artifactCommandId(), resource)]
-      : [];
-    for (const change of workspaceChanges) {
-      await this.store.saveWorkspaceChange(change);
-      await this.emit("workspace.change.created", change);
-    }
-    for (const event of runtimeToolWorkspaceEvents(artifactCommandId(), resource, resourceRefs)) {
+    const workspaceChanges = await this.backendWorkspaceChangesForOperation(input.run.id, input.run.session_id, writeResult.operation.id);
+    for (const event of runtimeToolWorkspaceEvents(resource, resourceRefs)) {
       await input.recordEvent(event);
     }
     return { operations: [writeResult.operation], artifacts, workspaceChanges };
   }
 
-  private async executeSandboxDomainOperation(context: TrustedDomainContext, input: Record<string, JsonValue>): Promise<RuntimeToolCallResult> {
+  private async executeSandboxDomainOperation(context: TrustedDomainContext, request: SystemSandboxExecRequest): Promise<RuntimeToolCallResult> {
     if (!context.runId) throw new RuntimeRequestError("conflict", "sandbox_exec_requires_trusted_backend_run");
     const run = await this.store.getBackendRun(context.runId);
     if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
@@ -5426,19 +5497,34 @@ export class AgentRuntime {
     const sandboxInstance = await this.ensureGatewaySandboxInstance(policy);
     const execution = await executeSandboxCommand(
       policy,
-      sandboxCommandInputFromArgs(input),
+      {
+        command: request.command,
+        args: request.args,
+        ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+        env: request.environment,
+        ...(request.stdin === undefined ? {} : { stdin: request.stdin }),
+        secret_env: request.secretEnvironment,
+        secret_files: request.secretFiles.map((file) => ({
+          secret_ref_id: file.secretRefId,
+          filename: file.filename,
+          ...(file.environmentName === undefined ? {} : { env: file.environmentName }),
+          ...(file.mode === undefined ? {} : { mode: file.mode })
+        })),
+        ...(request.timeoutMs === undefined ? {} : { timeout_ms: request.timeoutMs }),
+        metadata: request.toolCallId === undefined ? {} : { tool_call_id: request.toolCallId }
+      },
       createSandboxCommandAdapter(),
       { workspaceRoot: this.store.rootDir, fileRoot: this.store.rootDir, env: process.env }
     );
     return this.saveSandboxExecExecution(
       run,
-      stringRecordValue(input.metadata, "tool_call_id") || undefined,
-      input,
+      request.toolCallId,
+      request,
       execution,
       gatewayBoundaryToolFeedback({
         allowed: true,
-        action_id: sandboxExecCommandId(),
-        provider_tool_name: sandboxExecCommandId(),
+          action_id: runtimeOperationIds.sandboxExec,
+          provider_tool_name: runtimeOperationIds.sandboxExec,
         reason: "explicit_allow",
         policy
       }),
@@ -5449,7 +5535,7 @@ export class AgentRuntime {
   private async saveSandboxExecExecution(
     run: BackendRunRecord,
     toolCallId: string | undefined,
-    args: Record<string, JsonValue>,
+    request: SystemSandboxExecRequest,
     execution: SandboxCommandExecutionResult,
     boundary?: BackendToolBoundaryFeedback,
     sandboxInstance?: GatewaySandboxInstanceRecord
@@ -5463,7 +5549,7 @@ export class AgentRuntime {
       id: createId("operation"),
       session_id: run.session_id,
       capability_id: proposalCapabilityManifest.id,
-      operation: "sandbox.exec",
+      operation: runtimeOperationIds.sandboxExec,
       actor_identity: "system",
       instruction_source: "tool_output",
       instruction_authority: "backend_runtime",
@@ -5472,7 +5558,7 @@ export class AgentRuntime {
         run_id: run.id,
         tool_call_id: toolCallId,
         command: execution.command,
-        args: args.args ?? []
+        args: request.args
       }),
       input_ref: {
         kind: "backend_run",
@@ -5495,10 +5581,10 @@ export class AgentRuntime {
       run_id: run.id,
       session_id: run.session_id,
       tool_call_id: toolCallId,
-      provider_tool_name: "sandbox.exec",
-      action_id: "sandbox.exec",
+      provider_tool_name: runtimeOperationIds.sandboxExec,
+      action_id: runtimeOperationIds.sandboxExec,
       status: sandboxToolRunStatus(execution.status),
-      input_summary: summarize(`${execution.command} ${(args.args as JsonValue[] | undefined)?.join?.(" ") ?? ""}`, 220),
+      input_summary: summarize(`${execution.command} ${request.args.join(" ")}`, 220),
       output_summary: summarize(execution.error ?? execution.stderr ?? execution.stdout ?? execution.reason ?? execution.status, 220),
       resource_refs: withGatewayBoundaryRefs(resourceRefs, boundary),
       created_at: nowIso()
@@ -5509,7 +5595,7 @@ export class AgentRuntime {
       resourceRefs,
       outputPayload: {
         status: execution.status,
-        action_id: "sandbox.exec",
+        action_id: runtimeOperationIds.sandboxExec,
         command: execution.command,
         exit_code: execution.exit_code ?? null,
         signal: execution.signal ?? null,
@@ -5533,14 +5619,14 @@ export class AgentRuntime {
     };
   }
 
-  private async executeMcpDomainOperation(context: TrustedDomainContext, input: Record<string, JsonValue>): Promise<RuntimeToolCallResult> {
+  private async executeMcpDomainOperation(context: TrustedDomainContext, request: SystemMcpCallRequest): Promise<RuntimeToolCallResult> {
     if (!context.runId) throw new RuntimeRequestError("conflict", "mcp_call_requires_trusted_backend_run");
     const run = await this.store.getBackendRun(context.runId);
     if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
     const policy = await this.gatewayBoundaryPolicyForRun(run);
     if (!policy) throw new RuntimeRequestError("conflict", "mcp_call_requires_gateway_boundary");
-    const serverName = stringPayload(input.server_name);
-    const toolName = stringPayload(input.tool_name);
+    const serverName = request.serverName;
+    const toolName = request.toolName;
     const configured = await this.store.getGatewayMcpConfigByServerName(serverName);
     const hasBoundaryRef = policy.mcp_config_refs.some((ref) =>
       ref.server_name === serverName || (configured ? ref.id === configured.id : false)
@@ -5570,19 +5656,19 @@ export class AgentRuntime {
     };
     const execution = await executeMcpToolInvocation(
       executionPolicy,
-      { server_name: serverName, tool_name: toolName, input: recordPayload(input.input) },
+      { server_name: serverName, tool_name: toolName, input: request.input },
       adapter,
       { env: process.env, fileRoot: this.store.rootDir }
     );
     return this.saveMcpToolExecution(
       run,
-      stringRecordValue(input.metadata, "tool_call_id") || undefined,
-      input,
+      request.toolCallId,
+      request,
       execution,
       gatewayBoundaryToolFeedback({
         allowed: true,
-        action_id: mcpCallCommandId(),
-        provider_tool_name: mcpCallCommandId(),
+        action_id: runtimeOperationIds.mcpCall,
+        provider_tool_name: runtimeOperationIds.mcpCall,
         reason: "explicit_allow",
         policy
       }),
@@ -5593,7 +5679,7 @@ export class AgentRuntime {
   private async saveMcpToolExecution(
     run: BackendRunRecord,
     toolCallId: string | undefined,
-    args: Record<string, JsonValue>,
+    request: SystemMcpCallRequest,
     execution: McpToolExecutionResult,
     boundary?: BackendToolBoundaryFeedback,
     configured?: Awaited<ReturnType<WorkspaceStore["getGatewayMcpConfigByServerName"]>>
@@ -5606,7 +5692,7 @@ export class AgentRuntime {
       id: createId("operation"),
       session_id: run.session_id,
       capability_id: proposalCapabilityManifest.id,
-      operation: "mcp.call",
+      operation: runtimeOperationIds.mcpCall,
       actor_identity: "system",
       instruction_source: "tool_output",
       instruction_authority: "backend_runtime",
@@ -5616,7 +5702,7 @@ export class AgentRuntime {
         tool_call_id: toolCallId,
         server_name: execution.server_name,
         tool_name: execution.tool_name,
-        input: args.input ?? {}
+        input: request.input
       }),
       input_ref: {
         kind: "backend_run",
@@ -5639,7 +5725,7 @@ export class AgentRuntime {
       run_id: run.id,
       session_id: run.session_id,
       tool_call_id: toolCallId,
-      provider_tool_name: "mcp.call",
+      provider_tool_name: runtimeOperationIds.mcpCall,
       action_id: `${execution.server_name}/${execution.tool_name}`,
       status: mcpToolRunStatus(execution.status),
       input_summary: summarize(`${execution.server_name}/${execution.tool_name}`),
@@ -5653,7 +5739,7 @@ export class AgentRuntime {
       resourceRefs,
       outputPayload: {
         status: execution.status,
-        action_id: "mcp.call",
+        action_id: runtimeOperationIds.mcpCall,
         server_name: execution.server_name,
         tool_name: execution.tool_name,
         reason: execution.reason ?? null,
@@ -6094,7 +6180,27 @@ export class AgentRuntime {
     toolRuns: ToolRunRecord[];
     transcriptMessages?: MessageRecord[];
     artifacts?: ReflectionArtifactSnapshot[];
+    abortSignal?: AbortSignal;
   }): Promise<ReflectionRuntimeResult> {
+    const sourceRunId = input.sourceRunId ?? input.backendRun?.id;
+    const cancelledResult = (): ReflectionRuntimeResult => {
+      const now = nowIso();
+      return {
+        reflectionRun: {
+          id: createId("reflection"),
+          kind: input.kind === "chat_turn" ? "background_review" : input.kind,
+          ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+          session_id: input.session.id,
+          status: "completed",
+          input_summary: summarize(input.userMessage?.content ?? input.session.title),
+          output_summary: "Background Review cancelled during shutdown.",
+          started_at: now,
+          completed_at: now
+        },
+        suggestions: []
+      };
+    };
+    if (input.abortSignal?.aborted) return cancelledResult();
     const startedAt = nowIso();
     let reflectionRun: ReflectionRunRecord = {
       id: createId("reflection"),
@@ -6124,15 +6230,18 @@ export class AgentRuntime {
       return { reflectionRun, suggestions: [] };
     }
     try {
+      throwIfAborted(input.abortSignal);
       const snapshot = await this.buildReviewSnapshot(input);
+      throwIfAborted(input.abortSignal);
       const runner = this.workspaceOptions.backgroundReviewRunner;
       const rawResult = runner
-        ? await runner.run(snapshot, defaultBackgroundReviewPolicy)
+        ? await runner.run(snapshot, defaultBackgroundReviewPolicy, input.abortSignal)
         : this.workspaceOptions.enableBackendBackgroundReview
-          ? await this.runBackgroundReviewWithBackend(snapshot, input.backendRun)
+          ? await this.runBackgroundReviewWithBackend(snapshot, input.backendRun, input.abortSignal)
           : { reviewer: "background-review-unconfigured", summary: "Background Review runner is not configured.", mutations: [] };
       const settings = await this.store.getSettings();
       const restricted = restrictBackgroundReviewResult(rawResult, defaultBackgroundReviewPolicy);
+      throwIfAborted(input.abortSignal);
       const result = {
         ...restricted,
         mutations: restricted.mutations.filter((mutation) => {
@@ -6143,6 +6252,7 @@ export class AgentRuntime {
       };
       await this.preflightBackgroundReviewMutations(result.mutations);
       const learningSnapshot = await this.store.createLearningSnapshot(reflectionRun.id);
+      throwIfAborted(input.abortSignal);
       let suggestions: ReflectionSuggestionRecord[];
       try {
         suggestions = await this.applyBackgroundReviewMutations(reflectionRun, input.session, result.mutations);
@@ -6173,6 +6283,15 @@ export class AgentRuntime {
       });
       return { reflectionRun, suggestions };
     } catch (error) {
+      if (error instanceof Error && error.message === "background_review_aborted") {
+        reflectionRun = await this.store.updateReflectionRun({
+          ...reflectionRun,
+          status: "completed",
+          output_summary: "Background Review cancelled during shutdown.",
+          completed_at: nowIso()
+        });
+        return { reflectionRun, suggestions: [] };
+      }
       reflectionRun = await this.store.updateReflectionRun({
         ...reflectionRun,
         status: "failed",
@@ -6231,35 +6350,55 @@ export class AgentRuntime {
     };
   }
 
-  private async runBackgroundReviewWithBackend(snapshot: ReviewSnapshot, sourceRun?: BackendRunRecord): Promise<BackgroundReviewResult> {
+  private async runBackgroundReviewWithBackend(snapshot: ReviewSnapshot, sourceRun?: BackendRunRecord, abortSignal?: AbortSignal): Promise<BackgroundReviewResult> {
+    throwIfAborted(abortSignal);
+    if (this.backgroundTasksClosing) throw new Error("background_review_aborted");
     const backend = sourceRun ? this.backendRegistry.get(sourceRun.backend_id) : undefined;
     if (!backend) return { reviewer: "background-review-unavailable", summary: "No review Backend was available.", mutations: [] };
     const prompt = backgroundReviewPrompt(snapshot, defaultBackgroundReviewPolicy);
     const envelope = createGatewayEnvelope(webGatewayContext, prompt);
     const textParts: string[] = [];
-    for await (const event of backend.runTurn({
-      run_id: createId("review_run"),
-      session_id: snapshot.source_session_id,
-      input_message_id: createId("review_message"),
-      workspace_root: this.store.rootDir,
-      working_directory: this.backendWorkingDirectory(),
-      envelope,
-      user_input: prompt,
-      input_locale: "en",
-      output_locale: "en",
-      active_memory: [],
-      recent_messages: [],
-      available_tools: [],
-      metadata: { background_review: true, source_run_id: snapshot.source_run_id },
-      context_intent: "workspace_task"
-    })) {
-      if (event.event_type === "text_delta" && typeof event.payload.text === "string") textParts.push(event.payload.text);
+    const reviewRunId = createId("review_run");
+    this.backgroundReviewBackends.set(reviewRunId, backend);
+    if (this.backgroundTasksClosing || abortSignal?.aborted) {
+      this.backgroundReviewBackends.delete(reviewRunId);
+      try {
+        await backend.cancelRun?.(reviewRunId);
+      } catch (error) {
+        const failure = new Error(`background_cancel_failed:${reviewRunId}`);
+        Object.assign(failure, { cause: error, runId: reviewRunId });
+        this.backgroundTaskFailures.push({ error: failure, runId: reviewRunId });
+      }
+      throw new Error("background_review_aborted");
+    }
+    try {
+      for await (const event of backend.runTurn({
+        run_id: reviewRunId,
+        session_id: snapshot.source_session_id,
+        input_message_id: createId("review_message"),
+        workspace_root: this.store.rootDir,
+        working_directory: this.backendWorkingDirectory(),
+        envelope,
+        user_input: prompt,
+        input_locale: "en",
+        output_locale: "en",
+        active_memory: [],
+        recent_messages: [],
+        available_tools: [],
+        metadata: { background_review: true, source_run_id: snapshot.source_run_id },
+        context_intent: "workspace_task"
+      })) {
+        throwIfAborted(abortSignal);
+        if (event.event_type === "text_delta" && typeof event.payload.text === "string") textParts.push(event.payload.text);
+      }
+    } finally {
+      this.backgroundReviewBackends.delete(reviewRunId);
     }
     const text = textParts.join("").trim();
     return text ? parseBackgroundReviewResult(text) : { reviewer: backend.id, summary: "Review Backend returned no mutations.", mutations: [] };
   }
 
-  private async runSkillConsolidationWithBackend(input: { group_key: string; packages: Array<{ id: string; title: string; description: string; markdown: string; support_files: Array<{ path: string; content: string }> }> }, session: SessionRecord) {
+  private async runSkillConsolidationWithBackend(input: { group_key: string; packages: Array<{ id: string; title: string; description: string; markdown: string; support_files: Array<{ path: string; content: string }> }> }, session: { id: string }) {
     const backend = this.backendRegistry.get(this.selectedBackendIdForRun((await this.store.getSettings()).default_backend_id));
     if (!backend) return undefined;
     const prompt = skillConsolidationPrompt(input);
@@ -6788,70 +6927,6 @@ export class AgentRuntime {
     }
   }
 
-  private createOperationPlans(providerOutput: ProviderOutput): OperationPlan[] {
-    const operations: OperationPlan[] = [
-      {
-        operation: "memory.session.create",
-        proposedEffects: ["Keep the current user intent in session memory."]
-      }
-    ];
-
-    for (const toolCall of providerOutput.toolCalls) {
-      const plan = this.operationPlanFromToolCall(toolCall);
-      if (!plan) {
-        continue;
-      }
-    if (plan.operation === artifactCommandId()) {
-        operations.unshift(plan);
-      } else {
-        operations.push(plan);
-      }
-    }
-
-    return operations;
-  }
-
-  private operationPlanFromToolCall(toolCall: ProviderToolCall): OperationPlan | undefined {
-    if (toolCall.name === "create_artifact") {
-      const title = stringArg(toolCall.arguments.title).trim();
-      const content = stringArg(toolCall.arguments.content).trim();
-      if (!title || !content) {
-        return undefined;
-      }
-      const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry(artifactCommandId());
-      return {
-        operation: command.id,
-        proposedEffects: command.proposed_effects,
-        toolCall,
-        artifact: {
-          title,
-          content,
-          ...(stringArg(toolCall.arguments.preview).trim() ? { preview: stringArg(toolCall.arguments.preview).trim() } : {})
-        }
-      };
-    }
-
-    if (toolCall.name === "remember_topic") {
-      const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry(memoryCommandId());
-      return {
-        operation: command.id,
-        proposedEffects: command.proposed_effects,
-        toolCall
-      };
-    }
-
-    if (toolCall.name === "request_external_send") {
-      const command = getDomainCommandForProviderToolName(toolCall.name) ?? requireDomainCommandEntry("external.send");
-      return {
-        operation: command.id,
-        proposedEffects: command.proposed_effects,
-        toolCall
-      };
-    }
-
-    return undefined;
-  }
-
   private async rebuildActivity(): Promise<ActivityInboxItem[]> {
     const activity = buildActivityInboxItems(await this.store.readActivityInputs());
     await this.emit("activity.updated", activity);
@@ -7003,9 +7078,6 @@ function surfaceOperationArtifactMetadata(
 ): Record<string, JsonValue> {
   return jsonRecord({
     ...(operation.metadata ?? {}),
-    surface_operation_id: operation.id,
-    surface_operation_kind: operation.kind,
-    surface_operation_payload: jsonSafe(operation),
     source_artifact_id: sourceArtifact?.id,
     source_artifact_uri: sourceArtifact?.file_ref.uri,
     source_artifact_hash: sourceContent ? stableHash(sourceContent) : undefined
@@ -9547,59 +9619,6 @@ function isOperationRenderResource(value: Record<string, unknown>): value is Pic
   return typeof value.id === "string" && typeof value.operation === "string" && typeof value.status === "string";
 }
 
-function operationAuditRuntimeResult(value: unknown): { operation: OperationRecord; auditRecord?: AuditRecord; resourceRefs: ResourceRef[] } | undefined {
-  const record = unknownRecord(value);
-  if (record.result && record.result !== value) {
-    const nested = operationAuditRuntimeResult(record.result);
-    if (nested) {
-      return nested;
-    }
-  }
-  const operation = unknownRecord(record.operation);
-  const auditRecord = unknownRecord(record.auditRecord);
-  if (
-    typeof operation.id !== "string"
-    || typeof operation.operation !== "string"
-    || typeof operation.status !== "string"
-  ) {
-    return undefined;
-  }
-  const resourceRefs = Array.isArray(operation.target_resource_refs)
-    ? operation.target_resource_refs.filter(isResourceRef)
-    : [];
-  const resultRef = isResourceRef(operation.result_ref) ? operation.result_ref : undefined;
-  return {
-    operation: operation as unknown as OperationRecord,
-    ...(typeof auditRecord.id === "string" && typeof auditRecord.outputs_summary === "string" ? { auditRecord: auditRecord as unknown as AuditRecord } : {}),
-    resourceRefs: resultRef ? [resultRef, ...resourceRefs] : resourceRefs
-  };
-}
-
-function runtimeWriteResource(value: unknown): unknown {
-  const record = unknownRecord(value);
-  if ("resource" in record) {
-    return record.resource;
-  }
-  if (record.result && record.result !== value) {
-    return runtimeWriteResource(record.result);
-  }
-  return undefined;
-}
-
-function isArtifactRecordResource(value: unknown): value is ArtifactRecord {
-  const record = unknownRecord(value);
-  return typeof record.id === "string"
-    && typeof record.title === "string"
-    && isResourceRef(record.file_ref);
-}
-
-function isMemoryFrontmatterResource(value: unknown): value is MemoryFrontmatter {
-  const record = unknownRecord(value);
-  return typeof record.id === "string"
-    && typeof record.topic === "string"
-    && typeof record.state === "string";
-}
-
 function isResourceDeletionResult(value: { rollbackPoint?: RollbackPoint }): boolean {
   const rollback = value.rollbackPoint;
   if (!rollback) return false;
@@ -9607,77 +9626,12 @@ function isResourceDeletionResult(value: { rollbackPoint?: RollbackPoint }): boo
     && Object.keys(rollback.after_snapshot).length === 0;
 }
 
-function runtimeToolCallResult(value: unknown): RuntimeToolCallResult | undefined {
-  const record = unknownRecord(value);
-  const operation = unknownRecord(record.operation);
-  const toolRun = unknownRecord(record.toolRun);
-  if (typeof operation.id !== "string" || typeof toolRun.id !== "string" || !Array.isArray(record.resourceRefs)) return undefined;
-  return value as RuntimeToolCallResult;
-}
-
-function runtimeToolWorkspaceChange(
-  run: BackendRunRecord,
-  operation: OperationRecord,
-  resourceRef: ResourceRef,
-  commandId: ProviderCapturedWriteCommandId,
-  resource: unknown
-): WorkspaceChangeRecord {
-  return {
-    id: createId("change"),
-    run_id: run.id,
-    session_id: run.session_id,
-    resource_ref: resourceRef,
-    change_type: isArtifactCommand(commandId) ? "artifact_created" : "memory_suggested",
-    summary: isArtifactCommand(commandId)
-      ? `Created artifact ${isArtifactRecordResource(resource) ? resource.title : resourceRef.label ?? resourceRef.id}.`
-      : `Suggested memory ${isMemoryFrontmatterResource(resource) ? resource.topic : resourceRef.label ?? resourceRef.id}.`,
-    legacy_operation_id: operation.id,
-    created_at: nowIso()
-  };
-}
-
-function runtimeToolWorkspaceEvents(
-  commandId: ProviderCapturedWriteCommandId,
-  resource: unknown,
-  resourceRefs: ResourceRef[],
-  toolCallId?: string
-): BackendOutputEvent[] {
-  if (isArtifactCommand(commandId)) {
-    const artifact = isArtifactRecordResource(resource) ? resource : undefined;
-    return [
-      {
-        event_type: "artifact_created",
-        payload: {
-          artifact_id: artifact?.id ?? resourceRefs[0]?.id ?? "unknown",
-          title: artifact?.title ?? resourceRefs[0]?.label ?? "Artifact"
-        },
-        resource_refs: resourceRefs,
-        tool_call_id: toolCallId
-      }
-    ];
-  }
-
-  const memory = isMemoryFrontmatterResource(resource) ? resource : undefined;
-  return [
-    {
-      event_type: "memory_suggested",
-      payload: {
-        memory_id: memory?.id ?? resourceRefs[0]?.id ?? "unknown",
-        topic: memory?.topic ?? resourceRefs[0]?.label ?? "memory"
-      },
-      resource_refs: resourceRefs,
-      tool_call_id: toolCallId
-    }
-  ];
-}
-
-function isResourceRef(value: unknown): value is ResourceRef {
-  const record = unknownRecord(value);
-  return typeof record.kind === "string" && typeof record.id === "string" && typeof record.uri === "string";
-}
-
 function unknownRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function stringRecordValue(value: unknown, key: string): string | undefined {
@@ -9781,7 +9735,7 @@ function resourceVersionConflictPayload(error: CollectionRecordVersionConflictEr
     actual_version: error.latest.version,
     latest_resource: error.latest,
     retry: {
-      command_id: collectionPatchCommandId(),
+      command_id: runtimeOperationIds.collectionPatchApply,
       expected_version: error.latest.version
     }
   };
@@ -9852,7 +9806,7 @@ function runtimeToolArguments(payload: Record<string, JsonValue>, actionId: stri
     return explicitArguments;
   }
   const input = recordPayload(payload.input);
-  if (isMcpCallCommand(actionId)) {
+  if (getDomainCommandEntry(actionId)?.provider_tool_names?.includes("mcp.call")) {
     const nestedInput = recordPayload(input.input);
     return {
       server_name: stringPayload(payload.server_name) || stringPayload(input.server_name),
@@ -9867,7 +9821,10 @@ function jsonRecord(value: Record<string, unknown>): Record<string, JsonValue> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined).map(([key, entry]) => [key, jsonSafe(entry, key)]));
 }
 
-function jsonDefinedRecord(value: Record<string, unknown>): Record<string, JsonValue> {
+function jsonDefinedRecord(value: unknown): Record<string, JsonValue> {
+  if (!isRecord(value)) {
+    throw new RuntimeRequestError("validation", "domain_payload_must_be_object");
+  }
   return Object.fromEntries(Object.entries(value)
     .filter(([, entry]) => entry !== undefined)
     .map(([key, entry]) => [key, jsonDefined(entry)]));
@@ -9932,6 +9889,46 @@ function safeRuntimeErrorMessage(error: unknown, fallback = "Unknown error"): st
   return fallback;
 }
 
+function runtimeRequestErrorFromDomainOperationError(error: DomainOperationError): RuntimeRequestError {
+  const code: RuntimeRequestError["code"] = error.code === "invalid_input"
+    ? "validation"
+    : error.code === "invalid_output" || error.code === "internal"
+      ? "internal"
+      : error.code === "source_not_allowed"
+        ? "forbidden"
+        : error.code;
+  return new RuntimeRequestError(code, error.message);
+}
+
+function parseRuntimeRequestErrorCode(code: string): RuntimeRequestErrorCode {
+  switch (code) {
+    case "bad_request": case "validation": case "gone": case "not_found": case "conflict":
+    case "forbidden": case "unavailable": case "outcome_unknown": case "internal":
+    case "provider_not_configured": case "provider_failed": case "backend_cancelled":
+    case "backend_execution_root_not_ready": case "domain_command_failed":
+      return code;
+    default:
+      return "internal";
+  }
+}
+
+/**
+ * Tool-call failures cross provider, Gateway, Automation, and persisted backend
+ * event boundaries. Preserve only the typed error code there: raw exception
+ * messages may contain provider details or secrets and are not a tool protocol.
+ */
+function normalizeRuntimeToolFailure(error: unknown): RuntimeToolFailure {
+  const code: RuntimeToolFailureCode = error instanceof RuntimeRequestError || error instanceof DomainOperationError
+    ? error.code
+    : "internal_error";
+  return {
+    code,
+    reason: "runtime_tool_failed",
+    retryable: code === "provider_failed",
+    summary: `runtime_tool_failed:${code}`
+  };
+}
+
 function stringArg(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -9950,37 +9947,8 @@ function isProviderDiagnosticReason(value: unknown): value is ProviderDiagnostic
   );
 }
 
-const gatewayPairingPolicyChannels = [...gatewayChannels];
-const gatewayRoutingPolicyChannels = [...gatewayChannels];
-
-function createDefaultRuntimeGatewayPairingPolicy(channel: GatewayPairingPolicyRecord["channel"]): GatewayPairingPolicyRecord {
-  const base = createDefaultGatewayPairingPolicy(channel);
-  const envAllowlist = gatewaySourceAllowlist();
-  if (envAllowlist.length === 0) {
-    return base;
-  }
-  return {
-    ...base,
-    allowlist: envAllowlist,
-    metadata: {
-      ...base.metadata,
-      source: "env_gateway_allowlist",
-      env_allowlist: true
-    }
-  };
-}
-
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-
-function gatewaySourceAllowlist(): string[] {
-  return (process.env.SAMURAI_GATEWAY_SOURCE_ALLOWLIST ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 function applyGatewayBoundaryAllowedTools(availableTools: string[], policy: GatewayBoundaryPolicy | undefined): string[] {
@@ -10269,19 +10237,7 @@ function sandboxToolRunStatus(status: SandboxCommandExecutionResult["status"]): 
 }
 
 function gatewayBoundaryActionId(providerToolName: string): string {
-  if (providerToolName === "create_artifact") {
-    return "artifact.create";
-  }
-  if (providerToolName === "create_generated_surface" || providerToolName === "mcp__samurai__generated_surface_create") {
-    return "generated_surface.create";
-  }
-  if (providerToolName === "remember_topic") {
-    return "memory.topic.create";
-  }
-  if (providerToolName === "request_external_send") {
-    return "external.send.prepare";
-  }
-  return providerToolName || "unknown_tool";
+  return getDomainCommandForProviderToolName(providerToolName)?.id ?? (providerToolName || "unknown_tool");
 }
 
 function normalizeExternalAssistHints(hints: ExternalAssistHint[] | void): ExternalAssistHint[] {
@@ -10717,45 +10673,42 @@ function shouldCreateGeneratedSurfaceOutput(query: string): boolean {
   return /独自\s*UI|独自画面|カスタム\s*UI|HTML(?:\s*表示|(?:を|で)?\s*生成)|generated\s*UI|custom\s*UI|custom\s*html|renders?\s+(?:this|it)\s+as\s+(?:custom|html)/i.test(trimmed);
 }
 
-function shouldReviseGeneratedSurfaceOutput(query: string): boolean {
-  return /修正|直して|変更|更新|改良|revise|edit|change|update|fix/i.test(query.trim());
-}
-
 function normalizeGeneratedSurfaceCommandPayload(
-  commandId: "generated_surface.create" | "generated_surface.revise",
+  command: DomainCommandEntry,
   args: Record<string, JsonValue>,
-  run: BackendRunRecord,
   runInput: BackendRunInput
 ): Record<string, JsonValue> {
-  const actions = Array.isArray(args.actions)
-    ? args.actions.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
-    : [];
+  assertProviderGeneratedSurfaceServerFieldsAbsent(args);
+  const suppliedBundle = recordPayload(args.bundle);
+  const actionValues = Array.isArray(suppliedBundle.actions)
+    ? suppliedBundle.actions
+    : Array.isArray(args.actions)
+      ? args.actions
+      : [];
+  const actions = actionValues.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
   const suppliedRequest = recordPayload(args.request);
-  const parsedRequest = SurfaceGenerationRequestSchema.safeParse(suppliedRequest);
   const selectedSkillRefs: ResourceRef[] = (runInput.selected_skills ?? []).map((skill) => ({
     kind: "skill",
     id: skill.id,
     uri: `skills/${skill.id}.md`,
     label: skill.title
   }));
-  const request: SurfaceGenerationRequest = parsedRequest.success
-    ? parsedRequest.data
-    : SurfaceGenerationRequestSchema.parse({
-        id: createId("surface_request"),
-        session_id: run.session_id,
-        user_intent: runInput.user_input,
-        source_resource_refs: resourceRefsPayload(args.source_resource_refs),
-        allowed_domain_commands: actions
-          .map((action) => typeof action.command_id === "string" ? action.command_id : "")
-          .filter(Boolean),
-        selected_knowledge_refs: resourceRefsPayload(args.selected_knowledge_refs),
-        selected_skill_refs: selectedSkillRefs,
-        client_capabilities: { generated_surface: true, iframe: true },
-        expected_lifetime: args.expected_lifetime === "pinned" ? "pinned" : args.expected_lifetime === "message" ? "message" : "session",
-        fallback_chain: ["built_in_surface", "artifact", "text"],
-        created_at: nowIso()
-      });
-  const suppliedBundle = recordPayload(args.bundle);
+  const request = {
+    // The provider describes a view; it never owns the user's instruction.
+    user_intent: runInput.user_input,
+    source_resource_refs: resourceRefsPayload(suppliedRequest.source_resource_refs ?? args.source_resource_refs),
+    allowed_domain_commands: Array.isArray(suppliedRequest.allowed_domain_commands)
+      ? suppliedRequest.allowed_domain_commands
+      : actions.map((action) => typeof action.command_id === "string" ? action.command_id : "").filter(Boolean),
+    selected_knowledge_refs: resourceRefsPayload(suppliedRequest.selected_knowledge_refs ?? args.selected_knowledge_refs),
+    // Selected skills are determined by Host context assembly, not a tool argument.
+    selected_skill_refs: selectedSkillRefs,
+    client_capabilities: Object.keys(recordPayload(suppliedRequest.client_capabilities ?? args.client_capabilities)).length > 0
+      ? recordPayload(suppliedRequest.client_capabilities ?? args.client_capabilities)
+      : { generated_surface: true, iframe: true },
+    expected_lifetime: surfaceExpectedLifetime(suppliedRequest.expected_lifetime ?? args.expected_lifetime),
+    fallback_chain: surfaceFallbackChain(suppliedRequest.fallback_chain ?? args.fallback_chain)
+  };
   const bundle: Record<string, JsonValue> = Object.keys(suppliedBundle).length > 0
     ? suppliedBundle
     : {
@@ -10769,20 +10722,114 @@ function normalizeGeneratedSurfaceCommandPayload(
           ? { input_data_schema: args.input_data_schema }
           : {})
       };
+  const isRevision = Object.hasOwn(recordPayload(command.input_schema.properties), "surface_id");
+  if (!isRevision) {
+    return { request, bundle };
+  }
+  const surfaceId = stringRecordValue(runInput.metadata.active_app_context, "generated_surface_id");
+  if (!surfaceId) throw new RuntimeRequestError("conflict", "generated_surface_active_context_required");
+  return { surface_id: surfaceId, request, bundle };
+}
+
+function surfaceExpectedLifetime(value: JsonValue | undefined): "message" | "session" | "pinned" {
+  return value === "message" || value === "pinned" ? value : "session";
+}
+
+function surfaceFallbackChain(value: JsonValue | undefined): Array<"built_in_surface" | "artifact" | "text"> {
+  if (!Array.isArray(value)) return ["built_in_surface", "artifact", "text"];
+  const chain = value.filter((item): item is "built_in_surface" | "artifact" | "text" => item === "built_in_surface" || item === "artifact" || item === "text");
+  return chain.length > 0 ? chain : ["built_in_surface", "artifact", "text"];
+}
+
+function surfaceOperationTrustedContext(input: SurfaceOperation): TrustedDomainRuntimeContext {
+  const sessionId = "session_id" in input && typeof input.session_id === "string" ? input.session_id : undefined;
   return {
-    ...args,
-    ...(isGeneratedSurfaceRevision(commandId)
-      ? {
-          surface_id: typeof args.surface_id === "string"
-            ? args.surface_id
-            : stringRecordValue(runInput.metadata.active_app_context, "generated_surface_id") ?? ""
-        }
-      : {}),
-    request: request as unknown as JsonValue,
-    bundle: bundle as unknown as JsonValue,
-    producer_run_id: run.id,
-    prompt_fingerprint: stableHash(runInput.user_input)
+    ...(sessionId ? { sessionId } : {}),
+    surfaceOperation: { id: input.id, kind: input.kind }
   };
+}
+
+const providerServerOwnedContextFields = [
+  "workspace_id",
+  "actor_id",
+  "actor_identity",
+  "correlation_id",
+  "source",
+  "input_source",
+  "session_id",
+  "envelope_id",
+  "input_message_id",
+  "run_id",
+  "producer_run_id",
+  "prompt_fingerprint",
+  "created_at"
+] as const;
+
+const generatedSurfaceRequestServerOwnedFields = new Set<string>([
+  ...providerServerOwnedContextFields,
+  "id",
+  "surface_id"
+]);
+
+function normalizeProviderDomainCommandPayload(
+  command: DomainCommandEntry,
+  args: Record<string, JsonValue>,
+  trusted: { inputLocale?: SupportedLocale; outputLocale?: SupportedLocale; runId: string; providerToolName: string; toolCallId?: string }
+): Record<string, JsonValue> {
+  assertProviderDomainServerFieldsAbsent("command", command.id, args);
+  const properties = recordPayload(command.input_schema.properties);
+  // Preserve every domain field. The generated operation schema is the one
+  // authority that rejects unknown fields and malformed known values.
+  const payload: Record<string, JsonValue> = { ...args };
+  if (Object.hasOwn(properties, "input_locale") && trusted.inputLocale) payload.input_locale = trusted.inputLocale;
+  if (Object.hasOwn(properties, "output_locale") && trusted.outputLocale) payload.output_locale = trusted.outputLocale;
+  if (Object.hasOwn(properties, "metadata")) {
+    if (args.metadata === undefined || isRecord(args.metadata)) {
+      payload.metadata = {
+        ...recordPayload(args.metadata),
+        backend_run_id: trusted.runId,
+        provider_tool_name: trusted.providerToolName,
+        ...(trusted.toolCallId ? { tool_call_id: trusted.toolCallId } : {})
+      };
+    }
+  }
+  return payload;
+}
+
+function normalizeProviderDomainQueryPayload(
+  queryId: string,
+  args: Record<string, JsonValue>
+): Record<string, JsonValue> {
+  const query = requireDomainQueryEntry(queryId);
+  assertProviderDomainServerFieldsAbsent("query", query.id, args);
+  // Do not sanitize unknown tool fields: the operation schema must reject them.
+  return { ...args };
+}
+
+function assertProviderDomainServerFieldsAbsent(
+  operationKind: "command" | "query",
+  operationId: string,
+  args: Record<string, JsonValue>
+): void {
+  for (const key of providerServerOwnedContextFields) {
+    if (args[key] !== undefined) {
+      throw new RuntimeRequestError("conflict", `untrusted_provider_${operationKind}_field:${operationId}:${key}`);
+    }
+  }
+}
+
+function assertProviderGeneratedSurfaceServerFieldsAbsent(args: Record<string, JsonValue>): void {
+  const request = recordPayload(args.request);
+  for (const key of generatedSurfaceRequestServerOwnedFields) {
+    if (request[key] !== undefined) {
+      throw new RuntimeRequestError("conflict", `untrusted_generated_surface_request_field:${key}`);
+    }
+  }
+  for (const key of [...providerServerOwnedContextFields, "surface_id"] as const) {
+    if (args[key] !== undefined) {
+      throw new RuntimeRequestError("conflict", `untrusted_generated_surface_field:${key}`);
+    }
+  }
 }
 
 function createBackendToolBridge(input: {
@@ -10812,204 +10859,7 @@ function createBackendToolBridge(input: {
   };
 }
 
-export const samuraiToolBridgeDescriptors: BackendToolBridge["tools"] = [{
-  name: "samurai.artifact.create",
-  provider_tool_name: "mcp__samurai__artifact_create",
-  title: "Create Samurai Artifact",
-  description: "Create a Samurai workspace Artifact from generated user-facing content.",
-  input_schema: requireDomainCommandEntry("artifact.create").input_schema
-}, {
-  name: "samurai.generated_surface.create",
-  provider_tool_name: "mcp__samurai__generated_surface_create",
-  title: "Create Samurai Generated Surface",
-  description: "Generate a saved HTML Surface for the Workspace Canvas. Use only when the user asks for an independent or custom UI.",
-  input_schema: requireDomainCommandEntry("generated_surface.create").input_schema
-}, {
-  name: "samurai.generated_surface.revise",
-  provider_tool_name: "mcp__samurai__generated_surface_revise",
-  title: "Revise Samurai Generated Surface",
-  description: "Create a new immutable HTML revision for the selected Generated Surface after a chat correction.",
-  input_schema: requireDomainCommandEntry("generated_surface.revise").input_schema
-}, {
-  name: "samurai.skill.optimization.start",
-  provider_tool_name: "mcp__samurai__skill_optimization_start",
-  title: "Start Samurai Skill improvement",
-  description: "Start an independent GEPA improvement run for a selected Skill. The original Skill is not changed.",
-  input_schema: requireDomainCommandEntry("skill.optimization.start").input_schema
-}, {
-  name: "samurai.skill.optimization.cancel",
-  provider_tool_name: "mcp__samurai__skill_optimization_cancel",
-  title: "Cancel Samurai Skill improvement",
-  description: "Cancel a running Skill improvement and keep the original Skill unchanged.",
-  input_schema: requireDomainCommandEntry("skill.optimization.cancel").input_schema
-}, {
-  name: "samurai.skill.optimization.promote",
-  provider_tool_name: "mcp__samurai__skill_optimization_promote",
-  title: "Promote Samurai Skill improvement",
-  description: "Apply a reviewed Skill improvement candidate after the user confirms it.",
-  input_schema: requireDomainCommandEntry("skill.optimization.promote").input_schema
-}, {
-  name: "samurai.skill.optimization.reject",
-  provider_tool_name: "mcp__samurai__skill_optimization_reject",
-  title: "Reject Samurai Skill improvement",
-  description: "Reject a Skill improvement candidate without changing the original Skill.",
-  input_schema: requireDomainCommandEntry("skill.optimization.reject").input_schema
-}, {
-  name: "samurai.skill.optimization.rollback",
-  provider_tool_name: "mcp__samurai__skill_optimization_rollback",
-  title: "Rollback Samurai Skill improvement",
-  description: "Restore a promoted Skill from its saved pre-promotion snapshot.",
-  input_schema: requireDomainCommandEntry("skill.optimization.rollback").input_schema
-}, {
-  name: "samurai.session.search",
-  provider_tool_name: "mcp__samurai__session_search",
-  title: "Search Samurai Sessions",
-  description: "Search previous Samurai sessions without injecting them into the prompt.",
-  input_schema: {
-    type: "object",
-    required: ["query"],
-    properties: {
-      query: { type: "string" },
-      limit: { type: "number" }
-    }
-  }
-}, {
-  name: "samurai.memory.search",
-  provider_tool_name: "mcp__samurai__memory_search",
-  title: "Search Samurai Memory",
-  description: "Search accepted Samurai Memory entries by topic.",
-  input_schema: {
-    type: "object",
-    required: ["query"],
-    properties: {
-      query: { type: "string" },
-      limit: { type: "number" }
-    }
-  }
-}, {
-  name: "samurai.wiki.search",
-  provider_tool_name: "mcp__samurai__wiki_search",
-  title: "Search Samurai Knowledge Wiki",
-  description: "Search active Knowledge Wiki pages and return refs.",
-  input_schema: {
-    type: "object",
-    required: ["query"],
-    properties: {
-      query: { type: "string" },
-      limit: { type: "number" }
-    }
-  }
-}, {
-  name: "samurai.skill.view",
-  provider_tool_name: "mcp__samurai__skill_view",
-  title: "View Samurai Skill",
-  description: "Read the body of a selected Skill or an allowed support file only when needed for the current run.",
-  input_schema: requireDomainQueryEntry("skill.view").input_schema
-}, {
-  name: "samurai.skill.search",
-  provider_tool_name: "mcp__samurai__skill_search",
-  title: "Search Samurai Skills",
-  description: "Search reusable Samurai Skills and return catalog refs.",
-  input_schema: {
-    type: "object",
-    required: ["query"],
-    properties: {
-      query: { type: "string" },
-      limit: { type: "number" }
-    }
-  }
-}, {
-  name: "samurai.collection.search",
-  provider_tool_name: "mcp__samurai__collection_search",
-  title: "Search Samurai Collections",
-  description: "Search local Collection records and return read-only summaries.",
-  input_schema: {
-    type: "object",
-    properties: {
-      collection_id: { type: "string" },
-      query: { type: "string" },
-      limit: { type: "number" }
-    }
-  }
-}, {
-  name: "samurai.collection.manage",
-  provider_tool_name: "mcp__samurai__collection_manage",
-  title: "Manage Samurai Collection",
-  description: "Read and write Collection data through the host. Prefer this over raw file I/O for Collection records and schema edits; raw file I/O remains an escape hatch. getItems returns computed derived/embed values. putItems validates rows and returns written/rejected. patchSchema validates before saving.",
-  input_schema: collectionManageCompatibilityEntry.input_schema
-}, {
-  name: "samurai.collection.schema.save",
-  provider_tool_name: "mcp__samurai__collection_schema_save",
-  title: "Save Samurai Collection Schema",
-  description: "Save a validated CollectionSchema for a personal Workspace data app. Prefer this validated path for schema writes; raw file I/O remains an escape hatch. Include views that match the user's use case: collection_table for general records, collection_gallery for movie/book/recipe/place logs, calendar_view when a date/datetime field exists, and collection_kanban when an enum/status field exists. For dashboard-style layouts, create or present a custom view rather than using a fixed dashboard renderer.",
-  input_schema: requireDomainCommandEntry("collection.schema.save").input_schema
-}, {
-  name: "samurai.collection.record.create",
-  provider_tool_name: "mcp__samurai__collection_record_create",
-  title: "Create Samurai Collection Record",
-  description: "Create a schema-validated Collection record through Runtime. Prefer this path for validated writes; raw collections/<id>/records file I/O remains an escape hatch.",
-  input_schema: requireDomainCommandEntry("collection.record.create").input_schema
-}, {
-  name: "samurai.collection.view.present",
-  provider_tool_name: "mcp__samurai__collection_view_present",
-  title: "Present Samurai Collection",
-  description: "Present an existing Collection as an interactive Workspace card without creating or overwriting its schema.",
-  input_schema: requireDomainQueryEntry("collection.view.present").input_schema
-}];
-
-const samuraiToolBridgeTools = new Set(samuraiToolBridgeDescriptors.map((tool) => tool.name));
-const samuraiToolBridgeWriteTools = new Set([
-  "samurai.collection.manage",
-  "samurai.collection.schema.save",
-  "samurai.collection.record.create",
-  "samurai.generated_surface.create",
-  "samurai.generated_surface.revise",
-  "samurai.skill.optimization.start",
-  "samurai.skill.optimization.cancel",
-  "samurai.skill.optimization.promote",
-  "samurai.skill.optimization.reject",
-  "samurai.skill.optimization.rollback"
-]);
-
-function samuraiToolBridgeActionId(toolName: string): string {
-  if (toolName === "samurai.artifact.create") {
-    return "artifact.create";
-  }
-  if (toolName === "samurai.generated_surface.create") {
-    return "generated_surface.create";
-  }
-  if (toolName === "samurai.generated_surface.revise") {
-    return "generated_surface.revise";
-  }
-  if (toolName === "samurai.skill.optimization.start") {
-    return "skill.optimization.start";
-  }
-  if (toolName === "samurai.skill.optimization.cancel") {
-    return "skill.optimization.cancel";
-  }
-  if (toolName === "samurai.skill.optimization.promote") {
-    return "skill.optimization.promote";
-  }
-  if (toolName === "samurai.skill.optimization.reject") {
-    return "skill.optimization.reject";
-  }
-  if (toolName === "samurai.skill.optimization.rollback") {
-    return "skill.optimization.rollback";
-  }
-  if (toolName === "samurai.collection.schema.save") {
-    return "collection.schema.save";
-  }
-  if (toolName === "samurai.collection.record.create") {
-    return "collection.record.create";
-  }
-  if (toolName === "samurai.collection.view.present") {
-    return "collection.view.present";
-  }
-  if (toolName === "samurai.collection.manage") {
-    return "collection.manage";
-  }
-  return toolName;
-}
+export { samuraiToolBridgeDescriptors, samuraiToolBridgeTools, samuraiToolBridgeWriteTools } from "./provider-tool-bridge-composition.js";
 
 function toolBridgeEndpointUrl(runId: string): string {
   const explicit = process.env.SAMURAI_TOOL_BRIDGE_URL?.trim();
@@ -11080,74 +10930,6 @@ function hasCreatedArtifact(artifacts: ArtifactRecord[], workspaceChanges: Works
   return artifacts.length > 0 || workspaceChanges.some((change) => change.change_type === "artifact_created");
 }
 
-function normalizeSamuraiToolBridgeName(name: string): string {
-  const normalized = name.trim();
-  const descriptor = samuraiToolBridgeDescriptors.find((tool) => tool.name === normalized || tool.provider_tool_name === normalized);
-  if (descriptor) {
-    return descriptor.name;
-  }
-  const aliases: Record<string, string> = {
-    "artifact.create": "samurai.artifact.create",
-    create_artifact: "samurai.artifact.create",
-    artifact_create: "samurai.artifact.create",
-    mcp__samurai__artifact_create: "samurai.artifact.create",
-    "generated_surface.create": "samurai.generated_surface.create",
-    create_generated_surface: "samurai.generated_surface.create",
-    generated_surface_create: "samurai.generated_surface.create",
-    mcp__samurai__generated_surface_create: "samurai.generated_surface.create",
-    "generated_surface.revise": "samurai.generated_surface.revise",
-    revise_generated_surface: "samurai.generated_surface.revise",
-    generated_surface_revise: "samurai.generated_surface.revise",
-    mcp__samurai__generated_surface_revise: "samurai.generated_surface.revise",
-    "skill.optimization.start": "samurai.skill.optimization.start",
-    start_skill_optimization: "samurai.skill.optimization.start",
-    mcp__samurai__skill_optimization_start: "samurai.skill.optimization.start",
-    "skill.optimization.cancel": "samurai.skill.optimization.cancel",
-    cancel_skill_optimization: "samurai.skill.optimization.cancel",
-    mcp__samurai__skill_optimization_cancel: "samurai.skill.optimization.cancel",
-    "skill.optimization.promote": "samurai.skill.optimization.promote",
-    promote_skill_optimization: "samurai.skill.optimization.promote",
-    mcp__samurai__skill_optimization_promote: "samurai.skill.optimization.promote",
-    "skill.optimization.reject": "samurai.skill.optimization.reject",
-    reject_skill_optimization: "samurai.skill.optimization.reject",
-    mcp__samurai__skill_optimization_reject: "samurai.skill.optimization.reject",
-    "skill.optimization.rollback": "samurai.skill.optimization.rollback",
-    rollback_skill_optimization: "samurai.skill.optimization.rollback",
-    mcp__samurai__skill_optimization_rollback: "samurai.skill.optimization.rollback",
-    session_search: "samurai.session.search",
-    mcp__samurai__session_search: "samurai.session.search",
-    memory_search: "samurai.memory.search",
-    mcp__samurai__memory_search: "samurai.memory.search",
-    wiki_search: "samurai.wiki.search",
-    knowledge_wiki_search: "samurai.wiki.search",
-    mcp__samurai__wiki_search: "samurai.wiki.search",
-    skill_search: "samurai.skill.search",
-    mcp__samurai__skill_search: "samurai.skill.search",
-    collection_search: "samurai.collection.search",
-    mcp__samurai__collection_search: "samurai.collection.search",
-    "collection.manage": "samurai.collection.manage",
-    manage_collection: "samurai.collection.manage",
-    collection_manage: "samurai.collection.manage",
-    mcp__samurai__collection_manage: "samurai.collection.manage",
-    "collection.schema.save": "samurai.collection.schema.save",
-    save_collection_schema: "samurai.collection.schema.save",
-    collection_schema_save: "samurai.collection.schema.save",
-    mcp__samurai__collection_schema_save: "samurai.collection.schema.save",
-    "collection.record.create": "samurai.collection.record.create",
-    create_collection_record: "samurai.collection.record.create",
-    collection_record_create: "samurai.collection.record.create",
-    mcp__samurai__collection_record_create: "samurai.collection.record.create",
-    "collection.view.present": "samurai.collection.view.present",
-    present_collection: "samurai.collection.view.present",
-    collection_view_present: "samurai.collection.view.present",
-    mcp__samurai__collection_view_present: "samurai.collection.view.present"
-  };
-  if (aliases[normalized]) {
-    return aliases[normalized];
-  }
-  return normalized;
-}
-
 function artifactKindPayload(value: JsonValue | undefined): ArtifactKind | undefined {
   return typeof value === "string" && artifactKindValues.includes(value as ArtifactKind) ? value as ArtifactKind : undefined;
 }
@@ -11161,20 +10943,6 @@ function resourceRefLookupKeys(ref: ResourceRef): string[] {
     ref.id ? `${ref.kind}:${ref.id}` : undefined,
     ref.uri ? `${ref.kind}:${ref.uri}` : undefined
   ].filter((key): key is string => Boolean(key));
-}
-
-function isSamuraiToolBridgeObservedProviderTool(providerToolName: string, payload: Record<string, JsonValue>): boolean {
-  if (payload.already_executed === true && payload.tool_origin === "samurai_tool_bridge") {
-    return true;
-  }
-  return (
-    providerToolName === "mcp__samurai__artifact_create"
-    || providerToolName === "mcp__samurai__generated_surface_create"
-    || providerToolName === "mcp__samurai__generated_surface_revise"
-    || providerToolName === "mcp__samurai__collection_schema_save"
-    || providerToolName === "mcp__samurai__collection_record_create"
-    || providerToolName === "mcp__samurai__collection_view_present"
-  ) && payload.tool_origin === "samurai_tool_bridge";
 }
 
 function timingSafeTokenEqual(left: string, right: string): boolean {
@@ -13404,6 +13172,64 @@ function envBoolean(key: string, fallback: boolean): boolean {
 function envNumber(key: string, fallback: number): number {
   const value = Number(process.env[key]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("background_review_aborted");
+}
+
+function assertTrustedRuntimeContextActive(context: Pick<TrustedDomainRuntimeContext, "signal" | "deadlineAt">): void {
+  if (context.signal?.aborted) throw new RuntimeRequestError("unavailable", "runtime_context_aborted");
+  if (context.deadlineAt !== undefined && Date.now() >= context.deadlineAt) {
+    throw new RuntimeRequestError("unavailable", "runtime_context_deadline_exceeded");
+  }
+}
+
+const trustedContextPayloadFields = new Set([
+  "workspace_id",
+  "actor_id",
+  "actor_identity",
+  "correlation_id",
+  "source",
+  "input_source",
+  "session_id",
+  "envelope_id",
+  "run_id",
+  "backend_run_id"
+]);
+
+function assertNoTrustedContextPayloadFields(payload: Record<string, JsonValue>): void {
+  const field = Object.keys(payload).find((key) => trustedContextPayloadFields.has(key));
+  if (field) throw new RuntimeRequestError("bad_request", `untrusted_domain_context:${field}`);
+}
+
+function trustedActorIdentityForSource(inputSource: DomainCommandInputSource): TrustedActorIdentity {
+  switch (inputSource) {
+    case "automation":
+    case "scheduled_context":
+      return "owner_scheduled";
+    case "gateway_inbound":
+      return "paired_contact";
+    case "surface_operation":
+    case "provider_tool_call":
+    case "runtime_api":
+    case "generated_surface":
+      return "owner";
+  }
+}
+
+async function settleWithin(tasks: Iterable<Promise<unknown>>, timeoutMs: number): Promise<boolean> {
+  const pending = Promise.allSettled(tasks).then(() => true);
+  if (timeoutMs <= 0) return false;
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    return await Promise.race([pending, timedOut]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function safeExternalSendDispatchError(error: unknown, fallback: string): string {

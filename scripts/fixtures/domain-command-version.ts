@@ -43,6 +43,14 @@ try {
   });
   assert.equal(first.resource.version, 2);
 
+  const replay = await runtime.applyCollectionPatch({
+    collectionId: schema.id,
+    recordId: "item-1",
+    patch: { id: "patch-first", expected_version: 1, changes: { name: "first" } }
+  });
+  assert.equal(replay.resource.version, first.resource.version);
+  assert.deepEqual(replay.resource.data, first.resource.data);
+
   let stalePayload: ResourceVersionConflictPayload | undefined;
   try {
     await runtime.applyCollectionPatch({

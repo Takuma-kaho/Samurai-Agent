@@ -6,9 +6,17 @@ type Ports = Pick<DomainOperationPorts, "resource.translation.save" | "resource.
 export function createTranslationDomainServicePorts(services: Pick<RuntimeDomainServices, "translationDomainService">): Ports {
   return {
     "resource.translation.save": {
-      executeResourceTranslationSave: async (context, input) => ({
-        ok: true as const,
-        value: await services.translationDomainService.save(input)
+      saveResourceTranslation: (request) => services.translationDomainService.saveTranslation({
+        id: request.id,
+        source_ref: request.sourceRef,
+        source_locale: request.sourceLocale,
+        target_locale: request.targetLocale,
+        status: request.status,
+        original_hash: request.originalHash,
+        translated_text: request.translatedText,
+        ...(request.provenance === undefined ? {} : { provenance: request.provenance }),
+        created_at: request.createdAt,
+        updated_at: request.updatedAt
       })
     },
     "resource.translation_job.save": {

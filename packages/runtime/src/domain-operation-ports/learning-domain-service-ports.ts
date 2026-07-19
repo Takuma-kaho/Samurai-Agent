@@ -1,37 +1,26 @@
 import type { DomainOperationPorts } from "@samurai-agent/domain-operations";
 import type { RuntimeDomainServices } from "../domain-operation-services.js";
+import { readOnlyQueryPort } from "./read-only-query-port.js";
 
 type Ports = Pick<DomainOperationPorts, "curator.pause" | "curator.restore" | "curator.resume" | "curator.run" | "curator.snapshot.create" | "evaluation.run" | "learning.snapshot.prune" | "curator.snapshot.list">;
 
 export function createLearningDomainServicePorts(services: Pick<RuntimeDomainServices, "learningDomainService">): Ports {
   return {
     "curator.pause": {
-      executeCuratorPause: async (context, input) => ({
-        ok: true as const,
-        value: await services.learningDomainService.pause()
-      })
+      pauseCurator: () => services.learningDomainService.pause()
     },
     "curator.restore": {
       restoreCuratorSnapshot: (id) => services.learningDomainService.restoreLearningSnapshot(id),
       curatorSnapshotNotFoundError: () => services.learningDomainService.snapshotNotFoundError()
     },
     "curator.resume": {
-      executeCuratorResume: async (context, input) => ({
-        ok: true as const,
-        value: await services.learningDomainService.resume()
-      })
+      resumeCurator: () => services.learningDomainService.resume()
     },
     "curator.run": {
-      executeCuratorRun: async (context, input) => ({
-        ok: true as const,
-        value: await services.learningDomainService.runCurator()
-      })
+      runCurator: (input) => services.learningDomainService.runCurator(input)
     },
     "curator.snapshot.create": {
-      executeCuratorSnapshotCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.learningDomainService.createSnapshot(input)
-      })
+      createCuratorSnapshot: () => services.learningDomainService.createSnapshot()
     },
     "evaluation.run": {
       ensureEvaluationSession: () => services.learningDomainService.ensureEvaluationSession(),
@@ -57,16 +46,10 @@ export function createLearningDomainServicePorts(services: Pick<RuntimeDomainSer
       evaluationNow: () => services.learningDomainService.evaluationNow()
     },
     "learning.snapshot.prune": {
-      executeLearningSnapshotPrune: async (context, input) => ({
-        ok: true as const,
-        value: await services.learningDomainService.pruneSnapshots(input)
-      })
+      pruneLearningSnapshots: (input) => services.learningDomainService.pruneSnapshots(input)
     },
-    "curator.snapshot.list": {
-      executeCuratorSnapshotList: async (context, input) => ({
-        ok: true as const,
-        value: await services.learningDomainService.listSnapshots()
-      })
-    }
+    "curator.snapshot.list": readOnlyQueryPort<Ports["curator.snapshot.list"]>({
+      listCuratorSnapshots: () => services.learningDomainService.listSnapshots()
+    })
   };
 }

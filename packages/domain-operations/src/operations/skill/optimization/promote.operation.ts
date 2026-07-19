@@ -1,32 +1,26 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillOptimizationPromoteValueSchema } from "../../../value-objects/skill.js";
 
 const Input = z.object({
-  "candidate_id": z.string(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "run_id": z.string(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "optimization_run_id": z.string().trim().min(1).max(256),
+  "candidate_id": z.string().trim().min(1).max(256)
 }).strict();
 const Output = skillOptimizationPromoteValueSchema;
 
+export type SkillOptimizationPromoteInput = z.infer<typeof Input>;
+export type SkillOptimizationPromoteOutput = z.infer<typeof Output>;
+
 export interface SkillOptimizationPromotePorts {
-  executeSkillOptimizationPromote(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  promoteSkillOptimization(input: { optimizationRunId: string; candidateId: string }): Promise<SkillOptimizationPromoteOutput> | SkillOptimizationPromoteOutput;
 }
 
 const skillOptimizationPromote = defineCommand<SkillOptimizationPromotePorts>()({
   ...{
   "kind": "command",
   "id": "skill.optimization.promote",
-  "version": "1.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Promote Skill improvement",
   "description": "Apply a user-confirmed GEPA candidate after conflict and safety checks.",
@@ -73,7 +67,7 @@ const skillOptimizationPromote = defineCommand<SkillOptimizationPromotePorts>()(
   createHandler(ports) {
     return {
       execute: async function handleSkillOptimizationPromote(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeSkillOptimizationPromote(context, input);
+        return { ok: true, value: Output.parse(await ports.promoteSkillOptimization({ optimizationRunId: input.optimization_run_id, candidateId: input.candidate_id })) };
       }
     };
   }

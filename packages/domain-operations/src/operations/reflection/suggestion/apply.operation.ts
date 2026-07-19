@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import type { JsonValue, MessageEnvelope, OperationRecord, ReflectionSuggestionRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { reflectionSuggestionApplyValueSchema } from "../../../value-objects/reflection.js";
 
@@ -11,7 +11,7 @@ const Output = reflectionSuggestionApplyValueSchema;
 type ReflectionTarget = z.infer<typeof Output>["resource"];
 
 export interface ReflectionSuggestionApplyPorts {
-  listReflectionSuggestions(): Promise<Array<{ id: string; status: string; suggestion_type: string; title: string; content: string; source_refs: ResourceRef[]; target_ref?: ResourceRef; updated_at: string }>>;
+  listReflectionSuggestions(): Promise<ReflectionSuggestionRecord[]>;
   reflectionSuggestionError(code: "not_found" | "conflict", message: string): Error;
   ensureReflectionMutationSession(): Promise<SessionRecord>;
   createReflectionMutationEnvelope(content: string): MessageEnvelope;
@@ -20,7 +20,7 @@ export interface ReflectionSuggestionApplyPorts {
   createReflectionWikiTarget(input: { title: string; content: string; sourceRefs: ResourceRef[] }): Promise<{ resource: ReflectionTarget; ref: ResourceRef; rollbackPoint?: RollbackPoint }>;
   createReflectionSkillTarget(input: { title: string; content: string; sourceRefs: ResourceRef[] }): Promise<{ resource: ReflectionTarget; ref: ResourceRef; rollbackPoint?: RollbackPoint }>;
   createReflectionTargetRollback(operation: OperationRecord, refs: ResourceRef[], after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  updateReflectionSuggestion(suggestion: { id: string; status: string; suggestion_type: string; title: string; content: string; source_refs: ResourceRef[]; target_ref?: ResourceRef; updated_at: string }): Promise<unknown>;
+  updateReflectionSuggestion(suggestion: ReflectionSuggestionRecord): Promise<ReflectionSuggestionRecord>;
   reflectionNow(): string;
 }
 

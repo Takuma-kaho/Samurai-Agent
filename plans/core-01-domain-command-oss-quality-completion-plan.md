@@ -20,7 +20,7 @@
 | 4. Workspace・永続化 | Read/Write Port、冪等性Record、Query read-only接続に必要な範囲だけ対象 |
 | 5〜8 | 各機能をDomain Operationとして接続する境界だけ対象。各機能そのものの完成度は対象外 |
 
-対象外を理由に、Core 1の境界違反を残してはならない。たとえば`AgentRuntime`全体の分割はCore 2だが、Domain Operation ID分岐、114件の手書き配線、直接Store更新はCore 1として除去する。
+対象外を理由に、Core 1の境界違反を残してはならない。たとえば`AgentRuntime`全体の分割はCore 2だが、Domain Operation ID分岐、119件の手書き配線、直接Store更新はCore 1として除去する。
 
 ## 2. 完成の定義
 
@@ -31,12 +31,12 @@
 2026-07-15時点の基準Inventoryは以下。
 
 - Active Command: 102件。
-- Active Query: 12件。
+- Active Query: 17件。
 - Deprecated Operation: 5件。Registryには登録しない。
-- Active Operation: 114件。
+- Active Operation: 119件。
 - `collection.manage`: 互換変換専用。正規Operationではない。
 
-ただし、**件数一致だけでは合格にしない**。114件すべてのID集合、Schema、Handlerのソース位置、実行先、入口Mappingを比較する。
+ただし、**件数一致だけでは合格にしない**。119件すべてのID集合、Schema、Handlerのソース位置、実行先、入口Mappingを比較する。
 
 ## 3. 現状の批判的評価
 
@@ -44,7 +44,7 @@
 
 - CommandとQueryのRegistryが分かれている。
 - 入力Schema、冪等性Record、Heartbeat、CAS、Trusted Ingressの基礎がある。
-- 102 Command、12 Query、5 DeprecatedのInventoryがある。
+- 102 Command、17 Query、5 DeprecatedのInventoryがある。
 - 全入口を同じRuntime APIへ寄せる作業が進んでいる。
 - `core:domain-commands:check`とEvidence生成の基礎がある。
 
@@ -52,7 +52,7 @@
 
 | 現状 | 問題 | 必須修正 |
 | --- | --- | --- |
-| `domain-operation-handlers.ts`に114個の名前付き関数がある | 実体の大半は共通`typedPortHandler`を返すだけで、固有Handlerの存在を件数で擬似的に満たしている | Operation Module内に固有のnamed Handlerを置き、共通転送Handlerを削除 |
+| `domain-operation-handlers.ts`に119個の名前付き関数がある | 実体の大半は共通`typedPortHandler`を返すだけで、固有Handlerの存在を件数で擬似的に満たしている | Operation Module内に固有のnamed Handlerを置き、共通転送Handlerを削除 |
 | Contract、Schema、Handler、実処理が複数の巨大ファイルへ分散 | 1操作を理解・変更するために複数箇所を追う必要がある | 1操作1Moduleへ近接配置 |
 | `handler_id`文字列でContractとHandlerを後から結合 | 文字列Mappingが別の正本になり、コンパイル時の結合保証が弱い | DefinitionがHandler factoryを直接保持し、文字列結合を廃止 |
 | `defineCommand()`がID文字列からEffectやConcurrencyを推測 | 新規Operationの意味を暗黙Defaultが決める | 全Operationで明示。IDベースDefaultを禁止 |
@@ -281,7 +281,7 @@ export const artifactCreate = defineCommand<ArtifactCreatePorts>()({
 
 ### 8.3 Handlerを本当に分離する
 
-- 114件すべてにOperation Moduleと固有named Handlerを作る。
+- 119件すべてにOperation Moduleと固有named Handlerを作る。
 - 現在の分野別Domain Serviceから、操作固有の業務順序・判断をHandlerへ移す。
 - 共有してよい処理は、名前と責務が明確なService/Portへ残す。
 - Handlerは`TrustedDomainContext`と型付きInputだけを受け取る。
@@ -361,7 +361,7 @@ Ingress adapterが行ってよいのは、Transport認証、Raw Input変換、Tr
 - Action Catalog内のDomain Operation巨大配列。
 - Domain Operation payloadの巨大Schema Record。
 - 独自`jsonSchemaFromZod()`。
-- `AgentRuntime`内のOperation ID、114件のPort mapping、Domain直接処理。
+- `AgentRuntime`内のOperation ID、119件のPort mapping、Domain直接処理。
 - Server/adapterの直接Store mutation。
 - 利用されないLegacy HandlerとFallback。
 
@@ -376,7 +376,7 @@ Ingress adapterが行ってよいのは、Transport認証、Raw Input変換、Tr
 | ST01 | Operation Module数 | Active ID集合と`.operation.ts`集合が完全一致 |
 | ST02 | 1 Module 1 Operation | 各Moduleに`defineCommand`または`defineQuery`がちょうど1件 |
 | ST03 | Contract近接 | Input、Output、metadata、`createHandler`が同じModuleのAST内に存在 |
-| ST04 | Handler固有性 | 114件すべて別のnamed function symbol。共有参照0件 |
+| ST04 | Handler固有性 | 119件すべて別のnamed function symbol。共有参照0件 |
 | ST05 | 文字列binding禁止 | `handler_id`、`runtime_method`、`query_service_id`による実行bindingが0件 |
 | ST06 | 再配送禁止 | Handler/Port/Service内のOperation ID比較、switch、Map再配送が0件 |
 | ST07 | 共通転送禁止 | `typedPortHandler`相当のgeneric forwarding Handlerが0件 |
@@ -399,10 +399,10 @@ Ingress adapterが行ってよいのは、Transport認証、Raw Input変換、Tr
 
 | ID | 検証内容 | 合格条件 |
 | --- | --- | --- |
-| CT01 | Inventory | 102 Command、12 Query、5 DeprecatedのID集合が台帳と完全一致 |
-| CT02 | Zod正本 | 全114件のInput/OutputがZod-backed |
-| CT03 | Strict input | 未定義Top-level fieldを全114件で拒否 |
-| CT04 | Strict output | 未定義field、不足field、型違いを全114件の出力で拒否 |
+| CT01 | Inventory | 102 Command、17 Query、5 DeprecatedのID集合が台帳と完全一致 |
+| CT02 | Zod正本 | 全119件のInput/OutputがZod-backed |
+| CT03 | Strict input | 未定義Top-level fieldを全119件で拒否 |
+| CT04 | Strict output | 未定義field、不足field、型違いを全119件の出力で拒否 |
 | CT05 | 正常・異常表 | 各Schemaで正常、必須不足、型違い、境界値、余剰fieldを検証 |
 | CT06 | Property test | `fast-check`で生成した不正値がHandlerへ到達しない |
 | CT07 | JSON Schema生成 | `zod-to-json-schema`以外の独自変換0件 |
@@ -421,7 +421,7 @@ Ingress adapterが行ってよいのは、Transport認証、Raw Input変換、Tr
 | RH03 | Deterministic | 同じSourceから同じ並び、fingerprint、Catalogを生成 |
 | RH04 | Input先行検証 | 不正Input時のPort呼び出し0回 |
 | RH05 | Output後行検証 | 不正Outputを返したPort/Handlerを内部契約違反として遮断 |
-| RH06 | Fake Port | 全114 Handlerが期待Portだけを期待回数呼ぶ |
+| RH06 | Fake Port | 全119 Handlerが期待Portだけを期待回数呼ぶ |
 | RH07 | Port最小性 | 各Handler fixtureに未許可Portを渡せず、許可Port以外の呼出し0件 |
 | RH08 | Typed Error | 既知Errorと未知例外が定義済みError envelopeへ変換 |
 | RH09 | Availability | unavailable/例外時は一覧・実行ともfail-closed |
@@ -473,8 +473,8 @@ Crash testはtest-onlyの結果差し替えではなく、子Processを指定che
 | ID | 検証内容 | 合格条件 |
 | --- | --- | --- |
 | QP01 | Compile-time | QueryからWrite Portへ到達するfixtureがcompile error |
-| QP02 | SQLite read-only | 12 Queryを`PRAGMA query_only=ON` connectionで完走 |
-| QP03 | Filesystem read-only | 書込みAPIを持たないadapterで12 Queryを完走 |
+| QP02 | SQLite read-only | 17 Queryを`PRAGMA query_only=ON` connectionで完走 |
+| QP03 | Filesystem read-only | 書込みAPIを持たないadapterで17 Queryを完走 |
 | QP04 | Logical state diff | 実行前後の全table dumpとWorkspace tree hashが一致 |
 | QP05 | Hidden write | history、usage、access timestamp、cache更新0件 |
 | QP06 | `skill.view` | Queryは閲覧だけ。利用記録は`skill.usage.record` Commandだけ |
@@ -580,7 +580,7 @@ Coverage基準。
 
 ### Phase 0: Baseline固定
 
-- 現行114 ID、入口Mapping、結果、Error、Store changeをCharacterization fixtureへ固定する。
+- 現行119 ID、入口Mapping、結果、Error、Store changeをCharacterization fixtureへ固定する。
 - 現在の型・test失敗をゼロにする。
 - 新規Operation追加を一時停止し、Inventory差分を明示管理する。
 
@@ -611,7 +611,7 @@ Coverage基準。
 7. Automation / Objective / Work Item。
 8. Generated Surface / System / Settings / Translation。
 
-終了条件: 114 Operation Module、114固有Handler、114 Input/Output契約が揃う。
+終了条件: 119 Operation Module、119固有Handler、119 Input/Output契約が揃う。
 
 ### Phase 3: Catalog・全入口切替
 
@@ -657,7 +657,7 @@ Coverage基準。
 - 名前だけ違う共通転送Handler。
 - Operation IDで再分岐する分野別Handler/Service。
 - ContractとHandlerを結ぶ文字列ID。
-- 手書きの114件中央Mapping。
+- 手書きの119件中央Mapping。
 - Operation payloadを集めた巨大Fallback Schema。
 - Zod private API依存。
 - Queryの隠れ書込み。
@@ -671,8 +671,8 @@ Coverage基準。
 
 次の質問へすべて「はい」と根拠付きで答えられること。
 
-1. 114件すべてを1 Operation Moduleだけ読めば、入力、出力、意味、Handler、許可入口、Effect、Concurrency、Renderが分かるか。
-2. 114件すべてが別のnamed Handler functionを持つか。
+1. 119件すべてを1 Operation Moduleだけ読めば、入力、出力、意味、Handler、許可入口、Effect、Concurrency、Renderが分かるか。
+2. 119件すべてが別のnamed Handler functionを持つか。
 3. RegistryがContractとHandlerを文字列で後付け結合していないか。
 4. 新しいOperationを1 Module追加するだけで生成index、Catalog、全入口へ安全に反映できるか。
 5. Queryは型と実行環境の両方で書込み不能か。

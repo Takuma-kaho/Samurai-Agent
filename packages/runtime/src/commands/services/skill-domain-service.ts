@@ -4,9 +4,7 @@ import {
   stableHash,
   ObjectiveRecordSchema,
   WorkItemRecordSchema,
-  ProvenanceSchema,
   ResourceRefSchema,
-  SkillFrontmatterSchema,
   type BackendRunRecord,
   type CuratorLifecycleAction,
   type JsonValue,
@@ -25,6 +23,7 @@ import {
   type SkillOptimizationDataset,
   type SkillOptimizationRun,
   type SkillOptimizationSnapshot,
+  type SkillUsageRecord,
   type WorkItemRecord
 } from "@samurai-agent/core-schemas";
 import { jsonValue } from "./json-value.js";
@@ -76,7 +75,7 @@ export interface SkillOptimizationPort<TSkill extends OptimizationSkill> {
   getSession(id: string): Promise<{ id: string; ui_locale: string; output_locale: string } | undefined>;
   acquireLock(input: { skillId: string; runId: string; acquiredAt: string }): Promise<boolean>;
   getLock(skillId: string): Promise<{ run_id: string } | undefined>;
-  releaseLock(input: { skillId: string; runId: string }): Promise<unknown>;
+  releaseLock(input: { skillId: string; runId: string }): Promise<boolean>;
   saveDataset(record: SkillOptimizationDataset): Promise<SkillOptimizationDataset>;
   saveObjective(record: ObjectiveRecord): Promise<ObjectiveRecord>;
   getObjective(id: string): Promise<ObjectiveRecord | undefined>;
@@ -84,8 +83,8 @@ export interface SkillOptimizationPort<TSkill extends OptimizationSkill> {
   saveWorkItem(record: WorkItemRecord): Promise<WorkItemRecord>;
   getWorkItem(id: string): Promise<WorkItemRecord | undefined>;
   claimWorkItem(input: { workerId: string; leaseMs: number; now: string }): Promise<WorkItemRecord | undefined>;
-  completeWorkItem(input: { workItemId: string; workerId: string }): Promise<unknown>;
-  failWorkItem(input: { workItemId: string; workerId: string; failureKind: "cancelled" | "non_retryable"; error: string }): Promise<unknown>;
+  completeWorkItem(input: { workItemId: string; workerId: string }): Promise<WorkItemRecord | undefined>;
+  failWorkItem(input: { workItemId: string; workerId: string; failureKind: "cancelled" | "non_retryable"; error: string }): Promise<WorkItemRecord | undefined>;
   getRun(id: string): Promise<SkillOptimizationRun | undefined>;
   saveRun(record: SkillOptimizationRun): Promise<SkillOptimizationRun>;
   getCandidate(id: string): Promise<OptimizationCandidate | undefined>;
@@ -96,7 +95,7 @@ export interface SkillOptimizationPort<TSkill extends OptimizationSkill> {
   listPromotions(): Promise<OptimizationPromotion[]>;
   savePromotion(record: OptimizationPromotion): Promise<OptimizationPromotion>;
   replaceContentIfUnchanged(input: { id: string; expectedContentHash: string; content: string; lockRunId?: string }): Promise<TSkill | undefined>;
-  savePresentations(input: { sessionId: string; run: SkillOptimizationRun; candidates: OptimizationCandidate[] }): Promise<unknown>;
+  savePresentations(input: { sessionId: string; run: SkillOptimizationRun; candidates: OptimizationCandidate[] }): Promise<void>;
   hostComplete(input: { sessionId?: string; messages: Array<{ role: string; content: string }> }): Promise<{ content: string }>;
   requestError(code: "not_found" | "conflict" | "provider_not_configured", message: string): Error;
   errorMessage(error: unknown, fallback?: string): string;
@@ -135,8 +134,35 @@ export interface ReadableSkill {
 export interface SkillUsagePort {
   listUses(input: { runId: string; resourceId: string }): Promise<LearningResourceUseRecord[]>;
   recordUse(record: LearningResourceUseRecord): Promise<LearningResourceUseRecord>;
-  incrementSkillUsage(input: { skillId: string; runId: string }): Promise<unknown>;
+  incrementSkillUsage(input: { skillId: string; runId: string }): Promise<SkillUsageRecord>;
 }
+
+export interface SkillLifecycleRequest {
+  skillId: string;
+  action: SkillApplyAction;
+}
+
+export interface SkillOptimizationStartRequest {
+  skillId: string;
+  sessionId?: string;
+  objective?: string;
+  goldenExamples?: readonly JsonValue[];
+  syntheticExamples?: readonly JsonValue[];
+}
+
+/** A Skill optimization run is not a BackendRun. Keep its identifier named at every boundary. */
+export interface SkillOptimizationRunRequest { optimizationRunId: string; }
+export interface SkillOptimizationCandidateRequest extends SkillOptimizationRunRequest { candidateId: string; }
+export interface SkillOptimizationRollbackRequest { promotionId?: string; snapshotId?: string; }
+export interface SkillUsageRecordRequest {
+  skillId: string;
+  runId: string;
+  resourceId: string;
+  contentHash: string;
+  stage: "body_loaded" | "support_loaded";
+  metadata: Record<string, JsonValue>;
+}
+export interface SkillViewRequest { skillId: string; runId: string; path?: string; }
 
 export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationSkill> {
   private readonly optimizationWorkers = new Map<string, { cancel: () => void }>();
@@ -164,25 +190,7 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
   skillMutationConflict(message: string) { return this.dependencies.conflictError(message); }
   patchSkillRecord(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string }) { return this.dependencies.mutation.patchSkill(input); }
 
-  createCandidate(payload: Record<string, JsonValue>) {
-    const title = optionalString(payload.title);
-    const content = optionalString(payload.content);
-    if (!title || !content) throw this.dependencies.conflictError("domain_command_skill_title_content_required");
-    return this.createCandidateInput({
-      title, content,
-      description: optionalString(payload.description) || summarize(content),
-      tags: stringArray(payload.tags),
-      required_capabilities: stringArray(payload.required_capabilities),
-      source_refs: sourceRefs(payload.source_refs),
-      provenance_detail: provenance(payload.provenance_detail)
-    });
-  }
-
-  applyLifecycle(payload: Record<string, JsonValue>) {
-    const action = optionalString(payload.action);
-    if (!isApplyAction(action)) throw this.dependencies.conflictError("domain_command_skill_lifecycle_action_required");
-    return this.applyLifecycleInput({ skillId: requiredId(payload, "skill_id"), action });
-  }
+  applyLifecycle(input: SkillLifecycleRequest) { return this.applyLifecycleInput(input); }
 
   async applyLifecycleInput(input: { skillId: string; action: SkillApplyAction }): Promise<SkillWriteResult<StoredSkill>> {
     const targetState = lifecycleTargetState(input.action);
@@ -206,29 +214,29 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     });
   }
 
-  cancelOptimization(payload: Record<string, JsonValue>) { return this.cancelOptimizationRun(payload); }
-  promoteOptimization(payload: Record<string, JsonValue>) { return this.promoteOptimizationRun(payload); }
-  rejectOptimization(payload: Record<string, JsonValue>) { return this.rejectOptimizationRun(payload); }
-  rollbackOptimization(payload: Record<string, JsonValue>) { return this.rollbackOptimizationRun(payload); }
-  startOptimization(payload: Record<string, JsonValue>) { return this.startOptimizationRun(payload); }
+  cancelOptimization(input: SkillOptimizationRunRequest) { return this.cancelOptimizationRun(input); }
+  promoteOptimization(input: SkillOptimizationCandidateRequest) { return this.promoteOptimizationRun(input); }
+  rejectOptimization(input: SkillOptimizationCandidateRequest) { return this.rejectOptimizationRun(input); }
+  rollbackOptimization(input: SkillOptimizationRollbackRequest) { return this.rollbackOptimizationRun(input); }
+  startOptimization(input: SkillOptimizationStartRequest) { return this.startOptimizationRun(input); }
 
-  private async startOptimizationRun(payload: Record<string, JsonValue>): Promise<{ run: SkillOptimizationRun; dataset: SkillOptimizationDataset; objective: ObjectiveRecord; work_item: WorkItemRecord }> {
-    const skillId = requiredId(payload, "skill_id");
+  private async startOptimizationRun(input: SkillOptimizationStartRequest): Promise<{ run: SkillOptimizationRun; dataset: SkillOptimizationDataset; objective: ObjectiveRecord; work_item: WorkItemRecord }> {
+    const skillId = input.skillId;
     const skill = await this.dependencies.optimization.getSkill(skillId);
     const markdown = await this.dependencies.optimization.readMarkdown(skillId);
     if (!skill || markdown === undefined) throw this.dependencies.optimization.requestError("not_found", "skill_not_found");
     if (skill.state === "archived" || skill.state === "candidate") {
       throw this.dependencies.optimization.requestError("conflict", "skill_not_optimizable_in_current_state");
     }
-    const sessionId = optionalString(payload.session_id) || undefined;
+    const sessionId = input.sessionId;
     if (sessionId && !await this.dependencies.optimization.getSession(sessionId)) {
       throw this.dependencies.optimization.requestError("not_found", "skill_optimization_session_not_found");
     }
     const skillBody = skillMarkdownContent(markdown);
     const baselineContentHash = stableHash(skillBody);
     const real = await this.optimizationRealExamples(skill, baselineContentHash);
-    const golden = optimizationExamplesFromPayload(payload.golden_examples, "golden");
-    const synthetic = optimizationExamplesFromPayload(payload.synthetic_examples, "synthetic");
+    const golden = optimizationExamplesFromValues(input.goldenExamples, "golden");
+    const synthetic = optimizationExamplesFromValues(input.syntheticExamples, "synthetic");
     let dataset: SkillOptimizationDataset;
     try {
       dataset = buildSkillOptimizationDataset({ skill_id: skill.id, real, golden, synthetic });
@@ -241,7 +249,7 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     const objective: ObjectiveRecord = ObjectiveRecordSchema.parse({
       id: createId("objective"), ...(sessionId ? { session_id: sessionId } : {}),
       title: `Skill改善: ${skill.title}`,
-      objective: optionalString(payload.objective) || `Skill「${skill.title}」の本文をGEPAで改善候補化する`,
+      objective: input.objective || `Skill「${skill.title}」の本文をGEPAで改善候補化する`,
       completion_criteria: ["GEPA候補を生成する", "holdout評価と安全検証を記録する", "ユーザー確認後にのみ反映する"],
       status: "active", max_attempts: 1, created_at: now, updated_at: now
     });
@@ -431,9 +439,9 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     }
   }
 
-  private async cancelOptimizationRun(payload: Record<string, JsonValue>): Promise<SkillOptimizationRun> {
+  private async cancelOptimizationRun(input: SkillOptimizationRunRequest): Promise<SkillOptimizationRun> {
     const port = this.dependencies.optimization;
-    const runId = requiredId(payload, "run_id");
+    const runId = input.optimizationRunId;
     const run = await port.getRun(runId);
     if (!run) throw port.requestError("not_found", "skill_optimization_run_not_found");
     if (["completed", "failed", "cancelled"].includes(run.status) && run.phase !== "awaiting_confirmation") return run;
@@ -452,10 +460,10 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     return cancelled;
   }
 
-  private async promoteOptimizationRun(payload: Record<string, JsonValue>): Promise<{ run: SkillOptimizationRun; skill: TSkill; candidate: OptimizationCandidate; snapshot: SkillOptimizationSnapshot; promotion: OptimizationPromotion }> {
+  private async promoteOptimizationRun(input: SkillOptimizationCandidateRequest): Promise<{ run: SkillOptimizationRun; skill: TSkill; candidate: OptimizationCandidate; snapshot: SkillOptimizationSnapshot; promotion: OptimizationPromotion }> {
     const port = this.dependencies.optimization;
-    const runId = requiredId(payload, "run_id");
-    const candidateId = requiredId(payload, "candidate_id");
+    const { optimizationRunId, candidateId } = input;
+    const runId = optimizationRunId;
     const [run, candidate] = await Promise.all([port.getRun(runId), port.getCandidate(candidateId)]);
     if (!run || !candidate) throw port.requestError("not_found", "skill_optimization_candidate_not_found");
     if (candidate.run_id !== run.id || candidate.status !== "passed") throw port.requestError("conflict", "skill_optimization_candidate_not_promotable");
@@ -499,10 +507,10 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     return { run: completedRun, skill: promoted, candidate: { ...candidate, status: "promoted" }, snapshot, promotion };
   }
 
-  private async rejectOptimizationRun(payload: Record<string, JsonValue>): Promise<{ run: SkillOptimizationRun; candidate: OptimizationCandidate }> {
+  private async rejectOptimizationRun(input: SkillOptimizationCandidateRequest): Promise<{ run: SkillOptimizationRun; candidate: OptimizationCandidate }> {
     const port = this.dependencies.optimization;
-    const runId = requiredId(payload, "run_id");
-    const candidateId = requiredId(payload, "candidate_id");
+    const { optimizationRunId, candidateId } = input;
+    const runId = optimizationRunId;
     const [run, candidate] = await Promise.all([port.getRun(runId), port.getCandidate(candidateId)]);
     if (!run || !candidate || candidate.run_id !== run.id) throw port.requestError("not_found", "skill_optimization_candidate_not_found");
     const now = nowIso();
@@ -514,10 +522,9 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     return { run: nextRun, candidate: rejected };
   }
 
-  private async rollbackOptimizationRun(payload: Record<string, JsonValue>): Promise<{ skill: TSkill; snapshot: SkillOptimizationSnapshot; promotion?: OptimizationPromotion }> {
+  private async rollbackOptimizationRun(input: SkillOptimizationRollbackRequest): Promise<{ skill: TSkill; snapshot: SkillOptimizationSnapshot; promotion?: OptimizationPromotion }> {
     const port = this.dependencies.optimization;
-    const promotionId = optionalString(payload.promotion_id);
-    const snapshotId = optionalString(payload.snapshot_id);
+    const { promotionId, snapshotId } = input;
     const promotion = promotionId ? (await port.listPromotions()).find((item) => item.id === promotionId) : undefined;
     const snapshot = await port.getSnapshot(snapshotId || promotion?.snapshot_id || "");
     if (!snapshot) throw port.requestError("not_found", "skill_optimization_snapshot_not_found");
@@ -544,124 +551,9 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     return { skill: restored, snapshot: restoredSnapshot, promotion: restoredPromotion };
   }
 
-  async patch(payload: Record<string, JsonValue>): Promise<SkillWriteResult<StoredSkill>> {
-    const input = {
-      id: requiredId(payload, "skill_id"),
-      title: nullableString(payload.title), description: nullableString(payload.description),
-      tags: stringArray(payload.tags), content: nullableString(payload.content)
-    };
-    const contract = this.dependencies.mutation.contract("skill.patch");
-    const current = await this.dependencies.mutation.getSkill(input.id);
-    if (!current) throw this.dependencies.mutation.requestError("not_found", "skill_not_found");
-    const beforeMarkdown = await this.dependencies.mutation.readMarkdown(input.id);
-    const session = await this.dependencies.mutation.ensureSession();
-    const envelope = this.dependencies.mutation.createEnvelope(`Edit Skill: ${current.title}`);
-    return this.dependencies.mutation.runMutation({
-      session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
-      targetResourceRefs: [skillRef(current)],
-      execute: async (operation) => {
-        const saved = await this.dependencies.mutation.patchSkill(input);
-        if (!saved) throw this.dependencies.mutation.requestError("not_found", "skill_not_found");
-        const ref = skillRef(saved);
-        const rollbackPoint = await this.dependencies.mutation.createRollback(
-          operation, [ref],
-          { skill: jsonValue(current), markdown: beforeMarkdown ?? "" },
-          { skill: jsonValue(saved) }
-        );
-        return { resource: saved, ref, rollbackPoint, summary: `Updated Skill ${saved.title}.` };
-      }
-    });
-  }
+  recordUsage(input: SkillUsageRecordRequest) { return this.recordUsageInput(input); }
 
-  saveProject(payload: Record<string, JsonValue>) { return this.saveProjectInput({ candidateId: requiredId(payload, "candidate_id") }); }
-
-  saveSupportFile(payload: Record<string, JsonValue>) {
-    const path = optionalString(payload.path);
-    if (!path) throw this.dependencies.conflictError("domain_command_skill_support_path_required");
-    return this.saveSupportFileInput({
-      skillId: requiredId(payload, "skill_id"), path, content: optionalString(payload.content)
-    });
-  }
-
-  async createCandidateInput(input: {
-    title: string; description: string; content: string; tags?: string[]; required_capabilities?: string[];
-    source_refs?: SkillFrontmatter["source_refs"]; provenance_detail?: SkillFrontmatter["provenance_detail"];
-  }): Promise<SkillWriteResult<StoredSkill>> {
-    const contract = this.dependencies.mutation.contract("skill.candidate.create");
-    const skillId = createId("skill");
-    const markdown = renderSkillMarkdown({
-      id: skillId, state: "candidate", title: input.title, description: input.description,
-      tags: input.tags ?? [], provenance: "generated_local", trust_level: "generated_local",
-      allowed_scopes: ["skill"], required_capabilities: input.required_capabilities ?? [],
-      schedule_policy: {}, secret_policy: {}, owner_pinned: false, last_reviewed_at: nowIso(),
-      source_refs: input.source_refs ?? [], provenance_detail: input.provenance_detail ?? {
-        kind: "generated_local", summary: "Created from a local runtime operation.", verified: false
-      }
-    }, input.content);
-    const session = await this.dependencies.mutation.ensureSession();
-    const envelope = this.dependencies.mutation.createEnvelope(`Create skill candidate: ${input.title}`);
-    return this.dependencies.mutation.runMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
-      execute: async (operation) => {
-        const skill = await this.dependencies.mutation.saveMarkdown({ state: "candidate", skillId, markdown });
-        const ref = skillRef(skill);
-        const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], {}, { skill_id: skill.id });
-        return { resource: skill, ref, rollbackPoint, summary: `Created skill candidate ${skill.title}.` };
-      } });
-  }
-
-  async saveProjectInput(input: { candidateId: string }): Promise<SkillWriteResult<StoredSkill>> {
-    const candidateMarkdown = await this.dependencies.mutation.readMarkdown(input.candidateId);
-    if (!candidateMarkdown) throw this.dependencies.mutation.requestError("not_found", `Skill candidate not found: ${input.candidateId}`);
-    const parsed = parseSkillMarkdown(candidateMarkdown);
-    if (parsed.frontmatter.state !== "candidate") throw this.dependencies.conflictError("skill_is_not_candidate");
-    const contract = this.dependencies.mutation.contract("skill.project.save");
-    const skillId = createId("skill");
-    const markdown = renderSkillMarkdown({ ...parsed.frontmatter, id: skillId, state: "project",
-      provenance: `candidate:${input.candidateId}`, last_reviewed_at: nowIso() }, parsed.content);
-    const session = await this.dependencies.mutation.ensureSession();
-    const envelope = this.dependencies.mutation.createEnvelope(`Save project skill from candidate: ${input.candidateId}`);
-    return this.dependencies.mutation.runMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
-      execute: async (operation) => {
-        const skill = await this.dependencies.mutation.saveMarkdown({ state: "project", skillId, markdown });
-        const ref = skillRef(skill);
-        const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref], {}, { skill_id: skill.id, candidate_id: input.candidateId });
-        return { resource: skill, ref, rollbackPoint, summary: `Saved project skill ${skill.title}.` };
-      } });
-  }
-
-  async saveSupportFileInput(input: { skillId: string; path: string; content: string }): Promise<SkillWriteResult<{ skill_id: string; path: string; file_path: string; content: string }>> {
-    const skill = await this.dependencies.mutation.getSkill(input.skillId);
-    if (!skill) throw this.dependencies.mutation.requestError("not_found", `Skill not found: ${input.skillId}`);
-    const before = (await this.dependencies.mutation.listSupportFiles(input.skillId)).find((file) => file.path === input.path);
-    const contract = this.dependencies.mutation.contract("skill.support_file.save");
-    const session = await this.dependencies.mutation.ensureSession();
-    const envelope = this.dependencies.mutation.createEnvelope(`Save Skill support file: ${skill.title}/${input.path}`);
-    return this.dependencies.mutation.runMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
-      targetResourceRefs: [skillRef(skill)], execute: async (operation) => {
-        const supportFile = await this.dependencies.mutation.writeSupportFile(input);
-        const saved = { skill_id: skill.id, ...supportFile };
-        const ref = { kind: "skill_support", id: `${skill.id}:${saved.path}`, uri: saved.file_path, label: saved.path };
-        const rollbackPoint = await this.dependencies.mutation.createRollback(operation, [ref],
-          { path: saved.file_path, content: before?.content ?? null }, { path: saved.file_path, content: saved.content });
-        return { resource: saved, ref, rollbackPoint, summary: `Saved support file ${saved.path} for Skill ${skill.title}.` };
-      } });
-  }
-
-  recordUsage(payload: Record<string, JsonValue>) {
-    return this.recordUsageInput({
-      skillId: requiredId(payload, "skill_id"), runId: requiredId(payload, "run_id"),
-      resourceId: requiredId(payload, "resource_id"), contentHash: requiredId(payload, "content_hash"),
-      stage: payload.stage === "support_loaded" ? "support_loaded" : "body_loaded",
-      metadata: recordValue(payload.metadata)
-    });
-  }
-
-  view(payload: Record<string, JsonValue>) {
-    return this.viewSkill({
-      skillId: requiredId(payload, "skill_id"), runId: requiredId(payload, "run_id"),
-      path: optionalString(payload.path) || undefined
-    });
-  }
+  view(input: SkillViewRequest) { return this.viewSkill(input); }
 
   async viewSkill(input: { skillId: string; runId: string; path?: string }) {
     const [skill, run] = await Promise.all([
@@ -710,26 +602,11 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
 }
 
 function optionalString(value: JsonValue | undefined): string { return typeof value === "string" ? value.trim() : ""; }
-function nullableString(value: JsonValue | undefined): string | undefined { return typeof value === "string" ? value : undefined; }
-function requiredId(payload: Record<string, JsonValue>, key: string): string {
-  const value = optionalString(payload[key]) || optionalString(payload.id);
-  if (!value) throw new Error(`domain_operation_required_field:${key}`);
-  return value;
-}
-function stringArray(value: JsonValue | undefined): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const values = value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
-  return values.length ? values : undefined;
-}
 function recordValue(value: JsonValue | undefined): Record<string, JsonValue> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, JsonValue> : {};
 }
 function sourceRefs(value: JsonValue | undefined): SkillFrontmatter["source_refs"] | undefined {
   const parsed = z.array(ResourceRefSchema).safeParse(value);
-  return parsed.success ? parsed.data : undefined;
-}
-function provenance(value: JsonValue | undefined): SkillFrontmatter["provenance_detail"] | undefined {
-  const parsed = ProvenanceSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
 }
 function isApplyAction(value: string): value is SkillApplyAction { return value === "mark_stale" || value === "archive" || value === "reactivate"; }
@@ -745,20 +622,9 @@ function skillMarkdownContent(markdown: string): string {
   const contentStart = markdown.indexOf("\n", end + 4);
   return (contentStart === -1 ? "" : markdown.slice(contentStart + 1)).trim();
 }
-function renderSkillMarkdown(frontmatter: SkillFrontmatter, content: string): string {
-  return ["---", JSON.stringify(SkillFrontmatterSchema.parse(frontmatter), null, 2), "---", content.trim(), ""].join("\n");
-}
-function parseSkillMarkdown(markdown: string): { frontmatter: SkillFrontmatter; content: string } {
-  if (!markdown.startsWith("---\n")) throw new Error("skill_frontmatter_missing");
-  const end = markdown.indexOf("\n---", 4);
-  if (end === -1) throw new Error("skill_frontmatter_unclosed");
-  const raw = markdown.slice(4, end).trim();
-  const contentStart = markdown.indexOf("\n", end + 4);
-  return { frontmatter: SkillFrontmatterSchema.parse(JSON.parse(raw)), content: contentStart === -1 ? "" : markdown.slice(contentStart + 1).trim() };
-}
 
-function optimizationExamplesFromPayload(value: JsonValue | undefined, source: "golden" | "synthetic"): OptimizationExampleInput[] {
-  if (!Array.isArray(value)) return [];
+function optimizationExamplesFromValues(value: readonly JsonValue[] | undefined, source: "golden" | "synthetic"): OptimizationExampleInput[] {
+  if (!value) return [];
   return value.flatMap((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const record = item as Record<string, JsonValue>;

@@ -1,4 +1,4 @@
-import type { DomainOperationPorts } from "@samurai-agent/domain-operations";
+import { domainQueryIds, type DomainOperationPorts } from "@samurai-agent/domain-operations";
 import type { RuntimeDomainServices } from "./domain-operation-services.js";
 import { createArtifactDomainServicePorts } from "./domain-operation-ports/artifact-domain-service-ports.js";
 import { createAutomationDomainServicePorts } from "./domain-operation-ports/automation-domain-service-ports.js";
@@ -21,11 +21,12 @@ import { createSkillDomainServicePorts } from "./domain-operation-ports/skill-do
 import { createSystemDomainServicePorts } from "./domain-operation-ports/system-domain-service-ports.js";
 import { createTranslationDomainServicePorts } from "./domain-operation-ports/translation-domain-service-ports.js";
 import { createWikiDomainServicePorts } from "./domain-operation-ports/wiki-domain-service-ports.js";
+import { createSearchDomainServicePorts } from "./domain-operation-ports/search-domain-service-ports.js";
 
 export type { RuntimeDomainServices } from "./domain-operation-services.js";
 
 export function createDomainOperationPorts(services: RuntimeDomainServices): DomainOperationPorts {
-  return {
+  const ports = {
     ...createArtifactDomainServicePorts(services),
     ...createAutomationDomainServicePorts(services),
     ...createBrowserDomainServicePorts(services),
@@ -46,7 +47,10 @@ export function createDomainOperationPorts(services: RuntimeDomainServices): Dom
     ...createSkillDomainServicePorts(services),
     ...createSystemDomainServicePorts(services),
     ...createTranslationDomainServicePorts(services),
-    ...createWikiDomainServicePorts(services)
-  } satisfies DomainOperationPorts;
+    ...createWikiDomainServicePorts(services),
+    ...createSearchDomainServicePorts(services)
+  };
+  const missingQueryPorts = domainQueryIds.filter((id) => !(id in ports));
+  if (missingQueryPorts.length > 0) throw new Error(`domain_query_ports_incomplete:${missingQueryPorts.join(",")}`);
+  return ports;
 }
-

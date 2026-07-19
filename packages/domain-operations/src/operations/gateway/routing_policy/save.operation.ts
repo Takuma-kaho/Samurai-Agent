@@ -1,30 +1,53 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import {
+  GatewayChannelSchema,
+  GatewayRoutingPolicyStatusSchema,
+  GatewayRoutingSessionKeyStrategySchema,
+  type GatewayChannel,
+  type GatewayRoutingPolicyStatus,
+  type GatewayRoutingSessionKeyStrategy,
+  type JsonValue
+} from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewayRoutingPolicyValueSchema } from "../../../value-objects/gateway.js";
 
+const policyMetadataSchema = z.record(domainJsonValueSchema)
+  .refine((metadata) => Object.keys(metadata).length <= 128, "gateway_policy_metadata_too_large");
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  channel: GatewayChannelSchema,
+  status: GatewayRoutingPolicyStatusSchema.optional(),
+  session_key_strategy: GatewayRoutingSessionKeyStrategySchema.optional(),
+  /** `null` deliberately clears the default account. */
+  default_account_id: z.string().trim().min(1).max(256).nullable().optional(),
+  /** `null` deliberately clears the default thread. */
+  default_thread_id: z.string().trim().min(1).max(256).nullable().optional(),
+  default_route: z.string().trim().min(1).max(512).optional(),
+  metadata: policyMetadataSchema.optional()
 }).strict();
 const Output = gatewayRoutingPolicyValueSchema;
 
+export type GatewayRoutingPolicySaveInput = z.infer<typeof Input>;
+
+export interface GatewayRoutingPolicySaveRequest {
+  channel: GatewayChannel;
+  status?: GatewayRoutingPolicyStatus;
+  sessionKeyStrategy?: GatewayRoutingSessionKeyStrategy;
+  defaultAccountId?: string | null;
+  defaultThreadId?: string | null;
+  defaultRoute?: string;
+  metadata?: Record<string, JsonValue>;
+}
+
 export interface GatewayRoutingPolicySavePorts {
-  executeGatewayRoutingPolicySave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  saveGatewayRoutingPolicy(request: GatewayRoutingPolicySaveRequest): Promise<z.infer<typeof Output>>;
 }
 
 const gatewayRoutingPolicySave = defineCommand<GatewayRoutingPolicySavePorts>()({
   ...{
   "kind": "command",
   "id": "gateway.routing_policy.save",
-  "version": "1.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Save Gateway routing policy",
   "description": "Save an owner Gateway routing policy.",
@@ -59,8 +82,18 @@ const gatewayRoutingPolicySave = defineCommand<GatewayRoutingPolicySavePorts>()(
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGatewayRoutingPolicySave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGatewayRoutingPolicySave(context, input);
+      execute: async function handleGatewayRoutingPolicySave(_context: TrustedDomainContext, input: GatewayRoutingPolicySaveInput): Promise<DomainResult<z.infer<typeof Output>>> {
+        const request: GatewayRoutingPolicySaveRequest = {
+          channel: input.channel,
+          status: input.status,
+          sessionKeyStrategy: input.session_key_strategy,
+          defaultAccountId: input.default_account_id,
+          defaultThreadId: input.default_thread_id,
+          defaultRoute: input.default_route,
+          metadata: input.metadata
+        };
+        const value = await ports.saveGatewayRoutingPolicy(request);
+        return { ok: true, value };
       }
     };
   }

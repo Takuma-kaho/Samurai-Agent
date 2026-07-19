@@ -5,7 +5,6 @@ import { messagePresentationUpdateValueSchema } from "../../../value-objects/pre
 
 const Input = z.object({
   "presentation_id": z.string().trim().min(1),
-  "surface_operation_id": z.string().trim().min(1).optional(),
   "view_state": z.record(domainJsonValueSchema).default({})
 }).strict();
 const Output = messagePresentationUpdateValueSchema;
@@ -24,7 +23,7 @@ const messagePresentationUpdate = defineCommand<MessagePresentationUpdatePorts>(
   ...{
   "kind": "command",
   "id": "message.presentation.update",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Update message presentation state",
   "description": "Persist card-local UI state for a chat message presentation.",

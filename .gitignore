@@ -26,6 +26,10 @@ coverage/
 workspace-data/
 *.timestamp-*.mjs
 
+# Temporary bundles produced by domain-command verification
+/domain-command-ingress-fixed.mjs
+/domain-command-schema-matrix.mjs
+
 # Editor / local tooling
 .idea/
 .vscode/

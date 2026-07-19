@@ -1,5 +1,4 @@
 import {
-  ResourceTranslationRecordSchema,
   SupportedLocaleSchema,
   createId,
   nowIso,
@@ -11,19 +10,8 @@ import {
   type SupportedLocale,
   type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
-import type { AutomationJobWriteResult } from "./automation-domain-service.js";
+import type { AutomationJobWriteResult, ScheduledAutomationContext } from "./automation-domain-service.js";
 import { jsonValue } from "./json-value.js";
-
-export interface TranslationJobInput {
-  source_ref: ResourceRef;
-  source_locale?: SupportedLocale;
-  target_locale: SupportedLocale;
-  schedule?: string;
-  title?: string;
-  enabled?: boolean;
-  next_run_at?: string;
-  max_attempts?: number;
-}
 
 export interface TranslationWritePort {
   saveTranslation(record: ResourceTranslationRecord): Promise<ResourceTranslationRecord>;
@@ -39,8 +27,8 @@ interface TranslationChatResult {
 }
 
 export interface TranslationExecutionPort {
-  runChat(input: { sessionId: string; content: string; inputLocale: SupportedLocale; outputLocale: SupportedLocale; metadata: Record<string, JsonValue>; context: unknown }): Promise<TranslationChatResult>;
-  saveWorkspaceChange(change: WorkspaceChangeRecord): Promise<unknown>;
+  runChat(input: { sessionId: string; content: string; inputLocale: SupportedLocale; outputLocale: SupportedLocale; metadata: Record<string, JsonValue>; context: ScheduledAutomationContext }): Promise<TranslationChatResult>;
+  saveWorkspaceChange(change: WorkspaceChangeRecord): Promise<WorkspaceChangeRecord>;
   emitWorkspaceChange(change: WorkspaceChangeRecord): Promise<void>;
 }
 
@@ -68,8 +56,8 @@ export interface TranslationDomainServiceDependencies {
 export class TranslationDomainService {
   constructor(private readonly dependencies: TranslationDomainServiceDependencies) {}
 
-  save(payload: Record<string, JsonValue>) {
-    return this.dependencies.translations.saveTranslation(ResourceTranslationRecordSchema.parse(payload));
+  saveTranslation(record: ResourceTranslationRecord) {
+    return this.dependencies.translations.saveTranslation(record);
   }
 
   saveAutomationJob(input: Parameters<TranslationWritePort["saveAutomationJob"]>[0]) {
@@ -87,43 +75,6 @@ export class TranslationDomainService {
   loadCollectionRecordSource(ref: ResourceRef) { return this.dependencies.sources.loadCollectionRecord(ref); }
   stripSkillFrontmatter(content: string) { return stripFrontmatter(content); }
   hashContent(content: string) { return stableHash(content); }
-
-  saveJob(payload: Record<string, JsonValue>) {
-    const sourceRef = resourceRef(payload.source_ref);
-    const targetLocale = locale(payload.target_locale);
-    if (!sourceRef || !targetLocale) {
-      throw this.dependencies.requestError("conflict", "domain_command_translation_job_source_target_required");
-    }
-    return this.saveTranslationJob({
-      source_ref: sourceRef,
-      source_locale: locale(payload.source_locale),
-      target_locale: targetLocale,
-      schedule: optionalString(payload.schedule) || undefined,
-      title: optionalString(payload.title) || undefined,
-      enabled: typeof payload.enabled === "boolean" ? payload.enabled : undefined,
-      next_run_at: optionalString(payload.next_run_at) || undefined,
-      max_attempts: typeof payload.max_attempts === "number" ? payload.max_attempts : undefined
-    });
-  }
-
-  async saveTranslationJob(input: TranslationJobInput): Promise<AutomationJobWriteResult> {
-    const source = await this.loadSource(input.source_ref, input.source_locale);
-    if (!source) {
-      throw this.dependencies.requestError("not_found", `Translatable resource not found: ${input.source_ref.kind}/${input.source_ref.id}`);
-    }
-    const schedule = input.schedule?.trim() || "once";
-    return this.dependencies.translations.saveAutomationJob({
-      title: input.title?.trim() || `Translate ${source.ref.kind}/${source.ref.id} to ${input.target_locale}`,
-      kind: "resource_translation", schedule,
-      target_instruction: `Translate ${source.ref.kind}/${source.ref.id} from ${source.source_locale} to ${input.target_locale}.`,
-      delivery_target: {
-        channel: "resource_translation", source_ref: jsonValue(source.ref),
-        source_locale: source.source_locale, target_locale: input.target_locale,
-        original_hash: source.original_hash, source_label: source.ref.label ?? source.ref.id
-      },
-      enabled: input.enabled, next_run_at: input.next_run_at, max_attempts: input.max_attempts
-    });
-  }
 
   async loadSource(ref: ResourceRef, fallbackLocale?: SupportedLocale): Promise<{
     ref: ResourceRef; source_locale: SupportedLocale; content: string; original_hash: string;
@@ -146,7 +97,7 @@ export class TranslationDomainService {
     };
   }
 
-  async executeJob(job: AutomationJobRecord, session: { id: string }, context: unknown): Promise<{
+  async executeJob(job: AutomationJobRecord, session: { id: string }, context: ScheduledAutomationContext): Promise<{
     translation: ResourceTranslationRecord; backendRunId: string; source_ref: ResourceRef;
     source_locale: SupportedLocale; target_locale: SupportedLocale; original_hash: string;
   }> {

@@ -39,6 +39,13 @@ export interface TrustedDomainContext {
   actorId: string;
   sessionId?: string;
   runId?: string;
+  /** Server-selected input envelope; never populated from a command payload. */
+  envelopeId?: string;
+  /** Server-validated Surface operation identity; never populated from a command payload. */
+  surfaceOperation?: {
+    id: string;
+    kind: string;
+  };
   correlationId: string;
   signal?: AbortSignal;
   deadlineAt?: number;
@@ -54,6 +61,43 @@ export interface QueryOperationPort<I, O> {
 
 export interface OperationHandler<I, O> {
   execute(context: TrustedDomainContext, input: I): Promise<DomainResult<O>> | DomainResult<O>;
+}
+
+/**
+ * An executable definition keeps the concrete input/output types captured at
+ * binding time.  The registry deliberately stores this opaque boundary rather
+ * than widening every handler to `OperationHandler<unknown, unknown>`.
+ */
+export interface BoundOperationDefinition {
+  readonly definition: OperationDefinition;
+  readonly handlerName: string;
+  execute(context: TrustedDomainContext, rawInput: unknown): Promise<DomainResult<unknown>>;
+}
+
+export class DomainContractError extends Error {
+  constructor(
+    readonly stage: "input" | "result" | "output",
+    readonly operationId: string,
+    readonly issue: { path: (string | number)[]; message: string } | undefined
+  ) {
+    super(`domain_operation_${stage}_invalid:${operationId}`);
+    this.name = "DomainContractError";
+  }
+}
+
+/**
+ * A handler may require identity selected by the Runtime, rather than a value
+ * supplied in its public input DTO. Keeping this distinct from input-schema
+ * failures prevents a payload field from ever becoming an authority channel.
+ */
+export class TrustedDomainContextError extends Error {
+  constructor(
+    readonly operationId: string,
+    readonly field: "runId"
+  ) {
+    super(`domain_operation_trusted_context_missing:${operationId}:${field}`);
+    this.name = "TrustedDomainContextError";
+  }
 }
 
 interface BaseDefinition<I extends z.ZodTypeAny, O extends z.ZodTypeAny, P> {
@@ -94,9 +138,28 @@ export interface QueryDefinition<I extends z.ZodTypeAny = z.ZodTypeAny, O extend
 export type OperationDefinition = CommandDefinition | QueryDefinition;
 
 /** Nominal boundary for capabilities that cannot mutate domain state. */
+export const domainQueryReadCapability: unique symbol = Symbol("samurai.domain.query.read");
+export const domainWriteCapability: unique symbol = Symbol("samurai.domain.write");
+
 export interface DomainQueryPorts {
-  readonly domainPortKind?: "query";
+  readonly [domainQueryReadCapability]: true;
+  readonly [domainWriteCapability]?: never;
 }
+
+export interface DomainWritePorts {
+  readonly [domainWriteCapability]: true;
+  readonly [domainQueryReadCapability]?: never;
+}
+
+export type ReadCapability<Fn extends (...args: any[]) => any> = Fn & {
+  readonly [domainQueryReadCapability]: true;
+};
+
+export type QueryPortContract<P extends DomainQueryPorts> = {
+  [K in keyof P]: P[K] extends (...args: any[]) => any
+    ? P[K] extends { readonly [domainQueryReadCapability]: true } ? P[K] : never
+    : P[K];
+};
 
 export function defineCommand<P>() {
   return <I extends z.ZodTypeAny, O extends z.ZodTypeAny>(definition: Omit<CommandDefinition<I, O, P>, "kind">): CommandDefinition<I, O, P> =>
@@ -104,8 +167,41 @@ export function defineCommand<P>() {
 }
 
 export function defineQuery<P extends DomainQueryPorts>() {
-  return <I extends z.ZodTypeAny, O extends z.ZodTypeAny>(definition: Omit<QueryDefinition<I, O, P>, "kind" | "effect" | "idempotency" | "concurrency">): QueryDefinition<I, O, P> =>
+  return <I extends z.ZodTypeAny, O extends z.ZodTypeAny>(definition: Omit<QueryDefinition<I, O, QueryPortContract<P>>, "kind" | "effect" | "idempotency" | "concurrency">): QueryDefinition<I, O, QueryPortContract<P>> =>
     Object.freeze({ ...definition, kind: "query" as const, effect: "read_only" as const, idempotency: "none" as const, concurrency: "none" as const });
+}
+
+/**
+ * Bind a definition and its handler while their Zod-inferred types are still
+ * known.  Only this closure may accept raw transport input; handlers always
+ * receive the validated operation DTO.
+ */
+export function bindOperationDefinition<I extends z.ZodTypeAny, O extends z.ZodTypeAny, P>(
+  definition: CommandDefinition<I, O, P> | QueryDefinition<I, O, P>,
+  handler: OperationHandler<z.infer<I>, z.infer<O>>
+): BoundOperationDefinition {
+  const handlerName = handler.execute.name;
+  if (!handlerName) throw new Error(`domain_operation_handler_name_missing:${definition.id}`);
+  return Object.freeze({
+    definition,
+    handlerName,
+    async execute(context: TrustedDomainContext, rawInput: unknown): Promise<DomainResult<unknown>> {
+      const input = definition.input.safeParse(rawInput);
+      if (!input.success) {
+        throw new DomainContractError("input", definition.id, input.error.issues[0]);
+      }
+      const result = await handler.execute(context, input.data);
+      const envelope = domainResultEnvelopeSchema.safeParse(result);
+      if (!envelope.success) {
+        throw new DomainContractError("result", definition.id, envelope.error.issues[0]);
+      }
+      const output = definition.output.safeParse(envelope.data.value);
+      if (!output.success) {
+        throw new DomainContractError("output", definition.id, output.error.issues[0]);
+      }
+      return { ok: true, value: output.data };
+    }
+  });
 }
 
 export const domainResultEnvelopeSchema = z.object({

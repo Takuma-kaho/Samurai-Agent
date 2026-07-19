@@ -42,11 +42,14 @@ try {
   const createdResource = created.result as { definition: { id: string; current_revision_id: string; content_hash: string }; revision: { id: string; bundle_hash: string } };
   assert.equal(created.render_spec?.kind, "custom_view");
 
-  const generated = await runtime.runDomainCommand({
-    command_id: "generated_surface.action.run", input_source: "runtime_api", idempotency_key: "surface-action-host",
-    payload: { surface_id: createdResource.definition.id, revision_id: createdResource.definition.current_revision_id, action_id: "complete", interaction_id: "surface-interaction-action", action_payload: {} }
+  const generated = await runtime.runGeneratedSurfaceAction({
+    surfaceId: createdResource.definition.id,
+    revisionId: createdResource.definition.current_revision_id,
+    actionId: "complete",
+    interactionId: "surface-interaction-action",
+    actionPayload: {}
   });
-  const generatedWrite = ((generated.result as { command: { result: unknown } }).command.result) as Record<string, any>;
+  const generatedWrite = generated.command as Record<string, any>;
   const human = await runtime.runDomainCommand({
     command_id: "collection.patch.apply", input_source: "runtime_api", idempotency_key: "human-patch",
     payload: { collection_id: schema.id, record_id: "human", expected_version: 1, changes: { name: "done" } }
@@ -60,9 +63,12 @@ try {
   assert.deepEqual(normalized[1], normalized[0]);
   assert.deepEqual(normalized[2], normalized[0]);
   assert.equal((await store.listSurfaceInteractions(createdResource.definition.id)).filter((item) => item.kind === "action").length, 1);
-  await assert.rejects(runtime.runDomainCommand({
-    command_id: "generated_surface.action.run", input_source: "runtime_api", idempotency_key: "surface-action-stale-host",
-    payload: { surface_id: createdResource.definition.id, revision_id: createdResource.definition.current_revision_id, action_id: "complete", interaction_id: "surface-interaction-stale", action_payload: {} }
+  await assert.rejects(runtime.runGeneratedSurfaceAction({
+    surfaceId: createdResource.definition.id,
+    revisionId: "stale-surface-revision",
+    actionId: "complete",
+    interactionId: "surface-interaction-stale",
+    actionPayload: {}
   }), (error: unknown) => error instanceof RuntimeRequestError && error.code === "conflict");
 
   await runtime.shutdownMcpProcessPool();

@@ -1,31 +1,22 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { workspaceRestoreValueSchema } from "../../../value-objects/workspace-maintenance.js";
 
 const Input = z.object({
-  "backup_id": z.string(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "backup_id": z.string().trim().min(1).max(256)
 }).strict();
 const Output = workspaceRestoreValueSchema;
 
 export interface WorkspaceBackupRestorePorts {
-  executeWorkspaceBackupRestore(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  restoreWorkspaceBackup(input: { backupId: string }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const workspaceBackupRestore = defineCommand<WorkspaceBackupRestorePorts>()({
   ...{
   "kind": "command",
   "id": "workspace.backup.restore",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Restore workspace backup",
   "description": "Restore a verified Workspace backup.",
@@ -61,8 +52,8 @@ const workspaceBackupRestore = defineCommand<WorkspaceBackupRestorePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleWorkspaceBackupRestore(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeWorkspaceBackupRestore(context, input);
+      execute: async function handleWorkspaceBackupRestore(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        return { ok: true, value: Output.parse(await ports.restoreWorkspaceBackup({ backupId: input.backup_id })) };
       }
     };
   }

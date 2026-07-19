@@ -1,21 +1,12 @@
 // Domain operation module. Keep its contract and handler together.
 import { GeneratedSurfaceDefinitionSchema, GeneratedSurfaceRevisionRecordSchema, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord } from "@samurai-agent/core-schemas";
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "format": z.enum(["html", "zip"]) .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "revision_id": z.string() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_id": z.string(),
-  "surface_operation_id": z.string() .optional()
+  "format": z.enum(["html", "zip"]).optional(),
+  "revision_id": z.string().trim().min(1).max(256).optional(),
+  "surface_id": z.string().trim().min(1).max(256)
 }).strict();
 const Output = z.object({
   surface: GeneratedSurfaceDefinitionSchema,
@@ -29,18 +20,20 @@ const Output = z.object({
   file_name: z.string().min(1)
 }).strict();
 
+export type GeneratedSurfaceExportInput = z.infer<typeof Input>;
+
 export interface GeneratedSurfaceExportPorts extends DomainQueryPorts {
-  getGeneratedSurface(id: string): Promise<GeneratedSurfaceDefinition | undefined>;
-  getGeneratedSurfaceRevision(id: string): Promise<GeneratedSurfaceRevisionRecord | undefined>;
-  readGeneratedSurfaceBundle(id: string): Promise<{ html: string; css?: string; script?: string } | undefined>;
-  generatedSurfaceQueryError(message: string): Error;
+  getGeneratedSurface: ReadCapability<(id: string) => Promise<GeneratedSurfaceDefinition | undefined>>;
+  getGeneratedSurfaceRevision: ReadCapability<(id: string) => Promise<GeneratedSurfaceRevisionRecord | undefined>>;
+  readGeneratedSurfaceBundle: ReadCapability<(id: string) => Promise<{ html: string; css?: string; script?: string } | undefined>>;
+  generatedSurfaceQueryError: ReadCapability<(message: string) => Error>;
 }
 
 const generatedSurfaceExport = defineQuery<GeneratedSurfaceExportPorts>()({
   ...{
   "kind": "query",
   "id": "generated_surface.export",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Export generated surface",
   "description": "Export the selected Generated Surface as HTML or ZIP.",
@@ -78,7 +71,7 @@ const generatedSurfaceExport = defineQuery<GeneratedSurfaceExportPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGeneratedSurfaceExport(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleGeneratedSurfaceExport(_context: TrustedDomainContext, input: GeneratedSurfaceExportInput): Promise<DomainResult<z.infer<typeof Output>>> {
         const surface = await ports.getGeneratedSurface(input.surface_id);
         if (!surface) throw ports.generatedSurfaceQueryError("generated_surface_not_found");
         const revisionId = input.revision_id ?? surface.current_revision_id;

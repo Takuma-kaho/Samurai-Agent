@@ -9,7 +9,6 @@ const Input = z.object({
   "max_attempts": z.number().int().positive().optional(),
   "objective": z.string().trim().min(1),
   "objective_id": z.string().trim().min(1).optional(),
-  "session_id": z.string().trim().min(1).optional(),
   "time_budget_ms": z.number().int().positive().optional(),
   "title": z.string().trim().min(1).optional(),
   "token_budget": z.number().int().positive().optional()
@@ -24,7 +23,7 @@ const objectiveCreate = defineCommand<ObjectiveCreatePorts>()({
   ...{
   "kind": "command",
   "id": "objective.create",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Create objective",
   "description": "Create a durable objective with explicit completion criteria.",
@@ -65,7 +64,7 @@ const objectiveCreate = defineCommand<ObjectiveCreatePorts>()({
         const now = nowIso();
         const objective: ObjectiveRecord = {
           id: input.objective_id ?? createId("objective"),
-          session_id: input.session_id,
+          session_id: context.sessionId,
           title: input.title ?? summarize(input.objective, 80),
           objective: input.objective,
           completion_criteria: input.completion_criteria,

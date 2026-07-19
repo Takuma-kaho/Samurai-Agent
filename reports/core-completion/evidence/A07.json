@@ -3,11 +3,18 @@
   "test_id": "A07",
   "command": "pnpm core:test:boundaries",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "6682f514733b19b8b23f70654271e693bad532b5",
   "worktree_clean": false,
-  "source_sha256": "6150759a7ddddf7408c37dfea8928c4cfe09d4f566e70d11147bae1d719fcacb",
+  "source_sha256": "71d3644fe6ef1ebe54ad274efd77f9c994884842e233a4413b5b29e90bd5b371",
   "source_files": [
     "apps/server/src/api-server.ts",
+    "apps/server/src/composition/index.ts",
+    "apps/server/src/domain-ingress.ts",
+    "apps/server/src/index.ts",
+    "apps/server/src/middleware/security.ts",
+    "apps/server/src/routes/backend-events.ts",
+    "apps/server/src/streams/backend-events.ts",
+    "apps/server/src/workers/automation-scheduler.ts",
     "packages/learning/src/background-review.ts",
     "packages/learning/src/curator/consolidation.ts",
     "packages/learning/src/curator/lifecycle-policy.ts",
@@ -29,6 +36,10 @@
     "apps/web/src/components/CollectionWorkspaceView.vue",
     "apps/web/src/components/ContextDrawer.vue",
     "apps/web/src/components/CustomViewFrame.vue",
+    "apps/web/src/components/GeneratedSurfaceCard.vue",
+    "apps/web/src/components/GeneratedSurfaceFrame.vue",
+    "apps/web/src/components/ManagementSurfaces.vue",
+    "apps/web/src/components/SkillOptimizationCard.vue",
     "apps/web/src/components/WorkspaceCanvas.vue",
     "apps/web/src/components/WorkspacePanels.vue",
     "apps/web/src/env.d.ts",
@@ -53,10 +64,12 @@
     "apps/web/src/main.ts",
     "apps/web/src/types/lucide-vue-next-icons.d.ts",
     "packages/ui-protocol/src/index.ts",
+    "packages/agent-backends/src/index.ts",
+    "packages/gateway/src/index.ts",
     "scripts/verify-architecture-boundaries.mjs"
   ],
-  "started_at": "2026-07-12T04:44:37.715Z",
-  "completed_at": "2026-07-12T04:44:37.715Z",
+  "started_at": "2026-07-18T13:13:19.071Z",
+  "completed_at": "2026-07-18T13:13:19.071Z",
   "assertions": [
     {
       "name": "Server route direct Store mutations",
@@ -65,6 +78,16 @@
     },
     {
       "name": "Server Runtime mutations bypassing Domain Command Bus",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "Surface and Provider Adapter direct Store mutations",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "Surface and Provider Adapter Store dependencies",
       "actual": 0,
       "expected": 0
     },
@@ -83,6 +106,8 @@
     "status": "passed",
     "server_direct_store_mutations": 0,
     "server_runtime_mutation_bypasses": 0,
+    "adapter_direct_store_mutations": 0,
+    "adapter_store_dependencies": 0,
     "learning_ui_dependencies": 0,
     "renderer_store_dependencies": 0
   }

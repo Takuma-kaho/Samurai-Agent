@@ -7,6 +7,7 @@ import type { MemoryCreatePorts } from "./create-memory.js";
 
 const now = "2026-01-01T00:00:00.000Z";
 const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test" };
+const contextWithSession: TrustedDomainContext = { ...context, sessionId: "session_1" };
 const session = { id: "session_1", ui_locale: "ja", output_locale: "en" } as never;
 const operation: OperationRecord = { id: "operation_1", session_id: "session_1", capability_id: "memory", operation: "memory.session.create", actor_identity: "owner", instruction_source: "owner_instruction", instruction_authority: "owner", channel: "web", input_hash: "hash", target_resource_refs: [], proposed_effects: [], status: "completed", created_at: now, updated_at: now };
 const memory: MemoryFrontmatter = { id: "memory_1", state: "session", topic: "turn", source: "message", source_locale: "ja", content_locale: "ja", source_kind: "owner_instruction", instruction_authority: "owner", confidence: 1, created_by: "owner", created_at: now, updated_at: now, related_memories: [], conflicts_with: [], sensitive_level: "none" };
@@ -27,7 +28,7 @@ function ports() {
 describe("memory create handlers", () => {
   it("creates session memory through its recorded mutation", async () => {
     const fixture = ports();
-    const result = await memorySessionCreate.createHandler(fixture.value).execute(context, memorySessionCreate.input.parse({ content: "Remember this", session_id: "session_1" }));
+    const result = await memorySessionCreate.createHandler(fixture.value).execute(contextWithSession, memorySessionCreate.input.parse({ content: "Remember this" }));
     expect(fixture.writeSessionMemory).toHaveBeenCalledWith(expect.objectContaining({ id: "envelope_1" }), "Remember this");
     expect(result.value.resource.id).toBe("memory_1");
   });

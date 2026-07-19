@@ -35,6 +35,7 @@ import {
 } from "@samurai-agent/capability-registry";
 import {
   CaptureModeSchema,
+  CollectionSchemaSchema,
   BackendReleaseReadinessHealthSchema,
   CuratorLifecycleActionSchema,
   EvaluationDiagnosticsReportSchema,
@@ -47,9 +48,6 @@ import {
   ExternalProviderRoleSchema,
   ActorIdentitySchema,
   GatewayDiagnosticsReportSchema,
-  GatewayMcpConfigRecordSchema,
-  GatewayPairingPolicyRecordSchema,
-  GatewayRoutingPolicyRecordSchema,
   GatewaySandboxWorkspaceSyncDirectionSchema,
   GatewaySandboxWorkspaceSyncStatusSchema,
   KnowledgeWikiDiagnosticsReportSchema,
@@ -125,7 +123,16 @@ import {
   type ProviderDiagnostics,
   type ProviderRegistry
 } from "@samurai-agent/runtime";
-import { assertTrustedRuntimePayload } from "./domain-ingress";
+import {
+  isDomainCommandId,
+  isDomainQueryId,
+  parseDomainOperationInput,
+  type DomainCommandId,
+  type DomainOperationInput,
+  type DomainOperationOutput,
+  type DomainQueryId
+} from "@samurai-agent/domain-operations";
+import { assertTrustedRuntimePayload, resolveTrustedRuntimeApiInput, type TrustedRuntimeApiContext } from "./domain-ingress";
 import { parseSurfaceOperation, type RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import { WorkspaceStore, type SessionTranscriptExport } from "@samurai-agent/workspace-store";
 import { registerBackendEventRoutes } from "./routes/backend-events";
@@ -138,6 +145,8 @@ const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const loadedEnvPaths = new Set<string>();
 const temporaryContextTtlMs = 15 * 60 * 1000;
 const temporaryContextMaxBytes = 8 * 1024 * 1024;
+const apiServerClosePromises = new WeakMap<ApiServer, Promise<void>>();
+const defaultServerShutdownTimeoutMs = 10_000;
 
 export interface CreateApiServerOptions {
   workspaceDataDir?: string;
@@ -164,7 +173,16 @@ export interface ApiServer {
   pluginRegistry: PluginRuntimeRegistry;
   pluginCatalogIssues: PluginManifestLoadIssue[];
   pluginEntrypointLoad: PluginEntrypointLoadResult;
+  shutdown: ApiServerShutdownState;
   scheduler?: AutomationScheduler;
+}
+
+export interface ApiServerShutdownState {
+  acceptingRequests: boolean;
+  abortController: AbortController;
+  activeRequests: Set<Promise<void>>;
+  drainWaiters: Set<() => void>;
+  timeoutMs: number;
 }
 
 interface TemporaryContextRecord {
@@ -195,6 +213,7 @@ export interface ApiServerLifecycleState {
   closing: boolean;
   close_started_at?: string;
   closed_at?: string;
+  close_error?: string;
 }
 
 interface GatewayEmailImapTransportConfig {
@@ -309,6 +328,11 @@ function workspaceHasUserData(rootDir: string): boolean {
   }
 }
 
+function serverShutdownTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.SAMURAI_SERVER_SHUTDOWN_TIMEOUT_MS ?? defaultServerShutdownTimeoutMs);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultServerShutdownTimeoutMs;
+}
+
 async function bootstrapWorkspaceExecutionRoot(workspaceRoot: string): Promise<void> {
   await mkdir(workspaceRoot, { recursive: true });
   if (existsSync(path.join(workspaceRoot, ".git"))) {
@@ -333,6 +357,45 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   const store = await WorkspaceStore.create({ rootDir: workspaceRoot });
   const app = express();
   const httpServer = createServer(app);
+  const shutdown: ApiServerShutdownState = {
+    acceptingRequests: true,
+    abortController: new AbortController(),
+    activeRequests: new Set(),
+    drainWaiters: new Set(),
+    timeoutMs: serverShutdownTimeoutMs()
+  };
+  app.use((req, res, next) => {
+    if (!shutdown.acceptingRequests) {
+      res.status(503).json({ error: "server_shutting_down" });
+      return;
+    }
+    const requestController = new AbortController();
+    const abortFromShutdown = () => requestController.abort();
+    if (shutdown.abortController.signal.aborted) requestController.abort();
+    else shutdown.abortController.signal.addEventListener("abort", abortFromShutdown, { once: true });
+    (req as Request & { signal?: AbortSignal }).signal = requestController.signal;
+    let resolveRequest!: () => void;
+    const task = new Promise<void>((resolve) => {
+      resolveRequest = resolve;
+    });
+    shutdown.activeRequests.add(task);
+    const finish = () => {
+      if (!shutdown.activeRequests.delete(task)) return;
+      shutdown.abortController.signal.removeEventListener("abort", abortFromShutdown);
+      resolveRequest();
+      for (const waiter of shutdown.drainWaiters) waiter();
+    };
+    const cancel = () => {
+      requestController.abort();
+      finish();
+    };
+    res.once("finish", finish);
+    res.once("close", cancel);
+    res.once("error", cancel);
+    req.once("aborted", cancel);
+    req.once("error", cancel);
+    next();
+  });
   const corsOrigins=options.corsOrigins??(process.env.SAMURAI_CORS_ORIGINS?.split(",").map(value=>value.trim()).filter(Boolean)??["http://127.0.0.1:5173","http://localhost:5173"]);
   const ownerToken=options.ownerToken??process.env.SAMURAI_OWNER_TOKEN;
   const ownerTokenManager=ownerToken?new OwnerTokenManager(ownerToken):undefined;
@@ -620,7 +683,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/workspace/backups", async (_req, res, next) => {
       try {
-        res.status(201).json(await runRuntimeApiCommand(runtime, _req, "workspace.backup.create"));
+        res.status(201).json(await runRuntimeApiCommand(runtime, _req, "workspace.backup.create", {}));
     } catch (error) {
       next(error);
     }
@@ -668,7 +731,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         created_at: typeof req.body?.created_at === "string" ? req.body.created_at : now,
         updated_at: typeof req.body?.updated_at === "string" ? req.body.updated_at : now
       };
-      res.status(201).json(await runRuntimeApiCommand(runtime, req, "resource.translation.save", record as unknown as Record<string, JsonValue>));
+      res.status(201).json(await runRuntimeApiCommand(runtime, req, "resource.translation.save", record));
     } catch (error) {
       next(error);
     }
@@ -683,7 +746,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         return;
       }
       res.status(201).json(await runRuntimeApiWriteCommand(runtime, req, "resource.translation_job.save", {
-        source_ref: sourceRef as unknown as JsonValue,
+        source_ref: sourceRef,
         target_locale: targetLocale,
         ...(asSupportedLocale(req.body?.source_locale) ? { source_locale: asSupportedLocale(req.body.source_locale)! } : {}),
         ...(typeof req.body?.schedule === "string" ? { schedule: req.body.schedule } : {}),
@@ -859,21 +922,27 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         return;
       }
       if (getDomainQueryEntry(commandId)) {
-        const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
+        const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+          sessionId: req.body?.session_id,
+          backendRunId: req.body?.backend_run_id
+        });
         res.status(200).json(await runtime.runDomainQuery({
           query_id: commandId,
           input_source: "runtime_api",
-          payload
-        }));
+          payload: ingress.payload
+        }, runtimeRequestContext(req, ingress.context)));
         return;
       }
-      const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
-      res.status(201).json(await runtime.runDomainCommand({
+      const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+        sessionId: req.body?.session_id,
+        backendRunId: req.body?.backend_run_id
+      });
+      res.status(201).json(publicDomainCommandResult(await runtime.runDomainCommand({
         command_id: commandId,
         input_source: "runtime_api",
         idempotency_key: domainCommandIdempotencyKey(req),
-        payload
-      }));
+        payload: ingress.payload
+      }, runtimeRequestContext(req, ingress.context))));
     } catch (error) {
       next(error);
     }
@@ -887,21 +956,27 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         return;
       }
       if (getDomainQueryEntry(req.params.commandId)) {
-        const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
+        const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+          sessionId: req.body?.session_id,
+          backendRunId: req.body?.backend_run_id
+        });
         res.status(200).json(await runtime.runDomainQuery({
           query_id: req.params.commandId,
           input_source: "runtime_api",
-          payload
-        }));
+          payload: ingress.payload
+        }, runtimeRequestContext(req, ingress.context)));
         return;
       }
-      const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
-      res.status(201).json(await runtime.runDomainCommand({
+      const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+        sessionId: req.body?.session_id,
+        backendRunId: req.body?.backend_run_id
+      });
+      res.status(201).json(publicDomainCommandResult(await runtime.runDomainCommand({
         command_id: req.params.commandId,
         input_source: "runtime_api",
         idempotency_key: domainCommandIdempotencyKey(req),
-        payload
-      }));
+        payload: ingress.payload
+      }, runtimeRequestContext(req, ingress.context))));
     } catch (error) {
       next(error);
     }
@@ -955,16 +1030,39 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         domainBadRequest(res, "invalid_domain_query_payload");
         return;
       }
-      const payload = await trustedRuntimeApiPayload(store, jsonRecord(req.body?.payload ?? {}));
+      const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+        sessionId: req.body?.session_id,
+        backendRunId: req.body?.backend_run_id
+      });
       res.status(200).json(await runtime.runDomainQuery({
         query_id: req.params.queryId,
         input_source: "runtime_api",
-        payload
-      }));
+        payload: ingress.payload
+      }, runtimeRequestContext(req, ingress.context)));
     } catch (error) {
       next(error);
     }
   });
+
+    app.post("/api/generated-surfaces/:surfaceId/actions/:actionId/run", async (req, res, next) => {
+      try {
+        const payload = jsonRecord(req.body?.payload ?? {});
+        const actionPayload = payload.action_payload !== undefined && isRecord(payload.action_payload)
+          ? jsonRecord(payload.action_payload)
+          : {};
+        const result = await runtime.runGeneratedSurfaceAction({
+          surfaceId: req.params.surfaceId,
+          actionId: req.params.actionId,
+          revisionId: typeof payload.revision_id === "string" ? payload.revision_id : undefined,
+          interactionId: typeof payload.interaction_id === "string" ? payload.interaction_id : `surface_interaction_${Date.now()}`,
+          messageId: typeof payload.message_id === "string" ? payload.message_id : undefined,
+          actionPayload
+        }, runtimeRequestContext(req));
+        res.status(201).json(result);
+      } catch (error) {
+        next(error);
+      }
+    });
 
     app.get("/api/generated-surfaces/:surfaceId", async (req, res, next) => {
       try {
@@ -1272,13 +1370,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           return;
         }
         const result = await runRuntimeApiCommand(runtime, req, "chat.turn.run", {
-          session_id: req.params.sessionId,
           content,
           ...(typeof req.body?.backend_id === "string" ? { backend_id: req.body.backend_id } : {}),
           ...(asSupportedLocale(req.body?.input_locale) ? { input_locale: req.body.input_locale } : {}),
           ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
           metadata: jsonRecord(req.body?.metadata)
-        });
+        }, { sessionId: req.params.sessionId });
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -1345,7 +1442,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/search/reindex", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiCommand(runtime, req, "session.search.reindex"));
+        res.json(await runRuntimeApiCommand(runtime, req, "session.search.reindex", {}));
       } catch (error) {
         next(error);
       }
@@ -1441,9 +1538,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           return;
         }
         res.status(201).json(await runRuntimeApiCommand(runtime, req, "reflection.run", {
-          session_id: sessionId,
           ...(typeof req.body?.source_run_id === "string" ? { source_run_id: req.body.source_run_id } : {})
-        }));
+        }, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1466,7 +1562,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/curator/run", async (req, res, next) => {
       try {
-        res.status(201).json(await runRuntimeApiCommand(runtime, req, "curator.run"));
+        res.status(201).json(await runRuntimeApiCommand(runtime, req, "curator.run", {}));
       } catch (error) {
         next(error);
       }
@@ -1541,7 +1637,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/evaluation/run", async (req, res, next) => {
       try {
-        res.status(201).json(await runRuntimeApiCommand(runtime, req, "evaluation.run"));
+        res.status(201).json(await runRuntimeApiCommand(runtime, req, "evaluation.run", {}));
       } catch (error) {
         next(error);
       }
@@ -1628,11 +1724,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         };
         if (getDomainQueryEntry(operation)) {
           res.setHeader("Warning", '299 - "Query operation sent to legacy command URL"');
-          const query = await runtime.runDomainQuery({ query_id: operation, input_source: "runtime_api", payload });
-          res.json({ ...(isRecord(query.result) ? query.result : { resource: query.result }), query: query.query, render_spec: query.render_spec, render_specs: query.render_specs });
+          const result = await runDynamicRuntimeApiQuery(runtime, req, operation, payload);
+          res.json(isRecord(result) ? result : { resource: result });
           return;
         }
-        res.json(await runRuntimeApiWriteCommand(runtime, req, operation, payload));
+        res.json(await runDynamicRuntimeApiWriteCommand(runtime, req, operation, payload));
       } catch (error) {
         next(error);
       }
@@ -1659,11 +1755,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         };
         if (getDomainQueryEntry(operation)) {
           res.setHeader("Warning", '299 - "Query operation sent to legacy command URL"');
-          const query = await runtime.runDomainQuery({ query_id: operation, input_source: "runtime_api", payload });
-          res.json({ ...(isRecord(query.result) ? query.result : { resource: query.result }), query: query.query, render_spec: query.render_spec, render_specs: query.render_specs });
+          const result = await runDynamicRuntimeApiQuery(runtime, req, operation, payload);
+          res.json(isRecord(result) ? result : { resource: result });
           return;
         }
-        res.json(await runRuntimeApiWriteCommand(runtime, req, operation, payload));
+        res.json(await runDynamicRuntimeApiWriteCommand(runtime, req, operation, payload));
       } catch (error) {
         next(error);
       }
@@ -1771,31 +1867,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/gateway/pairing-policies", async (req, res, next) => {
       try {
-        const channel = typeof req.body?.channel === "string" ? req.body.channel : undefined;
-        if (!isGatewayChannel(channel)) {
-          res.status(400).json({ error: "invalid_gateway_channel" });
-          return;
-        }
-        const existing = await runtime.getGatewayPairingPolicy(channel);
-        const now = nowIso();
-        const parsed = GatewayPairingPolicyRecordSchema.parse({
-          ...existing,
-          id: typeof req.body?.id === "string" && req.body.id.trim() ? req.body.id.trim() : existing.id,
-          channel,
-          status: isGatewayPairingPolicyStatus(req.body?.status) ? req.body.status : existing.status,
-          trust_mode: isGatewayPairingTrustMode(req.body?.trust_mode) ? req.body.trust_mode : existing.trust_mode,
-          allowlist: Array.isArray(req.body?.allowlist)
-            ? stringArray(req.body.allowlist).map((item) => item.trim()).filter(Boolean)
-            : existing.allowlist,
-          pairing_ttl_ms: positiveIntegerOrUndefined(req.body?.pairing_ttl_ms, existing.pairing_ttl_ms),
-          duplicate_window_ms: positiveIntegerOrUndefined(req.body?.duplicate_window_ms, existing.duplicate_window_ms),
-          rate_limit_window_ms: positiveIntegerOrUndefined(req.body?.rate_limit_window_ms, existing.rate_limit_window_ms),
-          rate_limit_max: positiveIntegerOrUndefined(req.body?.rate_limit_max, existing.rate_limit_max),
-          metadata: isRecord(req.body?.metadata) ? jsonRecord(req.body.metadata) : existing.metadata,
-          created_at: existing.created_at,
-          updated_at: now
-        });
-        res.status(201).json(await runRuntimeApiCommand(runtime, req, "gateway.pairing_policy.save", parsed as unknown as Record<string, JsonValue>));
+        res.status(201).json(await runRuntimeApiCommand(runtime, req, "gateway.pairing_policy.save", req.body));
       } catch (error) {
         next(error);
       }
@@ -1823,33 +1895,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/gateway/routing-policies", async (req, res, next) => {
       try {
-        const channel = typeof req.body?.channel === "string" ? req.body.channel : undefined;
-        if (!isGatewayChannel(channel)) {
-          res.status(400).json({ error: "invalid_gateway_channel" });
-          return;
-        }
-        const existing = await runtime.getGatewayRoutingPolicy(channel);
-        const now = nowIso();
-        const parsed = GatewayRoutingPolicyRecordSchema.parse({
-          ...existing,
-          id: typeof req.body?.id === "string" && req.body.id.trim() ? req.body.id.trim() : existing.id,
-          channel,
-          status: isGatewayRoutingPolicyStatus(req.body?.status) ? req.body.status : existing.status,
-          session_key_strategy: isGatewayRoutingSessionKeyStrategy(req.body?.session_key_strategy) ? req.body.session_key_strategy : existing.session_key_strategy,
-          default_account_id: typeof req.body?.default_account_id === "string" && req.body.default_account_id.trim()
-            ? req.body.default_account_id.trim()
-            : existing.default_account_id,
-          default_thread_id: typeof req.body?.default_thread_id === "string" && req.body.default_thread_id.trim()
-            ? req.body.default_thread_id.trim()
-            : existing.default_thread_id,
-          default_route: typeof req.body?.default_route === "string" && req.body.default_route.trim()
-            ? req.body.default_route.trim()
-            : existing.default_route,
-          metadata: isRecord(req.body?.metadata) ? jsonRecord(req.body.metadata) : existing.metadata,
-          created_at: existing.created_at,
-          updated_at: now
-        });
-        res.status(201).json(await runRuntimeApiCommand(runtime, req, "gateway.routing_policy.save", parsed as unknown as Record<string, JsonValue>));
+        res.status(201).json(await runRuntimeApiCommand(runtime, req, "gateway.routing_policy.save", req.body));
       } catch (error) {
         next(error);
       }
@@ -1885,7 +1931,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/gateway/pairings/expire", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiCommand(runtime, req, "gateway.pairing.expire"));
+        res.json(await runRuntimeApiCommand(runtime, req, "gateway.pairing.expire", {}));
       } catch (error) {
         next(error);
       }
@@ -1995,16 +2041,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/gateway/mcp-configs", async (req, res, next) => {
       try {
-        const now = nowIso();
-        const parsed = GatewayMcpConfigRecordSchema.parse({
-          ...req.body,
-          id: typeof req.body?.id === "string" && req.body.id.trim() ? req.body.id : createId("gateway_mcp"),
-          enabled: typeof req.body?.enabled === "boolean" ? req.body.enabled : true,
-          metadata: isRecord(req.body?.metadata) ? req.body.metadata : {},
-          created_at: typeof req.body?.created_at === "string" ? req.body.created_at : now,
-          updated_at: now
-        });
-        const saved = await runRuntimeApiCommand(runtime, req, "gateway.mcp_config.save", parsed as unknown as Record<string, JsonValue>) as GatewayMcpConfigRecord;
+        const saved = await runRuntimeApiCommand(runtime, req, "gateway.mcp_config.save", req.body);
         res.status(201).json(summarizeGatewayMcpConfig(saved));
       } catch (error) {
         next(error);
@@ -2027,7 +2064,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/gateway/concurrency-locks/expire", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiCommand(runtime, req, "gateway.concurrency_lock.expire"));
+        res.json(await runRuntimeApiCommand(runtime, req, "gateway.concurrency_lock.expire", {}));
       } catch (error) {
         next(error);
       }
@@ -2512,7 +2549,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.post("/api/automation/scheduler/tick", async (req, res, next) => {
       try {
         const now = typeof req.body?.now === "string" ? req.body.now : undefined;
-        const runs = scheduler ? await scheduler.tick(now) : await runtime.runDueAutomationJobs(now);
+        const context = runtimeRequestContext(req);
+        const runs = scheduler ? await scheduler.tick(now, context) : await runtime.runDueAutomationJobs(now, context);
         res.status(201).json({ scheduler: scheduler?.state, runs });
       } catch (error) {
         next(error);
@@ -2634,7 +2672,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.post("/api/automation/jobs/run-due", async (req, res, next) => {
       try {
         const now = typeof req.body?.now === "string" ? req.body.now : undefined;
-        res.status(201).json(scheduler ? await scheduler.tick(now) : await runtime.runDueAutomationJobs(now));
+        const context = runtimeRequestContext(req);
+        res.status(201).json(scheduler ? await scheduler.tick(now, context) : await runtime.runDueAutomationJobs(now, context));
       } catch (error) {
         next(error);
       }
@@ -2844,7 +2883,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "invalid_client_event" });
           return;
         }
-        res.status(201).json(await runRuntimeApiCommand(runtime, req, "client.event.save", event as unknown as Record<string, JsonValue>));
+        res.status(201).json(await runRuntimeApiCommand(runtime, req, "client.event.save", event));
       } catch (error) {
         next(error);
       }
@@ -3239,6 +3278,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "title_and_content_required" });
           return;
         }
+        const proposalProvenance = provenance(req.body?.provenance);
         const result = await runRuntimeApiWriteCommand(runtime, req, "wiki.proposal.create", {
           title,
           content,
@@ -3246,7 +3286,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           tags: stringArray(req.body?.tags),
           ...(asSupportedLocale(req.body?.content_locale) ? { content_locale: req.body.content_locale } : {}),
           source_refs: resourceRefs(req.body?.source_refs),
-          ...(provenance(req.body?.provenance) ? { provenance: provenance(req.body.provenance)! as unknown as JsonValue } : {})
+          ...(proposalProvenance ? { provenance: proposalProvenance } : {})
         });
         res.status(201).json(result);
       } catch (error) {
@@ -3272,6 +3312,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.patch("/api/wiki/:id", async (req, res, next) => {
       try {
+        const patchProvenance = provenance(req.body?.provenance);
         const result = await runRuntimeApiWriteCommand(runtime, req, "wiki.patch", {
           wiki_id: req.params.id,
           ...(typeof req.body?.title === "string" ? { title: req.body.title.trim() } : {}),
@@ -3279,7 +3320,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...(Array.isArray(req.body?.tags) ? { tags: stringArray(req.body.tags) } : {}),
           ...(asSupportedLocale(req.body?.content_locale) ? { content_locale: req.body.content_locale } : {}),
           ...(Array.isArray(req.body?.source_refs) ? { source_refs: resourceRefs(req.body.source_refs) } : {}),
-          ...(provenance(req.body?.provenance) ? { provenance: provenance(req.body.provenance)! as unknown as JsonValue } : {})
+          ...(patchProvenance ? { provenance: patchProvenance } : {})
         });
         res.json(result);
       } catch (error) {
@@ -3297,7 +3338,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/wiki/reindex", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.reindex"));
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.reindex", {}));
       } catch (error) {
         next(error);
       }
@@ -3313,7 +3354,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/collections/schemas", async (req, res, next) => {
       try {
-        const result = await runRuntimeApiWriteCommand(runtime, req, "collection.schema.save", jsonRecord(req.body));
+        const parsed = CollectionSchemaSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "invalid_collection_schema", details: parsed.error.flatten() });
+          return;
+        }
+        const result = await runRuntimeApiWriteCommand(runtime, req, "collection.schema.save", parsed.data);
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -3322,7 +3368,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/collections/reindex", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "collection.reindex"));
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "collection.reindex", {}));
       } catch (error) {
         next(error);
       }
@@ -3385,16 +3431,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const ids = queryStringList(req.query.ids);
         const fields = queryStringList(req.query.fields);
-        const result = await runtime.runDomainQuery({
-          query_id: "collection.records.list",
-          input_source: "runtime_api",
-          payload: {
-            collection_id: req.params.collectionId,
-            ...(ids.length > 0 ? { ids } : {}),
-            ...(fields.length > 0 ? { fields } : {})
-          }
-        });
-        res.json(result.result);
+        res.json(await runRuntimeApiQuery(runtime, req, "collection.records.list", {
+          collection_id: req.params.collectionId,
+          ...(ids.length > 0 ? { ids } : {}),
+          ...(fields.length > 0 ? { fields } : {})
+        }));
       } catch (error) {
         next(error);
       }
@@ -3527,7 +3568,6 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           id: typeof req.body?.id === "string" ? req.body.id : createId("patch"),
           record_id: req.params.recordId,
           changes: isRecord(req.body?.changes) ? req.body.changes : {},
-          source_operation_id: typeof req.body?.source_operation_id === "string" ? req.body.source_operation_id : "pending_runtime_operation",
           created_at: typeof req.body?.created_at === "string" ? req.body.created_at : nowIso()
         };
         const result = await runRuntimeApiWriteCommand(runtime, req, "collection.patch.apply", {
@@ -3535,8 +3575,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           record_id: req.params.recordId,
           patch_id: patch.id,
           expected_version: expectedVersion,
-          changes: jsonRecord(patch.changes),
-          source_operation_id: patch.source_operation_id
+          changes: jsonRecord(patch.changes)
         });
         res.json(result);
       } catch (error) {
@@ -3569,17 +3608,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/automation/memory-review/run", async (req, res, next) => {
       try {
-        const result = await runRuntimeApiCommand<Awaited<ReturnType<AgentRuntime["runMemoryReviewAutomation"]>>>(runtime, req, "automation.memory_review.run");
-        res.status(201).json({
-          automationRun: result.automationRun,
-          operation: result.operation,
-          policyDecision: result.policyDecision,
-          auditRecord: result.auditRecord,
-          ...(result.rollbackPoint ? { rollbackPoint: result.rollbackPoint } : {}),
-          activity: result.activity,
-          ...(result.memoryReviewTrace ? { memoryReviewTrace: result.memoryReviewTrace } : {}),
-          ...(result.curatorResult ? { curatorResult: result.curatorResult } : {})
-        });
+        const result = await runRuntimeApiCommand(runtime, req, "automation.memory_review.run", {});
+        res.status(201).json(result);
       } catch (error) {
         next(error);
       }
@@ -3592,7 +3622,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "session_id_required" });
           return;
         }
-        const result = await runRuntimeApiCommand<Awaited<ReturnType<AgentRuntime["archiveMemory"]>>>(runtime, req, "memory.archive", { memory_id: req.params.id, session_id: sessionId });
+        const result = await runRuntimeApiCommand(runtime, req, "memory.archive", { memory_id: req.params.id }, { sessionId });
         res.json(archiveMemoryPayload(result));
       } catch (error) {
         next(error);
@@ -3644,7 +3674,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           }
           patch.external_provider_role = parsed.data;
         }
-        const settings = await runRuntimeApiCommand(runtime, req, "settings.patch", patch as unknown as Record<string, JsonValue>) as SettingsRecord;
+        const settings = await runRuntimeApiCommand(runtime, req, "settings.patch", patch);
         io.emit("settings.updated", settings);
         res.json(settingsPayload(settings));
       } catch (error) {
@@ -3663,7 +3693,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
       if (req.path.startsWith("/api/domain/")) {
         const status = error instanceof RuntimeRequestError
-          ? error.code === "bad_request" ? 400 : error.code === "gone" ? 410 : error.code === "not_found" ? 404 : error.code === "forbidden" ? 403 : error.code === "provider_failed" ? 502 : 409
+          ? runtimeRequestHttpStatus(error.code)
           : 500;
         const code = error instanceof RuntimeRequestError ? error.code : "internal_error";
         const message = error instanceof Error ? redactSecretLikeString(error.message) : "Unknown error";
@@ -3679,18 +3709,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         return;
       }
       if (error instanceof RuntimeRequestError) {
-        const status =
-          error.code === "bad_request"
-            ? 400
-            : error.code === "gone"
-              ? 410
-              : error.code === "not_found"
-                ? 404
-                : error.code === "forbidden"
-                  ? 403
-                  : error.code === "provider_failed"
-                    ? 502
-                    : 409;
+        const status = runtimeRequestHttpStatus(error.code);
         if (error.code === "provider_not_configured" || error.code === "provider_failed") {
           res.status(status).json(providerErrorPayload(error));
           return;
@@ -3714,9 +3733,6 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     if (scheduler) {
       clearInterval(scheduler.timer);
     }
-    void temporaryContexts.close().catch(() => undefined);
-    lifecycle.closed_at = nowIso();
-    lifecycle.closing = false;
   });
 
   return {
@@ -3727,6 +3743,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     runtime,
     lifecycle,
     temporaryContexts,
+    shutdown,
     pluginRegistry,
     pluginCatalogIssues: pluginCatalog.issues,
     pluginEntrypointLoad,
@@ -3738,44 +3755,176 @@ export async function startServer(port?: number): Promise<ApiServer> {
   loadServerEnv();
   const resolvedPort = port ?? Number(process.env.PORT ?? defaultPort);
   const server = await createApiServer();
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.httpServer.off("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.httpServer.off("error", onError);
-      resolve();
-    };
-    server.httpServer.once("error", onError);
-    server.httpServer.once("listening", onListening);
-    server.httpServer.listen(resolvedPort, "127.0.0.1");
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        server.httpServer.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.httpServer.off("error", onError);
+        resolve();
+      };
+      server.httpServer.once("error", onError);
+      server.httpServer.once("listening", onListening);
+      server.httpServer.listen(resolvedPort, "127.0.0.1");
+    });
+  } catch (error) {
+    try {
+      await closeApiServer(server);
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "server_startup_cleanup_failed");
+    }
+    throw error;
+  }
   console.log(`Samurai Agent API listening on http://127.0.0.1:${resolvedPort}`);
   return server;
 }
 
-export async function closeApiServer(server: ApiServer): Promise<void> {
+async function waitForActiveRequestsToDrain(shutdown: ApiServerShutdownState, deadlineAt: number): Promise<boolean> {
+  if (shutdown.activeRequests.size === 0) return true;
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout;
+    let check: () => void;
+    const finish = (drained: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      shutdown.drainWaiters.delete(check);
+      resolve(drained);
+    };
+    check = () => {
+      if (shutdown.activeRequests.size === 0) finish(true);
+    };
+    shutdown.drainWaiters.add(check);
+    timer = setTimeout(() => finish(shutdown.activeRequests.size === 0), Math.max(0, deadlineAt - Date.now()));
+  });
+}
+
+async function awaitBeforeDeadline(task: Promise<unknown>, deadlineAt: number): Promise<{ completed: boolean; error?: unknown }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ completed: false });
+    }, Math.max(0, deadlineAt - Date.now()));
+    const done = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(error === undefined ? { completed: true } : { completed: true, error });
+    };
+    task.then(() => done(), (error) => done(error));
+  });
+}
+
+export function closeApiServer(server: ApiServer): Promise<void> {
+  const existing = apiServerClosePromises.get(server);
+  if (existing) {
+    return existing;
+  }
   if (!server.lifecycle.closing && !server.lifecycle.closed_at) {
     server.lifecycle.closing = true;
     server.lifecycle.close_started_at = nowIso();
   }
-  if (server.scheduler) {
-    clearInterval(server.scheduler.timer);
-  }
-  await new Promise<void>((resolve) => {
-    server.io.close();
-    if (!server.httpServer.listening) {
-      resolve();
-      return;
+  const closePromise = (async () => {
+    const errors: unknown[] = [];
+    const shutdown = server.shutdown ?? {
+      acceptingRequests: true,
+      abortController: new AbortController(),
+      activeRequests: new Set<Promise<void>>(),
+      drainWaiters: new Set<() => void>(),
+      timeoutMs: defaultServerShutdownTimeoutMs
+    };
+    server.shutdown = shutdown;
+    if (shutdown.abortController.signal.aborted) shutdown.abortController = new AbortController();
+    shutdown.acceptingRequests = false;
+    const deadlineAt = Date.now() + shutdown.timeoutMs;
+    const abortTimer = setTimeout(() => {
+      shutdown.abortController.abort();
+      server.httpServer.closeAllConnections?.();
+    }, Math.max(0, deadlineAt - Date.now()));
+    const ioCloseTask = Promise.resolve().then(() => server.io.close());
+    const httpCloseTask = new Promise<void>((resolve, reject) => {
+      if (!server.httpServer.listening) {
+        resolve();
+        return;
+      }
+      server.httpServer.close((error) => error ? reject(error) : resolve());
+    });
+    let safeToCloseStore = true;
+    if (server.scheduler) {
+      try {
+        if (typeof server.scheduler.stop === "function") {
+          await server.scheduler.stop({ signal: shutdown.abortController.signal, deadlineAt });
+        } else {
+          clearInterval(server.scheduler.timer);
+        }
+      } catch (error) {
+        errors.push(error);
+        safeToCloseStore = false;
+      }
     }
-    server.httpServer.close(() => resolve());
+    if (!(await waitForActiveRequestsToDrain(shutdown, deadlineAt))) {
+      errors.push(new Error("api_server_active_requests_shutdown_timeout"));
+      safeToCloseStore = false;
+    }
+    const ioClosed = await awaitBeforeDeadline(ioCloseTask, deadlineAt);
+    if (!ioClosed.completed) errors.push(new Error("api_server_socket_io_shutdown_timeout"));
+    else if (ioClosed.error) errors.push(ioClosed.error);
+    const httpClosed = await awaitBeforeDeadline(httpCloseTask, deadlineAt);
+    if (!httpClosed.completed) errors.push(new Error("api_server_http_shutdown_timeout"));
+    else if (httpClosed.error) errors.push(httpClosed.error);
+    try {
+      const temporaryClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.temporaryContexts.close()), deadlineAt);
+      if (!temporaryClosed.completed) {
+        errors.push(new Error("api_server_temporary_context_shutdown_timeout"));
+        safeToCloseStore = false;
+      } else if (temporaryClosed.error) {
+        errors.push(temporaryClosed.error);
+      }
+    } catch (error) {
+      errors.push(error);
+      safeToCloseStore = false;
+    }
+    try {
+      const runtimeClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.runtime.shutdownMcpProcessPool()), deadlineAt);
+      if (!runtimeClosed.completed) {
+        errors.push(new Error("api_server_runtime_shutdown_timeout"));
+        safeToCloseStore = false;
+      } else if (runtimeClosed.error) {
+        errors.push(runtimeClosed.error);
+        safeToCloseStore = false;
+      }
+    } catch (error) {
+      errors.push(error);
+      safeToCloseStore = false;
+    }
+    if (safeToCloseStore) try {
+      // WorkspaceStore is the final cleanup step: Runtime/MCP and temporary files
+      // must no longer need to read from it when it is closed.
+      await server.store.close();
+    } catch (error) {
+      errors.push(error);
+    }
+    else errors.push(new Error("workspace_store_close_deferred_active_shutdown"));
+    clearTimeout(abortTimer);
+    if (errors.length > 0) {
+      server.lifecycle.closing = true;
+      server.lifecycle.close_error = "api_server_close_failed";
+      throw new AggregateError(errors, "api_server_close_failed");
+    }
+    delete server.lifecycle.close_error;
+    server.lifecycle.closed_at = nowIso();
+    server.lifecycle.closing = false;
+  })();
+  apiServerClosePromises.set(server, closePromise);
+  void closePromise.catch(() => {
+    if (apiServerClosePromises.get(server) === closePromise) apiServerClosePromises.delete(server);
   });
-  server.lifecycle.closed_at = server.lifecycle.closed_at ?? nowIso();
-  server.lifecycle.closing = false;
-  await server.temporaryContexts.close();
-  await server.runtime.shutdownMcpProcessPool();
-  await server.store.close();
+  return closePromise;
 }
 
 function asSupportedLocale(value: unknown): SupportedLocale | undefined {
@@ -3801,11 +3950,29 @@ export async function trustedRuntimeApiPayload(
   return assertTrustedRuntimePayload(store, payload, (code, message) => new RuntimeRequestError(code, message));
 }
 
+export async function trustedRuntimeApiInput(
+  store: WorkspaceStore,
+  payload: Record<string, JsonValue>,
+  transport: { sessionId?: unknown; backendRunId?: unknown } = {}
+) {
+  return resolveTrustedRuntimeApiInput(store, payload, transport, (code, message) => new RuntimeRequestError(code, message));
+}
+
 function domainBadRequest(res: Response, code: string): void {
   res.status(400).json({
     ok: false,
     error: { code, message: code, retryable: false }
   });
+}
+
+function runtimeRequestHttpStatus(code: RuntimeRequestError["code"]): number {
+  if (code === "bad_request" || code === "validation") return 400;
+  if (code === "gone") return 410;
+  if (code === "not_found") return 404;
+  if (code === "forbidden") return 403;
+  if (code === "provider_failed") return 502;
+  if (code === "internal") return 500;
+  return 409;
 }
 
 function domainCommandIdempotencyKey(req: Request): string | undefined {
@@ -3822,6 +3989,15 @@ function domainCommandIdempotencyKey(req: Request): string | undefined {
   return normalized;
 }
 
+function publicDomainCommandResult(result: {
+  result: unknown;
+}) {
+  return {
+    ok: true,
+    value: result.result
+  };
+}
+
 function gatewayInboundRequestKey(req: Request): string {
   return `gateway:${stableHash({ path: req.path, body: jsonSafe(req.body) })}`;
 }
@@ -3830,39 +4006,122 @@ function gatewayInboundPayloadKey(adapter: string, payload: unknown, query: Reco
   return `gateway:${stableHash({ adapter, payload: jsonSafe(payload), query: jsonSafe(query) })}`;
 }
 
-async function runRuntimeApiCommand<TResult = unknown>(
+async function runRuntimeApiCommand<Id extends DomainCommandId>(
   runtime: AgentRuntime,
   req: Request,
-  commandId: string,
-  payload: Record<string, JsonValue> = {}
-): Promise<TResult> {
+  commandId: Id,
+  payload: unknown,
+  context: TrustedRuntimeApiContext = {}
+): Promise<DomainOperationOutput<Id>> {
+  const input = parseDomainOperationInput(commandId, payload);
   const result = await runtime.runDomainCommand({
     command_id: commandId,
     input_source: "runtime_api",
     idempotency_key: domainCommandIdempotencyKey(req),
-    payload
-  });
-  return result.result as TResult;
+    payload: input
+  }, runtimeRequestContext(req, context));
+  return result.result as DomainOperationOutput<Id>;
 }
 
-async function runRuntimeApiWriteCommand(
+async function runRuntimeApiQuery<Id extends DomainQueryId>(
+  runtime: AgentRuntime,
+  req: Request,
+  queryId: Id,
+  payload: unknown,
+  context: TrustedRuntimeApiContext = {}
+): Promise<DomainOperationOutput<Id>> {
+  const input = parseDomainOperationInput(queryId, payload);
+  const result = await runtime.runDomainQuery({
+    query_id: queryId,
+    input_source: "runtime_api",
+    payload: input
+  }, runtimeRequestContext(req, context));
+  return result.result as DomainOperationOutput<Id>;
+}
+
+interface RuntimeWriteValue {
+  resource: unknown;
+  operation: unknown;
+  policyDecision?: unknown;
+  auditRecord?: unknown;
+  rollbackPoint?: unknown;
+  activity: unknown;
+}
+
+type DomainWriteCommandId = {
+  [Id in DomainCommandId]: DomainOperationOutput<Id> extends RuntimeWriteValue ? Id : never;
+}[DomainCommandId];
+
+function requireRuntimeWriteValue(value: unknown, commandId: string): RuntimeWriteValue {
+  if (!isRecord(value) || !("resource" in value) || !("operation" in value) || !("activity" in value)) {
+    throw new Error(`domain_command_write_result_invalid:${commandId}`);
+  }
+  return {
+    resource: value.resource,
+    operation: value.operation,
+    ...(value.policyDecision === undefined ? {} : { policyDecision: value.policyDecision }),
+    ...(value.auditRecord === undefined ? {} : { auditRecord: value.auditRecord }),
+    ...(value.rollbackPoint === undefined ? {} : { rollbackPoint: value.rollbackPoint }),
+    activity: value.activity
+  };
+}
+
+async function runRuntimeApiWriteCommand<Id extends DomainWriteCommandId>(
+  runtime: AgentRuntime,
+  req: Request,
+  commandId: Id,
+  payload: DomainOperationInput<Id>
+) {
+  return runtimeWritePayload(requireRuntimeWriteValue(
+    await runRuntimeApiCommand(runtime, req, commandId, payload),
+    commandId
+  ));
+}
+
+/** Dynamic legacy tool selection is parsed before it crosses the Registry boundary. */
+async function runDynamicRuntimeApiWriteCommand(
   runtime: AgentRuntime,
   req: Request,
   commandId: string,
-  payload: Record<string, JsonValue> = {}
+  payload: unknown
 ) {
-  const result = await runRuntimeApiCommand(runtime, req, commandId, payload);
-  if (!isRecord(result) || !("resource" in result) || !("operation" in result) || !("activity" in result)) {
-    throw new Error(`domain_command_write_result_invalid:${commandId}`);
+  if (!isDomainCommandId(commandId)) {
+    throw new RuntimeRequestError("not_found", `domain_command_not_found:${commandId}`);
   }
-  return runtimeWritePayload(result as {
-    resource: unknown;
-    operation: unknown;
-    policyDecision?: unknown;
-    auditRecord?: unknown;
-    rollbackPoint?: unknown;
-    activity: unknown;
-  });
+  const input = parseDomainOperationInput(commandId, payload);
+  const result = await runtime.runDomainCommand({
+    command_id: commandId,
+    input_source: "runtime_api",
+    idempotency_key: domainCommandIdempotencyKey(req),
+    payload: input
+  }, runtimeRequestContext(req));
+  return runtimeWritePayload(requireRuntimeWriteValue(result.result, commandId));
+}
+
+/** Dynamic legacy query selection is parsed before it crosses the Registry boundary. */
+async function runDynamicRuntimeApiQuery(
+  runtime: AgentRuntime,
+  req: Request,
+  queryId: string,
+  payload: unknown
+): Promise<unknown> {
+  if (!isDomainQueryId(queryId)) {
+    throw new RuntimeRequestError("not_found", `domain_query_not_found:${queryId}`);
+  }
+  const input = parseDomainOperationInput(queryId, payload);
+  return (await runtime.runDomainQuery({
+    query_id: queryId,
+    input_source: "runtime_api",
+    payload: input
+  }, runtimeRequestContext(req))).result;
+}
+
+function runtimeRequestContext(req: Request, context: TrustedRuntimeApiContext = {}): TrustedRuntimeApiContext {
+  const signal = (req as Request & { signal?: AbortSignal }).signal;
+  return {
+    ...context,
+    ...(signal ? { signal } : {})
+  };
 }
 
 function asToolRunStatus(value: unknown): ToolRunStatus | undefined {
@@ -5572,22 +5831,6 @@ function normalizeInjectedExternalAssistProviders(provider?: ExternalAssistProvi
 
 function isGatewayPairingStatus(value: unknown): value is "pending" | "approved" | "rejected" | "expired" | "revoked" {
   return value === "pending" || value === "approved" || value === "rejected" || value === "expired" || value === "revoked";
-}
-
-function isGatewayPairingPolicyStatus(value: unknown): value is "enabled" | "disabled" {
-  return value === "enabled" || value === "disabled";
-}
-
-function isGatewayPairingTrustMode(value: unknown): value is "pairing_required" | "auto_approve" | "blocked" {
-  return value === "pairing_required" || value === "auto_approve" || value === "blocked";
-}
-
-function isGatewayRoutingPolicyStatus(value: unknown): value is "enabled" | "disabled" {
-  return value === "enabled" || value === "disabled";
-}
-
-function isGatewayRoutingSessionKeyStrategy(value: unknown): value is "account_thread" | "account_main" | "channel_main" {
-  return value === "account_thread" || value === "account_main" || value === "channel_main";
 }
 
 function isGatewayInboundStatus(value: unknown): value is "blocked" | "routed" | "processed" | "failed" {

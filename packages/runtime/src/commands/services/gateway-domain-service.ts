@@ -1,4 +1,7 @@
 import {
+  createId,
+  gatewayChannels,
+  GatewayMcpConfigRecordSchema,
   GatewayPairingPolicyRecordSchema,
   GatewayRoutingPolicyRecordSchema,
   nowIso,
@@ -15,15 +18,32 @@ import {
   type GatewaySandboxWorkspaceSyncResult,
   type GatewayChannel,
   type GatewaySandboxWorkspaceSyncDirection,
-  type JsonValue
+  type JsonValue,
+  type SupportedLocale
 } from "@samurai-agent/core-schemas";
+import type {
+  GatewayMcpConfigSaveRequest,
+  GatewayPairingPolicySaveRequest,
+  GatewayRoutingPolicySaveRequest
+} from "@samurai-agent/domain-operations";
 import type { ChatTurnResult } from "./conversation-domain-service.js";
-import { approvePairing, createDefaultGatewayBoundaryPolicy, createGatewayInboundMessage, createPendingPairing, evaluateGatewayPairingPolicy, expirePairing, gatewayContextForPairing, rejectPairing, resolveGatewaySessionRouting, revokePairing, rotatePairingCode, type GatewayContext } from "@samurai-agent/gateway";
+import {
+  approvePairing,
+  createDefaultGatewayBoundaryPolicy,
+  createDefaultGatewayPairingPolicy,
+  createDefaultGatewayRoutingPolicy,
+  createGatewayInboundMessage,
+  createPendingPairing,
+  evaluateGatewayPairingPolicy,
+  gatewayContextForPairing,
+  resolveGatewaySessionRouting,
+  type GatewayContext
+} from "@samurai-agent/gateway";
 
 export interface GatewayInboundInput {
   channel: GatewayChannel; source_identity: string; body: string; source_label?: string; account_id?: string;
   thread_id?: string; route?: string; metadata?: Record<string, JsonValue>; backend_id?: string;
-  input_locale?: string; output_locale?: string;
+  input_locale?: SupportedLocale; output_locale?: SupportedLocale;
 }
 
 type GatewayChatResult = ChatTurnResult;
@@ -38,7 +58,7 @@ interface GatewayInboundResult {
   deliveries?: GatewayDeliveryRecord[];
 }
 export interface GatewayInboundPort {
-  expirePairings(): Promise<unknown>;
+  expirePairings(): Promise<GatewayPairingRecord[]>;
   getRoutingPolicy(channel: GatewayChannel): Promise<GatewayRoutingPolicyRecord>;
   getPairingPolicy(channel: GatewayChannel): Promise<GatewayPairingPolicyRecord>;
   saveInbound(record: GatewayInboundMessageRecord): Promise<GatewayInboundMessageRecord>;
@@ -50,9 +70,9 @@ export interface GatewayInboundPort {
   savePairing(record: GatewayPairingRecord): Promise<GatewayPairingRecord>;
   saveBoundaryPolicy(policy: GatewayBoundaryPolicy): Promise<GatewayBoundaryPolicy>;
   acquireLock(policy: GatewayBoundaryPolicy, inbound: GatewayInboundMessageRecord): Promise<{ acquired: boolean; lock: GatewayConcurrencyLockRecord }>;
-  releaseLock(lockKey: string): Promise<unknown>;
+  releaseLock(lockKey: string): Promise<void>;
   ensureSession(context: GatewayContext, title: string): Promise<GatewaySession>;
-  runChat(input: { sessionId: string; body: string; backendId?: string; inputLocale?: string; outputLocale?: string; metadata: Record<string, JsonValue>; context: GatewayContext; boundaryPolicy: GatewayBoundaryPolicy }): Promise<GatewayChatResult>;
+  runChat(input: { sessionId: string; body: string; backendId?: string; inputLocale?: SupportedLocale; outputLocale?: SupportedLocale; metadata: Record<string, JsonValue>; context: GatewayContext; boundaryPolicy: GatewayBoundaryPolicy }): Promise<GatewayChatResult>;
   enqueueDeliveries(input: { channel: GatewayChannel; inbound: GatewayInboundMessageRecord; sessionKey: string; chat: GatewayChatResult }): Promise<GatewayDeliveryRecord[]>;
   errorMessage(error: unknown): string;
   conflictError(message: string): Error;
@@ -60,26 +80,27 @@ export interface GatewayInboundPort {
 
 export interface GatewayCommandPort {
   expireConcurrencyLocks(now?: string): Promise<GatewayConcurrencyLockRecord[]>;
-  routeInbound(input: {
-    channel: GatewayChannel;
-    source_identity: string;
-    body: string;
-    source_label?: string;
-    account_id?: string;
-    thread_id?: string;
-    route?: string;
-    metadata: Record<string, JsonValue>;
-    backend_id?: string;
-    input_locale?: string;
-    output_locale?: string;
-  }): Promise<GatewayInboundResult>;
-  saveMcpConfig(record: GatewayMcpConfigRecord): Promise<GatewayMcpConfigRecord>;
-  savePairingPolicy(record: GatewayPairingPolicyRecord): Promise<GatewayPairingPolicyRecord>;
-  saveRoutingPolicy(record: GatewayRoutingPolicyRecord): Promise<GatewayRoutingPolicyRecord>;
   deleteSandbox(id: string): Promise<GatewaySandboxInstanceRecord>;
   recreateSandbox(id: string): Promise<GatewaySandboxInstanceRecord>;
   syncSandbox(id: string, input: { direction?: GatewaySandboxWorkspaceSyncDirection; dryRun: boolean }): Promise<GatewaySandboxWorkspaceSyncResult>;
   repairState(input: { dryRun: boolean; now?: string }): Promise<GatewayRepairResult>;
+}
+
+/**
+ * Persistence is deliberately narrower than a Domain handler. The Gateway
+ * service owns record construction, timestamps, defaults, and merge rules.
+ */
+export interface GatewayPolicyPersistencePort {
+  getMcpConfig(id: string): Promise<GatewayMcpConfigRecord | undefined>;
+  saveMcpConfig(record: GatewayMcpConfigRecord): Promise<GatewayMcpConfigRecord>;
+  listPairingPolicies(): Promise<GatewayPairingPolicyRecord[]>;
+  getPairingPolicy(channel: GatewayChannel): Promise<GatewayPairingPolicyRecord | undefined>;
+  savePairingPolicy(record: GatewayPairingPolicyRecord): Promise<GatewayPairingPolicyRecord>;
+  emitPairingPolicySaved(record: GatewayPairingPolicyRecord): Promise<void>;
+  listRoutingPolicies(): Promise<GatewayRoutingPolicyRecord[]>;
+  getRoutingPolicy(channel: GatewayChannel): Promise<GatewayRoutingPolicyRecord | undefined>;
+  saveRoutingPolicy(record: GatewayRoutingPolicyRecord): Promise<GatewayRoutingPolicyRecord>;
+  emitRoutingPolicySaved(record: GatewayRoutingPolicyRecord): Promise<void>;
 }
 
 export interface GatewayPairingPort {
@@ -91,6 +112,7 @@ export interface GatewayPairingPort {
 
 export interface GatewayDomainServiceDependencies {
   gateway: GatewayCommandPort;
+  policy: GatewayPolicyPersistencePort;
   pairing: GatewayPairingPort;
   inbound: GatewayInboundPort;
   notFoundError: (message: string) => Error;
@@ -99,13 +121,13 @@ export interface GatewayDomainServiceDependencies {
 export class GatewayDomainService {
   constructor(private readonly dependencies: GatewayDomainServiceDependencies) {}
 
-  async expireConcurrencyLocks(payload: Record<string, JsonValue>) {
-    const locks = await this.dependencies.gateway.expireConcurrencyLocks(optionalString(payload.now) || undefined);
+  async expireConcurrencyLocks(input: { now?: string }) {
+    const locks = await this.dependencies.gateway.expireConcurrencyLocks(input.now);
     return { expired_count: locks.length, locks };
   }
 
-  routeInboundPrimitive(input: Parameters<GatewayCommandPort["routeInbound"]>[0]) {
-    return this.dependencies.gateway.routeInbound(input);
+  routeInboundPrimitive(input: GatewayInboundInput) {
+    return this.executeInbound(input);
   }
 
   async executeInbound(input: GatewayInboundInput): Promise<GatewayInboundResult> {
@@ -147,7 +169,12 @@ export class GatewayDomainService {
     const inbound = await this.dependencies.inbound.saveInbound(createGatewayInboundMessage({ channel: input.channel, source_identity: sourceIdentity, body, pairing, metadata }));
     const context = gatewayContextForPairing(pairing);
     const boundaryPolicy = await this.dependencies.inbound.saveBoundaryPolicy(createDefaultGatewayBoundaryPolicy({
-      source_channel: input.channel, source_identity: sourceIdentity, session_key: pairing.session_key, allowlist: evaluation.allowlist_snapshot }));
+      source_channel: input.channel,
+      source_identity: sourceIdentity,
+      session_key: pairing.session_key,
+      allowed_tools: evaluation.allowed_tools_snapshot,
+      allowlist: evaluation.allowlist_snapshot
+    }));
     await this.dependencies.inbound.emit("gateway.boundary_policy.saved", boundaryPolicy);
     const concurrencyLock = await this.dependencies.inbound.acquireLock(boundaryPolicy, inbound);
     if (!concurrencyLock.acquired) {
@@ -180,46 +207,86 @@ export class GatewayDomainService {
     await this.dependencies.inbound.emit("gateway.inbound.blocked", inbound); return { inbound };
   }
 
-  saveMcpConfig(record: GatewayMcpConfigRecord) {
-    return this.dependencies.gateway.saveMcpConfig(record);
+  async saveMcpConfig(request: GatewayMcpConfigSaveRequest): Promise<GatewayMcpConfigRecord> {
+    const existing = request.id ? await this.dependencies.policy.getMcpConfig(request.id) : undefined;
+    const now = nowIso();
+    const configRef = request.configRef === undefined ? existing?.config_ref : request.configRef ?? undefined;
+    const common = {
+      id: request.id ?? createId("gateway_mcp"),
+      server_name: request.serverName,
+      enabled: request.enabled ?? existing?.enabled ?? true,
+      allowed_tools: request.allowedTools ?? existing?.allowed_tools ?? [],
+      ...(configRef === undefined ? {} : { config_ref: configRef }),
+      secret_refs: request.secretRefs ?? existing?.secret_refs ?? [],
+      metadata: request.metadata ?? existing?.metadata ?? {},
+      created_at: existing?.created_at ?? now,
+      updated_at: now
+    };
+    const record = request.transport === "stdio"
+      ? GatewayMcpConfigRecordSchema.parse({
+          ...common,
+          transport: "stdio",
+          stdio: {
+            command: request.stdio.command,
+            args: request.stdio.args,
+            ...(request.stdio.cwd === undefined ? {} : { cwd: request.stdio.cwd }),
+            env: request.stdio.environment,
+            secret_env: request.stdio.secretEnvironment,
+            secret_files: request.stdio.secretFiles.map((file) => ({
+              secret_ref_id: file.secretRefId,
+              filename: file.filename,
+              env: file.environmentName,
+              ...(file.mode === undefined ? {} : { mode: file.mode })
+            })),
+            framing: request.stdio.framing,
+            initialize: request.stdio.initialize,
+            ...(request.stdio.timeoutMs === undefined ? {} : { timeout_ms: request.stdio.timeoutMs })
+          }
+        })
+      : GatewayMcpConfigRecordSchema.parse({
+          ...common,
+          transport: "http",
+          http: {
+            endpoint_url: request.http.endpointUrl,
+            headers: request.http.headers,
+            secret_headers: request.http.secretHeaders,
+            ...(request.http.timeoutMs === undefined ? {} : { timeout_ms: request.http.timeoutMs })
+          }
+        });
+    return this.dependencies.policy.saveMcpConfig(record);
   }
 
-  savePairingPolicy(payload: Record<string, JsonValue>) {
-    return this.dependencies.gateway.savePairingPolicy(GatewayPairingPolicyRecordSchema.parse(payload));
+  async listPairingPolicies(): Promise<GatewayPairingPolicyRecord[]> {
+    const saved = await this.dependencies.policy.listPairingPolicies();
+    const byChannel = new Map(saved.map((policy) => [policy.channel, policy]));
+    const now = nowIso();
+    return gatewayChannels.map((channel) => byChannel.get(channel) ?? defaultPairingPolicy(channel, now));
   }
 
-  approvePairing(payload: Record<string, JsonValue>) { return this.approvePairingById(requiredString(payload, "pairing_id")); }
-  expirePairings(payload: Record<string, JsonValue>) { return this.expirePairingsAt(optionalString(payload.now) || undefined); }
-  rejectPairing(payload: Record<string, JsonValue>) { return this.rejectPairingById(requiredString(payload, "pairing_id")); }
-  revokePairing(payload: Record<string, JsonValue>) { return this.revokePairingById(requiredString(payload, "pairing_id")); }
-  rotatePairing(payload: Record<string, JsonValue>) { return this.rotatePairingById(requiredString(payload, "pairing_id")); }
-
-  async approvePairingById(id: string): Promise<GatewayPairingRecord> {
-    const pairing = await this.requirePairing(id);
-    const fresh = expirePairing(pairing);
-    const next = fresh.status === "expired" ? fresh : approvePairing(fresh);
-    await this.dependencies.pairing.save(next);
-    await this.dependencies.pairing.emitUpdated(next);
-    return next;
+  async getPairingPolicy(channel: GatewayChannel): Promise<GatewayPairingPolicyRecord> {
+    return (await this.dependencies.policy.getPairingPolicy(channel)) ?? defaultPairingPolicy(channel, nowIso());
   }
 
-  async rejectPairingById(id: string): Promise<GatewayPairingRecord> {
-    return this.persistPairing(rejectPairing(await this.requirePairing(id)));
-  }
-
-  async rotatePairingById(id: string): Promise<GatewayPairingRecord> {
-    const fresh = expirePairing(await this.requirePairing(id));
-    return this.persistPairing(fresh.status === "expired" ? fresh : rotatePairingCode(fresh));
-  }
-
-  async revokePairingById(id: string): Promise<GatewayPairingRecord> {
-    return this.persistPairing(revokePairing(await this.requirePairing(id)));
-  }
-
-  async expirePairingsAt(now = nowIso()): Promise<GatewayPairingRecord[]> {
-    const expired = await this.dependencies.pairing.expireAll(now);
-    for (const pairing of expired) await this.dependencies.pairing.emitUpdated(pairing);
-    return expired;
+  async savePairingPolicy(request: GatewayPairingPolicySaveRequest): Promise<GatewayPairingPolicyRecord> {
+    const existing = await this.dependencies.policy.getPairingPolicy(request.channel);
+    const baseline = existing ?? defaultPairingPolicy(request.channel, nowIso());
+    const record = GatewayPairingPolicyRecordSchema.parse({
+      ...baseline,
+      status: request.status ?? baseline.status,
+      trust_mode: request.trustMode ?? baseline.trust_mode,
+      allowlist: request.allowlist ?? baseline.allowlist,
+      allowed_tools: request.allowedTools ?? baseline.allowed_tools,
+      pairing_ttl_ms: request.pairingTtlMs ?? baseline.pairing_ttl_ms,
+      duplicate_window_ms: request.duplicateWindowMs ?? baseline.duplicate_window_ms,
+      rate_limit_window_ms: request.rateLimitWindowMs ?? baseline.rate_limit_window_ms,
+      rate_limit_max: request.rateLimitMax ?? baseline.rate_limit_max,
+      metadata: request.metadata ?? baseline.metadata,
+      created_at: existing?.created_at ?? baseline.created_at,
+      updated_at: nowIso()
+    });
+    const saved = await this.dependencies.policy.savePairingPolicy(record);
+    await this.dependencies.policy.emitPairingPolicySaved(saved);
+    return saved;
   }
 
   async requirePairing(id: string): Promise<GatewayPairingRecord> {
@@ -240,18 +307,42 @@ export class GatewayDomainService {
     return this.dependencies.pairing.expireAll(now);
   }
 
-  private async persistPairing(pairing: GatewayPairingRecord): Promise<GatewayPairingRecord> {
-    const saved = await this.dependencies.pairing.save(pairing);
-    await this.dependencies.pairing.emitUpdated(saved);
+  async listRoutingPolicies(): Promise<GatewayRoutingPolicyRecord[]> {
+    const saved = await this.dependencies.policy.listRoutingPolicies();
+    const byChannel = new Map(saved.map((policy) => [policy.channel, policy]));
+    const now = nowIso();
+    return gatewayChannels.map((channel) => byChannel.get(channel) ?? createDefaultGatewayRoutingPolicy(channel, now));
+  }
+
+  async getRoutingPolicy(channel: GatewayChannel): Promise<GatewayRoutingPolicyRecord> {
+    return (await this.dependencies.policy.getRoutingPolicy(channel)) ?? createDefaultGatewayRoutingPolicy(channel, nowIso());
+  }
+
+  async saveRoutingPolicy(request: GatewayRoutingPolicySaveRequest): Promise<GatewayRoutingPolicyRecord> {
+    const existing = await this.dependencies.policy.getRoutingPolicy(request.channel);
+    const baseline = existing ?? createDefaultGatewayRoutingPolicy(request.channel, nowIso());
+    const record = GatewayRoutingPolicyRecordSchema.parse({
+      ...baseline,
+      status: request.status ?? baseline.status,
+      session_key_strategy: request.sessionKeyStrategy ?? baseline.session_key_strategy,
+      default_account_id: request.defaultAccountId === undefined
+        ? baseline.default_account_id
+        : request.defaultAccountId ?? undefined,
+      default_thread_id: request.defaultThreadId === undefined
+        ? baseline.default_thread_id
+        : request.defaultThreadId ?? undefined,
+      default_route: request.defaultRoute ?? baseline.default_route,
+      metadata: request.metadata ?? baseline.metadata,
+      created_at: existing?.created_at ?? baseline.created_at,
+      updated_at: nowIso()
+    });
+    const saved = await this.dependencies.policy.saveRoutingPolicy(record);
+    await this.dependencies.policy.emitRoutingPolicySaved(saved);
     return saved;
   }
 
-  saveRoutingPolicy(payload: Record<string, JsonValue>) {
-    return this.dependencies.gateway.saveRoutingPolicy(GatewayRoutingPolicyRecordSchema.parse(payload));
-  }
-
-  deleteSandbox(payload: Record<string, JsonValue>) { return this.dependencies.gateway.deleteSandbox(requiredString(payload, "sandbox_id")); }
-  recreateSandbox(payload: Record<string, JsonValue>) { return this.dependencies.gateway.recreateSandbox(requiredString(payload, "sandbox_id")); }
+  deleteSandbox(id: string) { return this.dependencies.gateway.deleteSandbox(id); }
+  recreateSandbox(id: string) { return this.dependencies.gateway.recreateSandbox(id); }
 
   syncSandboxPrimitive(id: string, input: { direction?: GatewaySandboxWorkspaceSyncDirection; dryRun: boolean }) {
     return this.dependencies.gateway.syncSandbox(id, input);
@@ -266,10 +357,28 @@ function optionalString(value: JsonValue | undefined): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function requiredString(payload: Record<string, JsonValue>, key: string): string {
-  const value = optionalString(payload[key]);
-  if (!value) throw new Error(`domain_operation_required_field:${key}`);
-  return value;
+function defaultPairingPolicy(channel: GatewayChannel, now: string): GatewayPairingPolicyRecord {
+  const base = createDefaultGatewayPairingPolicy(channel, now);
+  const allowlist = gatewaySourceAllowlist();
+  if (allowlist.length === 0) {
+    return base;
+  }
+  return {
+    ...base,
+    allowlist,
+    metadata: {
+      ...base.metadata,
+      source: "env_gateway_allowlist",
+      env_allowlist: true
+    }
+  };
+}
+
+function gatewaySourceAllowlist(): string[] {
+  return (process.env.SAMURAI_GATEWAY_SOURCE_ALLOWLIST ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function normalizeSourceIdentity(value: string, conflict: (message: string) => Error): string {
@@ -292,7 +401,8 @@ function inboundMetadata(
   return {
     ...(input.metadata ?? {}),
     gateway_pairing_policy: { id: policy.id, channel: policy.channel, status: policy.status, trust_mode: policy.trust_mode,
-      allowlist_snapshot: evaluation.allowlist_snapshot, reason: evaluation.reason ?? null, pairing_ttl_ms: evaluation.pairing_ttl_ms,
+      allowlist_snapshot: evaluation.allowlist_snapshot, allowed_tools_snapshot: evaluation.allowed_tools_snapshot,
+      reason: evaluation.reason ?? null, pairing_ttl_ms: evaluation.pairing_ttl_ms,
       duplicate_window_ms: evaluation.duplicate_window_ms, rate_limit_window_ms: evaluation.rate_limit_window_ms, rate_limit_max: evaluation.rate_limit_max },
     gateway_routing_policy: { id: routingPolicy.id, channel: routingPolicy.channel, status: routingPolicy.status,
       session_key_strategy: routingPolicy.session_key_strategy, default_account_id: routingPolicy.default_account_id ?? null,

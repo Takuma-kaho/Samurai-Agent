@@ -3,9 +3,9 @@
   "test_id": "A02",
   "command": "pnpm core:test:command-ingress",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "820f9f520b883464834b2f033651347da08987b1",
   "worktree_clean": false,
-  "source_sha256": "cc391b989ab5d8beed409bbd89a1fcb4f8272e267b830253c6347c47ddc333ce",
+  "source_sha256": "2b38058f58f87dd166392089ce2edfe4d8eb2d1d645ff9f940356c74c1f311a5",
   "source_files": [
     "apps/desktop/src/main.ts",
     "apps/server/src/api-server.ts",
@@ -31,8 +31,8 @@
     "scripts/verify-domain-command-ingress.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-12T03:48:38.695Z",
-  "completed_at": "2026-07-12T03:49:05.367Z",
+  "started_at": "2026-07-15T05:17:30.839Z",
+  "completed_at": "2026-07-15T05:17:31.072Z",
   "assertions": [
     {
       "name": "Five logical mutation entrances use Domain Command Bus",
@@ -79,6 +79,7 @@
         "command_id": "artifact.create"
       }
     ],
+    "registered_mappings": 86,
     "web_api_boundary": true,
     "desktop_api_boundary": true,
     "direct_server_mutations": 0

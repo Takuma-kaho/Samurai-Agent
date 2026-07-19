@@ -1,42 +1,76 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { GeneratedSurfaceActionDeclarationSchema, SurfaceGenerationRequestSchema, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord } from "@samurai-agent/core-schemas";
+import { ResourceRefSchema, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord, type SurfaceGenerationRequest } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { generatedSurfaceSavedValueSchema } from "../../value-objects/generated-surface.js";
 
+const boundedJsonObjectSchema = z.record(domainJsonValueSchema)
+  .refine((value) => Object.keys(value).length <= 128, "generated_surface_json_object_too_large");
+const generatedSurfaceRequestSchema = z.object({
+  user_intent: z.string().trim().min(1).max(100_000),
+  source_resource_refs: z.array(ResourceRefSchema).max(128),
+  allowed_domain_commands: z.array(z.string().trim().min(1).max(256)).max(128),
+  selected_knowledge_refs: z.array(ResourceRefSchema).max(128),
+  selected_skill_refs: z.array(ResourceRefSchema).max(128),
+  client_capabilities: boundedJsonObjectSchema,
+  expected_lifetime: z.enum(["message", "session", "pinned"]),
+  fallback_chain: z.array(z.enum(["built_in_surface", "artifact", "text"])).min(1).max(3)
+}).strict();
+const actionSchema = z.object({
+  id: z.string().trim().min(1).max(256),
+  label: z.string().trim().min(1).max(512),
+  command_id: z.string().trim().min(1).max(256),
+  input_schema: boundedJsonObjectSchema,
+  payload_template: boundedJsonObjectSchema.default({}),
+  requires_confirmation: z.boolean().default(false)
+}).strict();
+const assetPathSchema = z.string().trim().min(1).max(1_024).refine((value) => {
+  const normalized = value.replaceAll("\\", "/");
+  return !normalized.startsWith("/")
+    && normalized.split("/").every((part) => part !== "" && part !== "." && part !== "..")
+    && /^[A-Za-z0-9._~/-]+$/.test(normalized);
+}, "generated_surface_asset_path_invalid");
+const assetSchema = z.object({
+  path: assetPathSchema,
+  content: z.string().max(2_000_000),
+  encoding: z.enum(["utf8", "base64"]).optional(),
+  mime_type: z.string().trim().min(1).max(255).regex(/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/).optional()
+}).strict();
 const Bundle = z.object({
-  title: z.string().trim().min(1), html: z.string().min(1), css: z.string().optional(), script: z.string().optional(),
-  actions: z.array(GeneratedSurfaceActionDeclarationSchema), input_data_schema: z.record(z.unknown()).optional(),
-  assets: z.array(z.object({ path: z.string().min(1), content: z.string(), encoding: z.enum(["utf8", "base64"]).optional(), mime_type: z.string().optional() }).strict()).optional()
+  title: z.string().trim().min(1).max(512),
+  html: z.string().min(1).max(200_000),
+  css: z.string().max(100_000).optional(),
+  script: z.string().max(50_000).optional(),
+  actions: z.array(actionSchema).max(20),
+  input_data_schema: boundedJsonObjectSchema.optional(),
+  assets: z.array(assetSchema).max(50)
+    .refine((assets) => assets.reduce((size, asset) => size + asset.content.length, 0) <= 2_700_000, "generated_surface_assets_too_large")
+    .optional()
 }).strict();
 const BundleInput = z.union([Bundle, z.object({ custom_view: Bundle }).strict()]);
 const Input = z.object({
-  "bundle": BundleInput,
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "producer_run_id": z.string() .optional(),
-  "prompt_fingerprint": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "request": SurfaceGenerationRequestSchema,
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  bundle: BundleInput,
+  request: generatedSurfaceRequestSchema
 }).strict();
 const Output = generatedSurfaceSavedValueSchema;
 
+export type GeneratedSurfaceBundleInput = z.infer<typeof Bundle>;
+export type GeneratedSurfaceCreateInput = z.infer<typeof Input>;
+
 export interface GeneratedSurfaceCreatePorts {
-  buildGeneratedSurfaceRevision(input: { request: z.infer<typeof SurfaceGenerationRequestSchema>; bundle: z.infer<typeof Bundle>; producerRunId?: string; promptFingerprint?: string; existing?: GeneratedSurfaceDefinition }): { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord };
-  saveGeneratedSurfaceRevision(input: { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; html: string; css?: string; script?: string; assets?: z.infer<typeof Bundle>["assets"] }): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord }>;
+  createGeneratedSurfaceRequestId(): string;
+  generatedSurfaceNow(): string;
+  generatedSurfaceFingerprint(value: string): string;
+  generatedSurfaceCreateError(message: string): Error;
+  buildGeneratedSurfaceRevision(input: { request: SurfaceGenerationRequest; bundle: GeneratedSurfaceBundleInput; producerRunId?: string; promptFingerprint?: string; existing?: GeneratedSurfaceDefinition }): { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord };
+  saveGeneratedSurfaceRevision(input: { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; html: string; css?: string; script?: string; assets?: GeneratedSurfaceBundleInput["assets"] }): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord }>;
 }
 
 const generatedSurfaceCreate = defineCommand<GeneratedSurfaceCreatePorts>()({
   ...{
   "kind": "command",
   "id": "generated_surface.create",
-  "version": "2.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Create generated surface",
   "description": "Validate and persist a versioned Generated Surface bundle.",
@@ -79,10 +113,36 @@ const generatedSurfaceCreate = defineCommand<GeneratedSurfaceCreatePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGeneratedSurfaceCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleGeneratedSurfaceCreate(context: TrustedDomainContext, input: GeneratedSurfaceCreateInput): Promise<DomainResult<z.infer<typeof Output>>> {
+        if (!context.sessionId) throw ports.generatedSurfaceCreateError("generated_surface_session_required");
         const bundle = "custom_view" in input.bundle ? input.bundle.custom_view : input.bundle;
-        const built = ports.buildGeneratedSurfaceRevision({ request: input.request, bundle, producerRunId: input.producer_run_id, promptFingerprint: input.prompt_fingerprint });
-        const saved = await ports.saveGeneratedSurfaceRevision({ definition: built.definition, revision: built.revision, html: bundle.html, css: bundle.css, script: bundle.script, assets: bundle.assets });
+        const request: SurfaceGenerationRequest = {
+          id: ports.createGeneratedSurfaceRequestId(),
+          session_id: context.sessionId,
+          user_intent: input.request.user_intent,
+          source_resource_refs: input.request.source_resource_refs,
+          allowed_domain_commands: input.request.allowed_domain_commands,
+          selected_knowledge_refs: input.request.selected_knowledge_refs,
+          selected_skill_refs: input.request.selected_skill_refs,
+          client_capabilities: input.request.client_capabilities,
+          expected_lifetime: input.request.expected_lifetime,
+          fallback_chain: input.request.fallback_chain,
+          created_at: ports.generatedSurfaceNow()
+        };
+        const built = ports.buildGeneratedSurfaceRevision({
+          request,
+          bundle,
+          producerRunId: context.runId,
+          promptFingerprint: ports.generatedSurfaceFingerprint(input.request.user_intent)
+        });
+        const saved = await ports.saveGeneratedSurfaceRevision({
+          definition: built.definition,
+          revision: built.revision,
+          html: bundle.html,
+          css: bundle.css,
+          script: bundle.script,
+          assets: bundle.assets
+        });
         return { ok: true, value: Output.parse(saved) };
       }
     };

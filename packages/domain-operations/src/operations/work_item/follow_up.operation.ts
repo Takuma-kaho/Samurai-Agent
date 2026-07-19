@@ -1,32 +1,23 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { workItemFollowUpValueSchema } from "../../value-objects/work.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "instruction": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "work_item_id": z.string()
+  "instruction": z.string().trim().min(1).max(10_000).optional(),
+  "work_item_id": z.string().trim().min(1).max(256)
 }).strict();
 const Output = workItemFollowUpValueSchema;
 
 export interface WorkItemFollowUpPorts {
-  executeWorkItemFollowUp(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  createFollowUpWorkItem(input: { workItemId: string; instruction?: string }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const workItemFollowUp = defineCommand<WorkItemFollowUpPorts>()({
   ...{
   "kind": "command",
   "id": "work_item.follow_up",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Create follow-up work",
   "description": "Create a dependent follow-up work item.",
@@ -63,8 +54,12 @@ const workItemFollowUp = defineCommand<WorkItemFollowUpPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleWorkItemFollowUp(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeWorkItemFollowUp(context, input);
+      execute: async function handleWorkItemFollowUp(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        const value = await ports.createFollowUpWorkItem({
+          workItemId: input.work_item_id,
+          ...(input.instruction === undefined ? {} : { instruction: input.instruction })
+        });
+        return { ok: true, value: Output.parse(value) };
       }
     };
   }

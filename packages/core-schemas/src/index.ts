@@ -288,7 +288,7 @@ export const ResourceRefSchema = z.object({
   uri: z.string().min(1),
   version: z.string().optional(),
   label: z.string().optional()
-});
+}).strict();
 export type ResourceRef = z.infer<typeof ResourceRefSchema>;
 
 export const ProvenanceSchema = z.object({
@@ -298,7 +298,7 @@ export const ProvenanceSchema = z.object({
   model: z.string().optional(),
   confidence: z.number().min(0).max(1).optional(),
   verified: z.boolean()
-});
+}).strict();
 export type Provenance = z.infer<typeof ProvenanceSchema>;
 
 export const LocalizedTextSchema = z.object({
@@ -319,7 +319,7 @@ export const ResourceTranslationRecordSchema = z.object({
   provenance: ProvenanceSchema.optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type ResourceTranslationRecord = z.infer<typeof ResourceTranslationRecordSchema>;
 
 export const MessageEnvelopeSchema = z.object({
@@ -333,7 +333,7 @@ export const MessageEnvelopeSchema = z.object({
   output_locale: SupportedLocaleSchema,
   metadata: z.record(jsonValueSchema),
   received_at: z.string().datetime()
-});
+}).strict();
 export type MessageEnvelope = z.infer<typeof MessageEnvelopeSchema>;
 
 export const AgentBackendConfigSchema = z.object({
@@ -391,7 +391,7 @@ export const BackendRunRecordSchema = z.object({
   output_summary: z.string().optional(),
   error_code: z.string().optional(),
   metadata: z.record(jsonValueSchema)
-});
+}).strict();
 export type BackendRunRecord = z.infer<typeof BackendRunRecordSchema>;
 
 export const BackendEventRecordSchema = z.object({
@@ -403,7 +403,7 @@ export const BackendEventRecordSchema = z.object({
   payload: z.record(jsonValueSchema),
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime()
-});
+}).strict();
 export type BackendEventRecord = z.infer<typeof BackendEventRecordSchema>;
 
 export const ClientEventRecordSchema = z.object({
@@ -419,7 +419,7 @@ export const ClientEventRecordSchema = z.object({
   acked_at: z.string().datetime().optional(),
   expires_at: z.string().datetime().optional(),
   error_code: z.string().optional()
-});
+}).strict();
 export type ClientEventRecord = z.infer<typeof ClientEventRecordSchema>;
 
 export const WorkspaceChangeRecordSchema = z.object({
@@ -432,7 +432,7 @@ export const WorkspaceChangeRecordSchema = z.object({
   legacy_operation_id: z.string().optional(),
   correlation_id: z.string().optional(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type WorkspaceChangeRecord = z.infer<typeof WorkspaceChangeRecordSchema>;
 
 export const SkillIndexEntryReadModelSchema = z.object({
@@ -1002,7 +1002,7 @@ export const ReflectionRunRecordSchema = z.object({
   started_at: z.string().datetime(),
   completed_at: z.string().datetime().optional(),
   error: z.string().optional()
-});
+}).strict();
 export type ReflectionRunRecord = z.infer<typeof ReflectionRunRecordSchema>;
 
 export const ReflectionSuggestionRecordSchema = z.object({
@@ -1017,7 +1017,7 @@ export const ReflectionSuggestionRecordSchema = z.object({
   confidence: z.number().min(0).max(1),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type ReflectionSuggestionRecord = z.infer<typeof ReflectionSuggestionRecordSchema>;
 
 export const ReflectionDiagnosticsIssueSchema = z.object({
@@ -1109,7 +1109,7 @@ export const LearningEvaluationRecordSchema = z.object({
   evidence_refs: z.array(ResourceRefSchema),
   evaluator: z.string().min(1),
   created_at: z.string().datetime()
-});
+}).strict();
 export type LearningEvaluationRecord = z.infer<typeof LearningEvaluationRecordSchema>;
 
 export const SkillOptimizationExampleSchema = z.object({
@@ -1375,14 +1375,14 @@ export const CuratorLifecycleReportSchema = z.object({
     stale_after_days: z.number().int().positive(),
     archive_after_days: z.number().int().positive(),
     min_idle_hours: z.number().nonnegative()
-  }),
+  }).strict(),
   counts: z.object({
     memory_items: z.number().int().nonnegative(),
     wiki_pages: z.number().int().nonnegative(),
     skill_items: z.number().int().nonnegative(),
     skill_usage_rows: z.number().int().nonnegative(),
     suggestions: z.number().int().nonnegative()
-  }),
+  }).strict(),
   skill_actions: z.array(z.object({
     skill_id: z.string().min(1),
     title: z.string(),
@@ -1394,14 +1394,14 @@ export const CuratorLifecycleReportSchema = z.object({
     last_activity_at: z.string().datetime().optional(),
     owner_pinned: z.boolean(),
     suggestion_id: z.string().optional()
-  })),
+  }).strict()),
   protected_skills: z.array(z.object({
     skill_id: z.string().min(1),
     title: z.string(),
     state: SkillStateSchema,
     reason: z.literal("owner_pinned")
-  }))
-});
+  }).strict())
+}).strict();
 export type CuratorLifecycleReport = z.infer<typeof CuratorLifecycleReportSchema>;
 
 export const CuratorReviewReportSchema = z.object({
@@ -1413,40 +1413,40 @@ export const CuratorReviewReportSchema = z.object({
     patch_candidates: z.number().int().nonnegative(),
     consolidate_candidates: z.number().int().nonnegative(),
     archive_candidates: z.number().int().nonnegative()
-  }),
+  }).strict(),
   keep_candidates: z.array(z.object({
     kind: z.enum(["memory", "knowledge_wiki", "skill"]),
     id: z.string().min(1),
     title: z.string(),
     reason: z.string()
-  })),
+  }).strict()),
   memory_merge_groups: z.array(z.object({
     topic: z.string(),
     memory_ids: z.array(z.string().min(1)),
     reason: z.string(),
     suggestion_id: z.string().optional()
-  })),
+  }).strict()),
   skill_consolidation_groups: z.array(z.object({
     group_key: z.string().min(1),
     skill_ids: z.array(z.string().min(1)),
     suggested_umbrella_title: z.string(),
     reason: z.string(),
     suggestion_id: z.string().optional()
-  })),
+  }).strict()),
   wiki_patch_proposals: z.array(z.object({
     wiki_id: z.string().min(1),
     title: z.string(),
     reason: z.string(),
     suggestion_id: z.string().optional()
-  })),
+  }).strict()),
   archive_candidates: z.array(z.object({
     kind: z.enum(["memory", "knowledge_wiki", "skill"]),
     id: z.string().min(1),
     title: z.string(),
     reason: z.string(),
     suggestion_id: z.string().optional()
-  }))
-});
+  }).strict())
+}).strict();
 export type CuratorReviewReport = z.infer<typeof CuratorReviewReportSchema>;
 
 export const EvaluationFindingKindSchema = z.enum([
@@ -1468,7 +1468,7 @@ export const EvaluationTraceReportSchema = z.object({
     external_status: z.enum(["not_configured", "completed", "failed"]),
     provider_id: z.string().optional(),
     summary: z.string()
-  }),
+  }).strict(),
   counts: z.object({
     backend_runs: z.number().int().nonnegative(),
     backend_events: z.number().int().nonnegative(),
@@ -1477,7 +1477,7 @@ export const EvaluationTraceReportSchema = z.object({
     audit_records: z.number().int().nonnegative(),
     findings: z.number().int().nonnegative(),
     comparisons: z.number().int().nonnegative()
-  }),
+  }).strict(),
   run_scores: z.array(z.object({
     run_id: z.string().min(1),
     backend_id: z.string(),
@@ -1489,16 +1489,16 @@ export const EvaluationTraceReportSchema = z.object({
       severity: z.enum(["info", "warning", "critical"]),
       reason: z.string(),
       resource_refs: z.array(ResourceRefSchema)
-    })),
+    }).strict()),
     suggested_improvements: z.array(z.string())
-  })),
+  }).strict()),
   comparisons: z.array(z.object({
     current_run_id: z.string().min(1),
     baseline_run_id: z.string().min(1).optional(),
     result: z.enum(["no_baseline", "same", "improved", "regressed"]),
     reason: z.string()
-  }))
-});
+  }).strict())
+}).strict();
 export type EvaluationTraceReport = z.infer<typeof EvaluationTraceReportSchema>;
 
 export const EvaluationDiagnosticsIssueSchema = z.object({
@@ -1558,9 +1558,11 @@ export const ToolRunRecordSchema = z.object({
   status: ToolRunStatusSchema,
   input_summary: z.string(),
   output_summary: z.string(),
+  /** Stable machine-readable failure code when status is failed. */
+  error_code: z.string().optional(),
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime()
-});
+}).strict();
 export type ToolRunRecord = z.infer<typeof ToolRunRecordSchema>;
 
 export const ToolRunDiagnosticsReasonSchema = z.object({
@@ -1625,7 +1627,7 @@ export const AutomationJobRecordSchema = z.object({
   last_error: z.string().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type AutomationJobRecord = z.infer<typeof AutomationJobRecordSchema>;
 
 export const ExternalSendRecordSchema = z.object({
@@ -1714,6 +1716,8 @@ export const GatewayPairingPolicyRecordSchema = z.object({
   status: GatewayPairingPolicyStatusSchema,
   trust_mode: GatewayPairingTrustModeSchema,
   allowlist: z.array(z.string().min(1)),
+  /** Server-owned allowlist for Backend tools reached through this channel. */
+  allowed_tools: z.array(z.string().min(1)),
   pairing_ttl_ms: z.number().int().positive().optional(),
   duplicate_window_ms: z.number().int().positive().optional(),
   rate_limit_window_ms: z.number().int().positive().optional(),
@@ -2232,7 +2236,7 @@ export const PolicyEvaluationInputSchema = z.object({
   prior_grants: z.array(z.string()),
   recent_history: z.array(z.string()),
   input_hash: z.string().min(1)
-});
+}).strict();
 export type PolicyEvaluationInput = z.infer<typeof PolicyEvaluationInputSchema>;
 
 export const CapabilityOperationSchema = z.object({
@@ -2287,7 +2291,7 @@ export const MemoryFrontmatterSchema = z.object({
   sensitive_level: z.enum(["none", "low", "high"]),
   source_refs: z.array(ResourceRefSchema).optional(),
   provenance: ProvenanceSchema.optional()
-});
+}).strict();
 export type MemoryFrontmatter = z.infer<typeof MemoryFrontmatterSchema>;
 
 export const UserModelFactSchema = z.object({
@@ -2362,7 +2366,7 @@ export const ArtifactRecordSchema = z.object({
   created_by: z.string().min(1),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
 
 export const GraphNodeSchema = z.object({
@@ -2477,7 +2481,7 @@ export const OperationRecordSchema = z.object({
   correlation_id: z.string().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-});
+}).strict();
 export type OperationRecord = z.infer<typeof OperationRecordSchema>;
 
 export const DomainCommandExecutionRecordSchema = z.object({
@@ -2711,7 +2715,7 @@ export const ArtifactRevisionRecordSchema = z.object({
   content_hash: z.string().min(1),
   content_bytes: z.number().int().nonnegative(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type ArtifactRevisionRecord = z.infer<typeof ArtifactRevisionRecordSchema>;
 
 export const FileBrowserActionKindSchema = z.enum(["file", "browser"]);
@@ -2773,7 +2777,7 @@ export const ApprovalRequestSchema = z.object({
   created_at: z.string().datetime(),
   expires_at: z.string().datetime(),
   decided_at: z.string().datetime().optional()
-});
+}).strict();
 export type ApprovalRequest = z.infer<typeof ApprovalRequestSchema>;
 
 export const PolicyDecisionRecordSchema = z.object({
@@ -2788,7 +2792,7 @@ export const PolicyDecisionRecordSchema = z.object({
   required_approval_level: z.enum(["none", "first_time_confirm", "approval", "strong_approval"]),
   grant_id: z.string().optional(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type PolicyDecisionRecord = z.infer<typeof PolicyDecisionRecordSchema>;
 
 export const AuditRecordSchema = z.object({
@@ -2803,7 +2807,7 @@ export const AuditRecordSchema = z.object({
   affected_resources: z.array(ResourceRefSchema),
   rollback_point_id: z.string().optional(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type AuditRecord = z.infer<typeof AuditRecordSchema>;
 
 export const RollbackPointSchema = z.object({
@@ -2816,7 +2820,7 @@ export const RollbackPointSchema = z.object({
   irreversible_effects: z.array(z.string()),
   created_at: z.string().datetime(),
   expires_at: z.string().datetime()
-});
+}).strict();
 export type RollbackPoint = z.infer<typeof RollbackPointSchema>;
 
 export const ActivityInboxItemSchema = z.object({
@@ -2830,7 +2834,7 @@ export const ActivityInboxItemSchema = z.object({
   audit_record_id: z.string().optional(),
   rollback_point_id: z.string().optional(),
   created_at: z.string().datetime()
-});
+}).strict();
 export type ActivityInboxItem = z.infer<typeof ActivityInboxItemSchema>;
 
 export interface SettingsRecord {

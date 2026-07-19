@@ -11,9 +11,7 @@ const Input = z.object({
   "content": z.string().min(1),
   "editor_source": z.enum(["chat", "surface", "provider", "image_provider", "restore", "system"]).optional(),
   "extension": z.string().trim().min(1).optional(),
-  "producer_run_id": z.string().trim().min(1).optional(),
-  "provenance": z.record(domainJsonValueSchema).default({}),
-  "session_id": z.string().trim().min(1).optional()
+  "provenance": z.record(domainJsonValueSchema).default({})
 }).strict();
 const Output = artifactRevisionWriteValueSchema;
 
@@ -32,7 +30,7 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
   ...{
   "kind": "command",
   "id": "artifact.revise",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Revise artifact",
   "description": "Create an immutable Artifact revision with content hash and lineage.",
@@ -74,13 +72,13 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
         const artifact = await ports.getArtifact(input.artifact_id);
         if (!artifact) throw ports.artifactNotFoundError();
         if (artifact.kind === "graph") ports.validateGraphArtifactContent(input.content);
-        const session = input.session_id ? await ports.getArtifactSession(input.session_id) : await ports.ensureArtifactSession();
+        const session = context.sessionId ? await ports.getArtifactSession(context.sessionId) : await ports.ensureArtifactSession();
         if (!session) throw ports.artifactSessionNotFoundError();
         const contract = ports.artifactContract("artifact.revise");
         const envelope = ports.createArtifactEnvelope(session, `Revise artifact: ${artifact.title}`);
-        const editorSource = input.editor_source ?? editorSourceFor(context.inputSource);
+        const editorSource = input.editor_source ?? "system";
         const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async (operation) => {
-          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: input.content, producerRunId: input.producer_run_id, extension: input.extension, baseRevisionId: input.base_revision_id, editorSource, changeSummary: input.change_summary, provenance: input.provenance });
+          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: input.content, producerRunId: context.runId, extension: input.extension, baseRevisionId: input.base_revision_id, editorSource, changeSummary: input.change_summary, provenance: input.provenance });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonRecord(artifact) }, { artifact: jsonRecord(created.artifact) });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Created revision of ${artifact.title}.`, extra: { revision: created.revision } };
         }});
@@ -92,8 +90,4 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
 
 export default artifactRevise;
 
-function editorSourceFor(source: TrustedDomainContext["inputSource"]): "chat" | "surface" | "provider" | "system" {
-  if (source === "surface_operation" || source === "generated_surface") return "surface";
-  return source === "provider_tool_call" ? "provider" : "system";
-}
 function jsonRecord(artifact: ArtifactRecord): Record<string, JsonValue> { return JSON.parse(JSON.stringify(artifact)) as Record<string, JsonValue>; }

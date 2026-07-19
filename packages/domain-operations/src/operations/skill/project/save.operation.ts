@@ -2,21 +2,12 @@
 import { z } from "zod";
 import { createId, nowIso } from "@samurai-agent/core-schemas";
 import { parseSkillMarkdown, renderSkillMarkdown } from "@samurai-agent/skills";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillWriteValueSchema } from "../../../value-objects/skill.js";
 import type { SkillProjectMutationPorts } from "../skill-mutation.js";
 
 const Input = z.object({
-  "candidate_id": z.string(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "candidate_id": z.string().trim().min(1).max(256)
 }).strict();
 const Output = skillWriteValueSchema;
 
@@ -26,7 +17,7 @@ const skillProjectSave = defineCommand<SkillProjectSavePorts>()({
   ...{
   "kind": "command",
   "id": "skill.project.save",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Save project skill",
   "description": "Save a promoted project Skill markdown file.",
@@ -61,7 +52,7 @@ const skillProjectSave = defineCommand<SkillProjectSavePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleSkillProjectSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleSkillProjectSave(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const candidateMarkdown = await ports.readSkillMarkdown(input.candidate_id);
         if (!candidateMarkdown) throw ports.skillMutationNotFound(`Skill candidate not found: ${input.candidate_id}`);
         const parsed = parseSkillMarkdown(candidateMarkdown);

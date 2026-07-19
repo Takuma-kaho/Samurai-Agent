@@ -1,31 +1,25 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
 import { fileReadValueSchema } from "../../value-objects/file.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "path": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "path": z.string().trim().min(1).max(4096)
 }).strict();
 const Output = fileReadValueSchema;
 
+export type FileReadInput = z.infer<typeof Input>;
+export type FileReadOutput = z.infer<typeof Output>;
+
 export interface FileReadPorts extends DomainQueryPorts {
-  executeFileRead(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  readWorkspaceFile: ReadCapability<(input: Pick<FileReadInput, "path">) => Promise<FileReadOutput> | FileReadOutput>;
 }
 
 const fileRead = defineQuery<FileReadPorts>()({
   ...{
   "kind": "query",
   "id": "file.read",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Read workspace file",
   "description": "Read a file inside the local workspace.",
@@ -65,7 +59,7 @@ const fileRead = defineQuery<FileReadPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleFileRead(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeFileRead(context, input);
+        return { ok: true, value: Output.parse(await ports.readWorkspaceFile({ path: input.path })) };
       }
     };
   }

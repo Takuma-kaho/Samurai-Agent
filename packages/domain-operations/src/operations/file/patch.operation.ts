@@ -6,9 +6,9 @@ import { fileResourceSchema } from "../../value-objects/file.js";
 import { runtimeWriteValueSchema } from "../../value-objects/runtime-write.js";
 
 const Input = z.object({
-  "path": z.string().trim().min(1),
-  "replace": z.string(),
-  "search": z.string().min(1)
+  "path": z.string().trim().min(1).max(4_096),
+  "replace": z.string().max(1_000_000),
+  "search": z.string().min(1).max(1_000_000)
 }).strict();
 const Output = runtimeWriteValueSchema(fileResourceSchema);
 
@@ -20,7 +20,7 @@ export interface FilePatchPorts {
   ensureFileParent(path: string): Promise<void>;
   writeFileText(path: string, content: string): Promise<void>;
   isManagedCollectionPath(path: string): boolean;
-  reindexManagedCollections(): Promise<unknown>;
+  reindexManagedCollections(): Promise<void>;
   fileNotFoundError(path: string): Error;
   filePatchConflictError(): Error;
   createFileRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
@@ -31,7 +31,7 @@ const filePatch = defineCommand<FilePatchPorts>()({
   ...{
   "kind": "command",
   "id": "file.patch",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Patch workspace file",
   "description": "Patch a file inside the local workspace.",
@@ -70,7 +70,7 @@ const filePatch = defineCommand<FilePatchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleFilePatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleFilePatch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const path = ports.resolveFilePath(input.path);
         const session = await ports.ensureFileSession();
         const envelope = ports.createFileEnvelope(session, `file.patch: ${path.relativePath}`);

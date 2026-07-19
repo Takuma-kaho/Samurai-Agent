@@ -7,14 +7,28 @@ import { runtimeWriteValueSchema } from "../../value-objects/runtime-write.js";
 
 const Input = z.object({
   "action": z.enum(["navigate", "click", "input"]).default("navigate"),
-  "selector": z.string().trim().min(1).optional(),
-  "url": z.string().url(),
-  "value": z.string().optional()
-}).strict();
+  "selector": z.string().trim().min(1).max(4_096).optional(),
+  "url": z.string().trim().url().max(8_192),
+  "value": z.string().max(100_000).optional()
+}).strict().superRefine((input, context) => {
+  if (input.action !== "navigate" && input.selector === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["selector"], message: "selector is required for click and input actions" });
+  }
+  if (input.action === "input" && input.value === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["value"], message: "value is required for input actions" });
+  }
+});
 const Output = runtimeWriteValueSchema(browserInteractionSchema);
 
+export interface BrowserInteractionRequest {
+  url: string;
+  action: "navigate" | "click" | "input";
+  selector?: string;
+  value?: string;
+}
+
 export interface BrowserInteractPorts {
-  interactWithBrowser(input: z.infer<typeof Input>): Promise<z.infer<typeof browserInteractionSchema>>;
+  interactWithBrowser(input: BrowserInteractionRequest): Promise<z.infer<typeof browserInteractionSchema>>;
   ensureBrowserSession(): Promise<SessionRecord>;
   createBrowserEnvelope(session: SessionRecord, content: string): MessageEnvelope;
   stableBrowserHash(value: unknown): string;
@@ -31,7 +45,7 @@ const browserInteract = defineCommand<BrowserInteractPorts>()({
   ...{
   "kind": "command",
   "id": "browser.interact",
-  "version": "4.0",
+  "version": "5.0",
   "availability": "active",
   "runtimeRequirements": ["browser_adapter"],
   "title": "Interact with browser",
@@ -71,7 +85,7 @@ const browserInteract = defineCommand<BrowserInteractPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleBrowserInteract(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleBrowserInteract(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const session = await ports.ensureBrowserSession();
         const envelope = ports.createBrowserEnvelope(session, `browser.interact: ${input.url}`);
         const value = await ports.runBrowserMutation({
@@ -80,7 +94,12 @@ const browserInteract = defineCommand<BrowserInteractPorts>()({
           operationName: "browser.interact",
           proposedEffects: [`browser.interact ${input.url} without mutating external state.`],
           execute: async () => {
-            const resource = await ports.interactWithBrowser(input);
+            const resource = await ports.interactWithBrowser({
+              url: input.url,
+              action: input.action,
+              ...(input.selector === undefined ? {} : { selector: input.selector }),
+              ...(input.value === undefined ? {} : { value: input.value })
+            });
             const ref: ResourceRef = {
               kind: "browser_page",
               id: ports.stableBrowserHash(resource.url),

@@ -1,31 +1,25 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
 import { fileReadValueSchema } from "../../value-objects/file.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "path": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "path": z.string().trim().min(1).max(4096)
 }).strict();
 const Output = fileReadValueSchema;
 
+export type FileListInput = z.infer<typeof Input>;
+export type FileListOutput = z.infer<typeof Output>;
+
 export interface FileListPorts extends DomainQueryPorts {
-  executeFileList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  listWorkspaceFiles: ReadCapability<(input: Pick<FileListInput, "path">) => Promise<FileListOutput> | FileListOutput>;
 }
 
 const fileList = defineQuery<FileListPorts>()({
   ...{
   "kind": "query",
   "id": "file.list",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "List workspace files",
   "description": "List files inside the local workspace.",
@@ -65,7 +59,7 @@ const fileList = defineQuery<FileListPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleFileList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeFileList(context, input);
+        return { ok: true, value: Output.parse(await ports.listWorkspaceFiles({ path: input.path })) };
       }
     };
   }

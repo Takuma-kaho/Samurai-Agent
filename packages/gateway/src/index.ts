@@ -27,6 +27,9 @@ import {
   stableHash
 } from "@samurai-agent/core-schemas";
 
+const mcpProcessCloseGraceMs = 1_000;
+const mcpProcessCloseKillWaitMs = 1_000;
+
 export interface RouteSessionInput {
   source: MessageEnvelope["source"];
   identity: ActorIdentity;
@@ -62,6 +65,7 @@ export interface GatewayPairingPolicyEvaluation {
   trusted_without_pairing: boolean;
   reason?: "policy_disabled" | "policy_blocked" | "source_not_allowed";
   allowlist_snapshot: string[];
+  allowed_tools_snapshot: string[];
   pairing_ttl_ms: number;
   duplicate_window_ms: number;
   rate_limit_window_ms: number;
@@ -523,22 +527,23 @@ export function createStdioMcpToolAdapter(options: StdioMcpToolAdapterOptions): 
       const secretFiles = config.secret_files?.length
         ? await materializeSecretFiles(input.secrets, config.secret_files)
         : undefined;
-      const env = buildStdioMcpEnv({
-        baseEnv: options.env ?? process.env,
-        config,
-        materials: input.secrets,
-        secretFiles
-      });
-      const client = new StdioJsonRpcClient({
-        command: config.command,
-        args: config.args ?? [],
-        cwd: config.cwd,
-        env,
-        framing: config.framing ?? "json_lines",
-        timeoutMs: config.timeout_ms ?? input.sandbox.timeout_ms ?? 30_000,
-        spawnProcess: options.spawnProcess ?? spawn
-      });
+      let client: StdioJsonRpcClient | undefined;
       try {
+        const env = buildStdioMcpEnv({
+          baseEnv: options.env ?? process.env,
+          config,
+          materials: input.secrets,
+          secretFiles
+        });
+        client = new StdioJsonRpcClient({
+          command: config.command,
+          args: config.args ?? [],
+          cwd: config.cwd,
+          env,
+          framing: config.framing ?? "json_lines",
+          timeoutMs: config.timeout_ms ?? input.sandbox.timeout_ms ?? 30_000,
+          spawnProcess: options.spawnProcess ?? spawn
+        });
         await client.start();
         if (config.initialize !== false) {
           await client.request("initialize", {
@@ -560,8 +565,20 @@ export function createStdioMcpToolAdapter(options: StdioMcpToolAdapterOptions): 
           resource_refs: []
         };
       } finally {
-        client.close();
-        await secretFiles?.cleanup();
+        const cleanupErrors: unknown[] = [];
+        try {
+          await client?.close();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        try {
+          await secretFiles?.cleanup();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        if (cleanupErrors.length > 0) {
+          throw new AggregateError(cleanupErrors, "mcp_process_cleanup_failed");
+        }
       }
     }
   };
@@ -1161,6 +1178,7 @@ export function createDefaultGatewayPairingPolicy(
     status: "enabled",
     trust_mode: autoApprove ? "auto_approve" : "pairing_required",
     allowlist: ["*"],
+    allowed_tools: [],
     pairing_ttl_ms: defaultPairingTtlMs,
     duplicate_window_ms: defaultDuplicateWindowMs,
     rate_limit_window_ms: defaultRateLimitWindowMs,
@@ -1236,6 +1254,7 @@ export function evaluateGatewayPairingPolicy(
   const allowlistSnapshot = gatewayPairingAllowlistSnapshot(policy, input);
   const base = {
     allowlist_snapshot: allowlistSnapshot,
+    allowed_tools_snapshot: [...policy.allowed_tools],
     pairing_ttl_ms: policy.pairing_ttl_ms ?? defaultPairingTtlMs,
     duplicate_window_ms: policy.duplicate_window_ms ?? defaultDuplicateWindowMs,
     rate_limit_window_ms: policy.rate_limit_window_ms ?? defaultRateLimitWindowMs,
@@ -2292,10 +2311,22 @@ interface PooledStdioProcessEntry {
   createdAt: number;
 }
 
+interface StdioMcpStartupHandle {
+  key: string;
+  controller: AbortController;
+  promise: Promise<PooledStdioProcessEntry | undefined>;
+  client?: StdioJsonRpcClient;
+  secretFiles?: MaterializedSecretFiles;
+}
+
 class StdioMcpProcessPool {
   private readonly processes = new Map<string, PooledStdioProcessEntry>();
   private readonly maxProcesses: number;
   private readonly idleTtlMs: number;
+  private closed = false;
+  private closePromise?: Promise<void>;
+  private readonly starting = new Map<string, StdioMcpStartupHandle>();
+  private readonly closingEntries = new Set<PooledStdioProcessEntry>();
 
   constructor(private readonly options: PooledStdioMcpToolAdapterOptions) {
     this.maxProcesses = options.maxProcesses ?? 8;
@@ -2303,6 +2334,9 @@ class StdioMcpProcessPool {
   }
 
   async invoke(input: McpToolAdapterInput): Promise<{ output?: JsonValue; resource_refs?: Array<{ kind: string; id?: string; uri: string; label?: string }> }> {
+    if (this.closed) {
+      throw new Error("mcp_process_pool_closed");
+    }
     const config = await this.options.resolveConfig({
       server_name: input.server_name,
       config_ref: input.config_ref
@@ -2310,13 +2344,46 @@ class StdioMcpProcessPool {
     if (!config) {
       throw new Error(`mcp_config_not_found:${input.server_name}`);
     }
+    if (this.closed) {
+      throw new Error("mcp_process_pool_closed");
+    }
     await this.reapIdle();
+    if (this.closed) throw new Error("mcp_process_pool_closed");
     const key = pooledStdioProcessKey(config, input.secrets);
     let entry = this.processes.get(key);
     if (!entry || entry.client.isClosed()) {
       await entry?.secretFiles?.cleanup();
-      entry = await this.startEntry(key, config, input);
-      this.processes.set(key, entry);
+      if (this.closed) throw new Error("mcp_process_pool_closed");
+      let handle = this.starting.get(key);
+      if (!handle) {
+        const controller = new AbortController();
+        handle = {
+          key,
+          controller,
+          promise: Promise.resolve(undefined)
+        };
+        const trackedHandle = handle;
+        handle.promise = Promise.resolve().then(() => this.startEntry(key, config, input, trackedHandle)).then(async (started) => {
+          if (this.closed) {
+            this.closingEntries.add(started);
+            await this.closeEntry(started);
+            return undefined;
+          }
+          this.processes.set(key, started);
+          return started;
+        });
+        this.starting.set(key, handle);
+      }
+      try {
+        entry = await handle.promise;
+      } finally {
+        if (this.starting.get(key) === handle) {
+          this.starting.delete(key);
+        }
+      }
+      if (!entry) {
+        throw new Error("mcp_process_pool_closed");
+      }
       await this.evictOverflow();
     }
     entry.lastUsedAt = Date.now();
@@ -2332,9 +2399,39 @@ class StdioMcpProcessPool {
   }
 
   async closeAll(): Promise<void> {
-    const entries = [...this.processes.values()];
-    this.processes.clear();
-    await Promise.all(entries.map((entry) => this.closeEntry(entry)));
+    if (this.closePromise) {
+      return this.closePromise;
+    }
+    this.closed = true;
+    const attempt = (async () => {
+      const entries = [...new Set([...this.processes.values(), ...this.closingEntries])];
+      for (const entry of entries) this.closingEntries.add(entry);
+      this.processes.clear();
+      const starting = [...this.starting.values()];
+      for (const handle of starting) {
+        handle.controller.abort();
+        void handle.client?.close().catch(() => undefined);
+      }
+      const results = await Promise.allSettled([
+        ...entries.map((entry) => this.closeEntry(entry)),
+        ...starting.map((handle) => settleMcpStartup(handle.promise))
+      ]);
+      const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (errors.length > 0) {
+        throw new AggregateError(errors, "mcp_process_pool_close_failed");
+      }
+      for (const [key, handle] of this.starting) {
+        if (starting.includes(handle)) this.starting.delete(key);
+      }
+      if (this.processes.size > 0 || this.starting.size > 0 || this.closingEntries.size > 0) {
+        throw new Error("mcp_process_pool_close_incomplete");
+      }
+    })();
+    this.closePromise = attempt;
+    void attempt.catch(() => {
+      if (this.closePromise === attempt) this.closePromise = undefined;
+    });
+    return attempt;
   }
 
   stats(): PooledMcpToolAdapterStats {
@@ -2349,26 +2446,38 @@ class StdioMcpProcessPool {
     };
   }
 
-  private async startEntry(key: string, config: StdioMcpServerConfig, input: McpToolAdapterInput): Promise<PooledStdioProcessEntry> {
-    const secretFiles = config.secret_files?.length
-      ? await materializeSecretFiles(input.secrets, config.secret_files)
-      : undefined;
-    const env = buildStdioMcpEnv({
-      baseEnv: this.options.env ?? process.env,
-      config,
-      materials: input.secrets,
-      secretFiles
-    });
-    const client = new StdioJsonRpcClient({
-      command: config.command,
-      args: config.args ?? [],
-      cwd: config.cwd,
-      env,
-      framing: config.framing ?? "json_lines",
-      timeoutMs: config.timeout_ms ?? input.sandbox.timeout_ms ?? 30_000,
-      spawnProcess: this.options.spawnProcess ?? spawn
-    });
+  private async startEntry(
+    key: string,
+    config: StdioMcpServerConfig,
+    input: McpToolAdapterInput,
+    handle: StdioMcpStartupHandle
+  ): Promise<PooledStdioProcessEntry> {
+    let secretFiles: MaterializedSecretFiles | undefined;
+    let client: StdioJsonRpcClient | undefined;
     try {
+      secretFiles = config.secret_files?.length
+        ? await materializeSecretFiles(input.secrets, config.secret_files)
+        : undefined;
+      handle.secretFiles = secretFiles;
+      if (handle.controller.signal.aborted) throw new Error("mcp_process_startup_aborted");
+      const env = buildStdioMcpEnv({
+        baseEnv: this.options.env ?? process.env,
+        config,
+        materials: input.secrets,
+        secretFiles
+      });
+      client = new StdioJsonRpcClient({
+        command: config.command,
+        args: config.args ?? [],
+        cwd: config.cwd,
+        env,
+        framing: config.framing ?? "json_lines",
+        timeoutMs: config.timeout_ms ?? input.sandbox.timeout_ms ?? 30_000,
+        spawnProcess: this.options.spawnProcess ?? spawn
+      });
+      handle.client = client;
+      const abort = () => { void client?.close().catch(() => undefined); };
+      handle.controller.signal.addEventListener("abort", abort, { once: true });
       await client.start();
       if (config.initialize !== false) {
         await client.request("initialize", {
@@ -2381,6 +2490,7 @@ class StdioMcpProcessPool {
         });
         client.notify("notifications/initialized", {});
       }
+      handle.controller.signal.removeEventListener("abort", abort);
       return {
         key,
         server_name: config.server_name,
@@ -2390,8 +2500,20 @@ class StdioMcpProcessPool {
         lastUsedAt: Date.now()
       };
     } catch (error) {
-      client.close();
-      await secretFiles?.cleanup();
+      const cleanupErrors: unknown[] = [];
+      try {
+        await client?.close();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      try {
+        await secretFiles?.cleanup();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError([error, ...cleanupErrors], "mcp_process_start_cleanup_failed");
+      }
       throw error;
     }
   }
@@ -2402,6 +2524,7 @@ class StdioMcpProcessPool {
       entry.client.isClosed() || now - entry.lastUsedAt > this.idleTtlMs
     );
     for (const entry of stale) {
+      this.closingEntries.add(entry);
       this.processes.delete(entry.key);
       await this.closeEntry(entry);
     }
@@ -2413,15 +2536,52 @@ class StdioMcpProcessPool {
       if (!oldest) {
         return;
       }
+      this.closingEntries.add(oldest);
       this.processes.delete(oldest.key);
       await this.closeEntry(oldest);
     }
   }
 
   private async closeEntry(entry: PooledStdioProcessEntry): Promise<void> {
-    entry.client.close();
-    await entry.secretFiles?.cleanup();
+    const errors: unknown[] = [];
+    try {
+      await entry.client.close();
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await entry.secretFiles?.cleanup();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, `mcp_process_close_failed:${entry.server_name}`);
+    }
+    this.closingEntries.delete(entry);
   }
+}
+
+async function settleMcpStartup(task: Promise<unknown>): Promise<void> {
+  const timeoutMs = mcpProcessCloseGraceMs + mcpProcessCloseKillWaitMs + 500;
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("mcp_process_startup_shutdown_timeout"));
+    }, timeoutMs);
+    task.then(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    }, (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
 }
 
 function pooledStdioProcessKey(config: StdioMcpServerConfig, secrets: SecretResolutionMaterial[]): string {
@@ -2450,6 +2610,7 @@ class StdioJsonRpcClient {
   private jsonLineBuffer = "";
   private contentLengthBuffer = Buffer.alloc(0);
   private closed = false;
+  private closePromise?: Promise<void>;
   private pending = new Map<number, {
     resolve(value: unknown): void;
     reject(error: Error): void;
@@ -2503,18 +2664,72 @@ class StdioJsonRpcClient {
   }
 
   notify(method: string, params: JsonValue): void {
+    if (this.closed) {
+      throw new Error("mcp_process_closed");
+    }
     this.writeMessage({ jsonrpc: "2.0", method, params });
   }
 
-  close(): void {
-    this.closed = true;
-    for (const entry of this.pending.values()) {
-      clearTimeout(entry.timer);
+  async close(): Promise<void> {
+    if (this.closePromise) {
+      return this.closePromise;
     }
-    this.pending.clear();
-    if (this.child && !this.child.killed) {
-      this.child.kill();
-    }
+    const attempt = (async () => {
+      this.closed = true;
+      this.rejectAll(new Error("mcp_process_closed"));
+      const child = this.child;
+      if (!child || child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      const waitForExit = (timeoutMs: number): Promise<boolean> => new Promise((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve(true);
+          return;
+        }
+        let settled = false;
+        let timer: NodeJS.Timeout;
+        let onExit: () => void;
+        const done = (exited: boolean) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          child.off("exit", onExit);
+          child.off("close", onExit);
+          resolve(exited);
+        };
+        onExit = () => done(true);
+        timer = setTimeout(() => done(false), timeoutMs);
+        child.once("exit", onExit);
+        child.once("close", onExit);
+      });
+      try {
+        if (!child.killed) {
+          child.kill("SIGTERM");
+        }
+      } catch (error) {
+        // A process can race with its close event; still wait for the close event.
+        if (child.exitCode !== null || child.signalCode !== null) {
+          return;
+        }
+        throw new Error(`mcp_process_close_signal_failed:${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (await waitForExit(mcpProcessCloseGraceMs)) {
+        return;
+      }
+      try {
+        child.kill("SIGKILL");
+      } catch (error) {
+        throw new Error(`mcp_process_close_force_kill_failed:${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!(await waitForExit(mcpProcessCloseKillWaitMs))) {
+        throw new Error("mcp_process_close_timeout");
+      }
+    })();
+    this.closePromise = attempt;
+    void attempt.catch(() => {
+      if (this.closePromise === attempt) this.closePromise = undefined;
+    });
+    return attempt;
   }
 
   isClosed(): boolean {

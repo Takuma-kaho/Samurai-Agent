@@ -10,7 +10,7 @@ const storeMutationVerbs = new Set(["save", "update", "delete", "set", "upsert",
 const runtimeMutationVerbs = new Set(["save", "create", "patch", "delete", "archive", "restore", "apply", "run", "reindex", "approve", "deny", "reject", "rotate", "revoke", "expire", "repair", "recreate", "sync", "dispatch", "prepare", "handle"]);
 const allowedRuntimeEntrances = new Set([
   "runDomainCommand", "runDomainQuery", "runCollectionManageCompatibility", "runSurfaceOperation",
-  "runBackendToolBridgeCall", "runDueAutomationJobs", "syncBackendStream"
+  "runBackendToolBridgeCall", "runDueAutomationJobs", "syncBackendStream", "runGeneratedSurfaceAction"
 ]);
 const issues = [];
 
@@ -30,8 +30,8 @@ const serverFiles = sourceFiles("apps/server/src");
 for (const server of serverFiles) {
   const serverSource = readFileSync(path.join(root, server), "utf8");
   const ast = parse(server, serverSource);
-  inspectMutationCalls(ast, server, "store", storeMutationVerbs, "server_route_direct_store_mutation");
-  inspectMutationCalls(ast, server, "runtime", runtimeMutationVerbs, "server_direct_runtime_mutation_bypasses_command_bus", allowedRuntimeEntrances);
+  inspectMutationCallsWithAliases(ast, server, "store", storeMutationVerbs, "server_route_direct_store_mutation");
+  inspectMutationCallsWithAliases(ast, server, "runtime", runtimeMutationVerbs, "server_direct_runtime_mutation_bypasses_command_bus", allowedRuntimeEntrances);
 }
 
 for (const file of sourceFiles("packages/learning/src")) {
@@ -49,7 +49,7 @@ for (const directory of ["packages/ui-protocol/src", "packages/agent-backends/sr
     const source = readFileSync(path.join(root, file), "utf8");
     const ast = parse(file, source);
     if (importsOf(ast).includes("@samurai-agent/workspace-store") || identifiers(ast).includes("WorkspaceStore")) issues.push({ code: "adapter_depends_on_store", file });
-    inspectMutationCalls(ast, file, "store", storeMutationVerbs, "adapter_direct_store_mutation");
+    inspectMutationCallsWithAliases(ast, file, "store", storeMutationVerbs, "adapter_direct_store_mutation");
   }
 }
 
@@ -121,4 +121,94 @@ function inspectMutationCalls(ast, file, receiver, verbs, code, allowed = new Se
     if (!verb || allowed.has(method)) continue;
     issues.push({ code, file, line: ast.getLineAndCharacterOfPosition(call.getStart()).line + 1, value: `${receiver}.${method}` });
   }
+}
+
+// Boundary checks must follow the object, not just one spelling of it. A
+// route can hide a Store behind `this.store`, a local alias, destructuring, or
+// a small wrapper and still bypass the command bus. This is intentionally a
+// conservative, syntax-only dataflow check: it catches writes without trying
+// to infer arbitrary application types.
+function inspectMutationCallsWithAliases(ast, file, receiver, verbs, code, allowed = new Set()) {
+  const aliases = new Set([receiver]);
+  const mutationAliases = new Set();
+  const isStoreRoot = (node) => ts.isPropertyAccessExpression(node)
+    && ts.isThis(node.expression) && node.name.text === receiver;
+  const isAliasRoot = (node) => ts.isIdentifier(node) && aliases.has(node.text);
+  const isMutationMethod = (name) => [...verbs].some((candidate) => name.startsWith(candidate)
+    && name.length > candidate.length && /[A-Z]/.test(name[candidate.length]));
+  const propertyReceiver = (node) => ts.isPropertyAccessExpression(node)
+    && (isAliasRoot(node.expression) || isStoreRoot(node.expression) || (ts.isPropertyAccessExpression(node.expression)
+      && ts.isThis(node.expression.expression) && node.expression.name.text === receiver));
+
+  // Resolve aliases and method references to a fixed point so wrappers such
+  // as `const save = this.store.saveArtifact` are still observable.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const declaration of allNodes(ast).filter((node) => ts.isVariableDeclaration(node))) {
+      if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+      const value = declaration.initializer;
+      if (isStoreRoot(value) || isAliasRoot(value)
+        || (ts.isPropertyAccessExpression(value) && value.name.text === receiver)) {
+        if (!aliases.has(declaration.name.text)) { aliases.add(declaration.name.text); changed = true; }
+      }
+      if (ts.isPropertyAccessExpression(value) && (isAliasRoot(value.expression) || isStoreRoot(value.expression)) && isMutationMethod(value.name.text)) {
+        if (!mutationAliases.has(declaration.name.text)) { mutationAliases.add(declaration.name.text); changed = true; }
+      }
+    }
+    for (const declaration of allNodes(ast).filter((node) => ts.isVariableDeclaration(node))) {
+      if (!ts.isObjectBindingPattern(declaration.name) || !declaration.initializer) continue;
+      for (const element of declaration.name.elements) {
+        if (!ts.isIdentifier(element.name)) continue;
+        const property = element.propertyName ? element.propertyName.getText(ast) : element.name.text;
+        if (property === receiver && !aliases.has(element.name.text)) { aliases.add(element.name.text); changed = true; }
+      }
+    }
+  }
+
+  for (const call of allNodes(ast).filter((node) => ts.isCallExpression(node))) {
+    if (ts.isIdentifier(call.expression) && mutationAliases.has(call.expression.text)) {
+      issues.push({ code, file, line: ast.getLineAndCharacterOfPosition(call.getStart()).line + 1, value: `${call.expression.text}()` });
+      continue;
+    }
+    if (!ts.isPropertyAccessExpression(call.expression) || !isMutationMethod(call.expression.name.text)) continue;
+    if (allowed.has(call.expression.name.text)) continue;
+    if (propertyReceiver(call.expression)) {
+      issues.push({ code, file, line: ast.getLineAndCharacterOfPosition(call.getStart()).line + 1, value: `${receiver}.${call.expression.name.text}` });
+      continue;
+    }
+    // A wrapper parameter that performs a write is unsafe when called from a
+    // boundary with the Store alias. The call-site check below links the two.
+    const owner = enclosingFunction(call);
+    if (!owner) continue;
+    const target = call.expression.expression;
+    if (!ts.isIdentifier(target)) continue;
+    const parameter = owner.parameters.some((item) => ts.isIdentifier(item.name) && item.name.text === target.text);
+    if (!parameter) continue;
+    for (const wrapperCall of allNodes(ast).filter((node) => ts.isCallExpression(node) && ts.isIdentifier(node.expression))) {
+      const ownerName = functionName(owner);
+      const index = ownerName ? wrapperCall.expression.text === ownerName
+        ? owner.parameters.findIndex((item) => ts.isIdentifier(item.name) && item.name.text === target.text) : -1 : -1;
+      if (index >= 0 && wrapperCall.arguments[index] && (isAliasRoot(wrapperCall.arguments[index]) || isStoreRoot(wrapperCall.arguments[index]))) {
+        issues.push({ code, file, line: ast.getLineAndCharacterOfPosition(wrapperCall.getStart()).line + 1, value: `${wrapperCall.expression.text}(${target.text})` });
+      }
+    }
+  }
+}
+
+function functionName(node) {
+  if ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) && node.name && ts.isIdentifier(node.name)) return node.name.text;
+  if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && ts.isVariableDeclaration(node.parent)
+    && ts.isIdentifier(node.parent.name)) return node.parent.name.text;
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) return node.name.text;
+  return undefined;
+}
+
+function enclosingFunction(node) {
+  let current = node.parent;
+  while (current) {
+    if (ts.isFunctionDeclaration(current) || ts.isFunctionExpression(current) || ts.isArrowFunction(current) || ts.isMethodDeclaration(current)) return current;
+    current = current.parent;
+  }
+  return undefined;
 }

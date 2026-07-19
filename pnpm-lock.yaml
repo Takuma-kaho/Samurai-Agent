@@ -96,6 +96,9 @@ importers:
       '@samurai-agent/core-schemas':
         specifier: workspace:*
         version: link:../../packages/core-schemas
+      '@samurai-agent/domain-operations':
+        specifier: workspace:*
+        version: link:../../packages/domain-operations
       '@samurai-agent/gateway':
         specifier: workspace:*
         version: link:../../packages/gateway

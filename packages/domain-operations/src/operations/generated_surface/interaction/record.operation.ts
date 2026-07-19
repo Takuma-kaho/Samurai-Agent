@@ -1,28 +1,22 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
 import { SurfaceInteractionRecordSchema, createId, nowIso, type GeneratedSurfaceDefinition, type SurfaceInteractionRecord } from "@samurai-agent/core-schemas";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, domainJsonValueSchema, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { generatedSurfaceInteractionValueSchema } from "../../../value-objects/generated-surface.js";
 
 const Input = z.object({
-  "command_id": z.string() .optional(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "interaction_id": z.string() .optional(),
+  "command_id": z.string().trim().min(1).max(256).optional(),
+  "command_result": domainJsonValueSchema.optional(),
+  "interaction_id": z.string().trim().min(1).max(256).optional(),
   "kind": SurfaceInteractionRecordSchema.shape.kind,
-  "message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "revision_id": z.string() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_id": z.string(),
-  "surface_operation_id": z.string() .optional(),
-  "user_feedback": z.string() .optional()
+  "message_id": z.string().trim().min(1).max(256).optional(),
+  "revision_id": z.string().trim().min(1).max(256).optional(),
+  "surface_id": z.string().trim().min(1).max(256),
+  "user_feedback": z.string().max(100_000).optional()
 }).strict();
 const Output = generatedSurfaceInteractionValueSchema;
+
+export type GeneratedSurfaceInteractionRecordInput = z.infer<typeof Input>;
 
 export interface GeneratedSurfaceInteractionRecordPorts {
   getGeneratedSurface(id: string): Promise<GeneratedSurfaceDefinition | undefined>;
@@ -34,7 +28,7 @@ const generatedSurfaceInteractionRecord = defineCommand<GeneratedSurfaceInteract
   ...{
   "kind": "command",
   "id": "generated_surface.interaction.record",
-  "version": "2.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Record surface interaction",
   "description": "Record a Generated Surface open, dismiss, correction, or regeneration signal.",
@@ -72,14 +66,15 @@ const generatedSurfaceInteractionRecord = defineCommand<GeneratedSurfaceInteract
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGeneratedSurfaceInteractionRecord(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleGeneratedSurfaceInteractionRecord(_context: TrustedDomainContext, input: GeneratedSurfaceInteractionRecordInput): Promise<DomainResult<z.infer<typeof Output>>> {
         const surface = await ports.getGeneratedSurface(input.surface_id);
         if (!surface) throw ports.generatedSurfaceInteractionError("generated_surface_not_found");
         const record = SurfaceInteractionRecordSchema.parse({
           id: input.interaction_id ?? createId("surface_interaction"), kind: input.kind,
           session_id: surface.session_id, message_id: input.message_id,
           surface_id: surface.id, revision_id: input.revision_id ?? surface.current_revision_id,
-          command_id: input.command_id, user_feedback: input.user_feedback, created_at: nowIso()
+          command_id: input.command_id, command_result: input.command_result,
+          user_feedback: input.user_feedback, created_at: nowIso()
         });
         return { ok: true, value: Output.parse(await ports.saveGeneratedSurfaceInteraction(record)) };
       }

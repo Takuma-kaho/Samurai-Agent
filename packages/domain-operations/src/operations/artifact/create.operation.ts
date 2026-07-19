@@ -6,14 +6,11 @@ import { artifactCreateValueSchema } from "../../value-objects/artifact.js";
 
 const Input = z.object({
   "content": z.string().min(1),
-  "envelope_id": z.string().trim().min(1).optional(),
   "input_locale": SupportedLocaleSchema.optional(),
   "kind": z.enum(["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"]).optional(),
   "metadata": z.record(domainJsonValueSchema).default({}),
   "output_locale": SupportedLocaleSchema.optional(),
-  "session_id": z.string().trim().min(1).optional(),
-  "surface_operation_id": z.string().trim().min(1).optional(),
-  "title": z.string().trim().min(1)
+  "title": z.string().trim().min(1).max(512)
 }).strict();
 const Output = artifactCreateValueSchema;
 type OutputValue = z.infer<typeof Output>;
@@ -23,9 +20,8 @@ export interface ArtifactCreatePorts {
   createArtifactSession(input: { title: string; output_locale?: z.infer<typeof SupportedLocaleSchema> }): Promise<SessionRecord>;
   getArtifactSession(id: string): Promise<SessionRecord | undefined>; artifactSessionNotFoundError(): Error;
   validateGraphArtifactContent(content: string): void;
-  runArtifactSurface(input: Record<string, unknown>): Promise<OutputValue>;
   createArtifactEnvelope(session: SessionRecord, content: string, inputLocale?: z.infer<typeof SupportedLocaleSchema>, outputLocale?: z.infer<typeof SupportedLocaleSchema>, metadata?: Record<string, JsonValue>, envelopeId?: string): MessageEnvelope;
-  createArtifactDraft(input: { operation: OperationRecord; title: string; content: string; kind?: z.infer<typeof Input>["kind"]; locale: z.infer<typeof SupportedLocaleSchema>; sourceLocales: z.infer<typeof SupportedLocaleSchema>[]; createdBy: string }): Promise<ArtifactRecord>;
+  createArtifactDraft(input: { operation: OperationRecord; title: string; content: string; kind?: z.infer<typeof Input>["kind"]; locale: z.infer<typeof SupportedLocaleSchema>; sourceLocales: z.infer<typeof SupportedLocaleSchema>[]; createdBy: string; metadata?: Record<string, JsonValue> }): Promise<ArtifactRecord>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   runArtifactMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: Record<string, never> }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
@@ -34,13 +30,14 @@ const artifactCreate = defineCommand<ArtifactCreatePorts>()({
   ...{
   "kind": "command",
   "id": "artifact.create",
-  "version": "3.0",
+  "version": "6.0",
   "availability": "active",
   "title": "Create artifact",
   "description": "Create a local workspace artifact from backend, UI, or generated surface output.",
   "sources": [
     "surface_operation",
     "provider_tool_call",
+    "generated_surface",
     "runtime_api"
   ],
   "effect": "workspace_mutation",
@@ -89,24 +86,35 @@ const artifactCreate = defineCommand<ArtifactCreatePorts>()({
     return {
       execute: async function handleArtifactCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         if (input.kind === "graph") ports.validateGraphArtifactContent(input.content);
-        const createdSession = input.session_id ? undefined : await ports.createArtifactSession({ title: input.title, output_locale: input.output_locale });
-        const sessionId = input.session_id ?? createdSession?.id;
+        const createdSession = context.sessionId ? undefined : await ports.createArtifactSession({ title: input.title, output_locale: input.output_locale });
+        const sessionId = context.sessionId ?? createdSession?.id;
         if (!sessionId) throw ports.artifactSessionNotFoundError();
-        if (context.inputSource !== "provider_tool_call") {
-          const originalSurface = input.metadata.surface_operation_payload;
-          const surfaceInput = originalSurface && typeof originalSurface === "object" && !Array.isArray(originalSurface)
-            ? originalSurface as Record<string, unknown>
-            : { id: input.surface_operation_id, kind: "artifact.request", session_id: sessionId, action: "create", title: input.title, instruction: input.content, input_locale: input.input_locale, output_locale: input.output_locale, metadata: input.metadata };
-          return { ok: true, value: await ports.runArtifactSurface(surfaceInput) };
-        }
         const session = createdSession ?? await ports.getArtifactSession(sessionId);
         if (!session) throw ports.artifactSessionNotFoundError();
         const inputLocale = input.input_locale ?? session.ui_locale;
         const outputLocale = input.output_locale ?? session.output_locale;
+        const metadata = {
+          ...input.metadata,
+          ...(context.surfaceOperation
+            ? {
+                surface_operation_id: context.surfaceOperation.id,
+                surface_operation_kind: context.surfaceOperation.kind
+              }
+            : {})
+        };
         const contract = ports.artifactContract("artifact.create");
-        const envelope = ports.createArtifactEnvelope(session, input.content, inputLocale, outputLocale, input.metadata, input.envelope_id);
+        const envelope = ports.createArtifactEnvelope(session, input.content, inputLocale, outputLocale, metadata, context.envelopeId);
         const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, execute: async (operation) => {
-          const artifact = await ports.createArtifactDraft({ operation, title: input.title, content: input.content, kind: input.kind, locale: outputLocale, sourceLocales: [inputLocale], createdBy: "backend" });
+          const artifact = await ports.createArtifactDraft({
+            operation,
+            title: input.title,
+            content: input.content,
+            kind: input.kind,
+            locale: outputLocale,
+            sourceLocales: [inputLocale],
+            createdBy: context.actorId,
+            metadata
+          });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref], {}, { artifact_id: artifact.id });
           return { resource: artifact, ref: artifact.file_ref, rollbackPoint, summary: `Created artifact ${artifact.title}.`, extra: {} };
         }});

@@ -1,7 +1,7 @@
 {
   "status": "passed",
   "assertions": [
-    { "name": "hard gate count", "actual": 81, "expected": 81 }
+    { "name": "hard gate count", "actual": 81, "expected": 81, "expected_source": "fixture-plan-hard-gates" }
   ],
   "result": {
     "gate_count": 81,

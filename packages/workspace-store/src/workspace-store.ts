@@ -5,6 +5,8 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { gatewayDeliveryMigration } from "./migrations/gateway-delivery";
 import { skillOptimizationMigration } from "./migrations/skill-optimization";
+import { toolRunErrorCodeMigration } from "./migrations/tool-run-error-code";
+import { gatewayPairingPolicyAllowedToolsMigration } from "./migrations/gateway-pairing-policy-allowed-tools";
 import { compareScoredSearch, scoreSearchFields, searchTerms, stateSearchBoost } from "./search/scoring";
 import { normalizeBackupId } from "./backup/backup-id";
 import { backendEventFromRow, backendEventToRow, type BackendEventsTable } from "./repositories/backend-events";
@@ -668,6 +670,7 @@ interface GatewayPairingPoliciesTable {
   status: string;
   trust_mode: string;
   allowlist_json: JsonColumn;
+  allowed_tools_json: JsonColumn;
   pairing_ttl_ms: number | null;
   duplicate_window_ms: number | null;
   rate_limit_window_ms: number | null;
@@ -823,6 +826,7 @@ interface ToolRunsTable {
   status: string;
   input_summary: string;
   output_summary: string;
+  error_code: string | null;
   resource_refs_json: JsonColumn;
   created_at: string;
 }
@@ -1016,7 +1020,7 @@ interface WorkspaceDb {
 
 export interface WorkspaceStoreOptions {
   rootDir: string;
-  fileTransactionFailureInjector?: (phase: "planned" | "staged" | "db_committed" | "renamed") => void;
+  fileTransactionFailureInjector?: (phase: "planned" | "staged" | "db_transaction" | "db_committed" | "renamed") => void;
   restoreFailureInjector?: (phase: "extract" | "hash_verify" | "swap") => void;
 }
 
@@ -2277,6 +2281,24 @@ export class WorkspaceStore {
       if (!optimizationExisting.rows[0]) {
         for (const statement of skillOptimizationMigration.statements) await sql.raw(statement).execute(this.db);
         await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${skillOptimizationMigration.version},${skillOptimizationMigration.name},${optimizationChecksum},${nowIso()})`.execute(this.db);
+      }
+      const toolRunErrorCodeChecksum = createHash("sha256").update(JSON.stringify({ statements: toolRunErrorCodeMigration.statements, migrationName: toolRunErrorCodeMigration.name })).digest("hex");
+      const toolRunErrorCodeExisting = await sql<{ checksum: string }>`SELECT checksum FROM schema_migrations WHERE version = ${toolRunErrorCodeMigration.version}`.execute(this.db);
+      if (toolRunErrorCodeExisting.rows[0]?.checksum && toolRunErrorCodeExisting.rows[0].checksum !== toolRunErrorCodeChecksum) {
+        throw new Error(`schema_migration_checksum_mismatch:${toolRunErrorCodeMigration.version}`);
+      }
+      if (!toolRunErrorCodeExisting.rows[0]) {
+        for (const statement of toolRunErrorCodeMigration.statements) await sql.raw(statement).execute(this.db);
+        await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${toolRunErrorCodeMigration.version},${toolRunErrorCodeMigration.name},${toolRunErrorCodeChecksum},${nowIso()})`.execute(this.db);
+      }
+      const gatewayPairingPolicyAllowedToolsChecksum = createHash("sha256").update(JSON.stringify({ statements: gatewayPairingPolicyAllowedToolsMigration.statements, migrationName: gatewayPairingPolicyAllowedToolsMigration.name })).digest("hex");
+      const gatewayPairingPolicyAllowedToolsExisting = await sql<{ checksum: string }>`SELECT checksum FROM schema_migrations WHERE version = ${gatewayPairingPolicyAllowedToolsMigration.version}`.execute(this.db);
+      if (gatewayPairingPolicyAllowedToolsExisting.rows[0]?.checksum && gatewayPairingPolicyAllowedToolsExisting.rows[0].checksum !== gatewayPairingPolicyAllowedToolsChecksum) {
+        throw new Error(`schema_migration_checksum_mismatch:${gatewayPairingPolicyAllowedToolsMigration.version}`);
+      }
+      if (!gatewayPairingPolicyAllowedToolsExisting.rows[0]) {
+        for (const statement of gatewayPairingPolicyAllowedToolsMigration.statements) await sql.raw(statement).execute(this.db);
+        await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${gatewayPairingPolicyAllowedToolsMigration.version},${gatewayPairingPolicyAllowedToolsMigration.name},${gatewayPairingPolicyAllowedToolsChecksum},${nowIso()})`.execute(this.db);
       }
       await this.ensureGeneratedSurfacePresentationColumns();
       await this.recordMigrationJournal("schema.ensure", "completed", { statement_count: statements.length });
@@ -6362,6 +6384,7 @@ export class WorkspaceStore {
         if (Number(result.numUpdatedRows) !== 1) {
           return false;
         }
+        this.fileTransactionFailureInjector?.("db_transaction");
         await transaction
           .insertInto("collection_patches")
           .values(collectionPatchToRow(input.collectionId, input.patch))
@@ -9124,6 +9147,7 @@ function gatewayPairingPolicyToRow(policy: GatewayPairingPolicyRecord): GatewayP
     status: policy.status,
     trust_mode: policy.trust_mode,
     allowlist_json: stringify(policy.allowlist),
+    allowed_tools_json: stringify(policy.allowed_tools),
     pairing_ttl_ms: policy.pairing_ttl_ms ?? null,
     duplicate_window_ms: policy.duplicate_window_ms ?? null,
     rate_limit_window_ms: policy.rate_limit_window_ms ?? null,
@@ -9141,6 +9165,7 @@ function gatewayPairingPolicyFromRow(row: GatewayPairingPoliciesTable): GatewayP
     status: row.status as GatewayPairingPolicyRecord["status"],
     trust_mode: row.trust_mode as GatewayPairingPolicyRecord["trust_mode"],
     allowlist: parse(row.allowlist_json),
+    allowed_tools: parse(row.allowed_tools_json),
     pairing_ttl_ms: row.pairing_ttl_ms ?? undefined,
     duplicate_window_ms: row.duplicate_window_ms ?? undefined,
     rate_limit_window_ms: row.rate_limit_window_ms ?? undefined,
@@ -9501,6 +9526,7 @@ function toolRunToRow(run: ToolRunRecord): ToolRunsTable {
     status: run.status,
     input_summary: run.input_summary,
     output_summary: run.output_summary,
+    error_code: run.error_code ?? null,
     resource_refs_json: stringify(run.resource_refs),
     created_at: run.created_at
   };
@@ -9517,6 +9543,7 @@ function toolRunFromRow(row: ToolRunsTable): ToolRunRecord {
     status: row.status as ToolRunRecord["status"],
     input_summary: row.input_summary,
     output_summary: row.output_summary,
+    error_code: row.error_code ?? undefined,
     resource_refs: parse(row.resource_refs_json),
     created_at: row.created_at
   };

@@ -1,20 +1,20 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../../definition/index.js";
 import { collectionSchemaDocsValueSchema } from "../../../value-objects/collection.js";
 
 const Input = z.object({}).strict();
 const Output = collectionSchemaDocsValueSchema;
 
 export interface CollectionSchemaDocsPorts extends DomainQueryPorts {
-  executeCollectionSchemaDocs(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  readCollectionSchemaDocs: ReadCapability<() => Promise<z.infer<typeof Output>> | z.infer<typeof Output>>;
 }
 
 const collectionSchemaDocs = defineQuery<CollectionSchemaDocsPorts>()({
   ...{
   "kind": "query",
   "id": "collection.schema.docs",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Read Collection schema docs",
   "description": "Read the supported Collection schema and view contract.",
@@ -54,7 +54,7 @@ const collectionSchemaDocs = defineQuery<CollectionSchemaDocsPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionSchemaDocs(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCollectionSchemaDocs(context, input);
+        return { ok: true, value: Output.parse(await ports.readCollectionSchemaDocs()) };
       }
     };
   }

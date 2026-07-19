@@ -29,6 +29,8 @@ export const pluginManifests: PluginManifest[] = [
     }
   }
 ];
+const actionCatalogEntryById = new Map(actionCatalogEntries.map((entry) => [entry.id, entry] as const));
+const pluginManifestById = new Map(pluginManifests.map((manifest) => [manifest.id, manifest] as const));
 
 for (const entry of actionCatalogEntries) {
   ActionCatalogEntrySchema.parse(entry);
@@ -39,7 +41,7 @@ for (const manifest of pluginManifests) {
 }
 
 export function getActionCatalogEntry(id: string): ActionCatalogEntry | undefined {
-  return actionCatalogEntries.find((entry) => entry.id === id);
+  return actionCatalogEntryById.get(id);
 }
 
 export function listActionCatalogEntries(category?: string): ActionCatalogEntry[] {
@@ -49,7 +51,7 @@ export function listActionCatalogEntries(category?: string): ActionCatalogEntry[
 }
 
 export function getPluginManifest(id: string): PluginManifest | undefined {
-  return pluginManifests.find((manifest) => manifest.id === id);
+  return pluginManifestById.get(id);
 }
 
 export interface PluginManifestLoadIssue {

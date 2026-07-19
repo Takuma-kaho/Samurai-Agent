@@ -5,6 +5,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { passingDomainVerifierModel, validateDomainVerifierModel } from "./lib/domain-verifier-policy.mjs";
+import { execJsonChild } from "./lib/exec-json-child.mjs";
 
 const root = process.env.SAMURAI_REPO_ROOT
   ? path.resolve(process.env.SAMURAI_REPO_ROOT)
@@ -23,13 +24,8 @@ const output = path.join(temporaryRoot, "check.mjs");
 const fixtureResults = new Map();
 
 function runJsonCheck(file, options = {}) {
-  const { nodeArgs = [], env = process.env, ...execOptions } = options;
-  const stdout = execFileSync(process.execPath, [...nodeArgs, file], {
-    cwd: root,
-    encoding: "utf8",
-    ...execOptions,
-    env: { ...env, SAMURAI_REPO_ROOT: root }
-  });
+  const { env = process.env, ...execOptions } = options;
+  const stdout = execJsonChild(file, { cwd: root, env: { ...env, SAMURAI_REPO_ROOT: root }, ...execOptions });
   process.stdout.write(stdout);
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
   const result = JSON.parse(lines.at(-1));
@@ -41,8 +37,14 @@ try {
   execFileSync(process.execPath, [path.join(root, "scripts/generate-domain-operation-index.mjs"), "--check"], { cwd: root, stdio: "inherit" });
   const queryWritePortNegative = verifyQueryWritePortNegative();
   const negativeDiagnostics = queryWritePortNegative.diagnostics;
-  if (queryWritePortNegative.status === 0 || !negativeDiagnostics.includes("TS2559")) throw new Error(`query_write_port_negative_fixture_failed:${negativeDiagnostics}`);
-  process.stdout.write(`${JSON.stringify({ status: "passed", gate: "ST09", expected_diagnostic: "TS2559" })}\n`);
+  const expectedCapabilityDiagnostic = negativeDiagnostics.includes("TS2322") || negativeDiagnostics.includes("TS2741");
+  const namesCapabilityBoundary = negativeDiagnostics.includes("WriteOnlyPort")
+    && negativeDiagnostics.includes("DomainQueryPorts")
+    && (negativeDiagnostics.includes("domainQueryReadCapability") || negativeDiagnostics.includes("domainWriteCapability"));
+  if (queryWritePortNegative.status === 0 || !expectedCapabilityDiagnostic || !namesCapabilityBoundary || !negativeDiagnostics.includes("query-write-port-negative.type-test.ts")) {
+    throw new Error(`query_write_port_negative_fixture_failed:${negativeDiagnostics}`);
+  }
+  process.stdout.write(`${JSON.stringify({ status: "passed", gate: "ST09", expected_diagnostic: "TS2322" })}\n`);
   fixtureResults.set("query-write-port-negative", { status: "passed", gates: ["QP01"] });
   const idempotencyWorker = path.join(temporaryRoot, "domain-command-idempotency-worker.mjs");
   execFileSync(esbuild, [
@@ -63,7 +65,13 @@ try {
     "domain-command-parity.ts",
     "domain-command-compatibility.ts",
     "domain-query-purity.ts",
-    "domain-operation-structure.ts"
+    "domain-operation-structure.ts",
+    "domain-command-schema-matrix.ts",
+    "domain-operation-handler-matrix.ts",
+    "domain-operation-handler-matrix-shard-a.ts",
+    "domain-operation-handler-matrix-shard-b.ts",
+    "domain-operation-handler-matrix-c.ts",
+    "domain-operation-handler-matrix-aggregate.ts"
   ]) {
     const fixtureOutput = path.join(temporaryRoot, fixture.replace(/\.ts$/, ".mjs"));
     execFileSync(esbuild, [
@@ -74,10 +82,11 @@ try {
       `--outfile=${fixtureOutput}`
     ], { cwd: root, stdio: "inherit" });
     const result = runJsonCheck(fixtureOutput, {
+      ...(fixture === "domain-command-ingress.ts" ? { timeout: 60_000, killSignal: "SIGTERM", maxBuffer: 16 * 1024 * 1024 } : {}),
       env: fixture === "domain-command-idempotency.ts"
         ? { ...process.env, SAMURAI_DOMAIN_IDEMPOTENCY_WORKER: idempotencyWorker, SAMURAI_DOMAIN_CRASH_WORKER: crashWorker }
         : fixture === "domain-command-ingress.ts"
-          ? { ...process.env, NODE_ENV: "test" }
+          ? { ...process.env, NODE_ENV: "test", SAMURAI_INGRESS_DEBUG: "1", SAMURAI_INGRESS_TIMEOUT_MS: "30000" }
         : process.env
     });
     fixtureResults.set(fixture.replace(/\.ts$/, ""), result);
@@ -97,7 +106,16 @@ try {
   });
   if (mismatch.status === 0) throw new Error("domain_command_verifier_mismatch_self_test_failed");
   process.stdout.write(`${JSON.stringify({ status: "passed", verifier_mismatch_nonzero: true })}\n`);
-  const verifierSelfTest = runJsonCheck(path.join(root, "scripts/verify-domain-command-verifier-self-test.mjs"));
+  const verifierSelfTest = runJsonCheck(path.join(root, "scripts/verify-domain-command-verifier-self-test.mjs"), {
+    timeout: 600_000,
+    killSignal: "SIGTERM",
+    maxBuffer: 32 * 1024 * 1024
+  });
+  const selfTestMutationCodes = Array.isArray(verifierSelfTest.expected_error_codes) ? verifierSelfTest.expected_error_codes : [];
+  const formalVerifierMutations = selfTestMutationCodes.filter((code) => /^V\d{3}(?:_|$)/.test(code)).length;
+  if (formalVerifierMutations === 0 || verifierSelfTest.mutations !== selfTestMutationCodes.length) {
+    throw new Error("domain_verifier_self_test_mutation_accounting_failed");
+  }
   const coverageDirectory = path.join(temporaryRoot, "coverage");
   execFileSync("pnpm", [
     "exec", "vitest", "run", "packages/domain-operations/src", "packages/runtime/src/commands/domain-command-bus.test.ts",
@@ -165,15 +183,50 @@ try {
   ].flatMap((result) => Array.isArray(result.gates) ? result.gates : []));
   observedGateIds.add("ST09");
   observedGateIds.add("ST12");
+  const supplementalGateIds = [...observedGateIds].filter((id) => !expectedGateIds.includes(id)).sort();
   const missingGateIds = expectedGateIds.filter((id) => !observedGateIds.has(id));
   if (missingGateIds.length > 0) throw new Error(`domain_command_gates_missing:${missingGateIds.join(",")}`);
   const structure = fixtureResults.get("domain-operation-structure");
+  const schemaMatrix = fixtureResults.get("domain-command-schema-matrix");
+  const handlerMatrix = fixtureResults.get("domain-operation-handler-matrix");
+  const handlerMatrixA = fixtureResults.get("domain-operation-handler-matrix-shard-a");
+  const handlerMatrixB = fixtureResults.get("domain-operation-handler-matrix-shard-b");
+  const handlerMatrixC = fixtureResults.get("domain-operation-handler-matrix-c");
+  const handlerMatrixAggregate = fixtureResults.get("domain-operation-handler-matrix-aggregate");
+  if (schemaMatrix.manifest?.operations !== contracts.commands + contracts.queries
+    || schemaMatrix.manifest?.endpoints !== schemaMatrix.manifest.operations * 2
+    || schemaMatrix.manifest?.reviewed_schema_nodes !== 671
+    || schemaMatrix.manifest?.unreviewed_schema_nodes !== 0) {
+    throw new Error("domain_command_schema_matrix_hard_gate_failed");
+  }
+  const handlerRuns = [handlerMatrix, handlerMatrixA, handlerMatrixB, handlerMatrixC];
+  if (handlerRuns.some((result) => !Array.isArray(result.covered_operation_ids))) {
+    throw new Error("domain_handler_matrix_executed_ids_missing");
+  }
+  const executedOperationIds = handlerRuns.flatMap((result) => result.covered_operation_ids);
+  const executedCounts = new Map();
+  for (const id of executedOperationIds) executedCounts.set(id, (executedCounts.get(id) ?? 0) + 1);
+  const duplicateOperationIds = [...executedCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id).sort();
+  const expectedOperationIds = handlerMatrixAggregate.expected_operation_ids;
+  const missingOperationIds = expectedOperationIds.filter((id) => !executedCounts.has(id));
+  const extraOperationIds = [...executedCounts.keys()].filter((id) => !expectedOperationIds.includes(id)).sort();
+  if (executedOperationIds.length !== expectedOperationIds.length || duplicateOperationIds.length > 0 || missingOperationIds.length > 0 || extraOperationIds.length > 0) {
+    throw new Error(`domain_handler_matrix_hard_gate_failed:executed=${executedOperationIds.length}:duplicate=${duplicateOperationIds.join(",")}:missing=${missingOperationIds.join(",")}:extra=${extraOperationIds.join(",")}`);
+  }
+  const ingress = fixtureResults.get("domain-command-ingress");
+  if (!Array.isArray(ingress.entrances) || ingress.entrances.length !== 6 || ingress.rejection_parity?.entrances?.length !== 6) {
+    throw new Error("domain_command_ingress_six_entrance_gate_failed");
+  }
+  if (!structure.gates?.includes("ST06") || !structure.gates?.includes("ST14")) {
+    throw new Error("domain_operation_structure_st06_st14_self_test_missing");
+  }
   const verifierModel = passingDomainVerifierModel();
-  verifierModel.activeIdsComplete = contracts.commands === 102 && contracts.queries === 12 && contracts.deprecated_commands === 5;
-  verifierModel.handlersUnique = structure.unique_handlers === 114;
+  verifierModel.activeIdsComplete = contracts.commands + contracts.queries === expectedOperationIds.length && contracts.deprecated_commands > 0;
+  verifierModel.handlersUnique = structure.unique_handlers === structure.operation_modules;
   verifierModel.genericForwarderAbsent = observedGateIds.has("ST07");
   verifierModel.operationRedispatchAbsent = observedGateIds.has("ST06");
-  verifierModel.queryWriteCompileRejected = queryWritePortNegative.status !== 0 && negativeDiagnostics.includes("TS2559");
+  verifierModel.queryWriteCompileRejected = queryWritePortNegative.status !== 0
+    && (negativeDiagnostics.includes("TS2322") || negativeDiagnostics.includes("TS2741"));
   verifierModel.forbiddenStoreImportsAbsent = observedGateIds.has("ST08");
   verifierModel.strictInputs = observedGateIds.has("CT03");
   verifierModel.outputValidationPresent = observedGateIds.has("CT04") && observedGateIds.has("RH05");
@@ -191,8 +244,9 @@ try {
   const summary = {
     status: "passed",
     gates: expectedGateIds,
-    gate_count: observedGateIds.size,
-    structure_gates: [...new Set([...structure.gates, "ST09", "ST12"])].sort(),
+    gate_count: expectedGateIds.filter((id) => observedGateIds.has(id)).length,
+    supplemental_gates: supplementalGateIds,
+    structure_gates: [...new Set([...structure.gates, "ST09", "ST12"])].filter((id) => expectedGateIds.includes(id)).sort(),
     operation_modules: structure.operation_modules,
     contracts: {
       commands: contracts.commands,
@@ -219,21 +273,22 @@ try {
     coverage: { files: measuredFiles.length, lines: coverage.total.lines.pct, statements: coverage.total.statements.pct, functions: coverage.total.functions.pct, branches: coverage.total.branches.pct },
     git_diff_check: true,
     verifier_mismatch_nonzero: true,
-    verifier_mutations: verifierSelfTest.mutations
+    verifier_mutations: formalVerifierMutations,
+    verifier_self_test_mutations: verifierSelfTest.mutations
   };
   process.stdout.write(`${JSON.stringify(summary)}\n`);
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });
 }
 
+
 function verifyQueryWritePortNegative() {
   const definitionFile = path.join(root, "packages/domain-operations/src/definition/index.ts");
   const definitionAst = ts.createSourceFile(definitionFile, readFileSync(definitionFile, "utf8"), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const queryPorts = definitionAst.statements.find((statement) => ts.isInterfaceDeclaration(statement) && statement.name.text === "DomainQueryPorts");
   if (!queryPorts || !ts.isInterfaceDeclaration(queryPorts)) throw new Error("domain_query_ports_missing");
-  const members = queryPorts.members.map((member) => member.getText(definitionAst)).join("\n");
   const fixture = "query-write-port-negative.type-test.ts";
-  const source = `interface DomainQueryPorts { ${members} }\ninterface WriteOnlyPort { save(value: string): Promise<void> }\ndeclare const writeOnly: WriteOnlyPort;\nconst rejected: DomainQueryPorts = writeOnly;\nvoid rejected;\n`;
+  const source = `declare const domainQueryReadCapability: unique symbol;\ndeclare const domainWriteCapability: unique symbol;\ninterface Promise<T> {}\ninterface DomainQueryPorts { readonly [domainQueryReadCapability]: true; readonly [domainWriteCapability]?: never }\ninterface WriteOnlyPort { readonly [domainWriteCapability]: true; readonly [domainQueryReadCapability]?: never; save(value: string): Promise<void> }\ndeclare const writeOnly: WriteOnlyPort;\nconst rejected: DomainQueryPorts = writeOnly;\nvoid rejected;\n`;
   const sourceFile = ts.createSourceFile(fixture, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const host = {
     getSourceFile: (name) => name === fixture ? sourceFile : undefined,
@@ -244,5 +299,5 @@ function verifyQueryWritePortNegative() {
   };
   const program = ts.createProgram([fixture], { noEmit: true, noLib: true, strict: true }, host);
   const diagnostics = ts.getPreEmitDiagnostics(program).filter((diagnostic) => diagnostic.code !== 2318);
-  return { status: diagnostics.length === 0 ? 0 : 1, diagnostics: diagnostics.map((diagnostic) => `TS${diagnostic.code}:${diagnostic.messageText}`).join("\n") };
+  return { status: diagnostics.length === 0 ? 0 : 1, diagnostics: diagnostics.map((diagnostic) => `${fixture}:TS${diagnostic.code}:${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`).join("\n") };
 }

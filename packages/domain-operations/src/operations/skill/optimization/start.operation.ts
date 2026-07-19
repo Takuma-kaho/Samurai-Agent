@@ -4,31 +4,31 @@ import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDo
 import { skillOptimizationStartValueSchema } from "../../../value-objects/skill.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "golden_examples": z.array(domainJsonValueSchema) .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "objective": z.string() .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "skill_id": z.string(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "synthetic_examples": z.array(domainJsonValueSchema) .optional()
+  "skill_id": z.string().trim().min(1).max(256),
+  "objective": z.string().trim().min(1).max(10_000).optional(),
+  "golden_examples": z.array(domainJsonValueSchema).max(1_000).optional(),
+  "synthetic_examples": z.array(domainJsonValueSchema).max(1_000).optional()
 }).strict();
 const Output = skillOptimizationStartValueSchema;
 
+export type SkillOptimizationStartInput = z.infer<typeof Input>;
+export type SkillOptimizationStartOutput = z.infer<typeof Output>;
+
 export interface SkillOptimizationStartPorts {
-  executeSkillOptimizationStart(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  startSkillOptimization(input: {
+    skillId: string;
+    sessionId?: string;
+    objective?: string;
+    goldenExamples?: readonly z.infer<typeof domainJsonValueSchema>[];
+    syntheticExamples?: readonly z.infer<typeof domainJsonValueSchema>[];
+  }): Promise<SkillOptimizationStartOutput> | SkillOptimizationStartOutput;
 }
 
 const skillOptimizationStart = defineCommand<SkillOptimizationStartPorts>()({
   ...{
   "kind": "command",
   "id": "skill.optimization.start",
-  "version": "1.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Start Skill improvement",
   "description": "Run the locked GEPA Skill improvement worker and save reviewable candidates.",
@@ -76,7 +76,13 @@ const skillOptimizationStart = defineCommand<SkillOptimizationStartPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleSkillOptimizationStart(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeSkillOptimizationStart(context, input);
+        return { ok: true, value: Output.parse(await ports.startSkillOptimization({
+          skillId: input.skill_id,
+          ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+          ...(input.objective ? { objective: input.objective } : {}),
+          ...(input.golden_examples ? { goldenExamples: input.golden_examples } : {}),
+          ...(input.synthetic_examples ? { syntheticExamples: input.synthetic_examples } : {})
+        })) };
       }
     };
   }

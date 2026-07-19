@@ -1,32 +1,28 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillOptimizationRollbackValueSchema } from "../../../value-objects/skill.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "promotion_id": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "snapshot_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
-}).strict();
+  "promotion_id": z.string().trim().min(1).max(256).optional(),
+  "snapshot_id": z.string().trim().min(1).max(256).optional()
+}).strict().refine((value) => Boolean(value.promotion_id || value.snapshot_id), {
+  message: "promotion_id_or_snapshot_id_required"
+});
 const Output = skillOptimizationRollbackValueSchema;
 
+export type SkillOptimizationRollbackInput = z.infer<typeof Input>;
+export type SkillOptimizationRollbackOutput = z.infer<typeof Output>;
+
 export interface SkillOptimizationRollbackPorts {
-  executeSkillOptimizationRollback(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  rollbackSkillOptimization(input: { promotionId?: string; snapshotId?: string }): Promise<SkillOptimizationRollbackOutput> | SkillOptimizationRollbackOutput;
 }
 
 const skillOptimizationRollback = defineCommand<SkillOptimizationRollbackPorts>()({
   ...{
   "kind": "command",
   "id": "skill.optimization.rollback",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Rollback Skill improvement",
   "description": "Restore a promoted Skill from its immutable pre-promotion snapshot.",
@@ -71,7 +67,10 @@ const skillOptimizationRollback = defineCommand<SkillOptimizationRollbackPorts>(
   createHandler(ports) {
     return {
       execute: async function handleSkillOptimizationRollback(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeSkillOptimizationRollback(context, input);
+        return { ok: true, value: Output.parse(await ports.rollbackSkillOptimization({
+          ...(input.promotion_id ? { promotionId: input.promotion_id } : {}),
+          ...(input.snapshot_id ? { snapshotId: input.snapshot_id } : {})
+        })) };
       }
     };
   }

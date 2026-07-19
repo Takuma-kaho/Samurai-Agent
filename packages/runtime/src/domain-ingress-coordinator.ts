@@ -17,7 +17,12 @@ export interface DomainIngressDispatcher {
     input_source: DomainCommandInputSource;
     idempotency_key?: string;
     payload: Record<string, unknown>;
-  }): Promise<DomainIngressCommandResult>;
+  }, context?: DomainIngressExecutionContext): Promise<DomainIngressCommandResult>;
+}
+
+export interface DomainIngressExecutionContext {
+  signal?: AbortSignal;
+  deadlineAt?: number;
 }
 
 export interface GatewayInboundInput {
@@ -58,17 +63,21 @@ export async function runDueAutomation<T>(input: {
   jobs: AutomationJobRecord[];
   now: string;
   isLockedError(error: unknown): boolean;
+  signal?: AbortSignal;
+  deadlineAt?: number;
 }): Promise<T[]> {
   const command = requireDomainCommandEntry("automation.job.run");
   const results: T[] = [];
   for (const job of input.jobs) {
+    assertIngressActive(input);
     try {
       const outcome = await input.dispatcher.run({
         command_id: command.id,
         input_source: "automation",
         idempotency_key: `automation:${job.id}:${job.next_run_at ?? input.now}`,
         payload: { job_id: job.id, now: input.now }
-      });
+      }, { signal: input.signal, deadlineAt: input.deadlineAt });
+      assertIngressActive(input);
       results.push(outcome.result as T);
     } catch (error) {
       if (input.isLockedError(error)) continue;
@@ -76,6 +85,11 @@ export async function runDueAutomation<T>(input: {
     }
   }
   return results;
+}
+
+function assertIngressActive(input: DomainIngressExecutionContext): void {
+  if (input.signal?.aborted) throw new Error("domain_ingress_cancelled");
+  if (input.deadlineAt !== undefined && Date.now() >= input.deadlineAt) throw new Error("domain_ingress_deadline_exceeded");
 }
 
 function stringValue(value: JsonValue | undefined): string {

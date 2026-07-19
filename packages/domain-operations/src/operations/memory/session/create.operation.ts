@@ -6,9 +6,9 @@ import { memoryWriteValueSchema } from "../../../value-objects/memory.js";
 import { createMemory, type MemoryCreatePorts } from "../create-memory.js";
 
 const Input = z.object({
-  "content": z.string().min(1), "envelope_id": z.string().trim().min(1).optional(),
+  "content": z.string().min(1),
   "input_locale": SupportedLocaleSchema.optional(), "metadata": z.record(domainJsonValueSchema).default({}),
-  "output_locale": SupportedLocaleSchema.optional(), "session_id": z.string().trim().min(1).optional(),
+  "output_locale": SupportedLocaleSchema.optional(),
   "title": z.string().optional(), "ui_locale": SupportedLocaleSchema.optional()
 }).strict();
 const Output = memoryWriteValueSchema;
@@ -19,7 +19,7 @@ const memorySessionCreate = defineCommand<MemorySessionCreatePorts>()({
   ...{
   "kind": "command",
   "id": "memory.session.create",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Create session memory",
   "description": "Keep the current turn as session-scoped memory.",
@@ -56,7 +56,7 @@ const memorySessionCreate = defineCommand<MemorySessionCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleMemorySessionCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await createMemory(ports, { kind: "session", content: input.content, sessionId: input.session_id, title: input.title, uiLocale: input.ui_locale, inputLocale: input.input_locale, outputLocale: input.output_locale, metadata: input.metadata, envelopeId: input.envelope_id })) };
+        return { ok: true, value: Output.parse(await createMemory(ports, { kind: "session", content: input.content, sessionId: context.sessionId, title: input.title, uiLocale: input.ui_locale, inputLocale: input.input_locale, outputLocale: input.output_locale, metadata: input.metadata, envelopeId: context.envelopeId })) };
       }
     };
   }

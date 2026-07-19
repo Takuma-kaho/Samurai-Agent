@@ -1,30 +1,20 @@
 // Domain operation module. Keep its contract and handler together.
 import { LearningSnapshotRecordSchema } from "@samurai-agent/core-schemas";
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../../definition/index.js";
 
-const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
-}).strict();
+const Input = z.object({}).strict();
 const Output = z.array(LearningSnapshotRecordSchema);
 
 export interface CuratorSnapshotListPorts extends DomainQueryPorts {
-  executeCuratorSnapshotList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  listCuratorSnapshots: ReadCapability<() => Promise<z.infer<typeof Output>> | z.infer<typeof Output>>;
 }
 
 const curatorSnapshotList = defineQuery<CuratorSnapshotListPorts>()({
   ...{
   "kind": "query",
   "id": "curator.snapshot.list",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "List Curator Snapshots",
   "description": "List restorable learning-resource snapshots.",
@@ -59,8 +49,8 @@ const curatorSnapshotList = defineQuery<CuratorSnapshotListPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCuratorSnapshotList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeCuratorSnapshotList(context, input);
+      execute: async function handleCuratorSnapshotList(_context: TrustedDomainContext, _input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        return { ok: true, value: Output.parse(await ports.listCuratorSnapshots()) };
       }
     };
   }

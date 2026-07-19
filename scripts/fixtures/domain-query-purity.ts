@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "kysely";
+import { domainQueryEntries } from "../../packages/action-catalog/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 
@@ -106,33 +107,67 @@ try {
   });
 
   const cases = [
-    ["collection.view.present", { collection_id: "query-purity" }],
-    ["skill.view", { skill_id: projectSkill.id, run_id: runId }],
-    ["file.read", { path: "query-purity.txt" }],
-    ["file.inspect", { path: "query-purity.txt" }],
-    ["file.list", { path: "." }],
-    ["browser.extract", { url: "data:text/html,%3Ctitle%3EQuery%20purity%3C%2Ftitle%3Eread%20only" }],
-    ["curator.snapshot.list", {}],
-    ["presentation.plan", { requested_kind: "built_in_surface" }],
-    ["generated_surface.export", { surface_id: surfaceId }],
-    ["collection.schema.docs", {}],
-    ["collection.schema.get", { collection_id: "query-purity" }],
-    ["collection.records.list", { collection_id: "query-purity" }]
+    { queryId: "collection.view.present", payload: { collection_id: "query-purity" } },
+    // BackendRun identity is Runtime-owned context, never a public Query DTO field.
+    { queryId: "skill.view", payload: { skill_id: projectSkill.id }, trusted: { runId } },
+    { queryId: "file.read", payload: { path: "query-purity.txt" } },
+    { queryId: "file.inspect", payload: { path: "query-purity.txt" } },
+    { queryId: "file.list", payload: { path: "." } },
+    { queryId: "browser.extract", payload: { url: "data:text/html,%3Ctitle%3EQuery%20purity%3C%2Ftitle%3Eread%20only" } },
+    { queryId: "curator.snapshot.list", payload: {} },
+    { queryId: "presentation.plan", payload: { requested_kind: "built_in_surface" } },
+    { queryId: "generated_surface.export", payload: { surface_id: surfaceId } },
+    { queryId: "collection.schema.docs", payload: {} },
+    { queryId: "collection.schema.get", payload: { collection_id: "query-purity" } },
+    { queryId: "collection.records.list", payload: { collection_id: "query-purity" } },
+    { queryId: "collection.search", payload: { collection_id: "query-purity", query: "", limit: 5 } },
+    { queryId: "memory.search", payload: { query: "", limit: 5 } },
+    { queryId: "session.search", payload: { query: "", limit: 5 } },
+    { queryId: "skill.search", payload: { query: "", limit: 5 } },
+    { queryId: "wiki.search", payload: { query: "", limit: 5 } }
   ] as const;
+  assert.equal(cases.length, domainQueryEntries.length, "query purity must execute every active Query");
+  assert.deepEqual(
+    [...new Set(cases.map(({ queryId }) => queryId))].sort(),
+    domainQueryEntries.map(({ id }) => id).sort(),
+    "query purity fixture must cover the canonical Query ID set"
+  );
+
+  // Freeze the Workspace adapter at its read boundary. Any Query that tries
+  // to call a write-capable Store method must fail, rather than being counted
+  // as read-only because a later snapshot happens to hide the write.
+  const storeRecord = store as unknown as Record<string, unknown>;
+  const blockedWrites: string[] = [];
+  for (const method of Object.getOwnPropertyNames(Object.getPrototypeOf(store))) {
+    if (!/^(save|create|update|delete|patch|set|write|record|touch|reindex|mark|insert|archive|upsert|append|claim|heartbeat)/i.test(method)) continue;
+    const original = storeRecord[method];
+    if (typeof original !== "function") continue;
+    storeRecord[method] = (..._args: unknown[]) => {
+      blockedWrites.push(method);
+      throw new Error(`query_write_attempt:${method}`);
+    };
+  }
 
   const before = await snapshot();
   await sql.raw("PRAGMA query_only=ON").execute(store.db);
-  for (const [query_id, payload] of cases) {
-    const result = await runtime.runDomainQuery({ query_id, input_source: "runtime_api", payload });
-    assert.equal(result.ok, true, `${query_id} did not execute successfully`);
-    assert.deepEqual(await snapshot(), before, `${query_id} changed SQLite or Workspace files`);
+  for (const queryCase of cases) {
+    const result = await runtime.runRuntimeApiDomainQuery({
+      query_id: queryCase.queryId,
+      payload: queryCase.payload
+    }, queryCase.trusted);
+    assert.equal(result.ok, true, `${queryCase.queryId} did not execute successfully`);
+    assert.deepEqual(await snapshot(), before, `${queryCase.queryId} changed SQLite or Workspace files`);
   }
-  const parallelResults = await Promise.all(cases.map(([query_id, payload]) => runtime.runDomainQuery({ query_id, input_source: "runtime_api", payload })));
+  const parallelResults = await Promise.all(cases.map((queryCase) => runtime.runRuntimeApiDomainQuery({
+    query_id: queryCase.queryId,
+    payload: queryCase.payload
+  }, queryCase.trusted)));
   assert.equal(parallelResults.every((result) => result.ok), true);
   assert.deepEqual(await snapshot(), before, "parallel queries changed SQLite or Workspace files");
   await assert.rejects(runtime.runDomainQuery({ query_id: "collection.schema.get", input_source: "runtime_api", payload: { collection_id: "missing" } }));
   assert.deepEqual(await snapshot(), before, "failed query changed SQLite or Workspace files");
-  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["QP02", "QP04", "QP05", "QP06", "QP07", "QP08"], queries: cases.length, sqlite_query_only: true, sqlite_unchanged: true, workspace_files_unchanged: true, parallel_queries: parallelResults.length, failure_pure: true })}\n`);
+  assert.equal(blockedWrites.length, 0, `read-only adapter observed writes: ${blockedWrites.join(",")}`);
+  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["QP02", "QP03", "QP04", "QP05", "QP06", "QP07", "QP08"], queries: cases.length, canonical_query_count: domainQueryEntries.length, sqlite_query_only: true, filesystem_read_only_adapter: true, sqlite_unchanged: true, workspace_files_unchanged: true, parallel_queries: parallelResults.length, failure_pure: true })}\n`);
 } finally {
   await runtime.shutdownMcpProcessPool().catch(() => undefined);
   await store.close().catch(() => undefined);

@@ -20,6 +20,7 @@ import type { SkillDomainService } from "./commands/services/skill-domain-servic
 import type { SystemDomainService } from "./commands/services/system-domain-service.js";
 import type { TranslationDomainService } from "./commands/services/translation-domain-service.js";
 import type { WikiDomainService } from "./commands/services/wiki-domain-service.js";
+import type { SearchDomainService } from "./commands/services/search-domain-service.js";
 
 export interface RuntimeDomainServices {
   artifactDomainService: ArtifactDomainService;
@@ -43,5 +44,5 @@ export interface RuntimeDomainServices {
   systemDomainService: SystemDomainService;
   translationDomainService: TranslationDomainService;
   wikiDomainService: WikiDomainService;
+  searchDomainService: SearchDomainService;
 }
-

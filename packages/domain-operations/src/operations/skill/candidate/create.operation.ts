@@ -2,27 +2,18 @@
 import { z } from "zod";
 import { ProvenanceSchema, ResourceRefSchema, createId, nowIso } from "@samurai-agent/core-schemas";
 import { renderSkillMarkdown } from "@samurai-agent/skills";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillWriteValueSchema } from "../../../value-objects/skill.js";
 import type { SkillCandidateMutationPorts } from "../skill-mutation.js";
 
 const Input = z.object({
-  "content": z.string(),
-  "description": z.string() .optional(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
+  "content": z.string().max(1_000_000),
+  "description": z.string().max(10_000).optional(),
   "provenance_detail": ProvenanceSchema.optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "required_capabilities": z.array(z.string().trim().min(1)) .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "source_refs": z.array(ResourceRefSchema) .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "tags": z.array(z.string()) .optional(),
-  "title": z.string()
+  "required_capabilities": z.array(z.string().trim().min(1).max(256)).max(100).default([]),
+  "source_refs": z.array(ResourceRefSchema).max(1_000).default([]),
+  "tags": z.array(z.string().max(128)).max(100).default([]),
+  "title": z.string().max(512)
 }).strict();
 const Output = skillWriteValueSchema;
 
@@ -32,7 +23,7 @@ const skillCandidateCreate = defineCommand<SkillCandidateCreatePorts>()({
   ...{
   "kind": "command",
   "id": "skill.candidate.create",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Create skill candidate",
   "description": "Create a reusable Skill candidate from a reflection or backend pattern.",
@@ -68,14 +59,14 @@ const skillCandidateCreate = defineCommand<SkillCandidateCreatePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleSkillCandidateCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleSkillCandidateCreate(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const contract = ports.skillMutationContract("skill.candidate.create");
         const skillId = createId("skill");
         const markdown = renderSkillMarkdown({
-          id: skillId, state: "candidate", title: input.title, description: input.description ?? "", tags: input.tags ?? [],
+          id: skillId, state: "candidate", title: input.title, description: input.description ?? "", tags: input.tags,
           provenance: "generated_local", trust_level: "generated_local", allowed_scopes: ["skill"],
-          required_capabilities: input.required_capabilities ?? [], schedule_policy: {}, secret_policy: {}, owner_pinned: false,
-          last_reviewed_at: nowIso(), source_refs: input.source_refs ?? [], provenance_detail: input.provenance_detail ?? {
+          required_capabilities: input.required_capabilities, schedule_policy: {}, secret_policy: {}, owner_pinned: false,
+          last_reviewed_at: nowIso(), source_refs: input.source_refs, provenance_detail: input.provenance_detail ?? {
             kind: "generated_local", summary: "Created from a local runtime operation.", verified: false
           }
         }, input.content);

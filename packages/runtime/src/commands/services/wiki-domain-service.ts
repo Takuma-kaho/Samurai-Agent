@@ -16,7 +16,15 @@ type WikiInput = {
   id: string; title?: string; content?: string; tags?: string[]; content_locale?: SupportedLocale;
   source_refs?: WikiFrontmatter["source_refs"]; provenance?: WikiFrontmatter["provenance"];
 };
-interface WikiWriteResult<T> { resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
+export interface WikiWriteResult<T> { resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
+export interface WikiMutationInput<T> {
+  session: SessionRecord;
+  envelope: MessageEnvelope;
+  operationName: string;
+  proposedEffects: string[];
+  targetResourceRefs?: ResourceRef[];
+  execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }>;
+}
 
 export interface WikiExecutionPort {
   get(id: string): Promise<StoredWiki | undefined>;
@@ -27,7 +35,7 @@ export interface WikiExecutionPort {
   reindex(): Promise<WikiReindexResult>;
   ensureSession(): Promise<SessionRecord>;
   createEnvelope(content: string): MessageEnvelope;
-  runMutation<T>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<WikiWriteResult<T>>;
+  runMutation<T>(input: WikiMutationInput<T>): Promise<WikiWriteResult<T>>;
   createRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   requestError(code: "not_found", message: string): Error;
 }
@@ -38,7 +46,7 @@ export class WikiDomainService {
   ensureWikiSession() { return this.dependencies.wiki.ensureSession(); }
   createWikiEnvelope(content: string) { return this.dependencies.wiki.createEnvelope(content); }
   reindexWikiPages() { return this.dependencies.wiki.reindex(); }
-  runWikiMutation<T>(input: Parameters<WikiExecutionPort["runMutation"]>[0]) { return this.dependencies.wiki.runMutation(input) as Promise<WikiWriteResult<T>>; }
+  runWikiMutation<T>(input: WikiMutationInput<T>): Promise<WikiWriteResult<T>> { return this.dependencies.wiki.runMutation(input); }
   getWikiPage(id: string) { return this.dependencies.wiki.get(id); }
   setWikiPageState(id: string, state: WikiFrontmatter["state"]) { return this.dependencies.wiki.setState(id, state); }
   createWikiRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.wiki.createRollback(operation, refs, before, after); }

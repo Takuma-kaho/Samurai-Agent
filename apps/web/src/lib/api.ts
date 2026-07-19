@@ -342,6 +342,12 @@ export const api = {
   getGeneratedSurface(surfaceId: string) {
     return request<GeneratedSurfaceDetail>(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}`);
   },
+  runGeneratedSurfaceAction(surfaceId: string, actionId: string, payload: { revision_id?: string; interaction_id?: string; message_id?: string; action_payload?: Record<string, JsonValue> }) {
+    return request(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}/actions/${encodeURIComponent(actionId)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ payload })
+    });
+  },
   getGeneratedSurfaceBundle(surfaceId: string, revisionId: string) {
     return request<{ revision: GeneratedSurfaceRevisionRecord; bundle: { html: string; css?: string; script?: string }; csp: string }>(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}/revisions/${encodeURIComponent(revisionId)}/bundle`);
   },

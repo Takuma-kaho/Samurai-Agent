@@ -25,6 +25,7 @@ export const domainCommandOutputRenderKinds = domainRenderKinds;
 export type DomainCommandOutputRenderKind = DomainRenderKind;
 export type DomainCommandEntry = DomainCommandCatalogEntry;
 export type DomainQueryEntry = DomainQueryCatalogEntry;
+export type DomainOperationCatalogEntry = DomainCommandEntry | DomainQueryEntry;
 
 export interface DeprecatedDomainCommandEntry {
   id: string;
@@ -37,6 +38,13 @@ export interface DeprecatedDomainCommandEntry {
 
 export const domainCommandEntries = [...projectedCommandEntries];
 export const domainQueryEntries = [...projectedQueryEntries];
+export const domainOperationEntries: readonly DomainOperationCatalogEntry[] = Object.freeze([
+  ...domainCommandEntries,
+  ...domainQueryEntries
+]);
+const domainCommandEntryById = new Map(domainCommandEntries.map((entry) => [entry.id, entry] as const));
+const domainQueryEntryById = new Map(domainQueryEntries.map((entry) => [entry.id, entry] as const));
+const domainLegacyCommandEntryById = new Map<string, DeprecatedDomainCommandEntry>();
 export const domainLegacyCommandEntries: DeprecatedDomainCommandEntry[] = deprecatedOperations.map((entry) => ({
   id: entry.id,
   title: entry.title,
@@ -45,6 +53,27 @@ export const domainLegacyCommandEntries: DeprecatedDomainCommandEntry[] = deprec
   availability: "deprecated_command",
   replacement: entry.replacement
 }));
+for (const entry of domainLegacyCommandEntries) domainLegacyCommandEntryById.set(entry.id, entry);
+const domainCommandBySurfaceKind = new Map<string, DomainCommandEntry>();
+const domainCommandByProviderToolName = new Map<string, DomainCommandEntry>();
+const domainQueryBySurfaceKind = new Map<string, DomainQueryEntry>();
+const domainQueryByProviderToolName = new Map<string, DomainQueryEntry>();
+const domainOperationByProviderToolName = new Map<string, DomainOperationCatalogEntry>();
+for (const entry of domainOperationEntries) {
+  for (const name of entry.provider_tool_names ?? []) {
+    const existing = domainOperationByProviderToolName.get(name);
+    if (existing) throw new Error(`duplicate_domain_provider_tool_name:${name}:${existing.id}:${entry.id}`);
+    domainOperationByProviderToolName.set(name, entry);
+  }
+}
+for (const entry of domainCommandEntries) {
+  for (const kind of entry.surface_operation_kinds ?? []) if (!domainCommandBySurfaceKind.has(kind)) domainCommandBySurfaceKind.set(kind, entry);
+  for (const name of entry.provider_tool_names ?? []) domainCommandByProviderToolName.set(name, entry);
+}
+for (const entry of domainQueryEntries) {
+  for (const kind of entry.surface_operation_kinds ?? []) if (!domainQueryBySurfaceKind.has(kind)) domainQueryBySurfaceKind.set(kind, entry);
+  for (const name of entry.provider_tool_names ?? []) domainQueryByProviderToolName.set(name, entry);
+}
 
 export const collectionManageCompatibilityEntry = {
   id: collectionManageCompatibility.id,
@@ -78,7 +107,7 @@ export const actionCatalogEntries: ActionCatalogEntry[] = domainCommandEntries.m
 }));
 
 export function getDomainCommandEntry(id: string): DomainCommandEntry | undefined {
-  return domainCommandEntries.find((entry) => entry.id === id);
+  return domainCommandEntryById.get(id);
 }
 
 export function requireDomainCommandEntry(id: string): DomainCommandEntry {
@@ -88,7 +117,7 @@ export function requireDomainCommandEntry(id: string): DomainCommandEntry {
 }
 
 export function getDeprecatedDomainCommandEntry(id: string): DeprecatedDomainCommandEntry | undefined {
-  return domainLegacyCommandEntries.find((entry) => entry.id === id);
+  return domainLegacyCommandEntryById.get(id);
 }
 
 export function listDomainCommandEntries(source?: DomainCommandInputSource): DomainCommandEntry[] {
@@ -98,7 +127,7 @@ export function listDomainCommandEntries(source?: DomainCommandInputSource): Dom
 }
 
 export function getDomainQueryEntry(id: string): DomainQueryEntry | undefined {
-  return domainQueryEntries.find((entry) => entry.id === id);
+  return domainQueryEntryById.get(id);
 }
 
 export function requireDomainQueryEntry(id: string): DomainQueryEntry {
@@ -114,19 +143,23 @@ export function listDomainQueryEntries(source?: DomainCommandInputSource): Domai
 }
 
 export function getDomainCommandForSurfaceOperationKind(kind: string): DomainCommandEntry | undefined {
-  return domainCommandEntries.find((entry) => entry.surface_operation_kinds?.includes(kind));
+  return domainCommandBySurfaceKind.get(kind);
 }
 
 export function getDomainCommandForProviderToolName(name: string): DomainCommandEntry | undefined {
-  return domainCommandEntries.find((entry) => entry.provider_tool_names?.includes(name));
+  return domainCommandByProviderToolName.get(name);
 }
 
 export function getDomainQueryForSurfaceOperationKind(kind: string): DomainQueryEntry | undefined {
-  return domainQueryEntries.find((entry) => entry.surface_operation_kinds?.includes(kind));
+  return domainQueryBySurfaceKind.get(kind);
 }
 
 export function getDomainQueryForProviderToolName(name: string): DomainQueryEntry | undefined {
-  return domainQueryEntries.find((entry) => entry.provider_tool_names?.includes(name));
+  return domainQueryByProviderToolName.get(name);
+}
+
+export function getDomainOperationForProviderToolName(name: string): DomainOperationCatalogEntry | undefined {
+  return domainOperationByProviderToolName.get(name);
 }
 
 export function validateDomainCommandInput(entry: DomainCommandEntry, payload: Record<string, unknown>): ValidationIssue | undefined {
@@ -181,13 +214,15 @@ interface ValidationIssue {
 }
 
 function validateOperationInput(id: string, payload: Record<string, unknown>): ValidationIssue | undefined {
-  const definition = operationDefinitions.find((candidate) => candidate.id === id);
+  const definition = operationDefinitionById.get(id);
   if (!definition) return { path: "$", message: `Unknown domain operation: ${id}` };
   const result = definition.input.safeParse(payload);
   if (result.success) return undefined;
   const issue = result.error.issues[0];
   return { path: issue?.path.length ? `$.${issue.path.join(".")}` : "$", message: issue?.message ?? "Invalid input." };
 }
+
+const operationDefinitionById = new Map(operationDefinitions.map((definition) => [definition.id, definition] as const));
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);

@@ -1,34 +1,23 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../../definition/index.js";
 import { collectionViewValueSchema } from "../../../value-objects/collection.js";
 
 const Input = z.object({
-  "collection_id": z.string(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "query": z.string() .optional(),
-  "record_id": z.string() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "view_id": z.string() .optional()
+  "collection_id": z.string().trim().min(1).max(256),
+  "view_id": z.string().trim().min(1).max(256).optional()
 }).strict();
 const Output = collectionViewValueSchema;
 
 export interface CollectionViewPresentPorts extends DomainQueryPorts {
-  presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<z.infer<typeof Output>>;
+  presentCollectionView: ReadCapability<(input: { collectionId: string; viewId?: string }) => Promise<z.infer<typeof Output>>>;
 }
 
 const collectionViewPresent = defineQuery<CollectionViewPresentPorts>()({
   ...{
   "kind": "query",
   "id": "collection.view.present",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Present collection view",
   "description": "Regenerate a Collection view render spec from current schema, records, actions, and permissions.",
@@ -75,7 +64,7 @@ const collectionViewPresent = defineQuery<CollectionViewPresentPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionViewPresent(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleCollectionViewPresent(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         return { ok: true, value: Output.parse(await ports.presentCollectionView({ collectionId: input.collection_id, viewId: input.view_id })) };
       }
     };

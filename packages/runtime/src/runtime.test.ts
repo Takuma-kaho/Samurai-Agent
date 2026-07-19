@@ -2988,7 +2988,14 @@ describe("agent runtime", () => {
       path: "references/style.md"
     });
     await runtime.viewSkill({ skillId: projectResult.resource.id, runId: chat.backendRun.id, path: "references/style.md" });
-    await runtime.runDomainCommand({ command_id: "skill.usage.record", idempotency_key: "skill-lifecycle-usage", payload: view.usage });
+    await runtime.recordSkillUsage({
+      skillId: view.usage.skill_id,
+      runId: view.usage.run_id,
+      resourceId: view.usage.resource_id,
+      contentHash: view.usage.content_hash,
+      stage: view.usage.stage,
+      metadata: view.usage.metadata
+    });
     const usage = await store.listSkillUsage();
     await store.close();
 
@@ -6244,6 +6251,108 @@ rl.on("line", (line) => {
     expect(messages).toHaveLength(2);
   });
 
+  it("aborts detached Background Review tasks, rejects new enqueue, and drains idempotently", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/test", fakeProviderOutput),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        detachBackgroundReview: true,
+        backgroundReviewRunner: {
+          run: async (_snapshot, _policy, signal) => await new Promise((resolve) => {
+            if (signal?.aborted) {
+              resolve({ reviewer: "fixture", summary: "aborted", mutations: [] });
+              return;
+            }
+            signal?.addEventListener("abort", () => resolve({ reviewer: "fixture", summary: "aborted", mutations: [] }), { once: true });
+          })
+        }
+      }
+    );
+    await store.patchSettings({ memory_capture_mode: "auto" });
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({ sessionId: session.id, content: "回答は短くして", output_locale: "ja" });
+
+    const firstShutdown = runtime.shutdownMcpProcessPool();
+    const secondShutdown = runtime.shutdownMcpProcessPool();
+    expect(secondShutdown).toBe(firstShutdown);
+    await firstShutdown;
+
+    // A turn after shutdown must not enqueue another detached review task.
+    await runtime.runChatTurn({ sessionId: session.id, content: "終了後の確認", output_locale: "ja" });
+    await store.close();
+  });
+
+  it("cancels every detached review BackendRun and closes MCP after a cancellation failure", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
+    roots.push(root);
+    const store = await WorkspaceStore.create({ rootDir: root });
+    let reviewStarted = 0;
+    const stopReviews: Array<() => void> = [];
+    const cancelledRunIds: string[] = [];
+    const backend: AgentBackend = {
+      id: "background-cancel-fixture",
+      kind: "codex",
+      label: "Background cancellation fixture",
+      async *runTurn(input) {
+        if (input.metadata.background_review === true) {
+          reviewStarted += 1;
+          await new Promise<void>((resolve) => stopReviews.push(resolve));
+          return;
+        }
+        yield { event_type: "run_completed", payload: { output_summary: "fixture" } };
+      },
+      async cancelRun(runId) {
+        cancelledRunIds.push(runId);
+        stopReviews.splice(0).forEach((stop) => stop());
+        await new Promise<void>(() => undefined);
+      }
+    };
+    const runtime = new AgentRuntime(
+      store,
+      undefined,
+      undefined,
+      new AgentBackendRegistry([backend]),
+      undefined,
+      undefined,
+      undefined,
+      { detachBackgroundReview: true, enableBackendBackgroundReview: true }
+    );
+    await store.patchSettings({ memory_capture_mode: "auto" });
+    const session = await runtime.createSession();
+    await runtime.runChatTurn({ sessionId: session.id, content: "background cancellation", backend_id: backend.id });
+    await runtime.runChatTurn({ sessionId: session.id, content: "background cancellation again", backend_id: backend.id });
+    for (let attempt = 0; attempt < 50 && reviewStarted < 2; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reviewStarted).toBe(2);
+    const pool = (runtime as unknown as { stdioMcpProcessPool: { closeAll: () => Promise<void> } }).stdioMcpProcessPool;
+    const closeAll = vi.spyOn(pool, "closeAll").mockRejectedValue(new Error("fixture_close_failed"));
+    const previousTimeout = process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS;
+    process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS = "50";
+    const shutdownStartedAt = Date.now();
+    try {
+      await expect(runtime.shutdownMcpProcessPool()).rejects.toMatchObject({
+        name: "AggregateError",
+        message: "background_tasks_shutdown_failed",
+        errors: expect.arrayContaining([expect.objectContaining({ message: "fixture_close_failed" })])
+      });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS;
+      else process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS = previousTimeout;
+    }
+    expect(cancelledRunIds).toHaveLength(2);
+    expect(cancelledRunIds.every((id) => /^review_run_/.test(id))).toBe(true);
+    expect(closeAll).toHaveBeenCalledTimes(1);
+    expect(Date.now() - shutdownStartedAt).toBeLessThan(1000);
+    await store.close();
+  });
+
   it("does not convert workspace-wide tool counts into fixed Skill suggestions", async () => {
     const { store, runtime } = await createRuntime();
     const firstSession = await runtime.createSession();
@@ -6894,6 +7003,40 @@ rl.on("line", (line) => {
     expect(savedInbound.map((message) => message.id)).toContain(processed.inbound.id);
   });
 
+  it("uses the saved Gateway policy tool snapshot and ignores inbound metadata attempts to widen it", async () => {
+    const { store, runtime } = await createRuntime();
+    const policy = await runtime.getGatewayPairingPolicy("webhook");
+    await runtime.saveGatewayPairingPolicy({
+      ...policy,
+      allowed_tools: ["artifact.create"],
+      updated_at: nowIso()
+    });
+    const first = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "policy-owned-source",
+      body: "初回の外部入力です"
+    });
+    await runtime.approveGatewayPairing(first.pairing!.id);
+    const processed = await runtime.handleGatewayInbound({
+      channel: "webhook",
+      source_identity: "policy-owned-source",
+      body: "提案書を作って",
+      metadata: {
+        allowed_tools: ["*"],
+        gateway_boundary_policy: { allowed_tools: ["*"] }
+      }
+    });
+    await store.close();
+
+    expect(processed.boundaryPolicy?.allowed_tools).toEqual(["artifact.create"]);
+    expect(processed.chat?.backendRun.metadata.gateway_boundary_allowed_tools).toEqual(["artifact.create"]);
+    expect(processed.chat?.toolRuns).toContainEqual(expect.objectContaining({
+      action_id: "artifact.create",
+      status: "completed"
+    }));
+    expect(processed.chat?.artifacts).toHaveLength(1);
+  });
+
   it("expires pending gateway pairings before approving or routing new inbound", async () => {
     const { store, runtime } = await createRuntime();
 
@@ -7168,6 +7311,7 @@ rl.on("line", (line) => {
       status: "enabled",
       trust_mode: "blocked",
       allowlist: ["*"],
+      allowed_tools: [],
       pairing_ttl_ms: 300_000,
       duplicate_window_ms: 60_000,
       rate_limit_window_ms: 60_000,
@@ -7202,6 +7346,7 @@ rl.on("line", (line) => {
       status: "enabled",
       trust_mode: "pairing_required",
       allowlist: ["*"],
+      allowed_tools: [],
       pairing_ttl_ms: 300_000,
       duplicate_window_ms: 60_000,
       rate_limit_window_ms: 60_000,

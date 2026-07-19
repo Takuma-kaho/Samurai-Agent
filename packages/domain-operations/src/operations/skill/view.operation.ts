@@ -1,21 +1,11 @@
 // Domain operation module. Keep its contract and handler together.
 import { ExecutionScopeSchema, SkillFrontmatterSchema, SkillStateSchema } from "@samurai-agent/core-schemas";
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineQuery, TrustedDomainContextError, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "path": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "run_id": z.string(),
-  "session_id": z.string() .optional(),
-  "skill_id": z.string(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "skill_id": z.string().trim().min(1).max(256),
+  "path": z.string().trim().min(1).max(4096).optional()
 }).strict();
 const Output = z.object({
   skill: z.object({
@@ -43,15 +33,18 @@ const Output = z.object({
   }).strict()
 }).strict();
 
+export type SkillViewInput = z.infer<typeof Input>;
+export type SkillViewOutput = z.infer<typeof Output>;
+
 export interface SkillViewPorts extends DomainQueryPorts {
-  executeSkillView(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  viewSkill: ReadCapability<(input: { skillId: string; runId: string; path?: string }) => Promise<SkillViewOutput> | SkillViewOutput>;
 }
 
 const skillView = defineQuery<SkillViewPorts>()({
   ...{
   "kind": "query",
   "id": "skill.view",
-  "version": "1.0",
+  "version": "3.0",
   "availability": "active",
   "title": "View Skill",
   "description": "Read a selected Skill body or one declared support file on demand.",
@@ -94,7 +87,12 @@ const skillView = defineQuery<SkillViewPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleSkillView(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeSkillView(context, input);
+        if (!context.runId) throw new TrustedDomainContextError("skill.view", "runId");
+        return { ok: true, value: Output.parse(await ports.viewSkill({
+          skillId: input.skill_id,
+          runId: context.runId,
+          ...(input.path ? { path: input.path } : {})
+        })) };
       }
     };
   }

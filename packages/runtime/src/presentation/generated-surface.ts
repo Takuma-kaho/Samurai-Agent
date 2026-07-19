@@ -1,16 +1,20 @@
 import { createHash } from "node:crypto";
 import { getDomainCommandEntry } from "@samurai-agent/action-catalog";
+import { z } from "zod";
 import {
+  GeneratedSurfaceActionDeclarationSchema,
   GeneratedSurfaceDefinitionSchema,
   GeneratedSurfaceRevisionRecordSchema,
   GeneratedSurfaceValidationReportSchema,
   createId,
+  jsonValueSchema,
   nowIso,
   stableHash,
   type GeneratedSurfaceActionDeclaration,
   type GeneratedSurfaceDefinition,
   type GeneratedSurfaceRevisionRecord,
   type GeneratedSurfaceValidationReport,
+  type JsonValue,
   type ResourceRef,
   type SurfaceGenerationRequest
 } from "@samurai-agent/core-schemas";
@@ -23,9 +27,26 @@ export interface GeneratedSurfaceBundleInput {
   css?: string;
   script?: string;
   actions: GeneratedSurfaceActionDeclaration[];
-  input_data_schema?: Record<string, unknown>;
+  input_data_schema?: Record<string, JsonValue>;
   assets?: Array<{ path: string; content: string; encoding?: "utf8" | "base64"; mime_type?: string }>;
 }
+
+const generatedSurfaceBundleOutputSchema = z.object({
+  title: z.string(),
+  html: z.string(),
+  css: z.string().optional(),
+  script: z.string().optional(),
+  actions: z.array(GeneratedSurfaceActionDeclarationSchema),
+  input_data_schema: z.record(jsonValueSchema).optional(),
+  assets: z.array(z.object({
+    path: z.string(),
+    content: z.string(),
+    encoding: z.enum(["utf8", "base64"]).optional(),
+    mime_type: z.string().optional()
+  })).optional()
+});
+
+const generatedSurfaceBundleWrapperSchema = z.object({ custom_view: generatedSurfaceBundleOutputSchema });
 
 export function validateGeneratedSurfaceBundle(request: SurfaceGenerationRequest, bundle: GeneratedSurfaceBundleInput): GeneratedSurfaceValidationReport {
   const issues: Array<{ code: string; message: string }> = [];
@@ -119,31 +140,12 @@ export function buildGeneratedSurfaceRevision(input: {
   return { definition, revision, validation };
 }
 
+/** Parse untrusted provider output once, then expose only JSON-safe bundle data. */
 export function parseGeneratedSurfaceOutput(value: unknown): GeneratedSurfaceBundleInput | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const surface = "custom_view" in value && value.custom_view && typeof value.custom_view === "object" ? value.custom_view as Record<string, unknown> : value as Record<string, unknown>;
-  if (typeof surface.title !== "string" || typeof surface.html !== "string" || !Array.isArray(surface.actions)) return undefined;
-  return {
-    title: surface.title,
-    html: surface.html,
-    ...(typeof surface.css === "string" ? { css: surface.css } : {}),
-    ...(typeof surface.script === "string" ? { script: surface.script } : {}),
-    actions: surface.actions as GeneratedSurfaceActionDeclaration[],
-    ...(Array.isArray(surface.assets) ? {
-      assets: surface.assets.flatMap((asset) => {
-        if (!asset || typeof asset !== "object" || Array.isArray(asset)) return [];
-        const entry = asset as Record<string, unknown>;
-        if (typeof entry.path !== "string" || typeof entry.content !== "string") return [];
-        return [{
-          path: entry.path,
-          content: entry.content,
-          ...(entry.encoding === "base64" ? { encoding: "base64" as const } : {}),
-          ...(typeof entry.mime_type === "string" ? { mime_type: entry.mime_type } : {})
-        }];
-      })
-    } : {}),
-    ...(surface.input_data_schema && typeof surface.input_data_schema === "object" && !Array.isArray(surface.input_data_schema) ? { input_data_schema: surface.input_data_schema as Record<string, unknown> } : {})
-  };
+  const direct = generatedSurfaceBundleOutputSchema.safeParse(value);
+  if (direct.success) return direct.data as GeneratedSurfaceBundleInput;
+  const wrapped = generatedSurfaceBundleWrapperSchema.safeParse(value);
+  return wrapped.success ? wrapped.data.custom_view as GeneratedSurfaceBundleInput : undefined;
 }
 
 export function safeGeneratedSurfaceAssetPath(value: string): string | undefined {

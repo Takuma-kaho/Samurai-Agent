@@ -74,7 +74,7 @@ export interface BackgroundReviewResult {
 }
 
 export interface BackgroundReviewRunner {
-  run(snapshot: ReviewSnapshot, policy: BackgroundReviewPolicy): Promise<BackgroundReviewResult>;
+  run(snapshot: ReviewSnapshot, policy: BackgroundReviewPolicy, signal?: AbortSignal): Promise<BackgroundReviewResult>;
 }
 
 export const defaultBackgroundReviewPolicy: BackgroundReviewPolicy = {

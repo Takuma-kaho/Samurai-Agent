@@ -1,31 +1,22 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { workspaceRepairValueSchema } from "../../value-objects/workspace-maintenance.js";
 
 const Input = z.object({
-  "dry_run": z.boolean() .optional(),
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  "dry_run": z.boolean().default(true)
 }).strict();
 const Output = workspaceRepairValueSchema;
 
 export interface WorkspaceRepairPorts {
-  executeWorkspaceRepair(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  repairWorkspace(input: { dryRun: boolean }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const workspaceRepair = defineCommand<WorkspaceRepairPorts>()({
   ...{
   "kind": "command",
   "id": "workspace.repair",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Repair workspace",
   "description": "Inspect and repair recoverable Workspace integrity issues.",
@@ -60,8 +51,8 @@ const workspaceRepair = defineCommand<WorkspaceRepairPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleWorkspaceRepair(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeWorkspaceRepair(context, input);
+      execute: async function handleWorkspaceRepair(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        return { ok: true, value: Output.parse(await ports.repairWorkspace({ dryRun: input.dry_run })) };
       }
     };
   }

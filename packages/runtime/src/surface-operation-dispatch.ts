@@ -1,8 +1,6 @@
 import {
   getDomainCommandForSurfaceOperationKind,
-  getDomainQueryEntry,
   getDomainQueryForSurfaceOperationKind,
-  requireDomainCommandEntry,
   type DomainCommandEntry,
   type DomainCommandOutputRenderKind,
   type DomainQueryEntry
@@ -73,7 +71,8 @@ function queryRenderKind(query: DomainQueryEntry, renderKind: SurfaceRenderKind)
 
 export function planSurfaceOperationDispatch(operation: SurfaceOperation): SurfaceOperationDispatchPlan {
   if (operation.kind === "message.submit") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("chat.turn.run");
+    const command = getDomainCommandForSurfaceOperationKind(operation.kind);
+    if (!command) throw new Error(`surface_command_mapping_missing:${operation.kind}`);
     return surfaceDispatchPlan(operation, {
       dispatchTarget: "host_chat",
       runtimeMethod: "runDomainCommand",
@@ -87,7 +86,8 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
     });
   }
   if (operation.kind === "collection.record.create") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.record.create");
+    const command = getDomainCommandForSurfaceOperationKind(operation.kind);
+    if (!command) throw new Error(`surface_command_mapping_missing:${operation.kind}`);
     return surfaceDispatchPlan(operation, {
       dispatchTarget: "collection_engine",
       runtimeMethod: "runDomainCommand",
@@ -101,7 +101,8 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
     });
   }
   if (operation.kind === "collection.view.present") {
-    const query = getDomainQueryForSurfaceOperationKind(operation.kind) ?? getDomainQueryEntry("collection.view.present")!;
+    const query = getDomainQueryForSurfaceOperationKind(operation.kind);
+    if (!query) throw new Error(`surface_query_mapping_missing:${operation.kind}`);
     return surfaceDispatchPlan(operation, {
       dispatchTarget: "collection_engine",
       runtimeMethod: "runDomainQuery",
@@ -115,7 +116,8 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
     });
   }
   if (operation.kind === "collection.record.patch") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.patch.apply");
+    const command = getDomainCommandForSurfaceOperationKind(operation.kind);
+    if (!command) throw new Error(`surface_command_mapping_missing:${operation.kind}`);
     return surfaceDispatchPlan(operation, {
       dispatchTarget: "collection_engine",
       runtimeMethod: "runDomainCommand",
@@ -129,7 +131,8 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
     });
   }
   if (operation.kind === "collection.record.delete") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.record.delete");
+    const command = getDomainCommandForSurfaceOperationKind(operation.kind);
+    if (!command) throw new Error(`surface_command_mapping_missing:${operation.kind}`);
     return surfaceDispatchPlan(operation, {
       dispatchTarget: "collection_engine",
       runtimeMethod: "runDomainCommand",
@@ -143,7 +146,8 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
     });
   }
   if (operation.kind === "collection.action.run") {
-    const command = getDomainCommandForSurfaceOperationKind(operation.kind) ?? requireDomainCommandEntry("collection.action.run");
+    const command = getDomainCommandForSurfaceOperationKind(operation.kind);
+    if (!command) throw new Error(`surface_command_mapping_missing:${operation.kind}`);
     return surfaceDispatchPlan(operation, {
       dispatchTarget: "collection_engine",
       runtimeMethod: "runDomainCommand",
@@ -157,7 +161,8 @@ export function planSurfaceOperationDispatch(operation: SurfaceOperation): Surfa
     });
   }
   const structuredOperation = operation as StructuredSurfaceOperation;
-  const command = getDomainCommandForSurfaceOperationKind(structuredOperation.kind) ?? requireDomainCommandEntry("artifact.create");
+  const command = getDomainCommandForSurfaceOperationKind(structuredOperation.kind);
+  if (!command) throw new Error(`surface_command_mapping_missing:${structuredOperation.kind}`);
   return surfaceDispatchPlan(structuredOperation, {
     dispatchTarget: "artifact_pipeline",
     runtimeMethod: "runDomainCommand",

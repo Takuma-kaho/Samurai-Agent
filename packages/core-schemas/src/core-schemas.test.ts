@@ -346,6 +346,7 @@ describe("core schemas", () => {
       status: "enabled",
       trust_mode: "pairing_required",
       allowlist: ["line:*"],
+      allowed_tools: [],
       metadata: {},
       created_at: now,
       updated_at: now

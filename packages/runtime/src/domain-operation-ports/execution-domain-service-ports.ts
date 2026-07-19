@@ -11,34 +11,19 @@ export function createExecutionDomainServicePorts(services: Pick<RuntimeDomainSe
       workItemObjectiveNotFoundError: () => services.executionDomainService.objectiveNotFoundError()
     },
     "work_item.follow_up": {
-      executeWorkItemFollowUp: async (context, input) => ({
-        ok: true as const,
-        value: await services.executionDomainService.followUpWorkItem(input)
-      })
+      createFollowUpWorkItem: (input) => services.executionDomainService.followUpWorkItem(input)
     },
     "work_item.steer": {
-      executeWorkItemSteer: async (context, input) => ({
-        ok: true as const,
-        value: await services.executionDomainService.steerWorkItem(input)
-      })
+      steerWorkItem: (input) => services.executionDomainService.steerWorkItem(input)
     },
     "workspace.backup.create": {
-      executeWorkspaceBackupCreate: async (context, input) => ({
-        ok: true as const,
-        value: await services.executionDomainService.createWorkspaceBackup()
-      })
+      createWorkspaceBackup: () => services.executionDomainService.createWorkspaceBackup()
     },
     "workspace.backup.restore": {
-      executeWorkspaceBackupRestore: async (context, input) => ({
-        ok: true as const,
-        value: await services.executionDomainService.restoreWorkspaceBackup(input)
-      })
+      restoreWorkspaceBackup: (input) => services.executionDomainService.restoreWorkspaceBackup(input)
     },
     "workspace.repair": {
-      executeWorkspaceRepair: async (context, input) => ({
-        ok: true as const,
-        value: await services.executionDomainService.repairWorkspace(input)
-      })
+      repairWorkspace: (input) => services.executionDomainService.repairWorkspace(input)
     }
   };
 }

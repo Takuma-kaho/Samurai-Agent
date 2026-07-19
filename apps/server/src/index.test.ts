@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
 import { stableHash, type JsonValue } from "@samurai-agent/core-schemas";
 import { createDefaultAgentBackendRegistry, FakeProviderAdapter, ProviderRequestError, type ExternalAssistProvider, type ProviderAdapter, type ProviderInput, type ProviderOutput } from "@samurai-agent/runtime";
-import { closeApiServer, createApiServer, loadServerEnv, resolveWorkspaceRoot, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
+import { closeApiServer, createApiServer, installServerSignalHandlers, loadServerEnv, resolveWorkspaceRoot, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
 
 const roots: string[] = [];
 const servers: ApiServer[] = [];
@@ -298,6 +298,64 @@ describe("server env loading", () => {
       expect.objectContaining({ code: "plugin_missing_handlers", manifest_id: "broken-plugin", severity: "critical", missing_handler_ids: ["broken.echo.handler"] })
     ]));
     expect(diagnostics.recommendation).toContain("critical plugin");
+  });
+});
+
+describe("server shutdown", () => {
+  it("shares closeApiServer, completes every cleanup, and closes WorkspaceStore last", async () => {
+    const calls: string[] = [];
+    let runtimeAttempts = 0;
+    const lifecycle = { started_at: new Date().toISOString(), closing: false };
+    const server = {
+      lifecycle,
+      scheduler: undefined,
+      io: { close: () => calls.push("io") },
+      httpServer: {
+        listening: true,
+        close: (callback: (error?: Error) => void) => {
+          calls.push("http");
+          callback();
+        }
+      },
+      temporaryContexts: { close: async () => calls.push("temporary") },
+      runtime: { shutdownMcpProcessPool: async () => {
+        calls.push("runtime");
+        runtimeAttempts += 1;
+        if (runtimeAttempts === 1) throw new Error("runtime_shutdown_failed");
+      } },
+      store: { close: async () => calls.push("store") }
+    } as unknown as ApiServer;
+
+    const first = closeApiServer(server);
+    const second = closeApiServer(server);
+    expect(second).toBe(first);
+    await expect(first).rejects.toBeInstanceOf(AggregateError);
+    expect(calls).not.toContain("store");
+    expect(server.lifecycle.closed_at).toBeUndefined();
+    expect(server.lifecycle).toMatchObject({ closing: true, close_error: "api_server_close_failed" });
+    const retry = closeApiServer(server);
+    expect(retry).not.toBe(first);
+    await retry;
+    expect(calls.at(-1)).toBe("store");
+    expect(server.lifecycle).toMatchObject({ closing: false, closed_at: expect.any(String) });
+  });
+
+  it("routes SIGINT and SIGTERM through the same shared shutdown", async () => {
+    const calls: string[] = [];
+    const server = {
+      lifecycle: { started_at: new Date().toISOString(), closing: false },
+      io: { close: () => calls.push("io") },
+      httpServer: { listening: false },
+      temporaryContexts: { close: async () => calls.push("temporary") },
+      runtime: { shutdownMcpProcessPool: async () => calls.push("runtime") },
+      store: { close: async () => calls.push("store") }
+    } as unknown as ApiServer;
+    const remove = installServerSignalHandlers(server);
+    process.emit("SIGINT");
+    process.emit("SIGTERM");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    remove();
+    expect(calls).toEqual(["io", "temporary", "runtime", "store"]);
   });
 });
 
@@ -2203,6 +2261,113 @@ describe("backend run API", () => {
     expect(routedGateway.chat.messages.some((message) => message.role === "agent")).toBe(true);
   });
 
+  it("resolves BackendRun identity outside skill Domain payloads", async () => {
+    const { baseUrl, server } = await startTestServer();
+    const now = "2026-07-18T00:00:00.000Z";
+    const session = await server.store.createSession({
+      id: "domain-trusted-run-session",
+      session_key: "domain-trusted-run-session",
+      title: "Domain trusted run",
+      ui_locale: "en",
+      output_locale: "en",
+      created_at: now,
+      updated_at: now
+    });
+    const backendRunId = "domain-trusted-backend-run";
+    await server.store.saveBackendRun({
+      id: backendRunId,
+      session_id: session.id,
+      input_message_id: "domain-trusted-input",
+      backend_id: "samurai-native",
+      backend_kind: "samurai_native",
+      status: "completed",
+      started_at: now,
+      completed_at: now,
+      input_summary: "trusted Domain run fixture",
+      output_summary: "trusted Domain run fixture",
+      metadata: {}
+    });
+    const skill = await server.store.saveSkillMarkdown({
+      state: "project",
+      skillId: "domain-trusted-skill",
+      markdown: [
+        "---",
+        JSON.stringify({
+          id: "domain-trusted-skill",
+          state: "project",
+          title: "Trusted Domain Skill",
+          description: "A fixture for Runtime-owned BackendRun context.",
+          tags: [],
+          provenance: "fixture",
+          trust_level: "user_authored",
+          allowed_scopes: ["skill"],
+          required_capabilities: [],
+          schedule_policy: {},
+          secret_policy: {},
+          owner_pinned: false
+        }),
+        "---",
+        "# Trusted Domain Skill",
+        "",
+        "Read through a trusted BackendRun context."
+      ].join("\n")
+    });
+
+    const view = await postJson<{
+      payload: { skill_id: string };
+      result: { usage: { run_id: string } };
+    }>(`${baseUrl}/api/domain/queries/skill.view/run`, {
+      backend_run_id: backendRunId,
+      payload: { skill_id: skill.id }
+    });
+    const forgedPayload = await postJson<{
+      ok: boolean;
+      error: { code: string; message: string };
+    }>(`${baseUrl}/api/domain/queries/skill.view/run`, {
+      backend_run_id: backendRunId,
+      payload: { skill_id: skill.id, run_id: "forged-backend-run" }
+    }, 400);
+    const forgedSessionPayload = await postJson<{
+      ok: boolean;
+      error: { code: string; message: string };
+    }>(`${baseUrl}/api/domain/queries/skill.view/run`, {
+      backend_run_id: backendRunId,
+      payload: { skill_id: skill.id, session_id: "forged-session" }
+    }, 400);
+    const otherSession = await server.store.createSession({
+      id: "domain-trusted-other-session",
+      session_key: "domain-trusted-other-session",
+      title: "Other session",
+      ui_locale: "en",
+      output_locale: "en",
+      created_at: now,
+      updated_at: now
+    });
+    const mismatchedTransport = await postJson<{
+      ok: boolean;
+      error: { code: string; message: string };
+    }>(`${baseUrl}/api/domain/queries/skill.view/run`, {
+      session_id: otherSession.id,
+      backend_run_id: backendRunId,
+      payload: { skill_id: skill.id }
+    }, 400);
+
+    expect(view.payload).toEqual({ skill_id: skill.id });
+    expect(view.result.usage.run_id).toBe(backendRunId);
+    expect(forgedPayload).toMatchObject({
+      ok: false,
+      error: { code: "bad_request", message: "untrusted_domain_context:run_id" }
+    });
+    expect(forgedSessionPayload).toMatchObject({
+      ok: false,
+      error: { code: "bad_request", message: "untrusted_domain_context:session_id" }
+    });
+    expect(mismatchedTransport).toMatchObject({
+      ok: false,
+      error: { code: "bad_request", message: "domain_transport_session_mismatch:backend_run_id" }
+    });
+  });
+
   it("exposes gateway pairing approval and inbound routing diagnostics", async () => {
     const { baseUrl } = await startTestServer();
 
@@ -4028,7 +4193,7 @@ describe("backend run API", () => {
 
   it("serves minimal skill collection and automation backend routes", async () => {
     const { baseUrl } = await startTestServer();
-    const candidate = await postJson<{ resource: { id: string }; operation: { operation: string }; auditRecord: unknown; rollbackPoint?: unknown }>(
+    const candidate = await postJson<{ resource: { id: string }; operation: { operation: string }; rollbackPoint?: unknown }>(
       `${baseUrl}/api/skills/candidates`,
       {
         title: "調査メモ",
@@ -4158,7 +4323,7 @@ describe("backend run API", () => {
     const translations = await getJson<Array<{ translated_text: string }>>(
       `${baseUrl}/api/resource-translations?source_kind=artifact&source_id=artifact_translation&source_uri=artifacts/artifact_translation.md&target_locale=en`
     );
-    const automation = await postJson<{ automationRun: { status: string }; operation: { actor_identity: string; channel: string; input_ref: { kind: string } }; auditRecord: unknown }>(
+    const automation = await postJson<{ automationRun: { status: string }; operation: { actor_identity: string; channel: string; input_ref: { kind: string } }; memoryReviewTrace: unknown }>(
       `${baseUrl}/api/automation/memory-review/run`,
       {},
       201
@@ -4206,8 +4371,6 @@ describe("backend run API", () => {
     const proposal = await postJson<{
       resource: { id: string; state: string; file_path: string; source_refs: Array<{ kind: string; id: string }> };
       operation: { operation: string };
-      policyDecision: { decision: string };
-      auditRecord: { outputs_summary: string; affected_resources: Array<{ kind: string; id: string }>; rollback_point_id?: string };
       rollbackPoint: { id: string };
       activity: unknown[];
     }>(
@@ -4282,7 +4445,6 @@ describe("backend run API", () => {
     const reindex = await postJson<{
       resource: { active: number; total: number; files: number; indexed: number; errors: unknown[] };
       operation: { operation: string };
-      auditRecord: { outputs_summary: string; affected_resources: Array<{ kind: string; id: string }> };
     }>(`${baseUrl}/api/wiki/reindex`, {});
     const archived = await postJson<{
       resource: { state: string };
@@ -4588,6 +4750,7 @@ describe("backend run API", () => {
     expect(sessions.map((item) => item.title)).not.toContain("Workspace operations");
     expect(sessions.map((item) => item.id)).toContain(session.id);
   });
+
 });
 
 async function startTestServer(

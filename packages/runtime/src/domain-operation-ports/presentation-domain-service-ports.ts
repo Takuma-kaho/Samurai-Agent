@@ -1,5 +1,6 @@
 import type { DomainOperationPorts } from "@samurai-agent/domain-operations";
 import type { RuntimeDomainServices } from "../domain-operation-services.js";
+import { readOnlyQueryPort } from "./read-only-query-port.js";
 
 type Ports = Pick<DomainOperationPorts, "message.presentation.update" | "presentation.plan">;
 
@@ -13,6 +14,6 @@ export function createPresentationDomainServicePorts(services: Pick<RuntimeDomai
       updateMessagePresentationViewState: (input) => services.presentationDomainService.updateViewState(input),
       messagePresentationNotFoundError: (id) => services.presentationDomainService.presentationNotFound(id)
     },
-    "presentation.plan": {}
+    "presentation.plan": readOnlyQueryPort<Ports["presentation.plan"]>({})
   };
 }

@@ -1,31 +1,25 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
 import { browserExtractValueSchema } from "../../value-objects/browser.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional(),
-  "url": z.string() .optional()
+  "url": z.string().trim().url().max(8192)
 }).strict();
 const Output = browserExtractValueSchema;
 
+export type BrowserExtractInput = z.infer<typeof Input>;
+export type BrowserExtractOutput = z.infer<typeof Output>;
+
 export interface BrowserExtractPorts extends DomainQueryPorts {
-  executeBrowserExtract(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  extractBrowserPage: ReadCapability<(input: Pick<BrowserExtractInput, "url">) => Promise<BrowserExtractOutput> | BrowserExtractOutput>;
 }
 
 const browserExtract = defineQuery<BrowserExtractPorts>()({
   ...{
   "kind": "query",
   "id": "browser.extract",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Extract browser page",
   "description": "Extract text from a browser-readable page.",
@@ -65,7 +59,7 @@ const browserExtract = defineQuery<BrowserExtractPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleBrowserExtract(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeBrowserExtract(context, input);
+        return { ok: true, value: Output.parse(await ports.extractBrowserPage({ url: input.url })) };
       }
     };
   }

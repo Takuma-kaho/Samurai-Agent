@@ -6,7 +6,7 @@ type Ports = Pick<DomainOperationPorts, "settings.patch">;
 export function createSettingsDomainServicePorts(services: Pick<RuntimeDomainServices, "settingsDomainService">): Ports {
   return {
     "settings.patch": {
-      patchSettings: (patch) => services.settingsDomainService.patch(patch)
+      applySettingsPatch: (input) => services.settingsDomainService.patch(input)
     }
   };
 }

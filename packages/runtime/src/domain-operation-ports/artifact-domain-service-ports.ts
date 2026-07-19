@@ -8,7 +8,7 @@ export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainSer
     "artifact.create": {
       artifactContract: (id) => services.artifactDomainService.contract(id), createArtifactSession: (input) => services.artifactDomainService.createArtifactSession(input),
       getArtifactSession: (id) => services.artifactDomainService.getArtifactSession(id), artifactSessionNotFoundError: () => services.artifactDomainService.artifactSessionNotFoundError(),
-      validateGraphArtifactContent: (content) => services.artifactDomainService.validateGraphContent(content), runArtifactSurface: (input) => services.artifactDomainService.runArtifactSurface(input),
+      validateGraphArtifactContent: (content) => services.artifactDomainService.validateGraphContent(content),
       createArtifactEnvelope: (session, content, inputLocale, outputLocale, metadata, envelopeId) => services.artifactDomainService.createArtifactEnvelope(session, content, inputLocale, outputLocale, metadata, envelopeId),
       createArtifactDraft: (input) => services.artifactDomainService.createArtifactDraft(input), createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)

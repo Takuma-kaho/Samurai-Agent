@@ -1,5 +1,4 @@
 import {
-  type JsonValue,
   type ObjectiveRecord,
   type WorkDependencyRecord,
   type WorkItemRecord
@@ -25,6 +24,24 @@ export interface ExecutionDomainServiceDependencies {
   requestError: (code: "not_found", message: string) => Error;
 }
 
+export interface FollowUpWorkItemInput {
+  workItemId: string;
+  instruction?: string;
+}
+
+export interface SteerWorkItemInput {
+  workItemId: string;
+  instruction?: string;
+}
+
+export interface RestoreWorkspaceBackupInput {
+  backupId: string;
+}
+
+export interface RepairWorkspaceInput {
+  dryRun: boolean;
+}
+
 export class ExecutionDomainService {
   constructor(private readonly dependencies: ExecutionDomainServiceDependencies) {}
 
@@ -32,33 +49,23 @@ export class ExecutionDomainService {
   saveWorkItemRecord(record: WorkItemRecord) { return this.dependencies.store.saveWorkItem(record); }
   objectiveNotFoundError() { return this.dependencies.requestError("not_found", "objective_not_found"); }
 
-  followUpWorkItem(payload: Record<string, JsonValue>) {
-    return this.dependencies.coordinator.followUp(requiredString(payload, "work_item_id"), optionalString(payload.instruction));
+  followUpWorkItem(input: FollowUpWorkItemInput) {
+    return this.dependencies.coordinator.followUp(input.workItemId, input.instruction ?? "");
   }
 
-  steerWorkItem(payload: Record<string, JsonValue>) {
-    return this.dependencies.coordinator.steer(requiredString(payload, "work_item_id"), optionalString(payload.instruction));
+  steerWorkItem(input: SteerWorkItemInput) {
+    return this.dependencies.coordinator.steer(input.workItemId, input.instruction ?? "");
   }
 
   createWorkspaceBackup() {
     return this.dependencies.store.createWorkspaceBackup();
   }
 
-  restoreWorkspaceBackup(payload: Record<string, JsonValue>) {
-    return this.dependencies.store.restoreWorkspaceBackup(requiredString(payload, "backup_id"));
+  restoreWorkspaceBackup(input: RestoreWorkspaceBackupInput) {
+    return this.dependencies.store.restoreWorkspaceBackup(input.backupId);
   }
 
-  repairWorkspace(payload: Record<string, JsonValue>) {
-    return this.dependencies.store.repairWorkspace({ dryRun: payload.dry_run !== false });
+  repairWorkspace(input: RepairWorkspaceInput) {
+    return this.dependencies.store.repairWorkspace({ dryRun: input.dryRun });
   }
-}
-
-function optionalString(value: JsonValue | undefined): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function requiredString(payload: Record<string, JsonValue>, key: string): string {
-  const value = optionalString(payload[key]);
-  if (!value) throw new Error(`domain_operation_required_field:${key}`);
-  return value;
 }

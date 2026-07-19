@@ -1,5 +1,6 @@
 import { skillOptimizationStartValueSchema, type DomainOperationPorts } from "@samurai-agent/domain-operations";
 import type { RuntimeDomainServices } from "../domain-operation-services.js";
+import { readOnlyQueryPort } from "./read-only-query-port.js";
 
 type Ports = Pick<DomainOperationPorts, "skill.candidate.create" | "skill.lifecycle.apply" | "skill.optimization.cancel" | "skill.optimization.promote" | "skill.optimization.reject" | "skill.optimization.rollback" | "skill.optimization.start" | "skill.patch" | "skill.project.save" | "skill.support_file.save" | "skill.usage.record" | "skill.view">;
 
@@ -17,40 +18,22 @@ export function createSkillDomainServicePorts(services: Pick<RuntimeDomainServic
       skillMutationConflict: (message) => services.skillDomainService.skillMutationConflict(message)
     },
     "skill.lifecycle.apply": {
-      executeSkillLifecycleApply: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.applyLifecycle(input)
-      })
+      applySkillLifecycle: (input) => services.skillDomainService.applyLifecycle(input)
     },
     "skill.optimization.cancel": {
-      executeSkillOptimizationCancel: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.cancelOptimization(input)
-      })
+      cancelSkillOptimization: (input) => services.skillDomainService.cancelOptimization(input)
     },
     "skill.optimization.promote": {
-      executeSkillOptimizationPromote: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.promoteOptimization(input)
-      })
+      promoteSkillOptimization: (input) => services.skillDomainService.promoteOptimization(input)
     },
     "skill.optimization.reject": {
-      executeSkillOptimizationReject: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.rejectOptimization(input)
-      })
+      rejectSkillOptimization: (input) => services.skillDomainService.rejectOptimization(input)
     },
     "skill.optimization.rollback": {
-      executeSkillOptimizationRollback: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.rollbackOptimization(input)
-      })
+      rollbackSkillOptimization: (input) => services.skillDomainService.rollbackOptimization(input)
     },
     "skill.optimization.start": {
-      executeSkillOptimizationStart: async (context, input) => ({
-        ok: true as const,
-        value: skillOptimizationStartValueSchema.parse(await services.skillDomainService.startOptimization(input))
-      })
+      startSkillOptimization: async (input) => skillOptimizationStartValueSchema.parse(await services.skillDomainService.startOptimization(input))
     },
     "skill.patch": {
       getSkillForMutation: (id) => services.skillDomainService.getSkillForMutation(id),
@@ -91,16 +74,10 @@ export function createSkillDomainServicePorts(services: Pick<RuntimeDomainServic
       skillMutationConflict: (message) => services.skillDomainService.skillMutationConflict(message)
     },
     "skill.usage.record": {
-      executeSkillUsageRecord: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.recordUsage(input)
-      })
+      recordSkillUsage: (input) => services.skillDomainService.recordUsage(input)
     },
-    "skill.view": {
-      executeSkillView: async (context, input) => ({
-        ok: true as const,
-        value: await services.skillDomainService.view(input)
-      })
-    }
+    "skill.view": readOnlyQueryPort<Ports["skill.view"]>({
+      viewSkill: (input) => services.skillDomainService.view(input)
+    })
   };
 }

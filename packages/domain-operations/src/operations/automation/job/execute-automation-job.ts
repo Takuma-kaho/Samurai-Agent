@@ -1,4 +1,4 @@
-import { createId, nowIso, type ActivityInboxItem, type AutomationJobRecord, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
+import { createId, nowIso, type ActivityInboxItem, type AutomationJobRecord, type LearningEvaluationRecord, type MessageEnvelope, type OperationRecord, type ReflectionSuggestionRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
 
 type ScheduledContext = { source: "cron"; actor_identity: "owner_scheduled"; instruction_source: "scheduled_context"; channel: "cron"; session_key: string };
 interface AutomationRunRecord { id: string; kind: string; source: string; session_id?: string; backend_run_id?: string; status: "started" | "completed" | "failed"; operation_id?: string; started_at: string; completed_at?: string; error?: string }
@@ -15,9 +15,9 @@ export interface AutomationJobExecutionPorts {
   automationJobRef(job: AutomationJobRecord): ResourceRef;
   saveAutomationJobRecord(job: AutomationJobRecord): Promise<AutomationJobRecord>;
   reindexAutomationWiki(): Promise<{ active: number; total: number }>;
-  runAutomationCurator(): Promise<{ suggestions: unknown[] }>;
-  runAutomationMemoryReview(session: SessionRecord): Promise<{ suggestions: unknown[] }>;
-  runAutomationEvaluation(): Promise<{ learningEvaluations?: unknown[] }>;
+  runAutomationCurator(): Promise<{ suggestions: ReflectionSuggestionRecord[] }>;
+  runAutomationMemoryReview(session: SessionRecord): Promise<{ suggestions: ReflectionSuggestionRecord[] }>;
+  runAutomationEvaluation(): Promise<{ learningEvaluations?: LearningEvaluationRecord[] }>;
   runAutomationTranslation(job: AutomationJobRecord, session: SessionRecord, context: ScheduledContext): Promise<{ backendRunId: string; source_ref: ResourceRef; target_locale: string }>;
   runAutomationCollectionTrigger(job: AutomationJobRecord): Promise<string | undefined>;
   runAutomationInstruction(job: AutomationJobRecord, session: SessionRecord, context: ScheduledContext): Promise<{ backendRunId: string; summary: string }>;

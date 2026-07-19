@@ -23,7 +23,7 @@ describe("graph.patch handler", () => {
       createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
       runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [], ...executed.extra }; }
     });
-    const input = graphPatch.input.parse({ artifact_id: artifact.id, nodes: [{ id: "a", label: "Updated A" }] });
+    const input = graphPatch.input.parse({ artifact_id: artifact.id, editor_source: "surface", nodes: [{ id: "a", label: "Updated A" }] });
 
     await handler.execute(context, input);
 

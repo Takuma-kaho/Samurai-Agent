@@ -11,8 +11,6 @@ const Input = z.object({
   "input_locale": SupportedLocaleSchema.optional(),
   "metadata": z.record(domainJsonValueSchema).default({}),
   "output_locale": SupportedLocaleSchema.optional(),
-  "session_id": z.string().trim().min(1).optional(),
-  "surface_operation_id": z.string().trim().min(1).optional(),
   "temporary_context": z.array(z.object({
     id: z.string().trim().min(1), kind: z.literal("desktop_screenshot"), label: z.string().optional(),
     source_name: z.string().optional(), mime_type: z.string().trim().min(1), data_url: z.string().optional(),
@@ -37,7 +35,7 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
   ...{
   "kind": "command",
   "id": "chat.turn.run",
-  "version": "4.0",
+  "version": "5.0",
   "availability": "active",
   "runtimeRequirements": ["agent_backend"],
   "title": "Run chat turn",
@@ -81,11 +79,20 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleChatTurnRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const sessionId = input.session_id ?? (await ports.createChatSession({ output_locale: input.output_locale })).id;
+        const sessionId = context.sessionId ?? (await ports.createChatSession({ output_locale: input.output_locale })).id;
+        const metadata = {
+          ...input.metadata,
+          ...(context.surfaceOperation
+            ? {
+                surface_operation_id: context.surfaceOperation.id,
+                surface_operation_kind: context.surfaceOperation.kind
+              }
+            : {})
+        };
         return { ok: true, value: await ports.runChatTurn({
           sessionId, content: input.content, backend_id: input.backend_id, input_locale: input.input_locale,
           output_locale: input.output_locale, attachments: input.attachments,
-          temporary_context: input.temporary_context, metadata: input.metadata
+          temporary_context: input.temporary_context, metadata
         }) };
       }
     };

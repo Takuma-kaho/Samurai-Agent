@@ -22,8 +22,8 @@ export interface EvaluationRunPorts {
   createEvaluationReport(input: { backendRuns: BackendRunRecord[]; backendEvents: BackendEventRecord[]; workspaceChanges: WorkspaceChangeRecord[]; toolRuns: ToolRunRecord[]; auditRecords: AuditRecord[]; now: string }): Promise<EvaluationTraceReport>;
   actualLearningUses(records: LearningResourceUseRecord[]): LearningResourceUseRecord[];
   evaluateLearningEffect(input: { id: string; resource_ref: ResourceRef; resource_version?: string; task_class: string; before: EvaluationSignals[]; after: EvaluationSignals[]; evidence_refs: ResourceRef[]; created_at: string }): LearningEvaluationRecord;
-  saveLearningEvaluation(value: LearningEvaluationRecord): Promise<unknown>; saveEvaluationSuggestion(value: ReflectionSuggestionRecord): Promise<unknown>;
-  saveEvaluationJobReport(value: LearningJobReportRecord): Promise<unknown>; nextEvaluationRunAt(fromMs: number): string;
+  saveLearningEvaluation(value: LearningEvaluationRecord): Promise<LearningEvaluationRecord>; saveEvaluationSuggestion(value: ReflectionSuggestionRecord): Promise<ReflectionSuggestionRecord>;
+  saveEvaluationJobReport(value: LearningJobReportRecord): Promise<LearningJobReportRecord>; nextEvaluationRunAt(fromMs: number): string;
   createEvaluationId(prefix: "reflection" | "learning_evaluation" | "suggestion" | "learning_job_report"): string;
   evaluationNow(): string;
 }

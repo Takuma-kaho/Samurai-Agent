@@ -1,31 +1,28 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { gatewaySandboxInstanceValueSchema } from "../../../value-objects/gateway.js";
 
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "sandbox_id": z.string(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  sandbox_id: z.string().trim().min(1).max(256)
 }).strict();
 const Output = gatewaySandboxInstanceValueSchema;
 
+export type GatewaySandboxDeleteInput = z.infer<typeof Input>;
+
+export interface GatewaySandboxDeleteRequest {
+  sandboxId: string;
+}
+
 export interface GatewaySandboxDeletePorts {
-  executeGatewaySandboxDelete(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  deleteGatewaySandbox(request: GatewaySandboxDeleteRequest): Promise<z.infer<typeof Output>>;
 }
 
 const gatewaySandboxDelete = defineCommand<GatewaySandboxDeletePorts>()({
   ...{
   "kind": "command",
   "id": "gateway.sandbox.delete",
-  "version": "1.0",
+  "version": "2.0",
   "availability": "active",
   "title": "Delete Gateway sandbox",
   "description": "Delete a Gateway sandbox instance.",
@@ -60,8 +57,10 @@ const gatewaySandboxDelete = defineCommand<GatewaySandboxDeletePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGatewaySandboxDelete(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeGatewaySandboxDelete(context, input);
+      execute: async function handleGatewaySandboxDelete(_context: TrustedDomainContext, input: GatewaySandboxDeleteInput): Promise<DomainResult<z.infer<typeof Output>>> {
+        const request: GatewaySandboxDeleteRequest = { sandboxId: input.sandbox_id };
+        const value = await ports.deleteGatewaySandbox(request);
+        return { ok: true, value };
       }
     };
   }

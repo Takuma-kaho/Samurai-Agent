@@ -3,9 +3,9 @@
   "test_id": "A01",
   "command": "pnpm core:test:physical-boundaries",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
-  "worktree_clean": false,
-  "source_sha256": "cb170ea652475ef008ce405055f291d658d65faa90f9b8b052da561eca92482c",
+  "commit_sha": "820f9f520b883464834b2f033651347da08987b1",
+  "worktree_clean": true,
+  "source_sha256": "b7e84695e60889e5075eed9b2f2f16399cddebaf9dc60e415448299c2413c3b5",
   "source_files": [
     "apps/server/src/api-server.ts",
     "apps/server/src/composition/index.ts",
@@ -20,6 +20,10 @@
     "apps/web/src/components/CollectionWorkspaceView.vue",
     "apps/web/src/components/ContextDrawer.vue",
     "apps/web/src/components/CustomViewFrame.vue",
+    "apps/web/src/components/GeneratedSurfaceCard.vue",
+    "apps/web/src/components/GeneratedSurfaceFrame.vue",
+    "apps/web/src/components/ManagementSurfaces.vue",
+    "apps/web/src/components/SkillOptimizationCard.vue",
     "apps/web/src/components/WorkspaceCanvas.vue",
     "apps/web/src/components/WorkspacePanels.vue",
     "apps/web/src/lib/api.ts",
@@ -72,6 +76,7 @@
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
     "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/skill-optimization.ts",
     "packages/workspace-store/src/profile-registry.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
@@ -81,8 +86,8 @@
     "scripts/verify-physical-module-boundaries.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-12T03:47:28.194Z",
-  "completed_at": "2026-07-12T03:47:28.194Z",
+  "started_at": "2026-07-14T02:25:36.087Z",
+  "completed_at": "2026-07-14T02:25:36.087Z",
   "assertions": [
     {
       "name": "Entrypoints remain composition/export focused",
@@ -101,19 +106,19 @@
       "actual": [
         {
           "file": "packages/runtime/src/agent-runtime.ts",
-          "lines": 16245
+          "lines": 17669
         },
         {
           "file": "packages/workspace-store/src/workspace-store.ts",
-          "lines": 9314
+          "lines": 9728
         },
         {
           "file": "apps/server/src/api-server.ts",
-          "lines": 7609
+          "lines": 7879
         },
         {
           "file": "apps/web/src/AppWorkspace.vue",
-          "lines": 1727
+          "lines": 1945
         }
       ]
     }
@@ -144,19 +149,19 @@
     "large_modules_advisory": [
       {
         "file": "packages/runtime/src/agent-runtime.ts",
-        "lines": 16245
+        "lines": 17669
       },
       {
         "file": "packages/workspace-store/src/workspace-store.ts",
-        "lines": 9314
+        "lines": 9728
       },
       {
         "file": "apps/server/src/api-server.ts",
-        "lines": 7609
+        "lines": 7879
       },
       {
         "file": "apps/web/src/AppWorkspace.vue",
-        "lines": 1727
+        "lines": 1945
       }
     ],
     "missing_directories": []

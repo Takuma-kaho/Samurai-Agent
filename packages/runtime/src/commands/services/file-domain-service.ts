@@ -20,7 +20,7 @@ export interface FileWritePort {
   readTextIfExists(path: string): Promise<string | undefined>;
   writeText(path: string, content: string): Promise<void>;
   ensureParent(path: string): Promise<void>;
-  reindexCollections(): Promise<unknown>;
+  reindexCollections(): Promise<void>;
   isManagedCollectionPath(path: string): boolean;
 }
 export interface FileMutationHost {
@@ -42,53 +42,25 @@ export class FileDomainService {
   ensureFileParent(path: string) { return this.write.ensureParent(path); }
   writeFileText(path: string, content: string) { return this.write.writeText(path, content); }
   isManagedCollectionPath(path: string) { return this.write.isManagedCollectionPath(path); }
-  reindexManagedCollections() { return this.write.reindexCollections(); }
+  reindexManagedCollections(): Promise<void> { return this.write.reindexCollections(); }
   createFileRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.host.createRollback(operation, refs, before, after); }
   fileNotFoundError(path: string) { return this.host.requestError("not_found", `File not found: ${path}`); }
   filePatchConflictError() { return this.host.requestError("conflict", "file_patch_search_not_found"); }
 
-  async readFile(payload: Record<string, JsonValue>): Promise<{ resource: FileResource }> {
-    const workspacePath = this.read.resolve(text(payload.path));
+  async readFile(input: { path: string }): Promise<{ resource: FileResource }> {
+    const workspacePath = this.read.resolve(input.path);
     return { resource: { path: workspacePath.relativePath, content: await this.read.readText(workspacePath.absolutePath) } };
   }
 
-  async listFiles(payload: Record<string, JsonValue>): Promise<{ resource: FileResource }> {
-    const workspacePath = this.read.resolve(text(payload.path));
+  async listFiles(input: { path: string }): Promise<{ resource: FileResource }> {
+    const workspacePath = this.read.resolve(input.path);
     return { resource: { path: workspacePath.relativePath, entries: await this.read.list(workspacePath) } };
   }
 
-  async inspectFile(payload: Record<string, JsonValue>): Promise<{ resource: FileResource }> {
-    const workspacePath = this.read.resolve(text(payload.path));
+  async inspectFile(input: { path: string }): Promise<{ resource: FileResource }> {
+    const workspacePath = this.read.resolve(input.path);
     const [bytes, info, artifacts, changes] = await Promise.all([this.read.readBytes(workspacePath.absolutePath), this.read.stat(workspacePath.absolutePath), this.read.listArtifacts(), this.read.listChanges()]);
     return { resource: { path: workspacePath.relativePath, metadata: { size: info.size, modified_at: info.modifiedAt, content_hash: createHash("sha256").update(bytes).digest("hex") }, provenance: { artifact_ids: artifacts.filter((artifact) => artifact.file_ref.uri === workspacePath.relativePath).map((artifact) => artifact.id), workspace_change_ids: changes.filter((change) => change.resource_ref.uri === workspacePath.relativePath).map((change) => change.id) } } };
   }
 
-  async writeFile(payload: Record<string, JsonValue>): Promise<FileMutationResult> {
-    return this.mutateFile("file.write", payload, async (_before) => text(payload.content), "Wrote");
-  }
-
-  async patchFile(payload: Record<string, JsonValue>): Promise<FileMutationResult> {
-    return this.mutateFile("file.patch", payload, async (before, workspacePath) => {
-      if (before === undefined) throw this.host.requestError("not_found", `File not found: ${workspacePath.relativePath}`);
-      const search = text(payload.search);
-      if (!search || !before.includes(search)) throw this.host.requestError("conflict", "file_patch_search_not_found");
-      return before.replace(search, text(payload.replace));
-    }, "Patched");
-  }
-
-  private async mutateFile(operationName: "file.write" | "file.patch", payload: Record<string, JsonValue>, contentFor: (before: string | undefined, path: WorkspacePath) => Promise<string>, summaryVerb: "Wrote" | "Patched"): Promise<FileMutationResult> {
-    const workspacePath = this.read.resolve(text(payload.path)); const session = await this.host.ensureSession();
-    const envelope = this.host.createEnvelope(session, `${operationName}: ${workspacePath.relativePath}`); const ref = fileRef(workspacePath.relativePath);
-    return this.host.runMutation({ session, envelope, operationName, proposedEffects: [`${operationName} ${workspacePath.relativePath} inside the workspace.`], targetResourceRefs: [ref], execute: async (operationRecord) => {
-      const before = await this.write.readTextIfExists(workspacePath.absolutePath);
-      const content = await contentFor(before, workspacePath);
-      await this.write.ensureParent(workspacePath.absolutePath); await this.write.writeText(workspacePath.absolutePath, content);
-      if (this.write.isManagedCollectionPath(workspacePath.relativePath)) await this.write.reindexCollections();
-      const rollbackPoint = await this.host.createRollback(operationRecord, [ref], { path: workspacePath.relativePath, content: before ?? null }, { path: workspacePath.relativePath, content });
-      return { resource: { path: workspacePath.relativePath, content }, ref, rollbackPoint, summary: `${summaryVerb} workspace file ${workspacePath.relativePath}.` };
-    }});
-  }
 }
-
-function text(value: JsonValue | undefined): string { return typeof value === "string" ? value : ""; }
-function fileRef(path: string): ResourceRef { return { kind: "file", id: path, uri: path, label: path }; }

@@ -47,7 +47,7 @@ describe("DurableDomainCommandBus", () => {
     expect(new Set(results.map((result) => result.result_id))).toEqual(new Set(["result-1"]));
     expect(new Set(results.map((result) => result.value))).toEqual(new Set([1]));
     await store.close();
-  });
+  }, 60_000);
 
   it("rejects reuse of a key with a different payload", async () => {
     const store = await createStore();

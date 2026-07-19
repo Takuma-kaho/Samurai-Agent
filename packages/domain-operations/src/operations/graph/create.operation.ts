@@ -6,11 +6,9 @@ import { artifactWriteValueSchema } from "../../value-objects/artifact.js";
 
 const Input = z.object({
   "content": z.string().min(1),
-  "envelope_id": z.string().trim().min(1).optional(),
   "input_locale": SupportedLocaleSchema.optional(),
   "metadata": z.record(domainJsonValueSchema).default({}),
   "output_locale": SupportedLocaleSchema.optional(),
-  "session_id": z.string().trim().min(1).optional(),
   "title": z.string().trim().min(1).default("Untitled artifact"),
   "ui_locale": SupportedLocaleSchema.optional()
 }).strict();
@@ -31,7 +29,7 @@ const graphCreate = defineCommand<GraphCreatePorts>()({
   ...{
   "kind": "command",
   "id": "graph.create",
-  "version": "3.0",
+  "version": "4.0",
   "availability": "active",
   "title": "Create graph",
   "description": "Create a validated node and edge graph as a revision-backed Artifact.",
@@ -76,16 +74,16 @@ const graphCreate = defineCommand<GraphCreatePorts>()({
     return {
       execute: async function handleGraphCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         ports.validateGraphArtifactContent(input.content);
-        const session = input.session_id
-          ? await ports.getArtifactSession(input.session_id)
+        const session = context.sessionId
+          ? await ports.getArtifactSession(context.sessionId)
           : await ports.createArtifactSession({ title: input.title, ui_locale: input.ui_locale, output_locale: input.output_locale });
         if (!session) throw ports.artifactSessionNotFoundError();
         const inputLocale = input.input_locale ?? session.ui_locale;
         const outputLocale = input.output_locale ?? session.output_locale;
         const contract = ports.artifactContract("graph.create");
-        const envelope = ports.createArtifactEnvelope(session, input.content, inputLocale, outputLocale, input.metadata, input.envelope_id);
+        const envelope = ports.createArtifactEnvelope(session, input.content, inputLocale, outputLocale, input.metadata, context.envelopeId);
         const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, execute: async (operation) => {
-          const artifact = await ports.createArtifactDraft({ operation, title: input.title, content: input.content, kind: "graph", locale: outputLocale, sourceLocales: [inputLocale], createdBy: "backend" });
+          const artifact = await ports.createArtifactDraft({ operation, title: input.title, content: input.content, kind: "graph", locale: outputLocale, sourceLocales: [inputLocale], createdBy: context.actorId });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref], {}, { artifact_id: artifact.id });
           return { resource: artifact, ref: artifact.file_ref, rollbackPoint, summary: `Created artifact ${artifact.title}.`, extra: {} };
         }});

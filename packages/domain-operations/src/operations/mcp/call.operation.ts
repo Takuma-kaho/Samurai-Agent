@@ -1,33 +1,40 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
+import { type JsonValue } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { mcpCallValueSchema } from "../../value-objects/tool-execution.js";
 
+const toolInputSchema = z.record(domainJsonValueSchema)
+  .refine((value) => Object.keys(value).length <= 128, "mcp_tool_input_too_large")
+  .default({});
 const Input = z.object({
-  "envelope_id": z.string() .optional(),
-  "input_locale": z.string() .optional(),
-  "input_message_id": z.string() .optional(),
-  "metadata": z.record(domainJsonValueSchema) .optional(),
-  "server_name": z.string(),
-  "tool_name": z.string(),
-  "input": z.record(domainJsonValueSchema).optional(),
-  "output_locale": z.string() .optional(),
-  "provider_tool_call": z.boolean() .optional(),
-  "session_id": z.string() .optional(),
-  "source_operation_id": z.string() .optional(),
-  "surface_operation_id": z.string() .optional()
+  server_name: z.string().trim().min(1).max(128),
+  tool_name: z.string().trim().min(1).max(256),
+  input: toolInputSchema,
+  metadata: z.object({
+    tool_call_id: z.string().trim().min(1).max(256).optional()
+  }).strict().default({})
 }).strict();
 const Output = mcpCallValueSchema;
 
+export type McpCallInput = z.infer<typeof Input>;
+
+export interface McpCallRequest {
+  serverName: string;
+  toolName: string;
+  input: Record<string, JsonValue>;
+  toolCallId?: string;
+}
+
 export interface McpCallPorts {
-  executeMcpCall(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> | DomainResult<z.infer<typeof Output>>;
+  executeMcpCall(context: TrustedDomainContext, request: McpCallRequest): Promise<z.infer<typeof Output>>;
 }
 
 const mcpCall = defineCommand<McpCallPorts>()({
   ...{
   "kind": "command",
   "id": "mcp.call",
-  "version": "2.0",
+  "version": "3.0",
   "availability": "active",
   "title": "Call MCP tool",
   "description": "Call an MCP tool through stored Gateway MCP configuration.",
@@ -66,8 +73,15 @@ const mcpCall = defineCommand<McpCallPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleMcpCall(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.executeMcpCall(context, input);
+      execute: async function handleMcpCall(context: TrustedDomainContext, input: McpCallInput): Promise<DomainResult<z.infer<typeof Output>>> {
+        const request: McpCallRequest = {
+          serverName: input.server_name,
+          toolName: input.tool_name,
+          input: input.input,
+          toolCallId: input.metadata.tool_call_id
+        };
+        const value = await ports.executeMcpCall(context, request);
+        return { ok: true, value };
       }
     };
   }
