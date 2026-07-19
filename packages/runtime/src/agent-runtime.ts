@@ -5334,7 +5334,11 @@ export class AgentRuntime {
     const toolName = stringPayload(event.payload.action_id) || providerCommand?.id || providerQuery?.id || providerToolName;
     const args = runtimeToolArguments(event.payload, toolName);
     const toolCallId = stringPayload(event.payload.tool_call_id) || event.tool_call_id;
-    if (normalizeSamuraiToolBridgeName(toolName) === "samurai.collection.manage") {
+    // The bridge event keeps the canonical bridge name in `provider_tool_name`
+    // while `action_id` is the compatibility operation id (`collection.manage`).
+    // Resolve the compatibility adapter from the provider name so both direct
+    // bridge calls and provider-emitted bridge events use the same path.
+    if (normalizeSamuraiToolBridgeName(providerToolName || toolName) === "samurai.collection.manage") {
       const output = await this.runCollectionManageCompatibility(args, "provider_tool_call", providerToolIdempotencyKey(run.id, toolCallId, "collection.manage", args));
       const session = await this.store.getSession(run.session_id);
       if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
