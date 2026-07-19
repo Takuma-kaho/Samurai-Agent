@@ -13,6 +13,7 @@ const readSource = (file) => {
     throw new Error(`domain_operation_source_read_failed:${path.relative(root, file)}`, { cause: error });
   }
 };
+const normalizeLineEndings = (source) => source.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
 const sourceRoot = path.join(root, "packages/domain-operations/src");
 const operationsRoot = path.join(sourceRoot, "operations");
 const generatedRoot = path.join(sourceRoot, "generated");
@@ -128,7 +129,7 @@ const outputs = new Map([
 ]);
 if (process.argv.includes("--check")) {
   for (const [file, expected] of outputs) {
-    if (readSource(file) !== expected) throw new Error(`generated_domain_operation_drift:${path.basename(file)}`);
+    if (normalizeLineEndings(readSource(file)) !== expected) throw new Error(`generated_domain_operation_drift:${path.basename(file)}`);
   }
   process.stdout.write(`verified ${modules.length} generated domain operation bindings\n`);
 } else {

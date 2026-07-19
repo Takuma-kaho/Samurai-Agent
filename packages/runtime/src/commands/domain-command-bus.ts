@@ -172,7 +172,12 @@ export class DurableDomainCommandBus {
     let current = initial;
     while (current.status === "running") {
       const heartbeatAt = Date.parse(current.heartbeat_at ?? current.updated_at ?? current.created_at);
-      const staleAt = (Number.isFinite(heartbeatAt) ? heartbeatAt : Date.now()) + this.runningTimeoutMs;
+      // An invalid persisted timestamp cannot establish a safe running window.
+      // Treat it as stale immediately instead of extending the deadline on
+      // every polling iteration and potentially waiting forever.
+      const staleAt = Number.isFinite(heartbeatAt)
+        ? heartbeatAt + this.runningTimeoutMs
+        : Date.now();
       const remaining = staleAt - Date.now();
       if (remaining <= 0) break;
       await new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining)));
