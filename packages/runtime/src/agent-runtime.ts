@@ -10900,7 +10900,7 @@ function normalizeProviderDomainCommandPayload(
       };
     }
   }
-  if (command.id === "memory.topic.create" && typeof payload.content !== "string" && trusted.userInput?.trim()) {
+  if (command.provider_tool_names?.includes("remember_topic") && typeof payload.content !== "string" && trusted.userInput?.trim()) {
     payload.content = trusted.userInput.trim();
   }
   return payload;
