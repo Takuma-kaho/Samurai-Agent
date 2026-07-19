@@ -122,9 +122,9 @@ const clientLines = [
 ];
 
 const outputs = new Map([
-  [path.join(generatedRoot, "operation-index.generated.ts"), `${indexLines.join("\n")}\n`],
-  [path.join(generatedRoot, "operation-binder.generated.ts"), `${binderLines.join("\n")}\n`],
-  [path.join(generatedRoot, "operation-client.generated.ts"), `${clientLines.join("\n")}\n`]
+  [path.join(generatedRoot, "operation-index.generated.ts"), indexLines.join("\n")],
+  [path.join(generatedRoot, "operation-binder.generated.ts"), binderLines.join("\n")],
+  [path.join(generatedRoot, "operation-client.generated.ts"), clientLines.join("\n")]
 ]);
 if (process.argv.includes("--check")) {
   for (const [file, expected] of outputs) {

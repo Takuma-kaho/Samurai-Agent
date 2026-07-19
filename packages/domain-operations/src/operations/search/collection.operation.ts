@@ -20,7 +20,6 @@ export interface CollectionSearchPorts extends DomainQueryPorts {
 }
 
 const collectionSearch = defineQuery<CollectionSearchPorts>()({
-  kind: "query",
   id: "collection.search",
   version: "3.0",
   availability: "active",

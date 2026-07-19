@@ -365,4 +365,3 @@ export function bindOperationDefinitions(ports: DomainOperationPorts): readonly 
     bindOperationDefinition(operation118, operation118.createHandler(ports["workspace.repair"])),
   ]);
 }
-

@@ -1235,4 +1235,3 @@ export const operationDefinitions: readonly OperationDefinition[] = Object.freez
   operation117,
   operation118,
 ]);
-

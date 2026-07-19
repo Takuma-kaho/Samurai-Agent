@@ -241,4 +241,3 @@ Plan Bは以下を渡す。
 3. Background ReviewとEvaluationを同じPlan B内で接続する。
 4. Plan Bを統合後、Plan Cで長期運用を閉じる。
 5. 3計画完了後に、Core全体の完成度を再採点する。
-

@@ -127,4 +127,3 @@ export type DomainOperationKey = keyof typeof domainOperationClient;
 export function domainOperationIdFor(key: DomainOperationKey): DomainOperationId {
   return domainOperationClient[key]();
 }
-
