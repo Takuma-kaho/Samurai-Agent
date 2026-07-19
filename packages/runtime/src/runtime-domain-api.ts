@@ -87,7 +87,7 @@ export class RuntimeDomainApi {
   }
 
   async createWikiProposal(input: unknown): Promise<unknown> {
-    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("wikiProposalCreate"), idempotency_key: "wiki_create", payload: input });
+    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("wikiProposalCreate"), idempotency_key: `wiki_create:${stableHash(input)}`, payload: input });
     return result.result;
   }
 
@@ -114,7 +114,8 @@ export class RuntimeDomainApi {
   }
 
   async createCollectionRecord(record: { collection_id: string; id: string; data: unknown; resource_refs: unknown }): Promise<unknown> {
-    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("collectionRecordCreate"), idempotency_key: "collection_record_create_request", payload: { collection_id: record.collection_id, record_id: record.id, data: record.data, resource_refs: record.resource_refs } });
+    const payload = { collection_id: record.collection_id, record_id: record.id, data: record.data, resource_refs: record.resource_refs };
+    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("collectionRecordCreate"), idempotency_key: `collection_record_create_request:${stableHash(payload)}`, payload });
     return result.result;
   }
 
@@ -130,7 +131,7 @@ export class RuntimeDomainApi {
   }
 
   async runCollectionAction(input: unknown): Promise<unknown> {
-    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("collectionActionRun"), idempotency_key: "collection_action_run_request", payload: input });
+    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("collectionActionRun"), idempotency_key: `collection_action_run_request:${stableHash(input)}`, payload: input });
     return result.result;
   }
 

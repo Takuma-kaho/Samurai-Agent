@@ -542,7 +542,7 @@ type StructuredSurfaceOperation = Extract<SurfaceOperation, {
 
 export interface SurfaceArtifactRuntimeResult extends RuntimeWriteResult<ArtifactRecord> {
   sourceArtifact?: ArtifactRecord;
-  workspaceChange?: WorkspaceChangeRecord;
+  workspaceChange: WorkspaceChangeRecord;
 }
 
 export type SurfaceOperationRuntimeResult = SurfaceOperationResultEnvelope<
@@ -3169,8 +3169,7 @@ export class AgentRuntime {
         action_id: input.action_id,
         backend_id: input.backend_id,
         record_id: input.record_id,
-        payload: input.payload,
-        view_id: input.view_id
+        payload: input.payload
       });
       const view = await this.presentCollectionView({
         collectionId: input.collection_id,
@@ -3979,8 +3978,49 @@ export class AgentRuntime {
         metadata: surfaceOperationArtifactMetadata(input, sourceArtifact, sourceContent)
       }
     );
+
+    // A structured Surface has no provider BackendRun, but it still needs the
+    // same WorkspaceChange trace as a backend-created artifact. Reuse an
+    // existing trace when the Surface operation is replayed so idempotency is
+    // preserved across retries.
+    const existingWorkspaceChange = (await this.store.listWorkspaceChanges(session.id)).find((change) =>
+      change.legacy_operation_id === result.operation.id
+      && change.resource_ref.id === result.resource.id
+    );
+    const workspaceChange = existingWorkspaceChange ?? await (async () => {
+      const surfaceRun = await this.store.saveBackendRun({
+        id: createId("run"),
+        session_id: session.id,
+        input_message_id: input.id,
+        backend_id: "surface-operation",
+        backend_kind: "samurai_native",
+        status: "completed",
+        started_at: result.operation.created_at,
+        completed_at: nowIso(),
+        input_summary: summarize(surfaceOperationPrompt(input), 220),
+        output_summary: surfaceOperationWorkspaceSummary(input, result.resource),
+        metadata: {
+          surface_operation_id: input.id,
+          surface_operation_kind: input.kind,
+          operation_id: result.operation.id
+        }
+      });
+      const change = await this.store.saveWorkspaceChange({
+        id: createId("change"),
+        run_id: surfaceRun.id,
+        session_id: session.id,
+        resource_ref: result.resource.file_ref,
+        change_type: "artifact_created",
+        summary: surfaceOperationWorkspaceSummary(input, result.resource),
+        legacy_operation_id: result.operation.id,
+        created_at: nowIso()
+      });
+      await this.emit("workspace.change.created", change);
+      return change;
+    })();
     const surfaceResult: SurfaceArtifactRuntimeResult = {
       ...result,
+      workspaceChange,
       ...(sourceArtifact ? { sourceArtifact } : {})
     };
 
@@ -4769,7 +4809,15 @@ export class AgentRuntime {
   }
 
   async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
-    return await this.runtimeDomainApi.applyCollectionPatch(input) as CollectionPatchRuntimeResult;
+    const expectedVersion = input.patch.expected_version
+      ?? (await this.store.getCollectionRecord(input.collectionId, input.recordId))?.version;
+    if (expectedVersion === undefined) {
+      throw new RuntimeRequestError("not_found", `Collection record not found: ${input.collectionId}/${input.recordId}`);
+    }
+    return await this.runtimeDomainApi.applyCollectionPatch({
+      ...input,
+      patch: { ...input.patch, expected_version: expectedVersion }
+    }) as CollectionPatchRuntimeResult;
   }
 
   async deleteCollectionRecord(input: { collectionId: string; recordId: string; viewId?: string }): Promise<CollectionDeleteRuntimeResult> {
@@ -5337,6 +5385,7 @@ export class AgentRuntime {
           inputLocale: runInput.input_locale,
           outputLocale: runInput.output_locale,
           runId: run.id,
+          userInput: runInput.user_input,
           providerToolName: providerToolName || toolName,
           toolCallId
         });
@@ -10832,7 +10881,7 @@ const generatedSurfaceRequestServerOwnedFields = new Set<string>([
 function normalizeProviderDomainCommandPayload(
   command: DomainCommandEntry,
   args: Record<string, JsonValue>,
-  trusted: { inputLocale?: SupportedLocale; outputLocale?: SupportedLocale; runId: string; providerToolName: string; toolCallId?: string }
+  trusted: { inputLocale?: SupportedLocale; outputLocale?: SupportedLocale; runId: string; userInput?: string; providerToolName: string; toolCallId?: string }
 ): Record<string, JsonValue> {
   assertProviderDomainServerFieldsAbsent("command", command.id, args);
   const properties = recordPayload(command.input_schema.properties);
@@ -10850,6 +10899,9 @@ function normalizeProviderDomainCommandPayload(
         ...(trusted.toolCallId ? { tool_call_id: trusted.toolCallId } : {})
       };
     }
+  }
+  if (command.id === "memory.topic.create" && typeof payload.content !== "string" && trusted.userInput?.trim()) {
+    payload.content = trusted.userInput.trim();
   }
   return payload;
 }
