@@ -9,6 +9,32 @@ import {
   samuraiToolBridgeWriteTools
 } from "./provider-tool-bridge-composition.js";
 import { RuntimeDomainApi } from "./runtime-domain-api.js";
+import { resolveTemporaryContext as resolveTemporaryContextPort } from "./context/temporary-context-port.js";
+import { buildKnowledgeWikiContext as buildKnowledgeWikiContextPort, type WikiContextPage } from "./context/workspace-context-candidates.js";
+import { normalizeExternalAssistHints } from "./context/external-assist-context.js";
+import { buildContextPreview as buildContextPreviewWithPorts } from "./context/context-preview.js";
+import { WorkspaceContextPreviewAdapter } from "./context/workspace-context-preview-adapter.js";
+import { fileRef, memoryRef } from "./context/resource-refs.js";
+import { activeMemoryPreviewEntry } from "./context/context-assembly.js";
+import {
+  skillRef,
+  skillSupportFileRef
+} from "./context/skill-context.js";
+import {
+  applyGatewayBoundaryAllowedTools,
+  applyGatewayBoundaryToContextAssembly,
+  buildContextHandoffForBackend,
+  type BackendContextIntent,
+  type BackendExpectedOutput,
+  classifyBackendContextIntent,
+  contextAssemblyRuntimeMetadata,
+  contextHandoffRuntimeMetadata,
+  expectedBackendOutputs,
+  gatewayBoundaryRuntimeMetadata,
+  gatewayBoundaryRuntimeSnapshot,
+  shouldThinExternalBackendContext
+} from "./host/turn-preparation-policy.js";
+import { EnvironmentToolBridgeAdapter } from "./host/tool-bridge-adapter.js";
 import { runtimeOperationIds } from "./runtime-operation-composition.js";
 import { executeGeneratedSurfaceAction } from "./generated-surface-action-ingress.js";
 import {
@@ -167,7 +193,6 @@ import {
   type WikiFrontmatter,
   type WorkspaceChangeRecord,
   type ToolRunRecord,
-  SkillFrontmatterSchema,
   GatewayRepairResultSchema,
   GatewaySandboxWorkspaceSyncResultSchema,
   gatewayChannels,
@@ -221,7 +246,7 @@ import {
   type SandboxWorkspaceSyncExecutionResult
 } from "@samurai-agent/gateway";
 import { isSupportedLocale } from "@samurai-agent/localization";
-import { createSessionMemory, createTopicMemory, loadFreezeSnapshot, retrieveActiveMemoryWithReport, type MemoryCandidate } from "@samurai-agent/memory";
+import { createSessionMemory, createTopicMemory, retrieveActiveMemoryWithReport } from "@samurai-agent/memory";
 import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type MessageSubmitOperation, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   CollectionRecordVersionConflictError,
@@ -330,6 +355,8 @@ export interface RunChatTurnInput {
   metadata?: Record<string, unknown>;
   gateway_context?: GatewayContext;
   gateway_boundary_policy?: GatewayBoundaryPolicy;
+  /** Stable key supplied by the ingress; transport retries must reuse it. */
+  idempotency_key?: string;
 }
 
 export interface RunChatTurnResult {
@@ -606,6 +633,8 @@ export interface TrustedDomainRuntimeContext {
   };
   signal?: AbortSignal;
   deadlineAt?: number;
+  /** Stable key selected by the trusted ingress for retry-safe external work. */
+  idempotencyKey?: string;
 }
 
 /** Actors that the Runtime can assign without consulting a user payload. */
@@ -874,6 +903,7 @@ export class AgentRuntime {
   private readonly stdioMcpProcessPool: PooledMcpToolAdapter;
   private readonly pluginRegistry: PluginRuntimeRegistry;
   private readonly externalAssistProviders: ExternalAssistProvider[];
+  private readonly contextPreviewAdapter: WorkspaceContextPreviewAdapter;
   private readonly backendToolBridgeTokens = new Map<string, string>();
   private readonly backendEventSequences = new Map<string, number>();
   private readonly backgroundTasks = new Set<Promise<unknown>>();
@@ -1316,7 +1346,7 @@ export class AgentRuntime {
     });
     this.conversationDomainService = new ConversationDomainService({
       createSession: (input) => this.createSession(input),
-      runChatTurn: (input) => this.runChatTurn(input),
+      runChatTurn: (input) => this.runChatTurn({ ...input, idempotency_key: input.idempotencyKey }),
       reindexSessionSearch: () => this.store.reindexSessionSearch(),
       conflict: (message) => new RuntimeRequestError("conflict", message)
     });
@@ -1515,6 +1545,10 @@ export class AgentRuntime {
       searchDomainService
     }));
     this.externalAssistProviders = normalizeExternalAssistProviders(externalAssistProvider);
+    this.contextPreviewAdapter = new WorkspaceContextPreviewAdapter(this.store, {
+      externalAssistProviders: this.externalAssistProviders,
+      sessionNotFound: (sessionId) => new RuntimeRequestError("not_found", `Session not found: ${sessionId}`)
+    });
     this.stdioMcpProcessPool = createPooledStdioMcpToolAdapter({
       resolveConfig: async (input) => {
         const config = await this.store.getGatewayMcpConfigByServerName(input.server_name);
@@ -1616,11 +1650,11 @@ export class AgentRuntime {
   }
 
   async previewContext(input: { sessionId: string; query?: string }): Promise<ContextPreview> {
-    const session = await this.store.getSession(input.sessionId);
-    if (!session) {
-      throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
-    }
-    return this.buildContextPreview(session.id, input.query ?? "");
+    return buildContextPreviewWithPorts({
+      sessionId: input.sessionId,
+      query: input.query ?? "",
+      ports: this.contextPreviewAdapter.ports
+    });
   }
 
   async freezeContext(input: { sessionId: string; query?: string }): Promise<ContextFreezeResponse> {
@@ -1664,7 +1698,7 @@ export class AgentRuntime {
     report: ContextPreview["knowledge_wiki_report"];
     graph: KnowledgeWikiGraph;
   }> {
-    const context = await this.buildKnowledgeWikiContext(input.query ?? "");
+    const context = await buildKnowledgeWikiContextPort(this.store, input.query ?? "");
     return {
       knowledge_wiki: context.entries,
       report: context.report,
@@ -2147,7 +2181,10 @@ export class AgentRuntime {
     const workspaceRoot = this.store.rootDir;
     const backendWorkingDirectoryMode = this.backendWorkingDirectoryMode();
     const workingDirectory = this.backendWorkingDirectory();
-    const temporaryContext = await this.resolveTemporaryContext(envelope.attachments, input.temporary_context);
+    const temporaryContext = await resolveTemporaryContextPort({
+      resolve: (ref) => this.workspaceOptions.resolveTemporaryContextRef?.(ref),
+      conflict: (message) => new RuntimeRequestError("conflict", message)
+    }, envelope.attachments, input.temporary_context);
     const activeToolBridge = createBackendToolBridge({
       backendKind: backend.kind,
       runId: backendRunId,
@@ -2223,13 +2260,15 @@ export class AgentRuntime {
     await emitHostProgress("reasoning_summary", "関連する文脈を確認し、実行部へ渡す情報を絞っています。");
     await emitHostProgress("activity", "文脈候補を確認", "context_prepare");
     await emitHostProgress("reasoning_summary", "必要な情報はSamurai側に残し、実行部には参照先と使える道具を渡します。");
-    const contextPreview = await this.buildContextPreview(session.id, input.content, {
-      contextIntent,
+    const contextPreview = await buildContextPreviewWithPorts({
+      sessionId: session.id,
+      query: input.content,
+      ports: this.contextPreviewAdapter.ports,
       skipHeavyContext: thinExternalContext,
       onProgress: emitHostProgress
     });
     const freezeSnapshot = contextPreview.freeze_snapshot;
-    const gatewayBoundary = input.gateway_boundary_policy ? gatewayBoundaryRuntimeSnapshot(input.gateway_boundary_policy) : undefined;
+    const gatewayBoundary = input.gateway_boundary_policy ? gatewayBoundaryRuntimeSnapshot(input.gateway_boundary_policy, nowIso()) : undefined;
     const availableTools = applyGatewayBoundaryAllowedTools(contextPreview.available_tools, input.gateway_boundary_policy);
     const contextAssembly = applyGatewayBoundaryToContextAssembly(
       contextPreview.context_assembly,
@@ -3228,10 +3267,11 @@ export class AgentRuntime {
   }
 
   private async resolveDirectCollectionPresentation(input: MessageSubmitOperation): Promise<CollectionPresentationResolution | undefined> {
-    if (shouldCreateCollectionSchemaOutput(input.content)) {
+    const expectedOutputs = expectedBackendOutputs(input.content);
+    if (expectedOutputs.includes("collection_schema")) {
       return undefined;
     }
-    if (!shouldPresentCollectionOutput(input.content) && !shouldUpdateCollectionViewOutput(input.content)) {
+    if (!expectedOutputs.includes("collection_view") && !shouldUpdateCollectionViewOutput(input.content)) {
       return undefined;
     }
     const descriptor = await this.resolveCollectionPresentationDescriptor({
@@ -3649,7 +3689,10 @@ export class AgentRuntime {
       throw new RuntimeRequestError("validation", `domain_command_input_invalid:${command.id}:${inputIssue.path}:${inputIssue.message}`);
     }
     let result: unknown;
-    const trustedContext = await this.trustedDomainContext(inputSource, payload, trusted);
+    const trustedContext = await this.trustedDomainContext(inputSource, payload, {
+      ...trusted,
+      ...(input.idempotency_key ? { idempotencyKey: input.idempotency_key } : {})
+    });
     if (!this.domainOperationAvailable(command)) {
       throw new RuntimeRequestError("unavailable", `domain_operation_unavailable:${command.id}`);
     }
@@ -3890,7 +3933,7 @@ export class AgentRuntime {
     trusted: TrustedDomainRuntimeContext = {}
   ): Promise<TrustedDomainContext> {
     assertNoTrustedContextPayloadFields(payload);
-    const { runId, envelopeId, surfaceOperation, signal, deadlineAt } = trusted;
+    const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey } = trusted;
     assertTrustedRuntimeContextActive({ signal, deadlineAt });
     const actorIdentity = trustedActorIdentityForSource(inputSource);
     if (trusted.actorIdentity !== undefined && trusted.actorIdentity !== actorIdentity) {
@@ -3918,6 +3961,7 @@ export class AgentRuntime {
       ...(surfaceOperation ? { surfaceOperation } : {}),
       ...(signal ? { signal } : {}),
       ...(deadlineAt !== undefined ? { deadlineAt } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {}),
       correlationId: trusted.correlationId ?? stableHash({
         input_source: inputSource,
         session_id: sessionId ?? null,
@@ -5016,7 +5060,7 @@ export class AgentRuntime {
       input_locale: inputLocale,
       output_locale: outputLocale,
       active_memory: [],
-      gateway_boundary: gatewayBoundaryPolicy ? gatewayBoundaryRuntimeSnapshot(gatewayBoundaryPolicy) : undefined,
+      gateway_boundary: gatewayBoundaryPolicy ? gatewayBoundaryRuntimeSnapshot(gatewayBoundaryPolicy, nowIso()) : undefined,
       recent_messages: messages.slice(-10),
       metadata: {
         ...run.metadata,
@@ -5024,33 +5068,6 @@ export class AgentRuntime {
         working_directory: workingDirectory
       }
     };
-  }
-
-  private async resolveTemporaryContext(
-    attachments: ResourceRef[] = [],
-    explicitItems: TemporaryContextAttachment[] = []
-  ): Promise<TemporaryContextAttachment[]> {
-    const explicitById = new Map(explicitItems.map((item) => [item.id, item]));
-    const refs = attachments.filter((ref) => ref.kind === "temporary_context");
-    if (refs.length === 0) {
-      return explicitItems;
-    }
-    const resolved: TemporaryContextAttachment[] = [];
-    for (const ref of refs) {
-      const explicit = explicitById.get(ref.id);
-      if (explicit) {
-        resolved.push(explicit);
-        continue;
-      }
-      const item = await this.workspaceOptions.resolveTemporaryContextRef?.(ref);
-      if (item) {
-        resolved.push(item);
-      }
-    }
-    if (resolved.length !== refs.length) {
-      throw new RuntimeRequestError("conflict", "temporary_context_unavailable");
-    }
-    return resolved;
   }
 
   private async handleBackendToolStartedEvent(input: {
@@ -5828,92 +5845,6 @@ export class AgentRuntime {
     };
   }
 
-  private async buildExternalAssistContext(input: {
-    sessionId: string;
-    query: string;
-    role: "assistive" | "disabled";
-    recentMessages: MessageRecord[];
-    sessionSearch: Array<{ kind: string; id: string; title: string; summary: string }>;
-  }): Promise<ContextPreview["external_assist"]> {
-    const prefetchRecords = await this.runExternalAssistPrefetch(input);
-    const records = await this.store.listExternalAssistRecords({ sessionId: input.sessionId, limit: 8 });
-    const completedPrefetchRecords = prefetchRecords.filter((record) => record.status === "completed");
-    const lastPrefetch = completedPrefetchRecords[0] ?? records.find((record) => record.phase === "prefetch" && record.status === "completed");
-    const recentFailures = records.filter((record) => record.status === "failed").slice(0, 3);
-    const hints = completedPrefetchRecords.length > 0
-      ? completedPrefetchRecords.flatMap((record) => record.hints)
-      : lastPrefetch?.status === "completed" ? lastPrefetch.hints : [];
-    const note = externalAssistNote({
-      role: input.role,
-      providerId: externalAssistProviderLabel(this.externalAssistProviders),
-      prefetchRecords,
-      hintCount: hints.length,
-      failureCount: recentFailures.length
-    });
-    return {
-      role: input.role,
-      isolated_from_memory: true,
-      included_in_active_memory: false,
-      note,
-      hints,
-      ...(lastPrefetch ? { last_prefetch: lastPrefetch } : {}),
-      recent_failures: recentFailures
-    };
-  }
-
-  private async runExternalAssistPrefetch(input: {
-    sessionId: string;
-    query: string;
-    role: "assistive" | "disabled";
-    recentMessages: MessageRecord[];
-    sessionSearch: Array<{ kind: string; id: string; title: string; summary: string }>;
-  }): Promise<ExternalAssistRecord[]> {
-    if (input.role === "disabled" || this.externalAssistProviders.length === 0) {
-      return [];
-    }
-    return Promise.all(this.externalAssistProviders.map(async (provider) => {
-      const now = nowIso();
-      try {
-        const hints = normalizeExternalAssistHints(await provider.prefetch({
-          sessionId: input.sessionId,
-          query: input.query,
-          recentMessages: input.recentMessages,
-          sessionSearch: input.sessionSearch
-        }));
-        return this.store.saveExternalAssistRecord({
-          id: createId("external_assist"),
-          phase: "prefetch",
-          status: "completed",
-          provider_id: provider.id,
-          session_id: input.sessionId,
-          query: input.query,
-          role: input.role,
-          hints,
-          isolated_from_memory: true,
-          included_in_active_memory: false,
-          created_at: now,
-          updated_at: now
-        });
-      } catch (error) {
-        return this.store.saveExternalAssistRecord({
-          id: createId("external_assist"),
-          phase: "prefetch",
-          status: "failed",
-          provider_id: provider.id,
-          session_id: input.sessionId,
-          query: input.query,
-          role: input.role,
-          hints: [],
-          error: safeRuntimeErrorMessage(error),
-          isolated_from_memory: true,
-          included_in_active_memory: false,
-          created_at: now,
-          updated_at: now
-        });
-      }
-    }));
-  }
-
   private async runExternalAssistSync(input: ExternalAssistSyncInput & { role: "assistive" | "disabled" }): Promise<ExternalAssistRecord[]> {
     if (input.role === "disabled" || this.externalAssistProviders.length === 0) {
       return [];
@@ -5976,259 +5907,6 @@ export class AgentRuntime {
         });
       }
     }));
-  }
-
-  private async buildKnowledgeWikiContext(query: string): Promise<{
-    pages: WikiWithFilePath[];
-    entries: ContextPreview["knowledge_wiki"];
-    report: ContextPreview["knowledge_wiki_report"];
-  }> {
-    const retrievedAt = nowIso();
-    const matches = await this.store.searchWiki(query, 20, { activeOnly: false });
-    const pages: WikiWithFilePath[] = [];
-    const entries: ContextPreview["knowledge_wiki"] = [];
-    const excluded: ContextPreview["knowledge_wiki_report"]["excluded"] = [];
-    for (const wiki of matches) {
-      const stateReason = knowledgeWikiExclusionReason(wiki);
-      if (stateReason) {
-        excluded.push({
-          id: wiki.id,
-          slug: wiki.slug,
-          title: wiki.title,
-          state: wiki.state,
-          reason: stateReason
-        });
-        continue;
-      }
-      const content = (await this.store.readWikiContent(wiki.id)) ?? "";
-      if (!content.trim()) {
-        excluded.push({
-          id: wiki.id,
-          slug: wiki.slug,
-          title: wiki.title,
-          state: wiki.state,
-          reason: "empty_content"
-        });
-        continue;
-      }
-      if (entries.length < 5) {
-        pages.push(wiki);
-        entries.push({
-          id: wiki.id,
-          slug: wiki.slug,
-          title: wiki.title,
-          content,
-          source_refs: wiki.source_refs,
-          provenance: wiki.provenance
-        });
-      }
-    }
-    return {
-      pages,
-      entries,
-      report: {
-        query,
-        retrieved_at: retrievedAt,
-        candidate_count: matches.length,
-        included_count: entries.length,
-        included_wiki_ids: entries.map((entry) => entry.id),
-        excluded,
-        source_refs: entries.flatMap((entry) => entry.source_refs)
-      }
-    };
-  }
-
-  private async buildContextPreview(
-    sessionId: string,
-    query: string,
-    options: {
-      contextIntent?: BackendContextIntent;
-      skipHeavyContext?: boolean;
-      onProgress?: (displayKind: "reasoning_summary" | "activity", text: string, activityKind?: string) => Promise<void>;
-    } = {}
-  ): Promise<ContextPreview> {
-    const skipHeavyContext = options.skipHeavyContext === true;
-    const sessionSearchQuery = !skipHeavyContext && query.trim()
-      ? timeboxContextStep(this.store.search(query), [], "session_search")
-      : Promise.resolve(timeboxContextValue([], false));
-    const [session, settings, activeMemoryResult, knowledgeWikiContext, skillCandidates, skillUsage, collectionSchemas, messages, operations, backendRuns, toolRuns, workspaceChanges, searchResults] = await Promise.all([
-      this.store.getSession(sessionId),
-      this.store.getSettings(),
-      skipHeavyContext ? Promise.resolve(emptyActiveMemoryResult(query)) : timeboxContextStep(retrieveActiveMemoryWithReport(this.store, query), emptyActiveMemoryResult(query), "active_memory").then((result) => result.value),
-      skipHeavyContext ? Promise.resolve(emptyKnowledgeWikiContext(query)) : timeboxContextStep(this.buildKnowledgeWikiContext(query), emptyKnowledgeWikiContext(query), "knowledge_wiki").then((result) => result.value),
-      skipHeavyContext ? Promise.resolve([]) : timeboxContextStep(this.store.searchSkills(query, 12, { states: ["active", "pinned", "project"] }), [], "selected_skills").then((result) => result.value),
-      skipHeavyContext ? Promise.resolve([]) : this.store.listSkillUsage(),
-      skipHeavyContext ? Promise.resolve([]) : this.store.listCollectionSchemas(),
-      this.store.listMessages(sessionId),
-      this.store.listOperations(sessionId),
-      this.store.listBackendRuns(sessionId),
-      this.store.listToolRuns({ sessionId }),
-      this.store.listWorkspaceChanges(sessionId),
-      sessionSearchQuery
-    ]);
-    const sessionSearchTimedOut = searchResults.timedOut;
-    const sessionSearchValues = searchResults.value;
-    if (sessionSearchTimedOut) {
-      await options.onProgress?.("reasoning_summary", "過去会話検索が遅いため、今回は軽い文脈のまま実行部へ進めます。");
-    }
-    await options.onProgress?.("activity", "参照候補を整理", "context_handoff");
-    if (!session) {
-      throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
-    }
-    const activeMemory = activeMemoryResult.candidates;
-    const skillSelection = selectRuntimeSkills({
-      candidates: skillCandidates,
-      query,
-      limit: hostContextAssemblyLimits.selected_skills
-    });
-    const selectedSkills = skillSelection.selected.map((item) => item.skill);
-    const freezeSnapshot = skipHeavyContext
-      ? undefined
-      : await loadFreezeSnapshot(this.store, {
-          memoryRefs: activeMemory.map((memory) => memoryRef(memory.frontmatter)),
-          skillRefs: selectedSkills.map((skill) => skillRef(skill)),
-          wikiRefs: knowledgeWikiContext.pages.map((wiki) => wikiRef(wiki))
-        });
-    const skillUsageById = new Map(skillUsage.map((usage) => [usage.skill_id, usage]));
-    const skillSelectionById = new Map(skillSelection.selected.map((item) => [item.skill.id, item.selection]));
-    const selectedSkillEntries = await Promise.all(
-      selectedSkills.map(async (skill, index) => {
-        const markdownContent = stripSkillFrontmatter((await this.store.readSkillMarkdown(skill.id)) ?? "");
-        const supportFiles = await this.store.listSkillSupportFiles(skill.id);
-        const matchedSupportFiles = selectSkillSupportFiles(supportFiles, query);
-        const usage = skillUsageById.get(skill.id);
-        const disclosureLevel = decideSkillDisclosureLevel({
-          skill,
-          index,
-          query,
-          content: markdownContent,
-          matchedSupportFiles
-        });
-        return {
-          id: skill.id,
-          title: skill.title,
-          description: skill.description,
-          tags: skill.tags,
-          allowed_scopes: skillAllowedScopes(skill),
-          required_capabilities: skill.required_capabilities,
-          disclosure_level: disclosureLevel,
-          selection_reason: describeSkillSelection(disclosureLevel, index, matchedSupportFiles, usage, skillSelectionById.get(skill.id)),
-          selection: skillSelectionById.get(skill.id),
-          usage: usage
-            ? {
-                use_count: usage.use_count,
-                ...(usage.last_used_at ? { last_used_at: usage.last_used_at } : {})
-              }
-            : undefined,
-          content: disclosureLevel === "catalog" ? undefined : markdownContent,
-          support_file_refs: supportFiles.map((file) => ({ path: file.path, file_path: file.file_path })),
-          support_files: disclosureLevel === "support"
-            ? matchedSupportFiles.map((file) => ({ path: file.path, file_path: file.file_path, content: file.content.trim() }))
-            : undefined
-        };
-      })
-    );
-    const allCollectionNotes = (await Promise.all(
-      collectionSchemas.map(async (schema) => {
-        const notes = await this.store.listCollectionNotes(schema.id);
-        return notes.map((note) => ({
-          collection_id: schema.id,
-          file_path: note.file_path,
-          content: note.content.trim(),
-          role: "context_only" as const
-        }));
-      })
-    )).flat();
-    const collectionNotes = selectCollectionNotes(allCollectionNotes, query);
-    const collectionContextNotes = collectionNotes;
-    const knowledgeWiki = knowledgeWikiContext.entries;
-    const sessionSearchForBackend = shouldIncludeSessionSearchInBackendContext(query)
-      ? sessionSearchValues.slice(0, hostContextAssemblyLimits.session_search)
-      : [];
-    const sessionSearch = sessionSearchForBackend.map((result) => ({
-      kind: result.kind,
-      id: result.id,
-      title: result.title,
-      summary: result.summary
-    }));
-    const recentMessageRecords = messages.slice(-10);
-    const recentMessages = recentMessageRecords.map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: message.content
-    }));
-    const availableTools = proposalCapabilityManifest.agent_tools;
-    const externalAssist = skipHeavyContext
-      ? emptyExternalAssistContext(settings.external_provider_role, "External assist was skipped for this lightweight chat turn.")
-      : await this.buildExternalAssistContext({
-          sessionId,
-          query,
-          role: settings.external_provider_role,
-          recentMessages: recentMessageRecords,
-          sessionSearch
-        });
-    const lastMessage = messages.at(-1);
-    const lastBackendRun = backendRuns[0];
-    const contextAssembly = buildHostContextAssembly({
-      sessionId,
-      query,
-      sessionFound: true,
-      messageCount: messages.length,
-      recentMessageCount: recentMessages.length,
-      freezeSnapshotPresent: Boolean(freezeSnapshot),
-      activeMemoryCount: activeMemory.length,
-      activeMemoryCandidateCount: activeMemoryResult.report.candidate_count,
-      knowledgeWikiCandidateCount: knowledgeWikiContext.report.candidate_count,
-      knowledgeWikiIncludedCount: knowledgeWiki.length,
-      collectionNoteCandidateCount: allCollectionNotes.length,
-      collectionNoteIncludedCount: collectionContextNotes.length,
-      selectedSkillCount: selectedSkillEntries.length,
-      sessionSearchCandidateCount: sessionSearchValues.length,
-      sessionSearchIncludedCount: sessionSearch.length,
-      externalAssistRole: settings.external_provider_role,
-      externalAssistHintCount: externalAssist.hints.length,
-      externalAssistFailureCount: externalAssist.recent_failures.length,
-      availableToolCount: availableTools.length,
-      skippedSourceKinds: skipHeavyContext
-        ? new Set(["freeze_snapshot", "active_memory", "knowledge_wiki", "collection_notes", "selected_skills", "session_search", "external_assist"])
-        : sessionSearchTimedOut
-          ? new Set(["session_search"])
-        : undefined
-    });
-
-    return {
-      session_id: sessionId,
-      query,
-      context_assembly: contextAssembly,
-      session_summary: {
-        session_key: session.session_key,
-        title: session.title,
-        ui_locale: session.ui_locale,
-        output_locale: session.output_locale,
-        message_count: messages.length,
-        operation_count: operations.length,
-        backend_run_count: backendRuns.length,
-        tool_run_count: toolRuns.length,
-        workspace_change_count: workspaceChanges.length,
-        ...(lastMessage ? { last_message_at: lastMessage.created_at } : {}),
-        ...(lastBackendRun ? { last_backend_run_id: lastBackendRun.id } : {}),
-        ...(lastBackendRun ? { last_backend_run_status: lastBackendRun.status } : {})
-      },
-      external_assist: externalAssist,
-      freeze_snapshot: freezeSnapshot,
-      active_memory: activeMemory.map((memory) => ({
-        ...activeMemoryPreviewEntry(memory)
-      })),
-      active_memory_report: activeMemoryResult.report,
-      knowledge_wiki: knowledgeWiki,
-      knowledge_wiki_report: knowledgeWikiContext.report,
-      collection_notes: collectionContextNotes,
-      skill_selection_report: skillSelection.report,
-      selected_skills: selectedSkillEntries,
-      session_search: sessionSearch,
-      recent_messages: recentMessages,
-      available_tools: availableTools
-    };
   }
 
   private async runReflectionForCompletedTurn(input: {
@@ -10062,20 +9740,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function applyGatewayBoundaryAllowedTools(availableTools: string[], policy: GatewayBoundaryPolicy | undefined): string[] {
-  if (!policy) {
-    return availableTools;
-  }
-  if (policy.allowed_tools.includes("*")) {
-    return availableTools;
-  }
-  if (policy.allowed_tools.length === 0) {
-    return [];
-  }
-  const allowed = new Set(policy.allowed_tools);
-  return availableTools.filter((tool) => allowed.has(tool));
-}
-
 interface GatewayBoundaryToolDecision {
   allowed: boolean;
   action_id: string;
@@ -10351,47 +10015,7 @@ function gatewayBoundaryActionId(providerToolName: string): string {
   return getDomainCommandForProviderToolName(providerToolName)?.id ?? (providerToolName || "unknown_tool");
 }
 
-function normalizeExternalAssistHints(hints: ExternalAssistHint[] | void): ExternalAssistHint[] {
-  return (hints ?? []).slice(0, 5).map((hint, index) => ({
-    id: hint.id?.trim() || createId("external_hint"),
-    ...(hint.title?.trim() ? { title: hint.title.trim() } : {}),
-    summary: hint.summary.trim() || `External assist hint ${index + 1}.`,
-    ...(hint.source_uri?.trim() ? { source_uri: hint.source_uri.trim() } : {}),
-    ...(hint.source_label?.trim() ? { source_label: hint.source_label.trim() } : {}),
-    ...(typeof hint.confidence === "number" ? { confidence: Math.max(0, Math.min(1, hint.confidence)) } : {})
-  }));
-}
-
-function activeMemoryPreviewEntry(memory: MemoryCandidate): ContextPreview["active_memory"][number] {
-  return {
-    id: memory.frontmatter.id,
-    topic: memory.frontmatter.topic,
-    content: memory.content,
-    state: memory.frontmatter.state === "sensitive" ? "sensitive" : memory.frontmatter.state === "active" ? "active" : "topic",
-    sensitive_level: memory.frontmatter.sensitive_level,
-    priority: memory.priority,
-    selection_reason: memory.selection_reason,
-    conflicts_with: memory.frontmatter.conflicts_with
-  };
-}
-
-function knowledgeWikiExclusionReason(wiki: WikiWithFilePath): ContextPreview["knowledge_wiki_report"]["excluded"][number]["reason"] | undefined {
-  if (wiki.state === "proposed") {
-    return "proposed";
-  }
-  if (wiki.state === "rejected") {
-    return "rejected";
-  }
-  if (wiki.state === "archived") {
-    return "archived";
-  }
-  if (wiki.state !== "active") {
-    return "not_active";
-  }
-  return undefined;
-}
-
-function knowledgeWikiGraph(pages: WikiWithFilePath[], activeOnly: boolean): KnowledgeWikiGraph {
+function knowledgeWikiGraph(pages: WikiContextPage[], activeOnly: boolean): KnowledgeWikiGraph {
   const filtered = activeOnly ? pages.filter((page) => page.state === "active") : pages;
   return {
     active_only: activeOnly,
@@ -10410,31 +10034,6 @@ function knowledgeWikiGraph(pages: WikiWithFilePath[], activeOnly: boolean): Kno
   };
 }
 
-function externalAssistNote(input: {
-  role: "assistive" | "disabled";
-  providerId?: string;
-  prefetchRecords?: ExternalAssistRecord[];
-  hintCount: number;
-  failureCount: number;
-}): string {
-  if (input.role === "disabled") {
-    return "External provider assist is disabled for this workspace.";
-  }
-  if (!input.providerId) {
-    return "External provider assist is enabled, but no external assist provider is registered.";
-  }
-  if (input.prefetchRecords?.some((record) => record.status === "failed")) {
-    return "External provider assist failed non-fatally; accepted Memory and Session Search were still assembled.";
-  }
-  if (input.hintCount > 0) {
-    return "External provider assist returned unverified hints. They are isolated from accepted Memory unless separately reviewed.";
-  }
-  if (input.failureCount > 0) {
-    return "External provider assist has recent non-fatal failures. Accepted Memory and Session Search remain usable.";
-  }
-  return "External provider assist is enabled but returned no hint for this query.";
-}
-
 function normalizeExternalAssistProviders(provider?: ExternalAssistProvider | ExternalAssistProvider[]): ExternalAssistProvider[] {
   const providers = Array.isArray(provider) ? provider : provider ? [provider] : [];
   const seen = new Set<string>();
@@ -10446,342 +10045,6 @@ function normalizeExternalAssistProviders(provider?: ExternalAssistProvider | Ex
     seen.add(id);
     return true;
   });
-}
-
-function externalAssistProviderLabel(providers: ExternalAssistProvider[]): string | undefined {
-  if (providers.length === 0) {
-    return undefined;
-  }
-  if (providers.length === 1) {
-    return providers[0]?.id;
-  }
-  return providers.map((provider) => provider.id).join(", ");
-}
-
-const hostContextAssemblyLimits = {
-  recent_messages: 10,
-  knowledge_wiki: 5,
-  collection_notes: 5,
-  selected_skills: 5,
-  session_search: 8
-} as const;
-
-const contextStepTimeoutMs = 2_000;
-
-interface TimeboxedContextValue<T> {
-  value: T;
-  timedOut: boolean;
-  step: string;
-}
-
-function timeboxContextValue<T>(value: T, timedOut: boolean, step = "context"): TimeboxedContextValue<T> {
-  return { value, timedOut, step };
-}
-
-function timeboxContextStep<T>(promise: Promise<T>, fallback: T, step: string): Promise<TimeboxedContextValue<T>> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<TimeboxedContextValue<T>>((resolve) => {
-    timer = setTimeout(() => resolve(timeboxContextValue(fallback, true, step)), contextStepTimeoutMs);
-  });
-  return Promise.race([
-    promise
-      .then((value) => timeboxContextValue(value, false, step))
-      .catch(() => timeboxContextValue(fallback, true, step)),
-    timeout
-  ]).finally(() => {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  });
-}
-
-type BackendContextIntent = "light_chat" | "contextual_chat" | "workspace_task";
-
-interface BuildHostContextAssemblyInput {
-  sessionId: string;
-  query: string;
-  sessionFound: boolean;
-  messageCount: number;
-  recentMessageCount: number;
-  freezeSnapshotPresent: boolean;
-  activeMemoryCandidateCount: number;
-  activeMemoryCount: number;
-  knowledgeWikiCandidateCount: number;
-  knowledgeWikiIncludedCount: number;
-  collectionNoteCandidateCount: number;
-  collectionNoteIncludedCount: number;
-  selectedSkillCount: number;
-  sessionSearchCandidateCount: number;
-  sessionSearchIncludedCount: number;
-  externalAssistRole: "assistive" | "disabled";
-  externalAssistHintCount: number;
-  externalAssistFailureCount: number;
-  availableToolCount: number;
-  skippedSourceKinds?: Set<HostContextAssembly["sources"][number]["kind"]>;
-}
-
-function buildHostContextAssembly(input: BuildHostContextAssemblyInput): HostContextAssembly {
-  const omissions = contextAssemblyOmissions(input);
-  return {
-    version: 1,
-    assembled_at: nowIso(),
-    session_id: input.sessionId,
-    query: input.query,
-    sources: [
-      contextAssemblySource("session", input.sessionFound ? "included" : "missing", 1, input.sessionFound ? 1 : 0, input.sessionFound ? "Session record was loaded from Workspace Store." : "Session record was not found."),
-      contextAssemblySource("recent_messages", contextAssemblyStatus(input.messageCount, input.recentMessageCount), input.messageCount, input.recentMessageCount, `Latest ${hostContextAssemblyLimits.recent_messages} message(s) are kept for backend context.`),
-      contextAssemblySource("freeze_snapshot", input.freezeSnapshotPresent ? "included" : "missing", input.freezeSnapshotPresent ? 1 : 0, input.freezeSnapshotPresent ? 1 : 0, input.freezeSnapshotPresent ? "Profile snapshot was loaded for this turn." : "No profile snapshot could be loaded.", input.skippedSourceKinds),
-      contextAssemblySource("active_memory", contextAssemblyStatus(input.activeMemoryCandidateCount, input.activeMemoryCount), input.activeMemoryCandidateCount, input.activeMemoryCount, "Only accepted active/topic/sensitive Memory candidates are included for normal backend context.", input.skippedSourceKinds),
-      contextAssemblySource("knowledge_wiki", contextAssemblyStatus(input.knowledgeWikiCandidateCount, input.knowledgeWikiIncludedCount), input.knowledgeWikiCandidateCount, input.knowledgeWikiIncludedCount, "Only active Knowledge Wiki pages with readable content are included.", input.skippedSourceKinds),
-      contextAssemblySource("collection_notes", contextAssemblyStatus(input.collectionNoteCandidateCount, input.collectionNoteIncludedCount), input.collectionNoteCandidateCount, input.collectionNoteIncludedCount, "Collection notes are selected as context-only hints.", input.skippedSourceKinds),
-      contextAssemblySource("selected_skills", contextAssemblyStatus(input.selectedSkillCount, input.selectedSkillCount), input.selectedSkillCount, input.selectedSkillCount, "Skill index search selected reusable procedures with progressive disclosure.", input.skippedSourceKinds),
-      contextAssemblySource("session_search", contextAssemblyStatus(input.sessionSearchCandidateCount, input.sessionSearchIncludedCount), input.sessionSearchCandidateCount, input.sessionSearchIncludedCount, `Session Search is capped at ${hostContextAssemblyLimits.session_search} result(s).`, input.skippedSourceKinds),
-      contextAssemblySource(
-        "external_assist",
-        externalAssistSourceStatus(input.externalAssistRole, input.externalAssistHintCount),
-        input.externalAssistHintCount + input.externalAssistFailureCount,
-        input.externalAssistHintCount,
-        externalAssistSourceReason(input.externalAssistRole, input.externalAssistHintCount, input.externalAssistFailureCount),
-        input.skippedSourceKinds
-      ),
-      contextAssemblySource("available_tools", input.availableToolCount > 0 ? "included" : "empty", input.availableToolCount, input.availableToolCount, "Workspace tool catalog was exposed before any Gateway boundary filtering."),
-      contextAssemblySource("gateway_boundary", "missing", 0, 0, "No Gateway boundary policy was attached to this preview.")
-    ],
-    omissions,
-    limits: hostContextAssemblyLimits,
-    gateway_boundary: {
-      present: false,
-      allowed_tools_count: 0,
-      available_tools_before_boundary: input.availableToolCount,
-      available_tools_after_boundary: input.availableToolCount,
-      filtered_tool_count: 0,
-      reason: "No Gateway boundary policy was attached to this preview."
-    },
-    quality_checks: [
-      {
-        id: "session_loaded",
-        status: input.sessionFound ? "pass" : "fail",
-        detail: input.sessionFound ? "Session context is available." : "Host cannot assemble context without a session."
-      },
-      {
-        id: "active_wiki_only",
-        status: "pass",
-        detail: "Knowledge Wiki retrieval used active-only search."
-      },
-      {
-        id: "external_assist_isolated",
-        status: "pass",
-        detail: "External assist is not included in accepted active Memory."
-      },
-      {
-        id: "collection_notes_context_only",
-        status: "pass",
-        detail: "Collection notes remain context-only and do not relax schema validation."
-      },
-      {
-        id: "available_tools_catalog",
-        status: input.availableToolCount > 0 ? "pass" : "warning",
-        detail: input.availableToolCount > 0 ? "Workspace tool catalog is available." : "No workspace tools are available to this run."
-      },
-      {
-        id: "freeze_snapshot_loaded",
-        status: input.freezeSnapshotPresent || input.skippedSourceKinds?.has("freeze_snapshot") ? "pass" : "warning",
-        detail: input.skippedSourceKinds?.has("freeze_snapshot")
-          ? "Profile snapshot was intentionally skipped for this lightweight turn."
-          : input.freezeSnapshotPresent ? "Profile snapshot is pinned for this turn." : "Profile snapshot is missing for this turn."
-      }
-    ]
-  };
-}
-
-function externalAssistSourceStatus(
-  role: "assistive" | "disabled",
-  hintCount: number
-): HostContextAssembly["sources"][number]["status"] {
-  if (role === "disabled") {
-    return "disabled";
-  }
-  return hintCount > 0 ? "included" : "empty";
-}
-
-function externalAssistSourceReason(role: "assistive" | "disabled", hintCount: number, failureCount: number): string {
-  if (role === "disabled") {
-    return "External assist is disabled in workspace settings.";
-  }
-  if (hintCount > 0) {
-    return "External assist returned unverified hints isolated from Memory.";
-  }
-  if (failureCount > 0) {
-    return "External assist failed non-fatally; accepted Memory and Session Search remain available.";
-  }
-  return "External assist is enabled but returned no hint for this query.";
-}
-
-function contextAssemblyStatus(candidateCount: number, includedCount: number): HostContextAssembly["sources"][number]["status"] {
-  if (candidateCount === 0 && includedCount === 0) {
-    return "empty";
-  }
-  if (includedCount < candidateCount) {
-    return "filtered";
-  }
-  return includedCount > 0 ? "included" : "empty";
-}
-
-function contextAssemblySource(
-  kind: HostContextAssembly["sources"][number]["kind"],
-  status: HostContextAssembly["sources"][number]["status"],
-  candidateCount: number,
-  includedCount: number,
-  reason: string,
-  skippedSourceKinds?: Set<HostContextAssembly["sources"][number]["kind"]>
-): HostContextAssembly["sources"][number] {
-  if (skippedSourceKinds?.has(kind)) {
-    return {
-      kind,
-      status: "skipped",
-      candidate_count: 0,
-      included_count: 0,
-      reason: "Skipped for lightweight external backend context."
-    };
-  }
-  return {
-    kind,
-    status,
-    candidate_count: Math.max(0, candidateCount),
-    included_count: Math.max(0, includedCount),
-    reason
-  };
-}
-
-function contextAssemblyOmissions(input: BuildHostContextAssemblyInput): HostContextAssembly["omissions"] {
-  const omissions: HostContextAssembly["omissions"] = [];
-  if (input.messageCount > input.recentMessageCount) {
-    omissions.push({
-      kind: "recent_messages",
-      count: input.messageCount - input.recentMessageCount,
-      reason: `Older messages were omitted from the live backend context after the latest ${hostContextAssemblyLimits.recent_messages}.`
-    });
-  }
-  if (input.knowledgeWikiCandidateCount > input.knowledgeWikiIncludedCount) {
-    omissions.push({
-      kind: "knowledge_wiki",
-      count: input.knowledgeWikiCandidateCount - input.knowledgeWikiIncludedCount,
-      reason: "Knowledge Wiki pages without readable active content were omitted."
-    });
-  }
-  if (input.activeMemoryCandidateCount > input.activeMemoryCount) {
-    omissions.push({
-      kind: "active_memory",
-      count: input.activeMemoryCandidateCount - input.activeMemoryCount,
-      reason: "Session/provisional/archived/empty Memory candidates were excluded from normal backend context."
-    });
-  }
-  if (input.collectionNoteCandidateCount > input.collectionNoteIncludedCount) {
-    omissions.push({
-      kind: "collection_notes",
-      count: input.collectionNoteCandidateCount - input.collectionNoteIncludedCount,
-      reason: "Collection notes outside the query match or context limit were omitted."
-    });
-  }
-  if (input.sessionSearchCandidateCount > input.sessionSearchIncludedCount) {
-    omissions.push({
-      kind: "session_search",
-      count: input.sessionSearchCandidateCount - input.sessionSearchIncludedCount,
-      reason: `Session Search results were capped at ${hostContextAssemblyLimits.session_search}.`
-    });
-  }
-  if (input.externalAssistFailureCount > 0) {
-    omissions.push({
-      kind: "external_assist",
-      count: input.externalAssistFailureCount,
-      reason: "External assist failures were isolated from accepted Memory and kept as diagnostics."
-    });
-  }
-  if (!input.freezeSnapshotPresent && !input.skippedSourceKinds?.has("freeze_snapshot")) {
-    omissions.push({
-      kind: "freeze_snapshot",
-      reason: "Freeze snapshot was not available for this turn."
-    });
-  }
-  return omissions;
-}
-
-function shouldIncludeSessionSearchInBackendContext(query: string): boolean {
-  const normalized = query.trim().replace(/[！!。.,、\s]/g, "").toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  const greetingOnly = new Set([
-    "こんにちは",
-    "こんばんは",
-    "おはよう",
-    "おはようございます",
-    "やあ",
-    "hi",
-    "hello",
-    "hey"
-  ]);
-  if (greetingOnly.has(normalized)) {
-    return false;
-  }
-  return query.trim().length >= 12 || /続き|前回|さっき|以前|覚えて|探して|検索|session|history|履歴/i.test(query);
-}
-
-function classifyBackendContextIntent(query: string): BackendContextIntent {
-  const trimmed = query.trim();
-  const normalized = trimmed.replace(/[！!。.,、\s]/g, "").toLowerCase();
-  if (!normalized) {
-    return "light_chat";
-  }
-  if (/続き|前回|さっき|以前|この前|覚えて|思い出|探して|検索|履歴|history|session|remember|previous|last time/i.test(trimmed)) {
-    return "contextual_chat";
-  }
-  if (/作って|作成|編集|修正|実装|調査|確認|レビュー|テスト|ビルド|実行|保存|更新|追加|削除|まとめて|書いて|生成|deploy|build|test|fix|implement|review|create|update|delete|search/i.test(trimmed)) {
-    return "workspace_task";
-  }
-  const lightChatOnly = new Set([
-    "こんにちは",
-    "こんばんは",
-    "おはよう",
-    "おはようございます",
-    "ありがとう",
-    "ありがとうございます",
-    "了解",
-    "ok",
-    "okay",
-    "hi",
-    "hello",
-    "hey",
-    "thanks",
-    "thankyou",
-    "thankyou"
-  ]);
-  if (lightChatOnly.has(normalized) || trimmed.length <= 8) {
-    return "light_chat";
-  }
-  return trimmed.length >= 24 ? "workspace_task" : "contextual_chat";
-}
-
-type BackendExpectedOutput = "artifact" | "collection_schema" | "collection_view" | "generated_surface";
-
-function expectedBackendOutputs(query: string): BackendExpectedOutput[] {
-  const outputs: BackendExpectedOutput[] = [];
-  if (shouldCreateGeneratedSurfaceOutput(query)) {
-    outputs.push("generated_surface");
-  }
-  if (shouldCreateArtifactOutput(query)) {
-    outputs.push("artifact");
-  }
-  if (shouldCreateCollectionSchemaOutput(query)) {
-    outputs.push("collection_schema");
-  }
-  return outputs;
-}
-
-function shouldCreateGeneratedSurfaceOutput(query: string): boolean {
-  const trimmed = query.trim();
-  if (!trimmed) return false;
-  return /独自\s*UI|独自画面|カスタム\s*UI|HTML(?:\s*表示|(?:を|で)?\s*生成)|generated\s*UI|custom\s*UI|custom\s*html|renders?\s+(?:this|it)\s+as\s+(?:custom|html)/i.test(trimmed);
 }
 
 function normalizeGeneratedSurfaceCommandPayload(
@@ -10984,38 +10247,6 @@ function toolBridgeEndpointUrl(runId: string): string {
   return `http://127.0.0.1:${port}/api/backend-runs/${encodeURIComponent(runId)}/tool-calls`;
 }
 
-function shouldCreateArtifactOutput(query: string): boolean {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (/実装|修正|編集|コード|テスト|ビルド|デプロイ|commit|branch|pr|pull request|fix|implement|test|build|deploy|code/i.test(trimmed)) {
-    return false;
-  }
-  if (/ファイル|保存|書き込|追加先|保存先|path|plans\/|\.md\b|markdown\s+file|save\s+as|write\s+(a\s+)?file/i.test(trimmed)) {
-    return false;
-  }
-  const asksToCreate = /作って|作成|書いて|まとめて|生成|下書き|ドラフト|create|write|draft|generate/i.test(trimmed);
-  if (!asksToCreate) {
-    return false;
-  }
-  return /作業メモ|メモ|議事録|下書き|ドラフト|提案書|企画書|レポート|報告書|資料|ドキュメント|文章|メール文|表|一覧|memo|note|minutes|draft|proposal|report|document|table|email/i.test(trimmed);
-}
-
-function shouldCreateCollectionSchemaOutput(query: string): boolean {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    return false;
-  }
-  const createIntent = /作って|作成|作る|create|make|build|crear|criar|créer|creer|erstellen|machen|만들|생성|创建|建立|創建/i.test(trimmed);
-  const collectionNoun = /アプリ|コレクション|ログ|collection|app|application|log|tracker|aplicación|aplicacion|aplicação|aplicacao|appli|anwendung|앱|컬렉션|로그|기록|应用|應用|集合|日志|日誌|记录|紀錄/i.test(trimmed);
-  return createIntent && collectionNoun;
-}
-
-function shouldPresentCollectionOutput(query: string): boolean {
-  return false;
-}
-
 function shouldUpdateCollectionViewOutput(query: string): boolean {
   return false;
 }
@@ -11075,58 +10306,6 @@ function mergeUniqueById<T extends { id: string }>(target: T[], source: T[]): vo
   }
 }
 
-function shouldThinExternalBackendContext(kind: AgentBackendKind, intent: BackendContextIntent): boolean {
-  return intent === "light_chat" && (kind === "claude_code" || kind === "codex" || kind === "external");
-}
-
-function emptyActiveMemoryResult(query: string): Awaited<ReturnType<typeof retrieveActiveMemoryWithReport>> {
-  return {
-    candidates: [],
-    report: {
-      query,
-      retrieved_at: nowIso(),
-      candidate_count: 0,
-      included_count: 0,
-      included_memory_ids: [],
-      excluded: [],
-      sensitive_redactions: [],
-      conflict_groups: [],
-      resolution_suggestions: []
-    }
-  };
-}
-
-function emptyKnowledgeWikiContext(query: string): {
-  pages: WikiWithFilePath[];
-  entries: ContextPreview["knowledge_wiki"];
-  report: ContextPreview["knowledge_wiki_report"];
-} {
-  return {
-    pages: [],
-    entries: [],
-    report: {
-      query,
-      retrieved_at: nowIso(),
-      candidate_count: 0,
-      included_count: 0,
-      included_wiki_ids: [],
-      excluded: [],
-      source_refs: []
-    }
-  };
-}
-
-function emptyExternalAssistContext(role: "assistive" | "disabled", note: string): ContextPreview["external_assist"] {
-  return {
-    role,
-    isolated_from_memory: true,
-    included_in_active_memory: false,
-    note,
-    hints: [],
-    recent_failures: []
-  };
-}
-
 function hasMeaningfulBackendOutput(
   events: BackendEventRecord[],
   workspaceChanges: WorkspaceChangeRecord[],
@@ -11150,295 +10329,6 @@ function meaningfulBackendRunSummary(summary: string | undefined): string {
     return "";
   }
   return trimmed;
-}
-
-function applyGatewayBoundaryToContextAssembly(
-  assembly: HostContextAssembly,
-  boundary: GatewayBoundaryRuntimeSnapshot | undefined,
-  availableToolsBeforeBoundary: string[],
-  availableToolsAfterBoundary: string[]
-): HostContextAssembly {
-  if (!boundary) {
-    return assembly;
-  }
-  const beforeCount = availableToolsBeforeBoundary.length;
-  const afterCount = availableToolsAfterBoundary.length;
-  const filteredCount = Math.max(0, beforeCount - afterCount);
-  const sources = assembly.sources.map((source) => {
-    if (source.kind === "available_tools") {
-      return contextAssemblySource(
-        "available_tools",
-        filteredCount > 0 ? "filtered" : contextAssemblyStatus(beforeCount, afterCount),
-        beforeCount,
-        afterCount,
-        filteredCount > 0 ? "Gateway boundary policy filtered the workspace tool catalog." : "Gateway boundary policy allowed the available workspace tools."
-      );
-    }
-    if (source.kind === "gateway_boundary") {
-      return contextAssemblySource(
-        "gateway_boundary",
-        "included",
-        1,
-        1,
-        "Gateway boundary runtime snapshot is attached to this backend run."
-      );
-    }
-    return source;
-  });
-  const omissions = filteredCount > 0
-    ? [
-        ...assembly.omissions,
-        {
-          kind: "available_tools" as const,
-          count: filteredCount,
-          reason: "Gateway boundary policy removed tools not allowed for this source."
-        }
-      ]
-    : assembly.omissions;
-  const gatewayBoundary: HostContextAssembly["gateway_boundary"] = {
-    present: true,
-    policy_id: boundary.policy_id,
-    source_channel: boundary.source_channel,
-    ...(boundary.source_identity ? { source_identity: boundary.source_identity } : {}),
-    allowed_tools_count: boundary.allowed_tools.length,
-    available_tools_before_boundary: beforeCount,
-    available_tools_after_boundary: afterCount,
-    filtered_tool_count: filteredCount,
-    reason: filteredCount > 0 ? "Gateway boundary restricted available tools for this run." : "Gateway boundary did not remove any available tool for this run."
-  };
-  return {
-    ...assembly,
-    sources,
-    omissions,
-    gateway_boundary: gatewayBoundary,
-    quality_checks: [
-      ...assembly.quality_checks,
-      {
-        id: "gateway_boundary_applied",
-        status: "pass",
-        detail: filteredCount > 0
-          ? `Gateway boundary filtered ${filteredCount} tool(s).`
-          : "Gateway boundary was attached and required no tool filtering."
-      }
-    ]
-  };
-}
-
-function contextAssemblyRuntimeMetadata(assembly: HostContextAssembly): Record<string, JsonValue> {
-  return {
-    context_assembly_version: assembly.version,
-    context_assembly_sources: assembly.sources.map((source) => ({
-      kind: source.kind,
-      status: source.status,
-      candidate_count: source.candidate_count,
-      included_count: source.included_count
-    })),
-    context_assembly_gateway_boundary_present: assembly.gateway_boundary.present,
-    context_assembly_filtered_tool_count: assembly.gateway_boundary.filtered_tool_count,
-    context_assembly_quality_warnings: assembly.quality_checks
-      .filter((check) => check.status !== "pass")
-      .map((check) => ({ id: check.id, status: check.status, detail: check.detail }))
-  };
-}
-
-function buildContextHandoffForBackend(input: {
-  backendKind: AgentBackendKind;
-  contextIntent: BackendContextIntent;
-  contextPreview: ContextPreview;
-  contextAssembly: HostContextAssembly;
-  gatewayBoundaryPresent: boolean;
-}): ContextHandoff {
-  const pointerFirst = input.backendKind === "claude_code" || input.backendKind === "codex" || input.backendKind === "external";
-  const sourceByKind = new Map(input.contextAssembly.sources.map((source) => [source.kind, source]));
-  const modeFor = (kind: HostContextAssembly["sources"][number]["kind"], includedCount: number): ContextHandoff["sources"][number]["mode"] => {
-    const source = sourceByKind.get(kind);
-    if (!source || source.status === "skipped" || includedCount === 0) {
-      return "skipped";
-    }
-    if (!pointerFirst) {
-      return "inline";
-    }
-    return kind === "session" || kind === "recent_messages" ? "inline" : "pointer";
-  };
-  const refsFor = (kind: HostContextAssembly["sources"][number]["kind"]): ResourceRef[] => {
-    switch (kind) {
-      case "freeze_snapshot":
-        return [
-          input.contextPreview.freeze_snapshot?.soul.file_ref,
-          input.contextPreview.freeze_snapshot?.profile?.file_ref,
-          ...(input.contextPreview.freeze_snapshot?.memory_refs ?? []),
-          ...(input.contextPreview.freeze_snapshot?.skill_refs ?? []),
-          ...(input.contextPreview.freeze_snapshot?.wiki_refs ?? [])
-        ].filter((ref): ref is ResourceRef => Boolean(ref));
-      case "active_memory":
-        return input.contextPreview.active_memory.map((memory) => ({
-          kind: "memory",
-          id: memory.id,
-          uri: `memory/${memory.state}/${memory.id}.md`,
-          label: memory.topic
-        }));
-      case "knowledge_wiki":
-        return input.contextPreview.knowledge_wiki.map((wiki) => ({
-          kind: "wiki",
-          id: wiki.id,
-          uri: `wiki/${wiki.slug}.md`,
-          label: wiki.title
-        }));
-      case "collection_notes":
-        return input.contextPreview.collection_notes.map((note) => fileRef(note.file_path));
-      case "selected_skills":
-        return input.contextPreview.selected_skills.flatMap((skill) => [
-          {
-            kind: "skill",
-            id: skill.id,
-            uri: `skills/${skill.id}/SKILL.md`,
-            label: skill.title
-          },
-          ...(skill.support_file_refs ?? []).map((file) => ({
-            kind: "skill_support_file",
-            id: `${skill.id}:${file.path}`,
-            uri: file.file_path,
-            label: file.path
-          }))
-        ]);
-      case "session_search":
-        return input.contextPreview.session_search.map((result) => ({
-          kind: result.kind,
-          id: result.id,
-          uri: `session-search/${result.kind}/${result.id}`,
-          label: result.title
-        }));
-      case "external_assist":
-        return input.contextPreview.external_assist.hints.map((hint) => ({
-          kind: "external_assist",
-          id: hint.id,
-          uri: hint.source_uri ?? `external-assist/${hint.id}`,
-          label: hint.title ?? hint.summary
-        }));
-      case "recent_messages":
-        return input.contextPreview.recent_messages.map((message) => ({
-          kind: "message",
-          id: message.id,
-          uri: `session/${input.contextPreview.session_id}/messages/${message.id}`,
-          label: message.role
-        }));
-      case "available_tools":
-        return input.contextPreview.available_tools.map((tool) => ({
-          kind: "tool",
-          id: stableHash(tool),
-          uri: `tool/${tool}`,
-          label: tool
-        }));
-      case "gateway_boundary":
-        return input.gatewayBoundaryPresent
-          ? [{
-              kind: "gateway_boundary",
-              id: input.contextPreview.session_id,
-              uri: `session/${input.contextPreview.session_id}/gateway-boundary`,
-              label: "Gateway Boundary"
-            }]
-          : [];
-      case "session":
-        return [{
-          kind: "session",
-          id: input.contextPreview.session_id,
-          uri: `session/${input.contextPreview.session_id}`,
-          label: input.contextPreview.session_summary.title
-        }];
-      default:
-        return [];
-    }
-  };
-  const sources = input.contextAssembly.sources.map((source) => {
-    const refs = refsFor(source.kind);
-    return {
-      kind: source.kind,
-      mode: modeFor(source.kind, source.included_count),
-      candidate_count: source.candidate_count,
-      included_count: source.included_count,
-      reason: source.reason,
-      refs
-    };
-  });
-  const estimatedSize = JSON.stringify({
-    query: input.contextPreview.query,
-    sources: sources.map((source) => ({
-      kind: source.kind,
-      mode: source.mode,
-      refs: source.refs.map((ref) => ref.uri)
-    }))
-  }).length;
-  return {
-    version: 1,
-    strategy: pointerFirst ? "pointer_first" : "inline_context",
-    sources,
-    ...(estimatedSize > 16_000 ? { prompt_size_warning: `Context handoff is ${estimatedSize} characters before backend prompt formatting.` } : {})
-  };
-}
-
-function contextHandoffRuntimeMetadata(handoff: ContextHandoff): Record<string, JsonValue> {
-  return {
-    context_handoff_version: handoff.version,
-    context_handoff_strategy: handoff.strategy,
-    context_handoff_sources: handoff.sources.map((source) => ({
-      kind: source.kind,
-      mode: source.mode,
-      candidate_count: source.candidate_count,
-      included_count: source.included_count,
-      ref_count: source.refs.length,
-      reason: source.reason
-    })),
-    ...(handoff.prompt_size_warning ? { context_handoff_prompt_size_warning: handoff.prompt_size_warning } : {})
-  };
-}
-
-function gatewayBoundaryRuntimeSnapshot(policy: GatewayBoundaryPolicy): GatewayBoundaryRuntimeSnapshot {
-  const secretRefIds = new Set<string>();
-  for (const ref of policy.secret_refs) {
-    secretRefIds.add(ref.id);
-  }
-  for (const mcp of policy.mcp_config_refs) {
-    for (const ref of mcp.secret_refs) {
-      secretRefIds.add(ref.id);
-    }
-  }
-  return {
-    policy_id: policy.id,
-    source_channel: policy.source_channel,
-    source_identity: policy.source_identity,
-    session_key: policy.session_key,
-    allowed_tools: policy.allowed_tools,
-    mcp_config_refs: policy.mcp_config_refs.map((ref) => ({
-      id: ref.id,
-      server_name: ref.server_name,
-      config_ref: ref.config_ref,
-      allowed_tools: ref.allowed_tools,
-      secret_ref_ids: ref.secret_refs.map((secretRef) => secretRef.id)
-    })),
-    secret_ref_ids: [...secretRefIds],
-    sandbox: policy.sandbox,
-    path_normalization: policy.path_normalization,
-    allowlist: policy.allowlist,
-    timeout_ms: policy.timeout_ms,
-    concurrency_lock: policy.concurrency_lock,
-    created_at: nowIso()
-  };
-}
-
-function gatewayBoundaryRuntimeMetadata(snapshot: GatewayBoundaryRuntimeSnapshot): Record<string, JsonValue> {
-  return {
-    gateway_boundary_policy_id: snapshot.policy_id,
-    gateway_boundary_source_channel: snapshot.source_channel,
-    gateway_boundary_source_identity: snapshot.source_identity ?? null,
-    gateway_boundary_allowed_tools: snapshot.allowed_tools,
-    gateway_boundary_sandbox_mode: snapshot.sandbox.mode,
-    gateway_boundary_sandbox_backend: snapshot.sandbox.backend,
-    gateway_boundary_workspace_access: snapshot.sandbox.workspace_access,
-    gateway_boundary_network_access: snapshot.sandbox.network_access,
-    gateway_boundary_secret_ref_ids: snapshot.secret_ref_ids,
-    gateway_boundary_mcp_config_ref_ids: snapshot.mcp_config_refs.map((ref) => ref.id),
-    gateway_boundary_concurrency_lock_key: snapshot.concurrency_lock?.key ?? null
-  };
 }
 
 function approvePairing(pairing: GatewayPairingRecord): GatewayPairingRecord {
@@ -11481,336 +10371,6 @@ function fileRollbackSnapshot(snapshot: RollbackPoint["before_snapshot"]): { pat
 
 function createCronMemoryReviewEnvelope(): MessageEnvelope {
   return createGatewayEnvelope(cronMemoryReviewGatewayContext, "Run scheduled memory review.");
-}
-
-function renderSkillMarkdown(frontmatter: SkillFrontmatter, content: string): string {
-  const parsed = SkillFrontmatterSchema.parse(frontmatter);
-  return ["---", JSON.stringify(parsed, null, 2), "---", content.trim(), ""].join("\n");
-}
-
-function parseSkillMarkdown(markdown: string): { frontmatter: SkillFrontmatter; content: string } {
-  if (!markdown.startsWith("---\n")) {
-    throw new Error("skill_frontmatter_missing");
-  }
-  const end = markdown.indexOf("\n---", 4);
-  if (end === -1) {
-    throw new Error("skill_frontmatter_unclosed");
-  }
-  const rawFrontmatter = markdown.slice(4, end).trim();
-  const contentStart = markdown.indexOf("\n", end + 4);
-  return {
-    frontmatter: SkillFrontmatterSchema.parse(JSON.parse(rawFrontmatter)),
-    content: contentStart === -1 ? "" : markdown.slice(contentStart + 1).trim()
-  };
-}
-
-function stripSkillFrontmatter(markdown: string): string {
-  return parseSkillMarkdown(markdown).content.trim();
-}
-
-function memoryRef(memory: MemoryFrontmatter & { file_path?: string }) {
-  return {
-    kind: "memory",
-    id: memory.id,
-    uri: memory.file_path ?? `memory/${memory.state}/${memory.id}.md`,
-    label: memory.topic
-  };
-}
-
-function skillRef(skill: SkillWithFilePath) {
-  return {
-    kind: "skill",
-    id: skill.id,
-    uri: skill.file_path,
-    label: skill.title
-  };
-}
-
-function skillSupportFileRef(file: SkillSupportFile) {
-  return {
-    kind: "skill_support_file",
-    id: `${file.skill_id}:${file.path}`,
-    uri: file.file_path,
-    label: file.path
-  };
-}
-
-type SkillDisclosureLevel = "catalog" | "body" | "support";
-type RuntimeSkillSelection = NonNullable<ContextPreview["selected_skills"][number]["selection"]>;
-
-function selectRuntimeSkills(input: {
-  candidates: SkillWithFilePath[];
-  query: string;
-  limit: number;
-}): {
-  selected: Array<{ skill: SkillWithFilePath; selection: RuntimeSkillSelection }>;
-  report: ContextPreview["skill_selection_report"];
-} {
-  const availableCapabilities = availableRuntimeCapabilities();
-  const availableCapabilitySet = new Set(availableCapabilities);
-  const supportedScopes = supportedRuntimeScopes();
-  const terms = skillQueryTerms(input.query);
-  const evaluated = input.candidates.map((skill) => {
-    const selection = evaluateSkillSelection(skill, terms, availableCapabilitySet, supportedScopes);
-    const excludedReason = selection.missing_capabilities.length
-      ? "missing_capability" as const
-      : selection.unsupported_scopes.length
-        ? "scope_unsupported" as const
-        : undefined;
-    return { skill, selection, excludedReason };
-  });
-  const selected = evaluated
-    .filter((item) => !item.excludedReason)
-    .sort((left, right) => right.selection.score - left.selection.score || left.skill.title.localeCompare(right.skill.title))
-    .slice(0, input.limit)
-    .map(({ skill, selection }) => ({ skill, selection }));
-  return {
-    selected,
-    report: {
-      query: input.query,
-      candidate_count: input.candidates.length,
-      selected_count: selected.length,
-      selected_skill_ids: selected.map((item) => item.skill.id),
-      available_capabilities: availableCapabilities,
-      environment: {
-        runtime: "local_workspace",
-        platform: process.platform
-      },
-      excluded: evaluated
-        .filter((item) => Boolean(item.excludedReason))
-        .map((item) => ({
-          id: item.skill.id,
-          title: item.skill.title,
-          reason: item.excludedReason!,
-          missing_capabilities: item.selection.missing_capabilities,
-          unsupported_scopes: item.selection.unsupported_scopes
-        }))
-    }
-  };
-}
-
-function evaluateSkillSelection(
-  skill: SkillWithFilePath,
-  terms: string[],
-  availableCapabilities: Set<string>,
-  supportedScopes: Set<SkillFrontmatter["allowed_scopes"][number]>
-): RuntimeSkillSelection {
-  const allowedScopes = skillAllowedScopes(skill);
-  const ownerPinned = skillOwnerPinned(skill);
-  const catalog = normalizeSkillSearchText([
-    skill.title,
-    skill.description,
-    skill.tags.join(" "),
-    skill.required_capabilities.join(" "),
-    allowedScopes.join(" ")
-  ].join(" "));
-  const matchedTerms = terms.filter((term) => catalog.includes(term));
-  const matchedCapabilities = skill.required_capabilities.filter((capability) => availableCapabilities.has(capability));
-  const missingCapabilities = skill.required_capabilities.filter((capability) => !availableCapabilities.has(capability));
-  const unsupportedScopes = allowedScopes.filter((scope) => !supportedScopes.has(scope));
-  const reasons: string[] = [];
-  if (matchedTerms.length) {
-    reasons.push(`Matched query terms: ${matchedTerms.join(", ")}.`);
-  }
-  if (matchedCapabilities.length) {
-    reasons.push(`Required capabilities available: ${matchedCapabilities.join(", ")}.`);
-  }
-  if (missingCapabilities.length) {
-    reasons.push(`Missing capabilities: ${missingCapabilities.join(", ")}.`);
-  }
-  if (unsupportedScopes.length) {
-    reasons.push(`Unsupported scopes: ${unsupportedScopes.join(", ")}.`);
-  }
-  if (ownerPinned) {
-    reasons.push("Owner pinned skill.");
-  }
-  if (!reasons.length) {
-    reasons.push("Skill catalog matched the query.");
-  }
-  return {
-    score: matchedTerms.length * 10 + matchedCapabilities.length * 6 + (ownerPinned ? 4 : 0) + stateSelectionBoost(skill.state),
-    matched_terms: matchedTerms,
-    matched_capabilities: matchedCapabilities,
-    missing_capabilities: missingCapabilities,
-    unsupported_scopes: unsupportedScopes,
-    reasons
-  };
-}
-
-function availableRuntimeCapabilities(): string[] {
-  return [...new Set([
-    ...proposalCapabilityManifest.agent_tools,
-    ...proposalCapabilityManifest.operations.map((operation) => operation.operation)
-  ])].sort();
-}
-
-function supportedRuntimeScopes(): Set<SkillFrontmatter["allowed_scopes"][number]> {
-  return new Set([
-    ...proposalCapabilityManifest.operations.map((operation) => operation.scope),
-    "artifact",
-    "collection",
-    "memory",
-    "session",
-    "skill",
-    "workspace"
-  ]);
-}
-
-function skillAllowedScopes(skill: SkillWithFilePath): SkillFrontmatter["allowed_scopes"] {
-  return Array.isArray(skill.allowed_scopes) ? skill.allowed_scopes : skill.frontmatter.allowed_scopes;
-}
-
-function skillOwnerPinned(skill: SkillWithFilePath): boolean {
-  return Boolean(skill.owner_pinned ?? skill.frontmatter.owner_pinned);
-}
-
-function stateSelectionBoost(state: SkillWithFilePath["state"]): number {
-  if (state === "pinned" || state === "active") {
-    return 5;
-  }
-  if (state === "project") {
-    return 3;
-  }
-  return 0;
-}
-
-function decideSkillDisclosureLevel(input: {
-  skill: SkillWithFilePath;
-  index: number;
-  query: string;
-  content: string;
-  matchedSupportFiles: SkillSupportFile[];
-}): SkillDisclosureLevel {
-  void input;
-  return "catalog";
-}
-
-function selectSkillSupportFiles(files: SkillSupportFile[], query: string): SkillSupportFile[] {
-  const terms = skillQueryTerms(query);
-  const wantsSupport = wantsSkillSupportDisclosure(query);
-  const scored = files
-    .map((file) => ({
-      file,
-      score: scoreSkillSupportFile(file, terms, wantsSupport)
-    }))
-    .filter((entry) => entry.score > 0)
-    .sort((left, right) => right.score - left.score || left.file.path.localeCompare(right.file.path));
-  return scored.slice(0, 5).map((entry) => entry.file);
-}
-
-type CollectionContextNote = {
-  collection_id: string;
-  file_path: string;
-  content: string;
-  role: "context_only";
-};
-
-function selectCollectionNotes(notes: CollectionContextNote[], query: string): CollectionContextNote[] {
-  const terms = skillQueryTerms(query);
-  const scored = notes
-    .filter((note) => note.content.trim().length > 0)
-    .map((note, index) => ({
-      note,
-      score: scoreCollectionNote(note, terms, index)
-    }))
-    .filter((entry) => terms.length === 0 || entry.score > 0)
-    .sort((left, right) => right.score - left.score || left.note.file_path.localeCompare(right.note.file_path));
-  return scored.slice(0, 5).map((entry) => ({
-    ...entry.note,
-    content: truncateContextText(entry.note.content)
-  }));
-}
-
-function scoreCollectionNote(note: CollectionContextNote, terms: string[], index: number): number {
-  if (terms.length === 0) {
-    return Math.max(1, 5 - index);
-  }
-  const haystack = normalizeSkillSearchText(`${note.collection_id} ${note.file_path} ${note.content}`);
-  return terms.reduce((score, term) => score + (haystack.includes(term) ? 1 : 0), 0);
-}
-
-function truncateContextText(content: string, maxLength = 4000): string {
-  return content.length > maxLength ? `${content.slice(0, maxLength).trimEnd()}\n[truncated]` : content;
-}
-
-function scoreSkillSupportFile(file: SkillSupportFile, terms: string[], wantsSupport: boolean): number {
-  const pathText = normalizeSkillSearchText(file.path);
-  const contentText = normalizeSkillSearchText(file.content);
-  let score = wantsSupport && isKnownSkillSupportPath(pathText) ? 2 : 0;
-  for (const term of terms) {
-    if (pathText.includes(term)) {
-      score += 8;
-    }
-    if (contentText.includes(term)) {
-      score += 3;
-    }
-  }
-  return score;
-}
-
-function describeSkillSelection(
-  level: SkillDisclosureLevel,
-  index: number,
-  supportFiles: SkillSupportFile[],
-  usage?: { use_count: number; last_used_at?: string },
-  selection?: RuntimeSkillSelection
-): string {
-  const usageNote = usage ? ` Usage: ${usage.use_count} prior run(s)${usage.last_used_at ? `, last used ${usage.last_used_at}` : ""}.` : "";
-  const selectionNote = selection?.reasons.length ? ` ${selection.reasons.join(" ")}` : "";
-  if (level === "support") {
-    return `Matched support files: ${supportFiles.map((file) => file.path).join(", ")}.${selectionNote}${usageNote}`.trim();
-  }
-  if (level === "body") {
-    return `${index === 0 ? "Top skill match; body disclosed." : "Skill body matched the request."}${selectionNote}${usageNote}`.trim();
-  }
-  return `Catalog match only; body and support files stay undisclosed until needed.${selectionNote}${usageNote}`.trim();
-}
-
-function wantsSkillSupportDisclosure(query: string): boolean {
-  const normalized = normalizeSkillSearchText(query);
-  return [
-    "reference",
-    "references",
-    "template",
-    "templates",
-    "script",
-    "scripts",
-    "asset",
-    "assets",
-    "support",
-    "style",
-    "example",
-    "examples",
-    "補助",
-    "資料",
-    "詳細",
-    "詳しく",
-    "手順",
-    "例",
-    "使い方",
-    "スタイル"
-  ].some((hint) => normalized.includes(hint));
-}
-
-function isKnownSkillSupportPath(pathText: string): boolean {
-  return [
-    "references/",
-    "templates/",
-    "scripts/",
-    "assets/",
-    "examples/"
-  ].some((prefix) => pathText.startsWith(prefix));
-}
-
-function skillQueryTerms(query: string): string[] {
-  return normalizeSkillSearchText(query)
-    .split(/\s+/)
-    .map((term) => term.trim())
-    .filter((term) => term.length > 0);
-}
-
-function normalizeSkillSearchText(value: string): string {
-  return value.toLowerCase().normalize("NFKC");
 }
 
 function groupByRunId<T extends { run_id: string }>(items: T[]): Map<string, T[]> {
@@ -12480,15 +11040,6 @@ function localeFromJson(value: JsonValue | undefined): SupportedLocale | undefin
   return typeof value === "string" && ["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"].includes(value)
     ? value as SupportedLocale
     : undefined;
-}
-
-function fileRef(relativePath: string) {
-  return {
-    kind: "file",
-    id: stableHash(relativePath),
-    uri: relativePath,
-    label: relativePath
-  };
 }
 
 function isManagedCollectionWorkspacePath(relativePath: string): boolean {

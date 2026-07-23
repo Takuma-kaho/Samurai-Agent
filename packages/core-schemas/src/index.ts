@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 
 export const supportedLocales = ["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"] as const;
 export const translationStatuses = ["verified", "draft", "missing"] as const;
@@ -75,7 +74,10 @@ export const activityTypes = [
 ] as const;
 export const activitySeverities = ["info", "notice", "warning", "critical"] as const;
 export const agentBackendKinds = ["mock", "samurai_native", "claude_code", "codex", "external"] as const;
-export const backendRunStatuses = ["queued", "running", "waiting_for_backend_input", "completed", "failed", "cancelled"] as const;
+export const backendRunStatuses = ["queued", "running", "waiting_for_backend_input", "completed", "failed", "cancelled", "outcome_unknown"] as const;
+export const backendRunPhases = ["admitted", "preparing", "backend_starting", "external_running", "waiting", "cancelling", "finalizing", "post_turn", "settled"] as const;
+export const BackendRunPhaseSchema = z.enum(backendRunPhases);
+export type BackendRunPhase = z.infer<typeof BackendRunPhaseSchema>;
 export const backendEventTypes = [
   "run_started",
   "agent_reasoning",
@@ -260,15 +262,57 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+// The Runtime owns creation of this decision.  Keeping the opaque marker in
+// the shared schema package lets the Workspace Store accept the settlement
+// Port without importing Runtime back into the persistence layer.
+declare const lifecycleTransitionDecisionBrand: unique symbol;
+export type LifecycleTransitionDecision = {
+  readonly fromStatus: BackendRunStatus;
+  readonly toStatus: BackendRunStatus;
+  readonly fromPhase: BackendRunPhase;
+  readonly toPhase: BackendRunPhase;
+  readonly reason: string;
+  readonly terminalEvidence?: JsonValue;
+  readonly failure?: {
+    readonly code: string;
+    readonly message: string;
+    readonly phase: BackendRunPhase;
+    readonly retryable: boolean;
+    readonly causeCategory: string;
+  };
+  readonly [lifecycleTransitionDecisionBrand]: true;
+};
+
 /**
  * Contract schemas are authored in Zod and published as strict JSON Schema.
  * Keeping this conversion at the shared schema boundary prevents each caller
  * from inventing a different JSON Schema dialect or reference strategy.
  */
 export function toStrictJsonSchema(schema: z.ZodTypeAny, _name: string): Record<string, JsonValue> {
-  const converted: unknown = JSON.parse(JSON.stringify(zodToJsonSchema(schema, { $refStrategy: "root" })));
+  const converted: unknown = JSON.parse(JSON.stringify(loadZodToJsonSchema()(schema, { $refStrategy: "root" })));
   if (!isJsonRecord(converted)) throw new Error("zod_json_schema_conversion_invalid");
   return converted;
+}
+
+type ZodToJsonSchema = (schema: z.ZodTypeAny, options: { $refStrategy: "root" }) => unknown;
+let zodToJsonSchema: ZodToJsonSchema | undefined;
+
+/**
+ * JSON Schema generation is used by the Domain catalog, not by ordinary
+ * record validation. Load its large converter only when that explicit API is
+ * called so every Runtime/Store import does not pay the startup cost.
+ */
+function loadZodToJsonSchema(): ZodToJsonSchema {
+  if (zodToJsonSchema) return zodToJsonSchema;
+  const runtimeProcess = (globalThis as typeof globalThis & {
+    process?: { getBuiltinModule?: (id: string) => unknown };
+  }).process;
+  const moduleApi = runtimeProcess?.getBuiltinModule?.("module") as { createRequire?: (url: string) => (id: string) => unknown } | undefined;
+  if (!moduleApi?.createRequire) throw new Error("zod_json_schema_converter_unavailable");
+  const loaded = moduleApi.createRequire(import.meta.url)("zod-to-json-schema") as { zodToJsonSchema?: ZodToJsonSchema };
+  if (typeof loaded.zodToJsonSchema !== "function") throw new Error("zod_json_schema_converter_invalid");
+  zodToJsonSchema = loaded.zodToJsonSchema;
+  return zodToJsonSchema;
 }
 
 function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
@@ -384,7 +428,12 @@ export const BackendRunRecordSchema = z.object({
   output_message_id: z.string().optional(),
   backend_id: z.string().min(1),
   backend_kind: AgentBackendKindSchema,
+  backend_session_id: z.string().min(1).optional(),
   status: BackendRunStatusSchema,
+  phase: BackendRunPhaseSchema.optional(),
+  current_attempt: z.number().int().positive().optional(),
+  request_idempotency_key: z.string().min(1).optional(),
+  request_hash: z.string().min(1).optional(),
   started_at: z.string().datetime(),
   completed_at: z.string().datetime().optional(),
   input_summary: z.string(),
@@ -400,6 +449,9 @@ export const BackendEventRecordSchema = z.object({
   session_id: z.string().min(1),
   event_type: BackendEventTypeSchema,
   sequence: z.number().int().positive(),
+  attempt_no: z.number().int().positive().optional(),
+  source_event_id: z.string().min(1).optional(),
+  source_sequence: z.number().int().positive().optional(),
   payload: z.record(jsonValueSchema),
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime()
@@ -1533,6 +1585,7 @@ export const EvaluationDiagnosticsReportSchema = z.object({
   backend_runs: z.number().int().nonnegative(),
   failed_backend_runs: z.number().int().nonnegative(),
   waiting_backend_runs: z.number().int().nonnegative(),
+  outcome_unknown_backend_runs: z.number().int().nonnegative(),
   tool_runs: z.number().int().nonnegative(),
   ignored_or_failed_tool_runs: z.number().int().nonnegative(),
   workspace_changes: z.number().int().nonnegative(),

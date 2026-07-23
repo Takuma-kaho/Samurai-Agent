@@ -47,6 +47,7 @@ const props = defineProps<{
   toggleBackendRun: (id: string) => void;
   backendLabel: (id: string, fallback?: string) => string;
   backendRunNote: (run: BackendRunRecord) => string;
+  backendRunStatusLabel: (run: BackendRunRecord) => string;
   collectionListLoading: boolean;
   collectionListError: string | null;
   collectionSchemas: Array<CollectionSchema & { file_path: string }>;
@@ -165,11 +166,11 @@ const emit = defineEmits<{ "update:searchQuery": [value: string] }>();
         <ChevronRight class="history-chevron" :class="{ open: props.isBackendRunOpen(run.id) }" :size="15" />
         <Clock3 class="history-leading" :size="15" />
         <span class="history-main">
-          <strong>{{ props.backendLabel(run.backend_id, run.backend_kind) }} / {{ run.status }}</strong>
+          <strong>{{ props.backendLabel(run.backend_id, run.backend_kind) }} / {{ props.backendRunStatusLabel(run) }}</strong>
           <small>{{ run.input_summary }}</small>
         </span>
       </button>
-      <div v-if="props.isBackendRunOpen(run.id)" class="history-detail"><p>{{ props.backendRunNote(run) || run.status }}</p></div>
+      <div v-if="props.isBackendRunOpen(run.id)" class="history-detail"><p>{{ props.backendRunNote(run) || props.backendRunStatusLabel(run) }}</p></div>
     </article>
     <article v-if="props.pendingLegacyApprovalCount > 0" class="audit-item lit-surface">
       <Clock3 :size="16" />

@@ -786,6 +786,29 @@ describe("backend run API", () => {
     expect(result.result.messages.some((message) => message.role === "agent")).toBe(true);
   });
 
+  it("replays a surface retry by operation id and admits a new id separately", async () => {
+    const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
+    const operation = {
+      id: "surface_retry_fixture_1",
+      kind: "message.submit",
+      session_id: session.id,
+      content: "通信再試行の確認",
+      output_locale: "ja"
+    };
+
+    const first = await postJson<{ result: { backendRun: { id: string } } }>(`${baseUrl}/api/surface/operations`, operation, 201);
+    const replay = await postJson<{ result: { backendRun: { id: string } } }>(`${baseUrl}/api/surface/operations`, operation, 201);
+    const next = await postJson<{ result: { backendRun: { id: string } } }>(`${baseUrl}/api/surface/operations`, {
+      ...operation,
+      id: "surface_retry_fixture_2",
+      content: "別操作の確認"
+    }, 201);
+
+    expect(replay.result.backendRun.id).toBe(first.result.backendRun.id);
+    expect(next.result.backendRun.id).not.toBe(first.result.backendRun.id);
+  });
+
   it("runs the movie-log Collection flow through the HTTP Surface API", async () => {
     let apiServer: ApiServer | undefined;
     let backendRuns = 0;

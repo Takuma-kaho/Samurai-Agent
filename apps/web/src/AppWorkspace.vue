@@ -57,6 +57,7 @@ import type { SurfaceRenderKind, SurfaceRendererCapabilities, SurfaceRenderSpec 
 import {
   api,
   ApiError,
+  createIdempotencyKey,
   getApiBaseUrl,
   type AgentBackendStatus,
   type ApprovalLifecyclePayload,
@@ -99,6 +100,7 @@ import {
   backendEventSummary,
   backendRunContextSummary,
   backendRunNote,
+  backendRunStatusLabel,
   draftSessionTitle,
   formatProviderNoticeDetails,
   isInitialTitle,
@@ -195,6 +197,7 @@ const initializing = ref(true);
 const sessionLoadError = ref(false);
 const pendingUserMessage = ref<ChatDisplayMessage | null>(null);
 const pendingUserMessageStartIndex = ref(0);
+const pendingChatOperation = ref<{ idempotencyKey: string; content: string } | null>(null);
 const {
   agentResponsePending,
   pendingAgentReceivedContent,
@@ -632,6 +635,10 @@ async function sendMessage() {
     return;
   }
   const content = prompt.value.trim();
+  const operation = pendingChatOperation.value?.content === content
+    ? pendingChatOperation.value
+    : { idempotencyKey: createIdempotencyKey(), content };
+  pendingChatOperation.value = operation;
   prompt.value = "";
   loading.value = true;
   pendingUserMessageStartIndex.value = messages.value.length;
@@ -655,6 +662,7 @@ async function sendMessage() {
     activeSession.value = session;
     promoteSessionToTop(session);
     const envelope = await api.submitChatSurfaceOperation({
+      idempotencyKey: operation.idempotencyKey,
       sessionId: session.id,
       content,
       inputLocale: settings.value.ui_locale,
@@ -697,6 +705,7 @@ async function sendMessage() {
     activity.value = result.activity;
     await reloadActiveSession();
     clearAttachments();
+    pendingChatOperation.value = null;
   } catch (error) {
     pendingUserMessage.value = null;
     resetPendingAgentResponse();
@@ -1884,7 +1893,8 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
         :is-backend-run-open="isBackendRunOpen"
         :toggle-backend-run="toggleBackendRun"
         :backend-label="backendLabel"
-        :backend-run-note="backendRunNote"
+        :backend-run-note="(run) => backendRunNote(run, label)"
+        :backend-run-status-label="(run) => backendRunStatusLabel(run, label)"
         :collection-list-loading="collectionListLoading"
         :collection-list-error="collectionListError"
         :collection-schemas="collectionSchemas"
@@ -1927,7 +1937,8 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
       :last-surface-render-spec="lastSurfaceRenderSpec"
       :memory="memory"
       :first-memory="firstMemory"
-      :backend-run-context-summary="backendRunContextSummary"
+        :backend-run-context-summary="backendRunContextSummary"
+        :backend-run-status-label="(run) => backendRunStatusLabel(run, label)"
       :surface-renderer-label="surfaceRendererLabel"
       :is-backend-event-open="isBackendEventOpen"
       :toggle-backend-event="toggleBackendEvent"

@@ -39,10 +39,18 @@ export class SamuraiNativeBackend implements AgentBackend {
   }
 
   async *runTurn(input: BackendRunInput): AsyncIterable<BackendOutputEvent> {
+    if (input.abort_signal?.aborted) {
+      yield this.promptBuilder.cancelledBeforeStartEvent();
+      return;
+    }
     yield this.promptBuilder.runStartedEvent(input);
 
     if (!this.provider) {
       yield this.promptBuilder.providerMissingEvent();
+      return;
+    }
+    if (input.abort_signal?.aborted) {
+      yield this.promptBuilder.cancelledBeforeStartEvent();
       return;
     }
 
@@ -52,7 +60,7 @@ export class SamuraiNativeBackend implements AgentBackend {
         yield event;
       }
     } catch (error) {
-      yield this.promptBuilder.providerFailureEvent(error, this.provider);
+      yield this.promptBuilder.providerFailureEvent(error, this.provider, input.abort_signal?.aborted === true);
     }
   }
 }
@@ -60,6 +68,7 @@ export class SamuraiNativeBackend implements AgentBackend {
 export class NativeContextBuilder {
   build(input: BackendRunInput): ProviderInput {
     return {
+      abortSignal: input.abort_signal,
       envelope: input.envelope,
       freezeSnapshot: input.freeze_snapshot,
       gatewayBoundary: input.gateway_boundary,
@@ -120,6 +129,7 @@ export class NativePromptBuilder {
   providerMissingEvent(): BackendOutputEvent {
     return {
       event_type: "run_failed",
+      terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
       payload: {
         error_code: "provider_not_configured",
         message: "No LLM provider is configured."
@@ -127,9 +137,24 @@ export class NativePromptBuilder {
     };
   }
 
+  cancelledBeforeStartEvent(): BackendOutputEvent {
+    return {
+      event_type: "run_failed",
+      terminal_evidence: { kind: "cancelled", source: "owned_loop_return" },
+      payload: {
+        error_code: "provider_cancelled_before_start",
+        message: "Provider request was cancelled before starting.",
+        reason: "already_aborted",
+        retryable: false,
+        cause_category: "cancellation"
+      }
+    };
+  }
+
   runCompletedEvent(output: ProviderOutput): BackendOutputEvent {
     return {
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "owned_loop_return" },
       payload: {
         output_summary: summarize(output.content) || "Backend run completed.",
         finish_reason: output.finishReason ?? null,
@@ -138,21 +163,55 @@ export class NativePromptBuilder {
     };
   }
 
-  providerFailureEvent(error: unknown, provider: ProviderAdapter): BackendOutputEvent {
+  providerFailureEvent(error: unknown, provider: ProviderAdapter, signalAborted = false): BackendOutputEvent {
     const providerError = error instanceof ProviderRequestError ? error : undefined;
+    const disposition = providerError?.disposition
+      ?? (error instanceof Error && error.name === "AbortError" ? "cancel_unconfirmed" : "transport_lost");
+    const cancelledBeforeStart = signalAborted && disposition === "not_started";
+    const code = cancelledBeforeStart ? "provider_cancelled_before_start" : providerError?.code ?? "provider_failed";
+    const message = cancelledBeforeStart
+      ? "Provider request was cancelled before starting."
+      : safeProviderFailureMessage(providerError?.message ?? (error instanceof Error ? error.message : "Provider failed."));
+    const retryable = providerError?.diagnostics.retryable ?? false;
+    const terminalEvidence: BackendOutputEvent["terminal_evidence"] = disposition === "not_started"
+      ? cancelledBeforeStart
+        ? { kind: "cancelled", source: "owned_loop_return" }
+        : { kind: "not_started", source: "preflight_rejection" }
+      : disposition === "provider_terminal_response"
+        ? { kind: "failed", source: "provider_terminal_response", error: { code, message, retryable, causeCategory: "provider" } }
+        : {
+            kind: "indeterminate",
+            reason: disposition,
+            providerStarted: true,
+            mayHaveSideEffects: true
+          };
     return {
       event_type: "run_failed",
+      terminal_evidence: terminalEvidence,
       payload: {
-        error_code: providerError?.code ?? "provider_failed",
-        message: providerError ? "Provider failed." : error instanceof Error ? error.message : "Provider failed.",
+        error_code: code,
+        message,
         reason: providerError?.diagnostics.reason ?? "unknown",
-        retryable: providerError?.diagnostics.retryable ?? false,
+        retryable,
+        cause_category: cancelledBeforeStart || disposition === "cancel_unconfirmed" ? "cancellation" : disposition === "transport_lost" ? "transport" : disposition === "not_started" ? "configuration" : "provider",
         provider: providerError?.diagnostics.provider ?? provider.id,
         model: providerError?.diagnostics.model ?? provider.model,
         status: providerError?.diagnostics.status ?? null
       }
     };
   }
+}
+
+function safeProviderFailureMessage(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/(?:api[_-]?key|access[_-]?token|secret|password)["']?\s*[:=]\s*["']?[^"',\s}]+/gi, "credential=[redacted]")
+    .replace(/\b(?:sk|key)-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/(?<![A-Za-z0-9:/.])\/[^\s"'<>]+/g, "[path]")
+    .replace(/[A-Za-z]:\\[^\s"'<>]+/g, "[path]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240) || "Provider failed.";
 }
 
 export class NativeToolLoop {

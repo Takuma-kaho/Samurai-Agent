@@ -9,6 +9,7 @@ const props = defineProps<{
   open: boolean;
   label: (key: LocaleKey) => string;
   latestBackendRun?: BackendRunRecord;
+  backendRunStatusLabel: (run: BackendRunRecord) => string;
   latestBackendEvents: BackendEventRecord[];
   lastSurfaceRenderSpec: SurfaceRenderSpec | null;
   memory: Array<MemoryFrontmatter & { file_path: string }>;
@@ -37,8 +38,9 @@ const emit = defineEmits<{ close: [] }>();
     </header>
 
     <section class="drawer-card lit-surface">
-      <div class="drawer-card-head"><span>今回渡した文脈</span><span class="status-pill">{{ props.latestBackendRun?.status ?? "idle" }}</span></div>
-      <p>{{ props.backendRunContextSummary(props.latestBackendRun) }}</p>
+      <div class="drawer-card-head"><span>今回渡した文脈</span><span class="status-pill">{{ props.latestBackendRun ? props.backendRunStatusLabel(props.latestBackendRun) : "idle" }}</span></div>
+      <p v-if="props.latestBackendRun?.status === 'outcome_unknown'" class="outcome-unknown-warning">{{ props.label("backend_run.outcome_unknown.body") }}</p>
+      <p v-else>{{ props.backendRunContextSummary(props.latestBackendRun) }}</p>
     </section>
 
     <section class="drawer-card lit-surface">

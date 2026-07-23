@@ -59,6 +59,7 @@ import {
   type BackgroundReviewChangeRecord,
   type LearningJobReportRecord,
   type JsonValue,
+  type LifecycleTransitionDecision,
   type MemoryFrontmatter,
   MemoryFrontmatterSchema,
   type MessageRecord,
@@ -114,8 +115,23 @@ import {
   stableHash
 } from "@samurai-agent/core-schemas";
 import { Kysely, SqliteDialect, sql } from "kysely";
+import type { Transaction } from "kysely";
 
 type JsonColumn = string;
+
+export interface Core02SettlementInput {
+  expectedRun: BackendRunRecord;
+  nextRun: BackendRunRecord;
+  terminalEvent: BackendEventRecord;
+  outputSourceId: string;
+  output?: MessageRecord;
+  decision: LifecycleTransitionDecision;
+  attemptNo: number;
+  sourceIdentity: { sourceEventId?: string; sourceSequence?: number };
+  terminalEvidence: unknown;
+  diagnostic?: { code: string; message: string; metadata?: Record<string, JsonValue> };
+  reservation: { sessionId: string; runId: string; version: number; status: "held" | "released" };
+}
 
 interface SessionsTable {
   id: string;
@@ -903,13 +919,27 @@ interface BackendRunsTable {
   output_message_id: string | null;
   backend_id: string;
   backend_kind: string;
+  backend_session_id: string | null;
   status: string;
+  phase: string | null;
+  current_attempt: number | null;
+  request_idempotency_key: string | null;
+  request_hash: string | null;
   started_at: string;
   completed_at: string | null;
   input_summary: string;
   output_summary: string | null;
   error_code: string | null;
   metadata_json: JsonColumn;
+}
+
+interface SessionRunReservationsTable {
+  session_id: string;
+  run_id: string;
+  status: string;
+  version: number;
+  held_at: string;
+  released_at: string | null;
 }
 
 interface ClientEventsTable {
@@ -1011,6 +1041,7 @@ interface WorkspaceDb {
   plugin_states: PluginStatesTable;
   grants: GrantsTable;
   backend_runs: BackendRunsTable;
+  session_run_reservations: SessionRunReservationsTable;
   backend_events: BackendEventsTable;
   client_events: ClientEventsTable;
   workspace_changes: WorkspaceChangesTable;
@@ -2183,7 +2214,12 @@ export class WorkspaceStore {
         output_message_id TEXT,
         backend_id TEXT NOT NULL,
         backend_kind TEXT NOT NULL,
+        backend_session_id TEXT,
         status TEXT NOT NULL,
+        phase TEXT,
+        current_attempt INTEGER,
+        request_idempotency_key TEXT,
+        request_hash TEXT,
         started_at TEXT NOT NULL,
         completed_at TEXT,
         input_summary TEXT NOT NULL,
@@ -2198,12 +2234,25 @@ export class WorkspaceStore {
         session_id TEXT NOT NULL,
         event_type TEXT NOT NULL,
         sequence INTEGER NOT NULL,
+        attempt_no INTEGER,
+        source_event_id TEXT,
+        source_sequence INTEGER,
         payload_json TEXT NOT NULL,
         resource_refs_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
         UNIQUE (run_id, sequence),
         FOREIGN KEY (run_id) REFERENCES backend_runs(id),
         FOREIGN KEY (session_id) REFERENCES sessions(id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS session_run_reservations (
+        session_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        held_at TEXT NOT NULL,
+        released_at TEXT,
+        FOREIGN KEY (session_id) REFERENCES sessions(id),
+        FOREIGN KEY (run_id) REFERENCES backend_runs(id)
       )`,
       `CREATE TABLE IF NOT EXISTS client_events (
         id TEXT PRIMARY KEY,
@@ -2258,6 +2307,7 @@ export class WorkspaceStore {
       await this.ensureCollectionRecordColumns();
       await this.ensureDomainCommandExecutionColumns();
       await this.ensureDomainCorrelationColumns();
+      await this.ensureCore02Columns();
       await this.ensureSessionSearchIndexes();
       const migrationVersion = 1;
       const migrationName = "core_baseline";
@@ -2462,6 +2512,31 @@ export class WorkspaceStore {
   private async hasTableColumn(table: string, name: string): Promise<boolean> {
     const result = await sql<{ name: string }>`PRAGMA table_info(${sql.raw(table)})`.execute(this.db);
     return result.rows.some((row) => row.name === name);
+  }
+
+  private async ensureCore02Columns(): Promise<void> {
+    const additions: Array<[string, string]> = [
+      ["backend_runs", "phase TEXT"],
+      ["backend_runs", "backend_session_id TEXT"],
+      ["backend_runs", "current_attempt INTEGER"],
+      ["backend_runs", "request_idempotency_key TEXT"],
+      ["backend_runs", "request_hash TEXT"],
+      ["backend_events", "attempt_no INTEGER"],
+      ["backend_events", "source_event_id TEXT"],
+      ["backend_events", "source_sequence INTEGER"]
+    ];
+    for (const [table, definition] of additions) {
+      const name = definition.split(" ", 1)[0] ?? definition;
+      if (!await this.hasTableColumn(table, name)) {
+        await sql.raw(`ALTER TABLE ${table} ADD COLUMN ${definition}`).execute(this.db);
+      }
+    }
+    await sql.raw("CREATE UNIQUE INDEX IF NOT EXISTS idx_backend_runs_session_idempotency ON backend_runs(session_id, request_idempotency_key) WHERE request_idempotency_key IS NOT NULL").execute(this.db);
+    await sql.raw("CREATE UNIQUE INDEX IF NOT EXISTS idx_backend_events_source_identity ON backend_events(run_id, attempt_no, source_event_id) WHERE source_event_id IS NOT NULL").execute(this.db);
+    await sql.raw("DROP INDEX IF EXISTS idx_backend_events_source_sequence").execute(this.db);
+    await sql.raw("CREATE UNIQUE INDEX idx_backend_events_source_sequence ON backend_events(run_id, attempt_no, source_sequence) WHERE source_sequence IS NOT NULL AND source_event_id IS NULL").execute(this.db);
+    await sql.raw("UPDATE backend_runs SET phase = CASE WHEN status = 'queued' THEN 'admitted' WHEN status = 'waiting_for_backend_input' THEN 'waiting' WHEN status IN ('completed','failed','cancelled','outcome_unknown') THEN 'settled' ELSE NULL END WHERE phase IS NULL").execute(this.db);
+    await sql.raw("UPDATE backend_runs SET current_attempt = 1 WHERE current_attempt IS NULL").execute(this.db);
   }
 
   async ensureDefaultSettings(): Promise<void> {
@@ -3202,6 +3277,219 @@ export class WorkspaceStore {
     return run;
   }
 
+  /** Core 02 admission: reservation, user message and queued run commit together. */
+  private async executeCore02Transaction<T>(operation: (transaction: Transaction<WorkspaceDb>) => Promise<T>): Promise<T> {
+    const maxAttempts = 3;
+    const defaultBusyTimeoutMs = 5000;
+    await sql.raw("PRAGMA busy_timeout = 100").execute(this.db);
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          return await this.db.transaction().execute(operation);
+        } catch (error) {
+          if (!isSqliteBusyError(error) || attempt === maxAttempts) {
+            throw error;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, attempt * 10));
+        }
+      }
+    } finally {
+      await sql.raw(`PRAGMA busy_timeout = ${defaultBusyTimeoutMs}`).execute(this.db);
+    }
+    throw new Error("core02_transaction_retry_exhausted");
+  }
+
+  async admitTurn(input: {
+    session: SessionRecord;
+    binding: { id: string; kind: BackendRunRecord["backend_kind"] };
+    request: { sessionId: string; content: string; envelope: MessageRecord["envelope"]; idempotencyKey: string; metadata?: JsonValue };
+    requestHash: string;
+    runId: string;
+    now: string;
+  }): Promise<{ reservation: { sessionId: string; runId: string; version: number; status: "held" | "released" }; userMessage: MessageRecord; run: BackendRunRecord; replay: boolean }> {
+    if (!input.request.envelope) throw new Error("message_envelope_required");
+    const message: MessageRecord = { id: createId("message"), session_id: input.session.id, role: "user", content: input.request.content, input_locale: input.request.envelope.input_locale, output_locale: input.request.envelope.output_locale, envelope: input.request.envelope, created_at: input.now };
+    const run: BackendRunRecord = { id: input.runId, session_id: input.session.id, input_message_id: message.id, backend_id: input.binding.id, backend_kind: input.binding.kind, status: "queued", phase: "admitted", current_attempt: 1, request_idempotency_key: input.request.idempotencyKey, request_hash: input.requestHash, started_at: input.now, input_summary: input.request.content.slice(0, 240), metadata: typeof input.request.metadata === "object" && input.request.metadata && !Array.isArray(input.request.metadata) ? input.request.metadata as Record<string, JsonValue> : {} };
+    let reservationVersion = 1;
+    try {
+      await this.executeCore02Transaction(async (transaction) => {
+      // The first write is the source of truth for same-key races.  Do not
+      // pre-read the unique key and then upgrade a read transaction to write.
+      await transaction.insertInto("backend_runs").values(backendRunToRow(run)).execute();
+      const reservation = await transaction.selectFrom("session_run_reservations").selectAll().where("session_id", "=", input.session.id).executeTakeFirst();
+      if (reservation?.status === "held") {
+        const heldRun = await transaction.selectFrom("backend_runs").select(["status"]).where("id", "=", reservation.run_id).executeTakeFirst();
+        const code = heldRun?.status === "waiting_for_backend_input" ? "session_waiting_for_backend_input" : "session_run_in_progress";
+        throw new Error(`${code}:${reservation.run_id}`);
+      }
+      reservationVersion = reservation ? reservation.version + 1 : 1;
+      await transaction.insertInto("messages").values({ id: message.id, session_id: message.session_id, role: message.role, content: message.content, input_locale: message.input_locale, output_locale: message.output_locale, envelope_json: stringify(message.envelope), created_at: message.created_at }).execute();
+      if (reservation) {
+        const updated = await transaction.updateTable("session_run_reservations").set({ run_id: run.id, status: "held", version: reservationVersion, held_at: input.now, released_at: null }).where("session_id", "=", input.session.id).where("status", "=", "released").where("version", "=", reservation.version).executeTakeFirst();
+        if (Number(updated.numUpdatedRows ?? 0) !== 1) throw new Error("session_reservation_conflict");
+      } else {
+        await transaction.insertInto("session_run_reservations").values({ session_id: input.session.id, run_id: run.id, status: "held", version: 1, held_at: input.now, released_at: null }).execute();
+      }
+      });
+    } catch (error) {
+      if (isBackendRunIdempotencyConstraint(error)) {
+        const replayRunRow = await this.db.selectFrom("backend_runs").selectAll()
+          .where("session_id", "=", input.session.id)
+          .where("request_idempotency_key", "=", input.request.idempotencyKey)
+          .executeTakeFirst();
+        if (replayRunRow) {
+          const replayRun = backendRunFromRow(replayRunRow);
+          if (replayRun.request_hash !== input.requestHash) {
+            throw new Error("idempotency_conflict");
+          }
+          const replayMessageRow = await this.db.selectFrom("messages").selectAll().where("id", "=", replayRun.input_message_id).executeTakeFirst();
+          if (!replayMessageRow) {
+            throw new Error(`admission_replay_missing_message:${replayRun.id}`);
+          }
+          const replayReservation = await this.db.selectFrom("session_run_reservations").selectAll().where("run_id", "=", replayRun.id).executeTakeFirst();
+          const released = replayReservation?.status === "released" || isTerminalBackendRunStatus(replayRun.status);
+          return {
+            reservation: { sessionId: input.session.id, runId: replayRun.id, version: replayReservation?.version ?? 1, status: released ? "released" : "held" },
+            userMessage: messageFromRow(replayMessageRow),
+            run: replayRun,
+            replay: true
+          };
+        }
+      }
+      throw error;
+    }
+    return { reservation: { sessionId: input.session.id, runId: run.id, version: reservationVersion, status: "held" }, userMessage: message, run, replay: false };
+  }
+
+  async releaseReservation(runId: string): Promise<void> {
+    await this.db.updateTable("session_run_reservations").set({ status: "released", released_at: nowIso(), version: sql<number>`version + 1` }).where("run_id", "=", runId).where("status", "=", "held").execute();
+  }
+
+  async getSessionRunReservation(input: { runId: string }): Promise<{ sessionId: string; runId: string; version: number; status: "held" | "released" } | undefined> {
+    const row = await this.db.selectFrom("session_run_reservations").selectAll().where("run_id", "=", input.runId).executeTakeFirst();
+    if (!row) return undefined;
+    return { sessionId: row.session_id, runId: row.run_id, version: row.version, status: row.status === "held" ? "held" : "released" };
+  }
+
+  async commitCore02RunTransition(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord> {
+    let query = this.db.updateTable("backend_runs")
+      .set(backendRunToRow(input.nextRun))
+      .where("id", "=", input.expectedRun.id)
+      .where("status", "=", input.expectedRun.status);
+    query = input.expectedRun.phase === undefined ? query.where("phase", "is", null) : query.where("phase", "=", input.expectedRun.phase);
+    query = input.expectedRun.current_attempt === undefined ? query.where("current_attempt", "is", null) : query.where("current_attempt", "=", input.expectedRun.current_attempt);
+    const updated = await query.executeTakeFirst();
+    if (Number(updated.numUpdatedRows ?? 0) !== 1) throw new Error(`run_lifecycle_cas_conflict:${input.expectedRun.id}`);
+    return input.nextRun;
+  }
+
+  async commitCore02BackendSession(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord> {
+    return this.commitCore02RunTransition(input);
+  }
+
+  /**
+   * Core 02's only terminal persistence boundary. The terminal Event is
+   * prepared in memory by the Journal and becomes durable here, together with
+   * the output/diagnostic, Run settlement, and Session reservation release.
+   */
+  async commitTurnSettlement(input: Core02SettlementInput): Promise<BackendRunRecord> {
+    const nextStatus = input.nextRun.status;
+    if (!isTerminalBackendRunStatus(nextStatus)) throw new Error(`settlement_status_not_terminal:${nextStatus}`);
+    if (input.outputSourceId !== `message:${input.expectedRun.id}:output`) throw new Error(`settlement_output_source_conflict:${input.expectedRun.id}`);
+    if (!Number.isSafeInteger(input.attemptNo) || input.attemptNo <= 0) throw new Error(`settlement_attempt_invalid:${input.expectedRun.id}`);
+    if (input.nextRun.phase !== "settled" || input.decision.toStatus !== nextStatus || input.decision.toPhase !== "settled") throw new Error(`settlement_decision_conflict:${input.expectedRun.id}`);
+    if (input.decision.fromStatus !== input.expectedRun.status || input.decision.fromPhase !== (input.expectedRun.phase ?? "admitted")) throw new Error(`settlement_decision_source_conflict:${input.expectedRun.id}`);
+    if (input.expectedRun.id !== input.nextRun.id || input.expectedRun.session_id !== input.nextRun.session_id || input.reservation.runId !== input.expectedRun.id || input.reservation.sessionId !== input.expectedRun.session_id) {
+      throw new Error(`settlement_scope_conflict:${input.expectedRun.id}`);
+    }
+    if (input.terminalEvent.run_id !== input.expectedRun.id || input.terminalEvent.session_id !== input.expectedRun.session_id) throw new Error(`settlement_event_scope_conflict:${input.expectedRun.id}`);
+    if (input.terminalEvent.event_type !== "run_completed" && input.terminalEvent.event_type !== "run_failed") throw new Error(`settlement_event_not_terminal:${input.expectedRun.id}`);
+    if (!Number.isSafeInteger(input.terminalEvent.attempt_no) || input.terminalEvent.attempt_no !== input.attemptNo) throw new Error(`settlement_attempt_conflict:${input.expectedRun.id}`);
+    if (input.sourceIdentity.sourceEventId !== undefined && input.terminalEvent.source_event_id !== input.sourceIdentity.sourceEventId) throw new Error(`settlement_source_identity_conflict:${input.expectedRun.id}`);
+    if (input.sourceIdentity.sourceSequence !== undefined && input.terminalEvent.source_sequence !== input.sourceIdentity.sourceSequence) throw new Error(`settlement_source_identity_conflict:${input.expectedRun.id}`);
+    if (!sameTerminalEvidence(input.terminalEvent.payload.terminal_evidence, input.terminalEvidence)) throw new Error(`terminal_evidence_conflict:${input.expectedRun.id}`);
+    if (!settlementEvidenceMatchesStatus(input.terminalEvent.payload.terminal_evidence, nextStatus)) throw new Error(`settlement_evidence_status_conflict:${input.expectedRun.id}`);
+    if (!input.output && !input.diagnostic) throw new Error(`settlement_result_required:${input.expectedRun.id}`);
+    if (input.output && (input.output.id !== input.outputSourceId || input.output.id !== `message:${input.expectedRun.id}:output`)) throw new Error(`settlement_output_source_conflict:${input.expectedRun.id}`);
+    if (input.output && (input.output.session_id !== input.expectedRun.session_id || input.output.role !== "agent")) throw new Error(`settlement_output_scope_conflict:${input.expectedRun.id}`);
+    const now = nowIso();
+    return this.executeCore02Transaction(async (transaction) => {
+      const currentRow = await transaction.selectFrom("backend_runs").selectAll().where("id", "=", input.expectedRun.id).executeTakeFirst();
+      if (!currentRow) throw new Error(`settlement_run_not_found:${input.expectedRun.id}`);
+      const current = backendRunFromRow(currentRow);
+      const safeEvent = normalizeSettlementEvent(input.terminalEvent, current, input.nextRun);
+      const safeOutput = input.output ? { ...input.output, envelope: input.output.envelope } : undefined;
+
+      const isUnknownCorrection = current.status === "outcome_unknown" && input.nextRun.status !== "outcome_unknown";
+      if (isTerminalBackendRunStatus(current.status) && !isUnknownCorrection) {
+        await assertCore02SettlementReplay(current, input.nextRun, safeEvent, safeOutput, input.diagnostic, transaction);
+        await releaseReservationInTransaction(transaction, current.id, input.reservation.version, now);
+        return current;
+      }
+      const expectedStatus = isUnknownCorrection ? current.status : input.expectedRun.status;
+      const expectedPhase = isUnknownCorrection ? current.phase : input.expectedRun.phase;
+      const expectedAttempt = isUnknownCorrection ? current.current_attempt : input.expectedRun.current_attempt;
+      if (current.status !== expectedStatus || (current.phase ?? null) !== (expectedPhase ?? null) || (current.current_attempt ?? 1) !== (expectedAttempt ?? 1)) {
+        throw new Error(`settlement_cas_conflict:${current.id}`);
+      }
+      if (input.expectedRun.status === "outcome_unknown" && input.nextRun.status === "outcome_unknown") {
+        throw new Error(`settlement_conflict:${current.id}`);
+      }
+
+      const identityExisting = await findSettlementEvent(transaction, safeEvent);
+      let committedEvent = identityExisting;
+      if (committedEvent) {
+        if (!sameBackendEvent(committedEvent, safeEvent) && !(committedEvent.id === safeEvent.id && sameBackendEventIgnoringIdentity(committedEvent, safeEvent))) throw new Error(`settlement_event_conflict:${current.id}`);
+      } else {
+        const max = await transaction.selectFrom("backend_events").select(({ fn }) => fn.max("sequence").as("max_sequence")).where("run_id", "=", current.id).executeTakeFirst();
+        committedEvent = { ...safeEvent, sequence: Number(max?.max_sequence ?? 0) + 1 };
+        await transaction.insertInto("backend_events").values(backendEventToRow(committedEvent)).execute();
+      }
+
+      if (safeOutput) {
+        const outputRow = await transaction.selectFrom("messages").selectAll().where("id", "=", safeOutput.id).executeTakeFirst();
+        if (outputRow && !sameMessage(outputRow, safeOutput)) throw new Error(`settlement_output_conflict:${current.id}`);
+        if (!outputRow) {
+          await transaction.insertInto("messages").values({
+            id: safeOutput.id,
+            session_id: safeOutput.session_id,
+            role: safeOutput.role,
+            content: safeOutput.content,
+            input_locale: safeOutput.input_locale,
+            output_locale: safeOutput.output_locale,
+            envelope_json: safeOutput.envelope ? stringify(safeOutput.envelope) : null,
+            created_at: safeOutput.created_at
+          }).execute();
+        }
+      }
+
+      const settled: BackendRunRecord = {
+        ...input.nextRun,
+        phase: "settled",
+        metadata: {
+          ...input.nextRun.metadata,
+          ...(input.diagnostic ? {
+            settlement_diagnostic_code: input.diagnostic.code,
+            settlement_diagnostic_message: input.diagnostic.message,
+            ...(input.diagnostic.metadata ?? {})
+          } : {})
+        },
+        ...(safeOutput ? { output_message_id: safeOutput.id } : {}),
+        ...(nextStatus === "outcome_unknown" ? { completed_at: undefined } : { completed_at: input.nextRun.completed_at ?? now })
+      };
+      let update = transaction.updateTable("backend_runs")
+        .set(backendRunToRow(settled))
+        .where("id", "=", current.id)
+        .where("status", "=", expectedStatus)
+      update = expectedPhase === undefined ? update.where("phase", "is", null) : update.where("phase", "=", expectedPhase);
+      update = expectedAttempt === undefined ? update.where("current_attempt", "is", null) : update.where("current_attempt", "=", expectedAttempt);
+      const updated = await update.executeTakeFirst();
+      if (Number(updated.numUpdatedRows ?? 0) !== 1) throw new Error(`settlement_cas_conflict:${current.id}`);
+      await releaseReservationInTransaction(transaction, current.id, input.reservation.version, now);
+      return settled;
+    });
+  }
+
   async updateBackendRun(run: BackendRunRecord): Promise<BackendRunRecord> {
     await this.db.updateTable("backend_runs").set(backendRunToRow(run)).where("id", "=", run.id).execute();
     return run;
@@ -3218,6 +3506,24 @@ export class WorkspaceStore {
       query = query.where("session_id", "=", sessionId);
     }
     const rows = await query.orderBy("started_at", "desc").execute();
+    return rows.map(backendRunFromRow);
+  }
+
+  /** Startup recovery query: only durable non-terminal work with a held lane, plus unknown Runs eligible for later confirmation. */
+  async listCore02RecoveryCandidates(): Promise<BackendRunRecord[]> {
+    const rows = await this.db
+      .selectFrom("backend_runs")
+      .leftJoin("session_run_reservations", "session_run_reservations.run_id", "backend_runs.id")
+      .selectAll("backend_runs")
+      .where((expression) => expression.or([
+        expression.and([
+          expression("backend_runs.status", "in", ["queued", "running", "waiting_for_backend_input"]),
+          expression("session_run_reservations.status", "=", "held")
+        ]),
+        expression("backend_runs.status", "=", "outcome_unknown")
+      ]))
+      .orderBy("backend_runs.started_at", "asc")
+      .execute();
     return rows.map(backendRunFromRow);
   }
 
@@ -3249,6 +3555,60 @@ export class WorkspaceStore {
     const safeEvent = { ...event, payload: redactPrivateData(event.payload, { redactPii: true }) };
     await this.db.insertInto("backend_events").values(backendEventToRow(safeEvent)).execute();
     return safeEvent;
+  }
+
+  async appendCore02Event(event: BackendEventRecord): Promise<{ event: BackendEventRecord; duplicate: boolean }> {
+    if (event.event_type === "run_completed" || event.event_type === "run_failed" || event.payload.terminal_evidence !== undefined) {
+      throw new Error("terminal_event_requires_settlement");
+    }
+    if (!Number.isSafeInteger(event.attempt_no) || (event.source_event_id === undefined && event.source_sequence === undefined)) throw new Error("core02_event_identity_required");
+    const safeInput = { ...event, payload: redactPrivateData(event.payload, { redactPii: true }) };
+    return this.db.transaction().execute(async (transaction) => {
+      if (safeInput.source_event_id) {
+        const duplicate = await transaction.selectFrom("backend_events").selectAll().where("run_id", "=", safeInput.run_id).where("attempt_no", "=", safeInput.attempt_no ?? 1).where("source_event_id", "=", safeInput.source_event_id).executeTakeFirst();
+        if (duplicate) return { event: backendEventFromRow(duplicate), duplicate: true };
+      }
+      if (!safeInput.source_event_id && safeInput.source_sequence !== undefined) {
+        const duplicate = await transaction.selectFrom("backend_events").selectAll().where("run_id", "=", safeInput.run_id).where("attempt_no", "=", safeInput.attempt_no ?? 1).where("source_event_id", "is", null).where("source_sequence", "=", safeInput.source_sequence).executeTakeFirst();
+        if (duplicate) return { event: backendEventFromRow(duplicate), duplicate: true };
+      }
+      const max = await transaction.selectFrom("backend_events").select(({ fn }) => fn.max("sequence").as("max_sequence")).where("run_id", "=", safeInput.run_id).executeTakeFirst();
+      const next = { ...safeInput, sequence: Number(max?.max_sequence ?? 0) + 1 };
+      await transaction.insertInto("backend_events").values(backendEventToRow(next)).execute();
+      return { event: next, duplicate: false };
+    });
+  }
+
+  async commitCore02LifecycleEvent(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }> {
+    if (input.event.event_type === "run_completed" || input.event.event_type === "run_failed" || input.event.payload.terminal_evidence !== undefined) {
+      throw new Error("terminal_event_requires_settlement");
+    }
+    if (!Number.isSafeInteger(input.event.attempt_no) || (input.event.source_event_id === undefined && input.event.source_sequence === undefined)) throw new Error("core02_event_identity_required");
+    return this.db.transaction().execute(async (transaction) => {
+      if (input.event.source_event_id) {
+        const duplicate = await transaction.selectFrom("backend_events").selectAll().where("run_id", "=", input.event.run_id).where("attempt_no", "=", input.event.attempt_no ?? 1).where("source_event_id", "=", input.event.source_event_id).executeTakeFirst();
+        if (duplicate) {
+          const current = await transaction.selectFrom("backend_runs").selectAll().where("id", "=", input.expectedRun.id).executeTakeFirst();
+          return { run: current ? backendRunFromRow(current) : input.expectedRun, event: backendEventFromRow(duplicate), duplicate: true };
+        }
+      }
+      if (!input.event.source_event_id && input.event.source_sequence !== undefined) {
+        const duplicate = await transaction.selectFrom("backend_events").selectAll().where("run_id", "=", input.event.run_id).where("attempt_no", "=", input.event.attempt_no ?? 1).where("source_event_id", "is", null).where("source_sequence", "=", input.event.source_sequence).executeTakeFirst();
+        if (duplicate) {
+          const current = await transaction.selectFrom("backend_runs").selectAll().where("id", "=", input.expectedRun.id).executeTakeFirst();
+          return { run: current ? backendRunFromRow(current) : input.expectedRun, event: backendEventFromRow(duplicate), duplicate: true };
+        }
+      }
+      const max = await transaction.selectFrom("backend_events").select(({ fn }) => fn.max("sequence").as("max_sequence")).where("run_id", "=", input.event.run_id).executeTakeFirst();
+      const event = { ...input.event, sequence: Number(max?.max_sequence ?? 0) + 1 };
+      await transaction.insertInto("backend_events").values(backendEventToRow(event)).execute();
+      let update = transaction.updateTable("backend_runs").set(backendRunToRow(input.nextRun)).where("id", "=", input.expectedRun.id).where("status", "=", input.expectedRun.status);
+      update = input.expectedRun.phase === undefined ? update.where("phase", "is", null) : update.where("phase", "=", input.expectedRun.phase);
+      update = input.expectedRun.current_attempt === undefined ? update.where("current_attempt", "is", null) : update.where("current_attempt", "=", input.expectedRun.current_attempt);
+      const updated = await update.executeTakeFirst();
+      if (Number(updated.numUpdatedRows ?? 0) !== 1) throw new Error(`run_lifecycle_cas_conflict:${input.expectedRun.id}`);
+      return { run: input.nextRun, event, duplicate: false };
+    });
   }
 
   async listBackendEvents(input: { runId?: string; sessionId?: string; afterSequence?: number; limit?: number } = {}): Promise<BackendEventRecord[]> {
@@ -7679,6 +8039,205 @@ function stringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function isTerminalBackendRunStatus(status: BackendRunRecord["status"]): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled" || status === "outcome_unknown";
+}
+
+function isBackendRunIdempotencyConstraint(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("backend_runs.session_id, backend_runs.request_idempotency_key")
+    || message.includes("idx_backend_runs_session_idempotency");
+}
+
+function normalizeSettlementEvent(event: BackendEventRecord, current: BackendRunRecord, nextRun: BackendRunRecord): BackendEventRecord {
+  const payload = redactPrivateData(event.payload, { redactPii: true });
+  const attemptNo = event.attempt_no ?? nextRun.current_attempt ?? current.current_attempt ?? 1;
+  const terminalEvidence = payload.terminal_evidence ?? inferredSettlementEvidence(nextRun.status, nextRun.error_code);
+  return {
+    ...event,
+    source_event_id: event.source_event_id ?? `terminal:${current.id}:${attemptNo}:${nextRun.status}`,
+    attempt_no: attemptNo,
+    sequence: Math.max(1, event.sequence),
+    payload: { ...payload, terminal_evidence: terminalEvidence }
+  };
+}
+
+function inferredSettlementEvidence(status: BackendRunRecord["status"], errorCode?: string): JsonValue {
+  if (status === "completed") return { kind: "completed", source: "canonical_event" };
+  if (status === "cancelled") return { kind: "cancelled", source: "canonical_event" };
+  if (status === "outcome_unknown") return { kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true };
+  return { kind: "failed", source: "canonical_event", error: { code: errorCode ?? "backend_failed", message: "Backend operation failed.", retryable: false, causeCategory: "runtime" } };
+}
+
+async function findSettlementEvent(transaction: Transaction<WorkspaceDb>, event: BackendEventRecord): Promise<BackendEventsTable | undefined> {
+  if (event.source_event_id) {
+    const bySource = await transaction.selectFrom("backend_events").selectAll().where("run_id", "=", event.run_id).where("attempt_no", "=", event.attempt_no ?? 1).where("source_event_id", "=", event.source_event_id).executeTakeFirst();
+    if (bySource) return bySource;
+  }
+  if (!event.source_event_id && event.source_sequence !== undefined) {
+    const bySequence = await transaction.selectFrom("backend_events").selectAll().where("run_id", "=", event.run_id).where("attempt_no", "=", event.attempt_no ?? 1).where("source_event_id", "is", null).where("source_sequence", "=", event.source_sequence).executeTakeFirst();
+    if (bySequence) return bySequence;
+  }
+  return transaction.selectFrom("backend_events").selectAll().where("id", "=", event.id).executeTakeFirst();
+}
+
+async function releaseReservationInTransaction(transaction: Transaction<WorkspaceDb>, runId: string, expectedVersion: number, releasedAt: string): Promise<void> {
+  let update = transaction.updateTable("session_run_reservations")
+    .set({ status: "released", released_at: releasedAt, version: sql<number>`version + 1` })
+    .where("run_id", "=", runId)
+    .where("status", "=", "held");
+  if (expectedVersion > 0) update = update.where("version", "=", expectedVersion);
+  const result = await update.executeTakeFirst();
+  if (Number(result.numUpdatedRows ?? 0) === 1 || expectedVersion === 0) return;
+  const current = await transaction.selectFrom("session_run_reservations").select(["status"]).where("run_id", "=", runId).executeTakeFirst();
+  if (current?.status === "released") return;
+  throw new Error(`settlement_reservation_conflict:${runId}`);
+}
+
+async function assertCore02SettlementReplay(
+  current: BackendRunRecord,
+  nextRun: BackendRunRecord,
+  event: BackendEventRecord,
+  output: MessageRecord | undefined,
+  diagnostic: Core02SettlementInput["diagnostic"],
+  transaction: Transaction<WorkspaceDb>
+): Promise<void> {
+  const resultWasCorrected = current.status === "outcome_unknown" && nextRun.status !== "outcome_unknown";
+  if (current.status !== nextRun.status && !resultWasCorrected) throw new Error(`settlement_conflict:${current.id}`);
+  const existingEvent = await findSettlementEvent(transaction, event);
+  if (!existingEvent || (!sameBackendEvent(existingEvent, event) && !(existingEvent.id === event.id && sameBackendEventIgnoringIdentity(existingEvent, event)))) throw new Error(`settlement_event_conflict:${current.id}`);
+  if (output) {
+    if (current.output_message_id !== output.id) throw new Error(`settlement_output_conflict:${current.id}`);
+    const outputRow = await transaction.selectFrom("messages").selectAll().where("id", "=", output.id).executeTakeFirst();
+    if (!outputRow || !sameMessage(outputRow, output)) throw new Error(`settlement_output_conflict:${current.id}`);
+  } else if (current.output_message_id) {
+    throw new Error(`settlement_output_conflict:${current.id}`);
+  }
+  const storedDiagnosticCode = current.metadata.settlement_diagnostic_code;
+  const storedDiagnosticMessage = current.metadata.settlement_diagnostic_message;
+  if (diagnostic) {
+    if (storedDiagnosticCode !== diagnostic.code || storedDiagnosticMessage !== diagnostic.message) {
+      throw new Error(`settlement_conflict:${current.id}`);
+    }
+    for (const [key, value] of Object.entries(diagnostic.metadata ?? {})) {
+      if (current.metadata[key] !== value) throw new Error(`settlement_conflict:${current.id}`);
+    }
+  } else if (storedDiagnosticCode !== undefined || storedDiagnosticMessage !== undefined) {
+    throw new Error(`settlement_conflict:${current.id}`);
+  }
+}
+
+function isSqliteBusyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /SQLITE_BUSY|SQLITE_LOCKED|database is locked/i.test(message);
+}
+
+function sameMessage(row: MessagesTable, message: MessageRecord): boolean {
+  return stableHash({
+    id: row.id,
+    session_id: row.session_id,
+    role: row.role,
+    content: row.content,
+    input_locale: row.input_locale,
+    output_locale: row.output_locale,
+    envelope: row.envelope_json === null ? null : parse(row.envelope_json)
+  }) === stableHash({
+    id: message.id,
+    session_id: message.session_id,
+    role: message.role,
+    content: message.content,
+    input_locale: message.input_locale,
+    output_locale: message.output_locale,
+    envelope: message.envelope ?? null
+  });
+}
+
+function sameBackendEvent(row: BackendEventsTable, event: BackendEventRecord): boolean {
+  const comparableRow = {
+    run_id: row.run_id,
+    session_id: row.session_id,
+    event_type: row.event_type,
+    attempt_no: row.attempt_no,
+    source_event_id: row.source_event_id,
+    source_sequence: row.source_sequence,
+    payload_json: row.payload_json,
+    resource_refs_json: row.resource_refs_json
+  };
+  const comparableEvent = backendEventToRow(event);
+  return stableHash(comparableRow) === stableHash({
+    run_id: comparableEvent.run_id,
+    session_id: comparableEvent.session_id,
+    event_type: comparableEvent.event_type,
+    attempt_no: comparableEvent.attempt_no,
+    source_event_id: comparableEvent.source_event_id,
+    source_sequence: comparableEvent.source_sequence,
+    payload_json: comparableEvent.payload_json,
+    resource_refs_json: comparableEvent.resource_refs_json
+  });
+}
+
+function sameBackendEventIgnoringIdentity(row: BackendEventsTable, event: BackendEventRecord): boolean {
+  const comparableRow = {
+    run_id: row.run_id,
+    session_id: row.session_id,
+    event_type: row.event_type,
+    attempt_no: row.attempt_no,
+    payload_json: row.payload_json,
+    resource_refs_json: row.resource_refs_json
+  };
+  const comparableEvent = backendEventToRow(event);
+  return stableHash(comparableRow) === stableHash({
+    run_id: comparableEvent.run_id,
+    session_id: comparableEvent.session_id,
+    event_type: comparableEvent.event_type,
+    attempt_no: comparableEvent.attempt_no,
+    payload_json: comparableEvent.payload_json,
+    resource_refs_json: comparableEvent.resource_refs_json
+  });
+}
+
+function sameTerminalEvidence(left: unknown, right: unknown): boolean {
+  return left !== undefined && right !== undefined && stableHash(left) === stableHash(right);
+}
+
+function settlementEvidenceMatchesStatus(value: unknown, status: BackendRunRecord["status"]): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const kind = (value as { kind?: unknown }).kind;
+  if (status === "completed") return kind === "completed";
+  if (status === "failed") return kind === "failed" || kind === "not_started";
+  if (status === "cancelled") return kind === "cancelled" || kind === "not_started";
+  return status === "outcome_unknown" && kind === "indeterminate";
+}
+
+async function assertSettlementReplayMatches(
+  transaction: Transaction<WorkspaceDb>,
+  current: BackendRunRecord,
+  requestedStatus: BackendRunRecord["status"],
+  output: MessageRecord | undefined,
+  safeEvents: Array<{ source: BackendEventRecord; safe: BackendEventRecord }>
+): Promise<void> {
+  if (current.status !== requestedStatus) {
+    throw new Error(`settlement_conflict:${current.id}`);
+  }
+  if (output) {
+    if (current.output_message_id !== output.id) {
+      throw new Error(`settlement_output_conflict:${current.id}`);
+    }
+    const outputRow = await transaction.selectFrom("messages").selectAll().where("id", "=", output.id).executeTakeFirst();
+    if (!outputRow || !sameMessage(outputRow, output)) {
+      throw new Error(`settlement_output_conflict:${current.id}`);
+    }
+  }
+  for (const { source, safe } of safeEvents) {
+    const existingById = await transaction.selectFrom("backend_events").selectAll().where("id", "=", source.id).executeTakeFirst();
+    const existingBySequence = await transaction.selectFrom("backend_events").selectAll().where("run_id", "=", source.run_id).where("sequence", "=", source.sequence).executeTakeFirst();
+    const existing = existingById ?? existingBySequence;
+    if (!existing || !sameBackendEvent(existing, safe)) {
+      throw new Error(`settlement_event_conflict:${current.id}`);
+    }
+  }
+}
+
 function parse<T>(value: string): T {
   return JSON.parse(value) as T;
 }
@@ -8596,7 +9155,12 @@ function backendRunToRow(run: BackendRunRecord): BackendRunsTable {
     output_message_id: run.output_message_id ?? null,
     backend_id: run.backend_id,
     backend_kind: run.backend_kind,
+    backend_session_id: run.backend_session_id ?? null,
     status: run.status,
+    phase: run.phase ?? null,
+    current_attempt: run.current_attempt ?? null,
+    request_idempotency_key: run.request_idempotency_key ?? null,
+    request_hash: run.request_hash ?? null,
     started_at: run.started_at,
     completed_at: run.completed_at ?? null,
     input_summary: run.input_summary,
@@ -8615,6 +9179,11 @@ function backendRunFromRow(row: BackendRunsTable): BackendRunRecord {
     backend_id: row.backend_id,
     backend_kind: row.backend_kind as BackendRunRecord["backend_kind"],
     status: row.status as BackendRunRecord["status"],
+    ...(row.phase ? { phase: row.phase as BackendRunRecord["phase"] } : {}),
+    ...(row.backend_session_id ? { backend_session_id: row.backend_session_id } : {}),
+    ...(row.current_attempt !== null ? { current_attempt: row.current_attempt } : {}),
+    ...(row.request_idempotency_key ? { request_idempotency_key: row.request_idempotency_key } : {}),
+    ...(row.request_hash ? { request_hash: row.request_hash } : {}),
     started_at: row.started_at,
     completed_at: row.completed_at ?? undefined,
     input_summary: row.input_summary,

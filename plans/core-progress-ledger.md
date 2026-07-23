@@ -1,8 +1,8 @@
 # Core 実装進捗台帳
 
-最終更新: 2026-07-19
+最終更新: 2026-07-22
 
-現在の判定は、**Core-01は「残課題あり」**、**Core-02〜Core-08は「基盤あり・個別完了作業は未着手」**である。
+現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-03〜Core-08は「基盤あり・個別完了作業は未着手」**である。
 
 ## 0. この文書の目的
 
@@ -42,7 +42,7 @@
 | Core | 状態 | 現在できていること | 詳細チェックリスト |
 |---|---|---|---|
 | Core-01 | **残課題あり** | 119操作の契約、個別Module、共通Dispatcher、入口統一、検証基盤 | 作成済み |
-| Core-02 | 基盤あり・個別完了作業は未着手 | HostとRuntimeの主要機能 | 未作成。着手時に作成する |
+| Core-02 | **実装中** | Phase 0〜2と終了結果保存経路を実装中。Phase 3〜7、本番切替、旧Runtime削除は対象外 | [core-02-phase-0-2-scope-ledger.json](./core-02-phase-0-2-scope-ledger.json) |
 | Core-03 | 基盤あり・個別完了作業は未着手 | Backend差し替えとEvent正規化 | 未作成。着手時に作成する |
 | Core-04 | 基盤あり・個別完了作業は未着手 | filesystemとSQLiteの永続化 | 未作成。着手時に作成する |
 | Core-05 | 基盤あり・個別完了作業は未着手 | Memory、Wiki、Skill、Review、Evaluation、Curator | 未作成。着手時に作成する |
@@ -94,9 +94,9 @@
 
 ## 5. Core-02〜Core-08の扱い
 
-- Core-02〜Core-08の詳細チェックリストと完了条件は、現時点では作成しない。
-- 進捗サマリーは現在ある基盤の概要であり、今後の実装範囲や完了条件を確定するものではない。
-- 各Coreへ着手する時に、正本と現行実装を再監査してから、そのCore専用のチェックリストをこの台帳へ追記する。
+- Core-02は、専用台帳でPhase 0〜2と`C02-FINAL-01`だけを管理する。
+- Core-02のPhase 3〜7、本番切替、旧Runtime削除、全体Hard Gateは`unverified`のまま残す。
+- Core-03〜Core-08の詳細チェックリストと完了条件は、引き続き作成しない。
 
 ## 6. 更新ルール
 
@@ -114,6 +114,14 @@
 | 日付 | Core | 変更 | 検証・根拠 | 次の作業 |
 |---|---|---|---|---|
 | 2026-07-19 | Core-01 | 完全完了ではなく「残課題あり」で区切った | 現行台帳は102 Command / 17 Query / 5 Deprecated、119 Operation Module。部分テストは成功したが、最新coverage・一括Hard Gate・Evidence整合は未完了 | Core-02着手前に本台帳を開始点として使う |
+| 2026-07-22 | Core-02 | Phase 0〜2＋終了結果保存経路の実装へ着手。未追跡の現行実装も対象に含めた | `plans/core-02-phase-0-2-scope-ledger.json`。VitestはNode-only設定でも起動停止を再現しており、検証基盤の修正を継続中 | Lifecycle / Journal / settlementの型接続と、期限付き検証を完了する |
+| 2026-07-22 | Core-02 | Lifecycle判定、Journal、終了結果の一括保存、Admission、Session lane、Control、Recoveryを実装。Phase 3〜7と旧Runtime切替は未着手のまま保持 | `core:host-runtime:check`成功、focused Vitest 10ファイル / 67テスト成功（108.18秒）。最新VerifierはCore Schema / Agent Backendのみ成功し、Workspace Store / Runtime typecheckは180秒超過、Git差分検査は`mmap failed: Operation canceled`で失敗 | TypeScript・Git検査の停止原因を解消し、同じ範囲でVerifierを再実行する |
+| 2026-07-22 | Core-02 | Phase 0〜2＋`C02-FINAL-01`の実装を継続。診断用の一時設定・bundleを整理し、実装対象のSourceと台帳は保持 | 最新Sourceで`core:host-runtime:check`成功（required 18 / parsed 41 / untracked Core-02 34）。独立focused VitestはRuntime 55件、Workspace/SQLite 14件の計69件が成功。直近完走VerifierではAgent Backendとbundleは成功したが、Core Schema / Workspace Store / Runtime typecheckの180秒制限超過、Verifier内Runtime focused実行の120秒超過、Git差分検査の停止が残る | typecheck・Git差分検査・Verifier内focused実行の停止原因を解消し、Phase 0〜2の全終了条件を再判定する。Phase 3〜7は`unverified`のまま |
+| 2026-07-22 | Core-02 | `LifecycleTransitionDecision`をCore Schemaの共有ブランド型へ接続し、Storeの終了保存Portが匿名decisionを受けない契約へ修正。Workspaceのsettlement fixtureも`RunLifecycle`生成decisionを使用する形へ変更 | 変更後の`core:host-runtime:check`成功（required 18 / parsed 41 / untracked Core-02 34）、focused bundle生成成功。変更後focused再実行はWorkspaceが120秒無出力で未完走、型検査も180秒到達前後の無出力停止が継続 | focused test・型検査・Git差分検査を成功終了できる実行環境または根本原因を確認し、全終了条件を再判定する |
+| 2026-07-22 | Core-02 | Vitestの依存cacheを生成bundle外へ分離し、bundle再生成でcacheを消さない検証基盤へ調整 | bundle生成は成功。cache分離後のWorkspace focused初回も120秒無出力で未完走のため、成功扱い・timeout延長・`forceExit`追加は行っていない | Vitest worker起動停止の根本原因を引き続き切り分け、Phase 0の検証終了条件を満たすまで`実装中`を維持する |
+| 2026-07-22 | Core-02 | 終了結果の同一再実行比較に診断内容と「回答なし／あり」の差分を追加し、異なる結果を`settlement_conflict`へ分けた | `core:host-runtime:check`成功（required 18 / parsed 41 / untracked Core-02 34）、focused bundle生成成功。focused Vitest・TypeScript・Git差分検査の停止は未解消 | Phase 0〜2＋`C02-FINAL-01`の全終了条件を、成功終了するfocused test・typecheck・Git検査で再判定する |
+| 2026-07-22 | Core-02 | fixtureの実行前状態を修正し、SQLite settlement競合テストを実Run状態から開始するよう整理 | 現在Sourceの独立focused VitestはWorkspace 3ファイル / 14件、Runtime 7ファイル / 55件の計69件が成功（Vitest内部計測 98.50秒 / 52.08秒）。ただし外側の起動遅延がVerifierの120秒制限を超えるため、Verifier全体は未完走。TypeScriptとGit差分検査も未達 | 起動遅延・typecheck・Git差分検査を解消し、Phase 0〜2の終了条件を再判定する |
+| 2026-07-22 | Core-02 | focused Runnerのgroup・bundle rootを明示し、cache再利用後の実行を再確認した | `core:host-runtime:check`成功（required 18 / parsed 41 / untracked Core-02 34）。Workspace 14件は2.79秒、Runtime 55件は2.76秒で各exit code 0。Core Schema / Workspace Store / Runtime typecheckとGit差分検査は未達のため、Phase 0〜2は完了扱いにしない | 型検査・Git差分検査を成功終了させ、最新SourceでVerifier全体を再判定する |
 
 追記用テンプレート:
 

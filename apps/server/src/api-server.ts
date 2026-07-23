@@ -6225,6 +6225,7 @@ async function evaluationDiagnosticsPayload(
   const pendingEvaluationSuggestions = evaluationSuggestions.filter((suggestion) => suggestion.status === "proposed");
   const failedBackendRuns = backendRuns.filter((run) => run.status === "failed" || run.status === "cancelled");
   const waitingBackendRuns = backendRuns.filter((run) => run.status === "waiting_for_backend_input");
+  const outcomeUnknownBackendRuns = backendRuns.filter((run) => run.status === "outcome_unknown");
   const attentionToolRuns = toolRuns.filter((toolRun) => toolRun.status === "ignored" || toolRun.status === "failed");
   const issues: EvaluationDiagnosticsReport["issues"] = [];
 
@@ -6297,6 +6298,18 @@ async function evaluationDiagnosticsPayload(
     });
   }
 
+  for (const run of outcomeUnknownBackendRuns) {
+    issues.push({
+      code: "backend_run_outcome_unknown",
+      severity: "critical",
+      message: "Backend run outcome is unconfirmed. External processing may still be running; do not retry automatically.",
+      run_id: run.id,
+      status: run.status,
+      resource_ref: backendRunDiagnosticsRef(run),
+      created_at: run.completed_at ?? run.started_at
+    });
+  }
+
   for (const toolRun of attentionToolRuns) {
     issues.push({
       code: "tool_run_attention_required",
@@ -6320,6 +6333,7 @@ async function evaluationDiagnosticsPayload(
     backend_runs: backendRuns.length,
     failed_backend_runs: failedBackendRuns.length,
     waiting_backend_runs: waitingBackendRuns.length,
+    outcome_unknown_backend_runs: outcomeUnknownBackendRuns.length,
     tool_runs: toolRuns.length,
     ignored_or_failed_tool_runs: attentionToolRuns.length,
     workspace_changes: workspaceChanges.length,
@@ -6354,6 +6368,9 @@ function toolRunDiagnosticsRef(toolRun: ToolRunRecord): ResourceRef {
 }
 
 function evaluationDiagnosticsRecommendation(issues: EvaluationDiagnosticsReport["issues"]): string {
+  if (issues.some((issue) => issue.code === "backend_run_outcome_unknown")) {
+    return "Some backend outcomes are unconfirmed. Do not retry them automatically; verify external processing before taking action, while new turns remain available.";
+  }
   if (issues.some((issue) => issue.code === "evaluation_run_failed" || issue.code === "backend_run_failed" || issue.severity === "critical")) {
     return "Review failed evaluation, backend, or tool traces before treating backend quality as release-ready.";
   }
@@ -7494,16 +7511,18 @@ async function maybeCreateClientEventFromRuntimeEvent(runtime: AgentRuntime, nam
 }
 
 function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | undefined {
-  if (run.status !== "completed" && run.status !== "failed" && run.status !== "waiting_for_backend_input") {
+  if (run.status !== "completed" && run.status !== "failed" && run.status !== "waiting_for_backend_input" && run.status !== "outcome_unknown") {
     return undefined;
   }
   const createdAt = run.completed_at ?? run.started_at;
-  const statusLabel = run.status === "completed" ? "完了" : run.status === "failed" ? "失敗" : "確認待ち";
+  const statusLabel = run.status === "completed" ? "完了" : run.status === "failed" ? "失敗" : run.status === "outcome_unknown" ? "結果未確認" : "確認待ち";
   const notificationKind = run.status === "completed"
     ? "backend_run_completed"
     : run.status === "failed"
       ? "backend_run_failed"
-      : "backend_run_waiting_for_input";
+      : run.status === "outcome_unknown"
+        ? "backend_run_outcome_unknown"
+        : "backend_run_waiting_for_input";
   return {
     id: `client_event_${stableHash({
       kind: "backend_run_status_notification",
@@ -7543,7 +7562,9 @@ function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | un
 }
 
 function summarizeClientNotificationBody(run: BackendRunRecord): string {
-  const raw = run.status === "failed"
+  const raw = run.status === "outcome_unknown"
+    ? "結果を確認できませんでした。外部処理が続いている可能性があります。自動再試行はしません。新しいTurnは開始できます。"
+    : run.status === "failed"
     ? run.error_code ?? run.output_summary ?? run.input_summary
     : run.status === "waiting_for_backend_input"
       ? run.output_summary ?? "続行するには入力が必要です。"

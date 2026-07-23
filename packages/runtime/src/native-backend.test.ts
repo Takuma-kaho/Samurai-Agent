@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
-import { FakeProviderAdapter } from "./provider";
+import { FakeProviderAdapter, ProviderRegistry, ProviderRequestError, type ProviderAdapter } from "./provider";
 import { NativeContextBuilder, NativeToolExecutor, NativeToolLoop, SamuraiNativeBackend } from "./native-backend";
 
 describe("SamuraiNativeBackend components", () => {
@@ -85,7 +85,174 @@ describe("SamuraiNativeBackend components", () => {
       }
     });
   });
+
+  it("classifies provider termination evidence without guessing from run_failed", async () => {
+    const abortError = new Error("Aborted");
+    abortError.name = "AbortError";
+    const explicitFailure = new SamuraiNativeBackend(providerThrowing(new ProviderRequestError(
+      "provider_failed",
+      "Provider rejected the request.",
+      { reason: "auth_failed", retryable: false },
+      "provider_terminal_response"
+    )));
+
+    const cases = [
+      {
+        name: "not configured",
+        backend: new SamuraiNativeBackend(),
+        evidence: { kind: "not_started", source: "preflight_rejection" }
+      },
+      {
+        name: "explicit provider failure",
+        backend: explicitFailure,
+        evidence: { kind: "failed", source: "provider_terminal_response", error: { code: "provider_failed", message: "Provider rejected the request.", retryable: false, causeCategory: "provider" } }
+      },
+      {
+        name: "abort without provider settlement",
+        backend: new SamuraiNativeBackend(providerThrowing(abortError)),
+        evidence: { kind: "indeterminate", reason: "cancel_unconfirmed", providerStarted: true, mayHaveSideEffects: true }
+      }
+    ] as const;
+
+    for (const entry of cases) {
+      const events = await collectEvents(entry.backend.runTurn(backendRunInput()));
+      expect(events.at(-1), entry.name).toMatchObject({ event_type: "run_failed", terminal_evidence: entry.evidence });
+    }
+  });
+
+  it("redacts provider secrets and filesystem paths without damaging URLs", async () => {
+    const backend = new SamuraiNativeBackend(providerThrowing(new ProviderRequestError(
+      "provider_failed",
+      "Bearer provider-secret failed at /workspace/run and /Library/App; docs https://example.test/api",
+      { reason: "auth_failed", retryable: false },
+      "provider_terminal_response"
+    )));
+
+    const events = await collectEvents(backend.runTurn(backendRunInput()));
+    const serialized = JSON.stringify(events.at(-1));
+
+    expect(serialized).toContain("[redacted]");
+    expect(serialized).toContain("[path]");
+    expect(serialized).toContain("https://example.test/api");
+    expect(serialized).not.toContain("provider-secret");
+    expect(serialized).not.toContain("/workspace/run");
+    expect(serialized).not.toContain("/Library/App");
+  });
+
+  it("does not call the provider when the signal is already aborted", async () => {
+    let providerCalls = 0;
+    const provider: ProviderAdapter = {
+      id: "fake",
+      model: "fake/never",
+      async generate() {
+        providerCalls += 1;
+        return { content: "must not run", toolCalls: [] };
+      }
+    };
+    const controller = new AbortController();
+    controller.abort();
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn({ ...backendRunInput(), abort_signal: controller.signal }));
+
+    expect(providerCalls).toBe(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.terminal_evidence).toEqual({ kind: "cancelled", source: "owned_loop_return" });
+  });
+
+  it("normalizes an abort between run_started and provider dispatch as confirmed cancellation", async () => {
+    let providerCalls = 0;
+    const controller = new AbortController();
+    const provider: ProviderAdapter = {
+      id: "fake",
+      model: "fake/never",
+      async generate() {
+        providerCalls += 1;
+        return { content: "must not run", toolCalls: [] };
+      }
+    };
+    const iterator = new SamuraiNativeBackend(new ProviderRegistry([provider])).runTurn({ ...backendRunInput(), abort_signal: controller.signal })[Symbol.asyncIterator]();
+
+    expect((await iterator.next()).value?.event_type).toBe("run_started");
+    controller.abort();
+    const terminal = await iterator.next();
+
+    expect(providerCalls).toBe(0);
+    expect(terminal.value?.terminal_evidence).toEqual({ kind: "cancelled", source: "owned_loop_return" });
+    expect((await iterator.next()).done).toBe(true);
+  });
+
+  it("does not start a fallback when cancellation follows a confirmed provider failure", async () => {
+    const controller = new AbortController();
+    let fallbackCalls = 0;
+    const first: ProviderAdapter = {
+      id: "fake",
+      model: "fake/first",
+      async generate() {
+        controller.abort();
+        throw new ProviderRequestError("provider_failed", "First provider rejected the request.", { reason: "auth_failed", retryable: false }, "provider_terminal_response");
+      }
+    };
+    const fallback: ProviderAdapter = {
+      id: "fake",
+      model: "fake/fallback",
+      async generate() {
+        fallbackCalls += 1;
+        return { content: "must not run", toolCalls: [] };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(new ProviderRegistry([first, fallback])).runTurn({ ...backendRunInput(), abort_signal: controller.signal }));
+
+    expect(fallbackCalls).toBe(0);
+    expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "cancelled", source: "owned_loop_return" });
+  });
+
+  it.each([
+    ["transport_lost", "transport_lost"],
+    ["cancel_unconfirmed", "cancel_unconfirmed"]
+  ] as const)("does not call a fallback after %s", async (disposition, reason) => {
+    let fallbackCalls = 0;
+    const first = providerThrowing(new ProviderRequestError(
+      "provider_failed",
+      disposition === "cancel_unconfirmed" ? "Provider cancellation was not confirmed." : "Provider transport was lost.",
+      { reason: "network", retryable: true },
+      disposition
+    ));
+    const fallback: ProviderAdapter = {
+      id: "fake",
+      model: "fake/fallback",
+      async generate() {
+        fallbackCalls += 1;
+        return { content: "must not run", toolCalls: [] };
+      }
+    };
+    const backend = new SamuraiNativeBackend(new ProviderRegistry([first, fallback]));
+
+    const events = await collectEvents(backend.runTurn(backendRunInput()));
+
+    expect(fallbackCalls).toBe(0);
+    expect(events.at(-1)).toMatchObject({
+      event_type: "run_failed",
+      terminal_evidence: { kind: "indeterminate", reason, providerStarted: true, mayHaveSideEffects: true }
+    });
+  });
 });
+
+function providerThrowing(error: Error): ProviderAdapter {
+  return {
+    id: "fake",
+    model: "fake/error",
+    async generate() {
+      throw error;
+    }
+  };
+}
+
+async function collectEvents(stream: AsyncIterable<BackendOutputEvent>): Promise<BackendOutputEvent[]> {
+  const events: BackendOutputEvent[] = [];
+  for await (const event of stream) events.push(event);
+  return events;
+}
 
 function backendRunInput(): BackendRunInput {
   return {
