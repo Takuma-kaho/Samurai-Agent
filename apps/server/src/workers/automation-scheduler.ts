@@ -1,5 +1,8 @@
 import { nowIso, redactPrivateData } from "@samurai-agent/core-schemas";
-import type { AgentRuntime } from "@samurai-agent/runtime";
+
+export interface AutomationRunner {
+  runDueAutomationJobs(now?: string, context?: { signal?: AbortSignal; deadlineAt?: number }): Promise<unknown[]>;
+}
 
 export interface AutomationSchedulerState {
   enabled: boolean;
@@ -17,17 +20,17 @@ export interface AutomationSchedulerState {
 export interface AutomationScheduler {
   timer: NodeJS.Timeout;
   state: AutomationSchedulerState;
-  tick: (now?: string, context?: { signal?: AbortSignal; deadlineAt?: number }) => Promise<Awaited<ReturnType<AgentRuntime["runDueAutomationJobs"]>>>;
+  tick: (now?: string, context?: { signal?: AbortSignal; deadlineAt?: number }) => Promise<unknown[]>;
   stop: (options?: { signal?: AbortSignal; deadlineAt?: number }) => Promise<void>;
 }
 
-export function startAutomationScheduler(runtime: AgentRuntime, env: NodeJS.ProcessEnv = process.env): AutomationScheduler | undefined {
+export function startAutomationScheduler(runtime: AutomationRunner, env: NodeJS.ProcessEnv = process.env): AutomationScheduler | undefined {
   if (env.SAMURAI_AUTOMATION_SCHEDULER === "false") return undefined;
   const intervalMs = Number(env.SAMURAI_AUTOMATION_TICK_MS ?? 60_000);
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) return undefined;
   const state: AutomationSchedulerState = { enabled: true, interval_ms: intervalMs, started_at: nowIso(), running: false, tick_count: 0, skipped_tick_count: 0, last_run_count: 0 };
   let stopping = false;
-  let activeTick: Promise<Awaited<ReturnType<AgentRuntime["runDueAutomationJobs"]>>> | undefined;
+  let activeTick: Promise<unknown[]> | undefined;
   let activeTickController: AbortController | undefined;
   let stopPromise: Promise<void> | undefined;
   const tick: AutomationScheduler["tick"] = async (now = nowIso(), context = {}) => {

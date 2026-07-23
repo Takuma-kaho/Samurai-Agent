@@ -72,7 +72,7 @@ export interface GatewayInboundPort {
   acquireLock(policy: GatewayBoundaryPolicy, inbound: GatewayInboundMessageRecord): Promise<{ acquired: boolean; lock: GatewayConcurrencyLockRecord }>;
   releaseLock(lockKey: string): Promise<void>;
   ensureSession(context: GatewayContext, title: string): Promise<GatewaySession>;
-  runChat(input: { sessionId: string; body: string; backendId?: string; inputLocale?: SupportedLocale; outputLocale?: SupportedLocale; metadata: Record<string, JsonValue>; context: GatewayContext; boundaryPolicy: GatewayBoundaryPolicy }): Promise<GatewayChatResult>;
+  runChat(input: { sessionId: string; body: string; backendId?: string; inputLocale?: SupportedLocale; outputLocale?: SupportedLocale; metadata: Record<string, JsonValue>; context: GatewayContext; boundaryPolicy: GatewayBoundaryPolicy; idempotencyKey: string }): Promise<GatewayChatResult>;
   enqueueDeliveries(input: { channel: GatewayChannel; inbound: GatewayInboundMessageRecord; sessionKey: string; chat: GatewayChatResult }): Promise<GatewayDeliveryRecord[]>;
   errorMessage(error: unknown): string;
   conflictError(message: string): Error;
@@ -187,6 +187,7 @@ export class GatewayDomainService {
       await this.dependencies.inbound.emit("gateway.inbound.routed", inbound);
       const chat = await this.dependencies.inbound.runChat({ sessionId: session.id, body, backendId: input.backend_id,
         inputLocale: input.input_locale, outputLocale: input.output_locale, context, boundaryPolicy,
+        idempotencyKey: `gateway:${inbound.id}`,
         metadata: { ...(input.metadata ?? {}), gateway_inbound_id: inbound.id, gateway_channel: input.channel,
           gateway_source_identity: sourceIdentity, gateway_pairing_policy_id: pairingPolicy.id,
           gateway_pairing_policy_trust_mode: pairingPolicy.trust_mode, gateway_routing_policy_id: routingPolicy.id,

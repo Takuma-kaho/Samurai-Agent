@@ -1,37 +1,23 @@
 import type { BackendOutputEvent, BackendRuntimeFailure, BackendTerminalEvidence } from "@samurai-agent/agent-backends";
 import type { BackendEventRecord, BackendRunPhase, BackendRunRecord, JsonValue, MessageRecord, SessionRecord } from "@samurai-agent/core-schemas";
 import { nowIso } from "@samurai-agent/core-schemas";
-import { BackendEventJournal, type JournalStore } from "./backend-event-journal";
+import { BackendEventJournal } from "./backend-event-journal";
 import { RunLifecycle, type LifecycleRunStore, type PreparedTerminalSettlement } from "./run-lifecycle";
 import { consumeBackendEvents, type TurnExecutionResult } from "./turn-executor";
 import { backendFailureFromUnknown, backendTerminalEvidenceFromValue, lifecycleEventForTerminalEvidence } from "./run-state-machine";
+import type { CommitTurnSettlementPort, CommittedEventPublisherPort, HostDiagnosticsPort, HostDiagnosticEventType, TurnCleanupPort, TurnSettlementInput } from "../host/host-types";
 
 type RecoveryEvent = Pick<BackendEventRecord, "id" | "event_type" | "payload" | "resource_refs" | "source_event_id" | "source_sequence" | "attempt_no">;
 
-export interface RecoverySettlementInput {
-  expectedRun: BackendRunRecord;
-  nextRun: BackendRunRecord;
-  terminalEvent: BackendEventRecord;
-  outputSourceId: string;
-  output?: MessageRecord;
-  diagnostic?: { code: string; message: string; metadata?: Record<string, JsonValue> };
-  reservation: { sessionId: string; runId: string; version: number; status: "held" | "released" };
-  decision: PreparedTerminalSettlement["decision"];
-  attemptNo: number;
-  sourceIdentity: PreparedTerminalSettlement["sourceIdentity"];
-  terminalEvidence: BackendTerminalEvidence;
-}
+export type RecoverySettlementInput = TurnSettlementInput;
 
-export interface RecoveryStore extends LifecycleRunStore {
-  listBackendRuns(): Promise<BackendRunRecord[]>;
-  listCore02RecoveryCandidates?(): Promise<BackendRunRecord[]>;
+export interface RecoveryStore extends LifecycleRunStore, CommitTurnSettlementPort {
+  listCore02RecoveryCandidates(): Promise<BackendRunRecord[]>;
   listBackendEvents(input: { runId: string }): Promise<RecoveryEvent[]>;
-  getBackendRun?(runId: string): Promise<BackendRunRecord | undefined>;
-  saveBackendEvent?(event: BackendEventRecord): Promise<BackendEventRecord>;
-  commitCore02LifecycleEvent?(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }>;
-  commitTurnSettlement?(input: RecoverySettlementInput): Promise<BackendRunRecord>;
-  getSessionRunReservation?(input: { runId: string }): Promise<{ sessionId: string; runId: string; version: number; status: "held" | "released" } | undefined>;
-  getSession?(sessionId: string): Promise<SessionRecord | undefined>;
+  getBackendRun(runId: string): Promise<BackendRunRecord | undefined>;
+  commitCore02LifecycleEvent(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }>;
+  getSessionRunReservation(input: { runId: string }): Promise<{ sessionId: string; runId: string; version: number; status: "held" | "released" } | undefined>;
+  getSession(sessionId: string): Promise<SessionRecord | undefined>;
 }
 
 export interface RecoveryBackend {
@@ -57,17 +43,20 @@ export interface RecoveryReport {
 export class RunRecovery {
   private lastReport: RecoveryReport = { diagnostics: [] };
   private readonly lifecycle: RunLifecycle;
-  private readonly eventJournal?: BackendEventJournal;
+  private readonly eventJournal: BackendEventJournal;
 
   constructor(
     private readonly store: RecoveryStore,
     private readonly backendFor: (id: string) => RecoveryBackend | undefined,
     private readonly clock: () => string = nowIso,
-    journal?: BackendEventJournal,
-    private readonly enqueue?: (run: BackendRunRecord) => Promise<void>
+    journal: BackendEventJournal,
+    private readonly committedEventPublisher: CommittedEventPublisherPort,
+    private readonly cleanup: TurnCleanupPort,
+    private readonly enqueue: (run: BackendRunRecord) => Promise<void>,
+    private readonly diagnostics: HostDiagnosticsPort
   ) {
     this.lifecycle = new RunLifecycle(clock);
-    this.eventJournal = journal ?? (store.saveBackendEvent ? new BackendEventJournal(store as JournalStore, clock) : undefined);
+    this.eventJournal = journal;
   }
 
   getLastReport(): RecoveryReport {
@@ -77,23 +66,24 @@ export class RunRecovery {
   async reconcile(): Promise<BackendRunRecord[]> {
     this.lastReport = { diagnostics: [] };
     const recovered: BackendRunRecord[] = [];
-    const candidates = this.store.listCore02RecoveryCandidates ? await this.store.listCore02RecoveryCandidates() : await this.store.listBackendRuns();
+    const candidates = await this.store.listCore02RecoveryCandidates();
     for (const run of candidates) {
-      if (!(run.status === "queued" || run.status === "running" || run.status === "waiting_for_backend_input" || run.status === "outcome_unknown")) continue;
-      if (run.status === "queued") {
-        await this.reenqueue(run);
-        recovered.push(run);
-        continue;
-      }
+      try {
+        if (!(run.status === "queued" || run.status === "running" || run.status === "waiting_for_backend_input" || run.status === "outcome_unknown")) continue;
+        if (run.status === "queued") {
+          await this.reenqueue(run);
+          recovered.push(run);
+          continue;
+        }
 
       const storedTerminal = findStoredTerminal(await this.store.listBackendEvents({ runId: run.id }));
-      if (storedTerminal && this.eventJournal) {
+      if (storedTerminal) {
         try {
           const pending = await this.prepareTerminal(run, storedTerminal, "stored_terminal");
           recovered.push(await this.commitPending(pending, outputSummary(storedTerminal.payload), undefined));
           continue;
         } catch (error) {
-          this.addDiagnostic(run, "recovery_enqueue_failed", error);
+          await this.addDiagnostic(run, "recovery_enqueue_failed", error);
         }
       }
 
@@ -109,14 +99,27 @@ export class RunRecovery {
       try {
         stream = backend?.streamEvents?.(run.id);
       } catch (error) {
-        const latest = await this.store.getBackendRun?.(run.id) ?? run;
+        const latest = await this.store.getBackendRun(run.id) ?? run;
         recovered.push(hasSettledOutcome(latest) ? latest : await this.markIndeterminate(latest, "transport_lost", error));
         continue;
       }
 
-      if (stream && this.eventJournal) {
+      if (stream) {
         try {
-          const execution = await consumeBackendEvents({ run, sessionId: run.session_id, stream, journal: this.eventJournal, clock: this.clock });
+          const execution = await consumeBackendEvents({
+            run,
+            sessionId: run.session_id,
+            stream,
+            journal: this.eventJournal,
+            clock: this.clock,
+            emitCommitted: async (event, committedRun) => {
+              try {
+                await this.committedEventPublisher.publish({ event, run: committedRun });
+              } catch (error) {
+                await this.recordHostDiagnostic(committedRun, "host_emit_failed", "recovery_event_publisher", error);
+              }
+            }
+          });
           const observedWaitingEvent = execution.events.some((event) => event.event_type === "backend_waiting_for_native_input");
           if (execution.run.status === "waiting_for_backend_input" && observedWaitingEvent) {
             recovered.push(execution.run);
@@ -126,23 +129,27 @@ export class RunRecovery {
             recovered.push(await this.markIndeterminate(execution.run, "runtime_state_unavailable"));
           }
         } catch (error) {
-          const latest = await this.store.getBackendRun?.(run.id) ?? run;
+          const latest = await this.store.getBackendRun(run.id) ?? run;
           recovered.push(hasSettledOutcome(latest) ? latest : await this.markIndeterminate(latest, "transport_lost", error));
+        } finally {
+          await this.cleanupRun(run);
         }
         continue;
       }
 
-      recovered.push(hasSettledOutcome(run) ? run : await this.markIndeterminate(run, "runtime_state_unavailable"));
+        recovered.push(hasSettledOutcome(run) ? run : await this.markIndeterminate(run, "runtime_state_unavailable"));
+      } catch (error) {
+        await this.addDiagnostic(run, "recovery_enqueue_failed", error);
+      }
     }
     return recovered;
   }
 
   private async reenqueue(run: BackendRunRecord): Promise<void> {
-    if (!this.enqueue) return;
     try {
       await this.enqueue(run);
     } catch (error) {
-      this.addDiagnostic(run, "recovery_enqueue_failed", error);
+      await this.addDiagnostic(run, "recovery_enqueue_failed", error);
     }
   }
 
@@ -163,25 +170,6 @@ export class RunRecovery {
     source: string,
     suppliedFailure?: BackendRuntimeFailure
   ): Promise<PreparedTerminalSettlement> {
-    if (!this.eventJournal) {
-      const evidence = event.terminal_evidence ?? { kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true };
-      const lifecycleEvent = lifecycleEventForTerminalEvidence(evidence, { failure: suppliedFailure });
-      const decision = this.lifecycle.decide(run, lifecycleEvent);
-      const nextRun = this.lifecycle.apply(run, decision);
-      return this.lifecycle.prepareTerminalSettlement(run, nextRun, decision, {
-        id: event.id ?? `recovery:${source}:${run.id}`,
-        run_id: run.id,
-        session_id: run.session_id,
-        event_type: decision.toStatus === "completed" ? "run_completed" : "run_failed",
-        sequence: 1,
-        attempt_no: event.attempt_no ?? run.current_attempt ?? 1,
-        source_event_id: event.source_event_id ?? `recovery:${source}:${run.id}:${run.current_attempt ?? 1}`,
-        ...(event.source_sequence !== undefined ? { source_sequence: event.source_sequence } : {}),
-        payload: { ...event.payload, terminal_evidence: evidence as unknown as JsonValue },
-        resource_refs: event.resource_refs ?? [],
-        created_at: this.clock()
-      });
-    }
     const evidence = event.terminal_evidence;
     if (!evidence) throw new Error(`recovery_terminal_evidence_missing:${run.id}`);
     const lifecycleEvent = lifecycleEventForTerminalEvidence(evidence, { failure: suppliedFailure });
@@ -202,29 +190,30 @@ export class RunRecovery {
 
   private async commitPending(pending: PreparedTerminalSettlement, content: string | undefined, diagnostic?: BackendRuntimeFailure): Promise<BackendRunRecord> {
     const output = content && pending.nextRun.status === "completed" ? await this.createOutput(pending.expectedRun, content) : undefined;
-    const reservation = await this.store.getSessionRunReservation?.({ runId: pending.expectedRun.id }) ?? {
-      sessionId: pending.expectedRun.session_id,
-      runId: pending.expectedRun.id,
-      version: 0,
-      status: "released" as const
-    };
-    if (!this.store.commitTurnSettlement) return this.lifecycle.persist(this.store, pending.expectedRun, pending.nextRun);
-    return this.store.commitTurnSettlement({
+    const reservation = await this.store.getSessionRunReservation({ runId: pending.expectedRun.id });
+    if (!reservation) throw new Error(`settlement_reservation_missing:${pending.expectedRun.id}`);
+    const settled = await this.store.commitTurnSettlement({
       ...pending,
       outputSourceId: `message:${pending.expectedRun.id}:output`,
       ...(output ? { output } : {}),
       ...(!output ? { diagnostic: { code: diagnostic?.code ?? pending.nextRun.error_code ?? "turn_settled", message: diagnostic?.message ?? pending.decision.failure?.message ?? pending.decision.reason } } : {}),
       reservation
     });
+    try {
+      await this.committedEventPublisher.publish({ event: pending.terminalEvent, run: settled });
+    } catch (error) {
+      await this.recordHostDiagnostic(settled, "host_emit_failed", "recovery_terminal_publisher", error);
+    }
+    return settled;
   }
 
   private async createOutput(run: BackendRunRecord, content: string): Promise<MessageRecord | undefined> {
-    const session = await this.store.getSession?.(run.session_id);
+    const session = await this.store.getSession(run.session_id);
     if (!session) return undefined;
     return { id: `message:${run.id}:output`, session_id: session.id, role: "agent", content, input_locale: session.ui_locale, output_locale: session.output_locale, created_at: this.clock() };
   }
 
-  private addDiagnostic(run: BackendRunRecord, code: RecoveryDiagnostic["code"], error: unknown): void {
+  private async addDiagnostic(run: BackendRunRecord, code: RecoveryDiagnostic["code"], error: unknown): Promise<void> {
     const message = backendFailureFromUnknown(error, {
       code: "recovery_diagnostic",
       message: "Recovery failed.",
@@ -232,6 +221,45 @@ export class RunRecovery {
       causeCategory: "runtime"
     }).message;
     this.lastReport.diagnostics.push({ run_id: run.id, code, phase: run.phase ?? "admitted", message: message.slice(0, 240), retryable: false, cause_category: "runtime" });
+    const diagnostic = {
+      runId: run.id,
+      sessionId: run.session_id,
+      attemptNo: run.current_attempt ?? 1,
+      operationId: `recovery:${code}`,
+      eventType: "host_cleanup_failed" as const,
+      message: message.slice(0, 240)
+    };
+    await this.recordHostDiagnostic(run, diagnostic.eventType, diagnostic.operationId, error, diagnostic.message);
+  }
+
+  private async cleanupRun(run: BackendRunRecord): Promise<void> {
+    try {
+      await this.cleanup.cleanup({ runId: run.id, sessionId: run.session_id });
+    } catch (error) {
+      await this.recordHostDiagnostic(run, "host_cleanup_failed", "recovery_cleanup", error);
+    }
+  }
+
+  private async recordHostDiagnostic(
+    run: Pick<BackendRunRecord, "id" | "session_id" | "current_attempt">,
+    eventType: HostDiagnosticEventType,
+    operationId: string,
+    error: unknown,
+    message?: string
+  ): Promise<void> {
+    const diagnostic = {
+      runId: run.id,
+      sessionId: run.session_id,
+      attemptNo: run.current_attempt ?? 1,
+      operationId,
+      eventType,
+      message: message ?? (error instanceof Error ? error.message : String(error))
+    };
+    try {
+      await this.diagnostics.record(diagnostic);
+    } catch (diagnosticError) {
+      this.diagnostics.logPersistenceFailure({ ...diagnostic, error: diagnosticError });
+    }
   }
 }
 

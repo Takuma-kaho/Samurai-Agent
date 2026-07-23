@@ -176,6 +176,7 @@ export function applyLifecycleTransition(run: BackendRunRecord, decision: Lifecy
   const baseMetadata = run.status === "outcome_unknown" && decision.toStatus !== "outcome_unknown"
     ? metadataWithoutUnknownWarning
     : previousMetadata;
+  const terminalEvidence = backendTerminalEvidenceFromValue(decision.terminalEvidence);
   const metadata = {
     ...baseMetadata,
     ...(decision.failure
@@ -187,11 +188,11 @@ export function applyLifecycleTransition(run: BackendRunRecord, decision: Lifecy
           failure_cause_category: decision.failure.causeCategory
         }
       : {}),
-    ...(decision.terminalEvidence?.kind === "indeterminate"
+    ...(terminalEvidence?.kind === "indeterminate"
       ? {
-          outcome_unknown_reason: decision.terminalEvidence.reason,
-          provider_started: decision.terminalEvidence.providerStarted,
-          may_have_external_side_effects: decision.terminalEvidence.mayHaveSideEffects
+          outcome_unknown_reason: terminalEvidence.reason,
+          provider_started: terminalEvidence.providerStarted,
+          may_have_external_side_effects: terminalEvidence.mayHaveSideEffects
         }
       : {})
   };
@@ -203,7 +204,7 @@ export function applyLifecycleTransition(run: BackendRunRecord, decision: Lifecy
     ...(terminal ? { completed_at: previousCompletedAt ?? now } : {}),
     ...(decision.toStatus === "failed" && decision.failure
       ? { error_code: decision.failure.code }
-      : decision.terminalEvidence?.kind === "indeterminate"
+      : terminalEvidence?.kind === "indeterminate"
         ? { error_code: "outcome_unknown" }
         : {})
   };

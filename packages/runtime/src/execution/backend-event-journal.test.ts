@@ -12,7 +12,7 @@ describe("BackendEventJournal", () => {
     const evidence = { kind: "failed", source: "provider_terminal_response", error: { code: "provider_denied", message: "Provider denied the request.", retryable: false, causeCategory: "provider" } } as const;
     const decision = new RunLifecycle().decide(run, lifecycleEventForTerminalEvidence(evidence));
 
-    const committed = await journal.commitLifecycleEvent(run, {
+    const prepared = await journal.prepareTerminalSettlement(run, {
       runId: run.id,
       sessionId: run.session_id,
       attemptNo: 1,
@@ -22,8 +22,9 @@ describe("BackendEventJournal", () => {
       terminalEvidence: evidence
     }, decision);
 
-    expect(committed.run).toMatchObject({ status: "failed", error_code: "provider_denied" });
-    expect(committed.event.payload.terminal_evidence).toEqual(evidence);
+    expect(prepared.nextRun).toMatchObject({ status: "failed", error_code: "provider_denied" });
+    expect(prepared.terminalEvent.payload.terminal_evidence).toEqual(evidence);
+    expect(store.events).toHaveLength(0);
   });
 
   it("deduplicates source identity only within the same attempt", async () => {
@@ -58,7 +59,7 @@ describe("BackendEventJournal", () => {
     await expect(journal.appendCanonicalEvent({ ...base, terminalEvidence: { kind: "completed", source: "canonical_event" } })).rejects.toThrow("terminal_event_requires_settlement");
   });
 
-  it("lets the atomic store return the current settled run for terminal replay", async () => {
+  it("keeps terminal replay preparation read-only for the atomic Store", async () => {
     const staleRun = runningRun();
     const settledRun = { ...staleRun, status: "completed", phase: "settled", completed_at: "2026-01-01T00:00:01.000Z" } as BackendRunRecord;
     const existing: BackendEventRecord = {
@@ -73,18 +74,15 @@ describe("BackendEventJournal", () => {
       resource_refs: [],
       created_at: "2026-01-01T00:00:01.000Z"
     };
-    let atomicCommits = 0;
     const journal = new BackendEventJournal({
       async listBackendEvents() { return [existing]; },
-      async saveBackendEvent(event) { return event; },
-      async commitCore02LifecycleEvent() {
-        atomicCommits += 1;
-        return { run: settledRun, event: existing, duplicate: true };
-      }
+      async getBackendRun() { return settledRun; },
+      async appendCore02Event(event) { return { event, duplicate: false }; },
+      async commitCore02LifecycleEvent() { return { run: settledRun, event: existing, duplicate: true }; }
     });
     const evidence = { kind: "completed", source: "provider_terminal_response" } as const;
 
-    const replay = await journal.commitLifecycleEvent(staleRun, {
+    const replay = await journal.prepareTerminalSettlement(staleRun, {
       runId: staleRun.id,
       sessionId: staleRun.session_id,
       attemptNo: 1,
@@ -94,8 +92,7 @@ describe("BackendEventJournal", () => {
       terminalEvidence: evidence
     }, new RunLifecycle().decide(staleRun, lifecycleEventForTerminalEvidence(evidence)));
 
-    expect(atomicCommits).toBe(0);
-    expect(replay).toMatchObject({ duplicate: true, run: { status: "completed" } });
+    expect(replay).toMatchObject({ expectedRun: staleRun, terminalEvent: existing });
   });
 });
 

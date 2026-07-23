@@ -1,6 +1,6 @@
 import type { BackendOutputEvent, BackendRuntimeFailure, RuntimeFailureCauseCategory } from "@samurai-agent/agent-backends";
 import type { BackendRunRecord, JsonValue } from "@samurai-agent/core-schemas";
-import type { PreparedTurn, ToolDispatchPort, TurnCleanupPort } from "../host/host-types";
+import type { CommittedEventPublisherPort, HostDiagnosticsPort, PreparedTurn, TurnCleanupPort, TurnToolExecutionPort } from "../host/host-types";
 import { BackendEventJournal } from "./backend-event-journal";
 import { RunLifecycle, type LifecycleRunStore, type PreparedTerminalSettlement } from "./run-lifecycle";
 import { lifecycleEventForTerminalEvidence } from "./run-state-machine";
@@ -18,9 +18,10 @@ export interface TurnExecutionResult {
 
 export interface TurnExecutorOptions {
   readonly lifecycle?: RunLifecycle;
-  readonly emitCommitted?: (event: TurnExecutionResult["events"][number], run: BackendRunRecord) => Promise<void>;
-  readonly toolDispatch?: ToolDispatchPort;
-  readonly cleanup?: TurnCleanupPort;
+  readonly committedEventPublisher: CommittedEventPublisherPort;
+  readonly toolExecution: TurnToolExecutionPort;
+  readonly cleanup: TurnCleanupPort;
+  readonly diagnostics: HostDiagnosticsPort;
 }
 
 export interface TurnExecutorCleanupInput {
@@ -41,13 +42,21 @@ export interface TurnResumeExecutionInput {
  */
 export class TurnExecutor {
   private readonly lifecycle: RunLifecycle;
+  private readonly committedEventPublisher: CommittedEventPublisherPort;
+  private readonly toolExecution: TurnToolExecutionPort;
+  private readonly cleanupPort: TurnCleanupPort;
+  private readonly diagnostics: HostDiagnosticsPort;
 
   constructor(
     private readonly store: LifecycleRunStore,
     private readonly journal: BackendEventJournal,
-    private readonly options: TurnExecutorOptions = {}
+    options: TurnExecutorOptions
   ) {
     this.lifecycle = options.lifecycle ?? new RunLifecycle();
+    this.committedEventPublisher = options.committedEventPublisher;
+    this.toolExecution = options.toolExecution;
+    this.cleanupPort = options.cleanup;
+    this.diagnostics = options.diagnostics;
   }
 
   async execute(prepared: PreparedTurn, signal?: AbortSignal): Promise<TurnExecutionResult> {
@@ -58,6 +67,13 @@ export class TurnExecutor {
     currentPrepared = withRun(prepared, run);
 
     const backend = currentPrepared.binding.backend;
+    if (Object.keys(currentPrepared.backendInput.metadata).length > 0) {
+      run = await this.lifecycle.persist(this.store, run, {
+        ...run,
+        metadata: { ...run.metadata, ...currentPrepared.backendInput.metadata }
+      });
+      currentPrepared = withRun(currentPrepared, run);
+    }
     if (!run.backend_session_id && backend.startSession) {
       throwIfAborted(signal);
       const sessionHandle = await backend.startSession({
@@ -92,24 +108,38 @@ export class TurnExecutor {
       journal: this.journal,
       lifecycle: this.lifecycle,
       emitCommitted: async (event, committedRun) => {
-        try {
-          await this.options.emitCommitted?.(event, committedRun);
-        } catch (error) {
-          await this.recordCleanupFailure(committedRun.id, "committed_event_emit", error);
-        }
-        if (event.event_type === "tool_call_started" || event.event_type === "tool_call_output") {
-          await this.options.toolDispatch?.dispatch({
-            turn: withRun(currentPrepared, committedRun),
+        await this.publishCommittedEvent(event, committedRun, "event_publisher");
+        if (event.event_type === "tool_call_started") {
+          await this.toolExecution.execute({
+            run: committedRun,
+            backendInput: currentPrepared.backendInput,
             event: {
+              event_type: event.event_type,
               tool_call_id: event.payload.tool_call_id as string | undefined,
-              payload: event.payload
-            }
+              payload: event.payload,
+            },
+            gatewayBoundaryPolicy: currentPrepared.request.gatewayBoundaryPolicy,
+            recordEvent: async (toolEvent) => {
+              const recorded = await this.journal.appendCanonicalEvent({
+                runId: committedRun.id,
+                sessionId: committedRun.session_id,
+                attemptNo: committedRun.current_attempt ?? 1,
+                eventType: toolEvent.event_type,
+                payload: toolEvent.payload,
+                resourceRefs: toolEvent.resource_refs,
+                sourceEventId: `host-tool:${committedRun.id}:${committedRun.current_attempt ?? 1}:${toolEvent.tool_call_id ?? event.payload.tool_call_id ?? event.id}:${toolEvent.event_type}:${String(toolEvent.payload.action_id ?? toolEvent.payload.status ?? "result")}`
+              });
+              if (!recorded.duplicate) {
+                await this.publishCommittedEvent(recorded.event, committedRun, "tool_event_publisher");
+              }
+              return recorded.event;
+            },
           });
         }
       }
     });
     if (execution.cleanupError !== undefined) {
-      await this.recordCleanupFailure(execution.run.id, "iterator_cleanup", execution.cleanupError);
+      await this.recordDiagnostic(execution.run, "host_cleanup_failed", "iterator_cleanup", execution.cleanupError);
     }
     return { ...execution, prepared: withRun(currentPrepared, execution.run) };
   }
@@ -125,44 +155,63 @@ export class TurnExecutor {
       payload: { reason: "resume" },
       sourceEventId: `control:resume:${input.run.id}:${input.run.current_attempt ?? 1}`
     }, decision);
+    if (!resumed.duplicate) await this.publishCommittedEvent(resumed.event, resumed.run, "control_event_publisher");
     const execution = await consumeBackendEvents({
       run: resumed.run,
       sessionId: resumed.run.session_id,
       stream: input.backend.resumeRun(resumed.run.id, input.input),
       journal: this.journal,
       lifecycle: this.lifecycle,
-      emitCommitted: this.options.emitCommitted
+      emitCommitted: async (event, committedRun) => {
+        await this.publishCommittedEvent(event, committedRun, "control_event_publisher");
+      }
     });
     if (execution.cleanupError !== undefined) {
-      await this.recordCleanupFailure(execution.run.id, "iterator_cleanup", execution.cleanupError);
+      await this.recordDiagnostic(execution.run, "host_cleanup_failed", "iterator_cleanup", execution.cleanupError);
     }
     return execution;
   }
 
   /** Required-finalize cleanup. Each resource is attempted independently. */
   async cleanup(input: TurnExecutorCleanupInput): Promise<void> {
-    const cleanup = this.options.cleanup;
-    if (!cleanup) return;
-    const operations: Array<[string, () => void | Promise<void>]> = [
-      ["event_flush", () => cleanup.flushEvents?.(input.runId)],
-      ["event_sequence_cache", () => cleanup.clearEventSequence?.(input.runId)],
-      ["tool_bridge_token", () => cleanup.revokeToolBridge?.(input.runId)],
-      ["execution_lock", () => cleanup.releaseExecutionLock?.({ runId: input.runId, sessionId: input.sessionId })]
-    ];
-    for (const [operation, run] of operations) {
-      try {
-        await run();
-      } catch (error) {
-        await this.recordCleanupFailure(input.runId, operation, error);
-      }
+    try {
+      await this.cleanupPort.cleanup(input);
+    } catch (error) {
+      const run = await (this.store as LifecycleRunStore & { getBackendRun?: (runId: string) => Promise<BackendRunRecord | undefined> }).getBackendRun?.(input.runId);
+      if (run) await this.recordDiagnostic(run, "host_cleanup_failed", "cleanup", error);
+      else this.diagnostics.logPersistenceFailure({
+        runId: input.runId,
+        sessionId: input.sessionId,
+        attemptNo: 1,
+        operationId: "cleanup",
+        eventType: "host_cleanup_failed",
+        message: error instanceof Error ? error.message : String(error),
+        error
+      });
     }
   }
 
-  private async recordCleanupFailure(runId: string, operation: string, error: unknown): Promise<void> {
+  private async recordDiagnostic(run: BackendRunRecord, eventType: "host_cleanup_failed" | "host_emit_failed", operationId: string, error: unknown): Promise<void> {
+    const input = {
+      runId: run.id,
+      sessionId: run.session_id,
+      attemptNo: run.current_attempt ?? 1,
+      operationId,
+      eventType,
+      message: error instanceof Error ? error.message : String(error)
+    } as const;
     try {
-      await this.options.cleanup?.recordFailure?.({ runId, operation, error });
-    } catch {
-      // Failure reporting is also best-effort and must not change the Run.
+      await this.diagnostics.record(input);
+    } catch (diagnosticError) {
+      this.diagnostics.logPersistenceFailure({ ...input, error: diagnosticError });
+    }
+  }
+
+  private async publishCommittedEvent(event: Awaited<ReturnType<BackendEventJournal["appendCanonicalEvent"]>>["event"], run: BackendRunRecord, operationId: string): Promise<void> {
+    try {
+      await this.committedEventPublisher.publish({ event, run });
+    } catch (error) {
+      await this.recordDiagnostic(run, "host_emit_failed", operationId, error);
     }
   }
 }

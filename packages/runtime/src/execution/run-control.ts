@@ -7,34 +7,20 @@ import type {
 } from "@samurai-agent/agent-backends";
 import type { BackendEventRecord, BackendRunRecord, JsonValue, MessageRecord, SessionRecord } from "@samurai-agent/core-schemas";
 import { nowIso } from "@samurai-agent/core-schemas";
-import { BackendEventJournal, type JournalStore } from "./backend-event-journal";
+import { BackendEventJournal } from "./backend-event-journal";
 import { RunLifecycle, type LifecycleRunStore, type PreparedTerminalSettlement } from "./run-lifecycle";
 import { TurnExecutor, consumeBackendEvents, type TurnExecutionResult } from "./turn-executor";
-import type { TurnCleanupPort } from "../host/host-types";
+import type { CommitTurnSettlementPort, CommittedEventPublisherPort, HostDiagnosticsPort, TurnCleanupPort, TurnSettlementInput, TurnToolExecutionPort } from "../host/host-types";
 import { backendFailureFromUnknown, lifecycleEventForTerminalEvidence } from "./run-state-machine";
 
-export interface RunControlSettlementInput {
-  expectedRun: BackendRunRecord;
-  nextRun: BackendRunRecord;
-  terminalEvent: BackendEventRecord;
-  outputSourceId: string;
-  output?: MessageRecord;
-  diagnostic?: { code: string; message: string; metadata?: Record<string, JsonValue> };
-  reservation: { sessionId: string; runId: string; version: number; status: "held" | "released" };
-  decision: PreparedTerminalSettlement["decision"];
-  attemptNo: number;
-  sourceIdentity: PreparedTerminalSettlement["sourceIdentity"];
-  terminalEvidence: BackendTerminalEvidence;
-}
+export type RunControlSettlementInput = TurnSettlementInput;
 
-export interface RunControlStore extends LifecycleRunStore {
+export interface RunControlStore extends LifecycleRunStore, CommitTurnSettlementPort {
   getBackendRun(runId: string): Promise<BackendRunRecord | undefined>;
-  listBackendEvents?(input: { runId: string }): Promise<BackendEventRecord[]>;
-  saveBackendEvent?(event: BackendEventRecord): Promise<BackendEventRecord>;
-  commitCore02LifecycleEvent?(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }>;
-  commitTurnSettlement?(input: RunControlSettlementInput): Promise<BackendRunRecord>;
-  getSessionRunReservation?(input: { runId: string }): Promise<{ sessionId: string; runId: string; version: number; status: "held" | "released" } | undefined>;
-  getSession?(sessionId: string): Promise<SessionRecord | undefined>;
+  listBackendEvents(input: { runId: string }): Promise<BackendEventRecord[]>;
+  commitCore02LifecycleEvent(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }>;
+  getSessionRunReservation(input: { runId: string }): Promise<{ sessionId: string; runId: string; version: number; status: "held" | "released" } | undefined>;
+  getSession(sessionId: string): Promise<SessionRecord | undefined>;
 }
 
 export interface RunControlOptions {
@@ -43,7 +29,10 @@ export interface RunControlOptions {
   nowMs?: () => number;
   sleep?: (ms: number) => Promise<void>;
   waitForEvidence?: (runId: string, deadline: number) => Promise<BackendCancelResult | undefined>;
-  cleanup?: TurnCleanupPort;
+  cleanup: TurnCleanupPort;
+  diagnostics: HostDiagnosticsPort;
+  committedEventPublisher: CommittedEventPublisherPort;
+  toolExecution: TurnToolExecutionPort;
 }
 
 /** Direct control path for a known Run. It never queues cancel/resume/sync. */
@@ -54,14 +43,16 @@ export class RunControl {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly waitForEvidence?: RunControlOptions["waitForEvidence"];
   private readonly lifecycle: RunLifecycle;
-  private readonly eventJournal?: BackendEventJournal;
-  private readonly executor?: TurnExecutor;
+  private readonly eventJournal: BackendEventJournal;
+  private readonly executor: TurnExecutor;
+  private readonly committedEventPublisher: CommittedEventPublisherPort;
+  private readonly diagnostics: HostDiagnosticsPort;
 
   constructor(
     private readonly store: RunControlStore,
     private readonly backendFor: (id: string) => AgentBackend | undefined,
-    options: RunControlOptions = {},
-    journal?: BackendEventJournal
+    options: RunControlOptions,
+    journal: BackendEventJournal
   ) {
     this.settleTimeoutMs = Math.max(1, options.settleTimeoutMs ?? 2500);
     this.clock = options.clock ?? nowIso;
@@ -69,8 +60,16 @@ export class RunControl {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.waitForEvidence = options.waitForEvidence;
     this.lifecycle = new RunLifecycle(this.clock);
-    this.eventJournal = journal ?? (store.listBackendEvents && store.saveBackendEvent ? new BackendEventJournal(store as JournalStore, this.clock) : undefined);
-    this.executor = this.eventJournal ? new TurnExecutor(store, this.eventJournal, { lifecycle: this.lifecycle, cleanup: options.cleanup }) : undefined;
+    this.eventJournal = journal;
+    this.committedEventPublisher = options.committedEventPublisher;
+    this.diagnostics = options.diagnostics;
+    this.executor = new TurnExecutor(store, this.eventJournal, {
+      lifecycle: this.lifecycle,
+      committedEventPublisher: options.committedEventPublisher,
+      toolExecution: options.toolExecution,
+      cleanup: options.cleanup,
+      diagnostics: options.diagnostics
+    });
   }
 
   async cancel(runId: string): Promise<BackendRunRecord> {
@@ -169,7 +168,6 @@ export class RunControl {
     }
 
     try {
-      if (!this.executor) throw new Error("event_journal_required");
       const backendInput = run.backend_session_id ? { ...safeInput, backend_session_id: run.backend_session_id } : safeInput;
       const execution = await this.executor.resumeRun({ run, backend, input: backendInput });
       return this.finishControlExecution(execution, "resume_terminal_missing");
@@ -190,7 +188,7 @@ export class RunControl {
     const run = await this.requireRun(runId);
     if (hasSettledOutcome(run)) return run;
     const backend = this.backendFor(run.backend_id);
-    if (!backend?.streamEvents || !this.eventJournal) {
+    if (!backend?.streamEvents) {
       const pending = await this.prepareUnknown(run, "stream_sync_unsupported");
       return this.commitPending(pending, undefined, { code: "stream_sync_unsupported", message: "Backend stream synchronization is unavailable." });
     }
@@ -207,8 +205,14 @@ export class RunControl {
   }
 
   private async consumeControlStream(run: BackendRunRecord, stream: AsyncIterable<BackendOutputEvent>): Promise<TurnExecutionResult> {
-    if (!this.eventJournal) throw new Error("event_journal_required");
-    return consumeBackendEvents({ run, sessionId: run.session_id, stream, journal: this.eventJournal, clock: this.clock });
+    return consumeBackendEvents({
+      run,
+      sessionId: run.session_id,
+      stream,
+      journal: this.eventJournal,
+      clock: this.clock,
+      emitCommitted: async (event, committedRun) => this.publishCommittedEvent(event, committedRun, "control_event_publisher")
+    });
   }
 
   private async finishControlExecution(execution: TurnExecutionResult, missingReason: string): Promise<BackendRunRecord> {
@@ -249,54 +253,56 @@ export class RunControl {
     const lifecycleEvent = lifecycleEventForTerminalEvidence(evidence, { requestedCancel, ...(failure ? { failure } : {}) });
     const selectedDecision = decision ?? this.lifecycle.decide(run, lifecycleEvent);
     const error = failure ?? (evidence.kind === "failed" ? evidence.error : undefined);
-    return this.eventJournal
-      ? this.eventJournal.prepareTerminalSettlement(run, {
-          runId: run.id,
-          sessionId: run.session_id,
-          attemptNo: run.current_attempt ?? 1,
-          eventType: selectedDecision.toStatus === "completed" ? "run_completed" : "run_failed",
-          payload: { ...(error ? { error_code: error.code, message: error.message } : {}) },
-          sourceEventId: `control:${source}:${run.id}:${run.current_attempt ?? 1}:${selectedDecision.toStatus}`,
-          terminalEvidence: evidence
-        }, selectedDecision)
-      : this.lifecycle.prepareTerminalSettlement(run, this.lifecycle.apply(run, selectedDecision), selectedDecision, {
-          id: `control:${source}:${run.id}`,
-          run_id: run.id,
-          session_id: run.session_id,
-          event_type: selectedDecision.toStatus === "completed" ? "run_completed" : "run_failed",
-          sequence: 1,
-          attempt_no: run.current_attempt ?? 1,
-          source_event_id: `control:${source}:${run.id}:${run.current_attempt ?? 1}:${selectedDecision.toStatus}`,
-          payload: { ...(error ? { error_code: error.code, message: error.message } : {}), terminal_evidence: evidence as unknown as JsonValue },
-          resource_refs: [],
-          created_at: this.clock()
-        });
+    return this.eventJournal.prepareTerminalSettlement(run, {
+      runId: run.id,
+      sessionId: run.session_id,
+      attemptNo: run.current_attempt ?? 1,
+      eventType: selectedDecision.toStatus === "completed" ? "run_completed" : "run_failed",
+      payload: { ...(error ? { error_code: error.code, message: error.message } : {}) },
+      sourceEventId: `control:${source}:${run.id}:${run.current_attempt ?? 1}:${selectedDecision.toStatus}`,
+      terminalEvidence: evidence
+    }, selectedDecision);
   }
 
   private async commitPending(pending: PreparedTerminalSettlement, content: string | undefined, diagnostic?: { code: string; message: string }): Promise<BackendRunRecord> {
     const output = content !== undefined && pending.nextRun.status === "completed" && content.length > 0
       ? await this.createOutput(pending.expectedRun, content)
       : undefined;
-    const reservation = await this.store.getSessionRunReservation?.({ runId: pending.expectedRun.id }) ?? {
-      sessionId: pending.expectedRun.session_id,
-      runId: pending.expectedRun.id,
-      version: 0,
-      status: "released" as const
-    };
-    if (this.store.commitTurnSettlement) {
-      return this.store.commitTurnSettlement({
-        ...pending,
-        outputSourceId: `message:${pending.expectedRun.id}:output`,
-        ...(output ? { output } : {}),
-        ...(!output ? { diagnostic: { code: diagnostic?.code ?? pending.nextRun.error_code ?? "turn_settled", message: diagnostic?.message ?? pending.decision.failure?.message ?? pending.decision.reason } } : {}),
-        reservation
-      });
+    const reservation = await this.store.getSessionRunReservation({ runId: pending.expectedRun.id });
+    if (!reservation) throw new Error(`settlement_reservation_missing:${pending.expectedRun.id}`);
+    const settled = await this.store.commitTurnSettlement({
+      ...pending,
+      outputSourceId: `message:${pending.expectedRun.id}:output`,
+      ...(output ? { output } : {}),
+      ...(!output ? { diagnostic: { code: diagnostic?.code ?? pending.nextRun.error_code ?? "turn_settled", message: diagnostic?.message ?? pending.decision.failure?.message ?? pending.decision.reason } } : {}),
+      reservation
+    });
+    await this.publishCommittedEvent(pending.terminalEvent, settled, "control_terminal_publisher");
+    return settled;
+  }
+
+  private async publishCommittedEvent(event: BackendEventRecord, run: BackendRunRecord, operationId: string): Promise<void> {
+    try {
+      await this.committedEventPublisher.publish({ event, run });
+    } catch (error) {
+      const input = {
+        runId: run.id,
+        sessionId: run.session_id,
+        attemptNo: run.current_attempt ?? 1,
+        operationId,
+        eventType: "host_emit_failed" as const,
+        message: error instanceof Error ? error.message : String(error)
+      };
+      try {
+        await this.diagnostics.record(input);
+      } catch (diagnosticError) {
+        this.diagnostics.logPersistenceFailure({ ...input, error: diagnosticError });
+      }
     }
-    return this.lifecycle.persist(this.store, pending.expectedRun, pending.nextRun);
   }
 
   private async createOutput(run: BackendRunRecord, content: string): Promise<MessageRecord | undefined> {
-    const session = await this.store.getSession?.(run.session_id);
+    const session = await this.store.getSession(run.session_id);
     if (!session) return undefined;
     return {
       id: `message:${run.id}:output`,

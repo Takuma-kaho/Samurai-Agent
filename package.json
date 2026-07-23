@@ -18,6 +18,8 @@
     "backend:channels:verify": "node scripts/verify-external-channels.mjs",
     "backend:gateway:verify": "node --import tsx scripts/verify-gateway-recovery.mjs",
     "core:verify": "node scripts/verify-core-completion.mjs",
+    "core:host-runtime:check": "node scripts/check-core-host-runtime.mjs",
+    "core:host-runtime:verify": "node scripts/verify-core-host-runtime.mjs",
     "core:additions:check-ledger": "node scripts/verify-core-additions-ledger.mjs",
     "core:additions:test": "node scripts/verify-core-additions-tests.mjs",
     "core:additions:score": "node scripts/verify-core-additions-score.mjs",

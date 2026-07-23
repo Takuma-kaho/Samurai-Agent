@@ -1,36 +1,55 @@
 import type { BackendRunRecord, MessageRecord } from "@samurai-agent/core-schemas";
 import { nowIso } from "@samurai-agent/core-schemas";
-import type { AdmittedTurn, HostCompletionPort, PostTurnPort, TurnOutput, TurnSettlementInput } from "./host-types";
+import type { AdmittedTurn, CommitTurnSettlementPort, HostCompletionPort, HostDiagnosticsPort, PostTurnOperations, TurnOutput, TurnSettlementInput } from "./host-types";
 
-export interface CompletionStore {
-  commitTurnSettlement(input: TurnSettlementInput): Promise<BackendRunRecord>;
-}
+export interface CompletionStore extends CommitTurnSettlementPort {}
 
-/** Required persistence and optional side effects are intentionally separate. */
+/** Settlement is durable first; named post-turn operations run only afterwards. */
 export class TurnCompletionCoordinator implements HostCompletionPort {
   constructor(
     private readonly store: CompletionStore,
-    private readonly postTurns: readonly PostTurnPort[] = [],
-    private readonly clock: () => string = nowIso,
-    private readonly recordPostTurnFailure?: (input: { runId: string; operation: string; error: unknown }) => void | Promise<void>
+    private readonly postTurn: PostTurnOperations,
+    private readonly diagnostics: HostDiagnosticsPort,
+    private readonly clock: () => string = nowIso
   ) {}
 
   async commitTurnSettlement(input: TurnSettlementInput & { admitted: AdmittedTurn; turnOutput: TurnOutput }): Promise<BackendRunRecord> {
     const message: MessageRecord | undefined = input.turnOutput.content ? {
-      id: input.outputSourceId, session_id: input.admitted.session.id, role: "agent", content: input.turnOutput.content,
-      input_locale: input.admitted.userMessage.input_locale, output_locale: input.admitted.session.output_locale, created_at: this.clock()
+      id: input.outputSourceId,
+      session_id: input.admitted.session.id,
+      role: "agent",
+      content: input.turnOutput.content,
+      input_locale: input.admitted.userMessage.input_locale,
+      output_locale: input.admitted.session.output_locale,
+      created_at: this.clock()
     } : undefined;
     const settled = await this.store.commitTurnSettlement({ ...input, output: message });
-    if (settled.status === "completed") {
-      for (const postTurn of this.postTurns) {
+    if (settled.status !== "completed") return settled;
+
+    const operations = [
+      this.postTurn.presentation,
+      this.postTurn.learningReview,
+      this.postTurn.externalAssistSync,
+      this.postTurn.notification,
+      this.postTurn.telemetry
+    ];
+    for (const operation of operations) {
+      if (!operation) continue;
+      try {
+        await operation.run({ admitted: input.admitted, run: settled, output: input.turnOutput });
+      } catch (error) {
+        const diagnostic = {
+          runId: settled.id,
+          sessionId: settled.session_id,
+          attemptNo: settled.current_attempt ?? 1,
+          operationId: operation.operationId,
+          eventType: "host_post_turn_failed" as const,
+          message: error instanceof Error ? error.message : String(error)
+        };
         try {
-          await postTurn.run({ admitted: input.admitted, run: settled, output: input.turnOutput });
-        } catch (error) {
-          try {
-            await this.recordPostTurnFailure?.({ runId: settled.id, operation: postTurn.id ?? "post_turn", error });
-          } catch {
-            // Failure reporting is optional and must not alter a committed Run.
-          }
+          await this.diagnostics.record(diagnostic);
+        } catch (diagnosticError) {
+          this.diagnostics.logPersistenceFailure({ ...diagnostic, error: diagnosticError });
         }
       }
     }

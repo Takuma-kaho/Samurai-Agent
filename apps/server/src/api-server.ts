@@ -123,6 +123,7 @@ import {
   type ProviderDiagnostics,
   type ProviderRegistry
 } from "@samurai-agent/runtime";
+import { composeAgentRuntime } from "./composition/runtime";
 import {
   isDomainCommandId,
   isDomainQueryId,
@@ -160,6 +161,7 @@ export interface CreateApiServerOptions {
   externalAssistProvider?: ExternalAssistProvider | ExternalAssistProvider[];
   ownerToken?: string;
   corsOrigins?: string[];
+  productionLogger?: (message: string, metadata: Record<string, unknown>) => void;
 }
 
 export interface ApiServer {
@@ -455,13 +457,18 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   const backendWorkingDirectoryMode = resolveBackendWorkingDirectoryMode();
   const backendRegistry = options.backendRegistry ?? createDefaultAgentBackendRegistry(provider, process.env, { repoRoot });
   const temporaryContexts = createTemporaryContextStore();
-  runtime = new AgentRuntime(store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, undefined, {
+  const productionLogger = options.productionLogger ?? ((message: string, metadata: Record<string, unknown>) => {
+    console.error(message, metadata);
+  });
+  runtime = composeAgentRuntime({ store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, workspaceOptions: {
     backendWorkingDirectoryMode,
     repoRoot,
     enableBackendBackgroundReview: options.automationScheduler !== false,
     detachBackgroundReview: true,
-    resolveTemporaryContextRef: (ref) => temporaryContexts.resolve(ref)
-  });
+    resolveTemporaryContextRef: (ref) => temporaryContexts.resolve(ref),
+    productionLogger
+  } });
+  await runtime.startup();
   await runtime.ensureStandardLearningJobs();
   const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
   const lifecycle: ApiServerLifecycleState = {
@@ -940,7 +947,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       res.status(201).json(publicDomainCommandResult(await runtime.runDomainCommand({
         command_id: commandId,
         input_source: "runtime_api",
-        idempotency_key: domainCommandIdempotencyKey(req),
+        idempotency_key: domainCommandIdempotencyKey(req, commandId === "chat.turn.run"),
         payload: ingress.payload
       }, runtimeRequestContext(req, ingress.context))));
     } catch (error) {
@@ -974,7 +981,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       res.status(201).json(publicDomainCommandResult(await runtime.runDomainCommand({
         command_id: req.params.commandId,
         input_source: "runtime_api",
-        idempotency_key: domainCommandIdempotencyKey(req),
+        idempotency_key: domainCommandIdempotencyKey(req, req.params.commandId === "chat.turn.run"),
         payload: ingress.payload
       }, runtimeRequestContext(req, ingress.context))));
     } catch (error) {
@@ -1375,7 +1382,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...(asSupportedLocale(req.body?.input_locale) ? { input_locale: req.body.input_locale } : {}),
           ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
           metadata: jsonRecord(req.body?.metadata)
-        }, { sessionId: req.params.sessionId });
+        }, { sessionId: req.params.sessionId }, { requireIdempotencyKey: true });
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -1396,7 +1403,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...(asSupportedLocale(req.body?.input_locale) ? { input_locale: req.body.input_locale } : {}),
           ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
           metadata: jsonRecord(req.body?.metadata)
-        });
+        }, {}, { requireIdempotencyKey: true });
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -3878,25 +3885,25 @@ export function closeApiServer(server: ApiServer): Promise<void> {
     if (!httpClosed.completed) errors.push(new Error("api_server_http_shutdown_timeout"));
     else if (httpClosed.error) errors.push(httpClosed.error);
     try {
-      const temporaryClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.temporaryContexts.close()), deadlineAt);
-      if (!temporaryClosed.completed) {
-        errors.push(new Error("api_server_temporary_context_shutdown_timeout"));
-        safeToCloseStore = false;
-      } else if (temporaryClosed.error) {
-        errors.push(temporaryClosed.error);
-      }
-    } catch (error) {
-      errors.push(error);
-      safeToCloseStore = false;
-    }
-    try {
-      const runtimeClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.runtime.shutdownMcpProcessPool()), deadlineAt);
+      const runtimeClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.runtime.shutdown()), deadlineAt);
       if (!runtimeClosed.completed) {
         errors.push(new Error("api_server_runtime_shutdown_timeout"));
         safeToCloseStore = false;
       } else if (runtimeClosed.error) {
         errors.push(runtimeClosed.error);
         safeToCloseStore = false;
+      }
+    } catch (error) {
+      errors.push(error);
+      safeToCloseStore = false;
+    }
+    try {
+      const temporaryClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.temporaryContexts.close()), deadlineAt);
+      if (!temporaryClosed.completed) {
+        errors.push(new Error("api_server_temporary_context_shutdown_timeout"));
+        safeToCloseStore = false;
+      } else if (temporaryClosed.error) {
+        errors.push(temporaryClosed.error);
       }
     } catch (error) {
       errors.push(error);
@@ -3975,11 +3982,14 @@ function runtimeRequestHttpStatus(code: RuntimeRequestError["code"]): number {
   return 409;
 }
 
-function domainCommandIdempotencyKey(req: Request): string | undefined {
+function domainCommandIdempotencyKey(req: Request, required = false): string | undefined {
   const header = req.get("Idempotency-Key");
   const body = typeof req.body?.idempotency_key === "string" ? req.body.idempotency_key : undefined;
   const key = header ?? body;
   if (key === undefined) {
+    if (required) {
+      throw new RuntimeRequestError("conflict", "idempotency_key_required");
+    }
     return undefined;
   }
   const normalized = key.trim();
@@ -4011,13 +4021,14 @@ async function runRuntimeApiCommand<Id extends DomainCommandId>(
   req: Request,
   commandId: Id,
   payload: unknown,
-  context: TrustedRuntimeApiContext = {}
+  context: TrustedRuntimeApiContext = {},
+  options: { requireIdempotencyKey?: boolean } = {}
 ): Promise<DomainOperationOutput<Id>> {
   const input = parseDomainOperationInput(commandId, payload);
   const result = await runtime.runDomainCommand({
     command_id: commandId,
     input_source: "runtime_api",
-    idempotency_key: domainCommandIdempotencyKey(req),
+    idempotency_key: domainCommandIdempotencyKey(req, options.requireIdempotencyKey === true),
     payload: input
   }, runtimeRequestContext(req, context));
   return result.result as DomainOperationOutput<Id>;

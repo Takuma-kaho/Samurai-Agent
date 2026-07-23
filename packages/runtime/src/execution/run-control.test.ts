@@ -2,13 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentBackend, BackendOutputEvent } from "@samurai-agent/agent-backends";
 import type { BackendEventRecord, BackendRunRecord } from "@samurai-agent/core-schemas";
 import { BackendEventJournal } from "./backend-event-journal";
-import { RunControl, type RunControlSettlementInput } from "./run-control";
+import { RunControl, type RunControlOptions, type RunControlSettlementInput } from "./run-control";
 
 describe("RunControl", () => {
   it("maps settled not_started to cancelled only for a cancel request", async () => {
     const store = new ControlStore(run("running", "backend_starting"));
     const backend = backendWith({ cancelRun: async () => ({ kind: "settled", evidence: { kind: "not_started", source: "preflight_rejection" } }) });
-    const control = new RunControl(store, () => backend, { clock: fixedClock });
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.cancel("run-1");
 
@@ -18,7 +18,7 @@ describe("RunControl", () => {
   it("uses the phase before cancelling to prove unsupported work never started", async () => {
     const store = new ControlStore(run("running", "backend_starting"));
     const backend = backendWith({ cancelRun: async () => ({ kind: "unsupported" }) });
-    const control = new RunControl(store, () => backend, { clock: fixedClock });
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.cancel("run-1");
 
@@ -35,7 +35,7 @@ describe("RunControl", () => {
         payload: { error_code: "backend_native_session_missing", message: "Native session is missing." }
       })
     });
-    const control = new RunControl(store, () => backend, { clock: fixedClock }, new BackendEventJournal(store, fixedClock));
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.resume("run-1", { token: "must-not-persist" });
 
@@ -58,7 +58,7 @@ describe("RunControl", () => {
         source_event_id: "terminal-1"
       })
     });
-    const control = new RunControl(store, () => backend, { clock: fixedClock }, new BackendEventJournal(store, fixedClock));
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.sync("run-1");
 
@@ -76,7 +76,7 @@ describe("RunControl", () => {
         source_event_id: "resume-terminal-before-cleanup-error"
       }, new Error("resume iterator cleanup failed"))
     });
-    const control = new RunControl(store, () => backend, { clock: fixedClock }, new BackendEventJournal(store, fixedClock));
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.resume("run-1", { answer: "ok" });
 
@@ -95,7 +95,7 @@ describe("RunControl", () => {
         source_event_id: "sync-terminal-before-cleanup-error"
       }, new Error("sync iterator cleanup failed"))
     });
-    const control = new RunControl(store, () => backend, { clock: fixedClock }, new BackendEventJournal(store, fixedClock));
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.sync("run-1");
 
@@ -108,12 +108,11 @@ describe("RunControl", () => {
     let now = 0;
     const store = new ControlStore(run("running", "external_running"));
     const backend = backendWith({ cancelRun: async () => ({ kind: "requested" }) });
-    const control = new RunControl(store, () => backend, {
+    const control = new RunControl(store, () => backend, controlOptions({
       settleTimeoutMs: 50,
-      clock: fixedClock,
       nowMs: () => now,
       sleep: async (ms) => { now += ms; }
-    });
+    }), new BackendEventJournal(store, fixedClock));
 
     const result = await control.cancel("run-1");
 
@@ -127,13 +126,12 @@ describe("RunControl", () => {
     let probes = 0;
     const store = new ControlStore(run("running", "external_running"));
     const backend = backendWith({ cancelRun: async () => ({ kind: "requested" }) });
-    const control = new RunControl(store, () => backend, {
+    const control = new RunControl(store, () => backend, controlOptions({
       settleTimeoutMs: 50,
-      clock: fixedClock,
       nowMs: () => now,
       sleep: async (ms) => { now += ms; },
       waitForEvidence: async () => { probes += 1; return { kind: "requested" }; }
-    });
+    }), new BackendEventJournal(store, fixedClock));
 
     const result = await control.cancel("run-1");
 
@@ -154,13 +152,12 @@ describe("RunControl", () => {
           ? () => { blockedCalls += 1; return late.promise; }
           : async () => ({ kind: "requested" })
       });
-      const control = new RunControl(store, () => backend, {
+      const control = new RunControl(store, () => backend, controlOptions({
         settleTimeoutMs: 50,
-        clock: fixedClock,
         ...(stalledStep === "waitForEvidence"
           ? { waitForEvidence: () => { blockedCalls += 1; return late.promise; } }
           : {})
-      });
+      }), new BackendEventJournal(store, fixedClock));
 
       const pending = control.cancel("run-1");
       for (let index = 0; index < 20 && blockedCalls === 0; index += 1) await Promise.resolve();
@@ -191,7 +188,7 @@ describe("RunControl", () => {
       let cancelCalls = 0;
       const store = new ControlStore(run("running", "external_running"));
       const backend = backendWith({ cancelRun: () => { cancelCalls += 1; return late.promise; } });
-      const control = new RunControl(store, () => backend, { settleTimeoutMs: 50, clock: fixedClock });
+    const control = new RunControl(store, () => backend, controlOptions({ settleTimeoutMs: 50 }), new BackendEventJournal(store, fixedClock));
 
       const pending = control.cancel("run-1");
       for (let index = 0; index < 20 && cancelCalls === 0; index += 1) await Promise.resolve();
@@ -210,7 +207,7 @@ describe("RunControl", () => {
   it("maps a normally ended stream without terminal evidence to outcome_unknown", async () => {
     const store = new ControlStore(run("running", "external_running"));
     const backend = backendWith({ streamEvents: () => eventsOf({ event_type: "text_delta", payload: { text: "partial" } }) });
-    const control = new RunControl(store, () => backend, { clock: fixedClock }, new BackendEventJournal(store, fixedClock));
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.sync("run-1");
 
@@ -227,7 +224,7 @@ describe("RunControl", () => {
     const existing = run("outcome_unknown", "settled");
     const store = new ControlStore(existing);
     const backend = backendWith({ cancelRun: async () => { cancelCalls += 1; return { kind: "requested" }; } });
-    const control = new RunControl(store, () => backend, { clock: fixedClock });
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.cancel("run-1");
 
@@ -239,7 +236,7 @@ describe("RunControl", () => {
   it("sanitizes a thrown cancel error before persisting failure metadata", async () => {
     const store = new ControlStore(run("running", "external_running"));
     const backend = backendWith({ cancelRun: async () => { throw new Error("Bearer cancel-secret failed at /Users/person/private/run"); } });
-    const control = new RunControl(store, () => backend, { clock: fixedClock });
+    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
 
     const result = await control.cancel("run-1");
     const metadata = JSON.stringify(result.metadata);
@@ -258,15 +255,47 @@ class ControlStore {
   readonly events: BackendEventRecord[] = [];
   constructor(public current: BackendRunRecord) {}
   async getBackendRun(runId: string): Promise<BackendRunRecord | undefined> { return this.current.id === runId ? this.current : undefined; }
-  async updateBackendRun(run: BackendRunRecord): Promise<BackendRunRecord> { this.current = run; return run; }
+  async commitCore02RunTransition(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord> { this.current = input.nextRun; return input.nextRun; }
+  async commitCore02BackendSession(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord> { this.current = input.nextRun; return input.nextRun; }
+  async commitCore02LifecycleEvent(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }> {
+    const duplicate = this.events.find((event) => event.run_id === input.event.run_id && event.source_event_id === input.event.source_event_id);
+    if (duplicate) return { run: this.current, event: duplicate, duplicate: true };
+    this.events.push(input.event);
+    this.current = input.nextRun;
+    return { run: input.nextRun, event: input.event, duplicate: false };
+  }
   async commitTurnSettlement(input: RunControlSettlementInput): Promise<BackendRunRecord> {
     const existing = this.events.find((event) => event.run_id === input.terminalEvent.run_id && event.source_event_id === input.terminalEvent.source_event_id);
     if (!existing) this.events.push(input.terminalEvent);
     this.current = { ...input.nextRun, phase: "settled" };
     return this.current;
   }
+  async getSessionRunReservation(input: { runId: string }): Promise<{ sessionId: string; runId: string; version: number; status: "held" | "released" } | undefined> {
+    return input.runId === this.current.id ? { sessionId: this.current.session_id, runId: input.runId, version: 1, status: "held" } : undefined;
+  }
+  async getSession(sessionId: string) {
+    return sessionId === this.current.session_id
+      ? { id: sessionId, session_key: sessionId, title: "Session", ui_locale: "ja" as const, output_locale: "ja" as const, created_at: this.current.started_at, updated_at: this.current.started_at }
+      : undefined;
+  }
   async listBackendEvents(input: { runId: string }): Promise<BackendEventRecord[]> { return this.events.filter((event) => event.run_id === input.runId); }
-  async saveBackendEvent(event: BackendEventRecord): Promise<BackendEventRecord> { this.events.push(event); return event; }
+  async appendCore02Event(event: BackendEventRecord): Promise<{ event: BackendEventRecord; duplicate: boolean }> {
+    const duplicate = this.events.find((candidate) => candidate.run_id === event.run_id && candidate.source_event_id === event.source_event_id);
+    if (duplicate) return { event: duplicate, duplicate: true };
+    this.events.push(event);
+    return { event, duplicate: false };
+  }
+}
+
+function controlOptions(overrides: Partial<RunControlOptions> = {}): RunControlOptions {
+  return {
+    cleanup: { cleanup: async () => undefined },
+    diagnostics: { record: async () => undefined, logPersistenceFailure: () => undefined },
+    committedEventPublisher: { publish: async () => undefined },
+    toolExecution: { execute: async () => undefined },
+    clock: fixedClock,
+    ...overrides
+  };
 }
 
 function backendWith(overrides: Partial<AgentBackend>): AgentBackend {

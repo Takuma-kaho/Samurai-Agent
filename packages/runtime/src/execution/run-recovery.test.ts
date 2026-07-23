@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { BackendOutputEvent } from "@samurai-agent/agent-backends";
 import type { BackendEventRecord, BackendRunRecord } from "@samurai-agent/core-schemas";
 import { BackendEventJournal } from "./backend-event-journal";
-import { RunRecovery, type RecoverySettlementInput } from "./run-recovery";
+import { RunRecovery, type RecoveryBackend, type RecoverySettlementInput } from "./run-recovery";
 
 describe("RunRecovery", () => {
   it("uses stored typed evidence instead of a raw terminal event name", async () => {
@@ -17,8 +17,8 @@ describe("RunRecovery", () => {
     })]);
     const rawNameStore = new RecoveryTestStore([runningRun()], [journalEvent({ error_code: "raw_only" })]);
 
-    const [typed] = await new RunRecovery(typedStore, () => undefined, fixedClock).reconcile();
-    const [rawOnly] = await new RunRecovery(rawNameStore, () => undefined, fixedClock).reconcile();
+    const [typed] = await makeRecovery(typedStore, () => undefined).reconcile();
+    const [rawOnly] = await makeRecovery(rawNameStore, () => undefined).reconcile();
 
     expect(typed).toMatchObject({ status: "failed", error_code: "provider_denied", metadata: { error_message: "Provider denied the request." } });
     expect(rawOnly).toMatchObject({ status: "outcome_unknown", error_code: "outcome_unknown" });
@@ -36,7 +36,7 @@ describe("RunRecovery", () => {
         source_event_id: "recovery-terminal-1"
       })
     };
-    const recovery = new RunRecovery(store, () => backend, fixedClock, new BackendEventJournal(store, fixedClock));
+    const recovery = makeRecovery(store, () => backend);
 
     const [recovered] = await recovery.reconcile();
 
@@ -56,7 +56,7 @@ describe("RunRecovery", () => {
       }
     };
 
-    const [recovered] = await new RunRecovery(store, () => backend, fixedClock, new BackendEventJournal(store, fixedClock)).reconcile();
+    const [recovered] = await makeRecovery(store, () => backend).reconcile();
 
     expect(resumeCalls).toBe(0);
     expect(recovered).toEqual(waiting);
@@ -78,7 +78,7 @@ describe("RunRecovery", () => {
       )
     };
 
-    const [recovered] = await new RunRecovery(store, () => backend, fixedClock, new BackendEventJournal(store, fixedClock)).reconcile();
+    const [recovered] = await makeRecovery(store, () => backend).reconcile();
 
     expect(resumeCalls).toBe(0);
     expect(recovered).toMatchObject({ status: "waiting_for_backend_input", phase: "waiting" });
@@ -90,7 +90,7 @@ describe("RunRecovery", () => {
     const store = new RecoveryTestStore([waiting], []);
     const backend = { id: "backend", streamEvents: () => eventsOf({ event_type: "text_delta", payload: { text: "partial" } }) };
 
-    const [recovered] = await new RunRecovery(store, () => backend, fixedClock, new BackendEventJournal(store, fixedClock)).reconcile();
+    const [recovered] = await makeRecovery(store, () => backend).reconcile();
 
     expect(recovered).toMatchObject({
       status: "outcome_unknown",
@@ -107,7 +107,7 @@ describe("RunRecovery", () => {
       streamEvents: () => throwingEvents(new Error("Bearer recovery-secret failed at /Users/person/private/socket"))
     };
 
-    const [recovered] = await new RunRecovery(store, () => backend, fixedClock, new BackendEventJournal(store, fixedClock)).reconcile();
+    const [recovered] = await makeRecovery(store, () => backend).reconcile();
     const metadata = JSON.stringify(recovered?.metadata);
 
     expect(recovered).toMatchObject({
@@ -138,7 +138,7 @@ describe("RunRecovery", () => {
       }
     };
 
-    const recovered = await new RunRecovery(store, () => backend, fixedClock, new BackendEventJournal(store, fixedClock)).reconcile();
+    const recovered = await makeRecovery(store, () => backend).reconcile();
 
     expect(recovered[0]).toMatchObject({
       id: "run-1",
@@ -161,7 +161,7 @@ describe("RunRecovery", () => {
     const store = new RecoveryTestStore([existingUnknown, correctableUnknown, queued], events);
     const enqueued: string[] = [];
 
-    const recovered = await new RunRecovery(store, () => undefined, fixedClock, undefined, async (run) => { enqueued.push(run.id); }).reconcile();
+    const recovered = await makeRecovery(store, () => undefined, { enqueue: async (run) => { enqueued.push(run.id); } }).reconcile();
 
     expect(recovered[0]).toEqual(existingUnknown);
     expect(recovered[1]).toMatchObject({ id: "run-2", status: "completed", phase: "settled" });
@@ -184,7 +184,7 @@ describe("RunRecovery", () => {
       })
     };
 
-    const [recovered] = await new RunRecovery(store, () => backend, fixedClock, new BackendEventJournal(store, fixedClock)).reconcile();
+    const [recovered] = await makeRecovery(store, () => backend).reconcile();
 
     expect(recovered).toMatchObject({ status: "completed", phase: "settled" });
     expect(store.events.filter((event) => event.source_event_id === "late-recovery-confirmation")).toHaveLength(1);
@@ -196,10 +196,10 @@ describe("RunRecovery", () => {
     const store = new RecoveryTestStore([first, second], []);
     const attempted: string[] = [];
 
-    const recovery = new RunRecovery(store, () => undefined, fixedClock, undefined, async (run) => {
+    const recovery = makeRecovery(store, () => undefined, { enqueue: async (run) => {
       attempted.push(run.id);
       if (run.id === "run-1") throw new Error("Bearer queue-secret unavailable at /Users/person/private/queue");
-    });
+    } });
     const recovered = await recovery.reconcile();
     const report = recovery.getLastReport();
 
@@ -223,7 +223,7 @@ describe("RunRecovery", () => {
     const unknown = { ...runningRun(), status: "outcome_unknown", phase: "settled", error_code: "outcome_unknown", metadata: { failure_code: "existing_failure" } } as BackendRunRecord;
     const store = new RecoveryTestStore([unknown], []);
 
-    const [recovered] = await new RunRecovery(store, () => undefined, fixedClock).reconcile();
+    const [recovered] = await makeRecovery(store, () => undefined).reconcile();
 
     expect(recovered).toEqual(unknown);
   });
@@ -231,19 +231,57 @@ describe("RunRecovery", () => {
 
 class RecoveryTestStore {
   constructor(public runs: BackendRunRecord[], public events: BackendEventRecord[]) {}
-  async listBackendRuns(): Promise<BackendRunRecord[]> { return this.runs; }
+  async listCore02RecoveryCandidates(): Promise<BackendRunRecord[]> { return this.runs.slice(); }
   async listBackendEvents(input: { runId: string }): Promise<BackendEventRecord[]> { return this.events.filter((event) => event.run_id === input.runId); }
   async getBackendRun(runId: string): Promise<BackendRunRecord | undefined> { return this.runs.find((run) => run.id === runId); }
-  async updateBackendRun(run: BackendRunRecord): Promise<BackendRunRecord> {
-    this.runs = this.runs.map((item) => item.id === run.id ? run : item);
-    return run;
+  async commitCore02RunTransition(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord> { return this.replace(input.nextRun); }
+  async commitCore02BackendSession(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord> { return this.replace(input.nextRun); }
+  async commitCore02LifecycleEvent(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }> {
+    const duplicate = this.events.find((event) => event.run_id === input.event.run_id && event.source_event_id === input.event.source_event_id);
+    if (duplicate) return { run: this.getBackendRun(input.expectedRun.id) ?? input.expectedRun, event: duplicate, duplicate: true };
+    this.events.push(input.event);
+    return { run: this.replace(input.nextRun), event: input.event, duplicate: false };
+  }
+  async appendCore02Event(event: BackendEventRecord): Promise<{ event: BackendEventRecord; duplicate: boolean }> {
+    const duplicate = this.events.find((candidate) => candidate.run_id === event.run_id && candidate.source_event_id === event.source_event_id);
+    if (duplicate) return { event: duplicate, duplicate: true };
+    this.events.push(event);
+    return { event, duplicate: false };
   }
   async commitTurnSettlement(input: RecoverySettlementInput): Promise<BackendRunRecord> {
     const existing = this.events.find((event) => event.run_id === input.terminalEvent.run_id && event.source_event_id === input.terminalEvent.source_event_id);
     if (!existing) this.events.push(input.terminalEvent);
-    return this.updateBackendRun({ ...input.nextRun, phase: "settled" });
+    return this.replace({ ...input.nextRun, phase: "settled" });
   }
-  async saveBackendEvent(event: BackendEventRecord): Promise<BackendEventRecord> { this.events.push(event); return event; }
+  async getSessionRunReservation(input: { runId: string }): Promise<{ sessionId: string; runId: string; version: number; status: "held" | "released" } | undefined> {
+    const run = this.runs.find((item) => item.id === input.runId);
+    return run ? { sessionId: run.session_id, runId: run.id, version: 1, status: "held" } : undefined;
+  }
+  async getSession(sessionId: string) {
+    const run = this.runs.find((item) => item.session_id === sessionId);
+    return run ? { id: sessionId, session_key: sessionId, title: "Session", ui_locale: "ja" as const, output_locale: "ja" as const, created_at: run.started_at, updated_at: run.started_at } : undefined;
+  }
+  private replace(run: BackendRunRecord): BackendRunRecord {
+    this.runs = this.runs.map((item) => item.id === run.id ? run : item);
+    return run;
+  }
+}
+
+function makeRecovery(
+  store: RecoveryTestStore,
+  backendFor: (id: string) => RecoveryBackend | undefined,
+  options: { enqueue?: (run: BackendRunRecord) => Promise<void> } = {}
+): RunRecovery {
+  return new RunRecovery(
+    store,
+    backendFor,
+    fixedClock,
+    new BackendEventJournal(store, fixedClock),
+    { publish: async () => undefined },
+    { cleanup: async () => undefined },
+    options.enqueue ?? (async () => undefined),
+    { record: async () => undefined, logPersistenceFailure: () => undefined }
+  );
 }
 
 function runningRun(id = "run-1"): BackendRunRecord {

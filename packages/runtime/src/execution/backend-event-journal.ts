@@ -19,13 +19,9 @@ export interface JournalEventInput {
 
 export interface JournalStore {
   listBackendEvents(input: { runId: string }): Promise<BackendEventRecord[]>;
-  getBackendRun?(runId: string): Promise<BackendRunRecord | undefined>;
-  saveBackendEvent(event: BackendEventRecord): Promise<BackendEventRecord>;
-  updateBackendRun?(run: BackendRunRecord): Promise<BackendRunRecord>;
-  atomic?<T>(operation: () => Promise<T>): Promise<T>;
-  commitCore02RunTransition?(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord>;
-  commitCore02LifecycleEvent?(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }>;
-  appendCore02Event?(event: BackendEventRecord): Promise<{ event: BackendEventRecord; duplicate: boolean }>;
+  getBackendRun(runId: string): Promise<BackendRunRecord | undefined>;
+  commitCore02LifecycleEvent(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }>;
+  appendCore02Event(event: BackendEventRecord): Promise<{ event: BackendEventRecord; duplicate: boolean }>;
 }
 
 /**
@@ -46,8 +42,7 @@ export class BackendEventJournal {
     const duplicate = existing.find((event) => event.attempt_no === input.attemptNo && ((input.sourceEventId !== undefined && event.source_event_id === input.sourceEventId) || (input.sourceEventId === undefined && input.sourceSequence !== undefined && event.source_event_id === undefined && event.source_sequence === input.sourceSequence)));
     if (duplicate) return { event: duplicate, duplicate: true };
     const event: BackendEventRecord = { id: createId("backend_event"), run_id: input.runId, session_id: input.sessionId, event_type: input.eventType, sequence: 0, attempt_no: input.attemptNo, ...(input.sourceEventId ? { source_event_id: input.sourceEventId } : {}), ...(input.sourceSequence !== undefined ? { source_sequence: input.sourceSequence } : {}), payload: journalPayload(input), resource_refs: input.resourceRefs ?? [], created_at: this.clock() };
-    if (this.store.appendCore02Event) return this.store.appendCore02Event(event);
-    return { event: await this.store.saveBackendEvent({ ...event, sequence: existing.reduce((max, item) => Math.max(max, item.sequence), 0) + 1 }), duplicate: false };
+    return this.store.appendCore02Event(event);
   }
 
   async commitLifecycleTransitionEvent(run: BackendRunRecord, input: JournalEventInput, decision: LifecycleTransitionDecision): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }> {
@@ -56,18 +51,12 @@ export class BackendEventJournal {
     const existing = await this.store.listBackendEvents({ runId: input.runId });
     const duplicate = findDuplicate(existing, input);
     if (duplicate) {
-      const current = this.store.getBackendRun ? await this.store.getBackendRun(run.id) : undefined;
+      const current = await this.store.getBackendRun(run.id);
       return { run: current ?? run, event: duplicate, duplicate: true };
     }
     const event = createEvent(input, this.clock(), existing.reduce((max, item) => Math.max(max, item.sequence), 0) + 1);
     const nextRun = this.lifecycle.apply(run, decision);
-    if (this.store.commitCore02LifecycleEvent) return this.store.commitCore02LifecycleEvent({ expectedRun: run, nextRun, event });
-    const persist = async () => {
-      await this.store.saveBackendEvent(event);
-      const persistedRun = await this.lifecycle.persist(this.store, run, nextRun);
-      return { run: persistedRun, event, duplicate: false };
-    };
-    return this.store.atomic ? this.store.atomic(persist) : persist();
+    return this.store.commitCore02LifecycleEvent({ expectedRun: run, nextRun, event });
   }
 
   /**
@@ -101,18 +90,6 @@ export class BackendEventJournal {
     return this.lifecycle.prepareTerminalSettlement(run, nextRun, decision, event);
   }
 
-  async commitLifecycleEvent(run: BackendRunRecord, input: JournalEventInput, decision: LifecycleTransitionDecision): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }> {
-    if (isTerminalEventType(input.eventType) || input.terminalEvidence) {
-      const prepared = await this.prepareTerminalSettlement(run, input, decision);
-      return { run: prepared.nextRun, event: prepared.terminalEvent, duplicate: Boolean(await this.findExistingTerminal(prepared)) };
-    }
-    return this.commitLifecycleTransitionEvent(run, input, decision);
-  }
-
-  private async findExistingTerminal(prepared: PreparedTerminalSettlement): Promise<BackendEventRecord | undefined> {
-    const existing = await this.store.listBackendEvents({ runId: prepared.expectedRun.id });
-    return existing.find((event) => event.id === prepared.terminalEvent.id || (prepared.sourceIdentity.sourceEventId && event.source_event_id === prepared.sourceIdentity.sourceEventId) || (prepared.sourceIdentity.sourceEventId === undefined && prepared.sourceIdentity.sourceSequence !== undefined && event.source_event_id === undefined && event.source_sequence === prepared.sourceIdentity.sourceSequence));
-  }
 }
 
 function validateJournalInput(input: JournalEventInput): void {
@@ -168,14 +145,27 @@ function syntheticTerminalSource(run: BackendRunRecord, eventType: BackendEventR
 
 export class InMemoryBackendEventJournalStore implements JournalStore {
   readonly events: BackendEventRecord[] = [];
+  readonly runs = new Map<string, BackendRunRecord>();
   async listBackendEvents(input: { runId: string }): Promise<BackendEventRecord[]> {
     return this.events.filter((event) => event.run_id === input.runId);
   }
-  async saveBackendEvent(event: BackendEventRecord): Promise<BackendEventRecord> {
-    this.events.push(event);
-    return event;
+  async getBackendRun(runId: string): Promise<BackendRunRecord | undefined> {
+    return this.runs.get(runId);
   }
-  async atomic<T>(operation: () => Promise<T>): Promise<T> {
-    return operation();
+
+  async appendCore02Event(event: BackendEventRecord): Promise<{ event: BackendEventRecord; duplicate: boolean }> {
+    const duplicate = this.events.find((candidate) => candidate.run_id === event.run_id && candidate.attempt_no === event.attempt_no && candidate.source_event_id === event.source_event_id);
+    if (duplicate) return { event: duplicate, duplicate: true };
+    const next = { ...event, sequence: this.events.filter((candidate) => candidate.run_id === event.run_id).length + 1 };
+    this.events.push(next);
+    return { event: next, duplicate: false };
+  }
+
+  async commitCore02LifecycleEvent(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord; event: BackendEventRecord }): Promise<{ run: BackendRunRecord; event: BackendEventRecord; duplicate: boolean }> {
+    const duplicate = this.events.find((candidate) => candidate.run_id === input.event.run_id && candidate.attempt_no === input.event.attempt_no && candidate.source_event_id === input.event.source_event_id);
+    if (duplicate) return { run: this.runs.get(input.expectedRun.id) ?? input.expectedRun, event: duplicate, duplicate: true };
+    const appended = await this.appendCore02Event(input.event);
+    this.runs.set(input.nextRun.id, input.nextRun);
+    return { run: input.nextRun, event: appended.event, duplicate: false };
   }
 }

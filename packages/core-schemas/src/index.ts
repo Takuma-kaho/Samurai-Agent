@@ -93,6 +93,9 @@ export const backendEventTypes = [
   "backend_native_input_submitted",
   "backend_stream_synced",
   "backend_stream_unavailable",
+  "host_post_turn_failed",
+  "host_cleanup_failed",
+  "host_emit_failed",
   "run_completed",
   "run_failed"
 ] as const;
@@ -1560,6 +1563,7 @@ export const EvaluationDiagnosticsIssueSchema = z.object({
     "evaluation_run_stale",
     "evaluation_suggestion_pending",
     "backend_run_failed",
+    "backend_run_outcome_unknown",
     "backend_run_waiting_for_input",
     "tool_run_attention_required"
   ]),

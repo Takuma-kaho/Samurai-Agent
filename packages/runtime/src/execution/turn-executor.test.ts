@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentBackend, BackendOutputEvent, BackendTerminalEvidence } from "@samurai-agent/agent-backends";
 import type { BackendEventRecord, BackendRunRecord } from "@samurai-agent/core-schemas";
 import { BackendEventJournal, InMemoryBackendEventJournalStore } from "./backend-event-journal";
-import { TurnExecutor, consumeBackendEvents } from "./turn-executor";
+import { TurnExecutor, consumeBackendEvents, type TurnExecutorOptions } from "./turn-executor";
 import type { PreparedTurn } from "../host/host-types";
 
 describe("consumeBackendEvents", () => {
@@ -105,11 +105,15 @@ describe("TurnExecutor", () => {
         store.order.push("startSession");
         return { backend_session_id: "backend-session-1", metadata: {}, started_at: "2026-01-01T00:00:00.000Z" };
       },
-      runTurn: () => streamWithCleanup(() => { iteratorClosed = true; })
+      runTurn: () => {
+        store.order.push("runTurn");
+        return streamWithCleanup(() => { iteratorClosed = true; });
+      }
     };
     const executor = new TurnExecutor(store, new BackendEventJournal(store), {
-      toolDispatch: {
-        dispatch: async ({ event }) => {
+      ...executorOptions(),
+      toolExecution: {
+        execute: async ({ event }) => {
           expect(store.events.at(-1)?.event_type).toBe("tool_call_started");
           store.order.push(`tool:${event.payload.action}`);
         }
@@ -147,7 +151,7 @@ describe("TurnExecutor", () => {
       },
       runTurn: () => eventsOf()
     };
-    const result = await new TurnExecutor(store, new BackendEventJournal(store)).resumeRun({ run: store.run, backend, input: { answer: "ok" } });
+    const result = await new TurnExecutor(store, new BackendEventJournal(store), executorOptions()).resumeRun({ run: store.run, backend, input: { answer: "ok" } });
 
     expect(result.run.status).toBe("completed");
     expect(receivedInput).toEqual({ answer: "ok" });
@@ -155,23 +159,20 @@ describe("TurnExecutor", () => {
     expect(result.terminalSettlement?.terminalEvent.event_type).toBe("run_completed");
   });
 
-  it("attempts required-finalize cleanup independently", async () => {
+  it("records required-finalize cleanup failure without swallowing it", async () => {
     const calls: string[] = [];
     const failures: string[] = [];
-    const executor = new TurnExecutor({} as never, {} as never, {
-      cleanup: {
-        flushEvents: async () => { calls.push("flush"); throw new Error("flush failed"); },
-        clearEventSequence: () => { calls.push("sequence"); },
-        revokeToolBridge: () => { calls.push("token"); },
-        releaseExecutionLock: async () => { calls.push("lock"); throw new Error("lock failed"); },
-        recordFailure: ({ operation }) => { failures.push(operation); }
-      }
+    const store = new ExecutorStore(queuedRun());
+    const executor = new TurnExecutor(store, new BackendEventJournal(store), {
+      ...executorOptions(),
+      cleanup: { cleanup: async () => { calls.push("cleanup"); throw new Error("cleanup failed"); } },
+      diagnostics: { record: async (input) => { failures.push(input.operationId); }, logPersistenceFailure: () => undefined }
     });
 
     await executor.cleanup({ runId: "run-1", sessionId: "session-1" });
 
-    expect(calls).toEqual(["flush", "sequence", "token", "lock"]);
-    expect(failures).toEqual(["event_flush", "execution_lock"]);
+    expect(calls).toEqual(["cleanup"]);
+    expect(failures).toEqual(["cleanup"]);
   });
 });
 
@@ -179,6 +180,10 @@ class ExecutorStore extends InMemoryBackendEventJournalStore {
   readonly order: string[] = [];
   constructor(public run: BackendRunRecord) {
     super();
+  }
+
+  async getBackendRun(runId: string): Promise<BackendRunRecord | undefined> {
+    return this.run.id === runId ? this.run : undefined;
   }
 
   async commitCore02RunTransition(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord> {
@@ -205,6 +210,16 @@ class ExecutorStore extends InMemoryBackendEventJournalStore {
     this.events.push(event);
     return { event, duplicate: false };
   }
+}
+
+function executorOptions(overrides: Partial<TurnExecutorOptions> = {}): TurnExecutorOptions {
+  return {
+    committedEventPublisher: { publish: async () => undefined },
+    toolExecution: { execute: async () => undefined },
+    cleanup: { cleanup: async () => undefined },
+    diagnostics: { record: async () => undefined, logPersistenceFailure: () => undefined },
+    ...overrides
+  };
 }
 
 async function* streamWithCleanup(onCleanup: () => void): AsyncIterable<BackendOutputEvent> {

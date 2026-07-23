@@ -25,7 +25,7 @@ type OutputValue = z.infer<typeof Output>;
 export interface ChatTurnRunPorts {
   createChatSession(input: { output_locale?: InputValue["output_locale"] }): Promise<OutputValue["session"]>;
   runChatTurn(input: {
-    sessionId: string; content: string; backend_id?: string; input_locale?: InputValue["input_locale"];
+    sessionId: string; content: string; idempotencyKey: string; backend_id?: string; input_locale?: InputValue["input_locale"];
     output_locale?: InputValue["output_locale"]; attachments: InputValue["attachments"];
     temporary_context: InputValue["temporary_context"]; metadata: InputValue["metadata"];
   }): Promise<OutputValue>;
@@ -47,7 +47,7 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
     "automation"
   ],
   "effect": "workspace_mutation",
-  "idempotency": "required",
+  "idempotency": "external",
   "concurrency": "none",
   "render": [
     "chat"
@@ -79,6 +79,7 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleChatTurnRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        if (!context.idempotencyKey) throw new Error("idempotency_key_required");
         const sessionId = context.sessionId ?? (await ports.createChatSession({ output_locale: input.output_locale })).id;
         const metadata = {
           ...input.metadata,
@@ -90,7 +91,7 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
             : {})
         };
         return { ok: true, value: await ports.runChatTurn({
-          sessionId, content: input.content, backend_id: input.backend_id, input_locale: input.input_locale,
+          sessionId, content: input.content, idempotencyKey: context.idempotencyKey, backend_id: input.backend_id, input_locale: input.input_locale,
           output_locale: input.output_locale, attachments: input.attachments,
           temporary_context: input.temporary_context, metadata
         }) };

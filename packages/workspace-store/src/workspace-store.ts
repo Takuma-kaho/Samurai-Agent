@@ -3437,9 +3437,12 @@ export class WorkspaceStore {
       }
 
       const identityExisting = await findSettlementEvent(transaction, safeEvent);
-      let committedEvent = identityExisting;
-      if (committedEvent) {
-        if (!sameBackendEvent(committedEvent, safeEvent) && !(committedEvent.id === safeEvent.id && sameBackendEventIgnoringIdentity(committedEvent, safeEvent))) throw new Error(`settlement_event_conflict:${current.id}`);
+      // Keep the SQLite row shape (`payload_json` / `resource_refs_json`) at
+      // the storage boundary.  The settlement result carries a domain
+      // BackendEventRecord, so convert only after reading the row.
+      let committedEvent = identityExisting ? backendEventFromRow(identityExisting) : undefined;
+      if (identityExisting) {
+        if (!sameBackendEvent(identityExisting, safeEvent) && !(identityExisting.id === safeEvent.id && sameBackendEventIgnoringIdentity(identityExisting, safeEvent))) throw new Error(`settlement_event_conflict:${current.id}`);
       } else {
         const max = await transaction.selectFrom("backend_events").select(({ fn }) => fn.max("sequence").as("max_sequence")).where("run_id", "=", current.id).executeTakeFirst();
         committedEvent = { ...safeEvent, sequence: Number(max?.max_sequence ?? 0) + 1 };
@@ -3576,6 +3579,34 @@ export class WorkspaceStore {
       const next = { ...safeInput, sequence: Number(max?.max_sequence ?? 0) + 1 };
       await transaction.insertInto("backend_events").values(backendEventToRow(next)).execute();
       return { event: next, duplicate: false };
+    });
+  }
+
+  /** Host diagnostics share the existing backend journal and never mutate Run state. */
+  async appendHostDiagnostic(input: {
+    runId: string;
+    sessionId: string;
+    attemptNo: number;
+    operationId: string;
+    eventType: "host_post_turn_failed" | "host_cleanup_failed" | "host_emit_failed";
+    message: string;
+    metadata?: Record<string, JsonValue>;
+  }): Promise<void> {
+    await this.appendCore02Event({
+      id: `host-diagnostic:${input.runId}:${input.attemptNo}:${input.operationId}`,
+      run_id: input.runId,
+      session_id: input.sessionId,
+      event_type: input.eventType,
+      sequence: 1,
+      attempt_no: input.attemptNo,
+      source_event_id: `host-diagnostic:${input.runId}:${input.attemptNo}:${input.operationId}`,
+      payload: {
+        operation_id: input.operationId,
+        message: input.message,
+        ...(input.metadata ?? {})
+      },
+      resource_refs: [],
+      created_at: nowIso()
     });
   }
 

@@ -1,9 +1,9 @@
 import { createId, stableHash } from "@samurai-agent/core-schemas";
 import type { AgentBackendRegistry } from "@samurai-agent/agent-backends";
-import type { AdmittedTurn, BackendBoundTurn, BackendBinding, HostAdmissionStore, TurnRequest } from "./host-types";
+import type { AdmittedTurn, BackendBoundTurn, BackendBinding, HostStorePort, TurnRequest } from "./host-types";
 
 export class TurnAdmission {
-  constructor(private readonly registry: AgentBackendRegistry, private readonly store: HostAdmissionStore, private readonly clock: () => string, private readonly resolveDefaultBackendId?: () => Promise<string> | string) {}
+  constructor(private readonly registry: AgentBackendRegistry, private readonly store: HostStorePort, private readonly clock: () => string, private readonly resolveDefaultBackendId?: () => Promise<string> | string) {}
 
   async admit(request: TurnRequest): Promise<AdmittedTurn> {
     if (!request.sessionId.trim()) throw new Error("session_id_required");

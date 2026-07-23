@@ -3,13 +3,14 @@ import type { BackendRuntimeFailure, BackendTerminalEvidence } from "@samurai-ag
 import { nowIso, type BackendEventRecord, type BackendRunRecord, type MessageRecord } from "@samurai-agent/core-schemas";
 import { BackendEventJournal } from "../execution/backend-event-journal";
 import { RunControl } from "../execution/run-control";
+import { RunRecovery } from "../execution/run-recovery";
 import { RunLifecycle, type PreparedTerminalSettlement } from "../execution/run-lifecycle";
 import { SessionRunQueue } from "../execution/session-run-queue";
 import { TurnExecutor } from "../execution/turn-executor";
 import { lifecycleEventForTerminalEvidence } from "../execution/run-state-machine";
 import { TurnAdmission } from "./turn-admission";
 import { TurnPreparer } from "./turn-preparer";
-import type { AdmittedTurn, HostPorts, PreparedTurn, TurnOutcome, TurnRequest, TurnOutput } from "./host-types";
+import type { AdmittedTurn, HostDiagnosticInput, HostPorts, PreparedTurn, TurnOutcome, TurnRequest, TurnOutput } from "./host-types";
 
 export class AgentHost {
   readonly queue: SessionRunQueue;
@@ -21,7 +22,10 @@ export class AgentHost {
   private readonly preparer: TurnPreparer;
   private readonly executor: TurnExecutor;
   private readonly control: RunControl;
+  private readonly recovery: RunRecovery;
+  private recoveryPromise: Promise<void> | undefined;
   private readonly activeAbortControllers = new Map<string, AbortController>();
+  private readonly activeRunSessions = new Map<string, string>();
 
   constructor(private readonly registry: AgentBackendRegistry, private readonly ports: HostPorts) {
     this.clock = ports.clock ?? nowIso;
@@ -32,13 +36,41 @@ export class AgentHost {
     this.preparer = new TurnPreparer(ports.context);
     this.executor = new TurnExecutor(ports.store, this.journal, {
       lifecycle: this.lifecycle,
-      emitCommitted: async (event, run) => {
-        await ports.emitCommitted?.({ event, run });
-      },
-      toolDispatch: ports.toolDispatch,
-      cleanup: ports.cleanup
+      committedEventPublisher: ports.committedEventPublisher,
+      toolExecution: ports.toolExecution,
+      cleanup: ports.cleanup,
+      diagnostics: ports.diagnostics
     });
-    this.control = new RunControl(ports.store, (id) => this.registry.get(id), { clock: this.clock, cleanup: ports.cleanup }, this.journal);
+    this.control = new RunControl(ports.store, (id) => this.registry.get(id), {
+      clock: this.clock,
+      cleanup: ports.cleanup,
+      diagnostics: ports.diagnostics,
+      committedEventPublisher: ports.committedEventPublisher,
+      toolExecution: ports.toolExecution
+    }, this.journal);
+    this.recovery = new RunRecovery(
+      ports.store,
+      (id) => this.registry.get(id),
+      this.clock,
+      this.journal,
+      ports.committedEventPublisher,
+      ports.cleanup,
+      async (run) => {
+        const task = this.queue.enqueue(run.session_id, () => this.executeRecoveredRun(run));
+        void task.catch((error) => this.recordDiagnostic(run, "host_cleanup_failed", "recovery_enqueue", error));
+      },
+      ports.diagnostics
+    );
+  }
+
+  /** Production startup performs reconciliation once before new admissions. */
+  async recover(): Promise<void> {
+    if (this.recoveryPromise) return this.recoveryPromise;
+    this.accepting = false;
+    this.recoveryPromise = this.recovery.reconcile().then(() => undefined).finally(() => {
+      this.accepting = true;
+    });
+    return this.recoveryPromise;
   }
 
   async runTurn(request: TurnRequest, signal?: AbortSignal): Promise<TurnOutcome> {
@@ -46,15 +78,19 @@ export class AgentHost {
     return this.queue.enqueue(request.sessionId, () => this.execute(request, signal), signal);
   }
 
-  /** Compatibility name for callers that still use the Host request verb. */
-  run(request: TurnRequest, signal?: AbortSignal): Promise<TurnOutcome> {
-    return this.runTurn(request, signal);
-  }
-
   async cancelRun(runId: string): Promise<Awaited<ReturnType<RunControl["cancel"]>>> {
+    const knownRun = await this.ports.store.getBackendRun(runId);
     this.activeAbortControllers.get(runId)?.abort();
-    const result = await this.control.cancel(runId);
-    if (isSettled(result)) this.queue.releaseSession(result.session_id);
+    let result: Awaited<ReturnType<RunControl["cancel"]>>;
+    try {
+      result = await this.control.cancel(runId);
+    } finally {
+      if (knownRun) await this.executor.cleanup({ runId: knownRun.id, sessionId: knownRun.session_id });
+    }
+    if (isSettled(result)) {
+      this.activeRunSessions.delete(result.id);
+      this.queue.releaseSession(result.session_id);
+    }
     return result;
   }
 
@@ -70,7 +106,10 @@ export class AgentHost {
     } finally {
       if (run) await this.executor.cleanup({ runId: run.id, sessionId: run.session_id });
     }
-    if (isSettled(result)) this.queue.releaseSession(result.session_id);
+    if (isSettled(result)) {
+      this.activeRunSessions.delete(result.id);
+      this.queue.releaseSession(result.session_id);
+    }
     else if (result.status !== "waiting_for_backend_input") lease?.restoreSuspended();
     return result;
   }
@@ -84,6 +123,8 @@ export class AgentHost {
     } catch (error) {
       lease?.restoreSuspended();
       throw error;
+    } finally {
+      if (run) await this.executor.cleanup({ runId: run.id, sessionId: run.session_id });
     }
     if (isSettled(result)) this.queue.releaseSession(result.session_id);
     else if (result.status !== "waiting_for_backend_input") lease?.restoreSuspended();
@@ -91,12 +132,62 @@ export class AgentHost {
   }
 
   private async execute(request: TurnRequest, signal?: AbortSignal): Promise<TurnOutcome> {
-    const admitted = await this.admission.admit(request);
-    if (!admitted.replay && this.ports.onAdmitted) await this.ports.onAdmitted(admitted).catch(() => undefined);
+    const preparedRequest = await this.ports.preflight.prepare({ request, signal });
+    const admitted = await this.admission.admit(preparedRequest);
+    return this.executeAdmitted(admitted, signal, true);
+  }
+
+  private async executeRecoveredRun(run: BackendRunRecord): Promise<TurnOutcome> {
+    const session = await this.ports.store.getSession(run.session_id);
+    const messages = await this.ports.store.listMessages(run.session_id);
+    const userMessage = messages.find((message) => message.id === run.input_message_id && message.role === "user");
+    const backend = this.registry.get(run.backend_id);
+    const reservation = await this.ports.store.getSessionRunReservation({ runId: run.id });
+    if (!session || !userMessage || !backend || !reservation) {
+      throw new Error(`recovery_run_context_missing:${run.id}`);
+    }
+    const admitted: AdmittedTurn = {
+      request: {
+        sessionId: session.id,
+        content: userMessage.content,
+        envelope: userMessage.envelope ?? {
+          id: `recovery-envelope:${run.id}`,
+          source: "local_cli",
+          actor_identity: "system",
+          session_key: session.session_key,
+          user_intent: userMessage.content,
+          attachments: [],
+          input_locale: userMessage.input_locale,
+          output_locale: userMessage.output_locale,
+          metadata: {},
+          received_at: userMessage.created_at
+        },
+        backendId: run.backend_id,
+        idempotencyKey: run.request_idempotency_key ?? `recovery:${run.id}`,
+        metadata: run.metadata
+      },
+      session,
+      binding: { id: backend.id, kind: backend.kind, backend },
+      requestHash: run.request_hash ?? `recovery:${run.id}`,
+      reservation,
+      userMessage,
+      run
+    };
+    return this.executeAdmitted(admitted, undefined, false);
+  }
+
+  private async executeAdmitted(admitted: AdmittedTurn, signal?: AbortSignal, observeAdmission = false): Promise<TurnOutcome> {
+    if (observeAdmission) {
+      try {
+        await this.ports.admissionObserver.observe(admitted);
+      } catch (error) {
+        await this.recordDiagnostic(admitted.run, "host_emit_failed", "admission_observer", error);
+      }
+    }
     if (admitted.replay) {
       const [events, messages] = await Promise.all([
         this.ports.store.listBackendEvents({ runId: admitted.run.id }),
-        admitted.run.output_message_id && this.ports.store.listMessages ? this.ports.store.listMessages(admitted.run.session_id) : Promise.resolve([])
+        admitted.run.output_message_id ? this.ports.store.listMessages(admitted.run.session_id) : Promise.resolve([])
       ]);
       if (admitted.run.status === "waiting_for_backend_input") this.queue.markWaiting(admitted.run.session_id, waitingExecutionFromEvents(events));
       return replayOutcome(admitted, events, messages.find((message) => message.id === admitted.run.output_message_id));
@@ -106,6 +197,7 @@ export class AgentHost {
     const abortListener = () => controller.abort();
     signal?.addEventListener("abort", abortListener, { once: true });
     this.activeAbortControllers.set(admitted.run.id, controller);
+    this.activeRunSessions.set(admitted.run.id, admitted.run.session_id);
     let run = admitted.run;
     let prepared: PreparedTurn | undefined;
     const events: BackendEventRecord[] = [];
@@ -113,7 +205,6 @@ export class AgentHost {
     let settlementStarted = false;
     try {
       run = await this.lifecycle.transition(this.ports.store, run, { type: "preparing" });
-      await this.ports.preflight?.(admitted);
       prepared = await this.preparer.prepare({ ...admitted, run }, controller.signal);
       const execution = await this.executor.execute(prepared, controller.signal);
       run = execution.run;
@@ -125,7 +216,7 @@ export class AgentHost {
         return { kind: "waiting", run, waiting: { prompt: waitingPrompt(execution.events) } };
       }
       if (execution.terminalSettlement) {
-        const output: TurnOutput = { content: textParts.join("") || outputSummaryFromEvents(execution.events) || "", events };
+        const output: TurnOutput = { content: outputContent(execution.terminalSettlement.nextRun.status, textParts.join(""), execution.events), events };
         settlementStarted = true;
         const settled = await this.commitSettlement(admitted, execution.terminalSettlement, output);
         settlementStarted = false;
@@ -133,7 +224,7 @@ export class AgentHost {
       }
 
       const pending = await this.prepareUnknown(run);
-      const output: TurnOutput = { content: textParts.join("") || outputSummaryFromEvents(execution.events) || "", events: [...events, pending.terminalEvent] };
+      const output: TurnOutput = { content: outputContent(pending.nextRun.status, textParts.join(""), [...events, pending.terminalEvent]), events: [...events, pending.terminalEvent] };
       settlementStarted = true;
       const settled = await this.commitSettlement(admitted, pending, output);
       settlementStarted = false;
@@ -149,16 +240,21 @@ export class AgentHost {
         : { kind: "indeterminate", reason: controller.signal.aborted ? "cancel_unconfirmed" : "transport_lost", providerStarted: true, mayHaveSideEffects: true } as const;
       const failure = { code: controller.signal.aborted ? "backend_cancel_unconfirmed" : "backend_exception", message: error instanceof Error ? error.message : "Backend execution failed.", retryable: false, causeCategory: controller.signal.aborted ? "cancellation" as const : "runtime" as const };
       const pending = await this.prepareTerminal(current, evidence, failure, controller.signal.aborted);
-      const output: TurnOutput = { content: textParts.join("") || outputSummaryFromEvents(events) || "", events: [...events, pending.terminalEvent] };
+      const output: TurnOutput = { content: outputContent(pending.nextRun.status, textParts.join(""), [...events, pending.terminalEvent]), events: [...events, pending.terminalEvent] };
       settlementStarted = true;
       const settled = await this.commitSettlement(admitted, pending, output);
       settlementStarted = false;
-      return settled.status === "outcome_unknown"
-        ? { kind: "outcome_unknown", run: settled, error: error instanceof Error ? error : new Error("outcome_unknown") }
-        : { kind: settled.status === "cancelled" ? "cancelled" : "failed", run: settled, ...(settled.status === "cancelled" ? { reason: settled.error_code ?? "cancelled" } : { error: error instanceof Error ? error : new Error("backend_failed") }) };
+      if (settled.status === "outcome_unknown") {
+        return { kind: "outcome_unknown", run: settled, error: error instanceof Error ? error : new Error("outcome_unknown") };
+      }
+      if (settled.status === "cancelled") {
+        return { kind: "cancelled", run: settled, reason: settled.error_code ?? "cancelled" };
+      }
+      return { kind: "failed", run: settled, error: error instanceof Error ? error : new Error("backend_failed") };
     } finally {
       if (signal) signal.removeEventListener("abort", abortListener);
       this.activeAbortControllers.delete(admitted.run.id);
+      if (run.status !== "waiting_for_backend_input") this.activeRunSessions.delete(admitted.run.id);
       await this.executor.cleanup({ runId: admitted.run.id, sessionId: admitted.run.session_id });
     }
   }
@@ -191,19 +287,43 @@ export class AgentHost {
       ...(!output.content ? { diagnostic: { code: pending.nextRun.error_code ?? "turn_settled", message: pending.decision.failure?.message ?? pending.decision.reason } } : {})
     });
     try {
-      await this.ports.emitCommitted?.({ event: pending.terminalEvent, run: settled });
+      await this.ports.committedEventPublisher.publish({ event: pending.terminalEvent, run: settled });
     } catch (error) {
-      await this.ports.cleanup?.recordFailure?.({ runId: settled.id, operation: "terminal_event_emit", error });
+      await this.recordDiagnostic(settled, "host_emit_failed", "terminal_event", error);
     }
     return settled;
   }
 
+  private async recordDiagnostic(run: Pick<BackendRunRecord, "id" | "session_id" | "current_attempt">, eventType: HostDiagnosticInput["eventType"], operationId: string, error: unknown): Promise<void> {
+    const input = {
+      runId: run.id,
+      sessionId: run.session_id,
+      attemptNo: run.current_attempt ?? 1,
+      operationId,
+      eventType,
+      message: error instanceof Error ? error.message : String(error)
+    } as const;
+    try {
+      await this.ports.diagnostics.record(input);
+    } catch (diagnosticError) {
+      this.ports.diagnostics.logPersistenceFailure({ ...input, error: diagnosticError });
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.accepting = false;
-    for (const controller of this.activeAbortControllers.values()) controller.abort();
-    this.queue.releaseAllWaiting();
-    await this.queue.drainAll();
     this.queue.close();
+    await this.queue.drainPending();
+    for (const controller of this.activeAbortControllers.values()) controller.abort();
+    const waitingRuns = [...this.activeRunSessions.keys()].filter((runId) => !this.activeAbortControllers.has(runId));
+    await Promise.allSettled(waitingRuns.map(async (runId) => {
+      try {
+        await this.cancelRun(runId);
+      } catch (error) {
+        await this.recordDiagnostic({ id: runId, session_id: this.activeRunSessions.get(runId) ?? "unknown", current_attempt: 1 }, "host_cleanup_failed", "shutdown_cancel", error);
+      }
+    }));
+    await this.queue.drainAll();
   }
 }
 
@@ -240,4 +360,11 @@ function waitingExecutionFromEvents(events: BackendEventRecord[]): "live" | "sus
 function outputSummaryFromEvents(events: BackendEventRecord[]): string | undefined {
   const terminal = [...events].reverse().find((event) => event.event_type === "run_completed");
   return typeof terminal?.payload.output_summary === "string" ? terminal.payload.output_summary : undefined;
+}
+
+function outputContent(status: BackendRunRecord["status"], text: string, events: BackendEventRecord[]): string {
+  const content = text || outputSummaryFromEvents(events) || "";
+  return status === "completed" && !content
+    ? "結果本文を受け取れませんでした。実行ログを確認してください。"
+    : content;
 }

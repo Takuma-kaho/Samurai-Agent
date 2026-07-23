@@ -22,6 +22,7 @@ export * from "./execution/run-control";
 export * from "./execution/run-recovery";
 export * from "./execution/turn-executor";
 export * from "./composition/create-agent-host";
+export * from "./composition/runtime-host";
 export * from "./host/turn-admission";
 export * from "./host/turn-preparer";
 export * from "./host/turn-completion-coordinator";

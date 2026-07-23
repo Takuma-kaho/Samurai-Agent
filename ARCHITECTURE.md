@@ -154,7 +154,7 @@ Reflection and Curator improve future runs
 | Interaction Shell | 会話を中心に、人間が見る、直す、理解する場所 | Backend固有の実行詳細 |
 | Surface Protocol | 人間・AIの共通操作と、状態を端末別Surfaceへ投影する契約 | Agentの自由な思考、Workspace正本 |
 | Host | Workspace文脈を組み、Backendへ渡し、結果を戻す | 個別モデル呼び出し |
-| AgentBackendRegistry | Backend選択とrun lifecycleを扱う | MemoryやSkillの正本 |
+| AgentBackendRegistry | Backend選択とBackend実行handleのlifecycleを扱う | Samurai側の永続Run状態、MemoryやSkillの正本 |
 | AgentBackend Cassette | Claude Code / Codex / Nativeなどの実行部 | Workspace正本、公開命名 |
 | BackendEventBridge | Backend固有eventを正規化する | UI layout、Memory本文 |
 | Workspace Store | filesystemとSQLiteの責務分離、index、履歴を扱う | Agentの判断ロジック |
@@ -193,6 +193,7 @@ Hostの責務。
 - Skill候補を選ぶ。
 - Backend cassetteを選択する。
 - Backend eventを正規化層へ渡す。
+- `BackendRunRecord`の永続状態遷移をRun lifecycleとして調整する。
 - 結果をWorkspaceへ戻す。
 
 Hostが持たない責務。
@@ -211,8 +212,10 @@ Hostが持たない責務。
 - backend id と backend kind を管理する。
 - sessionやworkspaceに応じてBackendを選ぶ。
 - Backend configを解決する。
-- run lifecycleを作る。
+- Backend session、実行handle、capabilityなどBackend実行側のlifecycleを作る。
 - Backendの有効/無効、失敗状態、接続状態をHostへ返す。
+
+`AgentBackendRegistry`が所有するlifecycleは、Backendを開始・再開・取消するための実行handleである。`BackendRunRecord`の`queued / running / waiting_for_backend_input / completed / failed / cancelled`など、Samurai Agentが永続化する状態遷移はHost・Runtime側のRun lifecycleが所有する。両者は同じ状態の正本を持たない。
 
 Backend候補。
 

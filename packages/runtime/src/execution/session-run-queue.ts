@@ -142,6 +142,13 @@ export class SessionRunQueue {
     }
   }
 
+  /** Waits for queued work to leave the lanes without waiting for active Backend work. */
+  async drainPending(): Promise<void> {
+    while ([...this.lanes.values()].some((lane) => lane.length > 0)) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
   close(): void {
     this.closed = true;
     for (const [sessionId, lane] of this.lanes) {

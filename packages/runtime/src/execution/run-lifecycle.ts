@@ -21,9 +21,8 @@ export type LifecycleTransitionDecision = CoreLifecycleTransitionDecision & {
 };
 
 export interface LifecycleRunStore {
-  commitCore02RunTransition?(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord>;
-  commitCore02BackendSession?(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord>;
-  updateBackendRun?(run: BackendRunRecord): Promise<BackendRunRecord>;
+  commitCore02RunTransition(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord>;
+  commitCore02BackendSession(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord>;
 }
 
 export interface PreparedTerminalSettlement {
@@ -61,9 +60,7 @@ export class RunLifecycle {
   }
 
   async persist(store: LifecycleRunStore, expectedRun: BackendRunRecord, nextRun: BackendRunRecord): Promise<BackendRunRecord> {
-    if (store.commitCore02RunTransition) return store.commitCore02RunTransition({ expectedRun, nextRun });
-    if (!store.updateBackendRun) throw new Error("run_lifecycle_store_missing_transition_port");
-    return store.updateBackendRun(nextRun);
+    return store.commitCore02RunTransition({ expectedRun, nextRun });
   }
 
   async recordBackendSession(store: LifecycleRunStore, run: BackendRunRecord, backendSessionId: string): Promise<BackendRunRecord> {
@@ -72,8 +69,7 @@ export class RunLifecycle {
       throw new Error(`backend_session_after_settlement:${run.id}`);
     }
     const nextRun = { ...run, backend_session_id: backendSessionId };
-    if (store.commitCore02BackendSession) return store.commitCore02BackendSession({ expectedRun: run, nextRun });
-    return this.persist(store, run, nextRun);
+    return store.commitCore02BackendSession({ expectedRun: run, nextRun });
   }
 
   prepareTerminalSettlement(

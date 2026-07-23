@@ -123,6 +123,10 @@ importers:
       socket.io:
         specifier: ^4.8.3
         version: 4.8.3
+    devDependencies:
+      '@samurai-agent/agent-backends':
+        specifier: workspace:*
+        version: link:../../packages/agent-backends
 
   apps/web:
     dependencies:
@@ -298,6 +302,9 @@ importers:
       '@samurai-agent/skill-optimization':
         specifier: workspace:*
         version: link:../skill-optimization
+      '@samurai-agent/skills':
+        specifier: workspace:*
+        version: link:../skills
       '@samurai-agent/ui-protocol':
         specifier: workspace:*
         version: link:../ui-protocol

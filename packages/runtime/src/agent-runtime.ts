@@ -20,20 +20,7 @@ import {
   skillRef,
   skillSupportFileRef
 } from "./context/skill-context.js";
-import {
-  applyGatewayBoundaryAllowedTools,
-  applyGatewayBoundaryToContextAssembly,
-  buildContextHandoffForBackend,
-  type BackendContextIntent,
-  type BackendExpectedOutput,
-  classifyBackendContextIntent,
-  contextAssemblyRuntimeMetadata,
-  contextHandoffRuntimeMetadata,
-  expectedBackendOutputs,
-  gatewayBoundaryRuntimeMetadata,
-  gatewayBoundaryRuntimeSnapshot,
-  shouldThinExternalBackendContext
-} from "./host/turn-preparation-policy.js";
+import { expectedBackendOutputs, gatewayBoundaryRuntimeSnapshot } from "./host/turn-preparation-policy.js";
 import { EnvironmentToolBridgeAdapter } from "./host/tool-bridge-adapter.js";
 import { runtimeOperationIds } from "./runtime-operation-composition.js";
 import { executeGeneratedSurfaceAction } from "./generated-surface-action-ingress.js";
@@ -99,7 +86,7 @@ import {
   type TrustedDomainContext
 } from "@samurai-agent/domain-operations";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { connect as netConnect, type Socket } from "node:net";
 import path from "node:path";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
@@ -110,7 +97,6 @@ import {
   type AgentBackend,
   type AgentBackendStatus,
   type BackendOutputEvent,
-  type BackendToolBridge,
   type BackendRunInput,
   type TemporaryContextAttachment
 } from "@samurai-agent/agent-backends";
@@ -308,6 +294,13 @@ import { ConversationDomainService } from "./commands/services/conversation-doma
 import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
+import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type HostLearningReviewInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
+import type {
+  AdmittedTurn,
+  BackendBoundTurn,
+  TurnRequest
+} from "./host/host-types";
+import type { AgentHost } from "./host/agent-host";
 import { MemoryDomainService } from "./commands/services/memory-domain-service";
 import { ArtifactDomainService, type ArtifactMutationInput } from "./commands/services/artifact-domain-service";
 import { createSearchReadStore, SearchDomainService } from "./commands/services/search-domain-service";
@@ -789,7 +782,7 @@ export interface DomainCommandReplayPayload {
   details?: JsonValue;
 }
 
-interface AgentRuntimeWorkspaceOptions {
+export interface AgentRuntimeWorkspaceOptions {
   domainCommandRunningTimeoutMs?: number;
   backendWorkingDirectoryMode?: "workspace" | "repo";
   repoRoot?: string;
@@ -797,10 +790,14 @@ interface AgentRuntimeWorkspaceOptions {
   backgroundReviewRunner?: BackgroundReviewRunner;
   enableBackendBackgroundReview?: boolean;
   detachBackgroundReview?: boolean;
+  deferHost?: boolean;
   skillConsolidationRunner?: SkillConsolidationRunner;
   backgroundReviewMutationFailureInjector?: (index: number, stage: "before" | "after_resource") => void;
   browserAdapter?: BrowserAdapter;
   pdfExportAdapter?: PdfExportAdapter;
+  hostFactory?: (dependencies: RuntimeHostCompositionDependencies) => AgentHost;
+  /** Injected by the production composition root; Host code never logs directly. */
+  productionLogger?: (message: string, metadata: Record<string, unknown>) => void;
 }
 
 export interface BrowserAdapter {
@@ -938,6 +935,7 @@ export class AgentRuntime {
   private readonly fileDomainService: FileDomainService;
   private readonly browserDomainService: BrowserDomainService;
   private readonly externalSendDomainService: ExternalSendDomainService;
+  private agentHost: AgentHost | undefined;
 
   constructor(
     private readonly store: WorkspaceStore,
@@ -972,7 +970,9 @@ export class AgentRuntime {
       savePresentation: (record) => this.store.saveMessagePresentation(record)
     }, (id) => new RuntimeRequestError("not_found", `Message presentation not found: ${id}`));
     this.backendRegistry = backendRegistry ?? createDefaultAgentBackendRegistry(provider);
-    this.durableWorkCoordinator = new DurableWorkCoordinator(this.store, this.backendRegistry);
+    this.durableWorkCoordinator = new DurableWorkCoordinator(this.store, {
+      cancelRun: (runId) => this.requireAgentHost().cancelRun(runId)
+    });
     this.executionDomainService = new ExecutionDomainService({
       store: {
         getObjective: (id) => this.store.getObjective(id),
@@ -1202,7 +1202,7 @@ export class AgentRuntime {
         ensureSession: (context, title) => this.ensureSessionForContext(context, title),
         runChat: (input) => this.runChatTurn({ sessionId: input.sessionId, content: input.body, backend_id: input.backendId,
           input_locale: input.inputLocale as SupportedLocale | undefined, output_locale: input.outputLocale as SupportedLocale | undefined,
-          metadata: input.metadata, gateway_context: input.context, gateway_boundary_policy: input.boundaryPolicy }),
+          metadata: input.metadata, gateway_context: input.context, gateway_boundary_policy: input.boundaryPolicy, idempotency_key: input.idempotencyKey }),
         enqueueDeliveries: (input) => this.enqueueGatewayReplyDeliveries({ ...input, chat: input.chat as RunChatTurnResult }),
         errorMessage: (error) => safeRuntimeErrorMessage(error, "gateway_inbound_failed"),
         conflictError: (message) => new RuntimeRequestError("conflict", message)
@@ -1420,7 +1420,8 @@ export class AgentRuntime {
           const chat = await this.runChatTurn({
             sessionId: input.session.id, content: input.prompt, backend_id: input.backendId,
             input_locale: input.session.ui_locale as SupportedLocale, output_locale: input.session.output_locale as SupportedLocale,
-            metadata: input.metadata, gateway_context: webGatewayContext
+            metadata: input.metadata, gateway_context: webGatewayContext,
+            idempotency_key: `collection-action:${String(input.metadata.collection_action_operation_id ?? stableHash(input.prompt))}`
           });
           return { ...chat, customView: input.customView ? collectionActionCustomViewOutput(chat) : undefined };
         },
@@ -1555,6 +1556,128 @@ export class AgentRuntime {
         return config ? stdioMcpServerConfigFromGatewayConfig(config) : undefined;
       }
     });
+    if (!this.workspaceOptions.deferHost) {
+      const hostFactory = this.workspaceOptions.hostFactory ?? createRuntimeAgentHost;
+      this.agentHost = hostFactory(this.getHostCompositionDependencies());
+    }
+  }
+
+  /** Composition root access: it receives typed adapters, never this Runtime instance. */
+  getHostCompositionDependencies(): RuntimeHostCompositionDependencies {
+    return {
+      core: {
+        store: this.store,
+        backendRegistry: this.backendRegistry,
+        emit: this.emit,
+        contextPreviewPorts: this.contextPreviewAdapter.ports
+      },
+      preparation: {
+        prepareRequest: (request) => this.prepareHostRequest(request),
+        recordLearningResourceUses: (turn, preview) => this.recordLearningResourceUses(turn, preview),
+        workingDirectory: () => this.backendWorkingDirectory(),
+        workingDirectoryMode: () => this.backendWorkingDirectoryMode(),
+        resolveDefaultBackendId: () => this.defaultBackendIdForRun()
+      },
+      execution: {
+        handleBackendToolStartedEvent: (input) => this.handleBackendToolStartedEvent(input),
+        registerToolBridgeToken: (runId, token) => { this.backendToolBridgeTokens.set(runId, token); },
+        clearRunState: (runId) => {
+          this.backendToolBridgeTokens.delete(runId);
+          this.backendEventSequences.delete(runId);
+        }
+      },
+      postTurn: {
+        saveGeneratedSurfacePresentations: async (input) => { await this.saveGeneratedSurfacePresentations(input); },
+        runExternalAssistSync: (input: HostExternalAssistSyncInput) => this.runExternalAssistSync(input),
+        runLearningReview: (input: HostLearningReviewInput) => this.runReflectionForCompletedTurn({
+          kind: "chat_turn",
+          session: input.session,
+          backendRun: input.backendRun,
+          userMessage: input.userMessage,
+          agentMessage: input.agentMessage,
+          backendEvents: input.backendEvents,
+          workspaceChanges: input.workspaceChanges,
+          toolRuns: input.toolRuns,
+          transcriptMessages: input.transcriptMessages,
+          artifacts: input.artifacts as Parameters<AgentRuntime["runReflectionForCompletedTurn"]>[0]["artifacts"],
+          abortSignal: input.abortSignal
+        }),
+        loadReflectionArtifacts: (input) => this.loadReflectionArtifacts(input),
+        backgroundReview: {
+          abortSignal: this.backgroundTaskAbortController.signal,
+          detach: this.workspaceOptions.detachBackgroundReview === true,
+          isClosing: () => this.backgroundTasksClosing,
+          schedule: (input) => this.scheduleBackgroundReview(input.runId, input.run)
+        }
+      },
+      diagnostics: {
+        formatError: (error) => safeRuntimeErrorMessage(error),
+        logError: (message, metadata) => this.workspaceOptions.productionLogger?.(message, metadata)
+      }
+    };
+  }
+
+  attachAgentHost(host: AgentHost): void {
+    if (this.agentHost) throw new Error("agent_host_already_attached");
+    this.agentHost = host;
+  }
+
+  private requireAgentHost(): AgentHost {
+    if (!this.agentHost) throw new Error("agent_host_not_composed");
+    return this.agentHost;
+  }
+
+  private scheduleBackgroundReview(runId: string, run: () => Promise<unknown>): void {
+    const task = run().catch((error) => {
+      this.backgroundTaskFailures.push({ error, runId });
+      throw error;
+    });
+    this.backgroundTasks.add(task);
+    void task.finally(() => this.backgroundTasks.delete(task)).catch(() => undefined);
+  }
+
+  private async prepareHostRequest(request: TurnRequest): Promise<TurnRequest> {
+    if (request.gatewayBoundaryPolicy) await this.store.saveGatewayBoundaryPolicy(request.gatewayBoundaryPolicy);
+    const temporaryContext = await resolveTemporaryContextPort({
+      resolve: (ref) => this.workspaceOptions.resolveTemporaryContextRef?.(ref),
+      conflict: (message) => new RuntimeRequestError("conflict", message)
+    },
+    request.envelope.attachments,
+    request.temporaryContext);
+    return {
+      ...request,
+      backendId: request.backendId?.trim() || undefined,
+      temporaryContext,
+      metadata: jsonRecord(request.metadata ?? {})
+    };
+  }
+
+  private async recordLearningResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void> {
+    for (const skill of preview.selected_skills) {
+      await this.store.recordLearningResourceUse({
+        id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "skill", resource_id: skill.id,
+        content_hash: stableHash({ id: skill.id, title: skill.title, description: skill.description }), stage: "selected",
+        metadata: { disclosure_level: skill.disclosure_level }, created_at: nowIso()
+      });
+    }
+    for (const memory of preview.active_memory) {
+      await this.store.recordLearningResourceUse({
+        id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "memory", resource_id: memory.id,
+        content_hash: stableHash(memory.content), stage: "body_loaded", metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
+      });
+    }
+    for (const wiki of preview.knowledge_wiki) {
+      await this.store.recordLearningResourceUse({
+        id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "wiki", resource_id: wiki.id,
+        content_hash: stableHash(wiki.content), stage: "body_loaded", metadata: { slug: wiki.slug }, created_at: nowIso()
+      });
+    }
+    for (const result of preview.session_search) {
+      await this.store.recordLearningResourceUse({
+        id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "session_result", resource_id: `${result.kind}:${result.id}`,
+        content_hash: stableHash(result.summary), stage: "selected", metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
+      });
+    }
   }
 
   shutdownMcpProcessPool(): Promise<void> {
@@ -1606,6 +1729,15 @@ export class AgentRuntime {
       if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "background_tasks_shutdown_failed");
     })();
     return this.backgroundShutdownPromise;
+  }
+
+  async startup(): Promise<void> {
+    await this.requireAgentHost().recover();
+  }
+
+  async shutdown(): Promise<void> {
+    await this.requireAgentHost().shutdown();
+    await this.shutdownMcpProcessPool();
   }
 
   getDomainOperationBindingIdentity(id: string) {
@@ -1868,11 +2000,11 @@ export class AgentRuntime {
     });
     const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
       const { record, uiRecord } = eventBridge.project(event);
-      await this.store.saveBackendEvent(record);
+      const appended = await this.store.appendCore02Event(record);
       if (uiRecord) {
         await this.emit("backend.event.created", uiRecord);
       }
-      return record;
+      return appended.event;
     };
     const toolCallId = input.toolCallId || createId("toolcall");
     const startedEvent = normalizeBackendOutputEvent({
@@ -2145,836 +2277,127 @@ export class AgentRuntime {
 
   async runChatTurn(input: RunChatTurnInput): Promise<RunChatTurnResult> {
     const session = await this.store.getSession(input.sessionId);
-    if (!session) {
-      throw new Error(`Session not found: ${input.sessionId}`);
-    }
-
+    if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
     const settings = await this.store.getSettings();
-    const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
-    const outputLocale = input.output_locale ?? session.output_locale ?? settings.output_locale;
-    const context = input.gateway_context ?? webGatewayContext;
-    const envelope = createGatewayEnvelope(context, input.content, inputLocale, outputLocale, input.metadata, input.attachments);
-    const userMessage = await this.saveMessage({
-      id: createId("message"),
-      session_id: session.id,
-      role: "user",
-      content: input.content,
-      input_locale: envelope.input_locale,
-      output_locale: envelope.output_locale,
-      envelope,
-      created_at: envelope.received_at
-    });
-
-    const requestedBackendId = input.backend_id?.trim();
-    const backendId = requestedBackendId || this.selectedBackendIdForRun(settings.default_backend_id);
-    const backend = this.backendRegistry.get(backendId);
-    if (!backend) {
-      throw new RuntimeRequestError("conflict", `backend_not_registered:${backendId}`);
-    }
-    if (input.gateway_boundary_policy) {
-      await this.store.saveGatewayBoundaryPolicy(input.gateway_boundary_policy);
-    }
-    const contextIntent = classifyBackendContextIntent(input.content);
-    const expectedOutputs = expectedBackendOutputs(input.content);
-    const thinExternalContext = shouldThinExternalBackendContext(backend.kind, contextIntent);
-    const backendRunId = createId("run");
-    const workspaceRoot = this.store.rootDir;
-    const backendWorkingDirectoryMode = this.backendWorkingDirectoryMode();
-    const workingDirectory = this.backendWorkingDirectory();
-    const temporaryContext = await resolveTemporaryContextPort({
-      resolve: (ref) => this.workspaceOptions.resolveTemporaryContextRef?.(ref),
-      conflict: (message) => new RuntimeRequestError("conflict", message)
-    }, envelope.attachments, input.temporary_context);
-    const activeToolBridge = createBackendToolBridge({
-      backendKind: backend.kind,
-      runId: backendRunId,
-      expectedOutputs,
-      contextIntent,
-      gatewayBoundaryPresent: Boolean(input.gateway_boundary_policy)
-    });
-    let backendRun: BackendRunRecord = {
-      id: backendRunId,
-      session_id: session.id,
-      input_message_id: userMessage.id,
-      backend_id: backend.id,
-      backend_kind: backend.kind,
-      status: "running",
-      started_at: nowIso(),
-      input_summary: summarize(input.content),
-      metadata: {
-        ...jsonRecord(input.metadata ?? {}),
-        context_intent: contextIntent,
-        ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
-        workspace_root: workspaceRoot,
-        working_directory: workingDirectory,
-        backend_working_directory_mode: backendWorkingDirectoryMode,
-        ...(temporaryContext.length > 0
-          ? {
-              temporary_context_count: temporaryContext.length,
-              temporary_context_ref_ids: temporaryContext.map((item) => item.id)
-            }
-          : {}),
-        ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {}),
-        context_handoff_status: "preparing"
-      }
-    };
-    if (activeToolBridge) {
-      this.backendToolBridgeTokens.set(backendRun.id, activeToolBridge.token ?? "");
-    }
-    backendRun = await this.store.saveBackendRun(backendRun);
-    await this.emit("backend.run.created", backendRun);
-
-    const operations: OperationRecord[] = [];
-    const artifacts: ArtifactRecord[] = [];
-    const memories: MemoryFrontmatter[] = [];
-    const backendEvents: BackendEventRecord[] = [];
-    const workspaceChanges: WorkspaceChangeRecord[] = [];
-    const toolRuns: ToolRunRecord[] = [];
-    const textParts: string[] = [];
-    this.backendEventSequences.set(backendRun.id, 1);
-    const eventBridge = new BackendEventBridge({
-      runId: backendRun.id,
-      sessionId: session.id,
-      nextSequence: () => this.allocateBackendEventSequence(backendRun.id)
-    });
-    const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
-      const { record, uiRecord } = eventBridge.project(event);
-      await this.store.saveBackendEvent(record);
-      backendEvents.push(record);
-      if (uiRecord) {
-        await this.emit("backend.event.created", uiRecord);
-      }
-      return record;
-    };
-    const emitHostProgress = async (displayKind: "reasoning_summary" | "activity", text: string, activityKind?: string) => {
-      await recordEvent({
-        event_type: "host_progress",
-        payload: {
-          display_kind: displayKind,
-          text,
-          ...(activityKind ? { activity_kind: activityKind } : {})
-        }
-      });
-    };
-
-    await emitHostProgress("reasoning_summary", "関連する文脈を確認し、実行部へ渡す情報を絞っています。");
-    await emitHostProgress("activity", "文脈候補を確認", "context_prepare");
-    await emitHostProgress("reasoning_summary", "必要な情報はSamurai側に残し、実行部には参照先と使える道具を渡します。");
-    const contextPreview = await buildContextPreviewWithPorts({
-      sessionId: session.id,
-      query: input.content,
-      ports: this.contextPreviewAdapter.ports,
-      skipHeavyContext: thinExternalContext,
-      onProgress: emitHostProgress
-    });
-    const freezeSnapshot = contextPreview.freeze_snapshot;
-    const gatewayBoundary = input.gateway_boundary_policy ? gatewayBoundaryRuntimeSnapshot(input.gateway_boundary_policy, nowIso()) : undefined;
-    const availableTools = applyGatewayBoundaryAllowedTools(contextPreview.available_tools, input.gateway_boundary_policy);
-    const contextAssembly = applyGatewayBoundaryToContextAssembly(
-      contextPreview.context_assembly,
-      gatewayBoundary,
-      contextPreview.available_tools,
-      availableTools
+    const envelope = createGatewayEnvelope(
+      input.gateway_context ?? webGatewayContext,
+      input.content,
+      input.input_locale ?? session.ui_locale ?? settings.ui_locale,
+      input.output_locale ?? session.output_locale ?? settings.output_locale,
+      input.metadata,
+      input.attachments
     );
-    const contextHandoff = buildContextHandoffForBackend({
-      backendKind: backend.kind,
-      contextIntent,
-      contextPreview,
-      contextAssembly,
-      gatewayBoundaryPresent: Boolean(gatewayBoundary)
-    });
-    await emitHostProgress("activity", "参照先を準備", "context_handoff");
-    const boundaryMetadata = gatewayBoundary ? gatewayBoundaryRuntimeMetadata(gatewayBoundary) : {};
-    const runMetadata = {
-      ...jsonRecord(input.metadata ?? {}),
-      context_intent: contextIntent,
-      ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
-      workspace_root: workspaceRoot,
-      working_directory: workingDirectory,
-      backend_working_directory_mode: backendWorkingDirectoryMode,
-      ...(temporaryContext.length > 0
-        ? {
-            temporary_context_count: temporaryContext.length,
-            temporary_context_ref_ids: temporaryContext.map((item) => item.id)
-          }
-        : {}),
-      ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {}),
-      context_handoff_status: "ready",
-      ...boundaryMetadata,
-      ...contextAssemblyRuntimeMetadata(contextAssembly),
-      ...contextHandoffRuntimeMetadata(contextHandoff),
-      ...(freezeSnapshot
-        ? {
-            freeze_snapshot_id: freezeSnapshot.id,
-            freeze_snapshot_hash: freezeSnapshot.stable_hash
-          }
-        : {})
-    };
-    backendRun = {
-      ...backendRun,
-      metadata: runMetadata
-    };
-    await this.store.updateBackendRun(backendRun);
-    await this.emit("backend.run.updated", backendRun);
-
-    const backendSession = await backend.startSession?.({
-      session_id: session.id,
-      session_key: session.session_key,
-      output_locale: outputLocale,
-      metadata: runMetadata
-    });
-    await emitHostProgress("activity", "実行部へ送信", "backend_send");
-    if (backendSession) {
-      backendRun = {
-        ...backendRun,
-        metadata: {
-          ...backendRun.metadata,
-          backend_session_id: backendSession.backend_session_id,
-          backend_session_started_at: backendSession.started_at,
-          backend_session_metadata: backendSession.metadata
-        }
-      };
-      await this.store.updateBackendRun(backendRun);
-      await this.emit("backend.run.updated", backendRun);
-    }
-
-    const activeMemory = contextPreview.active_memory;
-    const recentMessages = (await this.store.listMessages(session.id)).slice(-10);
-    const runInput: BackendRunInput = {
-      run_id: backendRun.id,
-      session_id: session.id,
-      input_message_id: userMessage.id,
-      workspace_root: workspaceRoot,
-      working_directory: workingDirectory,
+    // Compatibility callers may omit a key. This key is unique per call, so
+    // it does not promise idempotency across transport retries.
+    const idempotencyKey = input.idempotency_key?.trim() || `compat:${createId("idempotency")}`;
+    const outcome = await this.requireAgentHost().runTurn({
+      sessionId: input.sessionId,
+      content: input.content,
       envelope,
-      user_input: input.content,
-      input_locale: inputLocale,
-      output_locale: outputLocale,
-      active_memory: activeMemory.map((memory) => ({
-        id: memory.id,
-        topic: memory.topic,
-        content: memory.content,
-        state: memory.state,
-        sensitive_level: memory.sensitive_level,
-        priority: memory.priority,
-        selection_reason: memory.selection_reason,
-        conflicts_with: memory.conflicts_with
-      })),
-      freeze_snapshot: freezeSnapshot,
-      gateway_boundary: gatewayBoundary,
-      knowledge_wiki: contextPreview.knowledge_wiki,
-      collection_notes: contextPreview.collection_notes,
-      selected_skills: contextPreview.selected_skills,
-      session_search: contextPreview.session_search,
-      session_summary: contextPreview.session_summary,
-      external_assist: contextPreview.external_assist,
-      context_assembly: contextAssembly,
-      context_handoff: contextHandoff,
-      tool_bridge: activeToolBridge,
-      available_tools: availableTools,
-      recent_messages: recentMessages,
-      temporary_context: temporaryContext,
-      metadata: backendRun.metadata,
-      context_intent: contextIntent,
-      expected_outputs: expectedOutputs
-    };
-
-    for (const skill of contextPreview.selected_skills) {
-      await this.store.recordLearningResourceUse({
-        id: createId("learning_use"),
-        run_id: backendRun.id,
-        session_id: session.id,
-        resource_kind: "skill",
-        resource_id: skill.id,
-        content_hash: stableHash({ id: skill.id, title: skill.title, description: skill.description }),
-        stage: "selected",
-        metadata: { disclosure_level: skill.disclosure_level },
-        created_at: nowIso()
-      });
-    }
-    for (const memory of contextPreview.active_memory) {
-      await this.store.recordLearningResourceUse({
-        id: createId("learning_use"), run_id: backendRun.id, session_id: session.id,
-        resource_kind: "memory", resource_id: memory.id, content_hash: stableHash(memory.content), stage: "body_loaded",
-        metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
-      });
-    }
-    for (const wiki of contextPreview.knowledge_wiki) {
-      await this.store.recordLearningResourceUse({
-        id: createId("learning_use"), run_id: backendRun.id, session_id: session.id,
-        resource_kind: "wiki", resource_id: wiki.id, content_hash: stableHash(wiki.content), stage: "body_loaded",
-        metadata: { slug: wiki.slug }, created_at: nowIso()
-      });
-    }
-    for (const result of contextPreview.session_search) {
-      await this.store.recordLearningResourceUse({
-        id: createId("learning_use"), run_id: backendRun.id, session_id: session.id,
-        resource_kind: "session_result", resource_id: `${result.kind}:${result.id}`, content_hash: stableHash(result.summary), stage: "selected",
-        metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
-      });
-    }
-
-    let failedEvent: BackendEventRecord | undefined;
-    let waitingForBackendInput = false;
-
-    const sessionMemory = await createSessionMemory(this.store, envelope, input.content);
-    memories.push(sessionMemory);
-    const sessionMemoryRef = memoryRef(sessionMemory);
-    const sessionMemoryChange: WorkspaceChangeRecord = {
-      id: createId("change"),
-      run_id: backendRun.id,
-      session_id: session.id,
-      resource_ref: sessionMemoryRef,
-      change_type: "memory_suggested",
-      summary: `Captured session memory ${sessionMemory.topic}.`,
-      created_at: nowIso()
-    };
-    await this.store.saveWorkspaceChange(sessionMemoryChange);
-    workspaceChanges.push(sessionMemoryChange);
-    await this.emit("workspace.change.created", sessionMemoryChange);
-    await this.emit("memory.candidate.created", sessionMemory);
-
-    for await (const rawEvent of backend.runTurn(runInput)) {
-      const event = normalizeBackendOutputEvent(rawEvent);
-      const record = await recordEvent(event);
-      const updatedRun = applyBackendSessionMetadata(backendRun, event);
-      if (updatedRun !== backendRun) {
-        backendRun = updatedRun;
-        await this.store.updateBackendRun(backendRun);
-        await this.emit("backend.run.updated", backendRun);
-      }
-      if (event.event_type === "text_delta") {
-        const text = typeof event.payload.text === "string" ? event.payload.text : "";
-        if (text) {
-          textParts.push(text);
-        }
-      }
-      if (event.event_type === "tool_call_started") {
-        const feedback = await this.handleBackendToolStartedEvent({
-          run: backendRun,
-          runInput,
-          event,
-          gatewayBoundaryPolicy: input.gateway_boundary_policy,
-          recordEvent
-        });
-        operations.push(...feedback.operations);
-        artifacts.push(...feedback.artifacts);
-        memories.push(...feedback.memories);
-        toolRuns.push(...feedback.toolRuns);
-        workspaceChanges.push(...feedback.workspaceChanges);
-      }
-      if (event.event_type === "backend_waiting_for_native_input") {
-        waitingForBackendInput = true;
-        backendRun = {
-          ...backendRun,
-          status: "waiting_for_backend_input"
-        };
-        await this.store.updateBackendRun(backendRun);
-        await this.emit("backend.run.updated", backendRun);
-        break;
-      }
-      if (event.event_type === "run_failed") {
-        failedEvent = record;
-      }
-      if (event.event_type === "run_completed") {
-        backendRun = {
-          ...backendRun,
-          status: "completed",
-          output_summary: typeof event.payload.output_summary === "string" ? event.payload.output_summary : summarize(textParts.join(" ")),
-          completed_at: nowIso()
-        };
-      }
-    }
-
-    if (failedEvent) {
-      const errorCode = typeof failedEvent.payload.error_code === "string" ? failedEvent.payload.error_code : "provider_failed";
-      const wasCancelled = errorCode === "backend_cancelled";
-      backendRun = {
-        ...backendRun,
-        status: wasCancelled ? "cancelled" : "failed",
-        error_code: errorCode,
-        completed_at: nowIso()
-      };
-      await this.store.updateBackendRun(backendRun);
-      await this.emit("backend.run.updated", backendRun);
-      this.backendToolBridgeTokens.delete(backendRun.id);
-      this.backendEventSequences.delete(backendRun.id);
-      const payload = { session, messages: [userMessage], backendRun, backendEvents, workspaceChanges };
-      const code = wasCancelled
-        ? "backend_cancelled"
-        : backendRun.error_code === "provider_not_configured"
-          ? "provider_not_configured"
-          : backendRun.error_code === "backend_execution_root_not_ready"
-            ? "backend_execution_root_not_ready"
-            : "provider_failed";
-      throw new RuntimeRequestError(code, typeof failedEvent.payload.message === "string" ? failedEvent.payload.message : "Provider failed.", payload, {
-        reason: isProviderDiagnosticReason(failedEvent.payload.reason) ? failedEvent.payload.reason : code === "provider_not_configured" ? "not_configured" : "unknown",
-        retryable: failedEvent.payload.retryable === true,
-        provider: typeof failedEvent.payload.provider === "string" ? failedEvent.payload.provider : undefined,
-        model: typeof failedEvent.payload.model === "string" ? failedEvent.payload.model : undefined,
-        status: typeof failedEvent.payload.status === "number" ? failedEvent.payload.status : undefined
-      });
-    }
-
-    const persistedRunState = await this.loadPersistedRunOutputs(backendRun);
-    mergeUniqueById(operations, persistedRunState.operations);
-    mergeUniqueById(artifacts, persistedRunState.artifacts);
-    mergeUniqueById(backendEvents, await this.store.listBackendEvents({ runId: backendRun.id }));
-    mergeUniqueById(workspaceChanges, persistedRunState.workspaceChanges);
-    mergeUniqueById(toolRuns, persistedRunState.toolRuns);
-
-    const agentContent = textParts.join("\n").trim();
-    const generatedSurfaceForRun = expectedOutputs.includes("generated_surface")
-      ? (await this.store.listGeneratedSurfaces(session.id)).some((surface) => surface.generation_run_id === backendRun.id && surface.state !== "archived")
-      : false;
-    const shouldFallbackToArtifact = expectedOutputs.includes("artifact")
-      || (expectedOutputs.includes("generated_surface") && !generatedSurfaceForRun);
-    if (agentContent && shouldFallbackToArtifact && !gatewayBoundary && !hasCreatedArtifact(artifacts, workspaceChanges)) {
-      const fallbackArtifact = await this.createBackendArtifactFromText({
-        run: backendRun,
-        runInput,
-        title: expectedOutputs.includes("generated_surface") && !generatedSurfaceForRun ? "独自UI生成結果" : artifactTitleFromUserInput(input.content),
-        content: agentContent,
-        recordEvent
-      });
-      operations.push(...fallbackArtifact.operations);
-      artifacts.push(...fallbackArtifact.artifacts);
-      workspaceChanges.push(...fallbackArtifact.workspaceChanges);
-    }
-    const completedWithoutBody = !agentContent && !hasMeaningfulBackendOutput(backendEvents, workspaceChanges, artifacts);
-    const visibleAgentContent = completedWithoutBody ? "結果本文を受け取れませんでした。実行ログを確認してください。" : agentContent;
-    const agentMessage = await this.saveMessage({
-      id: createId("message"),
-      session_id: session.id,
-      role: "agent",
-      content: visibleAgentContent,
-      input_locale: envelope.input_locale,
-      output_locale: envelope.output_locale,
-      created_at: nowIso()
+      backendId: input.backend_id,
+      idempotencyKey,
+      metadata: jsonRecord(input.metadata ?? {}),
+      temporaryContext: input.temporary_context,
+      gatewayBoundaryPolicy: input.gateway_boundary_policy
     });
-
-    backendRun = {
-      ...backendRun,
-      output_message_id: agentMessage.id,
-      status: waitingForBackendInput ? "waiting_for_backend_input" : backendRun.status === "running" ? "completed" : backendRun.status,
-      output_summary: meaningfulBackendRunSummary(backendRun.output_summary) || summarize(visibleAgentContent),
-      completed_at: waitingForBackendInput ? undefined : (backendRun.completed_at ?? nowIso())
-    };
-    await this.store.updateBackendRun(backendRun);
-    await this.emit("backend.run.updated", backendRun);
-    if (!waitingForBackendInput) {
-      this.backendToolBridgeTokens.delete(backendRun.id);
-      this.backendEventSequences.delete(backendRun.id);
+    // Host returns only after settlement/post-turn completion. Re-read the
+    // durable Run before projecting the legacy facade result so diagnostics
+    // and recovery corrections are never based on an in-memory snapshot.
+    const committedRun = await this.store.getBackendRun(outcome.run.id) ?? outcome.run;
+    const result = await this.projectChatTurn(committedRun);
+    if (outcome.kind === "failed") {
+      throw new RuntimeRequestError(
+        outcome.run.error_code === "provider_not_configured" ? "provider_not_configured" : "provider_failed",
+        safeRuntimeErrorMessage(outcome.error),
+        { session: result.session, messages: result.messages, backendRun: result.backendRun, backendEvents: result.backendEvents, workspaceChanges: result.workspaceChanges }
+      );
     }
-
-    const externalAssistSyncRecords = waitingForBackendInput
-      ? []
-      : await this.runExternalAssistSync({
-          sessionId: session.id,
-          runId: backendRun.id,
-          inputMessageId: userMessage.id,
-          query: input.content,
-          userContent: input.content,
-          assistantContent: agentContent,
-          role: settings.external_provider_role
-        });
-    if (externalAssistSyncRecords.length > 0) {
-      const primaryExternalAssistSync = externalAssistSyncRecords[0];
-      backendRun = {
-        ...backendRun,
-        metadata: {
-          ...backendRun.metadata,
-          ...(primaryExternalAssistSync ? {
-            external_assist_sync_id: primaryExternalAssistSync.id,
-            external_assist_sync_status: primaryExternalAssistSync.status,
-            external_assist_sync_provider_id: primaryExternalAssistSync.provider_id
-          } : {}),
-          external_assist_sync_ids: externalAssistSyncRecords.map((record) => record.id),
-          external_assist_sync_statuses: externalAssistSyncRecords.map((record) => record.status),
-          external_assist_sync_provider_ids: externalAssistSyncRecords.map((record) => record.provider_id)
-        }
-      };
-      await this.store.updateBackendRun(backendRun);
-      await this.emit("backend.run.updated", backendRun);
+    if (outcome.kind === "cancelled") {
+      throw new RuntimeRequestError("backend_cancelled", outcome.reason, { session: result.session, messages: result.messages, backendRun: result.backendRun, backendEvents: result.backendEvents, workspaceChanges: result.workspaceChanges });
     }
-    const runBackgroundReview = async () => this.runReflectionForCompletedTurn({
-      kind: "chat_turn",
-      session,
-      backendRun,
-      userMessage,
-      agentMessage,
-      backendEvents,
-      workspaceChanges,
-      toolRuns,
-      transcriptMessages: await this.store.listMessages(session.id),
-      artifacts: await this.loadReflectionArtifacts({ sessionId: session.id, sourceRunId: backendRun.id, workspaceChanges }),
-      abortSignal: this.backgroundTaskAbortController.signal
-    });
-    const autoLearningEnabled = settings.memory_capture_mode === "auto" || settings.skill_capture_mode === "auto";
-    const reflection = autoLearningEnabled && !this.workspaceOptions.detachBackgroundReview ? await runBackgroundReview() : undefined;
-    if (autoLearningEnabled && this.workspaceOptions.detachBackgroundReview && !this.backgroundTasksClosing) {
-      const task = runBackgroundReview().catch((error) => {
-        this.backgroundTaskFailures.push({ error });
-        throw error;
-      });
-      this.backgroundTasks.add(task);
-      void task.finally(() => this.backgroundTasks.delete(task)).catch(() => undefined);
+    if (outcome.kind === "outcome_unknown") {
+      throw new RuntimeRequestError("outcome_unknown", safeRuntimeErrorMessage(outcome.error), { session: result.session, messages: result.messages, backendRun: result.backendRun, backendEvents: result.backendEvents, workspaceChanges: result.workspaceChanges });
     }
+    return result;
+  }
 
-    const messagePresentations = await this.saveGeneratedSurfacePresentations({
-      sessionId: session.id,
-      messageId: agentMessage.id,
-      runId: backendRun.id
-    });
-
+  private async projectChatTurn(run: BackendRunRecord): Promise<RunChatTurnResult> {
+    const session = await this.store.getSession(run.session_id);
+    if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${run.session_id}`);
+    const [messages, backendEvents, workspaceChanges, toolRuns, operations, artifacts, presentations, reflections, storedMemories] = await Promise.all([
+      this.store.listMessages(session.id),
+      this.store.listBackendEvents({ runId: run.id }),
+      this.store.listWorkspaceChanges(session.id).then((items) => items.filter((item) => item.run_id === run.id)),
+      this.store.listToolRuns({ runId: run.id }),
+      this.store.listOperations(session.id),
+      this.store.listArtifactsForSession(session.id),
+      run.output_message_id ? this.store.listMessagePresentations({ sessionId: session.id, messageId: run.output_message_id }) : Promise.resolve([]),
+      this.store.listReflectionRuns(session.id),
+      this.store.listMemoryForSession(session.id, { includeArchived: true })
+    ]);
+    // `file_path` is a Workspace Store read-model detail. Keep it out of the
+    // Chat/Domain result, whose public contract is MemoryFrontmatter only.
+    const memories = storedMemories.map(({ file_path: _filePath, ...memory }) => memory);
+    const operationIds = new Set(workspaceChanges.map((change) => change.legacy_operation_id).filter((id): id is string => Boolean(id)));
+    const scopedOperations = operations.filter((operation) => operationIds.has(operation.id));
+    const artifactIds = new Set(workspaceChanges.filter((change) => change.change_type === "artifact_created").map((change) => change.resource_ref.id));
+    const scopedArtifacts = artifacts.filter((artifact) => artifactIds.has(artifact.id) || artifactIds.has(artifact.file_ref.id));
+    const reflectionRuns = reflections.filter((reflection) => reflection.source_run_id === run.id);
+    const reflectionRunIds = new Set(reflectionRuns.map((reflection) => reflection.id));
+    const reflectionSuggestions = (await this.store.listReflectionSuggestions()).filter((suggestion) => reflectionRunIds.has(suggestion.reflection_run_id));
+    const userMessage = messages.find((message) => message.id === run.input_message_id);
+    const outputMessage = run.output_message_id ? messages.find((message) => message.id === run.output_message_id) : undefined;
     return {
       session,
-      messages: [userMessage, agentMessage],
-      messagePresentations,
-      backendRun,
+      messages: [userMessage, outputMessage].filter((message): message is MessageRecord => Boolean(message)),
+      messagePresentations: presentations,
+      backendRun: run,
       backendEvents,
       workspaceChanges,
-      operations,
+      operations: scopedOperations,
       policyDecisions: [],
-      artifacts,
+      artifacts: scopedArtifacts,
       memories,
       approvalRequests: [],
       auditRecords: [],
       rollbackPoints: [],
       activity: [],
-      reflectionRuns: reflection ? [reflection.reflectionRun] : [],
-      reflectionSuggestions: reflection?.suggestions ?? [],
+      reflectionRuns,
+      reflectionSuggestions,
       toolRuns
     };
   }
 
   async cancelBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.store.getBackendRun(runId);
-    if (!run) {
-      throw new RuntimeRequestError("not_found", "backend_run_not_found");
-    }
-    if (["completed", "failed", "cancelled"].includes(run.status)) {
-      return run;
-    }
-
-    const backend = this.backendRegistry.get(run.backend_id);
-    if (!backend) {
-      throw new RuntimeRequestError("conflict", `backend_not_registered:${run.backend_id}`);
-    }
-    await backend.cancelRun?.(run.id);
-    const cancelledAt = nowIso();
-    const releasedGatewayLock = await this.releaseGatewayConcurrencyLockForRun(run, cancelledAt);
-    const cancelledRun: BackendRunRecord = {
-      ...run,
-      status: "cancelled",
-      error_code: "backend_cancelled",
-      completed_at: cancelledAt,
-      metadata: releasedGatewayLock
-        ? {
-          ...run.metadata,
-          gateway_concurrency_lock_status: releasedGatewayLock.status,
-          gateway_concurrency_lock_released_at: releasedGatewayLock.released_at ?? cancelledAt
-        }
-        : run.metadata
-    };
-    await this.store.updateBackendRun(cancelledRun);
-    await this.emit("backend.run.updated", cancelledRun);
-    return cancelledRun;
-  }
-
-  async syncBackendStream(runId: string, input: { maxEvents?: number; timeoutMs?: number } = {}): Promise<BackendStreamSyncResult> {
-    let backendRun = await this.store.getBackendRun(runId);
-    if (!backendRun) {
-      throw new RuntimeRequestError("not_found", "backend_run_not_found");
-    }
-    const backend = this.backendRegistry.get(backendRun.backend_id);
-    if (!backend) {
-      throw new RuntimeRequestError("conflict", `backend_not_registered:${backendRun.backend_id}`);
-    }
-    const existingEvents = await this.store.listBackendEvents({ runId: backendRun.id });
-    const eventBridge = new BackendEventBridge({
-      runId: backendRun.id,
-      sessionId: backendRun.session_id,
-      startSequence: existingEvents.reduce((max, event) => Math.max(max, event.sequence), 0) + 1
-    });
-    const seen = new Set(existingEvents.map(backendEventSignature));
-    const persistedEvents: BackendEventRecord[] = [];
-    let skippedDuplicateCount = 0;
-    const recordEvent = async (event: BackendOutputEvent, options: { allowDuplicate?: boolean } = {}): Promise<BackendEventRecord | undefined> => {
-      const normalized = normalizeBackendStreamEvent(event);
-      const signature = backendOutputEventSignature(normalized);
-      if (!options.allowDuplicate && seen.has(signature)) {
-        skippedDuplicateCount += 1;
-        return undefined;
-      }
-      seen.add(signature);
-      const { record, uiRecord } = eventBridge.project(normalized);
-      await this.store.saveBackendEvent(record);
-      persistedEvents.push(record);
-      if (uiRecord) {
-        await this.emit("backend.event.created", uiRecord);
-      }
-      return record;
-    };
-
-    if (!backend.streamEvents) {
-      await recordEvent({
-        event_type: "backend_stream_unavailable",
-        payload: {
-          reason: "stream_events_unsupported",
-          backend_id: backend.id,
-          backend_label: backend.label,
-          supports_stream_events: false
-        }
-      }, { allowDuplicate: true });
-      return {
-        run: backendRun,
-        status: "unsupported",
-        events: persistedEvents,
-        persisted_event_count: persistedEvents.length,
-        skipped_duplicate_count: skippedDuplicateCount,
-        timed_out: false,
-        max_events_reached: false
-      };
-    }
-
-    const maxEvents = Math.max(1, Math.min(500, input.maxEvents ?? 200));
-    const timeoutMs = Math.max(100, Math.min(120_000, input.timeoutMs ?? 30_000));
-    const stream = backend.streamEvents(backendRun.id);
-    const iterator = stream[Symbol.asyncIterator]();
-    const deadline = Date.now() + timeoutMs;
-    let observedEvents = 0;
-    let timedOut = false;
-    let maxEventsReached = false;
-    const textParts: string[] = [];
-
-    try {
-      while (observedEvents < maxEvents) {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) {
-          timedOut = true;
-          break;
-        }
-        const next = await nextBackendStreamEvent(iterator, remainingMs);
-        if (next === "timeout") {
-          timedOut = true;
-          break;
-        }
-        if (next.done) {
-          break;
-        }
-        observedEvents += 1;
-        const normalized = normalizeBackendStreamEvent(next.value);
-        const record = await recordEvent(normalized);
-        if (!record) {
-          continue;
-        }
-        backendRun = applyBackendSessionMetadata(backendRun, normalized);
-        if (normalized.event_type === "text_delta" && typeof normalized.payload.text === "string") {
-          textParts.push(normalized.payload.text);
-        }
-        if (normalized.event_type === "run_completed") {
-          backendRun = {
-            ...backendRun,
-            status: "completed",
-            output_summary: typeof normalized.payload.output_summary === "string" ? normalized.payload.output_summary : summarize(textParts.join(" ")),
-            completed_at: nowIso()
-          };
-        } else if (normalized.event_type === "run_failed") {
-          backendRun = {
-            ...backendRun,
-            status: "failed",
-            error_code: typeof normalized.payload.error_code === "string" ? normalized.payload.error_code : "backend_stream_failed",
-            completed_at: nowIso()
-          };
-        } else if (normalized.event_type === "backend_waiting_for_native_input") {
-          backendRun = {
-            ...backendRun,
-            status: "waiting_for_backend_input",
-            completed_at: undefined
-          };
-        }
-        await this.store.updateBackendRun(backendRun);
-        await this.emit("backend.run.updated", backendRun);
-      }
-      maxEventsReached = observedEvents >= maxEvents;
-    } finally {
-      await iterator.return?.();
-    }
-
-    const summaryEvent = await recordEvent({
-      event_type: timedOut ? "backend_stream_unavailable" : "backend_stream_synced",
-      payload: {
-        reason: timedOut ? "stream_sync_timeout" : maxEventsReached ? "stream_sync_max_events" : "stream_sync_completed",
-        backend_id: backend.id,
-        observed_event_count: observedEvents,
-        persisted_event_count: persistedEvents.length,
-        skipped_duplicate_count: skippedDuplicateCount,
-        max_events: maxEvents,
-        timeout_ms: timeoutMs
-      }
-    }, { allowDuplicate: true });
-    if (summaryEvent && summaryEvent.event_type === "backend_stream_unavailable") {
-      await this.emit("backend.run.updated", backendRun);
-    }
-
-    return {
-      run: backendRun,
-      status: timedOut ? "timeout" : maxEventsReached ? "max_events" : "synced",
-      events: persistedEvents,
-      persisted_event_count: persistedEvents.length,
-      skipped_duplicate_count: skippedDuplicateCount,
-      timed_out: timedOut,
-      max_events_reached: maxEventsReached
-    };
+    if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
+    return this.requireAgentHost().cancelRun(runId);
   }
 
   async resumeBackendRun(runId: string, input: Record<string, JsonValue> = {}): Promise<BackendRunRecord> {
-    const storedRun = await this.store.getBackendRun(runId);
-    if (!storedRun) {
-      throw new RuntimeRequestError("not_found", "backend_run_not_found");
+    try {
+      return await this.requireAgentHost().resumeRun(runId, input);
+    } catch (error) {
+      if (String(error).includes("run_not_found")) throw new RuntimeRequestError("not_found", "backend_run_not_found");
+      throw error;
     }
-    let backendRun: BackendRunRecord = storedRun;
-    if (backendRun.status !== "waiting_for_backend_input") {
-      throw new RuntimeRequestError("conflict", "backend_run_not_waiting_for_input");
-    }
+  }
 
-    const backend = this.backendRegistry.get(backendRun.backend_id);
-    if (!backend) {
-      throw new RuntimeRequestError("conflict", `backend_not_registered:${backendRun.backend_id}`);
-    }
-
-    const existingEvents = await this.store.listBackendEvents({ runId: backendRun.id });
-    const eventBridge = new BackendEventBridge({
-      runId: backendRun.id,
-      sessionId: backendRun.session_id,
-      startSequence: existingEvents.reduce((max, event) => Math.max(max, event.sequence), 0) + 1
-    });
-    const textParts: string[] = [];
-    backendRun = {
-      ...backendRun,
-      status: "running",
-      metadata: {
-        ...backendRun.metadata,
-        resume_input: jsonSafe(input),
-        resumed_at: nowIso()
-      }
+  async syncBackendStream(runId: string, input: { maxEvents?: number; timeoutMs?: number } = {}): Promise<BackendStreamSyncResult> {
+    const before = await this.store.listBackendEvents({ runId });
+    const run = await this.requireAgentHost().syncRun(runId);
+    const after = await this.store.listBackendEvents({ runId });
+    const persisted = after.filter((event) => !before.some((previous) => previous.id === event.id));
+    const unsupported = persisted.some((event) => event.event_type === "backend_stream_unavailable");
+    return {
+      run,
+      status: unsupported ? "unsupported" : "synced",
+      events: persisted,
+      persisted_event_count: persisted.length,
+      skipped_duplicate_count: 0,
+      timed_out: false,
+      max_events_reached: Boolean(input.maxEvents && persisted.length >= input.maxEvents)
     };
-    await this.store.updateBackendRun(backendRun);
-    await this.emit("backend.run.updated", backendRun);
-
-    const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
-      const { record, uiRecord } = eventBridge.project(event);
-      await this.store.saveBackendEvent(record);
-      if (uiRecord) {
-        await this.emit("backend.event.created", uiRecord);
-      }
-      return record;
-    };
-
-    await recordEvent({
-      event_type: "backend_native_input_submitted",
-      payload: {
-        input: jsonSafe(input),
-        submitted_at: nowIso()
-      }
-    });
-
-    if (!backend.resumeRun) {
-      const unsupported = await recordEvent({
-        event_type: "run_failed",
-        payload: {
-          error_code: "backend_resume_unsupported",
-          message: `${backend.label} does not support resume.`,
-          reason: "resume_unsupported",
-          retryable: false,
-          backend_id: backend.id
-        }
-      });
-      backendRun = {
-        ...backendRun,
-        status: "failed",
-        error_code: typeof unsupported.payload.error_code === "string" ? unsupported.payload.error_code : "backend_resume_unsupported",
-        completed_at: nowIso()
-      };
-      await this.store.updateBackendRun(backendRun);
-      await this.emit("backend.run.updated", backendRun);
-      return backendRun;
-    }
-
-    const gatewayBoundaryPolicy = await this.gatewayBoundaryPolicyForRun(backendRun);
-    let resumeToolRunInput: BackendRunInput | undefined;
-    const getResumeToolRunInput = async () => {
-      resumeToolRunInput ??= await this.buildResumeToolRunInput(backendRun, jsonRecord(input), gatewayBoundaryPolicy);
-      return resumeToolRunInput;
-    };
-
-    const backendResumeInput = {
-      ...jsonRecord(input),
-      ...(typeof backendRun.metadata.workspace_root === "string" ? { workspace_root: backendRun.metadata.workspace_root } : {}),
-      ...(typeof backendRun.metadata.working_directory === "string" ? { working_directory: backendRun.metadata.working_directory } : {}),
-      ...(typeof backendRun.metadata.backend_session_id === "string" ? { backend_session_id: backendRun.metadata.backend_session_id } : {})
-    };
-    for await (const rawEvent of backend.resumeRun(backendRun.id, backendResumeInput)) {
-      const event = normalizeBackendOutputEvent(rawEvent);
-      const record = await recordEvent(event);
-      const updatedRun = applyBackendSessionMetadata(backendRun, event);
-      if (updatedRun !== backendRun) {
-        backendRun = updatedRun;
-        await this.store.updateBackendRun(backendRun);
-        await this.emit("backend.run.updated", backendRun);
-      }
-      if (event.event_type === "text_delta") {
-        const text = typeof event.payload.text === "string" ? event.payload.text : "";
-        if (text) {
-          textParts.push(text);
-        }
-      }
-      if (event.event_type === "tool_call_started") {
-        await this.handleBackendToolStartedEvent({
-          run: backendRun,
-          runInput: await getResumeToolRunInput(),
-          event,
-          gatewayBoundaryPolicy,
-          recordEvent
-        });
-      }
-      if (event.event_type === "backend_waiting_for_native_input") {
-        backendRun = { ...backendRun, status: "waiting_for_backend_input" };
-        break;
-      }
-      if (event.event_type === "run_failed") {
-        const errorCode = typeof record.payload.error_code === "string" ? record.payload.error_code : "backend_failed";
-        backendRun = {
-          ...backendRun,
-          status: errorCode === "backend_cancelled" ? "cancelled" : "failed",
-          error_code: errorCode,
-          completed_at: nowIso()
-        };
-        break;
-      }
-      if (event.event_type === "run_completed") {
-        backendRun = {
-          ...backendRun,
-          status: "completed",
-          output_summary: typeof event.payload.output_summary === "string" ? event.payload.output_summary : summarize(textParts.join(" ")),
-          completed_at: nowIso()
-        };
-        break;
-      }
-    }
-
-    if (backendRun.status === "running") {
-      backendRun = {
-        ...backendRun,
-        status: "completed",
-        output_summary: summarize(textParts.join(" ")),
-        completed_at: nowIso()
-      };
-    }
-    await this.store.updateBackendRun(backendRun);
-    await this.emit("backend.run.updated", backendRun);
-    return backendRun;
   }
 
   async runSurfaceOperation(input: SurfaceOperation): Promise<SurfaceOperationRuntimeResult> {
@@ -4376,20 +3799,6 @@ export class AgentRuntime {
     });
   }
 
-  private async releaseGatewayConcurrencyLockForRun(run: BackendRunRecord, now: string): Promise<GatewayConcurrencyLockRecord | undefined> {
-    const lockKey = typeof run.metadata.gateway_boundary_concurrency_lock_key === "string"
-      ? run.metadata.gateway_boundary_concurrency_lock_key
-      : undefined;
-    if (!lockKey) {
-      return undefined;
-    }
-    const lock = await this.store.getGatewayConcurrencyLock(lockKey);
-    if (!lock || lock.status !== "acquired") {
-      return undefined;
-    }
-    return this.store.releaseGatewayConcurrencyLock(lockKey, now);
-  }
-
   private async ensureGatewaySandboxInstance(policy: GatewayBoundaryPolicy): Promise<GatewaySandboxInstanceRecord | undefined> {
     if (policy.sandbox.mode === "off" || policy.sandbox.backend === "none") {
       return undefined;
@@ -4916,6 +4325,7 @@ export class AgentRuntime {
     const chat = await this.runChatTurn({
       sessionId: session.id,
       content: job.target_instruction,
+      idempotency_key: `automation:${job.id}:${job.next_run_at ?? "now"}`,
       output_locale: session.output_locale,
       metadata: {
         automation_job_id: job.id,
@@ -4990,39 +4400,6 @@ export class AgentRuntime {
   private async gatewayBoundaryPolicyForRun(run: BackendRunRecord): Promise<GatewayBoundaryPolicy | undefined> {
     const policyId = stringPayload(run.metadata.gateway_boundary_policy_id);
     return policyId ? this.store.getGatewayBoundaryPolicy(policyId) : undefined;
-  }
-
-  private async loadPersistedRunOutputs(run: BackendRunRecord): Promise<{
-    operations: OperationRecord[];
-    artifacts: ArtifactRecord[];
-    workspaceChanges: WorkspaceChangeRecord[];
-    toolRuns: ToolRunRecord[];
-  }> {
-    const [allChanges, allToolRuns, allOperations, allArtifacts] = await Promise.all([
-      this.store.listWorkspaceChanges(run.session_id),
-      this.store.listToolRuns({ sessionId: run.session_id }),
-      this.store.listOperations(run.session_id),
-      this.store.listArtifactsForSession(run.session_id)
-    ]);
-    const workspaceChanges = allChanges.filter((change) => change.run_id === run.id);
-    const runToolRuns = allToolRuns.filter((toolRun) => toolRun.run_id === run.id);
-    const operationIds = new Set(workspaceChanges.map((change) => change.legacy_operation_id).filter((id): id is string => Boolean(id)));
-    const toolRunResourceKeys = new Set(runToolRuns.flatMap((toolRun) => toolRun.resource_refs.flatMap(resourceRefLookupKeys)));
-    const artifactRefs = new Set(
-      workspaceChanges
-        .filter((change) => change.change_type === "artifact_created")
-        .flatMap((change) => [change.resource_ref.id, change.resource_ref.uri])
-        .filter(Boolean)
-    );
-    return {
-      operations: allOperations.filter((operation) =>
-        operationIds.has(operation.id)
-        || (operation.result_ref ? resourceRefLookupKeys(operation.result_ref).some((key) => toolRunResourceKeys.has(key)) : false)
-      ),
-      artifacts: allArtifacts.filter((artifact) => artifactRefs.has(artifact.id) || artifactRefs.has(artifact.file_ref.id) || artifactRefs.has(artifact.file_ref.uri)),
-      workspaceChanges,
-      toolRuns: runToolRuns
-    };
   }
 
   private async buildResumeToolRunInput(
@@ -5302,7 +4679,7 @@ export class AgentRuntime {
           }
         };
         Object.assign(input.run, updatedRun);
-        await this.store.updateBackendRun(updatedRun);
+        await this.store.commitCore02RunTransition({ expectedRun: input.run, nextRun: updatedRun });
         await this.emit("backend.run.updated", updatedRun);
       }
       const toolRun = await this.store.saveToolRun({
@@ -5530,42 +4907,6 @@ export class AgentRuntime {
       },
       resourceRefs: withGatewayBoundaryRefs([], boundary)
     };
-  }
-
-  private async createBackendArtifactFromText(input: {
-    run: BackendRunRecord;
-    runInput: BackendRunInput;
-    title: string;
-    content: string;
-    recordEvent: (event: BackendOutputEvent) => Promise<BackendEventRecord>;
-  }): Promise<{ operations: OperationRecord[]; artifacts: ArtifactRecord[]; workspaceChanges: WorkspaceChangeRecord[] }> {
-    const domainResult = await this.runDomainCommandWithTrustedContext({
-      command_id: runtimeOperationIds.artifactCreate,
-      input_source: "provider_tool_call",
-      idempotency_key: `${input.run.id}:expected-output-fallback:artifact.create`,
-      payload: {
-        title: input.title,
-        content: input.content,
-        input_locale: input.runInput.input_locale,
-        output_locale: input.runInput.output_locale,
-        metadata: {
-          backend_run_id: input.run.id,
-          expected_output_fallback: true
-        }
-      }
-    }, { runId: input.run.id, sessionId: input.run.session_id, envelopeId: input.runInput.input_message_id });
-    const writeResult = operationAuditRuntimeResult(domainResult.result);
-    if (!writeResult) {
-      return { operations: [], artifacts: [], workspaceChanges: [] };
-    }
-    const resourceRefs = uniqueResourceRefs(writeResult.resourceRefs);
-    const resource = runtimeWriteResource(domainResult.result);
-    const artifacts = isArtifactRecordResource(resource) ? [resource] : [];
-    const workspaceChanges = await this.backendWorkspaceChangesForOperation(input.run.id, input.run.session_id, writeResult.operation.id);
-    for (const event of runtimeToolWorkspaceEvents(resource, resourceRefs)) {
-      await input.recordEvent(event);
-    }
-    return { operations: [writeResult.operation], artifacts, workspaceChanges };
   }
 
   private async executeSandboxDomainOperation(context: TrustedDomainContext, request: SystemSandboxExecRequest): Promise<RuntimeToolCallResult> {
@@ -10209,33 +9550,6 @@ function assertProviderGeneratedSurfaceServerFieldsAbsent(args: Record<string, J
   }
 }
 
-function createBackendToolBridge(input: {
-  backendKind: AgentBackendKind;
-  runId: string;
-  expectedOutputs: BackendExpectedOutput[];
-  contextIntent: BackendContextIntent;
-  gatewayBoundaryPresent: boolean;
-}): BackendToolBridge | undefined {
-  if (input.gatewayBoundaryPresent) {
-    return undefined;
-  }
-  const shouldExposeBridge = true;
-  if (!shouldExposeBridge) {
-    return undefined;
-  }
-  if (input.backendKind !== "claude_code" && input.backendKind !== "codex" && input.backendKind !== "external") {
-    return undefined;
-  }
-  return {
-    enabled: true,
-    server_name: "samurai",
-    endpoint_url: toolBridgeEndpointUrl(input.runId),
-    token: randomBytes(32).toString("hex"),
-    token_env: "SAMURAI_TOOL_BRIDGE_TOKEN",
-    tools: samuraiToolBridgeDescriptors
-  };
-}
-
 export { samuraiToolBridgeDescriptors, samuraiToolBridgeTools, samuraiToolBridgeWriteTools } from "./provider-tool-bridge-composition.js";
 
 function toolBridgeEndpointUrl(runId: string): string {
@@ -10280,48 +9594,6 @@ function artifactKindPayload(value: JsonValue | undefined): ArtifactKind | undef
 }
 
 const artifactKindValues: ArtifactKind[] = ["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"];
-
-function resourceRefLookupKeys(ref: ResourceRef): string[] {
-  return [
-    ref.id,
-    ref.uri,
-    ref.id ? `${ref.kind}:${ref.id}` : undefined,
-    ref.uri ? `${ref.kind}:${ref.uri}` : undefined
-  ].filter((key): key is string => Boolean(key));
-}
-
-function timingSafeTokenEqual(left: string, right: string): boolean {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function mergeUniqueById<T extends { id: string }>(target: T[], source: T[]): void {
-  const ids = new Set(target.map((item) => item.id));
-  for (const item of source) {
-    if (!ids.has(item.id)) {
-      target.push(item);
-      ids.add(item.id);
-    }
-  }
-}
-
-function hasMeaningfulBackendOutput(
-  events: BackendEventRecord[],
-  workspaceChanges: WorkspaceChangeRecord[],
-  artifacts: ArtifactRecord[]
-): boolean {
-  const userFacingChanges = workspaceChanges.filter((change) => change.change_type !== "memory_suggested");
-  if (artifacts.length > 0 || userFacingChanges.length > 0) {
-    return true;
-  }
-  return events.some((event) =>
-    event.event_type !== "run_started"
-    && event.event_type !== "run_completed"
-    && event.event_type !== "agent_reasoning"
-    && event.event_type !== "host_progress"
-  );
-}
 
 function meaningfulBackendRunSummary(summary: string | undefined): string {
   const trimmed = summary?.trim() ?? "";
@@ -10392,58 +9664,6 @@ function backendRunRef(run: BackendRunRecord): ResourceRef {
   };
 }
 
-function normalizeBackendStreamEvent(event: BackendOutputEvent): BackendOutputEvent {
-  const normalized = normalizeBackendOutputEvent(event);
-  if (
-    normalized.event_type === "run_failed"
-    && (normalized.payload.error_code === "backend_stream_unavailable" || normalized.payload.reason === "stream_unavailable")
-  ) {
-    return {
-      event_type: "backend_stream_unavailable",
-      payload: normalized.payload,
-      resource_refs: normalized.resource_refs,
-      tool_call_id: normalized.tool_call_id
-    };
-  }
-  return normalized;
-}
-
-function backendOutputEventSignature(event: BackendOutputEvent): string {
-  const normalized = normalizeBackendOutputEvent(event);
-  return stableHash(JSON.stringify({
-    event_type: normalized.event_type,
-    payload: normalized.payload,
-    resource_refs: normalized.resource_refs ?? []
-  }));
-}
-
-function backendEventSignature(event: BackendEventRecord): string {
-  return stableHash(JSON.stringify({
-    event_type: event.event_type,
-    payload: event.payload,
-    resource_refs: event.resource_refs
-  }));
-}
-
-async function nextBackendStreamEvent(
-  iterator: AsyncIterator<BackendOutputEvent>,
-  timeoutMs: number
-): Promise<IteratorResult<BackendOutputEvent> | "timeout"> {
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      iterator.next(),
-      new Promise<"timeout">((resolve) => {
-        timeout = setTimeout(() => resolve("timeout"), timeoutMs);
-      })
-    ]);
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-  }
-}
-
 function toolRunRef(toolRun: ToolRunRecord): ResourceRef {
   return {
     kind: "tool_run",
@@ -10451,35 +9671,6 @@ function toolRunRef(toolRun: ToolRunRecord): ResourceRef {
     uri: `tool-runs/${toolRun.id}`,
     label: `${toolRun.provider_tool_name}:${toolRun.status}`
   };
-}
-
-function applyBackendSessionMetadata(run: BackendRunRecord, event: BackendOutputEvent): BackendRunRecord {
-  const backendSessionId = backendSessionIdFromPayload(event.payload, run.session_id);
-  if (!backendSessionId || run.metadata.backend_session_id === backendSessionId) {
-    return run;
-  }
-  return {
-    ...run,
-    metadata: {
-      ...run.metadata,
-      backend_session_id: backendSessionId,
-      backend_session_observed_at: nowIso(),
-      backend_session_source_event: event.event_type
-    }
-  };
-}
-
-function backendSessionIdFromPayload(payload: Record<string, JsonValue>, localSessionId: string): string | undefined {
-  const candidate =
-    stringPayload(payload.backend_session_id)
-    || stringPayload(payload.backend_native_session_id)
-    || stringPayload(payload.conversation_id)
-    || stringPayload(payload.thread_id);
-  if (candidate && candidate !== localSessionId) {
-    return candidate;
-  }
-  const sessionId = stringPayload(payload.session_id);
-  return sessionId && sessionId !== localSessionId ? sessionId : undefined;
 }
 
 function backendStatusWithRunHistory(status: AgentBackendStatus, runs: BackendRunRecord[]): AgentBackendStatus {
@@ -11908,4 +11099,11 @@ function safeExternalSendDispatchError(error: unknown, fallback: string): string
     (current, secret) => current.split(secret).join("[redacted]"),
     message
   );
+}
+
+function timingSafeTokenEqual(expected: string, actual: string): boolean {
+  const expectedBytes = Buffer.from(expected);
+  const actualBytes = Buffer.from(actual);
+  if (expectedBytes.length !== actualBytes.length) return false;
+  return timingSafeEqual(expectedBytes, actualBytes);
 }

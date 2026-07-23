@@ -11,12 +11,15 @@ describe("TurnCompletionCoordinator", () => {
     const settled = completedRun();
     const coordinator = new TurnCompletionCoordinator(
       { commitTurnSettlement: async () => settled },
-      [
-        { id: "external-assist", run: async () => { calls.push("external-assist"); throw new Error("assist failed"); } },
-        { id: "telemetry", run: async () => { calls.push("telemetry"); } }
-      ],
-      () => "2026-01-01T00:00:01.000Z",
-      async ({ operation }) => { failures.push(operation); }
+      {
+        externalAssistSync: { operationId: "external-assist", run: async () => { calls.push("external-assist"); throw new Error("assist failed"); } },
+        telemetry: { operationId: "telemetry", run: async () => { calls.push("telemetry"); } }
+      },
+      {
+        record: async ({ operationId, eventType }) => { failures.push(`${eventType}:${operationId}`); },
+        logPersistenceFailure: () => undefined
+      },
+      () => "2026-01-01T00:00:01.000Z"
     );
 
     const result = await coordinator.commitTurnSettlement({
@@ -27,7 +30,7 @@ describe("TurnCompletionCoordinator", () => {
 
     expect(result.status).toBe("completed");
     expect(calls).toEqual(["external-assist", "telemetry"]);
-    expect(failures).toEqual(["external-assist"]);
+    expect(failures).toEqual(["host_post_turn_failed:external-assist"]);
   });
 });
 

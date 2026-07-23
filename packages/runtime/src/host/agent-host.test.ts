@@ -8,7 +8,7 @@ import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { buildHostContextAssembly } from "../context/context-assembly";
 import { AgentHost } from "./agent-host";
 import { TurnCompletionCoordinator } from "./turn-completion-coordinator";
-import type { AdmittedTurn } from "./host-types";
+import type { AdmittedTurn, HostDiagnosticsPort } from "./host-types";
 
 const roots: string[] = [];
 
@@ -16,8 +16,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe("AgentHost Phase 3-4 path", () => {
-  it("settles terminal Event, answer, Run, and reservation through one SQLite completion path", async () => {
+describe("AgentHost production path", () => {
+  it("settles terminal data atomically and keeps a post-turn failure outside the completed Run", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-core02-host-"));
     roots.push(root);
     const store = await WorkspaceStore.create({ rootDir: root });
@@ -54,12 +54,29 @@ describe("AgentHost Phase 3-4 path", () => {
         handoff: async ({ turn }: { turn: AdmittedTurn }) => ({
           handoff: { version: 1 as const, strategy: "inline_context" as const, sources: [] },
           backendInput: backendInput(turn)
-        })
+        }),
+        reportProgress: async () => undefined
+      };
+      const diagnostics: HostDiagnosticsPort = {
+        record: async (input) => store.appendHostDiagnostic(input),
+        logPersistenceFailure: () => undefined
       };
       const host = new AgentHost(new AgentBackendRegistry([new MockBackend()]), {
         store,
         context,
-        completion: new TurnCompletionCoordinator(store)
+        completion: new TurnCompletionCoordinator(store, {
+          presentation: {
+            operationId: "presentation",
+            run: async () => { throw new Error("presentation failed"); }
+          }
+        }, diagnostics),
+        preflight: { prepare: async ({ request }) => request },
+        committedEventPublisher: { publish: async () => undefined },
+        admissionObserver: { observe: async () => undefined },
+        toolExecution: { execute: async () => undefined },
+        cleanup: { cleanup: async () => undefined },
+        diagnostics,
+        resolveDefaultBackendId: () => "mock"
       });
 
       const result = await host.runTurn({ sessionId: session.id, content: "hello", envelope, idempotencyKey: "host-key-1" });
@@ -67,7 +84,10 @@ describe("AgentHost Phase 3-4 path", () => {
       expect(result.kind).toBe("completed");
       if (result.kind !== "completed") return;
       expect(result.output.content).toContain("Mock response: hello");
-      expect((await store.listBackendEvents({ runId: result.run.id })).map((event) => event.event_type)).toEqual(["run_started", "text_delta", "run_completed"]);
+      const events = await store.listBackendEvents({ runId: result.run.id });
+      expect(events.map((event) => event.event_type)).toEqual(["run_started", "text_delta", "run_completed", "host_post_turn_failed"]);
+      expect(events.at(-1)?.payload.operation_id).toBe("presentation");
+      expect((await store.getBackendRun(result.run.id))?.status).toBe("completed");
       expect((await store.listMessages(session.id)).filter((message) => message.role === "agent")).toHaveLength(1);
       expect((await store.getSessionRunReservation({ runId: result.run.id }))?.status).toBe("released");
     } finally {
