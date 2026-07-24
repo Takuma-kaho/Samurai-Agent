@@ -293,8 +293,25 @@ try {
   // rejection must occur before the Registry Handler and must leave no
   // completed ToolRun or operation behind.
   const normalProviderProbes = normalProviderRejectionProbes();
+  const normalProviderFailures: Array<{ probe_id: string; message: string }> = [];
   for (const probe of normalProviderProbes) {
-    await assertNormalProviderProbeRejected({ runtime, workspace, sessionId: session.id, probe });
+    try {
+      await assertNormalProviderProbeRejected({ runtime, workspace, sessionId: session.id, probe });
+    } catch (error) {
+      normalProviderFailures.push({
+        probe_id: probe.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  if (normalProviderFailures.length > 0) {
+    process.stderr.write(`${JSON.stringify({
+      status: "failed",
+      gate: "ordinary_provider_rejections",
+      checked: normalProviderProbes.length,
+      failures: normalProviderFailures
+    }, null, 2)}\n`);
+    throw new Error(`ordinary_provider_rejection_checks_failed:${normalProviderFailures.length}`);
   }
 
   const createIntent = "Create a trusted generated surface";
