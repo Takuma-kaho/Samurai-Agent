@@ -249,6 +249,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         context_assembly: assembly.context,
         context_handoff: handoff,
         ...(assembly.availableTools ? { available_tools: [...assembly.availableTools] } : {}),
+        ...(activeToolBridge ? { tool_bridge: activeToolBridge } : {}),
         recent_messages: recentMessages,
         temporary_context: turn.request.temporaryContext,
         metadata,
