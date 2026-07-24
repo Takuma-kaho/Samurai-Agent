@@ -121,14 +121,15 @@ export class TurnExecutor {
             },
             gatewayBoundaryPolicy: currentPrepared.request.gatewayBoundaryPolicy,
             recordEvent: async (toolEvent) => {
+              const normalizedToolEvent = normalizeBackendOutputEvent(toolEvent);
               const recorded = await this.journal.appendCanonicalEvent({
                 runId: committedRun.id,
                 sessionId: committedRun.session_id,
                 attemptNo: committedRun.current_attempt ?? 1,
-                eventType: toolEvent.event_type,
-                payload: toolEvent.payload,
-                resourceRefs: toolEvent.resource_refs,
-                sourceEventId: `host-tool:${committedRun.id}:${committedRun.current_attempt ?? 1}:${toolEvent.tool_call_id ?? event.payload.tool_call_id ?? event.id}:${toolEvent.event_type}:${String(toolEvent.payload.action_id ?? toolEvent.payload.status ?? "result")}`
+                eventType: normalizedToolEvent.event_type,
+                payload: normalizedToolEvent.payload,
+                resourceRefs: normalizedToolEvent.resource_refs,
+                sourceEventId: `host-tool:${committedRun.id}:${committedRun.current_attempt ?? 1}:${normalizedToolEvent.tool_call_id ?? event.payload.tool_call_id ?? event.id}:${normalizedToolEvent.event_type}:${String(normalizedToolEvent.payload.action_id ?? normalizedToolEvent.payload.status ?? "result")}`
               });
               if (!recorded.duplicate) {
                 await this.publishCommittedEvent(recorded.event, committedRun, "tool_event_publisher");
