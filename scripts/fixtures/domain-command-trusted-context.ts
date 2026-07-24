@@ -147,7 +147,11 @@ const bridgeBackend: AgentBackend = {
       toolCallId: `trusted-${currentPhase}-tool-call`,
       toolInput: validProviderToolInput(currentPhase)
     });
-    yield { event_type: "run_completed", payload: { output_summary: `${currentPhase} completed` } };
+    yield {
+      event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      payload: { output_summary: `${currentPhase} completed` }
+    };
   }
 };
 
