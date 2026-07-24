@@ -1,10 +1,13 @@
-import type { AgentBackendRegistry } from "@samurai-agent/agent-backends";
-import { nowIso, type ObjectiveRecord, type WorkItemRecord } from "@samurai-agent/core-schemas";
+import { nowIso, type BackendRunRecord, type ObjectiveRecord, type WorkItemRecord } from "@samurai-agent/core-schemas";
 import type { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { createFollowUpWorkItem, steerWorkItem, transitionObjectiveState } from "./work-state-machine";
 
+export interface BackendRunCancellationPort {
+  cancelRun(runId: string): Promise<BackendRunRecord>;
+}
+
 export class DurableWorkCoordinator {
-  constructor(private readonly store: WorkspaceStore, private readonly backends: AgentBackendRegistry) {}
+  constructor(private readonly store: WorkspaceStore, private readonly runControl: BackendRunCancellationPort) {}
 
   async transitionObjective(objectiveId: string, action: "pause" | "resume" | "cancel", now = nowIso()) {
     const objective = await this.requireObjective(objectiveId);
@@ -16,14 +19,7 @@ export class DurableWorkCoordinator {
       for (const runId of transition.cancelBackendRunIds) {
         const run = await this.store.getBackendRun(runId);
         if (!run) continue;
-        const backend = this.backends.get(run.backend_id);
-        if (backend?.cancelRun) await backend.cancelRun(run.id);
-        await this.store.updateBackendRun({
-          ...run,
-          status: "cancelled",
-          error_code: "objective_cancelled",
-          completed_at: now
-        });
+        await this.runControl.cancelRun(run.id);
       }
     }
     return transition;

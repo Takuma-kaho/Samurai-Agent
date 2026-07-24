@@ -123,6 +123,7 @@ import {
   type ProviderDiagnostics,
   type ProviderRegistry
 } from "@samurai-agent/runtime";
+import { composeAgentRuntime } from "./composition/runtime";
 import {
   isDomainCommandId,
   isDomainQueryId,
@@ -160,6 +161,7 @@ export interface CreateApiServerOptions {
   externalAssistProvider?: ExternalAssistProvider | ExternalAssistProvider[];
   ownerToken?: string;
   corsOrigins?: string[];
+  productionLogger?: (message: string, metadata: Record<string, unknown>) => void;
 }
 
 export interface ApiServer {
@@ -455,13 +457,18 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   const backendWorkingDirectoryMode = resolveBackendWorkingDirectoryMode();
   const backendRegistry = options.backendRegistry ?? createDefaultAgentBackendRegistry(provider, process.env, { repoRoot });
   const temporaryContexts = createTemporaryContextStore();
-  runtime = new AgentRuntime(store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, undefined, {
+  const productionLogger = options.productionLogger ?? ((message: string, metadata: Record<string, unknown>) => {
+    console.error(message, metadata);
+  });
+  runtime = composeAgentRuntime({ store, emit, provider, backendRegistry, pluginRegistry, externalAssistProviders, workspaceOptions: {
     backendWorkingDirectoryMode,
     repoRoot,
     enableBackendBackgroundReview: options.automationScheduler !== false,
     detachBackgroundReview: true,
-    resolveTemporaryContextRef: (ref) => temporaryContexts.resolve(ref)
-  });
+    resolveTemporaryContextRef: (ref) => temporaryContexts.resolve(ref),
+    productionLogger
+  } });
+  await runtime.startup();
   await runtime.ensureStandardLearningJobs();
   const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
   const lifecycle: ApiServerLifecycleState = {
@@ -940,7 +947,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       res.status(201).json(publicDomainCommandResult(await runtime.runDomainCommand({
         command_id: commandId,
         input_source: "runtime_api",
-        idempotency_key: domainCommandIdempotencyKey(req),
+        idempotency_key: domainCommandIdempotencyKey(req, commandId === "chat.turn.run"),
         payload: ingress.payload
       }, runtimeRequestContext(req, ingress.context))));
     } catch (error) {
@@ -974,7 +981,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       res.status(201).json(publicDomainCommandResult(await runtime.runDomainCommand({
         command_id: req.params.commandId,
         input_source: "runtime_api",
-        idempotency_key: domainCommandIdempotencyKey(req),
+        idempotency_key: domainCommandIdempotencyKey(req, req.params.commandId === "chat.turn.run"),
         payload: ingress.payload
       }, runtimeRequestContext(req, ingress.context))));
     } catch (error) {
@@ -1375,7 +1382,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...(asSupportedLocale(req.body?.input_locale) ? { input_locale: req.body.input_locale } : {}),
           ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
           metadata: jsonRecord(req.body?.metadata)
-        }, { sessionId: req.params.sessionId });
+        }, { sessionId: req.params.sessionId }, { requireIdempotencyKey: true });
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -1396,7 +1403,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...(asSupportedLocale(req.body?.input_locale) ? { input_locale: req.body.input_locale } : {}),
           ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
           metadata: jsonRecord(req.body?.metadata)
-        });
+        }, {}, { requireIdempotencyKey: true });
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -3878,25 +3885,25 @@ export function closeApiServer(server: ApiServer): Promise<void> {
     if (!httpClosed.completed) errors.push(new Error("api_server_http_shutdown_timeout"));
     else if (httpClosed.error) errors.push(httpClosed.error);
     try {
-      const temporaryClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.temporaryContexts.close()), deadlineAt);
-      if (!temporaryClosed.completed) {
-        errors.push(new Error("api_server_temporary_context_shutdown_timeout"));
-        safeToCloseStore = false;
-      } else if (temporaryClosed.error) {
-        errors.push(temporaryClosed.error);
-      }
-    } catch (error) {
-      errors.push(error);
-      safeToCloseStore = false;
-    }
-    try {
-      const runtimeClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.runtime.shutdownMcpProcessPool()), deadlineAt);
+      const runtimeClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.runtime.shutdown()), deadlineAt);
       if (!runtimeClosed.completed) {
         errors.push(new Error("api_server_runtime_shutdown_timeout"));
         safeToCloseStore = false;
       } else if (runtimeClosed.error) {
         errors.push(runtimeClosed.error);
         safeToCloseStore = false;
+      }
+    } catch (error) {
+      errors.push(error);
+      safeToCloseStore = false;
+    }
+    try {
+      const temporaryClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.temporaryContexts.close()), deadlineAt);
+      if (!temporaryClosed.completed) {
+        errors.push(new Error("api_server_temporary_context_shutdown_timeout"));
+        safeToCloseStore = false;
+      } else if (temporaryClosed.error) {
+        errors.push(temporaryClosed.error);
       }
     } catch (error) {
       errors.push(error);
@@ -3975,11 +3982,14 @@ function runtimeRequestHttpStatus(code: RuntimeRequestError["code"]): number {
   return 409;
 }
 
-function domainCommandIdempotencyKey(req: Request): string | undefined {
+function domainCommandIdempotencyKey(req: Request, required = false): string | undefined {
   const header = req.get("Idempotency-Key");
   const body = typeof req.body?.idempotency_key === "string" ? req.body.idempotency_key : undefined;
   const key = header ?? body;
   if (key === undefined) {
+    if (required) {
+      throw new RuntimeRequestError("conflict", "idempotency_key_required");
+    }
     return undefined;
   }
   const normalized = key.trim();
@@ -4011,13 +4021,14 @@ async function runRuntimeApiCommand<Id extends DomainCommandId>(
   req: Request,
   commandId: Id,
   payload: unknown,
-  context: TrustedRuntimeApiContext = {}
+  context: TrustedRuntimeApiContext = {},
+  options: { requireIdempotencyKey?: boolean } = {}
 ): Promise<DomainOperationOutput<Id>> {
   const input = parseDomainOperationInput(commandId, payload);
   const result = await runtime.runDomainCommand({
     command_id: commandId,
     input_source: "runtime_api",
-    idempotency_key: domainCommandIdempotencyKey(req),
+    idempotency_key: domainCommandIdempotencyKey(req, options.requireIdempotencyKey === true),
     payload: input
   }, runtimeRequestContext(req, context));
   return result.result as DomainOperationOutput<Id>;
@@ -6225,6 +6236,7 @@ async function evaluationDiagnosticsPayload(
   const pendingEvaluationSuggestions = evaluationSuggestions.filter((suggestion) => suggestion.status === "proposed");
   const failedBackendRuns = backendRuns.filter((run) => run.status === "failed" || run.status === "cancelled");
   const waitingBackendRuns = backendRuns.filter((run) => run.status === "waiting_for_backend_input");
+  const outcomeUnknownBackendRuns = backendRuns.filter((run) => run.status === "outcome_unknown");
   const attentionToolRuns = toolRuns.filter((toolRun) => toolRun.status === "ignored" || toolRun.status === "failed");
   const issues: EvaluationDiagnosticsReport["issues"] = [];
 
@@ -6297,6 +6309,18 @@ async function evaluationDiagnosticsPayload(
     });
   }
 
+  for (const run of outcomeUnknownBackendRuns) {
+    issues.push({
+      code: "backend_run_outcome_unknown",
+      severity: "critical",
+      message: "Backend run outcome is unconfirmed. External processing may still be running; do not retry automatically.",
+      run_id: run.id,
+      status: run.status,
+      resource_ref: backendRunDiagnosticsRef(run),
+      created_at: run.completed_at ?? run.started_at
+    });
+  }
+
   for (const toolRun of attentionToolRuns) {
     issues.push({
       code: "tool_run_attention_required",
@@ -6320,6 +6344,7 @@ async function evaluationDiagnosticsPayload(
     backend_runs: backendRuns.length,
     failed_backend_runs: failedBackendRuns.length,
     waiting_backend_runs: waitingBackendRuns.length,
+    outcome_unknown_backend_runs: outcomeUnknownBackendRuns.length,
     tool_runs: toolRuns.length,
     ignored_or_failed_tool_runs: attentionToolRuns.length,
     workspace_changes: workspaceChanges.length,
@@ -6354,6 +6379,9 @@ function toolRunDiagnosticsRef(toolRun: ToolRunRecord): ResourceRef {
 }
 
 function evaluationDiagnosticsRecommendation(issues: EvaluationDiagnosticsReport["issues"]): string {
+  if (issues.some((issue) => issue.code === "backend_run_outcome_unknown")) {
+    return "Some backend outcomes are unconfirmed. Do not retry them automatically; verify external processing before taking action, while new turns remain available.";
+  }
   if (issues.some((issue) => issue.code === "evaluation_run_failed" || issue.code === "backend_run_failed" || issue.severity === "critical")) {
     return "Review failed evaluation, backend, or tool traces before treating backend quality as release-ready.";
   }
@@ -7494,16 +7522,18 @@ async function maybeCreateClientEventFromRuntimeEvent(runtime: AgentRuntime, nam
 }
 
 function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | undefined {
-  if (run.status !== "completed" && run.status !== "failed" && run.status !== "waiting_for_backend_input") {
+  if (run.status !== "completed" && run.status !== "failed" && run.status !== "waiting_for_backend_input" && run.status !== "outcome_unknown") {
     return undefined;
   }
   const createdAt = run.completed_at ?? run.started_at;
-  const statusLabel = run.status === "completed" ? "完了" : run.status === "failed" ? "失敗" : "確認待ち";
+  const statusLabel = run.status === "completed" ? "完了" : run.status === "failed" ? "失敗" : run.status === "outcome_unknown" ? "結果未確認" : "確認待ち";
   const notificationKind = run.status === "completed"
     ? "backend_run_completed"
     : run.status === "failed"
       ? "backend_run_failed"
-      : "backend_run_waiting_for_input";
+      : run.status === "outcome_unknown"
+        ? "backend_run_outcome_unknown"
+        : "backend_run_waiting_for_input";
   return {
     id: `client_event_${stableHash({
       kind: "backend_run_status_notification",
@@ -7543,7 +7573,9 @@ function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | un
 }
 
 function summarizeClientNotificationBody(run: BackendRunRecord): string {
-  const raw = run.status === "failed"
+  const raw = run.status === "outcome_unknown"
+    ? "結果を確認できませんでした。外部処理が続いている可能性があります。自動再試行はしません。新しいTurnは開始できます。"
+    : run.status === "failed"
     ? run.error_code ?? run.output_summary ?? run.input_summary
     : run.status === "waiting_for_backend_input"
       ? run.output_summary ?? "続行するには入力が必要です。"

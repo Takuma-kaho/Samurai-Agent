@@ -484,11 +484,12 @@ export const bHandlerExpectations = {
           temporary_context: [{ id: "temporary_fixture", kind: "desktop_screenshot", label: "Fixture screenshot", source_name: "screen.png", mime_type: "image/png", data_url: "data:image/png;base64,AAAA", file_path: "screens/screen.png", created_at: now, expires_at: "2099-01-01T00:00:00.000Z", metadata: { fixture: true } }],
           metadata: { fixture: "chat" }
         },
-        context: { sessionId: "session_fixture", surfaceOperation: { id: "surface_operation_fixture", kind: "message.submit" } },
+        context: { sessionId: "session_fixture", idempotencyKey: "handler-matrix-chat-turn", surfaceOperation: { id: "surface_operation_fixture", kind: "message.submit" } },
         branches: ["session:existing", "surface:present"],
         calls: [call("runChatTurn", {
           sessionId: "session_fixture",
           content: "Fixture chat",
+          idempotencyKey: "handler-matrix-chat-turn",
           backend_id: "backend_fixture",
           input_locale: "ja",
           output_locale: "en",
@@ -500,11 +501,11 @@ export const bHandlerExpectations = {
       {
         id: "create-defaults",
         input: { content: "Create fixture chat" },
-        context: { sessionId: undefined },
+        context: { sessionId: undefined, idempotencyKey: "handler-matrix-chat-turn" },
         branches: ["session:create", "surface:absent"],
         calls: [
           call("createChatSession", { output_locale: undefined }),
-          call("runChatTurn", { sessionId: "session_fixture", content: "Create fixture chat", backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} })
+          call("runChatTurn", { sessionId: "session_fixture", content: "Create fixture chat", idempotencyKey: "handler-matrix-chat-turn", backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} })
         ]
       }
     ]

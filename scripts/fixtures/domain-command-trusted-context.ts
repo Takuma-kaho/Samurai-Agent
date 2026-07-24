@@ -128,7 +128,7 @@ const bridgeBackend: AgentBackend = {
       const toolInput = field.startsWith("request.")
         ? { ...valid, request: { ...request, ...injected } }
         : { ...valid, ...injected };
-      await assert.rejects(
+      await expectProviderSpoofRejection(
         runtime.runBackendToolBridgeCall({
           runId: input.run_id,
           token: input.tool_bridge?.token ?? "",
@@ -136,7 +136,6 @@ const bridgeBackend: AgentBackend = {
           toolCallId: `trusted-${currentPhase}-spoof-${field.replaceAll(".", "-")}`,
           toolInput
         }),
-        (error: unknown) => isProviderSpoofRejection(error),
         `${field} must be rejected before the Generated Surface handler`
       );
       assert.equal(handlerInputs.length, handlersBeforeSpoof, `${field} reached the Generated Surface handler`);
@@ -148,7 +147,11 @@ const bridgeBackend: AgentBackend = {
       toolCallId: `trusted-${currentPhase}-tool-call`,
       toolInput: validProviderToolInput(currentPhase)
     });
-    yield { event_type: "run_completed", payload: { output_summary: `${currentPhase} completed` } };
+    yield {
+      event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      payload: { output_summary: `${currentPhase} completed` }
+    };
   }
 };
 
@@ -190,7 +193,7 @@ const normalProviderBackend: AgentBackend = {
   async *runTurn(input) {
     const probe = activeNormalProviderProbe;
     assert.ok(probe, "ordinary Provider backend was invoked without a probe");
-    const toolCallId = `${input.run_id}:${probe.id}`;
+    const toolCallId = normalProviderToolCallId(probe.id);
     // The event is what a normal provider emits.  In particular, it is not
     // marked as an already-executed Samurai tool bridge call.
     yield {
@@ -202,7 +205,11 @@ const normalProviderBackend: AgentBackend = {
         input: probe.input
       }
     };
-    yield { event_type: "run_completed", payload: { output_summary: `${probe.id} completed` } };
+    yield {
+      event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      payload: { output_summary: `${probe.id} completed` }
+    };
   }
 };
 
@@ -290,8 +297,25 @@ try {
   // rejection must occur before the Registry Handler and must leave no
   // completed ToolRun or operation behind.
   const normalProviderProbes = normalProviderRejectionProbes();
+  const normalProviderFailures: Array<{ probe_id: string; message: string }> = [];
   for (const probe of normalProviderProbes) {
-    await assertNormalProviderProbeRejected({ runtime, workspace, sessionId: session.id, probe });
+    try {
+      await assertNormalProviderProbeRejected({ runtime, workspace, sessionId: session.id, probe });
+    } catch (error) {
+      normalProviderFailures.push({
+        probe_id: probe.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  if (normalProviderFailures.length > 0) {
+    process.stderr.write(`${JSON.stringify({
+      status: "failed",
+      gate: "ordinary_provider_rejections",
+      checked: normalProviderProbes.length,
+      failures: normalProviderFailures
+    }, null, 2)}\n`);
+    throw new Error(`ordinary_provider_rejection_checks_failed:${normalProviderFailures.length}`);
   }
 
   const createIntent = "Create a trusted generated surface";
@@ -458,6 +482,29 @@ function isProviderSpoofRejection(error: unknown): boolean {
       || value.message.startsWith("untrusted_generated_surface_"));
 }
 
+async function expectProviderSpoofRejection(operation: Promise<unknown>, message: string): Promise<void> {
+  let rejected = false;
+  let error: unknown;
+  try {
+    await operation;
+  } catch (caught) {
+    rejected = true;
+    error = caught;
+  }
+  assert.equal(rejected, true, `${message}: expected a rejection`);
+  assert.equal(isProviderSpoofRejection(error), true, `${message}: ${describeRejection(error)}`);
+}
+
+function describeRejection(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const value = error as { name?: unknown; code?: unknown; message?: unknown };
+  return JSON.stringify({
+    name: value.name,
+    code: value.code,
+    message: value.message
+  });
+}
+
 function normalProviderRejectionProbes(): NormalProviderProbe[] {
   const commandInput: Record<string, JsonValue> = {
     title: "Ordinary Provider rejection fixture",
@@ -537,20 +584,32 @@ async function assertNormalProviderProbeRejected(input: {
     result = await input.runtime.runChatTurn({
       sessionId: input.sessionId,
       content: `Reject ${input.probe.id} before the Domain Operation Handler.`,
-      backend_id: normalProviderBackend.id
+      backend_id: normalProviderBackend.id,
+      idempotency_key: `trusted-context:${input.probe.id}`
     });
   } finally {
     activeNormalProviderProbe = undefined;
   }
 
-  const toolCallId = `${result.backendRun.id}:${input.probe.id}`;
+  const toolCallId = normalProviderToolCallId(input.probe.id);
   const outputEvents = result.backendEvents.filter((event) =>
     event.event_type === "tool_call_output" && event.payload.tool_call_id === toolCallId
   );
+  const storedEvents = await input.workspace.listBackendEvents({ runId: result.backendRun.id });
+  const persistedToolRuns = (await input.workspace.listToolRuns({ runId: result.backendRun.id }))
+    .filter((toolRun) => toolRun.tool_call_id === toolCallId);
+  const rejectionDiagnostic = JSON.stringify({
+    run_id: result.backendRun.id,
+    expected_tool_call_id: toolCallId,
+    result_events: result.backendEvents.map(compactBackendEvent),
+    stored_events: storedEvents.map(compactBackendEvent),
+    result_tool_runs: result.toolRuns.filter((toolRun) => toolRun.tool_call_id === toolCallId).map(compactToolRun),
+    stored_tool_runs: persistedToolRuns.map(compactToolRun)
+  });
   assert.equal(
     outputEvents.length,
     1,
-    `${input.probe.id} must emit one stable Provider tool rejection: ${JSON.stringify(outputEvents.map((event) => event.payload))}`
+    `${input.probe.id} must emit one stable Provider tool rejection: ${rejectionDiagnostic}`
   );
   const output = outputEvents[0]!.payload;
   assert.equal(output.status, "failed", `${input.probe.id} must never be reported as a successful Provider tool`);
@@ -558,8 +617,6 @@ async function assertNormalProviderProbeRejected(input: {
   assert.equal(output.reason, "runtime_tool_failed", `${input.probe.id} must expose only the stable Provider diagnostic`);
 
   const toolRuns = result.toolRuns.filter((toolRun) => toolRun.tool_call_id === toolCallId);
-  const persistedToolRuns = (await input.workspace.listToolRuns({ runId: result.backendRun.id }))
-    .filter((toolRun) => toolRun.tool_call_id === toolCallId);
   if (input.probe.kind === "command") {
     assert.equal(toolRuns.length, 1, `${input.probe.id} must create one failed ToolRun`);
     assert.equal(toolRuns[0]!.status, "failed", `${input.probe.id} ToolRun must not be completed`);
@@ -601,4 +658,28 @@ function assertServerOwnedTime(value: unknown, startedAt: number, finishedAt: nu
 
 function effectiveInventoryIds(inventory: { commands: Array<{ id: string }>; queries: Array<{ id: string }> }): Set<string> {
   return new Set([...inventory.commands, ...inventory.queries].map((entry) => entry.id));
+}
+
+function normalProviderToolCallId(probeId: string): string {
+  return `trusted-context:${probeId}`;
+}
+
+function compactBackendEvent(event: { event_type: string; source_event_id?: string; source_sequence?: number; payload: Record<string, JsonValue> }): Record<string, JsonValue> {
+  return {
+    event_type: event.event_type,
+    ...(event.source_event_id ? { source_event_id: event.source_event_id } : {}),
+    ...(event.source_sequence !== undefined ? { source_sequence: event.source_sequence } : {}),
+    ...(typeof event.payload.tool_call_id === "string" ? { tool_call_id: event.payload.tool_call_id } : {}),
+    ...(typeof event.payload.status === "string" ? { status: event.payload.status } : {}),
+    ...(typeof event.payload.error_code === "string" ? { error_code: event.payload.error_code } : {})
+  };
+}
+
+function compactToolRun(toolRun: { id: string; tool_call_id?: string; status: string; error_code?: string }): Record<string, JsonValue> {
+  return {
+    id: toolRun.id,
+    ...(toolRun.tool_call_id ? { tool_call_id: toolRun.tool_call_id } : {}),
+    status: toolRun.status,
+    ...(toolRun.error_code ? { error_code: toolRun.error_code } : {})
+  };
 }

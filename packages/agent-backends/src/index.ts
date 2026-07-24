@@ -1,4 +1,5 @@
 import {
+  createId,
   type AgentBackendKind,
   type BackendCapabilityId,
   type BackendCapabilityStatus,
@@ -62,6 +63,7 @@ export interface SessionSummaryLike {
 export interface BackendRunInput {
   run_id: string;
   session_id: string;
+  backend_session_id?: string;
   input_message_id: string;
   workspace_root?: string;
   working_directory?: string;
@@ -118,6 +120,7 @@ export interface BackendRunInput {
   context_intent?: "light_chat" | "contextual_chat" | "workspace_task";
   expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view" | "generated_surface">;
   tool_bridge?: BackendToolBridge;
+  abort_signal?: AbortSignal;
 }
 
 export interface BackendToolBridgeToolDescriptor {
@@ -142,6 +145,9 @@ export interface BackendOutputEvent {
   payload: Record<string, JsonValue>;
   resource_refs?: ResourceRef[];
   tool_call_id?: string;
+  source_event_id?: string;
+  source_sequence?: number;
+  terminal_evidence?: BackendTerminalEvidence;
 }
 
 export interface BackendSessionInput {
@@ -165,9 +171,26 @@ export interface AgentBackend {
   startSession?(input: BackendSessionInput): Promise<BackendSessionHandle>;
   runTurn(input: BackendRunInput): AsyncIterable<BackendOutputEvent>;
   resumeRun?(runId: string, input: Record<string, JsonValue>): AsyncIterable<BackendOutputEvent>;
-  cancelRun?(runId: string): Promise<void>;
+  cancelRun?(runId: string): Promise<BackendCancelResult>;
   streamEvents?(runId: string): AsyncIterable<BackendOutputEvent>;
 }
+
+export type RuntimeFailureCauseCategory = "configuration" | "provider" | "transport" | "cancellation" | "process" | "runtime" | "unknown";
+export interface BackendRuntimeFailure {
+  code: string;
+  message: string;
+  retryable: boolean;
+  causeCategory: RuntimeFailureCauseCategory;
+}
+export type BackendIndeterminateEvidence = { kind: "indeterminate"; reason: "transport_lost" | "cancel_unconfirmed" | "runtime_state_unavailable"; providerStarted: boolean; mayHaveSideEffects: boolean };
+export type BackendTerminalEvidence =
+  | { kind: "completed"; source: "canonical_event" | "process_exit" | "provider_terminal_response" | "owned_loop_return" }
+  | { kind: "failed"; source: "canonical_event" | "process_exit" | "provider_terminal_response" | "owned_loop_return"; error: BackendRuntimeFailure }
+  | { kind: "cancelled"; source: "canonical_event" | "process_exit" | "provider_terminal_response" | "owned_loop_return" }
+  | { kind: "not_started"; source: "preflight_rejection" }
+  | BackendIndeterminateEvidence;
+export type BackendSettledEvidence = Exclude<BackendTerminalEvidence, BackendIndeterminateEvidence>;
+export type BackendCancelResult = { kind: "settled"; evidence: BackendSettledEvidence } | { kind: "requested" } | { kind: "unsupported" };
 
 export interface AgentBackendStatus {
   id: string;
@@ -215,6 +238,8 @@ interface BackendEventStreamState {
   events: BackendOutputEvent[];
   settled: boolean;
   waiters: Array<() => void>;
+  adapterIdentityPrefix: string;
+  nextAdapterEventSequence: number;
 }
 
 export class AgentBackendRegistry {
@@ -319,6 +344,10 @@ export class MockBackend implements AgentBackend {
   }
 
   async *runTurn(input: BackendRunInput): AsyncIterable<BackendOutputEvent> {
+    if (input.abort_signal?.aborted) {
+      yield cancelledBeforeStartEvent(this.label);
+      return;
+    }
     yield {
       event_type: "run_started",
       payload: {
@@ -332,9 +361,24 @@ export class MockBackend implements AgentBackend {
     };
     yield {
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "owned_loop_return" },
       payload: { output_summary: "Mock response completed." }
     };
   }
+}
+
+function cancelledBeforeStartEvent(label: string): BackendOutputEvent {
+  return {
+    event_type: "run_failed",
+    terminal_evidence: { kind: "cancelled", source: "owned_loop_return" },
+    payload: {
+      error_code: "backend_cancelled_before_start",
+      message: `${label} was cancelled before starting.`,
+      reason: "already_aborted",
+      retryable: false,
+      cause_category: "cancellation"
+    }
+  };
 }
 
 export interface ExternalCliBackendOptions {
@@ -347,6 +391,7 @@ export interface ExternalCliBackendOptions {
   streamProbeArgs?: string[];
   streamProbeTimeoutMs?: number;
   resumeArgs?: string[];
+  sourceIdentityFactory?: () => string;
   capabilityProbeResults?: Array<Omit<BackendCapabilityStatus, "backend_id" | "checked_at"> & { checked_at?: string }>;
 }
 
@@ -360,6 +405,7 @@ export class ExternalCliBackend implements AgentBackend {
   private readonly streamProbeArgs?: string[];
   private readonly streamProbeTimeoutMs: number;
   private readonly resumeArgs?: string[];
+  private readonly sourceIdentityFactory: () => string;
   private readonly capabilityProbeResults: ExternalCliBackendOptions["capabilityProbeResults"];
   private readonly backendSessionIds = new Map<string, string>();
   private readonly activeRuns = new Map<string, { child: ChildProcessWithoutNullStreams; cancelled: boolean }>();
@@ -375,6 +421,7 @@ export class ExternalCliBackend implements AgentBackend {
     this.streamProbeArgs = options.streamProbeArgs && options.streamProbeArgs.length > 0 ? options.streamProbeArgs : undefined;
     this.streamProbeTimeoutMs = options.streamProbeTimeoutMs ?? 5_000;
     this.resumeArgs = options.resumeArgs && options.resumeArgs.length > 0 ? options.resumeArgs : undefined;
+    this.sourceIdentityFactory = options.sourceIdentityFactory ?? (() => createId("backend_stream"));
     this.capabilityProbeResults = options.capabilityProbeResults;
   }
 
@@ -467,7 +514,14 @@ export class ExternalCliBackend implements AgentBackend {
   }
 
   async *runTurn(input: BackendRunInput): AsyncIterable<BackendOutputEvent> {
+    if (input.backend_session_id) this.backendSessionIds.set(input.run_id, input.backend_session_id);
     const streamState = this.beginEventStream(input.run_id);
+    if (input.abort_signal?.aborted) {
+      const cancelled = this.appendStreamEvent(input.run_id, cancelledBeforeStartEvent(this.label));
+      this.settleEventStream(input.run_id, streamState);
+      yield cancelled;
+      return;
+    }
     const startedEvent: BackendOutputEvent = {
       event_type: "run_started",
       payload: {
@@ -475,12 +529,12 @@ export class ExternalCliBackend implements AgentBackend {
         input_summary: summarize(input.user_input)
       }
     };
-    this.appendStreamEvent(input.run_id, startedEvent);
-    yield startedEvent;
+    yield this.appendStreamEvent(input.run_id, startedEvent);
 
     if (!this.command) {
       const failedEvent: BackendOutputEvent = {
         event_type: "run_failed",
+        terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
         payload: {
           error_code: "backend_not_configured",
           message: `${this.label} command is not configured.`,
@@ -488,15 +542,16 @@ export class ExternalCliBackend implements AgentBackend {
           retryable: false
         }
       };
-      this.appendStreamEvent(input.run_id, failedEvent);
+      const normalizedFailedEvent = this.appendStreamEvent(input.run_id, failedEvent);
       this.settleEventStream(input.run_id, streamState);
-      yield failedEvent;
+      yield normalizedFailedEvent;
       return;
     }
     const commandProbe = resolveExternalCommandProbe(this.command);
     if (!commandProbe.resolved) {
       const failedEvent: BackendOutputEvent = {
         event_type: "run_failed",
+        terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
         payload: {
           error_code: "backend_command_not_found",
           message: `${this.label} command could not be resolved.`,
@@ -505,9 +560,15 @@ export class ExternalCliBackend implements AgentBackend {
           command_name: commandProbe.command_name ?? "unknown"
         }
       };
-      this.appendStreamEvent(input.run_id, failedEvent);
+      const normalizedFailedEvent = this.appendStreamEvent(input.run_id, failedEvent);
       this.settleEventStream(input.run_id, streamState);
-      yield failedEvent;
+      yield normalizedFailedEvent;
+      return;
+    }
+    if (input.abort_signal?.aborted) {
+      const cancelled = this.appendStreamEvent(input.run_id, cancelledBeforeStartEvent(this.label));
+      this.settleEventStream(input.run_id, streamState);
+      yield cancelled;
       return;
     }
 
@@ -528,13 +589,21 @@ export class ExternalCliBackend implements AgentBackend {
         env: externalBackendEnv(input),
         cwd: input.working_directory,
         label: this.label,
+        abortSignal: input.abort_signal,
         registerChild: (child) => this.activeRuns.set(input.run_id, { child, cancelled: false }),
+        markChildCancelled: (child) => {
+          const active = this.activeRuns.get(input.run_id);
+          if (active?.child === child) active.cancelled = true;
+        },
         isCancelled: () => this.activeRuns.get(input.run_id)?.cancelled === true,
-        unregisterChild: () => this.activeRuns.delete(input.run_id)
+        unregisterChild: (child) => {
+          if (this.activeRuns.get(input.run_id)?.child === child) {
+            this.activeRuns.delete(input.run_id);
+          }
+        }
       })) {
         this.rememberBackendSessionId(input.run_id, event);
-        this.appendStreamEvent(input.run_id, event);
-        yield event;
+        yield this.appendStreamEvent(input.run_id, event);
       }
     } finally {
       this.settleEventStream(input.run_id, streamState);
@@ -546,6 +615,7 @@ export class ExternalCliBackend implements AgentBackend {
     if (!streamState) {
       yield {
         event_type: "run_failed",
+        terminal_evidence: { kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true },
         payload: {
           error_code: "backend_stream_unavailable",
           message: `${this.label} has no buffered events for this run.`,
@@ -574,13 +644,14 @@ export class ExternalCliBackend implements AgentBackend {
     }
   }
 
-  async cancelRun(runId: string): Promise<void> {
+  async cancelRun(runId: string): Promise<BackendCancelResult> {
     const state = this.activeRuns.get(runId);
     if (!state) {
-      return;
+      return { kind: "unsupported" };
     }
     state.cancelled = true;
     state.child.kill("SIGTERM");
+    return { kind: "requested" };
   }
 
   async *resumeRun(runId: string, input: Record<string, JsonValue> = {}): AsyncIterable<BackendOutputEvent> {
@@ -588,8 +659,10 @@ export class ExternalCliBackend implements AgentBackend {
       yield* this.runResumeCommand(runId, input);
       return;
     }
-    yield {
+    const streamState = this.beginEventStream(runId);
+    const failedEvent: BackendOutputEvent = {
       event_type: "run_failed",
+      terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
       payload: {
         error_code: "backend_resume_unsupported",
         message: `${this.label} does not support resume yet.`,
@@ -598,12 +671,16 @@ export class ExternalCliBackend implements AgentBackend {
         run_id: runId
       }
     };
+    yield this.appendStreamEvent(runId, failedEvent);
+    this.settleEventStream(runId, streamState);
   }
 
   private async *runResumeCommand(runId: string, input: Record<string, JsonValue>): AsyncIterable<BackendOutputEvent> {
+    const streamState = this.beginEventStream(runId);
     if (!this.command) {
-      yield {
+      const failedEvent: BackendOutputEvent = {
         event_type: "run_failed",
+        terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
         payload: {
           error_code: "backend_not_configured",
           message: `${this.label} command is not configured.`,
@@ -611,12 +688,15 @@ export class ExternalCliBackend implements AgentBackend {
           retryable: false
         }
       };
+      yield this.appendStreamEvent(runId, failedEvent);
+      this.settleEventStream(runId, streamState);
       return;
     }
     const commandProbe = resolveExternalCommandProbe(this.command);
     if (!commandProbe.resolved) {
-      yield {
+      const failedEvent: BackendOutputEvent = {
         event_type: "run_failed",
+        terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
         payload: {
           error_code: "backend_command_not_found",
           message: `${this.label} command could not be resolved.`,
@@ -625,13 +705,16 @@ export class ExternalCliBackend implements AgentBackend {
           command_name: commandProbe.command_name ?? "unknown"
         }
       };
+      yield this.appendStreamEvent(runId, failedEvent);
+      this.settleEventStream(runId, streamState);
       return;
     }
     const backendSessionId = stringValue(input.backend_session_id) || this.backendSessionIds.get(runId) || "";
-    const args = interpolateBackendArgs(this.resumeArgs ?? [], { runId, backendSessionId });
-    if (args.some((arg) => arg.includes("{backend_session_id}"))) {
-      yield {
+    const resumeRequiresSession = this.resumeArgs?.some((arg) => arg.includes("{backend_session_id}")) === true;
+    if (resumeRequiresSession && !backendSessionId) {
+      const failedEvent: BackendOutputEvent = {
         event_type: "run_failed",
+        terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
         payload: {
           error_code: "backend_native_session_missing",
           message: `${this.label} cannot resume because no backend native session id is known.`,
@@ -640,9 +723,11 @@ export class ExternalCliBackend implements AgentBackend {
           run_id: runId
         }
       };
+      yield this.appendStreamEvent(runId, failedEvent);
+      this.settleEventStream(runId, streamState);
       return;
     }
-    const streamState = this.beginEventStream(runId);
+    const args = interpolateBackendArgs(this.resumeArgs ?? [], { runId, backendSessionId });
     try {
       for await (const event of runCommandEvents({
         runId,
@@ -665,11 +750,14 @@ export class ExternalCliBackend implements AgentBackend {
         label: this.label,
         registerChild: (child) => this.activeRuns.set(runId, { child, cancelled: false }),
         isCancelled: () => this.activeRuns.get(runId)?.cancelled === true,
-        unregisterChild: () => this.activeRuns.delete(runId)
+        unregisterChild: (child) => {
+          if (this.activeRuns.get(runId)?.child === child) {
+            this.activeRuns.delete(runId);
+          }
+        }
       })) {
         this.rememberBackendSessionId(runId, event);
-        this.appendStreamEvent(runId, event);
-        yield event;
+        yield this.appendStreamEvent(runId, event);
       }
     } finally {
       this.settleEventStream(runId, streamState);
@@ -684,23 +772,56 @@ export class ExternalCliBackend implements AgentBackend {
   }
 
   private beginEventStream(runId: string): BackendEventStreamState {
+    const existing = this.eventStreams.get(runId);
+    if (existing) {
+      existing.settled = false;
+      existing.adapterIdentityPrefix = this.adapterIdentityPrefix(runId);
+      existing.nextAdapterEventSequence = 1;
+      this.eventStreams.delete(runId);
+      this.eventStreams.set(runId, existing);
+      return existing;
+    }
     const streamState: BackendEventStreamState = {
       events: [],
       settled: false,
-      waiters: []
+      waiters: [],
+      adapterIdentityPrefix: this.adapterIdentityPrefix(runId),
+      nextAdapterEventSequence: 1
     };
     this.eventStreams.set(runId, streamState);
     this.trimEventStreams();
     return streamState;
   }
 
-  private appendStreamEvent(runId: string, event: BackendOutputEvent): void {
+  private appendStreamEvent(runId: string, event: BackendOutputEvent): BackendOutputEvent {
     const streamState = this.eventStreams.get(runId);
     if (!streamState) {
-      return;
+      return event;
     }
-    streamState.events.push(event);
+    const { source_event_id: rawSourceEventId, source_sequence: rawSourceSequence, ...eventWithoutIdentity } = event;
+    const sourceEventId = typeof rawSourceEventId === "string" && rawSourceEventId.trim() ? rawSourceEventId : undefined;
+    const sourceSequence = positiveSourceSequence(rawSourceSequence);
+    const normalizedBase: BackendOutputEvent = {
+      ...eventWithoutIdentity,
+      ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
+      ...(sourceSequence !== undefined ? { source_sequence: sourceSequence } : {})
+    };
+    const normalized = sourceEventId !== undefined || sourceSequence !== undefined
+      ? normalizedBase
+      : {
+          ...normalizedBase,
+          source_event_id: `${streamState.adapterIdentityPrefix}:adapter:${streamState.nextAdapterEventSequence}`
+        };
+    if (sourceEventId === undefined && sourceSequence === undefined) {
+      streamState.nextAdapterEventSequence += 1;
+    }
+    streamState.events.push(normalized);
     this.wakeEventStream(streamState);
+    return normalized;
+  }
+
+  private adapterIdentityPrefix(runId: string): string {
+    return `${runId}:adapter-stream:${this.sourceIdentityFactory()}`;
   }
 
   private settleEventStream(runId: string, streamState: BackendEventStreamState): void {
@@ -709,6 +830,7 @@ export class ExternalCliBackend implements AgentBackend {
     }
     streamState.settled = true;
     this.wakeEventStream(streamState);
+    this.trimEventStreams();
   }
 
   private wakeEventStream(streamState: BackendEventStreamState): void {
@@ -719,13 +841,14 @@ export class ExternalCliBackend implements AgentBackend {
   }
 
   private trimEventStreams(): void {
-    const maxStreams = 50;
-    while (this.eventStreams.size > maxStreams) {
-      const firstKey = this.eventStreams.keys().next().value;
+    const maxSettledStreams = 50;
+    while ([...this.eventStreams.values()].filter((state) => state.settled).length > maxSettledStreams) {
+      const firstKey = [...this.eventStreams.entries()].find(([, state]) => state.settled)?.[0];
       if (!firstKey) {
         return;
       }
       this.eventStreams.delete(firstKey);
+      this.backendSessionIds.delete(firstKey);
     }
   }
 }
@@ -1131,12 +1254,18 @@ interface CommandRunInput {
   env?: Record<string, string>;
   cwd?: string;
   label: string;
+  abortSignal?: AbortSignal;
   registerChild?: (child: ChildProcessWithoutNullStreams) => void;
+  markChildCancelled?: (child: ChildProcessWithoutNullStreams) => void;
   isCancelled?: () => boolean;
-  unregisterChild?: () => void;
+  unregisterChild?: (child: ChildProcessWithoutNullStreams) => void;
 }
 
 async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendOutputEvent> {
+  if (input.abortSignal?.aborted) {
+    yield cancelledBeforeStartEvent(input.label);
+    return;
+  }
   const child = spawn(input.command, input.args, {
     cwd: input.cwd,
     stdio: ["pipe", "pipe", "pipe"],
@@ -1146,13 +1275,43 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
     }
   });
   input.registerChild?.(child);
+  let childOwnershipReleased = false;
+  let cancellationRequestedAtClose = false;
+  let childClosed = false;
+  let abortListenerAttached = false;
+  const removeAbortListener = () => {
+    if (!abortListenerAttached || !input.abortSignal) return;
+    abortListenerAttached = false;
+    input.abortSignal.removeEventListener("abort", handleAbort);
+  };
+  const handleAbort = () => {
+    input.markChildCancelled?.(child);
+    if (!childClosed && child.pid !== undefined && !child.killed) {
+      child.kill("SIGTERM");
+    }
+  };
+  const releaseChildOwnership = () => {
+    if (childOwnershipReleased) return;
+    cancellationRequestedAtClose = input.isCancelled?.() === true;
+    removeAbortListener();
+    childOwnershipReleased = true;
+    input.unregisterChild?.(child);
+  };
+  child.once("close", releaseChildOwnership);
+  if (input.abortSignal) {
+    input.abortSignal.addEventListener("abort", handleAbort, { once: true });
+    abortListenerAttached = true;
+    if (input.abortSignal.aborted) handleAbort();
+  }
   const queue: BackendOutputEvent[] = [];
   let wake: (() => void) | undefined;
   let stdout = "";
   let stdoutLineBuffer = "";
   let stderrLineBuffer = "";
   let stderr = "";
+  let processErrorSummary = "";
   let settled = false;
+  let disposed = false;
   let terminalEventSeen = false;
   let pendingTerminalEvent: BackendOutputEvent | undefined;
   let textDeltaSeen = false;
@@ -1170,6 +1329,20 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
     wake = undefined;
   };
   const push = (event: BackendOutputEvent) => {
+    if (disposed) {
+      return;
+    }
+    if (event.terminal_evidence) {
+      if (terminalEventSeen) {
+        return;
+      }
+      terminalEventSeen = true;
+      pendingTerminalEvent = event;
+      return;
+    }
+    if (terminalEventSeen) {
+      return;
+    }
     if (
       event.event_type === "host_progress"
       && event.payload.display_kind === "activity"
@@ -1194,13 +1367,6 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
     }
     if (event.event_type === "text_delta" && typeof event.payload.text === "string" && event.payload.text.trim()) {
       textDeltaSeen = true;
-    }
-    if (event.event_type === "run_completed" || event.event_type === "run_failed") {
-      terminalEventSeen = true;
-      if (input.backendKind === "codex" && event.event_type === "run_completed") {
-        pendingTerminalEvent = event;
-        return;
-      }
     }
     enqueue(event);
   };
@@ -1229,24 +1395,19 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
     for (const timer of silenceTimers) {
       clearTimeout(timer);
     }
-    input.unregisterChild?.();
     wake?.();
     wake = undefined;
   };
-  const settle = (event: BackendOutputEvent) => {
-    if (settled) {
-      return;
+  const emitPendingTerminal = () => {
+    const terminal = pendingTerminalEvent;
+    pendingTerminalEvent = undefined;
+    if (terminal) {
+      enqueue(processErrorSummary
+        ? { ...terminal, payload: { ...terminal.payload, process_error_summary: processErrorSummary } }
+        : terminal);
     }
-    settled = true;
-    for (const timer of silenceTimers) {
-      clearTimeout(timer);
-    }
-    push(event);
-    input.unregisterChild?.();
   };
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
+  const handleStdoutData = (chunk: string) => {
     stdout += chunk;
     stdoutLineBuffer += chunk;
     const lines = stdoutLineBuffer.split(/\r?\n/);
@@ -1256,8 +1417,8 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
         push(event);
       }
     }
-  });
-  child.stderr.on("data", (chunk: string) => {
+  };
+  const handleStderrData = (chunk: string) => {
     stderr += chunk;
     stderrLineBuffer += chunk;
     const lines = stderrLineBuffer.split(/\r?\n/);
@@ -1267,20 +1428,45 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
         push(event);
       }
     }
-  });
+  };
+  const handleStdinError = () => {
+    // Spawn errors are normalized through the child "error" event.
+  };
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", handleStdoutData);
+  child.stderr.on("data", handleStderrData);
   child.on("error", (error) => {
-    settle({
-      event_type: "run_failed",
-      payload: {
-        error_code: "backend_spawn_failed",
-        message: `${input.label} failed to start.`,
-        reason: "spawn_failed",
-        retryable: false,
-        stderr_summary: summarize(stderr || error.message)
-      }
-    });
+    if (child.pid === undefined) {
+      push({
+        event_type: "run_failed",
+        terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
+        payload: {
+          error_code: "backend_spawn_failed",
+          message: `${input.label} failed to start.`,
+          reason: "spawn_failed",
+          retryable: false,
+          stderr_summary: safeFailureMessage(stderr || error.message, "")
+        }
+      });
+      emitPendingTerminal();
+      finish();
+      return;
+    }
+    processErrorSummary = safeFailureMessage(error.message, "Backend process reported an execution error.");
   });
-  child.on("close", (exitCode) => {
+  child.on("close", (exitCode, signalCode) => {
+    childClosed = true;
+    if (disposed) {
+      if (input.backendKind === "codex") {
+        cleanupCodexOutputLastMessage(input.runId);
+      }
+      child.stdout.removeAllListeners();
+      child.stderr.removeAllListeners();
+      child.stdin.removeAllListeners();
+      child.removeAllListeners();
+      return;
+    }
     for (const bufferedEvent of parseCliOutputEventsForBackend(stdoutLineBuffer, input.backendKind, "stdout")) {
       push(bufferedEvent);
     }
@@ -1289,24 +1475,10 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
       push(bufferedEvent);
     }
     stderrLineBuffer = "";
-    if (input.isCancelled?.() && !terminalEventSeen) {
-      settle({
-        event_type: "run_failed",
-        payload: {
-          error_code: "backend_cancelled",
-          message: `${input.label} was cancelled.`,
-          reason: "cancelled",
-          retryable: false,
-          exit_code: exitCode,
-          stderr_summary: summarize(stderr)
-        }
-      });
-      return;
-    }
     if (terminalEventSeen) {
-      const fallbackText = input.backendKind === "codex" && !textDeltaSeen ? readCodexOutputLastMessage(input.runId) : "";
+      const fallbackText = input.backendKind === "codex" && pendingTerminalEvent?.terminal_evidence?.kind === "completed" && !textDeltaSeen ? readCodexOutputLastMessage(input.runId) : "";
       if (fallbackText) {
-        push({
+        enqueue({
           event_type: "text_delta",
           payload: {
             provider_event_type: "output_last_message",
@@ -1314,11 +1486,7 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
           }
         });
       }
-      if (pendingTerminalEvent) {
-        const terminal = pendingTerminalEvent;
-        pendingTerminalEvent = undefined;
-        enqueue(terminal);
-      }
+      emitPendingTerminal();
       if (input.backendKind === "codex") {
         cleanupCodexOutputLastMessage(input.runId);
       }
@@ -1340,25 +1508,57 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
         cleanupCodexOutputLastMessage(input.runId);
         enqueue({
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "process_exit" },
           payload: {
             output_summary: meaningfulCliSummary(stdout),
-            stderr_summary: summarize(stderr)
+            ...(processErrorSummary ? { process_error_summary: processErrorSummary } : {}),
+            stderr_summary: safeFailureMessage(stderr, "")
           }
         });
         finish();
         return;
       }
-      settle({
+      enqueue({
         event_type: "run_completed",
+        terminal_evidence: { kind: "completed", source: "process_exit" },
         payload: {
           output_summary: meaningfulCliSummary(stdout),
-          stderr_summary: summarize(stderr)
+          ...(processErrorSummary ? { process_error_summary: processErrorSummary } : {}),
+          stderr_summary: safeFailureMessage(stderr, "")
         }
       });
+      finish();
       return;
     }
-    settle({
+    const cancellationRequested = cancellationRequestedAtClose || input.isCancelled?.() === true;
+    const cancellationConfirmed = cancellationRequested && (signalCode === "SIGTERM" || exitCode === 143);
+    if (cancellationConfirmed) {
+      enqueue({
+        event_type: "run_failed",
+        terminal_evidence: { kind: "cancelled", source: "process_exit" },
+        payload: {
+          error_code: "backend_cancelled",
+          message: `${input.label} was cancelled.`,
+          reason: "cancelled",
+          retryable: false,
+          exit_code: exitCode,
+          ...(processErrorSummary ? { process_error_summary: processErrorSummary } : {}),
+          stderr_summary: safeFailureMessage(stderr, "")
+        }
+      });
+      finish();
+      return;
+    }
+    enqueue({
       event_type: "run_failed",
+      terminal_evidence: { kind: "failed", source: "process_exit", error: {
+        code: input.backendKind === "codex" && isCodexExecutionRootError(stderr) ? "backend_execution_root_not_ready" : "backend_failed",
+        message: input.backendKind === "codex" && isCodexExecutionRootError(stderr)
+          ? "Codex could not run because the Workspace execution root is not ready."
+          : `${input.label} failed.`,
+        retryable: false,
+        causeCategory: "process"
+      } },
       payload: {
         error_code: input.backendKind === "codex" && isCodexExecutionRootError(stderr) ? "backend_execution_root_not_ready" : "backend_failed",
         message: input.backendKind === "codex" && isCodexExecutionRootError(stderr)
@@ -1367,32 +1567,60 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
         reason: "exit_code",
         retryable: false,
         exit_code: exitCode,
-        stderr_summary: summarize(stderr)
+        ...(processErrorSummary ? { process_error_summary: processErrorSummary } : {}),
+        stderr_summary: safeFailureMessage(stderr, "")
       }
     });
     if (input.backendKind === "codex") {
       cleanupCodexOutputLastMessage(input.runId);
     }
+    finish();
   });
-  child.stdin.on("error", () => {
-    // Spawn errors are normalized through the child "error" event.
-  });
+  child.stdin.on("error", handleStdinError);
   try {
-    child.stdin.end(input.input);
-  } catch {
-    // The child "error" or "close" event will produce a normalized run_failed event.
-  }
-
-  while (!settled || queue.length > 0) {
-    if (queue.length === 0) {
-      await new Promise<void>((resolve) => {
-        wake = resolve;
-      });
-      continue;
+    try {
+      child.stdin.end(input.input);
+    } catch {
+      // The child "error" or "close" event will produce a normalized run_failed event.
     }
-    const next = queue.shift();
-    if (next) {
-      yield next;
+
+    while (!settled || queue.length > 0) {
+      if (queue.length === 0) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        continue;
+      }
+      const next = queue.shift();
+      if (next) {
+        yield next;
+      }
+    }
+  } finally {
+    disposed = true;
+    removeAbortListener();
+    for (const timer of silenceTimers) {
+      clearTimeout(timer);
+    }
+    wake?.();
+    wake = undefined;
+    if (!childClosed && child.pid !== undefined && !child.killed) {
+      child.kill("SIGTERM");
+    }
+    child.stdout.off("data", handleStdoutData);
+    child.stderr.off("data", handleStderrData);
+    if (childClosed) {
+      child.stdin.off("error", handleStdinError);
+      child.removeAllListeners();
+    } else {
+      // Keep Node's internal stdio close listeners intact. Removing every
+      // listener here prevents ChildProcess from ever emitting its real close.
+      // The process may ignore SIGTERM, so drain owned pipes until that close.
+      child.stdout.resume();
+      child.stderr.resume();
+    }
+    if (input.backendKind === "codex") {
+      cleanupCodexOutputLastMessage(input.runId);
     }
   }
 }
@@ -1466,7 +1694,7 @@ function parseStructuredCliRecord(parsed: Record<string, unknown>, backendKind: 
   if (backendKind === "claude_code") {
     const events = claudeStreamJsonToBackendEvents(parsed);
     if (events.length) {
-      return events;
+      return attachProviderSourceIdentity(parsed, events);
     }
     const event = cliJsonToBackendEvent(parsed);
     return event ? [event] : [];
@@ -1474,7 +1702,7 @@ function parseStructuredCliRecord(parsed: Record<string, unknown>, backendKind: 
   if (backendKind === "codex") {
     const codexEvents = codexStreamJsonToBackendEvents(parsed);
     if (codexEvents.length) {
-      return codexEvents;
+      return attachProviderSourceIdentity(parsed, codexEvents);
     }
     if (isCodexStreamJson(parsed)) {
       return [];
@@ -1484,11 +1712,11 @@ function parseStructuredCliRecord(parsed: Record<string, unknown>, backendKind: 
   }
   const events = claudeStreamJsonToBackendEvents(parsed);
   if (events.length) {
-    return events;
+    return attachProviderSourceIdentity(parsed, events);
   }
   const codexEvents = codexStreamJsonToBackendEvents(parsed);
   if (codexEvents.length) {
-    return codexEvents;
+    return attachProviderSourceIdentity(parsed, codexEvents);
   }
   if (isCodexStreamJson(parsed)) {
     return [];
@@ -1596,6 +1824,9 @@ function claudeStreamJsonToBackendEvents(value: Record<string, unknown>): Backen
     const payload = recordValue(value.payload) ?? {};
     return [{
       event_type: isError ? "run_failed" : "run_completed",
+      terminal_evidence: isError
+        ? { kind: "failed", source: "provider_terminal_response", error: providerError(value, "backend_result_error", "Backend result reported an error.") }
+        : { kind: "completed", source: "provider_terminal_response" },
       payload: {
         ...backendSessionPayload(value),
         provider_event_type: "result",
@@ -1647,6 +1878,7 @@ function codexStreamJsonToBackendEvents(value: Record<string, unknown>): Backend
     const outputSummary = meaningfulCodexCompletionSummary(value);
     return [{
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       payload: {
         ...providerPayload,
         ...(outputSummary ? { output_summary: outputSummary } : {})
@@ -1657,6 +1889,7 @@ function codexStreamJsonToBackendEvents(value: Record<string, unknown>): Backend
   if (type === "turn.failed" || type === "task.failed" || type === "session.failed") {
     return [{
       event_type: "run_failed",
+      terminal_evidence: { kind: "failed", source: "provider_terminal_response", error: providerError(value, "backend_result_error", "Codex reported an error.") },
       payload: {
         ...providerPayload,
         error_code: stringValue(value.error_code) || "backend_result_error",
@@ -2068,7 +2301,7 @@ function probeExternalStreamCompatibility(input: {
     event_count: events.length,
     ...(events[0] ? { first_event_type: events[0].event_type } : {}),
     ...(stdout ? { stdout_summary: summarize(stdout) } : {}),
-    ...(stderr ? { stderr_summary: summarize(stderr) } : {})
+    ...(stderr ? { stderr_summary: safeFailureMessage(stderr, "") } : {})
   };
   if (result.error) {
     const timedOut = (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
@@ -2076,7 +2309,7 @@ function probeExternalStreamCompatibility(input: {
       ...base,
       status: timedOut ? "timeout" : "failed",
       reason: timedOut ? "timeout" : "spawn_failed",
-      stderr_summary: summarize(stderr || `${input.label} stream probe failed: ${result.error.message}`)
+      stderr_summary: safeFailureMessage(stderr || `${input.label} stream probe failed: ${result.error.message}`, "")
     };
   }
   if (result.status !== 0) {
@@ -2110,7 +2343,13 @@ function cliJsonToBackendEvent(value: Record<string, unknown>): BackendOutputEve
   if (normalizedType) {
     return {
       event_type: normalizedType,
+      ...providerSourceIdentity(value),
       payload: text && !("text" in payload) ? { ...payload, text } : payload,
+      ...(normalizedType === "run_completed"
+        ? { terminal_evidence: { kind: "completed", source: "provider_terminal_response" } as const }
+        : normalizedType === "run_failed"
+          ? { terminal_evidence: { kind: "failed", source: "provider_terminal_response", error: providerError(value, "backend_result_error", "Backend result reported an error.") } as const }
+          : {}),
       ...(stringValue(value.tool_call_id) ? { tool_call_id: stringValue(value.tool_call_id) } : {}),
       ...(Array.isArray(value.resource_refs) ? { resource_refs: value.resource_refs as BackendOutputEvent["resource_refs"] } : {})
     };
@@ -2119,6 +2358,68 @@ function cliJsonToBackendEvent(value: Record<string, unknown>): BackendOutputEve
     return { event_type: "text_delta", payload: { text } };
   }
   return undefined;
+}
+
+function providerError(value: Record<string, unknown>, fallbackCode: string, fallbackMessage: string): BackendRuntimeFailure {
+  const payload = recordValue(value.payload) ?? {};
+  const nestedError = recordValue(value.error) ?? recordValue(payload.error) ?? {};
+  return {
+    code: safeFailureCode(stringValue(value.error_code) || stringValue(payload.error_code) || stringValue(nestedError.code) || stringValue(value.code), fallbackCode),
+    message: safeFailureMessage(stringValue(value.message) || stringValue(payload.message) || stringValue(nestedError.message) || stringValue(value.result), fallbackMessage),
+    retryable: value.retryable === true || payload.retryable === true || nestedError.retryable === true,
+    causeCategory: "provider"
+  };
+}
+
+function safeFailureCode(value: string, fallback: string): string {
+  return /^[a-z][a-z0-9_.-]{0,79}$/i.test(value) ? value : fallback;
+}
+
+function safeFailureMessage(value: unknown, fallback = "Backend operation failed."): string {
+  const raw = typeof value === "string" && value.trim() ? value : fallback;
+  const safe = raw
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/(?:api[_-]?key|access[_-]?token|secret|password)["']?\s*[:=]\s*["']?[^"',\s}]+/gi, "credential=[redacted]")
+    .replace(/\b(?:sk|key)-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/(?<![A-Za-z0-9:/.])\/[^\s"'<>]+/g, "[path]")
+    .replace(/[A-Za-z]:\\[^\s"'<>]+/g, "[path]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (safe || fallback).slice(0, 240);
+}
+
+function providerSourceIdentity(value: Record<string, unknown>): Pick<BackendOutputEvent, "source_event_id" | "source_sequence"> {
+  const payload = recordValue(value.payload) ?? {};
+  const sourceEventId = stringValue(value.source_event_id) || stringValue(payload.source_event_id);
+  const sourceSequence = positiveSourceSequence(numberValue(value.source_sequence) ?? numberValue(payload.source_sequence));
+  return {
+    ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
+    ...(sourceSequence !== undefined ? { source_sequence: sourceSequence } : {})
+  };
+}
+
+function attachProviderSourceIdentity(value: Record<string, unknown>, events: BackendOutputEvent[]): BackendOutputEvent[] {
+  const identity = providerSourceIdentity(value);
+  if (events.length === 1) {
+    return events.map((event) => ({ ...identity, ...event }));
+  }
+  return events.map((event, index) => {
+    const part = index + 1;
+    const sourceEventId = identity.source_event_id
+      ? `provider-id:${encodeURIComponent(identity.source_event_id)}:part:${part}`
+      : identity.source_sequence !== undefined
+        ? `provider-sequence:${identity.source_sequence}:part:${part}`
+        : undefined;
+    return {
+      ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
+      ...(identity.source_sequence !== undefined ? { source_sequence: identity.source_sequence } : {}),
+      ...event
+    };
+  });
+}
+
+function positiveSourceSequence(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function backendSessionPayload(value: Record<string, unknown>): Record<string, JsonValue> {

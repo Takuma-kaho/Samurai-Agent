@@ -1,0 +1,450 @@
+{
+  "schema_version": 2,
+  "scope": "Core-02 Phase 0-7",
+  "status": "implementation_complete_environment_pending",
+  "started_at": "2026-07-23T13:29:51.297Z",
+  "finished_at": "2026-07-23T13:35:04.313Z",
+  "interrupted": true,
+  "stop_signal": "SIGINT",
+  "commit_sha": "6e11095f3399a2189bb6300077e74a871aa3da9a",
+  "production_source": [
+    "packages/core-schemas/src/index.ts",
+    "packages/agent-backends/src/index.ts",
+    "packages/workspace-store/src/workspace-store.ts",
+    "packages/runtime/src/agent-runtime.ts",
+    "packages/runtime/src/host/agent-host.ts",
+    "packages/runtime/src/host/host-types.ts",
+    "packages/runtime/src/host/turn-admission.ts",
+    "packages/runtime/src/host/turn-preparer.ts",
+    "packages/runtime/src/host/turn-preparation-policy.ts",
+    "packages/runtime/src/host/turn-completion-coordinator.ts",
+    "packages/runtime/src/execution/run-state-machine.ts",
+    "packages/runtime/src/execution/run-lifecycle.ts",
+    "packages/runtime/src/execution/backend-event-journal.ts",
+    "packages/runtime/src/execution/session-run-queue.ts",
+    "packages/runtime/src/execution/run-control.ts",
+    "packages/runtime/src/execution/run-recovery.ts",
+    "packages/runtime/src/execution/turn-executor.ts",
+    "packages/runtime/src/composition/create-agent-host.ts",
+    "packages/runtime/src/composition/runtime-host.ts",
+    "packages/runtime/src/host/backend-tool-bridge.ts",
+    "packages/runtime/src/execution/durable-work-coordinator.ts",
+    "apps/server/src/composition/runtime.ts",
+    "apps/server/src/workers/automation-scheduler.ts",
+    "apps/server/src/api-server.ts"
+  ],
+  "phase_ledger": [
+    {
+      "id": "Phase 0",
+      "description": "scope and contracts",
+      "status": "verified",
+      "source": [
+        "packages/runtime/src/host/host-types.ts",
+        "packages/core-schemas/src/index.ts"
+      ],
+      "command_results": [
+        {
+          "name": "core:host-runtime:check",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "core-schemas typecheck",
+          "status": "pass",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "Phase 1",
+      "description": "lifecycle and Journal",
+      "status": "verified",
+      "source": [
+        "packages/runtime/src/execution/run-lifecycle.ts",
+        "packages/runtime/src/execution/backend-event-journal.ts",
+        "packages/runtime/src/execution/run-state-machine.ts"
+      ],
+      "command_results": [
+        {
+          "name": "runtime typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "focused runtime tests",
+          "status": "pass",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "Phase 2",
+      "description": "atomic settlement",
+      "status": "verified",
+      "source": [
+        "packages/workspace-store/src/workspace-store.ts",
+        "packages/runtime/src/host/turn-completion-coordinator.ts"
+      ],
+      "command_results": [
+        {
+          "name": "workspace-store typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "focused SQLite tests",
+          "status": "pass",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "Phase 3",
+      "description": "named Host Ports",
+      "status": "verified",
+      "source": [
+        "packages/runtime/src/host/agent-host.ts",
+        "packages/runtime/src/host/turn-preparer.ts",
+        "packages/runtime/src/execution/turn-executor.ts"
+      ],
+      "command_results": [
+        {
+          "name": "core:host-runtime:check",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "runtime typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "focused runtime tests",
+          "status": "pass",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "Phase 4",
+      "description": "recovery and control",
+      "status": "verified",
+      "source": [
+        "packages/runtime/src/execution/run-control.ts",
+        "packages/runtime/src/execution/run-recovery.ts",
+        "packages/runtime/src/execution/session-run-queue.ts"
+      ],
+      "command_results": [
+        {
+          "name": "runtime typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "focused runtime tests",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "core-02 independent blocker audit",
+          "status": "pass",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "Phase 5",
+      "description": "production composition",
+      "status": "verified",
+      "source": [
+        "apps/server/src/composition/runtime.ts",
+        "packages/runtime/src/composition/runtime-host.ts",
+        "apps/server/src/api-server.ts"
+      ],
+      "command_results": [
+        {
+          "name": "server typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "production composition test",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "core-02 independent blocker audit",
+          "status": "pass",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "Phase 6",
+      "description": "old Turn path removal",
+      "status": "verified",
+      "source": [
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/runtime/src/execution/durable-work-coordinator.ts"
+      ],
+      "command_results": [
+        {
+          "name": "core:host-runtime:check",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "core-02 independent blocker audit",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "runtime typecheck",
+          "status": "pass",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "Phase 7",
+      "description": "source-freeze verification",
+      "status": "unverified",
+      "source": [
+        "packages/core-schemas/src/index.ts",
+        "packages/agent-backends/src/index.ts",
+        "packages/workspace-store/src/workspace-store.ts",
+        "packages/runtime/src/agent-runtime.ts",
+        "packages/runtime/src/host/agent-host.ts",
+        "packages/runtime/src/host/host-types.ts",
+        "packages/runtime/src/host/turn-admission.ts",
+        "packages/runtime/src/host/turn-preparer.ts",
+        "packages/runtime/src/host/turn-preparation-policy.ts",
+        "packages/runtime/src/host/turn-completion-coordinator.ts",
+        "packages/runtime/src/execution/run-state-machine.ts",
+        "packages/runtime/src/execution/run-lifecycle.ts",
+        "packages/runtime/src/execution/backend-event-journal.ts",
+        "packages/runtime/src/execution/session-run-queue.ts",
+        "packages/runtime/src/execution/run-control.ts",
+        "packages/runtime/src/execution/run-recovery.ts",
+        "packages/runtime/src/execution/turn-executor.ts",
+        "packages/runtime/src/composition/create-agent-host.ts",
+        "packages/runtime/src/composition/runtime-host.ts",
+        "packages/runtime/src/host/backend-tool-bridge.ts",
+        "packages/runtime/src/execution/durable-work-coordinator.ts",
+        "apps/server/src/composition/runtime.ts",
+        "apps/server/src/workers/automation-scheduler.ts",
+        "apps/server/src/api-server.ts"
+      ],
+      "command_results": [
+        {
+          "name": "core:host-runtime:check",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "core-02 independent blocker audit",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "core-schemas typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "agent-backends typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "workspace-store typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "runtime typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "server typecheck",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "focused runtime tests",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "focused SQLite tests",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "production composition test",
+          "status": "pass",
+          "exit_code": 0
+        },
+        {
+          "name": "git diff check",
+          "status": "unverified",
+          "exit_code": null
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "id": "core02-runtime-focused",
+      "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs packages/runtime/src/execution packages/runtime/src/host",
+      "exit_code": 0,
+      "duration_ms": 2715,
+      "status": "pass"
+    },
+    {
+      "id": "core02-workspace-sqlite",
+      "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs packages/workspace-store/src/core02-admission.test.ts packages/workspace-store/src/core02-event-identity.test.ts packages/workspace-store/src/core02-settlement.test.ts",
+      "exit_code": 0,
+      "duration_ms": 1463,
+      "status": "pass"
+    },
+    {
+      "id": "core02-production-composition",
+      "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs apps/server/src/composition/runtime.test.ts",
+      "exit_code": 0,
+      "duration_ms": 2091,
+      "status": "pass"
+    }
+  ],
+  "commands": [
+    {
+      "name": "core:host-runtime:check",
+      "command": "node scripts/check-core-host-runtime.mjs",
+      "exit_code": 0,
+      "duration_ms": 36030,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "core-02 independent blocker audit",
+      "command": "node scripts/audit-core-host-runtime.mjs",
+      "exit_code": 0,
+      "duration_ms": 2568,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "core-schemas typecheck",
+      "command": "node_modules/.bin/tsc -p packages/core-schemas/tsconfig.json --noEmit",
+      "exit_code": 0,
+      "duration_ms": 2374,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "agent-backends typecheck",
+      "command": "node_modules/.bin/tsc -p packages/agent-backends/tsconfig.json --noEmit",
+      "exit_code": 0,
+      "duration_ms": 1493,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "workspace-store typecheck",
+      "command": "node_modules/.bin/tsc -p packages/workspace-store/tsconfig.json --noEmit",
+      "exit_code": 0,
+      "duration_ms": 14504,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "runtime typecheck",
+      "command": "node_modules/.bin/tsc -p packages/runtime/tsconfig.json --noEmit --rootDir ../..",
+      "exit_code": 0,
+      "duration_ms": 173993,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "server typecheck",
+      "command": "node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit",
+      "exit_code": 0,
+      "duration_ms": 6097,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "focused runtime tests",
+      "test_id": "core02-runtime-focused",
+      "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs packages/runtime/src/execution packages/runtime/src/host",
+      "exit_code": 0,
+      "duration_ms": 2715,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "focused SQLite tests",
+      "test_id": "core02-workspace-sqlite",
+      "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs packages/workspace-store/src/core02-admission.test.ts packages/workspace-store/src/core02-event-identity.test.ts packages/workspace-store/src/core02-settlement.test.ts",
+      "exit_code": 0,
+      "duration_ms": 1463,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "production composition test",
+      "test_id": "core02-production-composition",
+      "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs apps/server/src/composition/runtime.test.ts",
+      "exit_code": 0,
+      "duration_ms": 2091,
+      "status": "pass",
+      "termination": "exit",
+      "timed_out": false
+    },
+    {
+      "name": "git diff check",
+      "command": "git diff --no-ext-diff --no-textconv --check",
+      "exit_code": null,
+      "duration_ms": 69684,
+      "status": "unverified",
+      "termination": "signal:SIGINT",
+      "timed_out": false
+    }
+  ],
+  "independent_audit": {
+    "status": "pass",
+    "blockers": []
+  },
+  "production_call_graph": {
+    "status": "pass",
+    "source": [
+      "packages/runtime/src/agent-runtime.ts",
+      "apps/server/src/composition/runtime.ts",
+      "apps/server/src/composition/runtime.test.ts"
+    ]
+  },
+  "ci": {
+    "status": "not_run",
+    "reason": "GitHubへのpushとCI実行はユーザー許可の対象"
+  },
+  "out_of_scope": [
+    "自動retry基盤",
+    "quarantine/probe/手動解除UI",
+    "分散queue",
+    "他Coreの業務仕様変更",
+    "HTTP API刷新",
+    "新しい診断DB",
+    "将来機能だけのPort",
+    "coverage/mutation/soak/全OS検証"
+  ]
+}

@@ -124,6 +124,7 @@ export function useWorkSummary(input: {
   }
   function runDurationLabel(run: BackendRunRecord | undefined): string {
     if (!run) return input.label("work_summary.did_work");
+    if (run.status === "outcome_unknown") return input.label("backend_run.outcome_unknown.summary");
     const started = Date.parse(run.started_at), completed = run.completed_at ? Date.parse(run.completed_at) : Number.NaN;
     if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return input.label("work_summary.did_work");
     const seconds = Math.max(1, Math.round((completed - started) / 1000));

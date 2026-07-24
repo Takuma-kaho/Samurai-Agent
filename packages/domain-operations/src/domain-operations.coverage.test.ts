@@ -257,7 +257,7 @@ describe("Domain Operation strict gate coverage", () => {
       })
     }) as DomainOperationPorts;
     const bindings = bindOperationDefinitions(operationPorts);
-    const executionCases = new Map<string, { input: unknown; context: { inputSource: string; workspaceId: string; actorId: string; correlationId: string } }>();
+    const executionCases = new Map<string, { input: unknown; context: { inputSource: string; workspaceId: string; actorId: string; correlationId: string; idempotencyKey?: string } }>();
 
     for (const binding of bindings) {
       const { definition } = binding;
@@ -272,6 +272,7 @@ describe("Domain Operation strict gate coverage", () => {
         workspaceId: "workspace",
         actorId: "actor",
         correlationId: `coverage-${definition.id}`,
+        ...(definition.id === "chat.turn.run" ? { idempotencyKey: "coverage-chat-turn" } : {}),
         ...(definition.id === "generated_surface.create" || definition.id === "generated_surface.revise"
           ? { sessionId: "surface-session", runId: "surface-run" }
           : definition.id === "memory.archive"

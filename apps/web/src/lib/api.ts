@@ -302,6 +302,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** 1回の送信操作に割り当て、通信再試行では呼び出し側が同じ値を渡すキー。 */
+export function createIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
 function apiEndpoint(path: string): string {
   if (/^https?:\/\//.test(path)) {
     return path;
@@ -332,7 +337,7 @@ export const api = {
   getSurfaceContract(source?: DomainCommandInputSource) {
     return request<SurfaceContractPayload>(source ? `/api/surface/contract?source=${encodeURIComponent(source)}` : "/api/surface/contract");
   },
-  runDomainCommand<T = unknown>(commandId: string, payload: Record<string, JsonValue>, idempotencyKey = crypto.randomUUID()) {
+  runDomainCommand<T = unknown>(commandId: string, payload: Record<string, JsonValue>, idempotencyKey = createIdempotencyKey()) {
     return request<{ command: SurfaceCommandEntry; result: T; render_spec?: unknown; render_specs?: unknown[] }>(`/api/domain/commands/${encodeURIComponent(commandId)}/run`, {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey },
@@ -375,6 +380,7 @@ export const api = {
     });
   },
   submitChatSurfaceOperation(input: {
+    idempotencyKey: string;
     sessionId: string;
     content: string;
     inputLocale?: SupportedLocale;
@@ -386,8 +392,9 @@ export const api = {
   }) {
     return request<ChatSurfaceOperationResult>("/api/surface/operations", {
       method: "POST",
+      headers: { "Idempotency-Key": input.idempotencyKey },
       body: JSON.stringify({
-        id: `surface_message_${Date.now()}`,
+        id: input.idempotencyKey,
         kind: "message.submit",
         session_id: input.sessionId,
         content: input.content,
@@ -400,9 +407,10 @@ export const api = {
       })
     });
   },
-  sendMessage(sessionId: string, content: string, outputLocale: SupportedLocale, backendId?: string) {
+  sendMessage(sessionId: string, content: string, outputLocale: SupportedLocale, idempotencyKey: string, backendId?: string) {
     return request<ChatTurnResult>(`/api/chat/sessions/${sessionId}/messages`, {
       method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({
         content,
         output_locale: outputLocale,
@@ -410,9 +418,10 @@ export const api = {
       })
     });
   },
-  startChat(content: string, uiLocale: SupportedLocale, outputLocale: SupportedLocale, backendId?: string) {
+  startChat(content: string, uiLocale: SupportedLocale, outputLocale: SupportedLocale, idempotencyKey: string, backendId?: string) {
     return request<ChatTurnResult>("/api/chat/messages", {
       method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({
         content,
         ui_locale: uiLocale,

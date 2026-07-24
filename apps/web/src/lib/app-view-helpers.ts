@@ -1,4 +1,5 @@
 import type { BackendEventRecord, BackendRunRecord, SessionRecord } from "@samurai-agent/core-schemas";
+import type { LocaleKey } from "@samurai-agent/localization";
 import type { AgentBackendStatus, SearchResult } from "./api";
 
 export type ProviderErrorReason = "not_configured" | "auth_failed" | "rate_limited" | "temporary_unavailable" | "model_not_found" | "invalid_model" | "invalid_response" | "network" | "unknown";
@@ -11,7 +12,20 @@ export function backendEventSummary(event: BackendEventRecord): string {
 }
 
 export function backendEventPayload(event: BackendEventRecord): string { return JSON.stringify(event.payload, null, 2); }
-export function backendRunNote(run: BackendRunRecord): string { return run.output_summary || run.error_code || ""; }
+export function backendRunStatusLabel(run: BackendRunRecord, label: (key: LocaleKey) => string): string {
+  if (run.status === "outcome_unknown") return label("backend_run.status.outcome_unknown");
+  if (run.status === "completed") return label("backend_run.status.completed");
+  if (run.status === "failed") return label("backend_run.status.failed");
+  if (run.status === "cancelled") return label("backend_run.status.cancelled");
+  if (run.status === "waiting_for_backend_input") return label("backend_run.status.waiting_for_backend_input");
+  if (run.status === "running") return label("backend_run.status.running");
+  return label("backend_run.status.queued");
+}
+
+export function backendRunNote(run: BackendRunRecord, label?: (key: LocaleKey) => string): string {
+  if (run.status === "outcome_unknown" && label) return label("backend_run.outcome_unknown.body");
+  return run.output_summary || run.error_code || "";
+}
 
 export function backendRunContextSummary(run: BackendRunRecord | undefined): string {
   const handoff = contextSources(run?.metadata?.context_handoff_sources, true);

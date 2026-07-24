@@ -75,7 +75,10 @@ export const activityTypes = [
 ] as const;
 export const activitySeverities = ["info", "notice", "warning", "critical"] as const;
 export const agentBackendKinds = ["mock", "samurai_native", "claude_code", "codex", "external"] as const;
-export const backendRunStatuses = ["queued", "running", "waiting_for_backend_input", "completed", "failed", "cancelled"] as const;
+export const backendRunStatuses = ["queued", "running", "waiting_for_backend_input", "completed", "failed", "cancelled", "outcome_unknown"] as const;
+export const backendRunPhases = ["admitted", "preparing", "backend_starting", "external_running", "waiting", "cancelling", "finalizing", "post_turn", "settled"] as const;
+export const BackendRunPhaseSchema = z.enum(backendRunPhases);
+export type BackendRunPhase = z.infer<typeof BackendRunPhaseSchema>;
 export const backendEventTypes = [
   "run_started",
   "agent_reasoning",
@@ -91,6 +94,9 @@ export const backendEventTypes = [
   "backend_native_input_submitted",
   "backend_stream_synced",
   "backend_stream_unavailable",
+  "host_post_turn_failed",
+  "host_cleanup_failed",
+  "host_emit_failed",
   "run_completed",
   "run_failed"
 ] as const;
@@ -260,6 +266,27 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+// The Runtime owns creation of this decision.  Keeping the opaque marker in
+// the shared schema package lets the Workspace Store accept the settlement
+// Port without importing Runtime back into the persistence layer.
+declare const lifecycleTransitionDecisionBrand: unique symbol;
+export type LifecycleTransitionDecision = {
+  readonly fromStatus: BackendRunStatus;
+  readonly toStatus: BackendRunStatus;
+  readonly fromPhase: BackendRunPhase;
+  readonly toPhase: BackendRunPhase;
+  readonly reason: string;
+  readonly terminalEvidence?: JsonValue;
+  readonly failure?: {
+    readonly code: string;
+    readonly message: string;
+    readonly phase: BackendRunPhase;
+    readonly retryable: boolean;
+    readonly causeCategory: string;
+  };
+  readonly [lifecycleTransitionDecisionBrand]: true;
+};
+
 /**
  * Contract schemas are authored in Zod and published as strict JSON Schema.
  * Keeping this conversion at the shared schema boundary prevents each caller
@@ -384,7 +411,12 @@ export const BackendRunRecordSchema = z.object({
   output_message_id: z.string().optional(),
   backend_id: z.string().min(1),
   backend_kind: AgentBackendKindSchema,
+  backend_session_id: z.string().min(1).optional(),
   status: BackendRunStatusSchema,
+  phase: BackendRunPhaseSchema.optional(),
+  current_attempt: z.number().int().positive().optional(),
+  request_idempotency_key: z.string().min(1).optional(),
+  request_hash: z.string().min(1).optional(),
   started_at: z.string().datetime(),
   completed_at: z.string().datetime().optional(),
   input_summary: z.string(),
@@ -400,6 +432,9 @@ export const BackendEventRecordSchema = z.object({
   session_id: z.string().min(1),
   event_type: BackendEventTypeSchema,
   sequence: z.number().int().positive(),
+  attempt_no: z.number().int().positive().optional(),
+  source_event_id: z.string().min(1).optional(),
+  source_sequence: z.number().int().positive().optional(),
   payload: z.record(jsonValueSchema),
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime()
@@ -1508,6 +1543,7 @@ export const EvaluationDiagnosticsIssueSchema = z.object({
     "evaluation_run_stale",
     "evaluation_suggestion_pending",
     "backend_run_failed",
+    "backend_run_outcome_unknown",
     "backend_run_waiting_for_input",
     "tool_run_attention_required"
   ]),
@@ -1533,6 +1569,7 @@ export const EvaluationDiagnosticsReportSchema = z.object({
   backend_runs: z.number().int().nonnegative(),
   failed_backend_runs: z.number().int().nonnegative(),
   waiting_backend_runs: z.number().int().nonnegative(),
+  outcome_unknown_backend_runs: z.number().int().nonnegative(),
   tool_runs: z.number().int().nonnegative(),
   ignored_or_failed_tool_runs: z.number().int().nonnegative(),
   workspace_changes: z.number().int().nonnegative(),

@@ -60,22 +60,42 @@ jobs:
         # by tsx there), so the same source gate is run once on Linux.
         if: runner.os == 'Linux'
         run: |
-          node scripts/generate-domain-operation-index.mjs --check
-          node --import tsx scripts/fixtures/domain-command-contract.ts
-          node --import tsx scripts/fixtures/domain-operation-structure.ts
-          node --import tsx scripts/fixtures/domain-query-purity.ts
-          node --import tsx scripts/fixtures/domain-command-compatibility.ts
-          node --import tsx scripts/fixtures/domain-command-version.ts
-          node --import tsx scripts/fixtures/domain-command-parity.ts
-          node --import tsx scripts/fixtures/domain-command-trusted-context.ts
-          node --import tsx scripts/fixtures/domain-command-schema-matrix.ts
-          node --import tsx scripts/fixtures/domain-operation-handler-matrix.ts
-          node --import tsx scripts/fixtures/domain-operation-handler-matrix-shard-a.ts
-          node --import tsx scripts/fixtures/domain-operation-handler-matrix-shard-b.ts
-          node --import tsx scripts/fixtures/domain-operation-handler-matrix-c.ts
-          node --import tsx scripts/fixtures/domain-operation-handler-matrix-aggregate.ts
-          node scripts/verify-architecture-boundaries.mjs
-          node scripts/verify-domain-command-verifier-self-test.mjs
+          failures=()
+          run_check() {
+            local label="$1"
+            shift
+            echo "▶ ${label}"
+            if "$@"; then
+              echo "✓ ${label}"
+            else
+              local exit_code=$?
+              failures+=("${label} (exit ${exit_code})")
+              echo "✗ ${label} (exit ${exit_code})"
+            fi
+          }
+
+          run_check "generated operation index" node scripts/generate-domain-operation-index.mjs --check
+          run_check "domain command contract" node --import tsx scripts/fixtures/domain-command-contract.ts
+          run_check "domain operation structure" node --import tsx scripts/fixtures/domain-operation-structure.ts
+          run_check "domain query purity" node --import tsx scripts/fixtures/domain-query-purity.ts
+          run_check "domain command compatibility" node --import tsx scripts/fixtures/domain-command-compatibility.ts
+          run_check "domain command version" node --import tsx scripts/fixtures/domain-command-version.ts
+          run_check "domain command parity" node --import tsx scripts/fixtures/domain-command-parity.ts
+          run_check "domain command trusted context" node --import tsx scripts/fixtures/domain-command-trusted-context.ts
+          run_check "domain command schema matrix" node --import tsx scripts/fixtures/domain-command-schema-matrix.ts
+          run_check "domain operation handler matrix" node --import tsx scripts/fixtures/domain-operation-handler-matrix.ts
+          run_check "domain operation handler shard A" node --import tsx scripts/fixtures/domain-operation-handler-matrix-shard-a.ts
+          run_check "domain operation handler shard B" node --import tsx scripts/fixtures/domain-operation-handler-matrix-shard-b.ts
+          run_check "domain operation handler matrix C" node --import tsx scripts/fixtures/domain-operation-handler-matrix-c.ts
+          run_check "domain operation handler aggregate" node --import tsx scripts/fixtures/domain-operation-handler-matrix-aggregate.ts
+          run_check "architecture boundaries" node scripts/verify-architecture-boundaries.mjs
+          run_check "verifier self-test" node scripts/verify-domain-command-verifier-self-test.mjs
+
+          if (( ${#failures[@]} > 0 )); then
+            echo "Failed verifier checks:"
+            printf ' - %s\n' "${failures[@]}"
+            exit 1
+          fi
 
       - name: Run Linux integration and verifier gates
         # This is the deep integration/release gate. Keep it out of the fast

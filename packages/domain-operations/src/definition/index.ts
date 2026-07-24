@@ -47,6 +47,8 @@ export interface TrustedDomainContext {
     kind: string;
   };
   correlationId: string;
+  /** Server-supplied stable identity for retry-safe admission. */
+  idempotencyKey?: string;
   signal?: AbortSignal;
   deadlineAt?: number;
 }

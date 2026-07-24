@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { TrustedDomainContext } from "../../../definition/index.js";
 import chatTurnRun from "./run.operation.js";
 
-const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test" };
+const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test", idempotencyKey: "turn-test-1" };
 const contextWithSession: TrustedDomainContext = { ...context, sessionId: "session_1" };
 const session = { id: "session_1", session_key: "session_1", title: "Chat", ui_locale: "ja", output_locale: "ja", created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" } as const;
 const result = { session, messages: [] } as never;
@@ -17,7 +17,7 @@ describe("chat.turn.run handler", () => {
     await handler.execute(contextWithSession, input);
 
     expect(createChatSession).not.toHaveBeenCalled();
-    expect(runChatTurn).toHaveBeenCalledWith({ sessionId: session.id, content: "Hello", backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} });
+    expect(runChatTurn).toHaveBeenCalledWith({ sessionId: session.id, content: "Hello", idempotencyKey: "turn-test-1", backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} });
   });
 
   it("creates a session before running when no session is supplied", async () => {

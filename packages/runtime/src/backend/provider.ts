@@ -30,6 +30,7 @@ export interface ProviderOutput {
 }
 
 export interface ProviderInput {
+  abortSignal?: AbortSignal;
   envelope: MessageEnvelope;
   freezeSnapshot?: FreezeSnapshot;
   gatewayBoundary?: GatewayBoundaryRuntimeSnapshot;
@@ -95,6 +96,8 @@ export interface ProviderStatus {
   configured: boolean;
 }
 
+export type ProviderFailureDisposition = "not_started" | "provider_terminal_response" | "transport_lost" | "cancel_unconfirmed";
+
 export class ProviderRequestError extends Error {
   constructor(
     readonly code: "provider_not_configured" | "provider_failed",
@@ -103,9 +106,10 @@ export class ProviderRequestError extends Error {
       reason: code === "provider_not_configured" ? "not_configured" : "unknown",
       retryable: false,
       message: safeDiagnosticMessage(message)
-    }
+    },
+    readonly disposition: ProviderFailureDisposition = defaultFailureDisposition(code, diagnostics)
   ) {
-    super(message);
+    super(safeDiagnosticMessage(message));
     this.name = "ProviderRequestError";
   }
 }
@@ -132,6 +136,13 @@ export class ProviderRegistry implements ProviderAdapter {
   }
 
   async generate(input: ProviderInput): Promise<ProviderOutput> {
+    if (input.abortSignal?.aborted) {
+      throw new ProviderRequestError("provider_failed", "Provider request was cancelled before starting.", {
+        reason: "network",
+        retryable: false,
+        message: "Provider request was cancelled before starting."
+      }, "not_started");
+    }
     if (this.candidates.length === 0) {
       throw new ProviderRequestError("provider_not_configured", "No LLM provider is configured.", {
         reason: "not_configured",
@@ -139,16 +150,42 @@ export class ProviderRegistry implements ProviderAdapter {
       });
     }
 
-    const failures: ProviderDiagnostics[] = [];
+    const failures: Array<{ diagnostics: ProviderDiagnostics; disposition: ProviderFailureDisposition }> = [];
     for (const candidate of this.candidates) {
+      if (input.abortSignal?.aborted) {
+        throw new ProviderRequestError("provider_failed", "Provider request was cancelled before starting.", {
+          reason: "network",
+          retryable: false,
+          message: "Provider request was cancelled before starting."
+        }, "not_started");
+      }
       try {
         return await candidate.generate(input);
       } catch (error) {
-        failures.push(providerFailureDiagnostic(candidate, error));
+        const disposition = providerFailureDisposition(error);
+        if (disposition === "transport_lost" || disposition === "cancel_unconfirmed") {
+          if (error instanceof ProviderRequestError) {
+            throw new ProviderRequestError(error.code, error.message, {
+              ...error.diagnostics,
+              provider: error.diagnostics.provider ?? candidate.id,
+              model: error.diagnostics.model ?? candidate.model
+            }, disposition);
+          }
+          throw new ProviderRequestError("provider_failed", error instanceof Error ? error.message : "Provider request failed.", providerFailureDiagnostic(candidate, error), disposition);
+        }
+        failures.push({
+          diagnostics: providerFailureDiagnostic(candidate, error),
+          disposition
+        });
       }
     }
 
-    throw new ProviderRequestError("provider_failed", "All configured LLM providers failed.", combineFailureDiagnostics(failures));
+    throw new ProviderRequestError(
+      "provider_failed",
+      "All configured LLM providers failed.",
+      combineFailureDiagnostics(failures.map((failure) => failure.diagnostics)),
+      combineFailureDispositions(failures.map((failure) => failure.disposition))
+    );
   }
 }
 
@@ -161,6 +198,13 @@ export class FakeProviderAdapter implements ProviderAdapter {
   ) {}
 
   async generate(input: ProviderInput): Promise<ProviderOutput> {
+    if (input.abortSignal?.aborted) {
+      throw new ProviderRequestError("provider_failed", "Provider request was cancelled before starting.", {
+        reason: "network",
+        retryable: false,
+        message: "Provider request was cancelled before starting."
+      }, "not_started");
+    }
     const output = typeof this.output === "function" ? await this.output(input) : this.output;
     return validateProviderOutput(output);
   }
@@ -225,7 +269,7 @@ class ProfileProviderAdapter implements ProviderAdapter {
 
   async generate(input: ProviderInput): Promise<ProviderOutput> {
     const request = this.profile.buildRequest(this.model, this.credential, input);
-    const response = await postJson(this.profile, request.url, request.headers, request.body);
+    const response = await postJson(this.profile, request.url, request.headers, request.body, input.abortSignal);
     try {
       return this.profile.normalizeResponse(response);
     } catch (error) {
@@ -277,20 +321,29 @@ function splitCsv(value: string | undefined): string[] {
   return value?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
 }
 
-async function postJson(profile: ProviderProfile, url: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
+async function postJson(profile: ProviderProfile, url: string, headers: Record<string, string>, body: unknown, signal?: AbortSignal): Promise<unknown> {
+  if (signal?.aborted) {
+    throw new ProviderRequestError("provider_failed", "Provider request was cancelled before starting.", {
+      reason: "network",
+      retryable: false,
+      message: "Provider request was cancelled before starting."
+    }, "not_started");
+  }
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
   } catch (error) {
+    const aborted = signal?.aborted === true || error instanceof Error && error.name === "AbortError";
     throw new ProviderRequestError("provider_failed", "Provider request failed.", {
       reason: "network",
-      retryable: true,
+      retryable: !aborted,
       message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider request failed.")
-    });
+    }, aborted ? "cancel_unconfirmed" : "transport_lost");
   }
 
   if (!response.ok) {
@@ -303,7 +356,16 @@ async function postJson(profile: ProviderProfile, url: string, headers: Record<s
     });
   }
 
-  return response.json() as Promise<unknown>;
+  try {
+    return await response.json() as unknown;
+  } catch (error) {
+    throw new ProviderRequestError("provider_failed", "Provider response was invalid.", {
+      status: response.status,
+      reason: "invalid_response",
+      retryable: false,
+      message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider response was invalid.")
+    }, "provider_terminal_response");
+  }
 }
 
 function validateProviderOutput(value: unknown): ProviderOutput {
@@ -401,6 +463,23 @@ function providerFailureDiagnostic(candidate: ProviderAdapter, error: unknown): 
   };
 }
 
+function providerFailureDisposition(error: unknown): ProviderFailureDisposition {
+  return error instanceof ProviderRequestError ? error.disposition : "transport_lost";
+}
+
+function defaultFailureDisposition(code: ProviderRequestError["code"], diagnostics: ProviderDiagnostics): ProviderFailureDisposition {
+  if (code === "provider_not_configured") return "not_started";
+  if (diagnostics.reason === "network") return "transport_lost";
+  return "provider_terminal_response";
+}
+
+function combineFailureDispositions(dispositions: ProviderFailureDisposition[]): ProviderFailureDisposition {
+  if (dispositions.includes("cancel_unconfirmed")) return "cancel_unconfirmed";
+  if (dispositions.includes("transport_lost")) return "transport_lost";
+  if (dispositions.includes("provider_terminal_response")) return "provider_terminal_response";
+  return "not_started";
+}
+
 function combineFailureDiagnostics(failures: ProviderDiagnostics[]): ProviderDiagnostics {
   const firstRetryable = failures.find((failure) => failure.retryable);
   const first = firstRetryable ?? failures[0];
@@ -419,6 +498,12 @@ function safeDiagnosticMessage(value: string): string {
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/key=([A-Za-z0-9._~+/=-]+)/gi, "key=[redacted]")
     .replace(/api[_-]?key["']?\s*[:=]\s*["']?[^"',\s}]+/gi, "api_key=[redacted]")
+    .replace(/(?:access[_-]?token|secret|password)["']?\s*[:=]\s*["']?[^"',\s}]+/gi, "credential=[redacted]")
+    .replace(/\b(?:sk|key)-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/(?<![A-Za-z0-9:/.])\/[^\s"'<>]+/g, "[path]")
+    .replace(/[A-Za-z]:\\[^\s"'<>]+/g, "[path]")
+    .replace(/\s+/g, " ")
+    .trim()
     .slice(0, 240);
 }
 

@@ -1,7 +1,9 @@
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { getEventListeners } from "node:events";
+import { ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentBackendRegistry,
   buildExternalBackendPrompt,
@@ -96,6 +98,7 @@ describe("agent backend registry", () => {
     });
     expect(missingEvents).toContainEqual(expect.objectContaining({
       event_type: "run_failed",
+      terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
       payload: expect.objectContaining({
         error_code: "backend_command_not_found",
         reason: "command_not_found",
@@ -109,6 +112,52 @@ describe("agent backend registry", () => {
       path_kind: "direct_path",
       resolved: true
     });
+  });
+
+  it("does not start Mock or CLI work for an already-aborted signal", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-already-aborted-"));
+    roots.push(root);
+    const executable = path.join(root, "must-not-run");
+    const marker = path.join(root, "spawned");
+    await writeFile(executable, `#!/bin/sh\nprintf spawned > "${marker}"\n`, "utf8");
+    await chmod(executable, 0o755);
+    const controller = new AbortController();
+    controller.abort();
+    const input = { ...backendInput("already-aborted"), abort_signal: controller.signal };
+
+    const mockEvents = await collectEvents(new MockBackend().runTurn(input));
+    const cli = new ExternalCliBackend({ id: "aborted-cli", kind: "external", label: "Aborted CLI", command: executable });
+    const cliEvents = await collectEvents(cli.runTurn(input));
+
+    expect(mockEvents).toHaveLength(1);
+    expect(cliEvents).toHaveLength(1);
+    expect(mockEvents[0]?.terminal_evidence).toEqual({ kind: "cancelled", source: "owned_loop_return" });
+    expect(cliEvents[0]?.terminal_evidence).toEqual({ kind: "cancelled", source: "owned_loop_return" });
+    await expect(access(marker)).rejects.toThrow();
+    expect(cli.getStatus().active_run_count).toBe(0);
+  });
+
+  it("does not spawn CLI work when abort follows the emitted run_started event", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-abort-before-spawn-"));
+    roots.push(root);
+    const executable = path.join(root, "must-not-spawn");
+    const marker = path.join(root, "spawned");
+    await writeFile(executable, `#!/bin/sh\nprintf spawned > "${marker}"\n`, "utf8");
+    await chmod(executable, 0o755);
+    const controller = new AbortController();
+    const backend = new ExternalCliBackend({ id: "abort-before-spawn-cli", kind: "external", label: "Abort Before Spawn CLI", command: executable });
+    const iterator = backend.runTurn({ ...backendInput("run-abort-before-spawn"), abort_signal: controller.signal })[Symbol.asyncIterator]();
+
+    const started = await iterator.next();
+    expect(started.value?.event_type).toBe("run_started");
+    controller.abort();
+    const terminal = await iterator.next();
+
+    expect(terminal.value?.terminal_evidence).toEqual({ kind: "cancelled", source: "owned_loop_return" });
+    expect((await iterator.next()).done).toBe(true);
+    expect(await fileExists(marker)).toBe(false);
+    expect(backend.getStatus().active_run_count).toBe(0);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
   });
 
   it("keeps task capabilities unverified until diagnostics supplies evidence", async () => {
@@ -201,8 +250,8 @@ describe("agent backend registry", () => {
       executable,
       [
         "#!/bin/sh",
-        "printf '{\"type\":\"assistant_delta\",\"text\":\"hello\"}\\n'",
-        "printf '{\"type\":\"tool_result\",\"tool_call_id\":\"tool_1\",\"payload\":{\"status\":\"ok\"}}\\n'"
+        "printf '{\"type\":\"assistant_delta\",\"text\":\"hello\",\"source_event_id\":\"provider-1\",\"source_sequence\":1}\\n'",
+        "printf '{\"type\":\"tool_result\",\"tool_call_id\":\"tool_1\",\"payload\":{\"status\":\"ok\"},\"source_sequence\":1}\\n'"
       ].join("\n"),
       "utf8"
     );
@@ -235,6 +284,80 @@ describe("agent backend registry", () => {
     });
     expect(runEvents[0]?.payload).not.toHaveProperty("locale_contract");
     expect(replayedEvents).toEqual(runEvents);
+    expect(runEvents.map((event) => event.source_sequence)).toEqual([undefined, 1, 1, undefined]);
+    expect(runEvents[1]?.source_event_id).toBe("provider-1");
+    expect(runEvents[2]?.source_event_id).toBeUndefined();
+    expect(runEvents[0]?.source_event_id).toMatch(/^run_stream:adapter-stream:.+:adapter:1$/);
+    expect(runEvents[3]?.source_event_id).toMatch(/^run_stream:adapter-stream:.+:adapter:2$/);
+    expect(new Set(runEvents.map((event) => event.source_event_id ?? `sequence:${event.source_sequence}`)).size).toBe(runEvents.length);
+  });
+
+  it("bounds settled replay state without reusing generated source identities", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-bounded-stream-"));
+    roots.push(root);
+    const executable = path.join(root, "bounded-stream-backend");
+    await writeFile(executable, "#!/bin/sh\ncat >/dev/null\nprintf '{\"type\":\"result\",\"backend_session_id\":\"bounded-session\",\"result\":\"done\"}\\n'\n", "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({
+      id: "bounded-stream-cli",
+      kind: "external",
+      label: "Bounded Stream CLI",
+      command: executable
+    });
+    const first = await collectEvents(backend.runTurn(backendInput("bounded-run-0")));
+    for (let index = 1; index <= 50; index += 1) {
+      await collectEvents(backend.runTurn(backendInput(`bounded-run-${index}`)));
+    }
+
+    const evictedReplay = await collectEvents(backend.streamEvents("bounded-run-0"));
+    const resumed = await collectEvents(backend.resumeRun("bounded-run-0"));
+    const firstIds = first.map((event) => event.source_event_id);
+
+    expect(evictedReplay[0]?.terminal_evidence).toEqual({ kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true });
+    expect(resumed[0]?.source_event_id).toMatch(/^bounded-run-0:adapter-stream:.+:adapter:1$/);
+    expect(firstIds).not.toContain(resumed[0]?.source_event_id);
+    expect((backend as unknown as { eventStreams: Map<string, unknown> }).eventStreams.size).toBeLessThanOrEqual(50);
+    const sessionIds = (backend as unknown as { backendSessionIds: Map<string, string> }).backendSessionIds;
+    expect(sessionIds.size).toBeLessThanOrEqual(50);
+    expect(sessionIds.has("bounded-run-0")).toBe(false);
+  });
+
+  it("does not evict active event streams or strand their waiters", () => {
+    const backend = new ExternalCliBackend({ id: "active-stream-cli", kind: "external", label: "Active Stream CLI" });
+    const internals = backend as unknown as {
+      beginEventStream(runId: string): { settled: boolean; waiters: Array<() => void> };
+      eventStreams: Map<string, { settled: boolean; waiters: Array<() => void> }>;
+    };
+    for (let index = 0; index <= 50; index += 1) {
+      const state = internals.beginEventStream(`active-run-${index}`);
+      state.waiters.push(() => {});
+    }
+
+    expect(internals.eventStreams.size).toBe(51);
+    expect([...internals.eventStreams.values()].every((state) => !state.settled && state.waiters.length === 1)).toBe(true);
+  });
+
+  it("does not reuse adapter source identity after a process restart", async () => {
+    const original = new ExternalCliBackend({
+      id: "restart-identity-cli",
+      kind: "external",
+      label: "Restart Identity CLI",
+      command: "samurai-missing-cli-for-restart-identity-test",
+      sourceIdentityFactory: () => "boot-a"
+    });
+    const restarted = new ExternalCliBackend({
+      id: "restart-identity-cli",
+      kind: "external",
+      label: "Restart Identity CLI",
+      sourceIdentityFactory: () => "boot-b"
+    });
+
+    const beforeRestart = await collectEvents(original.runTurn(backendInput("restart-run")));
+    const afterRestart = await collectEvents(restarted.resumeRun("restart-run"));
+
+    expect(beforeRestart[0]?.source_event_id).toBe("restart-run:adapter-stream:boot-a:adapter:1");
+    expect(afterRestart[0]?.source_event_id).toBe("restart-run:adapter-stream:boot-b:adapter:1");
+    expect(afterRestart[0]?.source_event_id).not.toBe(beforeRestart[0]?.source_event_id);
   });
 
   it("maps safe stderr progress to host progress without exposing raw stderr text", async () => {
@@ -362,6 +485,7 @@ describe("agent backend registry", () => {
     });
     expect(parseCliOutputLine(JSON.stringify({ type: "result", conversation_id: "native-session-1", payload: { output_summary: "done" } }))).toEqual({
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       payload: {
         provider_event_type: "result",
         output_summary: "done",
@@ -374,10 +498,418 @@ describe("agent backend registry", () => {
     });
   });
 
+  it("converts provider failures into stable terminal evidence", () => {
+    expect(parseCliOutputLine(JSON.stringify({ type: "result", is_error: true, error_code: "provider_denied", message: "denied" }))).toEqual({
+      event_type: "run_failed",
+      terminal_evidence: { kind: "failed", source: "provider_terminal_response", error: { code: "provider_denied", message: "denied", retryable: false, causeCategory: "provider" } },
+      payload: {
+        provider_event_type: "result",
+        output_summary: "Backend result reported an error.",
+        error_code: "provider_denied",
+        reason: "result_error",
+        retryable: false
+      }
+    });
+  });
+
+  it("distinguishes bare process exits from provider terminal responses", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-exit-evidence-"));
+    roots.push(root);
+    const completedCommand = path.join(root, "completed");
+    const failedCommand = path.join(root, "failed");
+    await writeFile(completedCommand, "#!/bin/sh\nexit 0\n", "utf8");
+    await writeFile(failedCommand, "#!/bin/sh\nexit 7\n", "utf8");
+    await chmod(completedCommand, 0o755);
+    await chmod(failedCommand, 0o755);
+    const completed = await collectEvents(new ExternalCliBackend({ id: "exit-ok", kind: "external", label: "Exit OK", command: completedCommand }).runTurn(backendInput("run-exit-ok")));
+    const failed = await collectEvents(new ExternalCliBackend({ id: "exit-failed", kind: "external", label: "Exit Failed", command: failedCommand }).runTurn(backendInput("run-exit-failed")));
+    expect(completed.at(-1)?.terminal_evidence).toEqual({ kind: "completed", source: "process_exit" });
+    expect(failed.at(-1)?.terminal_evidence).toEqual({ kind: "failed", source: "process_exit", error: { code: "backend_failed", message: "Exit Failed failed.", retryable: false, causeCategory: "process" } });
+  });
+
+  it("uses not_started only when the child never obtains a process id", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-spawn-failure-"));
+    roots.push(root);
+    const executable = path.join(root, "missing-interpreter");
+    await writeFile(executable, "#!/samurai/missing/interpreter\n", "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({ id: "spawn-failure-cli", kind: "external", label: "Spawn Failure CLI", command: executable });
+
+    const events = await collectEvents(backend.runTurn(backendInput("run-spawn-failure")));
+
+    expect(events.at(-1)).toMatchObject({
+      terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
+      payload: { error_code: "backend_spawn_failed", reason: "spawn_failed" }
+    });
+    await waitFor(() => backend.getStatus().active_run_count === 0);
+    expect(backend.getStatus().active_run_count).toBe(0);
+  });
+
+  it("keeps a post-spawn child error diagnostic and lets close decide the terminal", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-post-spawn-error-"));
+    roots.push(root);
+    const executable = path.join(root, "post-spawn-error");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write('READY\\n');\nsetTimeout(() => process.exit(0), 100);\n", "utf8");
+    await chmod(executable, 0o755);
+    const prototype = ChildProcess.prototype as unknown as { emit(event: string | symbol, ...args: unknown[]): boolean };
+    const originalEmit = prototype.emit;
+    let injected = false;
+    const emitSpy = vi.spyOn(prototype, "emit").mockImplementation(function (this: ChildProcess, event: string | symbol, ...args: unknown[]) {
+      const emitted = originalEmit.call(this, event, ...args);
+      if (!injected && event === "spawn" && this.pid !== undefined) {
+        injected = true;
+        queueMicrotask(() => originalEmit.call(this, "error", new Error("Bearer child-secret failed at /Users/person/private/socket")));
+      }
+      return emitted;
+    });
+    try {
+      const backend = new ExternalCliBackend({ id: "post-spawn-error-cli", kind: "external", label: "Post Spawn Error CLI", command: executable });
+
+      const events = await collectEvents(backend.runTurn(backendInput("run-post-spawn-error")));
+      const terminal = events.at(-1);
+      const diagnostic = String(terminal?.payload.process_error_summary ?? "");
+
+      expect(injected).toBe(true);
+      expect(terminal?.terminal_evidence).toEqual({ kind: "completed", source: "process_exit" });
+      expect(events.some((event) => event.terminal_evidence?.kind === "not_started")).toBe(false);
+      expect(diagnostic).toContain("[redacted]");
+      expect(diagnostic).toContain("[path]");
+      expect(diagnostic).not.toContain("child-secret");
+      expect(diagnostic).not.toContain("/Users/person");
+      expect(backend.getStatus().active_run_count).toBe(0);
+    } finally {
+      emitSpy.mockRestore();
+    }
+  });
+
+  it("redacts secrets and absolute paths from process diagnostics", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-safe-diagnostic-"));
+    roots.push(root);
+    const executable = path.join(root, "safe-diagnostic");
+    await writeFile(executable, "#!/bin/sh\nprintf 'Bearer secret-token api_key=supersecret /workspace/file /mnt/data /usr/bin/tool /Library/App https://example.test/api\\n' >&2\nexit 7\n", "utf8");
+    await chmod(executable, 0o755);
+    const events = await collectEvents(new ExternalCliBackend({ id: "safe-diagnostic-cli", kind: "external", label: "Safe Diagnostic CLI", command: executable }).runTurn(backendInput("run-safe-diagnostic")));
+    const summary = String(events.at(-1)?.payload.stderr_summary ?? "");
+
+    expect(summary).toContain("[redacted]");
+    expect(summary).toContain("[path]");
+    expect(summary).not.toContain("secret-token");
+    expect(summary).not.toContain("supersecret");
+    expect(summary).not.toContain("/workspace");
+    expect(summary).not.toContain("/mnt/data");
+    expect(summary).not.toContain("/usr/bin");
+    expect(summary).not.toContain("/Library/App");
+    expect(summary).toContain("https://example.test/api");
+  });
+
+  it("keeps cancellation as requested until process exit confirms cancellation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-evidence-"));
+    roots.push(root);
+    const executable = path.join(root, "long-running");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write('READY\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({ id: "cancel-cli", kind: "external", label: "Cancel CLI", command: executable });
+    const iterator = backend.runTurn(backendInput("run-cancel"))[Symbol.asyncIterator]();
+    const events: BackendOutputEvent[] = [];
+    let ready = false;
+    while (!ready) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+    }
+    expect(ready).toBe(true);
+    await expect(backend.cancelRun?.("run-cancel")).resolves.toEqual({ kind: "requested" });
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+    }
+    expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "cancelled", source: "process_exit" });
+  });
+
+  it("propagates an in-flight AbortSignal to the owned child and waits for close", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-abort-running-"));
+    roots.push(root);
+    const executable = path.join(root, "abort-running");
+    const stopped = path.join(root, "stopped");
+    const pidFile = path.join(root, "pid");
+    await writeFile(executable, [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const [stopped, pidFile] = process.argv.slice(2);",
+      "fs.writeFileSync(pidFile, String(process.pid));",
+      "process.on('SIGTERM', () => { fs.writeFileSync(stopped, 'stopped'); process.exit(143); });",
+      "process.stdout.write('READY\\n');",
+      "setInterval(() => {}, 1000);"
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+    const controller = new AbortController();
+    const backend = new ExternalCliBackend({ id: "abort-running-cli", kind: "external", label: "Abort Running CLI", command: executable, args: [stopped, pidFile] });
+    const iterator = backend.runTurn({ ...backendInput("run-abort-running"), abort_signal: controller.signal })[Symbol.asyncIterator]();
+    const events: BackendOutputEvent[] = [];
+    try {
+      let ready = false;
+      while (!ready) {
+        const next = await iterator.next();
+        if (next.done) break;
+        events.push(next.value);
+        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+      }
+      expect(ready).toBe(true);
+      expect(backend.getStatus().active_run_count).toBe(1);
+
+      controller.abort();
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) break;
+        events.push(next.value);
+      }
+
+      expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "cancelled", source: "process_exit" });
+      expect(await fileExists(stopped)).toBe(true);
+      expect(backend.getStatus().active_run_count).toBe(0);
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    } finally {
+      controller.abort();
+      await cleanupCliFixture(backend, iterator, pidFile);
+    }
+  });
+
+  it("keeps a bare natural exit 0 completed when cancel races process close", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-natural-close-"));
+    roots.push(root);
+    const executable = path.join(root, "cancel-then-complete");
+    const signalMarker = path.join(root, "sigterm-received");
+    const release = path.join(root, "release");
+    const pidFile = path.join(root, "pid");
+    await writeFile(executable, [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const [signalMarker, release, pidFile] = process.argv.slice(2);",
+      "fs.writeFileSync(pidFile, String(process.pid));",
+      "process.on('SIGTERM', () => { fs.writeFileSync(signalMarker, 'requested'); });",
+      "process.stdout.write('READY\\n');",
+      "const timer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(timer); process.exit(0); } }, 5);"
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({ id: "cancel-natural-close-cli", kind: "external", label: "Cancel Natural Close CLI", command: executable, args: [signalMarker, release, pidFile] });
+    const iterator = backend.runTurn(backendInput("run-cancel-natural-close"))[Symbol.asyncIterator]();
+    const events: BackendOutputEvent[] = [];
+    try {
+      let ready = false;
+      while (!ready) {
+        const next = await iterator.next();
+        if (next.done) break;
+        events.push(next.value);
+        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+      }
+      expect(ready).toBe(true);
+      await expect(backend.cancelRun?.("run-cancel-natural-close")).resolves.toEqual({ kind: "requested" });
+      await waitFor(() => fileExists(signalMarker));
+      await writeFile(release, "release", "utf8");
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) break;
+        events.push(next.value);
+      }
+
+      expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "completed", source: "process_exit" });
+      expect(events.filter((event) => event.terminal_evidence)).toHaveLength(1);
+      expect(backend.getStatus().active_run_count).toBe(0);
+    } finally {
+      await cleanupCliFixture(backend, iterator, pidFile, release);
+    }
+  });
+
+  it("holds provider terminal evidence until the owned child has closed", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-terminal-close-"));
+    roots.push(root);
+    const executable = path.join(root, "terminal-then-linger");
+    const marker = path.join(root, "terminal-written");
+    const release = path.join(root, "release");
+    await writeFile(executable, [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const marker = process.argv[2];",
+      "const release = process.argv[3];",
+      "process.stdout.write('READY\\n');",
+      "process.stdout.write(JSON.stringify({ type: 'result', result: 'done' }) + '\\n');",
+      "fs.writeFileSync(marker, 'terminal');",
+      "const timer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(timer); process.exit(0); } }, 5);"
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({ id: "terminal-close-cli", kind: "external", label: "Terminal Close CLI", command: executable, args: [marker, release] });
+    const iterator = backend.runTurn(backendInput("run-terminal-close"))[Symbol.asyncIterator]();
+    let ready = false;
+    while (!ready) {
+      const next = await iterator.next();
+      if (next.done) break;
+      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+    }
+    await waitFor(() => fileExists(marker));
+    expect(backend.getStatus().active_run_count).toBe(1);
+    let terminalDelivered = false;
+    const terminalPromise = iterator.next().then((next) => { terminalDelivered = true; return next; });
+    await Promise.resolve();
+    expect(terminalDelivered).toBe(false);
+
+    await writeFile(release, "release", "utf8");
+    const terminal = await terminalPromise;
+    expect(terminal.value?.terminal_evidence).toEqual({ kind: "completed", source: "provider_terminal_response" });
+    expect((await iterator.next()).done).toBe(true);
+    expect(backend.getStatus().active_run_count).toBe(0);
+  });
+
+  it("cleans an early-returned consumer without treating SIGTERM as terminal evidence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-early-return-"));
+    roots.push(root);
+    const executable = path.join(root, "early-return");
+    const marker = path.join(root, "sigterm-received");
+    await writeFile(executable, [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const marker = process.argv[2];",
+      "process.stdout.write('READY\\n');",
+      "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'stopped'); process.exit(143); });",
+      "setInterval(() => {}, 1000);"
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({ id: "early-return-cli", kind: "external", label: "Early Return CLI", command: executable, args: [marker] });
+    const iterator = backend.runTurn(backendInput("run-early-return"))[Symbol.asyncIterator]();
+    let ready = false;
+    while (!ready) {
+      const next = await iterator.next();
+      if (next.done) break;
+      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+    }
+    expect(backend.getStatus().active_run_count).toBe(1);
+    await iterator.return?.();
+    await waitFor(() => fileExists(marker));
+    await waitFor(() => backend.getStatus().active_run_count === 0);
+    expect(backend.getStatus().active_run_count).toBe(0);
+  });
+
+  it("keeps draining an early-returned child that ignores SIGTERM until real close", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-early-return-drain-"));
+    roots.push(root);
+    const executable = path.join(root, "early-return-drain");
+    const release = path.join(root, "release");
+    const pidFile = path.join(root, "pid");
+    const drainedAfterSignal = path.join(root, "drained-after-signal");
+    await writeFile(executable, [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const [release, pidFile, drainedAfterSignal] = process.argv.slice(2);",
+      "fs.writeFileSync(pidFile, String(process.pid));",
+      "let signalled = false;",
+      "process.on('SIGTERM', () => { signalled = true; });",
+      "const releaseTimer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(releaseTimer); process.exit(0); } }, 5);",
+      "process.stdout.write('READY\\n');",
+      "const chunk = Buffer.alloc(65536);",
+      "const pump = () => {",
+      "  if (fs.existsSync(release)) return;",
+      "  if (process.stdout.write(chunk)) { setImmediate(pump); return; }",
+      "  process.stdout.once('drain', () => {",
+      "    if (signalled) fs.writeFileSync(drainedAfterSignal, 'drained');",
+      "    setImmediate(pump);",
+      "  });",
+      "};",
+      "pump();"
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({ id: "early-return-drain-cli", kind: "external", label: "Early Return Drain CLI", command: executable, args: [release, pidFile, drainedAfterSignal] });
+    const iterator = backend.runTurn(backendInput("run-early-return-drain"))[Symbol.asyncIterator]();
+    let returned = false;
+    try {
+      let ready = false;
+      while (!ready) {
+        const next = await iterator.next();
+        if (next.done) break;
+        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+      }
+
+      await iterator.return?.();
+      returned = true;
+      expect(backend.getStatus().active_run_count).toBe(1);
+      await waitFor(() => fileExists(drainedAfterSignal));
+      await writeFile(release, "release", "utf8");
+      await waitFor(() => backend.getStatus().active_run_count === 0);
+      expect(backend.getStatus().active_run_count).toBe(0);
+    } finally {
+      await writeFile(release, "release", "utf8").catch(() => undefined);
+      if (!returned) await iterator.return?.().catch(() => undefined);
+      try {
+        await waitFor(() => backend.getStatus().active_run_count === 0);
+      } catch {
+        const pid = Number.parseInt(await readFile(pidFile, "utf8"), 10);
+        if (Number.isSafeInteger(pid) && pid > 0) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch (error) {
+            if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+          }
+        }
+        await waitFor(() => backend.getStatus().active_run_count === 0);
+      }
+    }
+  });
+
+  it("does not lose a confirmed provider completion when cancel races close", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-race-"));
+    roots.push(root);
+    const executable = path.join(root, "completed-then-close");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write('READY\\n');\nprocess.stdout.write(JSON.stringify({ type: 'result', result: 'done' }) + '\\n');\nprocess.stdout.write(JSON.stringify({ type: 'result', is_error: true, error_code: 'late_error', message: 'late provider failure' }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({ id: "cancel-race-cli", kind: "external", label: "Cancel Race CLI", command: executable });
+    const iterator = backend.runTurn(backendInput("run-cancel-race"))[Symbol.asyncIterator]();
+    const events: BackendOutputEvent[] = [];
+    let ready = false;
+    while (!ready) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+    }
+    expect(ready).toBe(true);
+    expect(events.some((event) => event.terminal_evidence)).toBe(false);
+    await expect(backend.cancelRun?.("run-cancel-race")).resolves.toEqual({ kind: "requested" });
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+    }
+    expect(events.filter((event) => event.terminal_evidence).map((event) => event.terminal_evidence)).toEqual([{ kind: "completed", source: "provider_terminal_response" }]);
+    expect(events.filter((event) => event.event_type === "run_completed" || event.event_type === "run_failed")).toHaveLength(1);
+  });
+
+  it("keeps the first typed provider completion when process close is later nonzero", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-terminal-conflict-"));
+    roots.push(root);
+    const executable = path.join(root, "completed-then-nonzero");
+    await writeFile(executable, "#!/bin/sh\nprintf '{\"type\":\"result\",\"result\":\"done\"}\\n'\nexit 9\n", "utf8");
+    await chmod(executable, 0o755);
+
+    const backend = new ExternalCliBackend({ id: "terminal-conflict-cli", kind: "external", label: "Terminal Conflict CLI", command: executable });
+    const events = await collectEvents(backend.runTurn(backendInput("run-terminal-conflict")));
+
+    expect(events.filter((event) => event.terminal_evidence)).toHaveLength(1);
+    expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "completed", source: "provider_terminal_response" });
+    expect(backend.getStatus().active_run_count).toBe(0);
+  });
+
+  it("reports missing stream state as indeterminate when runtime state is unavailable", async () => {
+    const backend = new ExternalCliBackend({ id: "missing-stream", kind: "external", label: "Missing Stream", command: process.execPath });
+    const events = await collectEvents(backend.streamEvents?.("unknown-run") ?? (async function* () {})());
+    expect(events[0]?.terminal_evidence).toEqual({ kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true });
+  });
+
   it("maps Claude-style stream JSON content blocks to canonical backend events", () => {
     const events = parseCliOutputEvents(JSON.stringify({
       type: "assistant",
       session_id: "claude-session-1",
+      source_event_id: "claude-raw-1",
+      source_sequence: 9,
       message: {
         content: [
           { type: "text", text: "調査しました" },
@@ -388,6 +920,8 @@ describe("agent backend registry", () => {
     const result = parseCliOutputLine(JSON.stringify({
       type: "result",
       session_id: "claude-session-1",
+      source_event_id: "claude-result-1",
+      source_sequence: 10,
       result: "done",
       is_error: false
     }));
@@ -395,6 +929,8 @@ describe("agent backend registry", () => {
     expect(events).toEqual([
       {
         event_type: "text_delta",
+        source_event_id: "provider-id:claude-raw-1:part:1",
+        source_sequence: 9,
         payload: {
           backend_session_id: "claude-session-1",
           provider_event_type: "assistant",
@@ -403,6 +939,8 @@ describe("agent backend registry", () => {
       },
       {
         event_type: "tool_call_started",
+        source_event_id: "provider-id:claude-raw-1:part:2",
+        source_sequence: 9,
         tool_call_id: "tool_1",
         payload: {
           backend_session_id: "claude-session-1",
@@ -417,12 +955,35 @@ describe("agent backend registry", () => {
     ]);
     expect(result).toEqual({
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      source_event_id: "claude-result-1",
+      source_sequence: 10,
       payload: {
         backend_session_id: "claude-session-1",
         provider_event_type: "result",
         output_summary: "done"
       }
     });
+  });
+
+  it("accepts only positive safe provider sequences and assigns adapter identity otherwise", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-invalid-sequence-"));
+    roots.push(root);
+    const executable = path.join(root, "invalid-sequence");
+    await writeFile(executable, [
+      "#!/bin/sh",
+      "printf '{\"type\":\"assistant_delta\",\"text\":\"hello\",\"source_sequence\":0}\\n'",
+      "printf '{\"type\":\"result\",\"result\":\"done\"}\\n'"
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ExternalCliBackend({ id: "invalid-sequence-cli", kind: "external", label: "Invalid Sequence CLI", command: executable });
+
+    const events = await collectEvents(backend.runTurn(backendInput("run-invalid-sequence")));
+    const text = events.find((event) => event.event_type === "text_delta");
+
+    expect(text?.source_sequence).toBeUndefined();
+    expect(text?.source_event_id).toMatch(/^run-invalid-sequence:adapter-stream:.+:adapter:\d+$/);
+    expect(parseCliOutputLine(JSON.stringify({ type: "assistant_delta", text: "bad", source_sequence: Number.MAX_SAFE_INTEGER + 1 }))?.source_sequence).toBeUndefined();
   });
 
   it("normalizes delegated search and subagent tool metadata", () => {
@@ -473,6 +1034,20 @@ describe("agent backend registry", () => {
       backend_session_id: "claude-session-2",
       output_summary: "resume ok"
     });
+  });
+
+  it("reports missing native resume sessions as confirmed preflight rejection", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-resume-missing-"));
+    roots.push(root);
+    const executable = path.join(root, "backend-resume-missing");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(executable, 0o755);
+    const backend = new ClaudeCodeBackend({ command: executable, resumeArgs: ["--resume", "{backend_session_id}"] });
+    const events = await collectEvents(backend.resumeRun("run_resume_missing"));
+    expect(events).toContainEqual(expect.objectContaining({
+      event_type: "run_failed",
+      terminal_evidence: { kind: "not_started", source: "preflight_rejection" }
+    }));
   });
 
   it("maps Codex-style JSONL stream events to canonical backend events", () => {
@@ -575,6 +1150,7 @@ describe("agent backend registry", () => {
     });
     expect(completed).toEqual({
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       payload: {
         backend_session_id: "codex-thread-1",
         provider_event_type: "turn.completed",
@@ -599,6 +1175,7 @@ describe("agent backend registry", () => {
       thread_id: "codex-thread-empty"
     }))).toEqual({
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       payload: {
         backend_session_id: "codex-thread-empty",
         provider_event_type: "turn.completed"
@@ -610,6 +1187,7 @@ describe("agent backend registry", () => {
       output_summary: "Codex completed."
     }))).toEqual({
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       payload: {
         backend_session_id: "codex-thread-empty",
         provider_event_type: "turn.completed"
@@ -966,11 +1544,16 @@ describe("agent backend registry", () => {
     expect(text).toContain("作業メモを作成しました。");
     expect(events.at(-1)).toEqual({
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      source_event_id: expect.stringMatching(
+        /^run_last_message:adapter-stream:backend_stream_[^:]+:adapter:\d+$/
+      ),
       payload: {
         backend_session_id: "codex-thread-empty",
         provider_event_type: "turn.completed"
       }
     });
+    expect(events.at(-1)).not.toHaveProperty("source_sequence");
   });
 });
 
@@ -980,6 +1563,37 @@ async function collectEvents(events: AsyncIterable<BackendOutputEvent>): Promise
     collected.push(event);
   }
   return collected;
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  return access(filePath).then(() => true, () => false);
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!await predicate()) {
+    if (Date.now() >= deadline) throw new Error("test_barrier_timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function cleanupCliFixture(backend: ExternalCliBackend, iterator: AsyncIterator<BackendOutputEvent>, pidFile: string, release?: string): Promise<void> {
+  if (release) await writeFile(release, "release", "utf8").catch(() => undefined);
+  await iterator.return?.().catch(() => undefined);
+  try {
+    await waitFor(() => backend.getStatus().active_run_count === 0);
+    return;
+  } catch {
+    const pid = Number.parseInt(await readFile(pidFile, "utf8"), 10);
+    if (Number.isSafeInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+      }
+    }
+    await waitFor(() => backend.getStatus().active_run_count === 0);
+  }
 }
 
 function backendInput(runId = "run_probe"): BackendRunInput {
