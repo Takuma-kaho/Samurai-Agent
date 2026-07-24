@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 export const supportedLocales = ["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"] as const;
 export const translationStatuses = ["verified", "draft", "missing"] as const;
@@ -292,30 +293,9 @@ export type LifecycleTransitionDecision = {
  * from inventing a different JSON Schema dialect or reference strategy.
  */
 export function toStrictJsonSchema(schema: z.ZodTypeAny, _name: string): Record<string, JsonValue> {
-  const converted: unknown = JSON.parse(JSON.stringify(loadZodToJsonSchema()(schema, { $refStrategy: "root" })));
+  const converted: unknown = JSON.parse(JSON.stringify(zodToJsonSchema(schema, { $refStrategy: "root" })));
   if (!isJsonRecord(converted)) throw new Error("zod_json_schema_conversion_invalid");
   return converted;
-}
-
-type ZodToJsonSchema = (schema: z.ZodTypeAny, options: { $refStrategy: "root" }) => unknown;
-let zodToJsonSchema: ZodToJsonSchema | undefined;
-
-/**
- * JSON Schema generation is used by the Domain catalog, not by ordinary
- * record validation. Load its large converter only when that explicit API is
- * called so every Runtime/Store import does not pay the startup cost.
- */
-function loadZodToJsonSchema(): ZodToJsonSchema {
-  if (zodToJsonSchema) return zodToJsonSchema;
-  const runtimeProcess = (globalThis as typeof globalThis & {
-    process?: { getBuiltinModule?: (id: string) => unknown };
-  }).process;
-  const moduleApi = runtimeProcess?.getBuiltinModule?.("module") as { createRequire?: (url: string) => (id: string) => unknown } | undefined;
-  if (!moduleApi?.createRequire) throw new Error("zod_json_schema_converter_unavailable");
-  const loaded = moduleApi.createRequire(import.meta.url)("zod-to-json-schema") as { zodToJsonSchema?: ZodToJsonSchema };
-  if (typeof loaded.zodToJsonSchema !== "function") throw new Error("zod_json_schema_converter_invalid");
-  zodToJsonSchema = loaded.zodToJsonSchema;
-  return zodToJsonSchema;
 }
 
 function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
