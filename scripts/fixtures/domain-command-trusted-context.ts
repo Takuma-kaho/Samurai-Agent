@@ -202,7 +202,11 @@ const normalProviderBackend: AgentBackend = {
         input: probe.input
       }
     };
-    yield { event_type: "run_completed", payload: { output_summary: `${probe.id} completed` } };
+    yield {
+      event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      payload: { output_summary: `${probe.id} completed` }
+    };
   }
 };
 
