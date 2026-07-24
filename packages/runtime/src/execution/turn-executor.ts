@@ -1,6 +1,7 @@
 import type { BackendOutputEvent, BackendRuntimeFailure, RuntimeFailureCauseCategory } from "@samurai-agent/agent-backends";
 import type { BackendRunRecord, JsonValue } from "@samurai-agent/core-schemas";
 import type { CommittedEventPublisherPort, HostDiagnosticsPort, PreparedTurn, TurnCleanupPort, TurnToolExecutionPort } from "../host/host-types";
+import { normalizeBackendOutputEvent } from "../backend/event-bridge";
 import { BackendEventJournal } from "./backend-event-journal";
 import { RunLifecycle, type LifecycleRunStore, type PreparedTerminalSettlement } from "./run-lifecycle";
 import { lifecycleEventForTerminalEvidence } from "./run-state-machine";
@@ -269,7 +270,7 @@ export async function consumeBackendEvents(input: { run: BackendRunRecord; sessi
     while (true) {
       const next = await iterator.next();
       if (next.done) break;
-      const event = next.value;
+      const event = normalizeBackendOutputEvent(next.value);
       sourceSequence = Math.max(sourceSequence + 1, event.source_sequence ?? 0);
       const candidateLifecycleEvent = lifecycleEventForBackendEvent(event, run.phase === "cancelling");
       const lifecycleEvent = candidateLifecycleEvent?.type === "started" && run.status === "running" ? undefined : candidateLifecycleEvent;

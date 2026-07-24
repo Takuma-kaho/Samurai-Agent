@@ -115,6 +115,7 @@ describe("TurnExecutor", () => {
       toolExecution: {
         execute: async ({ event }) => {
           expect(store.events.at(-1)?.event_type).toBe("tool_call_started");
+          expect(event.tool_call_id).toBe("tool-1");
           store.order.push(`tool:${event.payload.action}`);
         }
       }
@@ -225,7 +226,7 @@ function executorOptions(overrides: Partial<TurnExecutorOptions> = {}): TurnExec
 async function* streamWithCleanup(onCleanup: () => void): AsyncIterable<BackendOutputEvent> {
   try {
     yield { event_type: "run_started", payload: {} };
-    yield { event_type: "tool_call_started", payload: { tool_call_id: "tool-1", action: "tool.read" } };
+    yield { event_type: "tool_call_started", tool_call_id: "tool-1", payload: { action: "tool.read" } };
     yield { event_type: "run_completed", payload: { output_summary: "done" }, terminal_evidence: { kind: "completed", source: "owned_loop_return" } };
   } finally {
     onCleanup();
