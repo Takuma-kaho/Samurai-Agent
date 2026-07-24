@@ -3,7 +3,7 @@ import { BackendEventBridge } from "./backend-event-bridge";
 
 describe("BackendEventBridge", () => {
   it("normalizes backend events, assigns sequence, and drops invalid resource refs", () => {
-    const bridge = new BackendEventBridge({ runId: "run_1", sessionId: "session_1", startSequence: 5 });
+    const bridge = new BackendEventBridge({ runId: "run_1", sessionId: "session_1", attemptNo: 1, startSequence: 5 });
 
     const first = bridge.project({
       event_type: "tool_call_output",
@@ -39,7 +39,7 @@ describe("BackendEventBridge", () => {
   });
 
   it("separates persisted event payloads from compact UI projections", () => {
-    const bridge = new BackendEventBridge({ runId: "run_1", sessionId: "session_1" });
+    const bridge = new BackendEventBridge({ runId: "run_1", sessionId: "session_1", attemptNo: 1 });
     const started = bridge.project({
       event_type: "tool_call_started",
       payload: {

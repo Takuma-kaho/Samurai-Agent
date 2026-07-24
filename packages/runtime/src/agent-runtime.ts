@@ -1993,20 +1993,24 @@ export class AgentRuntime {
     }
     const runInput = await this.buildResumeToolRunInput(run, {});
     await this.ensureBackendEventSequence(run.id);
+    const toolCallId = input.toolCallId || createId("toolcall");
     const eventBridge = new BackendEventBridge({
       runId: run.id,
       sessionId: run.session_id,
+      attemptNo: run.current_attempt ?? 1,
       nextSequence: () => this.allocateBackendEventSequence(run.id)
     });
     const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
-      const { record, uiRecord } = eventBridge.project(event);
+      const { record, uiRecord } = eventBridge.project({
+        ...event,
+        source_event_id: event.source_event_id ?? `tool-bridge:${toolCallId}:${event.event_type}`
+      });
       const appended = await this.store.appendCore02Event(record);
       if (uiRecord) {
         await this.emit("backend.event.created", uiRecord);
       }
       return appended.event;
     };
-    const toolCallId = input.toolCallId || createId("toolcall");
     const startedEvent = normalizeBackendOutputEvent({
       event_type: "tool_call_started",
       tool_call_id: toolCallId,

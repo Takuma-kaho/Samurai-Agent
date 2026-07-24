@@ -21,6 +21,7 @@ export class BackendEventBridge {
   constructor(private readonly input: {
     runId: string;
     sessionId: string;
+    attemptNo: number;
     startSequence?: number;
     nextSequence?: () => number;
   }) {
@@ -35,6 +36,9 @@ export class BackendEventBridge {
       session_id: this.input.sessionId,
       event_type: normalized.event_type,
       sequence: this.input.nextSequence ? this.input.nextSequence() : this.nextSequence,
+      attempt_no: this.input.attemptNo,
+      ...(normalized.source_event_id ? { source_event_id: normalized.source_event_id } : {}),
+      ...(normalized.source_sequence !== undefined ? { source_sequence: normalized.source_sequence } : {}),
       payload: normalized.payload,
       resource_refs: normalized.resource_refs ?? [],
       created_at: nowIso()
