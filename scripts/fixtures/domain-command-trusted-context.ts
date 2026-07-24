@@ -128,7 +128,7 @@ const bridgeBackend: AgentBackend = {
       const toolInput = field.startsWith("request.")
         ? { ...valid, request: { ...request, ...injected } }
         : { ...valid, ...injected };
-      await assert.rejects(
+      await expectProviderSpoofRejection(
         runtime.runBackendToolBridgeCall({
           runId: input.run_id,
           token: input.tool_bridge?.token ?? "",
@@ -136,7 +136,6 @@ const bridgeBackend: AgentBackend = {
           toolCallId: `trusted-${currentPhase}-spoof-${field.replaceAll(".", "-")}`,
           toolInput
         }),
-        (error: unknown) => isProviderSpoofRejection(error),
         `${field} must be rejected before the Generated Surface handler`
       );
       assert.equal(handlerInputs.length, handlersBeforeSpoof, `${field} reached the Generated Surface handler`);
@@ -460,6 +459,29 @@ function isProviderSpoofRejection(error: unknown): boolean {
     && typeof value.message === "string"
     && (value.message.includes("domain_command_input_invalid:generated_surface.")
       || value.message.startsWith("untrusted_generated_surface_"));
+}
+
+async function expectProviderSpoofRejection(operation: Promise<unknown>, message: string): Promise<void> {
+  let rejected = false;
+  let error: unknown;
+  try {
+    await operation;
+  } catch (caught) {
+    rejected = true;
+    error = caught;
+  }
+  assert.equal(rejected, true, `${message}: expected a rejection`);
+  assert.equal(isProviderSpoofRejection(error), true, `${message}: ${describeRejection(error)}`);
+}
+
+function describeRejection(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const value = error as { name?: unknown; code?: unknown; message?: unknown };
+  return JSON.stringify({
+    name: value.name,
+    code: value.code,
+    message: value.message
+  });
 }
 
 function normalProviderRejectionProbes(): NormalProviderProbe[] {
