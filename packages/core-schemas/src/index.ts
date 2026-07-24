@@ -2958,6 +2958,7 @@ export type PrivacyRedactionOptions = {
 };
 
 const sensitivePrivacyKey = /(?:^|[_-])(secret|token|api[_-]?key|password|credential|authorization|cookie|private[_-]?key)(?:$|[_-])/i;
+const technicalIdentifierKey = /(?:^|_)(?:id|ids|sha|hash)$/i;
 
 export function redactPrivateData<T>(value: T, options: PrivacyRedactionOptions = {}, key = ""): T {
   if (sensitivePrivacyKey.test(key)) {
@@ -2970,7 +2971,7 @@ export function redactPrivateData<T>(value: T, options: PrivacyRedactionOptions 
       .replace(/\bAKIA[A-Z0-9]{16}\b/g, "[redacted]")
       .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted]")
       .replace(/\b(api[_-]?key|authorization|token|secret|password|credential|cookie|private[_-]?key)\s*[:=]\s*["']?[^"',\s}]+/gi, "$1=[redacted]");
-    if (options.redactPii) {
+    if (options.redactPii && !technicalIdentifierKey.test(key)) {
       redacted = redacted
         .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]")
         .replace(/(?<!\d)(?:\+?81[-\s]?)?(?:0\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4})(?!\d)/g, "[redacted-phone]");
