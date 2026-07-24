@@ -576,7 +576,10 @@ async function assertNormalProviderProbeRejected(input: {
   assert.equal(
     outputEvents.length,
     1,
-    `${input.probe.id} must emit one stable Provider tool rejection: ${JSON.stringify(outputEvents.map((event) => event.payload))}`
+    `${input.probe.id} must emit one stable Provider tool rejection: ${JSON.stringify({
+      matching: outputEvents.map((event) => event.payload),
+      events: result.backendEvents.map((event) => ({ event_type: event.event_type, sequence: event.sequence, payload: event.payload }))
+    })}`
   );
   const output = outputEvents[0]!.payload;
   assert.equal(output.status, "failed", `${input.probe.id} must never be reported as a successful Provider tool`);
