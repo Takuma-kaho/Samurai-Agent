@@ -1,5 +1,5 @@
-import type { BackendOutputEvent, BackendRuntimeFailure, RuntimeFailureCauseCategory } from "@samurai-agent/agent-backends";
-import type { BackendRunRecord, JsonValue } from "@samurai-agent/core-schemas";
+import type { BackendOutputEvent, BackendRuntimeFailure, BackendRunInput, RuntimeFailureCauseCategory } from "@samurai-agent/agent-backends";
+import { BackendTerminalEvidenceSchema, type BackendEventRecord, type BackendRunRecord, type GatewayBoundaryPolicy, type JsonValue } from "@samurai-agent/core-schemas";
 import type { CommittedEventPublisherPort, HostDiagnosticsPort, PreparedTurn, TurnCleanupPort, TurnToolExecutionPort } from "../host/host-types";
 import { normalizeBackendOutputEvent } from "../backend/event-bridge";
 import { BackendEventJournal } from "./backend-event-journal";
@@ -32,8 +32,15 @@ export interface TurnExecutorCleanupInput {
 
 export interface TurnResumeExecutionInput {
   readonly run: BackendRunRecord;
-  readonly backend: { resumeRun?: (runId: string, input: Record<string, JsonValue>) => AsyncIterable<BackendOutputEvent> };
+  readonly backend: { execution_owner: "host" | "backend" | "tool_bridge"; resumeRun?: (runId: string, input: Record<string, JsonValue>) => AsyncIterable<BackendOutputEvent> };
   readonly input: Record<string, JsonValue>;
+  readonly backendInput?: BackendRunInput;
+  readonly gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
+}
+
+export interface TurnSyncExecutionInput {
+  readonly run: BackendRunRecord;
+  readonly backend: { streamEvents?: (runId: string) => AsyncIterable<BackendOutputEvent> };
 }
 
 /**
@@ -75,9 +82,12 @@ export class TurnExecutor {
       });
       currentPrepared = withRun(currentPrepared, run);
     }
-    if (!run.backend_session_id && backend.startSession) {
+    if (backend.sessionPolicy.acquisition === "start_session" && !backend.startSession) {
+      throw new Error("backend_start_session_unsupported");
+    }
+    if (!run.backend_session_id && backend.sessionPolicy.acquisition === "start_session") {
       throwIfAborted(signal);
-      const sessionHandle = await backend.startSession({
+      const sessionHandle = await backend.startSession!({
         session_id: run.session_id,
         session_key: currentPrepared.session.session_key,
         output_locale: currentPrepared.session.output_locale,
@@ -108,34 +118,16 @@ export class TurnExecutor {
       stream: backend.runTurn(currentPrepared.backendInput),
       journal: this.journal,
       lifecycle: this.lifecycle,
-      emitCommitted: async (event, committedRun) => {
+      store: this.store,
+      emitCommitted: async (event, committedRun, sourceEvent) => {
         await this.publishCommittedEvent(event, committedRun, "event_publisher");
-        if (event.event_type === "tool_call_started") {
-          await this.toolExecution.execute({
+        if (event.event_type === "tool_call_started" && backend.execution_owner === "host") {
+          await this.executeHostTool({
+            event,
+            sourceEvent,
             run: committedRun,
             backendInput: currentPrepared.backendInput,
-            event: {
-              event_type: event.event_type,
-              tool_call_id: event.payload.tool_call_id as string | undefined,
-              payload: event.payload,
-            },
-            gatewayBoundaryPolicy: currentPrepared.request.gatewayBoundaryPolicy,
-            recordEvent: async (toolEvent) => {
-              const normalizedToolEvent = normalizeBackendOutputEvent(toolEvent);
-              const recorded = await this.journal.appendCanonicalEvent({
-                runId: committedRun.id,
-                sessionId: committedRun.session_id,
-                attemptNo: committedRun.current_attempt ?? 1,
-                eventType: normalizedToolEvent.event_type,
-                payload: normalizedToolEvent.payload,
-                resourceRefs: normalizedToolEvent.resource_refs,
-                sourceEventId: `host-tool:${committedRun.id}:${committedRun.current_attempt ?? 1}:${normalizedToolEvent.tool_call_id ?? event.payload.tool_call_id ?? event.id}:${normalizedToolEvent.event_type}:${String(normalizedToolEvent.payload.action_id ?? normalizedToolEvent.payload.status ?? "result")}`
-              });
-              if (!recorded.duplicate) {
-                await this.publishCommittedEvent(recorded.event, committedRun, "tool_event_publisher");
-              }
-              return recorded.event;
-            },
+            gatewayBoundaryPolicy: currentPrepared.request.gatewayBoundaryPolicy
           });
         }
       }
@@ -164,8 +156,38 @@ export class TurnExecutor {
       stream: input.backend.resumeRun(resumed.run.id, input.input),
       journal: this.journal,
       lifecycle: this.lifecycle,
-      emitCommitted: async (event, committedRun) => {
+      store: this.store,
+      emitCommitted: async (event, committedRun, sourceEvent) => {
         await this.publishCommittedEvent(event, committedRun, "control_event_publisher");
+        if (event.event_type === "tool_call_started" && input.backend.execution_owner === "host" && input.backendInput) {
+          await this.executeHostTool({
+            event,
+            sourceEvent,
+            run: committedRun,
+            backendInput: input.backendInput,
+            gatewayBoundaryPolicy: input.gatewayBoundaryPolicy
+          });
+        }
+      }
+    });
+    if (execution.cleanupError !== undefined) {
+      await this.recordDiagnostic(execution.run, "host_cleanup_failed", "iterator_cleanup", execution.cleanupError);
+    }
+    return execution;
+  }
+
+  /** Consume a durable backend stream without executing Host-owned Tools. */
+  async syncRun(input: TurnSyncExecutionInput): Promise<TurnExecutionResult | undefined> {
+    if (!input.backend.streamEvents) return undefined;
+    const execution = await consumeBackendEvents({
+      run: input.run,
+      sessionId: input.run.session_id,
+      stream: input.backend.streamEvents(input.run.id),
+      journal: this.journal,
+      lifecycle: this.lifecycle,
+      store: this.store,
+      emitCommitted: async (event, committedRun) => {
+        await this.publishCommittedEvent(event, committedRun, "sync_event_publisher");
       }
     });
     if (execution.cleanupError !== undefined) {
@@ -194,9 +216,9 @@ export class TurnExecutor {
   }
 
   private async recordDiagnostic(run: BackendRunRecord, eventType: "host_cleanup_failed" | "host_emit_failed", operationId: string, error: unknown): Promise<void> {
-    const input = {
-      runId: run.id,
-      sessionId: run.session_id,
+      const input = {
+        runId: run.id,
+        sessionId: run.session_id,
       attemptNo: run.current_attempt ?? 1,
       operationId,
       eventType,
@@ -207,6 +229,44 @@ export class TurnExecutor {
     } catch (diagnosticError) {
       this.diagnostics.logPersistenceFailure({ ...input, error: diagnosticError });
     }
+  }
+
+  private async executeHostTool(input: {
+    event: BackendEventRecord;
+    sourceEvent?: BackendOutputEvent;
+    run: BackendRunRecord;
+    backendInput: BackendRunInput;
+    gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
+  }): Promise<void> {
+    const toolCallId = input.sourceEvent?.tool_call_id ?? (typeof input.event.payload.tool_call_id === "string" ? input.event.payload.tool_call_id : undefined);
+    if (!toolCallId) throw new Error("tool_call_id_required");
+    await this.toolExecution.execute({
+      run: input.run,
+      backendInput: input.backendInput,
+      event: {
+        event_type: "tool_call_started",
+        tool_call_id: toolCallId,
+        payload: input.sourceEvent?.payload ?? input.event.payload
+      },
+      gatewayBoundaryPolicy: input.gatewayBoundaryPolicy,
+      recordEvent: async (toolEvent) => {
+        const normalizedToolEvent = normalizeBackendOutputEvent(toolEvent);
+        const recorded = await this.journal.appendCanonicalEvent({
+          runId: input.run.id,
+          sessionId: input.run.session_id,
+          ...(normalizedToolEvent.backend_session_id ? { backendSessionId: normalizedToolEvent.backend_session_id } : {}),
+          attemptNo: input.run.current_attempt ?? 1,
+          eventType: normalizedToolEvent.event_type,
+          payload: normalizedToolEvent.payload,
+          resourceRefs: normalizedToolEvent.resource_refs,
+          sourceEventId: `host-tool:${input.run.id}:${input.run.current_attempt ?? 1}:${normalizedToolEvent.tool_call_id ?? toolCallId ?? input.event.id}:${normalizedToolEvent.event_type}:${String(normalizedToolEvent.payload.action_id ?? normalizedToolEvent.payload.status ?? "result")}`
+        });
+        if (!recorded.duplicate) {
+          await this.publishCommittedEvent(recorded.event, input.run, "tool_event_publisher");
+        }
+        return recorded.event;
+      }
+    });
   }
 
   private async publishCommittedEvent(event: Awaited<ReturnType<BackendEventJournal["appendCanonicalEvent"]>>["event"], run: BackendRunRecord, operationId: string): Promise<void> {
@@ -256,7 +316,7 @@ function failureCauseCategory(value: unknown, event: BackendOutputEvent): Runtim
   return "unknown";
 }
 
-export async function consumeBackendEvents(input: { run: BackendRunRecord; sessionId: string; stream: AsyncIterable<BackendOutputEvent>; journal: BackendEventJournal; clock?: () => string; lifecycle?: RunLifecycle; emitCommitted?: (event: TurnExecutionResult["events"][number], run: BackendRunRecord) => Promise<void> }): Promise<TurnExecutionResult> {
+export async function consumeBackendEvents(input: { run: BackendRunRecord; sessionId: string; stream: AsyncIterable<BackendOutputEvent>; journal: BackendEventJournal; store?: LifecycleRunStore; clock?: () => string; lifecycle?: RunLifecycle; emitCommitted?: (event: TurnExecutionResult["events"][number], run: BackendRunRecord, sourceEvent?: BackendOutputEvent) => Promise<void> }): Promise<TurnExecutionResult> {
   let run = input.run;
   const events: TurnExecutionResult["events"] = [];
   let terminal = false;
@@ -264,6 +324,13 @@ export async function consumeBackendEvents(input: { run: BackendRunRecord; sessi
   const lifecycle = input.lifecycle ?? new RunLifecycle(input.clock);
   let terminalSettlement: PreparedTerminalSettlement | undefined;
   let sourceSequence = 0;
+  const eventStore = input.store as (LifecycleRunStore & {
+    listBackendEvents?: (input: { runId: string }) => Promise<BackendEventRecord[]>;
+  }) | undefined;
+  if (eventStore?.listBackendEvents) {
+    const existingEvents = await eventStore.listBackendEvents({ runId: input.run.id });
+    sourceSequence = existingEvents.reduce((max, event) => Math.max(max, event.source_sequence ?? 0), 0);
+  }
   let waitingExecution: "live" | "suspended" | undefined;
   let streamError: unknown;
   const iterator = input.stream[Symbol.asyncIterator]();
@@ -272,10 +339,37 @@ export async function consumeBackendEvents(input: { run: BackendRunRecord; sessi
       const next = await iterator.next();
       if (next.done) break;
       const event = normalizeBackendOutputEvent(next.value);
-      sourceSequence = Math.max(sourceSequence + 1, event.source_sequence ?? 0);
+      if ((event.event_type === "run_completed" || event.event_type === "run_failed") && !event.terminal_evidence) {
+        throw new Error("terminal_evidence_required");
+      }
+      if (event.terminal_evidence) BackendTerminalEvidenceSchema.parse(event.terminal_evidence);
+      const observedBackendSessionId = backendSessionIdFromEvent(event);
+      if (observedBackendSessionId) {
+        const sessionSourceEvent = event.source_event_id ?? event.event_type;
+        if (event.terminal_evidence) {
+          run = mergeBackendSession(run, observedBackendSessionId, sessionSourceEvent);
+        } else if (input.store) {
+          run = await lifecycle.recordBackendSession(input.store, run, observedBackendSessionId, sessionSourceEvent);
+        } else {
+          run = mergeBackendSession(run, observedBackendSessionId, sessionSourceEvent);
+        }
+      }
+      const canonicalSourceSequence = sourceSequence + 1;
+      sourceSequence = Math.max(canonicalSourceSequence, event.source_sequence ?? 0);
       const candidateLifecycleEvent = lifecycleEventForBackendEvent(event, run.phase === "cancelling");
       const lifecycleEvent = candidateLifecycleEvent?.type === "started" && run.status === "running" ? undefined : candidateLifecycleEvent;
-      const journalInput = { runId: run.id, sessionId: input.sessionId, attemptNo: run.current_attempt ?? 1, eventType: event.event_type, payload: event.payload, resourceRefs: event.resource_refs, sourceEventId: event.source_event_id, sourceSequence: event.source_sequence ?? sourceSequence, terminalEvidence: event.terminal_evidence };
+      const journalInput = {
+        runId: run.id,
+        sessionId: input.sessionId,
+        ...(event.backend_session_id ? { backendSessionId: event.backend_session_id } : {}),
+        attemptNo: run.current_attempt ?? 1,
+        eventType: event.event_type,
+        payload: event.payload,
+        resourceRefs: event.resource_refs,
+        sourceEventId: event.source_event_id,
+        sourceSequence: event.source_event_id ? event.source_sequence ?? canonicalSourceSequence : canonicalSourceSequence,
+        terminalEvidence: event.terminal_evidence
+      };
       if (lifecycleEvent && event.terminal_evidence) {
         const decision = lifecycle.decide(run, lifecycleEvent);
         terminalSettlement = await input.journal.prepareTerminalSettlement(run, journalInput, decision);
@@ -290,7 +384,7 @@ export async function consumeBackendEvents(input: { run: BackendRunRecord; sessi
         if (!committed.duplicate) {
           events.push(committed.event);
           if (event.event_type === "text_delta" && typeof event.payload.text === "string") textParts.push(event.payload.text);
-          await input.emitCommitted?.(committed.event, committed.run);
+          await input.emitCommitted?.(committed.event, committed.run, event);
         }
         run = committed.run;
         if (event.event_type === "backend_waiting_for_native_input") {
@@ -302,7 +396,7 @@ export async function consumeBackendEvents(input: { run: BackendRunRecord; sessi
         if (!committed.duplicate) {
           events.push(committed.event);
           if (event.event_type === "text_delta" && typeof event.payload.text === "string") textParts.push(event.payload.text);
-          await input.emitCommitted?.(committed.event, run);
+          await input.emitCommitted?.(committed.event, run, event);
         }
       }
     }
@@ -322,6 +416,27 @@ export async function consumeBackendEvents(input: { run: BackendRunRecord; sessi
     throw streamError;
   }
   return { run, events, terminal, text: textParts.join(""), ...(terminalSettlement ? { terminalSettlement } : {}), ...(waitingExecution ? { waitingExecution } : {}) };
+}
+
+function backendSessionIdFromEvent(event: BackendOutputEvent): string | undefined {
+  const value = event.backend_session_id ?? event.payload.backend_session_id;
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function mergeBackendSession(run: BackendRunRecord, backendSessionId: string, sourceEventId?: string): BackendRunRecord {
+  if (run.backend_session_id && run.backend_session_id !== backendSessionId) {
+    throw new Error(`backend_session_conflict:${run.id}`);
+  }
+  if (run.backend_session_id) return run;
+  return {
+    ...run,
+    backend_session_id: backendSessionId,
+    metadata: {
+      ...run.metadata,
+      backend_session_id: backendSessionId,
+      ...(sourceEventId ? { backend_session_source_event: sourceEventId } : {})
+    }
+  };
 }
 
 function withRun(prepared: PreparedTurn, run: BackendRunRecord, backendInput: PreparedTurn["backendInput"] = prepared.backendInput): PreparedTurn {

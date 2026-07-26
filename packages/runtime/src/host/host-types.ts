@@ -6,6 +6,7 @@ import type {
   ContextHandoff,
   ContextPreview,
   GatewayBoundaryRuntimeSnapshot,
+  GatewayBoundaryPolicy,
   HostContextAssembly,
   JsonValue,
   MessageEnvelope,
@@ -109,7 +110,7 @@ export interface TurnToolExecutionPort {
   execute(input: {
     run: BackendRunRecord;
     backendInput: BackendRunInput;
-    event: { event_type: BackendEventRecord["event_type"]; tool_call_id?: string; payload: Record<string, JsonValue> };
+    event: { event_type: BackendEventRecord["event_type"]; tool_call_id: string; payload: Record<string, JsonValue> };
     gatewayBoundaryPolicy?: import("@samurai-agent/core-schemas").GatewayBoundaryPolicy;
     recordEvent: (event: { event_type: BackendEventRecord["event_type"]; payload: Record<string, JsonValue>; resource_refs?: BackendEventRecord["resource_refs"]; tool_call_id?: string }) => Promise<BackendEventRecord>;
   }): Promise<void>;
@@ -155,6 +156,11 @@ export interface HostDiagnosticsPort {
   logPersistenceFailure(input: HostDiagnosticInput & { error: unknown }): void;
 }
 
+export interface ResumePreparation {
+  readonly backendInput: BackendRunInput;
+  readonly gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
+}
+
 export interface HostPorts {
   readonly store: HostStorePort;
   readonly context: HostContextPort;
@@ -165,6 +171,10 @@ export interface HostPorts {
   readonly toolExecution: TurnToolExecutionPort;
   readonly cleanup: TurnCleanupPort;
   readonly diagnostics: HostDiagnosticsPort;
+  readonly prepareResumeInput?: (input: {
+    run: BackendRunRecord;
+    resumeInput: Record<string, JsonValue>;
+  }) => Promise<ResumePreparation>;
   readonly clock?: () => string;
   readonly maxConcurrency?: number;
   readonly resolveDefaultBackendId?: () => Promise<string> | string;

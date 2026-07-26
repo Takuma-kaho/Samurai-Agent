@@ -120,7 +120,7 @@ function buildGates(options) {
   ];
   if (!options.skipExternalProbes) {
     gates.push(nodeGate("external-channel-probe", "External channel readiness without live sends", ["scripts/verify-external-channels.mjs", "--json"]));
-    gates.push(nodeGate("external-backend-probe", "External backend status/probe without starting runs", ["scripts/verify-external-backends.mjs", "--json"]));
+    gates.push(nodeGate("external-backend-status", "External backend command status without starting runs", ["scripts/verify-external-backends.mjs", "--json"]));
   }
   if (!options.skipSandboxProbes) {
     gates.push(nodeGate("sandbox-capabilities", "Sandbox executor capability probe without external runs", ["--import", "tsx", "scripts/verify-sandbox-executors.mjs", "--json"]));

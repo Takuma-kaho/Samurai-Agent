@@ -40,6 +40,7 @@ export async function handleBackendToolCall(input: {
 }): Promise<FeedbackResult> {
   const providerToolName = stringValue(input.event.payload.provider_tool_name);
   const toolCallId = stringValue(input.event.payload.tool_call_id) || input.event.tool_call_id;
+  if (!toolCallId) throw new Error("tool_call_id_required");
 
   if (providerToolName === "create_artifact") {
     return ignoredToolOutput(input.run, toolCallId, providerToolName, "provider_tool_requires_domain_command", input.store, input.boundary, artifactCreateCommand.id);
@@ -62,7 +63,7 @@ export async function handleBackendToolCall(input: {
 
 async function ignoredToolOutput(
   run: BackendRunRecord,
-  toolCallId: string | undefined,
+  toolCallId: string,
   toolName: string,
   reason: string,
   store?: WorkspaceStore,

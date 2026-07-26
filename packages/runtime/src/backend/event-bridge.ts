@@ -34,26 +34,23 @@ export class BackendEventBridge {
       id: createId("event"),
       run_id: this.input.runId,
       session_id: this.input.sessionId,
+      ...(normalized.backend_session_id ? { backend_session_id: normalized.backend_session_id } : {}),
       event_type: normalized.event_type,
       sequence: this.input.nextSequence ? this.input.nextSequence() : this.nextSequence,
       attempt_no: this.input.attemptNo,
       ...(normalized.source_event_id ? { source_event_id: normalized.source_event_id } : {}),
       ...(normalized.source_sequence !== undefined ? { source_sequence: normalized.source_sequence } : {}),
-      payload: normalized.payload,
+      payload: {
+        ...normalized.payload,
+        ...(normalized.terminal_evidence ? { terminal_evidence: normalized.terminal_evidence as unknown as JsonValue } : {})
+      },
       resource_refs: normalized.resource_refs ?? [],
       created_at: nowIso()
     };
     if (!this.input.nextSequence) {
       this.nextSequence += 1;
     }
-    const uiPayload = projectUiPayload(record);
-    const uiRecord = uiPayload
-      ? {
-          ...record,
-          payload: uiPayload,
-          resource_refs: projectUiResourceRefs(record)
-        }
-      : undefined;
+    const uiRecord = projectBackendEventForUi(record);
     return {
       record,
       visible: !!uiRecord,
@@ -63,13 +60,32 @@ export class BackendEventBridge {
   }
 }
 
+export function projectBackendEventForUi(record: BackendEventRecord): BackendEventRecord | undefined {
+  const payload = projectUiPayload(record);
+  return payload
+    ? { ...record, payload, resource_refs: projectUiResourceRefs(record) }
+    : undefined;
+}
+
 export function normalizeBackendOutputEvent(event: BackendOutputEvent): BackendOutputEvent {
   const payload = jsonRecord(event.payload);
-  if (event.tool_call_id && payload.tool_call_id === undefined) {
-    payload.tool_call_id = event.tool_call_id;
+  const payloadToolCallId = typeof payload.tool_call_id === "string" && payload.tool_call_id.trim() ? payload.tool_call_id : undefined;
+  const toolCallId = event.tool_call_id ?? payloadToolCallId;
+  const payloadSessionId = typeof payload.backend_session_id === "string" && payload.backend_session_id.trim()
+    ? payload.backend_session_id
+    : undefined;
+  const backendSessionId = event.backend_session_id ?? payloadSessionId;
+  delete payload.backend_session_id;
+  if ((event.event_type === "tool_call_started" || event.event_type === "tool_call_output") && !toolCallId) {
+    throw new Error("tool_call_id_required");
+  }
+  if (toolCallId && payload.tool_call_id === undefined) {
+    payload.tool_call_id = toolCallId;
   }
   return {
     ...event,
+    ...(backendSessionId ? { backend_session_id: backendSessionId } : {}),
+    ...(toolCallId ? { tool_call_id: toolCallId } : {}),
     payload,
     resource_refs: normalizeResourceRefs(event.resource_refs)
   };
@@ -120,7 +136,7 @@ function projectUiPayload(record: BackendEventRecord): Record<string, JsonValue>
     case "backend_native_input_submitted":
       return {
         submitted_at: stringPayload(record.payload.submitted_at) ?? record.created_at,
-        has_input: record.payload.input !== undefined
+        has_input: record.payload.has_input === true
       };
     default:
       return compactPayload(record.payload);

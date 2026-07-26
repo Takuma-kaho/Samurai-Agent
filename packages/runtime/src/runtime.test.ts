@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginRuntimeRegistry } from "@samurai-agent/action-catalog";
 import { AgentBackendRegistry, MockBackend, type AgentBackend } from "@samurai-agent/agent-backends";
 import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type OperationRecord, type RollbackPoint, type SkillFrontmatter } from "@samurai-agent/core-schemas";
+import { createGatewayEnvelope, webGatewayContext } from "@samurai-agent/gateway";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, planSurfaceOperationDispatch, setExternalSendSmtpClientConnectionFactoryForTest, type ExternalAssistProvider, type ProviderInput, type ProviderOutput } from "./index";
 
@@ -124,13 +125,16 @@ function fakeProviderOutput(input: Parameters<FakeProviderAdapter["generate"]>[0
   const wantsMalformedArtifact = /malformed artifact/i.test(intent);
   const wantsArtifact = /作って|下書き|提案書|draft|memo|note/i.test(intent);
   const toolCalls: ProviderOutput["toolCalls"] = [];
+  const nextToolCallId = () => `provider_tool_${toolCalls.length + 1}`;
   if (wantsMalformedArtifact) {
     toolCalls.push({
+      id: nextToolCallId(),
       name: "create_artifact",
       arguments: {}
     });
   } else if (wantsArtifact) {
     toolCalls.push({
+      id: nextToolCallId(),
       name: "create_artifact",
       arguments: {
         title: isJapanese ? "作業メモ" : "Workspace note",
@@ -139,13 +143,13 @@ function fakeProviderOutput(input: Parameters<FakeProviderAdapter["generate"]>[0
     });
   }
   if (/覚えて|今後|preference|remember/i.test(intent)) {
-    toolCalls.push({ name: "remember_topic", arguments: {} });
+    toolCalls.push({ id: nextToolCallId(), name: "remember_topic", arguments: {} });
   }
   if (/送信|メール|外部|公開|send|mail|publish|post/i.test(intent)) {
-    toolCalls.push({ name: "request_external_send", arguments: {} });
+    toolCalls.push({ id: nextToolCallId(), name: "request_external_send", arguments: {} });
   }
   if (/削除|消して|delete|remove/i.test(intent)) {
-    toolCalls.push({ name: "request_delete", arguments: {} });
+    toolCalls.push({ id: nextToolCallId(), name: "request_delete", arguments: {} });
   }
   return {
     content: isJapanese ? "対応しました。" : "Done.",
@@ -284,10 +288,13 @@ describe("agent runtime", () => {
       id: "unsupported-presentation-renderer",
       kind: "codex",
       label: "Unsupported Presentation Renderer Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         yield {
           event_type: "tool_call_output",
           payload: {
+            tool_call_id: "unsupported_renderer_tool",
             status: "completed",
             output: {
               status: "ready",
@@ -302,6 +309,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "done" }
         };
       }
@@ -435,6 +443,8 @@ describe("agent runtime", () => {
       id: "collection-schema-bridge",
       kind: "codex",
       label: "Collection Schema Bridge Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         expect(input.expected_outputs).toContain("collection_schema");
         expect(input.tool_bridge?.enabled).toBe(true);
@@ -484,6 +494,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "done" }
         };
       }
@@ -625,6 +636,8 @@ describe("agent runtime", () => {
       id: "collection-record-bridge",
       kind: "codex",
       label: "Collection Record Bridge Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         expect(input.expected_outputs).toContain("collection_schema");
         expect(input.tool_bridge?.tools.map((tool) => tool.name)).toContain("samurai.collection.record.create");
@@ -665,7 +678,7 @@ describe("agent runtime", () => {
           }
         });
         yield { event_type: "text_delta", payload: { text: "映画ログを作成しました。" } };
-        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "done" } };
       }
     };
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-collection-record-bridge-"));
@@ -715,6 +728,8 @@ describe("agent runtime", () => {
       id: "collection-direct-file-backend",
       kind: "codex",
       label: "Collection Direct File Backend Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         const collectionDir = path.join(input.workspace_root, "collections", "direct_movies");
         await mkdir(collectionDir, { recursive: true });
@@ -733,7 +748,7 @@ describe("agent runtime", () => {
           permissions: { create: true, update: true, delete: true }
         }, null, 2));
         yield { event_type: "text_delta", payload: { text: "映画ログを作成しました。" } };
-        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "done" } };
       }
     };
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-direct-collection-"));
@@ -769,6 +784,8 @@ describe("agent runtime", () => {
       id: "collection-movie-flow-bridge",
       kind: "codex",
       label: "Collection Movie Flow Bridge Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         backendRuns += 1;
         if (input.envelope.user_intent.includes("作って")) {
@@ -810,6 +827,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "done" }
         };
       }
@@ -1065,10 +1083,13 @@ describe("agent runtime", () => {
       id: "collection-open-unneeded",
       kind: "codex",
       label: "Unused backend fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         backendRuns += 1;
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "unexpected" }
         };
       }
@@ -1142,10 +1163,13 @@ describe("agent runtime", () => {
       id: "collection-open-localized-unneeded",
       kind: "codex",
       label: "Unused localized collection open fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         backendRuns += 1;
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "unexpected" }
         };
       }
@@ -1225,10 +1249,13 @@ describe("agent runtime", () => {
       id: "collection-open-aliases-unneeded",
       kind: "codex",
       label: "Unused multilingual alias collection open fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         backendRuns += 1;
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "unexpected" }
         };
       }
@@ -1305,10 +1332,13 @@ describe("agent runtime", () => {
       id: "collection-open-ambiguous-unneeded",
       kind: "codex",
       label: "Unused ambiguous collection open fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         backendRuns += 1;
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "unexpected" }
         };
       }
@@ -1389,10 +1419,13 @@ describe("agent runtime", () => {
       id: "collection-open-exact-title-unneeded",
       kind: "codex",
       label: "Unused exact title collection open fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         backendRuns += 1;
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "unexpected" }
         };
       }
@@ -1464,10 +1497,13 @@ describe("agent runtime", () => {
       id: "collection-view-intent-unneeded",
       kind: "codex",
       label: "Unused collection view intent fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         backendRuns += 1;
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "unexpected" }
         };
       }
@@ -1519,16 +1555,19 @@ describe("agent runtime", () => {
       id: "collection-view-tool",
       kind: "codex",
       label: "Collection view tool fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         await runtime.runBackendToolBridgeCall({
           runId: input.run_id,
           token: input.tool_bridge?.token ?? "",
           toolName: "mcp__samurai__collection_view_present",
           toolCallId: "present_movies",
-          toolInput: { query: "映画ログ", view_id: "movies_calendar" }
+          toolInput: { collection_id: "movies", query: "映画ログ", view_id: "movies_calendar" }
         });
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "presented" }
         };
       }
@@ -1623,6 +1662,8 @@ describe("agent runtime", () => {
       id: "collection-schema-patch-bridge",
       kind: "codex",
       label: "Collection schema patch bridge fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         backendRuns += 1;
         const intent = input.envelope.user_intent;
@@ -1677,7 +1718,7 @@ describe("agent runtime", () => {
           });
         }
         yield { event_type: "text_delta", payload: { text: "対応しました。" } };
-        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "done" } };
       }
     };
     runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
@@ -1822,6 +1863,8 @@ describe("agent runtime", () => {
       id: "collection-schema-patch-invalid-bridge",
       kind: "codex",
       label: "Collection schema invalid patch bridge fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         await runCollectionManagePatchSchemaTool({
           runtime,
@@ -1833,7 +1876,7 @@ describe("agent runtime", () => {
           patches: [{ op: "update_view", renderer: "calendar_view" }]
         });
         yield { event_type: "text_delta", payload: { text: "対応しました。" } };
-        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "done" } };
       }
     };
     runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
@@ -1887,6 +1930,8 @@ describe("agent runtime", () => {
       id: "collection-derived-patch-invalid-bridge",
       kind: "codex",
       label: "Collection derived invalid patch bridge fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         await runCollectionManagePatchSchemaTool({
           runtime,
@@ -1898,7 +1943,7 @@ describe("agent runtime", () => {
           patches: [{ op: "add_derived_field", field: { id: "total", type: "number", label: "合計", expression: { op: "eval", code: "price + tax" } } }]
         });
         yield { event_type: "text_delta", payload: { text: "対応しました。" } };
-        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "done" } };
       }
     };
     runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
@@ -1954,6 +1999,8 @@ describe("agent runtime", () => {
       id: "collection-derived-patch-bridge",
       kind: "codex",
       label: "Collection derived patch bridge fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         backendRuns += 1;
         await runCollectionManagePatchSchemaTool({
@@ -1977,7 +2024,7 @@ describe("agent runtime", () => {
           }]
         });
         yield { event_type: "text_delta", payload: { text: "対応しました。" } };
-        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "done" } };
       }
     };
     runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
@@ -2067,6 +2114,8 @@ describe("agent runtime", () => {
       id: "collection-patch-unknown-op-bridge",
       kind: "codex",
       label: "Collection unknown patch op bridge fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         await runCollectionManagePatchSchemaTool({
           runtime,
@@ -2078,7 +2127,7 @@ describe("agent runtime", () => {
           patches: [{ op: "backfill_records", field_id: "price", value: 0 }]
         });
         yield { event_type: "text_delta", payload: { text: "対応しました。" } };
-        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "done" } };
       }
     };
     runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
@@ -2114,6 +2163,8 @@ describe("agent runtime", () => {
       id: "collection-present-bridge",
       kind: "codex",
       label: "Collection Present Bridge Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         expect(input.tool_bridge?.enabled).toBe(true);
         await runtime.runBackendToolBridgeCall({
@@ -2122,6 +2173,7 @@ describe("agent runtime", () => {
           toolName: "mcp__samurai__collection_view_present",
           toolCallId: "present_tool_1",
           toolInput: {
+            collection_id: "movies",
             query: "映画ログ",
             record_id: "movie_1"
           }
@@ -2132,6 +2184,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "done" }
         };
       }
@@ -2537,6 +2590,8 @@ describe("agent runtime", () => {
       id: "collection-schema-file",
       kind: "codex",
       label: "Collection Schema File Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         expect(input.expected_outputs).toContain("collection_schema");
         const schemaDir = path.join(input.workspace_root, "collections", "movies");
@@ -2571,6 +2626,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "done" }
         };
       }
@@ -3210,6 +3266,8 @@ describe("agent runtime", () => {
       id: "codex",
       kind: "codex",
       label: "Codex Fixture",
+      sessionPolicy: { acquisition: "provider_event", resume: "unsupported" },
+      execution_owner: "backend",
       getStatus() {
         return {
           id: "codex",
@@ -3218,8 +3276,10 @@ describe("agent runtime", () => {
           configured: true,
           enabled: true,
           connection_state: "ready",
+          session_policy: { acquisition: "provider_event", resume: "unsupported" },
+          execution_owner: "backend",
           supports: {
-            start_session: true,
+            start_session: false,
             resume_run: false,
             cancel_run: false,
             stream_events: false
@@ -3228,7 +3288,7 @@ describe("agent runtime", () => {
       },
       async *runTurn() {
         yield { event_type: "text_delta", payload: { text: "Codex fixture response." } };
-        yield { event_type: "run_completed", payload: { output_summary: "done" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "done" } };
       }
     };
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-default-codex-"));
@@ -3253,6 +3313,8 @@ describe("agent runtime", () => {
       id: "session-aware",
       kind: "external",
       label: "Session Aware Fixture",
+      sessionPolicy: { acquisition: "provider_event", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         yield {
           event_type: "run_started",
@@ -3267,6 +3329,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
           payload: {
             output_summary: "done"
           }
@@ -3306,6 +3369,8 @@ describe("agent runtime", () => {
       id: "capture-context",
       kind: "external",
       label: "Capture Context Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         capturedSessionSearch = input.session_search;
         capturedActiveMemory = input.active_memory;
@@ -3319,6 +3384,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "ok" }
         };
       }
@@ -3370,6 +3436,8 @@ describe("agent runtime", () => {
       id: "slow-context-capture",
       kind: "external",
       label: "Slow Context Capture Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         backendCalled = true;
         expect(input.session_search).toEqual([]);
@@ -3379,6 +3447,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "ok" }
         };
       }
@@ -3419,9 +3488,11 @@ describe("agent runtime", () => {
       id: "capture-working-dir",
       kind: "external",
       label: "Capture Working Dir",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         capturedWorkingDirectory = input.working_directory;
-        yield { event_type: "run_completed", payload: { output_summary: "ok" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "ok" } };
       }
     };
     const runtime = new AgentRuntime(
@@ -3456,9 +3527,12 @@ describe("agent runtime", () => {
       id: "empty-complete",
       kind: "external",
       label: "Empty Complete Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: {}
         };
       }
@@ -3478,8 +3552,8 @@ describe("agent runtime", () => {
     await store.close();
 
     const agentMessage = result.messages.find((message) => message.role === "agent");
-    expect(agentMessage?.content).toBe("結果本文を受け取れませんでした。実行ログを確認してください。");
-    expect(result.backendRun.output_summary).toBe("結果本文を受け取れませんでした。実行ログを確認してください。");
+    expect(agentMessage).toBeUndefined();
+    expect(result.backendRun.output_summary).toBeUndefined();
   });
 
   it("lets external backend fixtures create Artifacts through the Samurai tool bridge", async () => {
@@ -3488,10 +3562,12 @@ describe("agent runtime", () => {
       id: "bridge-backend",
       kind: "codex",
       label: "Bridge Backend Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         expect(input.tool_bridge?.enabled).toBe(true);
         expect(input.tool_bridge?.server_name).toBe("samurai");
-        await runtime.runBackendToolBridgeCall({
+        const bridgeInput = {
           runId: input.run_id,
           token: input.tool_bridge?.token ?? "",
           toolName: "artifact_create",
@@ -3500,13 +3576,24 @@ describe("agent runtime", () => {
             title: "作業メモ",
             content: "# 作業メモ\n\nTool Bridgeから作成しました。"
           }
-        });
+        } as const;
+        const firstCall = await runtime.runBackendToolBridgeCall(bridgeInput);
+        const repeatedCall = await runtime.runBackendToolBridgeCall(bridgeInput);
+        expect(repeatedCall.output?.operation_id).toBe(firstCall.output?.operation_id);
+        await expect(runtime.runBackendToolBridgeCall({
+          ...bridgeInput,
+          toolInput: {
+            title: "別の作業メモ",
+            content: "同じtool_call_idで異なる書き込み"
+          }
+        })).rejects.toThrow();
         yield {
           event_type: "text_delta",
           payload: { text: "作業メモを作成しました。" }
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "done" }
         };
       }
@@ -3529,6 +3616,7 @@ describe("agent runtime", () => {
     expect(result.artifacts).toContainEqual(expect.objectContaining({
       title: "作業メモ"
     }));
+    expect(result.artifacts).toHaveLength(1);
     expect(content).toContain("Tool Bridgeから作成しました。");
     expect(result.workspaceChanges).toContainEqual(expect.objectContaining({
       change_type: "artifact_created"
@@ -3545,6 +3633,8 @@ describe("agent runtime", () => {
       id: "streaming-tool",
       kind: "external",
       label: "Streaming Tool Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         yield {
           event_type: "run_started",
@@ -3568,6 +3658,7 @@ describe("agent runtime", () => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: {
             output_summary: "done"
           }
@@ -3884,6 +3975,7 @@ rl.on("line", (line) => {
       new FakeProviderAdapter("fake/mcp", () => ({
         content: "MCPを実行しました。",
         toolCalls: [{
+          id: "mcp_tool_1",
           name: "mcp.call",
           arguments: {
             server_name: "calendar",
@@ -3958,6 +4050,7 @@ rl.on("line", (line) => {
       new FakeProviderAdapter("fake/sandbox", () => ({
         content: "Sandboxを実行しました。",
         toolCalls: [{
+          id: "sandbox_tool_1",
           name: "sandbox.exec",
           arguments: {
             command: process.execPath,
@@ -4041,6 +4134,7 @@ rl.on("line", (line) => {
       new FakeProviderAdapter("fake/sandbox-lifecycle", () => ({
         content: "Sandbox lifecycleを確認しました。",
         toolCalls: [{
+          id: "sandbox_lifecycle_tool_1",
           name: "sandbox.exec",
           arguments: {
             command: process.execPath,
@@ -4124,6 +4218,7 @@ rl.on("line", (line) => {
       new FakeProviderAdapter("fake/sandbox-sync", () => ({
         content: "Sandbox sync対象を作りました。",
         toolCalls: [{
+          id: "sandbox_sync_tool_1",
           name: "sandbox.exec",
           arguments: {
             command: process.execPath,
@@ -4211,6 +4306,7 @@ rl.on("line", (line) => {
     await store.updateBackendRun({
       ...result.backendRun,
       status: "running",
+      phase: "external_running",
       completed_at: undefined,
       error_code: undefined
     });
@@ -4219,9 +4315,9 @@ rl.on("line", (line) => {
     const stored = await store.getBackendRun(result.backendRun.id);
     await store.close();
 
-    expect(cancelled.status).toBe("cancelled");
-    expect(cancelled.error_code).toBe("backend_cancelled");
-    expect(stored?.status).toBe("cancelled");
+    expect(cancelled.status).toBe("outcome_unknown");
+    expect(cancelled.error_code).toBe("outcome_unknown");
+    expect(stored?.status).toBe("outcome_unknown");
   });
 
   it("releases gateway concurrency locks when cancelling backend runs", async () => {
@@ -4243,6 +4339,7 @@ rl.on("line", (line) => {
     await store.updateBackendRun({
       ...result.backendRun,
       status: "running",
+      phase: "external_running",
       completed_at: undefined,
       error_code: undefined,
       metadata: {
@@ -4256,7 +4353,7 @@ rl.on("line", (line) => {
     const stored = await store.getBackendRun(result.backendRun.id);
     await store.close();
 
-    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.status).toBe("outcome_unknown");
     expect(releasedLock).toMatchObject({
       lock_key: lockKey,
       status: "released"
@@ -4305,7 +4402,7 @@ rl.on("line", (line) => {
     expect(resumed.status).toBe("failed");
     expect(resumed.error_code).toBe("backend_resume_unsupported");
     expect(events.some((event) =>
-      event.event_type === "backend_native_input_submitted" && event.payload.input
+      event.event_type === "backend_native_input_submitted" && event.payload.has_input === true && event.payload.submitted_at
     )).toBe(true);
     expect(events.some((event) => event.event_type === "run_failed" && event.payload.error_code === "backend_resume_unsupported")).toBe(true);
   });
@@ -4347,15 +4444,17 @@ rl.on("line", (line) => {
       id: "resumable",
       kind: "mock",
       label: "Resumable Backend",
+      sessionPolicy: { acquisition: "none", resume: "native" },
+      execution_owner: "host",
       async *runTurn() {
-        yield { event_type: "run_started", payload: { input_summary: "waiting" } };
+        yield { event_type: "run_started", backend_session_id: "resumable-session", payload: { input_summary: "waiting" } };
         yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
       },
       async *resumeRun(_runId, input) {
         expect(input.workspace_root).toBe(root);
         expect(input.working_directory).toBe(root);
         yield { event_type: "text_delta", payload: { text: `Resumed: ${String(input.answer ?? "")}` } };
-        yield { event_type: "run_completed", payload: { output_summary: "Resume completed." } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "Resume completed." } };
       }
     };
     const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([resumableBackend]));
@@ -4376,7 +4475,7 @@ rl.on("line", (line) => {
       status: "completed",
       output_summary: "Resume completed."
     });
-    expect(resumed.metadata.resume_input).toEqual({ answer: "続けて" });
+    expect(resumed.metadata).not.toHaveProperty("resume_input");
     expect(events.some((event) => event.event_type === "backend_native_input_submitted")).toBe(true);
     expect(events.some((event) => event.event_type === "text_delta" && event.payload.text === "Resumed: 続けて")).toBe(true);
     expect(events.some((event) => event.event_type === "run_completed")).toBe(true);
@@ -4391,8 +4490,10 @@ rl.on("line", (line) => {
       id: "resumable-denied-tool",
       kind: "mock",
       label: "Resumable Denied Tool Backend",
+      sessionPolicy: { acquisition: "none", resume: "native" },
+      execution_owner: "host",
       async *runTurn() {
-        yield { event_type: "run_started", payload: { input_summary: "waiting" } };
+        yield { event_type: "run_started", backend_session_id: "resumable-denied-session", payload: { input_summary: "waiting" } };
         yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
       },
       async *resumeRun() {
@@ -4408,7 +4509,7 @@ rl.on("line", (line) => {
             }
           }
         };
-        yield { event_type: "run_completed", payload: { output_summary: "Resume completed." } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "Resume completed." } };
       }
     };
     const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([resumableBackend]));
@@ -4482,8 +4583,10 @@ rl.on("line", (line) => {
       id: "resumable-sandbox-tool",
       kind: "mock",
       label: "Resumable Sandbox Tool Backend",
+      sessionPolicy: { acquisition: "none", resume: "native" },
+      execution_owner: "host",
       async *runTurn() {
-        yield { event_type: "run_started", payload: { input_summary: "waiting" } };
+        yield { event_type: "run_started", backend_session_id: "resumable-sandbox-session", payload: { input_summary: "waiting" } };
         yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
       },
       async *resumeRun() {
@@ -4499,7 +4602,7 @@ rl.on("line", (line) => {
             }
           }
         };
-        yield { event_type: "run_completed", payload: { output_summary: "Resume sandbox completed." } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "Resume sandbox completed." } };
       }
     };
     const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([resumableBackend]));
@@ -4560,38 +4663,34 @@ rl.on("line", (line) => {
       id: "streamable",
       kind: "mock",
       label: "Streamable Backend",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         yield { event_type: "run_started", payload: { input_summary: "streamable" } };
       },
       async *streamEvents() {
         yield { event_type: "run_started", payload: { input_summary: "streamable" } };
         yield { event_type: "text_delta", payload: { text: "stream text" } };
-        yield { event_type: "run_completed", payload: { output_summary: "stream completed" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "provider_terminal_response" }, payload: { output_summary: "stream completed" } };
       }
     };
     const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([streamBackend]));
     const session = await runtime.createSession();
     const now = nowIso();
-    const message = await store.saveMessage({
-      id: createId("message"),
-      session_id: session.id,
-      role: "user",
-      content: "stream sync target",
-      input_locale: "ja",
-      output_locale: "ja",
-      created_at: now
+    const admitted = await store.admitTurn({
+      session,
+      binding: { id: "streamable", kind: "mock" },
+      request: {
+        sessionId: session.id,
+        content: "stream sync target",
+        envelope: createGatewayEnvelope(webGatewayContext, "stream sync target", "ja", "ja"),
+        idempotencyKey: "stream-sync-test"
+      },
+      requestHash: "stream-sync-test-hash",
+      runId: "run_stream_sync",
+      now
     });
-    await store.saveBackendRun({
-      id: "run_stream_sync",
-      session_id: session.id,
-      input_message_id: message.id,
-      backend_id: "streamable",
-      backend_kind: "mock",
-      status: "running",
-      started_at: now,
-      input_summary: "stream sync target",
-      metadata: {}
-    });
+    await store.updateBackendRun({ ...admitted.run, status: "running", phase: "external_running" });
 
     const synced = await runtime.syncBackendStream("run_stream_sync", { timeoutMs: 1_000 });
     const events = await store.listBackendEvents({ runId: "run_stream_sync" });
@@ -4645,8 +4744,8 @@ rl.on("line", (line) => {
     expect(events).toContainEqual(expect.objectContaining({
       event_type: "backend_stream_unavailable",
       payload: expect.objectContaining({
-        reason: "stream_events_unsupported",
-        supports_stream_events: false
+        reason: "stream_sync_unsupported",
+        run_status: "running"
       })
     }));
   });
@@ -4656,6 +4755,8 @@ rl.on("line", (line) => {
       id: "noisy",
       kind: "mock",
       label: "Noisy Fixture Backend",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         yield {
           event_type: "text_delta",
@@ -4676,6 +4777,7 @@ rl.on("line", (line) => {
         };
         yield {
           event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" },
           payload: { output_summary: "done" }
         };
       }
@@ -4705,7 +4807,7 @@ rl.on("line", (line) => {
     expect(event.resource_refs).toEqual([{ kind: "artifact", id: "artifact_ok", uri: "artifacts/artifact_ok.md" }]);
     expect(toolOutput.payload).toMatchObject({
       stdout: "x".repeat(4100),
-      token: "secret-token"
+      token: "[redacted]"
     });
     expect(emittedToolOutput.payload).toMatchObject({
       tool_call_id: "tool_1",
@@ -5700,9 +5802,9 @@ rl.on("line", (line) => {
     const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", {
       content: "確認しました。",
       toolCalls: [
-        { name: "unknown_tool", arguments: {} },
-        { name: "create_artifact", arguments: { title: "壊れたArtifact" } },
-        { name: "request_delete", arguments: { risk: "low", approval: "none" } }
+        { id: "unknown_tool_1", name: "unknown_tool", arguments: {} },
+        { id: "create_artifact_1", name: "create_artifact", arguments: { title: "壊れたArtifact" } },
+        { id: "request_delete_1", name: "request_delete", arguments: { risk: "low", approval: "none" } }
       ]
     }));
     const session = await runtime.createSession();
@@ -6301,13 +6403,15 @@ rl.on("line", (line) => {
       id: "background-cancel-fixture",
       kind: "codex",
       label: "Background cancellation fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         if (input.metadata.background_review === true) {
           reviewStarted += 1;
           await new Promise<void>((resolve) => stopReviews.push(resolve));
           return;
         }
-        yield { event_type: "run_completed", payload: { output_summary: "fixture" } };
+        yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "fixture" } };
       },
       async cancelRun(runId) {
         cancelledRunIds.push(runId);

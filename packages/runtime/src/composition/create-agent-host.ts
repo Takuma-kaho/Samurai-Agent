@@ -26,6 +26,7 @@ export interface AgentHostCompositionOptions {
   toolExecution: TurnToolExecutionPort;
   cleanup: TurnCleanupPort;
   diagnostics: HostDiagnosticsPort;
+  prepareResumeInput?: HostPorts["prepareResumeInput"];
   maxConcurrency?: number;
   postTurn?: PostTurnOperations;
   resolveDefaultBackendId?: () => Promise<string> | string;
@@ -44,6 +45,7 @@ export function createAgentHost(options: AgentHostCompositionOptions): AgentHost
     toolExecution: options.toolExecution,
     cleanup: options.cleanup,
     diagnostics: options.diagnostics,
+    prepareResumeInput: options.prepareResumeInput,
     maxConcurrency: options.maxConcurrency,
     resolveDefaultBackendId: options.resolveDefaultBackendId,
     postTurn: options.postTurn

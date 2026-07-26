@@ -3,12 +3,13 @@ import type { AgentBackend, BackendOutputEvent } from "@samurai-agent/agent-back
 import type { BackendEventRecord, BackendRunRecord } from "@samurai-agent/core-schemas";
 import { BackendEventJournal } from "./backend-event-journal";
 import { RunControl, type RunControlOptions, type RunControlSettlementInput } from "./run-control";
+import { TurnExecutor } from "./turn-executor";
 
 describe("RunControl", () => {
   it("maps settled not_started to cancelled only for a cancel request", async () => {
     const store = new ControlStore(run("running", "backend_starting"));
     const backend = backendWith({ cancelRun: async () => ({ kind: "settled", evidence: { kind: "not_started", source: "preflight_rejection" } }) });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.cancel("run-1");
 
@@ -18,7 +19,7 @@ describe("RunControl", () => {
   it("uses the phase before cancelling to prove unsupported work never started", async () => {
     const store = new ControlStore(run("running", "backend_starting"));
     const backend = backendWith({ cancelRun: async () => ({ kind: "unsupported" }) });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.cancel("run-1");
 
@@ -26,7 +27,7 @@ describe("RunControl", () => {
     expect(result.error_code).toBeUndefined();
   });
 
-  it("keeps not_started as failed on resume and preserves the backend error", async () => {
+  it("records only resume input presence and rejects native resume without a Session ID", async () => {
     const store = new ControlStore(run("waiting_for_backend_input", "waiting"));
     const backend = backendWith({
       resumeRun: () => eventsOf({
@@ -35,14 +36,14 @@ describe("RunControl", () => {
         payload: { error_code: "backend_native_session_missing", message: "Native session is missing." }
       })
     });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.resume("run-1", { token: "must-not-persist" });
 
     expect(result).toMatchObject({
       status: "failed",
       error_code: "backend_native_session_missing",
-      metadata: { error_message: "Native session is missing." }
+      metadata: { error_message: "Backend cannot resume because its native Session ID is missing." }
     });
     expect(JSON.stringify(result.metadata)).not.toContain("must-not-persist");
     expect(result.metadata).not.toHaveProperty("resume_input");
@@ -58,7 +59,7 @@ describe("RunControl", () => {
         source_event_id: "terminal-1"
       })
     });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.sync("run-1");
 
@@ -67,7 +68,7 @@ describe("RunControl", () => {
   });
 
   it("keeps a resume terminal outcome when iterator cleanup throws after journal commit", async () => {
-    const store = new ControlStore(run("waiting_for_backend_input", "waiting"));
+    const store = new ControlStore({ ...run("waiting_for_backend_input", "waiting"), backend_session_id: "native-session-1" });
     const backend = backendWith({
       resumeRun: () => terminalThenThrow({
         event_type: "run_completed",
@@ -76,13 +77,13 @@ describe("RunControl", () => {
         source_event_id: "resume-terminal-before-cleanup-error"
       }, new Error("resume iterator cleanup failed"))
     });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.resume("run-1", { answer: "ok" });
 
     expect(result.status).toBe("completed");
     expect(result.metadata).not.toHaveProperty("warning");
-    expect(store.events).toHaveLength(2);
+    expect(store.events).toHaveLength(3);
   });
 
   it("keeps a synced terminal outcome when iterator cleanup throws after journal commit", async () => {
@@ -95,7 +96,7 @@ describe("RunControl", () => {
         source_event_id: "sync-terminal-before-cleanup-error"
       }, new Error("sync iterator cleanup failed"))
     });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.sync("run-1");
 
@@ -108,11 +109,11 @@ describe("RunControl", () => {
     let now = 0;
     const store = new ControlStore(run("running", "external_running"));
     const backend = backendWith({ cancelRun: async () => ({ kind: "requested" }) });
-    const control = new RunControl(store, () => backend, controlOptions({
+    const control = controlFor(store, backend, controlOptions({
       settleTimeoutMs: 50,
       nowMs: () => now,
       sleep: async (ms) => { now += ms; }
-    }), new BackendEventJournal(store, fixedClock));
+    }));
 
     const result = await control.cancel("run-1");
 
@@ -126,12 +127,12 @@ describe("RunControl", () => {
     let probes = 0;
     const store = new ControlStore(run("running", "external_running"));
     const backend = backendWith({ cancelRun: async () => ({ kind: "requested" }) });
-    const control = new RunControl(store, () => backend, controlOptions({
+    const control = controlFor(store, backend, controlOptions({
       settleTimeoutMs: 50,
       nowMs: () => now,
       sleep: async (ms) => { now += ms; },
       waitForEvidence: async () => { probes += 1; return { kind: "requested" }; }
-    }), new BackendEventJournal(store, fixedClock));
+    }));
 
     const result = await control.cancel("run-1");
 
@@ -152,12 +153,12 @@ describe("RunControl", () => {
           ? () => { blockedCalls += 1; return late.promise; }
           : async () => ({ kind: "requested" })
       });
-      const control = new RunControl(store, () => backend, controlOptions({
+      const control = controlFor(store, backend, controlOptions({
         settleTimeoutMs: 50,
         ...(stalledStep === "waitForEvidence"
           ? { waitForEvidence: () => { blockedCalls += 1; return late.promise; } }
           : {})
-      }), new BackendEventJournal(store, fixedClock));
+      }));
 
       const pending = control.cancel("run-1");
       for (let index = 0; index < 20 && blockedCalls === 0; index += 1) await Promise.resolve();
@@ -188,7 +189,7 @@ describe("RunControl", () => {
       let cancelCalls = 0;
       const store = new ControlStore(run("running", "external_running"));
       const backend = backendWith({ cancelRun: () => { cancelCalls += 1; return late.promise; } });
-    const control = new RunControl(store, () => backend, controlOptions({ settleTimeoutMs: 50 }), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend, controlOptions({ settleTimeoutMs: 50 }));
 
       const pending = control.cancel("run-1");
       for (let index = 0; index < 20 && cancelCalls === 0; index += 1) await Promise.resolve();
@@ -207,7 +208,7 @@ describe("RunControl", () => {
   it("maps a normally ended stream without terminal evidence to outcome_unknown", async () => {
     const store = new ControlStore(run("running", "external_running"));
     const backend = backendWith({ streamEvents: () => eventsOf({ event_type: "text_delta", payload: { text: "partial" } }) });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.sync("run-1");
 
@@ -224,7 +225,7 @@ describe("RunControl", () => {
     const existing = run("outcome_unknown", "settled");
     const store = new ControlStore(existing);
     const backend = backendWith({ cancelRun: async () => { cancelCalls += 1; return { kind: "requested" }; } });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.cancel("run-1");
 
@@ -236,7 +237,7 @@ describe("RunControl", () => {
   it("sanitizes a thrown cancel error before persisting failure metadata", async () => {
     const store = new ControlStore(run("running", "external_running"));
     const backend = backendWith({ cancelRun: async () => { throw new Error("Bearer cancel-secret failed at /Users/person/private/run"); } });
-    const control = new RunControl(store, () => backend, controlOptions(), new BackendEventJournal(store, fixedClock));
+    const control = controlFor(store, backend);
 
     const result = await control.cancel("run-1");
     const metadata = JSON.stringify(result.metadata);
@@ -298,11 +299,29 @@ function controlOptions(overrides: Partial<RunControlOptions> = {}): RunControlO
   };
 }
 
+function controlFor(store: ControlStore, backend: AgentBackend, options = controlOptions()): RunControl {
+  const journal = new BackendEventJournal(store, fixedClock);
+  const executor = new TurnExecutor(store, journal, {
+    committedEventPublisher: options.committedEventPublisher,
+    toolExecution: options.toolExecution,
+    cleanup: options.cleanup,
+    diagnostics: options.diagnostics,
+    lifecycle: options.lifecycle
+  });
+  return new RunControl(store, () => backend, options, journal, executor);
+}
+
 function backendWith(overrides: Partial<AgentBackend>): AgentBackend {
+  const sessionPolicy = overrides.sessionPolicy ?? {
+    acquisition: "provider_event" as const,
+    resume: typeof overrides.resumeRun === "function" ? "native" as const : "unsupported" as const
+  };
   return {
     id: "backend",
     kind: "external",
     label: "Backend",
+    sessionPolicy,
+    execution_owner: "tool_bridge",
     runTurn: () => eventsOf(),
     ...overrides
   };

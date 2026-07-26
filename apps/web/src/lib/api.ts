@@ -106,6 +106,11 @@ export interface AgentBackendStatus {
   kind: "mock" | "samurai_native" | "claude_code" | "codex" | "external";
   label: string;
   configured: boolean;
+  enabled?: boolean;
+  connection_state?: "ready" | "unconfigured" | "disabled" | "degraded" | "unverified";
+  session_policy?: { acquisition: "provider_event" | "start_session" | "none"; resume: "native" | "unsupported" | "replay_forbidden" };
+  execution_owner?: "host" | "backend" | "tool_bridge";
+  supports?: { start_session: boolean; resume_run: boolean; cancel_run: boolean; stream_events: boolean };
   reason?: string;
 }
 

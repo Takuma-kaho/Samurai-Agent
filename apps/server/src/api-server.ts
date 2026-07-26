@@ -1417,6 +1417,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "tool_name_required" });
           return;
         }
+        const toolCallId = typeof req.body?.tool_call_id === "string" ? req.body.tool_call_id.trim() : "";
+        if (!toolCallId) {
+          res.status(400).json({ error: "tool_call_id_required" });
+          return;
+        }
         if (req.body?.input !== undefined && !isRecord(req.body.input)) {
           res.status(400).json({ error: "invalid_tool_input" });
           return;
@@ -1430,7 +1435,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           runId: req.params.runId,
           token,
           toolName,
-          toolCallId: typeof req.body?.tool_call_id === "string" ? req.body.tool_call_id : undefined,
+          toolCallId,
           toolInput: jsonRecord(req.body?.input ?? {})
         }));
       } catch (error) {

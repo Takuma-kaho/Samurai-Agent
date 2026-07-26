@@ -14,8 +14,8 @@ export class TurnAdmission {
     const backendId = request.backendId?.trim() || await this.resolveDefaultBackendId?.() || "samurai-native";
     const backend = this.registry.get(backendId);
     if (!backend) throw new Error(`backend_not_registered:${backendId}`);
-    const status = backend.getStatus?.();
-    if (status && (!status.configured || status.enabled === false || status.connection_state !== "ready")) throw new Error(status.reason ? `backend_not_ready:${status.reason}` : `backend_not_ready:${backend.id}`);
+    const status = this.registry.status(backend.id);
+    if (status && (!status.configured || status.enabled === false || (status.connection_state !== "ready" && status.connection_state !== "unverified"))) throw new Error(status.reason ? `backend_not_ready:${status.reason}` : `backend_not_ready:${backend.id}`);
     const binding: BackendBinding = { id: backend.id, kind: backend.kind, backend };
     const requestHash = stableHash({
       session_id: request.sessionId,

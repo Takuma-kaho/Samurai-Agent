@@ -75,6 +75,10 @@ export const activityTypes = [
 ] as const;
 export const activitySeverities = ["info", "notice", "warning", "critical"] as const;
 export const agentBackendKinds = ["mock", "samurai_native", "claude_code", "codex", "external"] as const;
+export const backendConnectionStates = ["ready", "unconfigured", "disabled", "degraded", "unverified"] as const;
+export const backendExecutionOwners = ["host", "backend", "tool_bridge"] as const;
+export const backendSessionAcquisitionModes = ["provider_event", "start_session", "none"] as const;
+export const backendSessionResumeModes = ["native", "unsupported", "replay_forbidden"] as const;
 export const backendRunStatuses = ["queued", "running", "waiting_for_backend_input", "completed", "failed", "cancelled", "outcome_unknown"] as const;
 export const backendRunPhases = ["admitted", "preparing", "backend_starting", "external_running", "waiting", "cancelling", "finalizing", "post_turn", "settled"] as const;
 export const BackendRunPhaseSchema = z.enum(backendRunPhases);
@@ -166,6 +170,10 @@ export const ExternalProviderRoleSchema = z.enum(externalProviderRoles);
 export const ActivityTypeSchema = z.enum(activityTypes);
 export const ActivitySeveritySchema = z.enum(activitySeverities);
 export const AgentBackendKindSchema = z.enum(agentBackendKinds);
+export const BackendConnectionStateSchema = z.enum(backendConnectionStates);
+export const BackendExecutionOwnerSchema = z.enum(backendExecutionOwners);
+export const BackendSessionAcquisitionModeSchema = z.enum(backendSessionAcquisitionModes);
+export const BackendSessionResumeModeSchema = z.enum(backendSessionResumeModes);
 export const BackendRunStatusSchema = z.enum(backendRunStatuses);
 export const BackendEventTypeSchema = z.enum(backendEventTypes);
 export const ClientTargetKindSchema = z.enum(clientTargetKinds);
@@ -223,6 +231,10 @@ export type ExternalProviderRole = z.infer<typeof ExternalProviderRoleSchema>;
 export type ActivityType = z.infer<typeof ActivityTypeSchema>;
 export type ActivitySeverity = z.infer<typeof ActivitySeveritySchema>;
 export type AgentBackendKind = z.infer<typeof AgentBackendKindSchema>;
+export type BackendConnectionState = z.infer<typeof BackendConnectionStateSchema>;
+export type BackendExecutionOwner = z.infer<typeof BackendExecutionOwnerSchema>;
+export type BackendSessionAcquisitionMode = z.infer<typeof BackendSessionAcquisitionModeSchema>;
+export type BackendSessionResumeMode = z.infer<typeof BackendSessionResumeModeSchema>;
 export type BackendRunStatus = z.infer<typeof BackendRunStatusSchema>;
 export type BackendEventType = z.infer<typeof BackendEventTypeSchema>;
 export type ClientTargetKind = z.infer<typeof ClientTargetKindSchema>;
@@ -265,6 +277,29 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 );
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+export const BackendSessionPolicySchema = z.object({
+  acquisition: BackendSessionAcquisitionModeSchema,
+  resume: BackendSessionResumeModeSchema
+}).strict();
+export type BackendSessionPolicy = z.infer<typeof BackendSessionPolicySchema>;
+
+export const BackendRuntimeFailureSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  retryable: z.boolean(),
+  causeCategory: z.enum(["configuration", "provider", "transport", "cancellation", "process", "runtime", "unknown"])
+}).strict();
+export type BackendRuntimeFailure = z.infer<typeof BackendRuntimeFailureSchema>;
+
+export const BackendTerminalEvidenceSchema = z.union([
+  z.object({ kind: z.literal("completed"), source: z.enum(["canonical_event", "process_exit", "provider_terminal_response", "owned_loop_return"]) }).strict(),
+  z.object({ kind: z.literal("failed"), source: z.enum(["canonical_event", "process_exit", "provider_terminal_response", "owned_loop_return"]), error: BackendRuntimeFailureSchema }).strict(),
+  z.object({ kind: z.literal("cancelled"), source: z.enum(["canonical_event", "process_exit", "provider_terminal_response", "owned_loop_return"]) }).strict(),
+  z.object({ kind: z.literal("not_started"), source: z.literal("preflight_rejection") }).strict(),
+  z.object({ kind: z.literal("indeterminate"), reason: z.enum(["transport_lost", "cancel_unconfirmed", "runtime_state_unavailable"]), providerStarted: z.boolean(), mayHaveSideEffects: z.boolean() }).strict()
+]);
+export type BackendTerminalEvidence = z.infer<typeof BackendTerminalEvidenceSchema>;
 
 // The Runtime owns creation of this decision.  Keeping the opaque marker in
 // the shared schema package lets the Workspace Store accept the settlement
@@ -368,8 +403,10 @@ export const AgentBackendConfigSchema = z.object({
   kind: AgentBackendKindSchema,
   label: z.string().min(1),
   enabled: z.boolean(),
-  metadata: z.record(jsonValueSchema)
-});
+  metadata: z.record(jsonValueSchema),
+  session_policy: BackendSessionPolicySchema,
+  execution_owner: BackendExecutionOwnerSchema
+}).strict();
 export type AgentBackendConfig = z.infer<typeof AgentBackendConfigSchema>;
 
 export const BackendCapabilityIdSchema = z.enum([
@@ -426,10 +463,11 @@ export const BackendRunRecordSchema = z.object({
 }).strict();
 export type BackendRunRecord = z.infer<typeof BackendRunRecordSchema>;
 
-export const BackendEventRecordSchema = z.object({
+const BackendEventRecordBaseSchema = z.object({
   id: z.string().min(1),
   run_id: z.string().min(1),
   session_id: z.string().min(1),
+  backend_session_id: z.string().min(1).optional(),
   event_type: BackendEventTypeSchema,
   sequence: z.number().int().positive(),
   attempt_no: z.number().int().positive().optional(),
@@ -439,6 +477,72 @@ export const BackendEventRecordSchema = z.object({
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime()
 }).strict();
+const backendEventPayload = (shape: z.ZodRawShape = {}) => z.object(shape).catchall(jsonValueSchema);
+const backendEventPayloadWithText = backendEventPayload({ text: z.string().optional() }).superRefine((payload, context) => {
+  if (typeof payload.text !== "string" || !payload.text.trim()) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["text"], message: "canonical text is required" });
+  }
+});
+const backendToolEventPayload = backendEventPayload({ tool_call_id: z.string().optional() }).superRefine((payload, context) => {
+  if (typeof payload.tool_call_id !== "string" || !payload.tool_call_id.trim()) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["tool_call_id"], message: "tool_call_id is required for tool events" });
+  }
+});
+const backendToolStartedPayload = backendToolEventPayload.superRefine((payload, context) => {
+  if (typeof payload.provider_tool_name !== "string" && typeof payload.action_id !== "string") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: [], message: "provider_tool_name or action_id is required for tool_call_started" });
+  }
+});
+const backendWaitingPayload = backendEventPayload({ prompt: z.string().optional(), message: z.string().optional() }).superRefine((payload, context) => {
+  if (typeof payload.prompt !== "string" && typeof payload.message !== "string") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: [], message: "prompt or message is required for backend waiting" });
+  }
+});
+const backendCompletedPayload = backendEventPayload({ terminal_evidence: BackendTerminalEvidenceSchema.optional() }).superRefine((payload, context) => {
+  const evidence = BackendTerminalEvidenceSchema.safeParse(payload.terminal_evidence);
+  if (!evidence.success || evidence.data.kind !== "completed") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["terminal_evidence"], message: "run_completed requires completed evidence" });
+  }
+});
+const backendFailedPayload = backendEventPayload({ terminal_evidence: BackendTerminalEvidenceSchema.optional() }).superRefine((payload, context) => {
+  const evidence = BackendTerminalEvidenceSchema.safeParse(payload.terminal_evidence);
+  if (!evidence.success || evidence.data.kind === "completed") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["terminal_evidence"], message: "run_failed requires non-completed evidence" });
+  }
+});
+const backendNativeInputSubmittedPayload = z.object({
+  submitted_at: z.string().datetime(),
+  has_input: z.boolean()
+}).strict();
+
+function backendEventVariant<T extends BackendEventType, P extends z.ZodTypeAny>(eventType: T, payload: P) {
+  return BackendEventRecordBaseSchema.extend({ event_type: z.literal(eventType), payload });
+}
+
+const backendEventVariants = [
+  backendEventVariant("run_started", backendEventPayload()),
+  backendEventVariant("agent_reasoning", backendEventPayloadWithText),
+  backendEventVariant("host_progress", backendEventPayloadWithText),
+  backendEventVariant("text_delta", backendEventPayloadWithText),
+  backendEventVariant("tool_call_started", backendToolStartedPayload),
+  backendEventVariant("tool_call_output", backendToolEventPayload),
+  backendEventVariant("artifact_created", backendEventPayload()),
+  backendEventVariant("workspace_change_suggested", backendEventPayload()),
+  backendEventVariant("memory_suggested", backendEventPayload()),
+  backendEventVariant("skill_candidate_created", backendEventPayload()),
+  backendEventVariant("backend_waiting_for_native_input", backendWaitingPayload),
+  backendEventVariant("backend_native_input_submitted", backendNativeInputSubmittedPayload),
+  backendEventVariant("backend_stream_synced", backendEventPayload()),
+  backendEventVariant("backend_stream_unavailable", backendEventPayload()),
+  backendEventVariant("host_post_turn_failed", backendEventPayload()),
+  backendEventVariant("host_cleanup_failed", backendEventPayload()),
+  backendEventVariant("host_emit_failed", backendEventPayload()),
+  backendEventVariant("run_completed", backendCompletedPayload),
+  backendEventVariant("run_failed", backendFailedPayload)
+] as const;
+
+/** New rows are checked by event kind; callers may still read older rows through the Store compatibility path. */
+export const BackendEventRecordSchema = z.discriminatedUnion("event_type", backendEventVariants as any);
 export type BackendEventRecord = z.infer<typeof BackendEventRecordSchema>;
 
 export const ClientEventRecordSchema = z.object({
@@ -2961,7 +3065,10 @@ const sensitivePrivacyKey = /(?:^|[_-])(secret|token|api[_-]?key|password|creden
 const technicalIdentifierKey = /(?:^|_)(?:id|ids|sha|hash)$/i;
 
 export function redactPrivateData<T>(value: T, options: PrivacyRedactionOptions = {}, key = ""): T {
-  if (sensitivePrivacyKey.test(key)) {
+  if (isSecretReferenceMetadataKey(key)) {
+    return value;
+  }
+  if (sensitivePrivacyKey.test(key) && !isSecretReferenceMetadataKey(key)) {
     return "[redacted]" as T;
   }
   if (typeof value === "string") {
@@ -2990,6 +3097,16 @@ export function redactPrivateData<T>(value: T, options: PrivacyRedactionOptions 
     ) as T;
   }
   return value;
+}
+
+function isSecretReferenceMetadataKey(key: string): boolean {
+  return key === "secret_env"
+    || key === "secret_files"
+    || key === "secret_resolution"
+    || key === "secret_ref_ids"
+    || key === "resolved_secret_ref_ids"
+    || key === "unresolved_secret_ref_ids"
+    || key === "unresolved_reasons";
 }
 
 export function stableStringify(value: unknown): string {

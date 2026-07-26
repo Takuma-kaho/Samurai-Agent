@@ -242,7 +242,7 @@ describe("agent backend registry", () => {
     ]));
   });
 
-  it("buffers external CLI events for streamEvents replay", async () => {
+  it("does not replay external CLI events from process memory", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-stream-"));
     roots.push(root);
     const executable = path.join(root, "backend-stream");
@@ -264,13 +264,12 @@ describe("agent backend registry", () => {
     });
     const status = backend.getStatus();
     const runEvents = await collectEvents(backend.runTurn(backendInput("run_stream")));
-    const replayedEvents = await collectEvents(backend.streamEvents("run_stream"));
 
     expect(status.supports).toMatchObject({
-      start_session: true,
+      start_session: false,
       resume_run: false,
       cancel_run: true,
-      stream_events: true
+      stream_events: false
     });
     expect(runEvents.map((event) => event.event_type)).toEqual([
       "run_started",
@@ -283,16 +282,16 @@ describe("agent backend registry", () => {
       input_summary: "probe backend"
     });
     expect(runEvents[0]?.payload).not.toHaveProperty("locale_contract");
-    expect(replayedEvents).toEqual(runEvents);
     expect(runEvents.map((event) => event.source_sequence)).toEqual([undefined, 1, 1, undefined]);
     expect(runEvents[1]?.source_event_id).toBe("provider-1");
     expect(runEvents[2]?.source_event_id).toBeUndefined();
-    expect(runEvents[0]?.source_event_id).toMatch(/^run_stream:adapter-stream:.+:adapter:1$/);
-    expect(runEvents[3]?.source_event_id).toMatch(/^run_stream:adapter-stream:.+:adapter:2$/);
-    expect(new Set(runEvents.map((event) => event.source_event_id ?? `sequence:${event.source_sequence}`)).size).toBe(runEvents.length);
+    expect(runEvents[0]?.source_event_id).toBeUndefined();
+    expect(runEvents[3]?.source_event_id).toBeUndefined();
+    expect(backend.streamEvents).toBeUndefined();
+    expect((backend as unknown as { eventStreams?: unknown }).eventStreams).toBeUndefined();
   });
 
-  it("bounds settled replay state without reusing generated source identities", async () => {
+  it("does not retain replay or generated Session state after a run", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-bounded-stream-"));
     roots.push(root);
     const executable = path.join(root, "bounded-stream-backend");
@@ -304,63 +303,39 @@ describe("agent backend registry", () => {
       label: "Bounded Stream CLI",
       command: executable
     });
-    const first = await collectEvents(backend.runTurn(backendInput("bounded-run-0")));
-    for (let index = 1; index <= 50; index += 1) {
-      await collectEvents(backend.runTurn(backendInput(`bounded-run-${index}`)));
-    }
+    await collectEvents(backend.runTurn(backendInput("bounded-run-0")));
 
-    const evictedReplay = await collectEvents(backend.streamEvents("bounded-run-0"));
-    const resumed = await collectEvents(backend.resumeRun("bounded-run-0"));
-    const firstIds = first.map((event) => event.source_event_id);
-
-    expect(evictedReplay[0]?.terminal_evidence).toEqual({ kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true });
-    expect(resumed[0]?.source_event_id).toMatch(/^bounded-run-0:adapter-stream:.+:adapter:1$/);
-    expect(firstIds).not.toContain(resumed[0]?.source_event_id);
-    expect((backend as unknown as { eventStreams: Map<string, unknown> }).eventStreams.size).toBeLessThanOrEqual(50);
-    const sessionIds = (backend as unknown as { backendSessionIds: Map<string, string> }).backendSessionIds;
-    expect(sessionIds.size).toBeLessThanOrEqual(50);
-    expect(sessionIds.has("bounded-run-0")).toBe(false);
+    expect(backend.streamEvents).toBeUndefined();
+    expect((backend as unknown as { eventStreams?: unknown }).eventStreams).toBeUndefined();
+    expect((backend as unknown as { backendSessionIds?: unknown }).backendSessionIds).toBeUndefined();
   });
 
-  it("does not evict active event streams or strand their waiters", () => {
+  it("does not expose an in-memory active event stream registry", () => {
     const backend = new ExternalCliBackend({ id: "active-stream-cli", kind: "external", label: "Active Stream CLI" });
-    const internals = backend as unknown as {
-      beginEventStream(runId: string): { settled: boolean; waiters: Array<() => void> };
-      eventStreams: Map<string, { settled: boolean; waiters: Array<() => void> }>;
-    };
-    for (let index = 0; index <= 50; index += 1) {
-      const state = internals.beginEventStream(`active-run-${index}`);
-      state.waiters.push(() => {});
-    }
-
-    expect(internals.eventStreams.size).toBe(51);
-    expect([...internals.eventStreams.values()].every((state) => !state.settled && state.waiters.length === 1)).toBe(true);
+    expect(backend.streamEvents).toBeUndefined();
+    expect((backend as unknown as { eventStreams?: unknown }).eventStreams).toBeUndefined();
   });
 
-  it("does not reuse adapter source identity after a process restart", async () => {
+  it("does not invent source identity after a process restart", async () => {
     const original = new ExternalCliBackend({
       id: "restart-identity-cli",
       kind: "external",
       label: "Restart Identity CLI",
       command: "samurai-missing-cli-for-restart-identity-test",
-      sourceIdentityFactory: () => "boot-a"
     });
     const restarted = new ExternalCliBackend({
       id: "restart-identity-cli",
       kind: "external",
       label: "Restart Identity CLI",
-      sourceIdentityFactory: () => "boot-b"
     });
 
     const beforeRestart = await collectEvents(original.runTurn(backendInput("restart-run")));
-    const afterRestart = await collectEvents(restarted.resumeRun("restart-run"));
-
-    expect(beforeRestart[0]?.source_event_id).toBe("restart-run:adapter-stream:boot-a:adapter:1");
-    expect(afterRestart[0]?.source_event_id).toBe("restart-run:adapter-stream:boot-b:adapter:1");
-    expect(afterRestart[0]?.source_event_id).not.toBe(beforeRestart[0]?.source_event_id);
+    expect(beforeRestart[0]?.source_event_id).toBeUndefined();
+    expect(restarted.streamEvents).toBeUndefined();
+    expect((restarted as unknown as { backendSessionIds?: unknown }).backendSessionIds).toBeUndefined();
   });
 
-  it("maps safe stderr progress to host progress without exposing raw stderr text", async () => {
+  it("keeps stderr as diagnostics and never turns it into progress Events", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-stderr-progress-"));
     roots.push(root);
     const executable = path.join(root, "backend-stderr-progress");
@@ -383,18 +358,11 @@ describe("agent backend registry", () => {
 
     const events = await collectEvents(backend.runTurn(backendInput("run_stderr_progress")));
 
-    expect(events).toContainEqual(expect.objectContaining({
-      event_type: "host_progress",
-      payload: expect.objectContaining({
-        display_kind: "activity",
-        text: "コードを検索",
-        provider_stream: "stderr"
-      })
-    }));
+    expect(events.some((event) => event.event_type === "host_progress")).toBe(false);
     expect(JSON.stringify(events)).not.toContain("Searching project files");
   });
 
-  it("emits a waiting progress event when an external backend is initially silent", async () => {
+  it("does not generate timer-based progress while an external backend is silent", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-silent-"));
     roots.push(root);
     const executable = path.join(root, "backend-silent");
@@ -417,17 +385,12 @@ describe("agent backend registry", () => {
 
     const events = await collectEvents(backend.runTurn(backendInput("run_silent")));
 
-    expect(events.map((event) => event.event_type)).toContain("host_progress");
-    expect(events).toContainEqual(expect.objectContaining({
-      event_type: "host_progress",
-      payload: expect.objectContaining({
-        text: "実行部からの応答を待っています"
-      })
-    }));
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "run_completed"]);
+    expect(events.some((event) => event.event_type === "host_progress")).toBe(false);
     expect(events.at(-1)?.event_type).toBe("run_completed");
   });
 
-  it("runs optional external CLI stream compatibility probes for status", async () => {
+  it("reports an available CLI as unverified without a stream compatibility probe", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-stream-probe-"));
     roots.push(root);
     const executable = path.join(root, "backend-stream-probe");
@@ -449,24 +412,15 @@ describe("agent backend registry", () => {
       kind: "external",
       label: "Probe CLI",
       command: executable,
-      streamProbeArgs: ["--stream-probe"],
-      streamProbeTimeoutMs: 1_000
     });
 
     const status = backend.getStatus();
 
     expect(status).toMatchObject({
-      connection_state: "ready",
-      metadata: {
-        stream_probe: {
-          enabled: true,
-          status: "compatible",
-          event_count: 1,
-          first_event_type: "text_delta",
-          exit_code: 0
-        }
-      }
+      connection_state: "unverified",
+      supports: { stream_events: false }
     });
+    expect(status.metadata).not.toHaveProperty("stream_probe");
   });
 
   it("maps CLI JSON lines to canonical backend events", () => {
@@ -479,23 +433,20 @@ describe("agent backend registry", () => {
       payload: { status: "ok" },
       tool_call_id: "tool_1"
     });
-    expect(parseCliOutputLine(JSON.stringify({ type: "resume_input", payload: { status: "submitted" } }))).toEqual({
+    expect(parseCliOutputLine(JSON.stringify({ type: "resume_input", submitted_at: "2026-01-01T00:00:00.000Z", has_input: true }))).toEqual({
       event_type: "backend_native_input_submitted",
-      payload: { status: "submitted" }
+      payload: { submitted_at: "2026-01-01T00:00:00.000Z", has_input: true }
     });
     expect(parseCliOutputLine(JSON.stringify({ type: "result", conversation_id: "native-session-1", payload: { output_summary: "done" } }))).toEqual({
       event_type: "run_completed",
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      backend_session_id: "native-session-1",
       payload: {
         provider_event_type: "result",
-        output_summary: "done",
-        backend_session_id: "native-session-1"
+        output_summary: "done"
       }
     });
-    expect(parseCliOutputLine("plain text")).toEqual({
-      event_type: "text_delta",
-      payload: { text: "plain text\n" }
-    });
+    expect(parseCliOutputLine("plain text")).toBeUndefined();
   });
 
   it("converts provider failures into stable terminal evidence", () => {
@@ -549,7 +500,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-post-spawn-error-"));
     roots.push(root);
     const executable = path.join(root, "post-spawn-error");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write('READY\\n');\nsetTimeout(() => process.exit(0), 100);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');\nsetTimeout(() => process.exit(0), 100);\n", "utf8");
     await chmod(executable, 0o755);
     const prototype = ChildProcess.prototype as unknown as { emit(event: string | symbol, ...args: unknown[]): boolean };
     const originalEmit = prototype.emit;
@@ -606,7 +557,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-evidence-"));
     roots.push(root);
     const executable = path.join(root, "long-running");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write('READY\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "cancel-cli", kind: "external", label: "Cancel CLI", command: executable });
     const iterator = backend.runTurn(backendInput("run-cancel"))[Symbol.asyncIterator]();
@@ -616,7 +567,7 @@ describe("agent backend registry", () => {
       const next = await iterator.next();
       if (next.done) break;
       events.push(next.value);
-      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY";
     }
     expect(ready).toBe(true);
     await expect(backend.cancelRun?.("run-cancel")).resolves.toEqual({ kind: "requested" });
@@ -640,7 +591,7 @@ describe("agent backend registry", () => {
       "const [stopped, pidFile] = process.argv.slice(2);",
       "fs.writeFileSync(pidFile, String(process.pid));",
       "process.on('SIGTERM', () => { fs.writeFileSync(stopped, 'stopped'); process.exit(143); });",
-      "process.stdout.write('READY\\n');",
+      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
       "setInterval(() => {}, 1000);"
     ].join("\n"), "utf8");
     await chmod(executable, 0o755);
@@ -654,7 +605,7 @@ describe("agent backend registry", () => {
         const next = await iterator.next();
         if (next.done) break;
         events.push(next.value);
-        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY";
       }
       expect(ready).toBe(true);
       expect(backend.getStatus().active_run_count).toBe(1);
@@ -689,7 +640,7 @@ describe("agent backend registry", () => {
       "const [signalMarker, release, pidFile] = process.argv.slice(2);",
       "fs.writeFileSync(pidFile, String(process.pid));",
       "process.on('SIGTERM', () => { fs.writeFileSync(signalMarker, 'requested'); });",
-      "process.stdout.write('READY\\n');",
+      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
       "const timer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(timer); process.exit(0); } }, 5);"
     ].join("\n"), "utf8");
     await chmod(executable, 0o755);
@@ -702,7 +653,7 @@ describe("agent backend registry", () => {
         const next = await iterator.next();
         if (next.done) break;
         events.push(next.value);
-        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY";
       }
       expect(ready).toBe(true);
       await expect(backend.cancelRun?.("run-cancel-natural-close")).resolves.toEqual({ kind: "requested" });
@@ -733,7 +684,7 @@ describe("agent backend registry", () => {
       "const fs = require('node:fs');",
       "const marker = process.argv[2];",
       "const release = process.argv[3];",
-      "process.stdout.write('READY\\n');",
+      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
       "process.stdout.write(JSON.stringify({ type: 'result', result: 'done' }) + '\\n');",
       "fs.writeFileSync(marker, 'terminal');",
       "const timer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(timer); process.exit(0); } }, 5);"
@@ -745,7 +696,7 @@ describe("agent backend registry", () => {
     while (!ready) {
       const next = await iterator.next();
       if (next.done) break;
-      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY";
     }
     await waitFor(() => fileExists(marker));
     expect(backend.getStatus().active_run_count).toBe(1);
@@ -770,7 +721,7 @@ describe("agent backend registry", () => {
       "#!/usr/bin/env node",
       "const fs = require('node:fs');",
       "const marker = process.argv[2];",
-      "process.stdout.write('READY\\n');",
+      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
       "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'stopped'); process.exit(143); });",
       "setInterval(() => {}, 1000);"
     ].join("\n"), "utf8");
@@ -781,7 +732,7 @@ describe("agent backend registry", () => {
     while (!ready) {
       const next = await iterator.next();
       if (next.done) break;
-      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY";
     }
     expect(backend.getStatus().active_run_count).toBe(1);
     await iterator.return?.();
@@ -805,7 +756,7 @@ describe("agent backend registry", () => {
       "let signalled = false;",
       "process.on('SIGTERM', () => { signalled = true; });",
       "const releaseTimer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(releaseTimer); process.exit(0); } }, 5);",
-      "process.stdout.write('READY\\n');",
+      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
       "const chunk = Buffer.alloc(65536);",
       "const pump = () => {",
       "  if (fs.existsSync(release)) return;",
@@ -826,7 +777,7 @@ describe("agent backend registry", () => {
       while (!ready) {
         const next = await iterator.next();
         if (next.done) break;
-        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY";
       }
 
       await iterator.return?.();
@@ -859,7 +810,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-race-"));
     roots.push(root);
     const executable = path.join(root, "completed-then-close");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write('READY\\n');\nprocess.stdout.write(JSON.stringify({ type: 'result', result: 'done' }) + '\\n');\nprocess.stdout.write(JSON.stringify({ type: 'result', is_error: true, error_code: 'late_error', message: 'late provider failure' }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');\nprocess.stdout.write(JSON.stringify({ type: 'result', result: 'done' }) + '\\n');\nprocess.stdout.write(JSON.stringify({ type: 'result', is_error: true, error_code: 'late_error', message: 'late provider failure' }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "cancel-race-cli", kind: "external", label: "Cancel Race CLI", command: executable });
     const iterator = backend.runTurn(backendInput("run-cancel-race"))[Symbol.asyncIterator]();
@@ -869,7 +820,7 @@ describe("agent backend registry", () => {
       const next = await iterator.next();
       if (next.done) break;
       events.push(next.value);
-      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY\n";
+      ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY";
     }
     expect(ready).toBe(true);
     expect(events.some((event) => event.terminal_evidence)).toBe(false);
@@ -898,10 +849,10 @@ describe("agent backend registry", () => {
     expect(backend.getStatus().active_run_count).toBe(0);
   });
 
-  it("reports missing stream state as indeterminate when runtime state is unavailable", async () => {
+  it("does not expose a replay API when runtime stream state is unavailable", async () => {
     const backend = new ExternalCliBackend({ id: "missing-stream", kind: "external", label: "Missing Stream", command: process.execPath });
-    const events = await collectEvents(backend.streamEvents?.("unknown-run") ?? (async function* () {})());
-    expect(events[0]?.terminal_evidence).toEqual({ kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true });
+    expect(backend.streamEvents).toBeUndefined();
+    expect(backend.getStatus().supports.stream_events).toBe(false);
   });
 
   it("maps Claude-style stream JSON content blocks to canonical backend events", () => {
@@ -931,8 +882,8 @@ describe("agent backend registry", () => {
         event_type: "text_delta",
         source_event_id: "provider-id:claude-raw-1:part:1",
         source_sequence: 9,
+        backend_session_id: "claude-session-1",
         payload: {
-          backend_session_id: "claude-session-1",
           provider_event_type: "assistant",
           text: "調査しました"
         }
@@ -942,8 +893,8 @@ describe("agent backend registry", () => {
         source_event_id: "provider-id:claude-raw-1:part:2",
         source_sequence: 9,
         tool_call_id: "tool_1",
+        backend_session_id: "claude-session-1",
         payload: {
-          backend_session_id: "claude-session-1",
           provider_event_type: "assistant",
           provider_tool_name: "mcp__docs__search",
           input: { q: "samurai" },
@@ -958,15 +909,15 @@ describe("agent backend registry", () => {
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       source_event_id: "claude-result-1",
       source_sequence: 10,
+      backend_session_id: "claude-session-1",
       payload: {
-        backend_session_id: "claude-session-1",
         provider_event_type: "result",
         output_summary: "done"
       }
     });
   });
 
-  it("accepts only positive safe provider sequences and assigns adapter identity otherwise", async () => {
+  it("accepts only positive safe provider sequences without inventing identity", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-invalid-sequence-"));
     roots.push(root);
     const executable = path.join(root, "invalid-sequence");
@@ -982,7 +933,7 @@ describe("agent backend registry", () => {
     const text = events.find((event) => event.event_type === "text_delta");
 
     expect(text?.source_sequence).toBeUndefined();
-    expect(text?.source_event_id).toMatch(/^run-invalid-sequence:adapter-stream:.+:adapter:\d+$/);
+    expect(text?.source_event_id).toBeUndefined();
     expect(parseCliOutputLine(JSON.stringify({ type: "assistant_delta", text: "bad", source_sequence: Number.MAX_SAFE_INTEGER + 1 }))?.source_sequence).toBeUndefined();
   });
 
@@ -1026,14 +977,8 @@ describe("agent backend registry", () => {
     const events = await collectEvents(backend.resumeRun("run_resume", { backend_session_id: "claude-session-2", answer: "続けて" }));
 
     expect(events.map((event) => event.event_type)).toEqual(["text_delta", "run_completed"]);
-    expect(events[0]?.payload).toMatchObject({
-      backend_session_id: "claude-session-2",
-      text: "resumed"
-    });
-    expect(events[1]?.payload).toMatchObject({
-      backend_session_id: "claude-session-2",
-      output_summary: "resume ok"
-    });
+    expect(events[0]).toMatchObject({ backend_session_id: "claude-session-2", payload: { text: "resumed" } });
+    expect(events[1]).toMatchObject({ backend_session_id: "claude-session-2", payload: { output_summary: "resume ok" } });
   });
 
   it("reports missing native resume sessions as confirmed preflight rejection", async () => {
@@ -1104,16 +1049,16 @@ describe("agent backend registry", () => {
 
     expect(started).toEqual({
       event_type: "run_started",
+      backend_session_id: "codex-thread-1",
       payload: {
-        backend_session_id: "codex-thread-1",
         provider_event_type: "thread.started",
         provider_thread_id: "codex-thread-1"
       }
     });
     expect(assistant).toEqual([{
       event_type: "text_delta",
+      backend_session_id: "codex-thread-1",
       payload: {
-        backend_session_id: "codex-thread-1",
         provider_event_type: "item.completed",
         item_type: "message",
         text: "調べました"
@@ -1122,8 +1067,8 @@ describe("agent backend registry", () => {
     expect(commandStart).toEqual({
       event_type: "tool_call_started",
       tool_call_id: "call_1",
+      backend_session_id: "codex-thread-1",
       payload: {
-        backend_session_id: "codex-thread-1",
         provider_event_type: "exec_command.begin",
         provider_tool_name: "exec_command",
         action_id: "sandbox.exec",
@@ -1136,8 +1081,8 @@ describe("agent backend registry", () => {
     expect(commandEnd).toEqual({
       event_type: "tool_call_output",
       tool_call_id: "call_1",
+      backend_session_id: "codex-thread-1",
       payload: {
-        backend_session_id: "codex-thread-1",
         provider_event_type: "exec_command.end",
         provider_tool_name: "exec_command",
         action_id: "sandbox.exec",
@@ -1151,16 +1096,16 @@ describe("agent backend registry", () => {
     expect(completed).toEqual({
       event_type: "run_completed",
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      backend_session_id: "codex-thread-1",
       payload: {
-        backend_session_id: "codex-thread-1",
         provider_event_type: "turn.completed",
         output_summary: "done"
       }
     });
     expect(reasoning).toEqual([{
       event_type: "agent_reasoning",
+      backend_session_id: "codex-thread-1",
       payload: {
-        backend_session_id: "codex-thread-1",
         provider_event_type: "item.completed",
         item_type: "reasoning",
         text: "差分の原因を確認しました"
@@ -1176,8 +1121,8 @@ describe("agent backend registry", () => {
     }))).toEqual({
       event_type: "run_completed",
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      backend_session_id: "codex-thread-empty",
       payload: {
-        backend_session_id: "codex-thread-empty",
         provider_event_type: "turn.completed"
       }
     });
@@ -1188,8 +1133,8 @@ describe("agent backend registry", () => {
     }))).toEqual({
       event_type: "run_completed",
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+      backend_session_id: "codex-thread-empty",
       payload: {
-        backend_session_id: "codex-thread-empty",
         provider_event_type: "turn.completed"
       }
     });
@@ -1212,16 +1157,16 @@ describe("agent backend registry", () => {
 
     expect(direct).toEqual({
       event_type: "text_delta",
+      backend_session_id: "codex-thread-output",
       payload: {
-        backend_session_id: "codex-thread-output",
         provider_event_type: "output_message",
         text: "本文です"
       }
     });
     expect(item).toEqual({
       event_type: "text_delta",
+      backend_session_id: "codex-thread-output",
       payload: {
-        backend_session_id: "codex-thread-output",
         provider_event_type: "item.completed",
         item_type: "agent_message",
         text: "続きの本文です"
@@ -1256,33 +1201,35 @@ describe("agent backend registry", () => {
         resume_run: true
       },
       metadata: {
-        args_count: 3
+        args_count: 5
       }
     });
     expect(events.map((event) => event.event_type)).toEqual(["run_started", "text_delta", "run_completed"]);
     expect(events[0]?.payload).toMatchObject({
-      backend_session_id: "codex-thread-2",
       provider_event_type: "thread.started"
     });
+    expect(events[0]?.backend_session_id).toBe("codex-thread-2");
     expect(events[1]?.payload).toMatchObject({
-      backend_session_id: "codex-thread-2",
       text: "resumed codex"
     });
+    expect(events[1]?.backend_session_id).toBe("codex-thread-2");
     expect(events[2]?.payload).toMatchObject({
-      backend_session_id: "codex-thread-2",
       output_summary: "resume ok"
     });
+    expect(events[2]?.backend_session_id).toBe("codex-thread-2");
   });
 
   it("normalizes legacy Codex exec args to keep JSON streaming enabled", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-codex-args-"));
     roots.push(root);
     const executable = path.join(root, "codex-argv");
+    const argvFile = path.join(root, "argv.txt");
+    const quotedArgvFile = argvFile.replaceAll("'", "'\\''");
     await writeFile(
       executable,
       [
         "#!/bin/sh",
-        "printf '%s\\n' \"$*\"",
+        `printf '%s\\n' "$*" > '${quotedArgvFile}'`,
         "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
       ].join("\n"),
       "utf8"
@@ -1293,12 +1240,9 @@ describe("agent backend registry", () => {
       args: ["exec", "-"]
     });
 
-    const text = (await collectEvents(backend.runTurn(backendInput("run_codex_args"))))
-      .filter((event) => event.event_type === "text_delta")
-      .map((event) => event.payload.text)
-      .join("\n");
-
-    expect(text).toContain("exec --json -");
+    await collectEvents(backend.runTurn(backendInput("run_codex_args")));
+    const argsText = await readFile(argvFile, "utf8");
+    expect(argsText).toContain("exec --json --output-last-message");
   });
 
   it("passes the Samurai Workspace root to Codex with -C instead of skip-git-repo-check", async () => {
@@ -1307,11 +1251,13 @@ describe("agent backend registry", () => {
     const workspaceRoot = path.join(root, "workspace");
     await mkdir(workspaceRoot, { recursive: true });
     const executable = path.join(root, "codex-argv-cd");
+    const argvFile = path.join(root, "argv.txt");
+    const quotedArgvFile = argvFile.replaceAll("'", "'\\''");
     await writeFile(
       executable,
       [
         "#!/bin/sh",
-        "printf '%s\\n' \"$*\"",
+        `printf '%s\\n' "$*" > '${quotedArgvFile}'`,
         "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
       ].join("\n"),
       "utf8"
@@ -1322,17 +1268,15 @@ describe("agent backend registry", () => {
       args: ["exec", "--json", "-"]
     });
 
-    const text = (await collectEvents(backend.runTurn({
+    await collectEvents(backend.runTurn({
       ...backendInput("run_codex_cd"),
       workspace_root: workspaceRoot,
       working_directory: workspaceRoot
-    })))
-      .filter((event) => event.event_type === "text_delta")
-      .map((event) => event.payload.text)
-      .join("\n");
+    }));
+    const argsText = await readFile(argvFile, "utf8");
 
-    expect(text).toContain(`-C ${workspaceRoot}`);
-    expect(text).not.toContain("--skip-git-repo-check");
+    expect(argsText).toContain(`-C ${workspaceRoot}`);
+    expect(argsText).not.toContain("--skip-git-repo-check");
   });
 
   it("passes locale and workspace context to external backend commands", () => {
@@ -1450,11 +1394,13 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-mcp-"));
     roots.push(root);
     const executable = path.join(root, "backend-argv");
+    const argvFile = path.join(root, "argv.txt");
+    const quotedArgvFile = argvFile.replaceAll("'", "'\\''");
     await writeFile(
       executable,
       [
         "#!/bin/sh",
-        "printf '%s\\n' \"$*\"",
+        `printf '%s\\n' "$*" > '${quotedArgvFile}'`,
         "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
       ].join("\n"),
       "utf8"
@@ -1491,32 +1437,30 @@ describe("agent backend registry", () => {
       artifactMcpScript: "scripts/samurai-artifact-mcp.mjs"
     });
 
-    const codexText = (await collectEvents(codex.runTurn(toolBridgeInput)))
-      .filter((event) => event.event_type === "text_delta")
-      .map((event) => event.payload.text)
-      .join("\n");
-    const claudeText = (await collectEvents(claude.runTurn(toolBridgeInput)))
-      .filter((event) => event.event_type === "text_delta")
-      .map((event) => event.payload.text)
-      .join("\n");
+    await collectEvents(codex.runTurn(toolBridgeInput));
+    const codexArgs = await readFile(argvFile, "utf8");
+    await collectEvents(claude.runTurn(toolBridgeInput));
+    const claudeArgs = await readFile(argvFile, "utf8");
 
-    expect(codexText).toContain("mcp_servers.samurai.command");
-    expect(codexText).toContain("mcp_servers.samurai.args");
-    expect(codexText).toContain("mcp_servers.samurai.env_vars");
-    expect(codexText).toContain("--output-last-message");
-    expect(codexText).toContain("scripts/samurai-artifact-mcp.mjs");
-    expect(codexText).not.toContain("bridge-token");
-    expect(claudeText).toContain("--mcp-config");
-    expect(claudeText).toContain("\"mcpServers\"");
-    expect(claudeText).toContain("\"samurai\"");
-    expect(claudeText).toContain("scripts/samurai-artifact-mcp.mjs");
-    expect(claudeText).not.toContain("bridge-token");
+    expect(codexArgs).toContain("mcp_servers.samurai.command");
+    expect(codexArgs).toContain("mcp_servers.samurai.args");
+    expect(codexArgs).toContain("mcp_servers.samurai.env_vars");
+    expect(codexArgs).toContain("--output-last-message");
+    expect(codexArgs).toContain("scripts/samurai-artifact-mcp.mjs");
+    expect(codexArgs).not.toContain("bridge-token");
+    expect(claudeArgs).toContain("--mcp-config");
+    expect(claudeArgs).toContain("mcpServers");
+    expect(claudeArgs).toContain("samurai");
+    expect(claudeArgs).toContain("scripts/samurai-artifact-mcp.mjs");
+    expect(claudeArgs).not.toContain("bridge-token");
   });
 
-  it("uses Codex output-last-message as fallback text when JSON stream has no body", async () => {
+  it("uses Codex's official output-last-message when JSONL has no answer", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-codex-last-message-"));
     roots.push(root);
     const executable = path.join(root, "codex-last-message-fixture");
+    const argsFile = path.join(root, "args.txt");
+    const quotedArgsFile = argsFile.replaceAll("'", "'\\''");
     await writeFile(
       executable,
       [
@@ -1527,6 +1471,7 @@ describe("agent backend registry", () => {
         "  if [ \"$prev\" = \"--output-last-message\" ]; then last_message=\"$arg\"; fi",
         "  prev=\"$arg\"",
         "done",
+        `printf '%s\\n' "$last_message" > '${quotedArgsFile}'`,
         "printf '{\"type\":\"turn.completed\",\"thread_id\":\"codex-thread-empty\",\"output_summary\":\"Codex completed.\"}\\n'",
         "printf '作業メモを作成しました。\\n' > \"$last_message\""
       ].join("\n"),
@@ -1536,20 +1481,19 @@ describe("agent backend registry", () => {
     const backend = new CodexBackend({ command: executable });
 
     const events = await collectEvents(backend.runTurn(backendInput("run_last_message")));
+    const outputPath = (await readFile(argsFile, "utf8")).trim();
     const text = events
       .filter((event) => event.event_type === "text_delta")
       .map((event) => event.payload.text)
       .join("");
 
-    expect(text).toContain("作業メモを作成しました。");
+    expect(outputPath).toMatch(/last-message\.txt$/);
+    expect(text).toBe("作業メモを作成しました。");
     expect(events.at(-1)).toEqual({
       event_type: "run_completed",
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
-      source_event_id: expect.stringMatching(
-        /^run_last_message:adapter-stream:backend_stream_[^:]+:adapter:\d+$/
-      ),
+      backend_session_id: "codex-thread-empty",
       payload: {
-        backend_session_id: "codex-thread-empty",
         provider_event_type: "turn.completed"
       }
     });

@@ -3,7 +3,7 @@ import type { BackendEventRecord, BackendRunPhase, BackendRunRecord, JsonValue, 
 import { nowIso } from "@samurai-agent/core-schemas";
 import { BackendEventJournal } from "./backend-event-journal";
 import { RunLifecycle, type LifecycleRunStore, type PreparedTerminalSettlement } from "./run-lifecycle";
-import { consumeBackendEvents, type TurnExecutionResult } from "./turn-executor";
+import { TurnExecutor, type TurnExecutionResult } from "./turn-executor";
 import { backendFailureFromUnknown, backendTerminalEvidenceFromValue, lifecycleEventForTerminalEvidence } from "./run-state-machine";
 import type { CommitTurnSettlementPort, CommittedEventPublisherPort, HostDiagnosticsPort, HostDiagnosticEventType, TurnCleanupPort, TurnSettlementInput } from "../host/host-types";
 
@@ -44,6 +44,7 @@ export class RunRecovery {
   private lastReport: RecoveryReport = { diagnostics: [] };
   private readonly lifecycle: RunLifecycle;
   private readonly eventJournal: BackendEventJournal;
+  private readonly executor: TurnExecutor;
 
   constructor(
     private readonly store: RecoveryStore,
@@ -53,10 +54,13 @@ export class RunRecovery {
     private readonly committedEventPublisher: CommittedEventPublisherPort,
     private readonly cleanup: TurnCleanupPort,
     private readonly enqueue: (run: BackendRunRecord) => Promise<void>,
-    private readonly diagnostics: HostDiagnosticsPort
+    private readonly diagnostics: HostDiagnosticsPort,
+    executor: TurnExecutor,
+    lifecycle?: RunLifecycle
   ) {
-    this.lifecycle = new RunLifecycle(clock);
+    this.lifecycle = lifecycle ?? new RunLifecycle(clock);
     this.eventJournal = journal;
+    this.executor = executor;
   }
 
   getLastReport(): RecoveryReport {
@@ -95,36 +99,18 @@ export class RunRecovery {
         continue;
       }
 
-      let stream: AsyncIterable<BackendOutputEvent> | undefined;
-      try {
-        stream = backend?.streamEvents?.(run.id);
-      } catch (error) {
-        const latest = await this.store.getBackendRun(run.id) ?? run;
-        recovered.push(hasSettledOutcome(latest) ? latest : await this.markIndeterminate(latest, "transport_lost", error));
-        continue;
-      }
-
-      if (stream) {
+      if (backend?.streamEvents) {
         try {
-          const execution = await consumeBackendEvents({
-            run,
-            sessionId: run.session_id,
-            stream,
-            journal: this.eventJournal,
-            clock: this.clock,
-            emitCommitted: async (event, committedRun) => {
-              try {
-                await this.committedEventPublisher.publish({ event, run: committedRun });
-              } catch (error) {
-                await this.recordHostDiagnostic(committedRun, "host_emit_failed", "recovery_event_publisher", error);
-              }
-            }
-          });
+          const execution: TurnExecutionResult | undefined = await this.executor.syncRun({ run, backend });
+          if (!execution) {
+            recovered.push(run);
+            continue;
+          }
           const observedWaitingEvent = execution.events.some((event) => event.event_type === "backend_waiting_for_native_input");
           if (execution.run.status === "waiting_for_backend_input" && observedWaitingEvent) {
             recovered.push(execution.run);
           } else if (execution.terminalSettlement) {
-            recovered.push(await this.commitPending(execution.terminalSettlement, execution.text || outputSummaryFromEvents(execution.events), undefined));
+            recovered.push(await this.commitPending(execution.terminalSettlement, outputSummaryFromEvents(execution.events) || execution.text, undefined));
           } else {
             recovered.push(await this.markIndeterminate(execution.run, "runtime_state_unavailable"));
           }

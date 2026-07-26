@@ -1,4 +1,4 @@
-import type { BackendEventRecord, BackendRunRecord, JsonValue, ResourceRef } from "@samurai-agent/core-schemas";
+import { BackendEventRecordSchema, type BackendEventRecord, type BackendRunRecord, type JsonValue, type ResourceRef } from "@samurai-agent/core-schemas";
 import type { BackendTerminalEvidence } from "@samurai-agent/agent-backends";
 import { createId, nowIso } from "@samurai-agent/core-schemas";
 import { RunLifecycle, type LifecycleTransitionDecision, type PreparedTerminalSettlement } from "./run-lifecycle";
@@ -7,6 +7,7 @@ import type { CanonicalLifecycleEvent } from "./run-state-machine";
 export interface JournalEventInput {
   runId: string;
   sessionId: string;
+  backendSessionId?: string;
   attemptNo: number;
   eventType: BackendEventRecord["event_type"];
   payload: Record<string, JsonValue>;
@@ -41,7 +42,21 @@ export class BackendEventJournal {
     const existing = await this.store.listBackendEvents({ runId: input.runId });
     const duplicate = existing.find((event) => event.attempt_no === input.attemptNo && ((input.sourceEventId !== undefined && event.source_event_id === input.sourceEventId) || (input.sourceEventId === undefined && input.sourceSequence !== undefined && event.source_event_id === undefined && event.source_sequence === input.sourceSequence)));
     if (duplicate) return { event: duplicate, duplicate: true };
-    const event: BackendEventRecord = { id: createId("backend_event"), run_id: input.runId, session_id: input.sessionId, event_type: input.eventType, sequence: 0, attempt_no: input.attemptNo, ...(input.sourceEventId ? { source_event_id: input.sourceEventId } : {}), ...(input.sourceSequence !== undefined ? { source_sequence: input.sourceSequence } : {}), payload: journalPayload(input), resource_refs: input.resourceRefs ?? [], created_at: this.clock() };
+    const event: BackendEventRecord = {
+      id: createId("backend_event"),
+      run_id: input.runId,
+      session_id: input.sessionId,
+      ...(journalBackendSessionId(input) ? { backend_session_id: journalBackendSessionId(input) } : {}),
+      event_type: input.eventType,
+      sequence: Math.max(1, existing.reduce((max, item) => Math.max(max, item.sequence), 0) + 1),
+      attempt_no: input.attemptNo,
+      ...(input.sourceEventId ? { source_event_id: input.sourceEventId } : {}),
+      ...(input.sourceSequence !== undefined ? { source_sequence: input.sourceSequence } : {}),
+      payload: journalPayload(input),
+      resource_refs: input.resourceRefs ?? [],
+      created_at: this.clock()
+    };
+    BackendEventRecordSchema.parse(event);
     return this.store.appendCore02Event(event);
   }
 
@@ -102,21 +117,29 @@ function validateJournalInput(input: JournalEventInput): void {
 }
 
 function journalPayload(input: JournalEventInput): Record<string, JsonValue> {
+  const { backend_session_id: _legacyBackendSessionId, ...payload } = input.payload;
   const waitingExecution = input.eventType === "backend_waiting_for_native_input"
-    ? input.payload.waiting_execution === "suspended" ? "suspended" : "live"
+    ? payload.waiting_execution === "suspended" ? "suspended" : "live"
     : undefined;
   return {
-    ...input.payload,
+    ...payload,
     ...(waitingExecution ? { waiting_execution: waitingExecution } : {}),
     ...(input.terminalEvidence ? { terminal_evidence: input.terminalEvidence as unknown as JsonValue } : {})
   };
 }
 
+function journalBackendSessionId(input: JournalEventInput): string | undefined {
+  if (input.backendSessionId?.trim()) return input.backendSessionId;
+  const value = input.payload.backend_session_id;
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
 function createEvent(input: JournalEventInput, createdAt: string, sequence: number, eventId?: string): BackendEventRecord {
-  return {
+  const event = {
     id: eventId ?? createId("backend_event"),
     run_id: input.runId,
     session_id: input.sessionId,
+    ...(journalBackendSessionId(input) ? { backend_session_id: journalBackendSessionId(input) } : {}),
     event_type: input.eventType,
     sequence: Math.max(1, sequence),
     attempt_no: input.attemptNo,
@@ -125,7 +148,8 @@ function createEvent(input: JournalEventInput, createdAt: string, sequence: numb
     payload: journalPayload(input),
     resource_refs: input.resourceRefs ?? [],
     created_at: createdAt
-  };
+  } satisfies BackendEventRecord;
+  return BackendEventRecordSchema.parse(event);
 }
 
 function findDuplicate(events: BackendEventRecord[], input: JournalEventInput): BackendEventRecord | undefined {
