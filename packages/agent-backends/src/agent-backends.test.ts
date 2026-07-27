@@ -569,7 +569,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-evidence-"));
     roots.push(root);
     const executable = path.join(root, "long-running");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nprocess.on('SIGTERM', () => process.kill(process.pid, 'SIGKILL'));\nsetInterval(() => {}, 1000);\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "cancel-cli", kind: "external", label: "Cancel CLI", command: executable });
     const iterator = backend.runTurn(backendInput("run-cancel"))[Symbol.asyncIterator]();
@@ -589,6 +589,7 @@ describe("agent backend registry", () => {
       events.push(next.value);
     }
     expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "cancelled", source: "process_exit" });
+    expect(events.at(-1)?.payload.signal).toBe("SIGKILL");
   });
 
   it("propagates an in-flight AbortSignal to the owned child and waits for close", async () => {
@@ -757,7 +758,7 @@ describe("agent backend registry", () => {
     expect(backend.getStatus().active_run_count).toBe(0);
   });
 
-  it("keeps draining an early-returned child that ignores SIGTERM until real close", async () => {
+  it("force-stops an early-returned child that ignores SIGTERM after the grace period", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-early-return-drain-"));
     roots.push(root);
     const executable = path.join(root, "early-return-drain");
@@ -801,8 +802,7 @@ describe("agent backend registry", () => {
       returned = true;
       expect(backend.getStatus().active_run_count).toBe(1);
       await waitFor(() => fileExists(drainedAfterSignal));
-      await writeFile(release, "release", "utf8");
-      await waitFor(() => backend.getStatus().active_run_count === 0);
+      await waitFor(() => backend.getStatus().active_run_count === 0, 3_500);
       expect(backend.getStatus().active_run_count).toBe(0);
     } finally {
       await writeFile(release, "release", "utf8").catch(() => undefined);

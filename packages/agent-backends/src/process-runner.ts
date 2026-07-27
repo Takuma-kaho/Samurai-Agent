@@ -63,16 +63,17 @@ export async function* runProcess(input: ProcessRunnerInput): AsyncIterable<Proc
     input.abortSignal.removeEventListener("abort", handleAbort);
     abortListenerAttached = false;
   };
-  const handleAbort = () => {
+  const requestStop = () => {
+    if (stopRequested) return;
     stopRequested = true;
     input.markChildCancelled?.(child);
-    if (!closed && child.pid !== undefined && !child.killed) {
-      child.kill("SIGTERM");
-      forceStopTimer = setTimeout(() => {
-        if (!closed && child.pid !== undefined && !child.killed) child.kill("SIGKILL");
-      }, input.stopGraceMs ?? 2_000);
-    }
+    if (closed || child.pid === undefined) return;
+    child.kill("SIGTERM");
+    forceStopTimer = setTimeout(() => {
+      if (!closed && child.pid !== undefined) child.kill("SIGKILL");
+    }, input.stopGraceMs ?? 2_000);
   };
+  const handleAbort = () => requestStop();
   const releaseChild = () => {
     if (forceStopTimer) clearTimeout(forceStopTimer);
     removeAbortListener();
@@ -88,10 +89,12 @@ export async function* runProcess(input: ProcessRunnerInput): AsyncIterable<Proc
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
+    if (disposed) return;
     stdout += chunk;
     enqueue({ kind: "stdout", chunk });
   });
   child.stderr.on("data", (chunk: string) => {
+    if (disposed) return;
     stderr += chunk;
     enqueue({ kind: "stderr", chunk });
   });
@@ -138,14 +141,7 @@ export async function* runProcess(input: ProcessRunnerInput): AsyncIterable<Proc
     removeAbortListener();
     wake?.();
     wake = undefined;
-    if (!closed && child.pid !== undefined && !child.killed) {
-      stopRequested = true;
-      input.markChildCancelled?.(child);
-      child.kill("SIGTERM");
-      forceStopTimer = setTimeout(() => {
-        if (!closed && child.pid !== undefined && !child.killed) child.kill("SIGKILL");
-      }, input.stopGraceMs ?? 2_000);
-    }
+    if (!closed) requestStop();
     if (!closed) {
       child.stdout.resume();
       child.stderr.resume();

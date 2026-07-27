@@ -69,7 +69,7 @@ export class ExternalCliBackend implements AgentBackend {
   private readonly artifactMcpScript?: string;
   private readonly resumeArgs?: string[];
   private readonly capabilityProbeResults: ExternalCliBackendOptions["capabilityProbeResults"];
-  private readonly activeRuns = new Map<string, { child: ChildProcessWithoutNullStreams; cancelled: boolean }>();
+  private readonly activeRuns = new Map<string, { child: ChildProcessWithoutNullStreams; cancelled: boolean; controller: AbortController }>();
   private liveVerification?: BackendLiveVerification;
   private readonly provider: ExternalCliProvider;
 
@@ -208,6 +208,10 @@ export class ExternalCliBackend implements AgentBackend {
       return;
     }
 
+    const cancellationController = new AbortController();
+    const abortSignal = input.abort_signal
+      ? AbortSignal.any([input.abort_signal, cancellationController.signal])
+      : cancellationController.signal;
     try {
       for await (const event of runCommandEvents({
         runId: input.run_id,
@@ -224,8 +228,8 @@ export class ExternalCliBackend implements AgentBackend {
         env: externalBackendEnv(input),
         cwd: input.working_directory,
         label: this.label,
-        abortSignal: input.abort_signal,
-        registerChild: (child) => this.activeRuns.set(input.run_id, { child, cancelled: false }),
+        abortSignal,
+        registerChild: (child) => this.activeRuns.set(input.run_id, { child, cancelled: false, controller: cancellationController }),
         markChildCancelled: (child) => {
           const active = this.activeRuns.get(input.run_id);
           if (active?.child === child) active.cancelled = true;
@@ -251,7 +255,7 @@ export class ExternalCliBackend implements AgentBackend {
       return { kind: "unsupported" };
     }
     state.cancelled = true;
-    state.child.kill("SIGTERM");
+    state.controller.abort();
     return { kind: "requested" };
   }
 
@@ -305,6 +309,10 @@ export class ExternalCliBackend implements AgentBackend {
     const args = interpolateBackendArgs(this.resumeArgs ?? [], { runId, backendSessionId });
     const resumeAbortSignal = (input as Record<string, unknown>).abort_signal as AbortSignal | undefined;
     const promptInput = Object.fromEntries(Object.entries(input).filter(([key]) => key !== "abort_signal")) as Record<string, JsonValue>;
+    const cancellationController = new AbortController();
+    const abortSignal = resumeAbortSignal
+      ? AbortSignal.any([resumeAbortSignal, cancellationController.signal])
+      : cancellationController.signal;
     try {
       for await (const event of runCommandEvents({
         runId,
@@ -326,8 +334,12 @@ export class ExternalCliBackend implements AgentBackend {
         },
         cwd: stringValue(input.working_directory),
         label: this.label,
-        abortSignal: resumeAbortSignal,
-        registerChild: (child) => this.activeRuns.set(runId, { child, cancelled: false }),
+        abortSignal,
+        registerChild: (child) => this.activeRuns.set(runId, { child, cancelled: false, controller: cancellationController }),
+        markChildCancelled: (child) => {
+          const active = this.activeRuns.get(runId);
+          if (active?.child === child) active.cancelled = true;
+        },
         isCancelled: () => this.activeRuns.get(runId)?.cancelled === true,
         unregisterChild: (child) => {
           if (this.activeRuns.get(runId)?.child === child) {
@@ -467,7 +479,7 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
 
     const close = closeEvent ?? { kind: "close" as const, exitCode: null, signal: null, stdout: "", stderr: "", cancelled: false };
     const cancellationRequested = close.cancelled || input.isCancelled?.() === true || input.abortSignal?.aborted === true;
-    const cancellationConfirmed = cancellationRequested && (close.signal === "SIGTERM" || close.exitCode === 143 || close.exitCode === 0);
+    const cancellationConfirmed = cancellationRequested && (close.signal === "SIGTERM" || close.signal === "SIGKILL" || close.exitCode === 143 || close.exitCode === 0);
     const providerFailure = input.provider.processFailure?.(close.stderr);
     const failureCode = providerFailure?.code ?? "backend_failed";
     const failureMessage = providerFailure?.message ?? `${input.label} failed.`;
@@ -526,6 +538,10 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
     if (naturalProviderTerminal) {
       if (!providerStarted) {
         yield processFailure("backend_protocol_error", "Backend emitted a terminal event before its start event.");
+        return;
+      }
+      if (!closeEvent) {
+        yield { event_type: "run_failed", terminal_evidence: { kind: "indeterminate", reason: "transport_lost", providerStarted: true, mayHaveSideEffects: true }, payload: { error_code: "backend_process_close_unconfirmed", message: `${input.label} process close could not be confirmed.`, reason: "process_close_unconfirmed", retryable: false } } satisfies BackendOutputEvent;
         return;
       }
       if (cancellationRequested && !providerTerminalBeforeCancellation) {

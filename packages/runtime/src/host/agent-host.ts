@@ -72,9 +72,7 @@ export class AgentHost {
   async recover(): Promise<void> {
     if (this.recoveryPromise) return this.recoveryPromise;
     this.accepting = false;
-    this.recoveryPromise = this.recovery.reconcile().then((runs) => {
-      for (const run of runs) this.recordBackendOutcome(run);
-    }).then(() => undefined).finally(() => {
+    this.recoveryPromise = this.recovery.reconcile().then(() => undefined).finally(() => {
       this.accepting = true;
     });
     return this.recoveryPromise;
@@ -95,7 +93,6 @@ export class AgentHost {
       if (knownRun) await this.executor.cleanup({ runId: knownRun.id, sessionId: knownRun.session_id });
     }
     if (isSettled(result)) {
-      this.recordBackendOutcome(result);
       this.activeRunSessions.delete(result.id);
       this.queue.releaseSession(result.session_id);
     }
@@ -115,7 +112,6 @@ export class AgentHost {
       if (run) await this.executor.cleanup({ runId: run.id, sessionId: run.session_id });
     }
     if (isSettled(result)) {
-      this.recordBackendOutcome(result);
       this.activeRunSessions.delete(result.id);
       this.queue.releaseSession(result.session_id);
     }
@@ -136,7 +132,6 @@ export class AgentHost {
       if (run) await this.executor.cleanup({ runId: run.id, sessionId: run.session_id });
     }
     if (isSettled(result)) {
-      this.recordBackendOutcome(result);
       this.queue.releaseSession(result.session_id);
     }
     else if (result.status !== "waiting_for_backend_input") lease?.restoreSuspended();
@@ -324,12 +319,7 @@ export class AgentHost {
     } catch (error) {
       await this.recordDiagnostic(settled, "host_emit_failed", "terminal_event", error);
     }
-    this.recordBackendOutcome(settled);
     return settled;
-  }
-
-  private recordBackendOutcome(run: BackendRunRecord): void {
-    if (isSettled(run)) this.registry.recordRunOutcome(run.backend_id, run.status);
   }
 
   private async recordDiagnostic(run: Pick<BackendRunRecord, "id" | "session_id" | "current_attempt">, eventType: HostDiagnosticInput["eventType"], operationId: string, error: unknown): Promise<void> {

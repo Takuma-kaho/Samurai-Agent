@@ -340,8 +340,6 @@ export class AgentBackendRegistry {
     const backend = this.get(id);
     return backend ? normalizeBackendStatus(backend, backend.getStatus?.()) : undefined;
   }
-
-  recordRunOutcome(_backendId: string, _status: "completed" | "failed" | "cancelled" | "outcome_unknown"): void {}
 }
 
 function validateBackendContract(backend: AgentBackend): void {
