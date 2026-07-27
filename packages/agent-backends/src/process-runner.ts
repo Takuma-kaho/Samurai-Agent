@@ -98,6 +98,12 @@ export async function* runProcess(input: ProcessRunnerInput): AsyncIterable<Proc
     stderr += chunk;
     enqueue({ kind: "stderr", chunk });
   });
+  child.stdin.once("error", (error) => {
+    // A child can close stdin after spawn but before the input write drains.
+    // EPIPE is not terminal evidence; the process close event remains canonical.
+    if ("code" in error && error.code === "EPIPE") return;
+    enqueue({ kind: "process_error", message: error.message });
+  });
   child.once("error", (error) => {
     if (child.pid === undefined) {
       spawnError = error.message;
