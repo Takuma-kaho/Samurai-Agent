@@ -18,7 +18,7 @@ export type CanonicalLifecycleEvent =
 const allowedStatusTransitions: Record<BackendRunStatus, readonly BackendRunStatus[]> = {
   queued: ["running", "cancelled", "failed"],
   running: ["waiting_for_backend_input", "completed", "failed", "cancelled", "outcome_unknown"],
-  waiting_for_backend_input: ["running", "failed", "cancelled", "outcome_unknown"],
+  waiting_for_backend_input: ["running", "completed", "failed", "cancelled", "outcome_unknown"],
   outcome_unknown: ["completed", "failed", "cancelled"],
   completed: [],
   failed: [],

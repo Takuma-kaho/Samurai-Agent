@@ -63,12 +63,24 @@ export class RunLifecycle {
     return store.commitCore02RunTransition({ expectedRun, nextRun });
   }
 
-  async recordBackendSession(store: LifecycleRunStore, run: BackendRunRecord, backendSessionId: string): Promise<BackendRunRecord> {
+  async recordBackendSession(store: LifecycleRunStore, run: BackendRunRecord, backendSessionId: string, sourceEventId?: string): Promise<BackendRunRecord> {
     if (!backendSessionId.trim()) throw new Error("backend_session_id_required");
+    if (run.backend_session_id) {
+      if (run.backend_session_id !== backendSessionId) throw new Error(`backend_session_conflict:${run.id}`);
+      return run;
+    }
     if (run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "outcome_unknown") {
       throw new Error(`backend_session_after_settlement:${run.id}`);
     }
-    const nextRun = { ...run, backend_session_id: backendSessionId };
+    const nextRun = {
+      ...run,
+      backend_session_id: backendSessionId,
+      metadata: {
+        ...run.metadata,
+        backend_session_id: backendSessionId,
+        ...(sourceEventId ? { backend_session_source_event: sourceEventId } : {})
+      }
+    };
     return store.commitCore02BackendSession({ expectedRun: run, nextRun });
   }
 

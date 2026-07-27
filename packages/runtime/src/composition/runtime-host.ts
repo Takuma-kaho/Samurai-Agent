@@ -1,4 +1,4 @@
-import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
+import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput, BackendToolCallStartedEvent } from "@samurai-agent/agent-backends";
 import {
   createId,
   nowIso,
@@ -19,6 +19,7 @@ import { createSessionMemory } from "@samurai-agent/memory";
 import { buildContextPreview, type ContextPreviewPorts } from "../context/context-preview";
 import { memoryRef } from "../context/resource-refs";
 import { createBackendToolBridge } from "../host/backend-tool-bridge";
+import { projectBackendEventForUi } from "../backend/event-bridge";
 import { createAgentHost } from "./create-agent-host";
 import {
   applyGatewayBoundaryAllowedTools,
@@ -65,7 +66,7 @@ export interface HostLearningReviewInput {
 export interface HostToolInput {
   run: BackendRunRecord;
   runInput: BackendRunInput;
-  event: BackendOutputEvent;
+  event: BackendToolCallStartedEvent;
   gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
   recordEvent: (event: BackendOutputEvent) => Promise<BackendEventRecord>;
 }
@@ -81,6 +82,7 @@ export interface RuntimeHostCompositionDependencies {
   /** Request and context preparation belongs outside the Host lifecycle. */
   preparation: {
     prepareRequest(request: TurnRequest): Promise<TurnRequest>;
+    prepareResumeInput(input: { run: BackendRunRecord; resumeInput: Record<string, JsonValue> }): Promise<{ backendInput: BackendRunInput; gatewayBoundaryPolicy?: GatewayBoundaryPolicy }>;
     recordLearningResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void>;
     workingDirectory(): string;
     workingDirectoryMode(): "workspace" | "repo";
@@ -89,8 +91,8 @@ export interface RuntimeHostCompositionDependencies {
   /** Backend tool bridge state is an execution adapter, not Host business logic. */
   execution: {
     handleBackendToolStartedEvent(input: HostToolInput): Promise<unknown>;
-    registerToolBridgeToken(runId: string, token: string): void;
-    clearRunState(runId: string): void;
+    registerToolBridgeToken(runId: string, token: string): Promise<void>;
+    clearRunState(runId: string): void | Promise<void>;
   };
   /** Only the post-commit domain operations that exist in production are listed. */
   postTurn: {
@@ -131,7 +133,8 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
   };
   const committedEventPublisher = {
     publish: async (input: { event: BackendEventRecord; run: BackendRunRecord }) => {
-      await deps.core.emit("backend.event.created", input.event);
+      const uiEvent = projectBackendEventForUi(input.event);
+      if (uiEvent) await deps.core.emit("backend.event.created", uiEvent);
       await deps.core.emit("backend.run.updated", input.run);
     }
   };
@@ -177,7 +180,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         contextIntent,
         gatewayBoundaryPresent: Boolean(assembly.gatewayBoundary)
       });
-      if (activeToolBridge?.token) deps.execution.registerToolBridgeToken(turn.run.id, activeToolBridge.token);
+      if (activeToolBridge?.token) await deps.execution.registerToolBridgeToken(turn.run.id, activeToolBridge.token);
       const recentMessages = (await deps.core.store.listMessages(turn.session.id)).slice(-10);
       const workspaceRoot = deps.core.store.rootDir;
       const workingDirectory = deps.preparation.workingDirectory();
@@ -283,6 +286,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
     preflight: { prepare: async ({ request }) => deps.preparation.prepareRequest(request) },
     committedEventPublisher,
     admissionObserver: { observe: async (turn) => deps.core.emit("backend.run.created", turn.run) },
+    prepareResumeInput: deps.preparation.prepareResumeInput,
     toolExecution: {
       execute: async ({ run, backendInput, event, gatewayBoundaryPolicy, recordEvent }) => {
         if (event.event_type !== "tool_call_started") return;
@@ -309,7 +313,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         operationId: "external_assist_sync",
         run: async ({ admitted, run, output }) => {
           const settings = await deps.core.store.getSettings();
-          await deps.postTurn.runExternalAssistSync({
+          const records = await deps.postTurn.runExternalAssistSync({
             sessionId: admitted.session.id,
             runId: run.id,
             inputMessageId: admitted.userMessage.id,
@@ -318,6 +322,17 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
             assistantContent: output.content,
             role: settings.external_provider_role
           });
+          const status = records.some((record) => record.status === "failed")
+            ? "failed"
+            : records.some((record) => record.status === "completed")
+              ? "completed"
+              : "skipped";
+          const updated = {
+            ...run,
+            metadata: { ...run.metadata, external_assist_sync_status: status }
+          };
+          await deps.core.store.updateBackendRun(updated);
+          run.metadata = updated.metadata;
         }
       },
       learningReview: {

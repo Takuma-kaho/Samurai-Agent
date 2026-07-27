@@ -96,6 +96,22 @@ describe("core schemas", () => {
     expect(event.event_type).toBe("backend_stream_synced");
   });
 
+  it("requires the execution fields for each typed backend event kind", () => {
+    const base = {
+      id: createId("event"),
+      run_id: createId("run"),
+      session_id: createId("session"),
+      sequence: 1,
+      resource_refs: [],
+      created_at: nowIso()
+    };
+
+    expect(BackendEventRecordSchema.safeParse({ ...base, event_type: "text_delta", payload: { reason: "missing text" } }).success).toBe(false);
+    expect(BackendEventRecordSchema.safeParse({ ...base, event_type: "tool_call_started", payload: { provider_tool_name: "Read" } }).success).toBe(false);
+    expect(BackendEventRecordSchema.safeParse({ ...base, event_type: "backend_native_input_submitted", payload: { submitted_at: nowIso(), has_input: true, input: "secret" } }).success).toBe(false);
+    expect(BackendEventRecordSchema.safeParse({ ...base, event_type: "run_completed", payload: { terminal_evidence: { kind: "completed", source: "canonical_event" } } }).success).toBe(true);
+  });
+
   it("parses client event queue records", () => {
     const event = ClientEventRecordSchema.parse({
       id: createId("client_event"),
@@ -645,6 +661,7 @@ describe("core schemas", () => {
       pending_evaluation_suggestions: 1,
       backend_runs: 2,
       failed_backend_runs: 1,
+      outcome_unknown_backend_runs: 0,
       waiting_backend_runs: 0,
       tool_runs: 1,
       ignored_or_failed_tool_runs: 1,

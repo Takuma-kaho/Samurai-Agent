@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ClaudeCodeBackend, CodexBackend, ExternalCliBackend, parseCliOutputEvents } from "../../packages/agent-backends/src/index";
+import {
+  ClaudeCodeBackend,
+  CodexBackend,
+  ExternalCliBackend,
+  parseClaudeCodeOutputEvents,
+  parseCodexOutputEvents
+} from "../../packages/agent-backends/src/index";
 
 const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-capabilities-"));
 try {
@@ -36,8 +42,8 @@ try {
   assert.equal(claude.capabilities?.find((item) => item.capability_id === "browser_interact")?.reason, "authentication_expired");
   assert.equal(unavailable.capabilities?.find((item) => item.capability_id === "web_search")?.state, "unavailable");
 
-  const searchEvent = parseCliOutputEvents(JSON.stringify({ type: "item.completed", item: { type: "web_search", id: "search-1", mode: "live", sources: [{ url: "https://example.test/source" }] } }))[0];
-  const subagentEvent = parseCliOutputEvents(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "agent-1", name: "Agent", input: { description: "Inspect tests" } }] } }))[0];
+  const searchEvent = parseCodexOutputEvents(JSON.stringify({ type: "item.completed", item: { type: "web_search", id: "search-1", mode: "live", sources: [{ url: "https://example.test/source" }] } }))[0];
+  const subagentEvent = parseClaudeCodeOutputEvents(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "agent-1", name: "Agent", input: { description: "Inspect tests" } }] } }))[0];
   assert.deepEqual(searchEvent?.payload.source_urls, ["https://example.test/source"]);
   assert.equal(subagentEvent?.payload.capability_id, "subagent_delegate");
   assert.equal(subagentEvent?.payload.child_task_summary, "Inspect tests");

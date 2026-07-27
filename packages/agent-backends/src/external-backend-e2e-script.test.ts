@@ -23,7 +23,7 @@ describe("external backend verification script", () => {
       "#!/bin/sh",
       "cat >/dev/null",
       "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"codex-e2e-thread\"}'",
-      "printf '%s\\n' '{\"type\":\"item.completed\",\"thread_id\":\"codex-e2e-thread\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"external e2e ok\"}]}}'",
+      "printf '%s\\n' '{\"type\":\"item.completed\",\"thread_id\":\"codex-e2e-thread\",\"item\":{\"type\":\"agent_message\",\"id\":\"msg-e2e-1\",\"text\":\"external e2e ok\"}}'",
       "printf '%s\\n' '{\"type\":\"turn.completed\",\"thread_id\":\"codex-e2e-thread\",\"output_summary\":\"external e2e ok\"}'"
     ].join("\n"));
     await chmod(executable, 0o755);
@@ -71,12 +71,13 @@ describe("external backend verification script", () => {
       "#!/bin/sh",
       "cat >/dev/null",
       "if [ \"$1\" = \"exec\" ] && [ \"$2\" = \"resume\" ]; then",
-      "  printf '%s\\n' '{\"type\":\"item.completed\",\"thread_id\":\"codex-e2e-thread\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"external resume ok\"}]}}'",
+      "  printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"codex-e2e-thread\"}'",
+      "  printf '%s\\n' '{\"type\":\"item.completed\",\"thread_id\":\"codex-e2e-thread\",\"item\":{\"type\":\"agent_message\",\"id\":\"msg-e2e-2\",\"text\":\"external resume ok\"}}'",
       "  printf '%s\\n' '{\"type\":\"turn.completed\",\"thread_id\":\"codex-e2e-thread\",\"output_summary\":\"external resume ok\"}'",
       "  exit 0",
       "fi",
       "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"codex-e2e-thread\"}'",
-      "printf '%s\\n' '{\"type\":\"item.completed\",\"thread_id\":\"codex-e2e-thread\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"external e2e ok\"}]}}'",
+      "printf '%s\\n' '{\"type\":\"item.completed\",\"thread_id\":\"codex-e2e-thread\",\"item\":{\"type\":\"agent_message\",\"id\":\"msg-e2e-3\",\"text\":\"external e2e ok\"}}'",
       "printf '%s\\n' '{\"type\":\"turn.completed\",\"thread_id\":\"codex-e2e-thread\",\"output_summary\":\"external e2e ok\"}'"
     ].join("\n"));
     await chmod(executable, 0o755);

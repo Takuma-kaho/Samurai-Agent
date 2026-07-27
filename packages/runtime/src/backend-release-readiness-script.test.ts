@@ -32,7 +32,7 @@ describe("backend release readiness verification script", () => {
       "public-naming-scan",
       "gateway-recovery-probe",
       "external-channel-probe",
-      "external-backend-probe",
+      "external-backend-status",
       "sandbox-capabilities",
       "sandbox-host-run"
     ]);

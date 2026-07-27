@@ -48,7 +48,11 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck Domain Command packages
-        run: pnpm --filter @samurai-agent/core-schemas --filter @samurai-agent/domain-operations --filter @samurai-agent/action-catalog --filter @samurai-agent/runtime --filter @samurai-agent/server run typecheck
+        run: pnpm --filter @samurai-agent/core-schemas --filter @samurai-agent/agent-backends --filter @samurai-agent/domain-operations --filter @samurai-agent/action-catalog --filter @samurai-agent/runtime --filter @samurai-agent/workspace-store --filter @samurai-agent/server --filter @samurai-agent/web run typecheck
+
+      - name: Run Core03 focused tests on Linux
+        if: runner.os == 'Linux'
+        run: CI=true pnpm exec vitest run packages/core-schemas/src/core-schemas.test.ts packages/agent-backends/src/agent-backends.test.ts packages/runtime/src/backend-event-bridge.test.ts packages/runtime/src/execution/backend-event-journal.test.ts packages/runtime/src/execution/turn-executor.test.ts packages/runtime/src/execution/run-recovery.test.ts --pool=forks
 
       - name: Run Domain Command unit tests
         run: pnpm exec vitest run packages/domain-operations/src/domain-operations.coverage.test.ts packages/runtime/src/commands/domain-command-bus.test.ts

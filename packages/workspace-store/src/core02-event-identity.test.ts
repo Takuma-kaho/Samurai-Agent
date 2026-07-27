@@ -22,8 +22,8 @@ describe("Core 02 event source identity", () => {
 
     const expanded: CanonicalEventFixture[] = [
       { event_type: "text_delta", source_event_id: "provider-id:provider-event-1:part:0", source_sequence: 7, payload: { text: "hello" }, resource_refs: [] },
-      { event_type: "tool_started", source_event_id: "provider-id:provider-event-1:part:1", source_sequence: 7, payload: { tool_name: "Read" }, resource_refs: [] },
-      { event_type: "tool_started", source_event_id: "provider-id:provider-event-1:part:2", source_sequence: 7, payload: { tool_name: "Search" }, resource_refs: [] }
+      { event_type: "tool_call_started", source_event_id: "provider-id:provider-event-1:part:1", source_sequence: 7, payload: { tool_call_id: "call-read", provider_tool_name: "Read" }, resource_refs: [] },
+      { event_type: "tool_call_started", source_event_id: "provider-id:provider-event-1:part:2", source_sequence: 7, payload: { tool_call_id: "call-search", provider_tool_name: "Search" }, resource_refs: [] }
     ];
     expect(expanded).toHaveLength(3);
     expect(new Set(expanded.map((event) => event.source_event_id)).size).toBe(3);

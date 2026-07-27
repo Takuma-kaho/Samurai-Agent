@@ -1,5 +1,5 @@
 import { domainOperationIdFor } from "@samurai-agent/domain-operations";
-import { stableHash, type JsonValue } from "@samurai-agent/core-schemas";
+import { createId, stableHash, type JsonValue } from "@samurai-agent/core-schemas";
 
 type RuntimeDomainActorIdentity = "owner" | "owner_scheduled" | "paired_contact";
 export interface RuntimeDomainTrustedContext {
@@ -23,7 +23,7 @@ export class RuntimeDomainApi {
   async archiveMemory(input: { memoryId: string; sessionId: string }): Promise<unknown> {
     const result = await this.dispatcher.command({
       command_id: domainOperationIdFor("memoryArchive"),
-      idempotency_key: "memory_archive_request",
+      idempotency_key: createId("memory_archive_request"),
       payload: { memory_id: input.memoryId }
     }, { sessionId: input.sessionId });
     return result.result;

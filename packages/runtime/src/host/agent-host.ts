@@ -1,6 +1,6 @@
 import { AgentBackendRegistry } from "@samurai-agent/agent-backends";
-import type { BackendRuntimeFailure, BackendTerminalEvidence } from "@samurai-agent/agent-backends";
-import { nowIso, type BackendEventRecord, type BackendRunRecord, type MessageRecord } from "@samurai-agent/core-schemas";
+import type { BackendOutputEvent, BackendRuntimeFailure, BackendTerminalEvidence } from "@samurai-agent/agent-backends";
+import { nowIso, stableHash, type BackendEventRecord, type BackendRunRecord, type MessageRecord } from "@samurai-agent/core-schemas";
 import { BackendEventJournal } from "../execution/backend-event-journal";
 import { RunControl } from "../execution/run-control";
 import { RunRecovery } from "../execution/run-recovery";
@@ -8,6 +8,7 @@ import { RunLifecycle, type PreparedTerminalSettlement } from "../execution/run-
 import { SessionRunQueue } from "../execution/session-run-queue";
 import { TurnExecutor } from "../execution/turn-executor";
 import { lifecycleEventForTerminalEvidence } from "../execution/run-state-machine";
+import { normalizeBackendOutputEvent } from "../backend/event-bridge";
 import { TurnAdmission } from "./turn-admission";
 import { TurnPreparer } from "./turn-preparer";
 import type { AdmittedTurn, HostDiagnosticInput, HostPorts, PreparedTurn, TurnOutcome, TurnRequest, TurnOutput } from "./host-types";
@@ -46,8 +47,10 @@ export class AgentHost {
       cleanup: ports.cleanup,
       diagnostics: ports.diagnostics,
       committedEventPublisher: ports.committedEventPublisher,
-      toolExecution: ports.toolExecution
-    }, this.journal);
+      toolExecution: ports.toolExecution,
+      prepareResumeInput: ports.prepareResumeInput,
+      lifecycle: this.lifecycle
+    }, this.journal, this.executor);
     this.recovery = new RunRecovery(
       ports.store,
       (id) => this.registry.get(id),
@@ -59,7 +62,9 @@ export class AgentHost {
         const task = this.queue.enqueue(run.session_id, () => this.executeRecoveredRun(run));
         void task.catch((error) => this.recordDiagnostic(run, "host_cleanup_failed", "recovery_enqueue", error));
       },
-      ports.diagnostics
+      ports.diagnostics,
+      this.executor,
+      this.lifecycle
     );
   }
 
@@ -126,9 +131,32 @@ export class AgentHost {
     } finally {
       if (run) await this.executor.cleanup({ runId: run.id, sessionId: run.session_id });
     }
-    if (isSettled(result)) this.queue.releaseSession(result.session_id);
+    if (isSettled(result)) {
+      this.queue.releaseSession(result.session_id);
+    }
     else if (result.status !== "waiting_for_backend_input") lease?.restoreSuspended();
     return result;
+  }
+
+  /** Narrow journal entrance for HTTP Tool Bridge events. */
+  async recordToolBridgeEvent(input: { run: BackendRunRecord; event: BackendOutputEvent }): Promise<BackendEventRecord> {
+    if (input.event.event_type !== "tool_call_started" && input.event.event_type !== "tool_call_output") {
+      throw new Error("tool_bridge_event_type_invalid");
+    }
+    const normalized = normalizeBackendOutputEvent(input.event);
+    const toolCallId = normalized.tool_call_id;
+    const recorded = await this.journal.appendCanonicalEvent({
+      runId: input.run.id,
+      sessionId: input.run.session_id,
+      ...((normalized.backend_session_id ?? input.run.backend_session_id) ? { backendSessionId: normalized.backend_session_id ?? input.run.backend_session_id } : {}),
+      attemptNo: input.run.current_attempt ?? 1,
+      eventType: normalized.event_type,
+      payload: normalized.payload,
+      resourceRefs: normalized.resource_refs,
+      sourceEventId: normalized.source_event_id ?? `tool-bridge:${input.run.id}:${toolCallId}:${normalized.event_type}:${stableHash(normalized.payload)}`
+    });
+    if (!recorded.duplicate) await this.ports.committedEventPublisher.publish({ event: recorded.event, run: input.run });
+    return recorded.event;
   }
 
   private async execute(request: TurnRequest, signal?: AbortSignal): Promise<TurnOutcome> {
@@ -343,7 +371,7 @@ function outcomeForSettledRun(run: BackendRunRecord, output: TurnOutput): TurnOu
   return { kind: "failed", run, error: new Error(run.error_code ?? "backend_failed") };
 }
 
-function isSettled(run: BackendRunRecord): boolean {
+function isSettled(run: BackendRunRecord): run is BackendRunRecord & { status: "completed" | "failed" | "cancelled" | "outcome_unknown" } {
   return run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "outcome_unknown";
 }
 
@@ -363,8 +391,5 @@ function outputSummaryFromEvents(events: BackendEventRecord[]): string | undefin
 }
 
 function outputContent(status: BackendRunRecord["status"], text: string, events: BackendEventRecord[]): string {
-  const content = text || outputSummaryFromEvents(events) || "";
-  return status === "completed" && !content
-    ? "結果本文を受け取れませんでした。実行ログを確認してください。"
-    : content;
+  return text || outputSummaryFromEvents(events) || "";
 }

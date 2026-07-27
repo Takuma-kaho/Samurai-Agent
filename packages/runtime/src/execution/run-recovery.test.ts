@@ -3,6 +3,7 @@ import type { BackendOutputEvent } from "@samurai-agent/agent-backends";
 import type { BackendEventRecord, BackendRunRecord } from "@samurai-agent/core-schemas";
 import { BackendEventJournal } from "./backend-event-journal";
 import { RunRecovery, type RecoveryBackend, type RecoverySettlementInput } from "./run-recovery";
+import { TurnExecutor } from "./turn-executor";
 
 describe("RunRecovery", () => {
   it("uses stored typed evidence instead of a raw terminal event name", async () => {
@@ -272,15 +273,23 @@ function makeRecovery(
   backendFor: (id: string) => RecoveryBackend | undefined,
   options: { enqueue?: (run: BackendRunRecord) => Promise<void> } = {}
 ): RunRecovery {
+  const journal = new BackendEventJournal(store, fixedClock);
+  const executor = new TurnExecutor(store, journal, {
+    committedEventPublisher: { publish: async () => undefined },
+    toolExecution: { execute: async () => undefined },
+    cleanup: { cleanup: async () => undefined },
+    diagnostics: { record: async () => undefined, logPersistenceFailure: () => undefined }
+  });
   return new RunRecovery(
     store,
     backendFor,
     fixedClock,
-    new BackendEventJournal(store, fixedClock),
+    journal,
     { publish: async () => undefined },
     { cleanup: async () => undefined },
     options.enqueue ?? (async () => undefined),
-    { record: async () => undefined, logPersistenceFailure: () => undefined }
+    { record: async () => undefined, logPersistenceFailure: () => undefined },
+    executor
   );
 }
 

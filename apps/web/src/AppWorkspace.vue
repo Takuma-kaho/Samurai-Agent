@@ -817,7 +817,9 @@ function chooseInitialBackend() {
 }
 
 function isRunnableBackend(backend: AgentBackendStatus): boolean {
-  return backend.configured && backend.enabled !== false;
+  return backend.configured
+    && backend.enabled !== false
+    && (backend.connection_state === undefined || backend.connection_state === "ready" || backend.connection_state === "unverified");
 }
 
 async function setSelectedBackend(id: string) {

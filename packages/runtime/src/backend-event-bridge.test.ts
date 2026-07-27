@@ -7,9 +7,10 @@ describe("BackendEventBridge", () => {
 
     const first = bridge.project({
       event_type: "tool_call_output",
+      tool_call_id: "tool_1",
       payload: {
-        ok: true,
-        nested: { unsupported: undefined }
+        status: "ok",
+        output: { nested: { unsupported: undefined } }
       },
       resource_refs: [
         { kind: "artifact", id: "artifact_1", uri: "artifacts/artifact_1.md" },
@@ -18,6 +19,7 @@ describe("BackendEventBridge", () => {
     });
     const second = bridge.project({
       event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       payload: { output_summary: "done" }
     });
 
@@ -25,12 +27,12 @@ describe("BackendEventBridge", () => {
       run_id: "run_1",
       session_id: "session_1",
       sequence: 5,
-      payload: { ok: true, nested: { unsupported: null } },
+      payload: { status: "ok", output: { nested: { unsupported: null } } },
       resource_refs: [{ kind: "artifact", id: "artifact_1", uri: "artifacts/artifact_1.md" }]
     });
     expect(first.visible).toBe(true);
     expect(first.uiRecord).toMatchObject({
-      payload: { ok: true },
+      payload: { status: "ok" },
       resource_refs: []
     });
     expect(first.terminal).toBeUndefined();
@@ -82,12 +84,12 @@ describe("BackendEventBridge", () => {
       event_type: "backend_native_input_submitted",
       payload: {
         submitted_at: "2026-06-26T00:00:00.000Z",
-        input: { answer: "yes", api_key: "secret-key" }
+        has_input: true
       }
     });
     const hidden = bridge.project({
       event_type: "text_delta",
-      payload: { text: "", ui_visible: false }
+      payload: { text: "internal", ui_visible: false }
     });
 
     expect(started.record.payload).toMatchObject({
@@ -125,7 +127,7 @@ describe("BackendEventBridge", () => {
     expect(JSON.stringify(output.uiRecord?.payload)).not.toContain("Bearer secret");
     expect(JSON.stringify(output.uiRecord?.payload)).not.toContain("raw_value");
     expect(output.uiRecord?.resource_refs).toEqual([]);
-    expect(submitted.record.payload).toMatchObject({ input: { answer: "yes", api_key: "secret-key" } });
+    expect(submitted.record.payload).toMatchObject({ has_input: true });
     expect(submitted.uiRecord?.payload).toEqual({
       submitted_at: "2026-06-26T00:00:00.000Z",
       has_input: true

@@ -1,9 +1,9 @@
 import type { AgentBackend, BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
-import type { JsonValue } from "@samurai-agent/core-schemas";
+import type { BackendSessionPolicy, JsonValue } from "@samurai-agent/core-schemas";
 import { ProviderRequestError, type ProviderAdapter, type ProviderInput, type ProviderOutput, type ProviderToolCall } from "./provider";
 
 export interface NativeToolExecutionPlan {
-  tool_call_id?: string;
+  tool_call_id: string;
   provider_tool_name: string;
   action_id: string;
   execution_boundary: "host_runtime";
@@ -23,6 +23,8 @@ export class SamuraiNativeBackend implements AgentBackend {
   readonly id = "samurai-native";
   readonly kind = "samurai_native" as const;
   readonly label = "Samurai Native";
+  readonly sessionPolicy: BackendSessionPolicy = { acquisition: "none", resume: "unsupported" };
+  readonly execution_owner = "host" as const;
 
   private readonly provider?: ProviderAdapter;
   private readonly contextBuilder: NativeContextBuilder;
@@ -196,7 +198,7 @@ export class NativePromptBuilder {
         cause_category: cancelledBeforeStart || disposition === "cancel_unconfirmed" ? "cancellation" : disposition === "transport_lost" ? "transport" : disposition === "not_started" ? "configuration" : "provider",
         provider: providerError?.diagnostics.provider ?? provider.id,
         model: providerError?.diagnostics.model ?? provider.model,
-        status: providerError?.diagnostics.status ?? null
+        ...(providerError?.diagnostics.status ? { status: providerError.diagnostics.status } : {})
       }
     };
   }
@@ -238,8 +240,9 @@ export class NativeToolLoop {
 
 export class NativeToolExecutor {
   planToolCall(toolCall: ProviderToolCall): NativeToolExecutionPlan {
+    if (!toolCall.id?.trim()) throw new Error("tool_call_id_required");
     return {
-      ...(toolCall.id ? { tool_call_id: toolCall.id } : {}),
+      tool_call_id: toolCall.id,
       provider_tool_name: toolCall.name,
       action_id: nativeToolActionId(toolCall.name),
       execution_boundary: "host_runtime",
@@ -254,7 +257,7 @@ export class NativeToolExecutor {
       event_type: "tool_call_started",
       tool_call_id: plan.tool_call_id,
       payload: {
-        tool_call_id: plan.tool_call_id ?? "",
+        tool_call_id: plan.tool_call_id,
         provider_tool_name: plan.provider_tool_name,
         action_id: plan.action_id,
         execution_boundary: plan.execution_boundary,

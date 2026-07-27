@@ -86,7 +86,6 @@ import {
   type TrustedDomainContext
 } from "@samurai-agent/domain-operations";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { createHash, timingSafeEqual } from "node:crypto";
 import { connect as netConnect, type Socket } from "node:net";
 import path from "node:path";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
@@ -98,6 +97,7 @@ import {
   type AgentBackendStatus,
   type BackendOutputEvent,
   type BackendRunInput,
+  type BackendToolCallStartedEvent,
   type TemporaryContextAttachment
 } from "@samurai-agent/agent-backends";
 import {
@@ -250,7 +250,7 @@ import {
   type WorkspaceStore
 } from "@samurai-agent/workspace-store";
 import { handleBackendToolCall, type BackendToolBoundaryFeedback } from "./backend/feedback";
-import { BackendEventBridge, normalizeBackendOutputEvent } from "./backend/event-bridge";
+import { normalizeBackendOutputEvent } from "./backend/event-bridge";
 import { SamuraiNativeBackend } from "./backend/native-backend";
 import { DomainCommandConflictError, DomainCommandIdempotencyKeyRequiredError, DomainCommandOutcomeUnknownError, DomainCommandReplayError, DurableDomainCommandBus } from "./commands/domain-command-bus";
 import { createDomainOperationPorts } from "./domain-operation-composition";
@@ -295,6 +295,7 @@ import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
 import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type HostLearningReviewInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
+import { BackendToolBridgeService, type BackendToolBridgeCallResult } from "./host/backend-tool-bridge-service";
 import type {
   AdmittedTurn,
   BackendBoundTurn,
@@ -823,16 +824,12 @@ export function createDefaultAgentBackendRegistry(
       command: env.SAMURAI_CLAUDE_CODE_COMMAND,
       args: splitArgs(env.SAMURAI_CLAUDE_CODE_ARGS),
       artifactMcpScript,
-      streamProbeArgs: splitProbeArgs(env.SAMURAI_CLAUDE_CODE_STREAM_PROBE_ARGS),
-      streamProbeTimeoutMs: parseTimeout(env.SAMURAI_CLAUDE_CODE_STREAM_PROBE_TIMEOUT_MS),
       resumeArgs: splitOptionalArgs(env.SAMURAI_CLAUDE_CODE_RESUME_ARGS)
     }),
     new CodexBackend({
       command: env.SAMURAI_CODEX_COMMAND,
       args: splitOptionalArgs(env.SAMURAI_CODEX_ARGS),
       artifactMcpScript,
-      streamProbeArgs: splitProbeArgs(env.SAMURAI_CODEX_STREAM_PROBE_ARGS),
-      streamProbeTimeoutMs: parseTimeout(env.SAMURAI_CODEX_STREAM_PROBE_TIMEOUT_MS),
       resumeArgs: splitOptionalArgs(env.SAMURAI_CODEX_RESUME_ARGS)
     })
   ]);
@@ -855,7 +852,7 @@ function hasExplicitDefaultBackend(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 function defaultBackendIdFromStatuses(statuses: AgentBackendStatus[]): string {
-  const runnable = statuses.filter((status) => status.configured && status.enabled !== false);
+  const runnable = statuses.filter((status) => isRunnableBackendStatus(status));
   return (
     runnable.find((status) => status.id === "codex")?.id
     ?? runnable.find((status) => status.id === "claude-code")?.id
@@ -867,11 +864,6 @@ function defaultBackendIdFromStatuses(statuses: AgentBackendStatus[]): string {
 
 function splitArgs(value: string | undefined): string[] {
   return value?.split(" ").map((item) => item.trim()).filter(Boolean) ?? [];
-}
-
-function splitProbeArgs(value: string | undefined): string[] | undefined {
-  const args = splitArgs(value);
-  return args.length > 0 ? args : undefined;
 }
 
 function splitOptionalArgs(value: string | undefined): string[] | undefined {
@@ -901,8 +893,7 @@ export class AgentRuntime {
   private readonly pluginRegistry: PluginRuntimeRegistry;
   private readonly externalAssistProviders: ExternalAssistProvider[];
   private readonly contextPreviewAdapter: WorkspaceContextPreviewAdapter;
-  private readonly backendToolBridgeTokens = new Map<string, string>();
-  private readonly backendEventSequences = new Map<string, number>();
+  private readonly backendToolBridgeService: BackendToolBridgeService;
   private readonly backgroundTasks = new Set<Promise<unknown>>();
   private readonly backgroundTaskAbortController = new AbortController();
   private readonly backgroundTaskFailures: Array<{ error: unknown; runId?: string }> = [];
@@ -988,6 +979,17 @@ export class AgentRuntime {
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
     this.pluginRegistry = pluginRegistry ?? new PluginRuntimeRegistry();
+    this.backendToolBridgeService = new BackendToolBridgeService({
+      getRun: (runId) => this.store.getBackendRun(runId),
+      listEvents: (runId) => this.store.listBackendEvents({ runId }),
+      buildRunInput: (run) => this.buildResumeToolRunInput(run, {}),
+      recordEvent: (run, event) => this.requireAgentHost().recordToolBridgeEvent({ run, event }),
+      executeRuntimeTool: (input) => this.handleRuntimeToolCall(input.run, input.runInput, input.event),
+      executeProviderQuery: (input) => this.handleProviderDomainQueryToolCall(input.run, input.runInput, input.event, input.queryId, input.args),
+      runReadOnlyTool: (input) => this.runReadOnlyBackendTool(input.toolName, input.toolInput, { runId: input.runId }),
+      executeBackendToolStarted: (input) => this.handleBackendToolStartedEvent(input),
+      createError: (code, message) => new RuntimeRequestError(code, message)
+    });
     this.pluginDomainService = new PluginDomainService({
       plugins: {
         setEnabled: (pluginId, enabled) => this.pluginRegistry.setPluginEnabled(pluginId, enabled),
@@ -1573,6 +1575,13 @@ export class AgentRuntime {
       },
       preparation: {
         prepareRequest: (request) => this.prepareHostRequest(request),
+        prepareResumeInput: async ({ run, resumeInput }) => {
+          const gatewayBoundaryPolicy = await this.gatewayBoundaryPolicyForRun(run);
+          return {
+            backendInput: await this.buildResumeToolRunInput(run, resumeInput, gatewayBoundaryPolicy),
+            ...(gatewayBoundaryPolicy ? { gatewayBoundaryPolicy } : {})
+          };
+        },
         recordLearningResourceUses: (turn, preview) => this.recordLearningResourceUses(turn, preview),
         workingDirectory: () => this.backendWorkingDirectory(),
         workingDirectoryMode: () => this.backendWorkingDirectoryMode(),
@@ -1580,10 +1589,14 @@ export class AgentRuntime {
       },
       execution: {
         handleBackendToolStartedEvent: (input) => this.handleBackendToolStartedEvent(input),
-        registerToolBridgeToken: (runId, token) => { this.backendToolBridgeTokens.set(runId, token); },
-        clearRunState: (runId) => {
-          this.backendToolBridgeTokens.delete(runId);
-          this.backendEventSequences.delete(runId);
+        registerToolBridgeToken: async (runId, token) => {
+          this.backendToolBridgeService.registerToken(runId, token);
+        },
+        clearRunState: async (runId) => {
+          const current = await this.store.getBackendRun(runId);
+          if (!current || isSettledBackendRun(current)) {
+            this.backendToolBridgeService.clearToken(runId);
+          }
         }
       },
       postTurn: {
@@ -1770,7 +1783,7 @@ export class AgentRuntime {
   private selectedBackendIdForRun(preferred?: string): string {
     if (preferred) {
       const status = this.backendRegistry.statuses().find((item) => item.id === preferred);
-      if (status?.configured && status.enabled) return preferred;
+      if (status && isRunnableBackendStatus(status)) return preferred;
     }
     return this.defaultBackendIdForRun();
   }
@@ -1966,141 +1979,10 @@ export class AgentRuntime {
     runId: string;
     token: string;
     toolName: string;
-    toolCallId?: string;
+    toolCallId: string;
     toolInput: Record<string, JsonValue>;
-  }): Promise<{
-    status: "completed";
-    artifact_id?: string;
-    title?: string;
-    resource_ref?: ResourceRef;
-    output?: JsonValue;
-    tool_run_ids: string[];
-  }> {
-    const run = await this.store.getBackendRun(input.runId);
-    if (!run) {
-      throw new RuntimeRequestError("not_found", "backend_run_not_found");
-    }
-    if (run.status !== "running") {
-      throw new RuntimeRequestError("conflict", "backend_run_not_running");
-    }
-    const expectedToken = this.backendToolBridgeTokens.get(run.id);
-    if (!expectedToken || !timingSafeTokenEqual(expectedToken, input.token)) {
-      throw new RuntimeRequestError("forbidden", "tool_bridge_token_invalid");
-    }
-    const providerToolName = normalizeSamuraiToolBridgeName(input.toolName);
-    if (!samuraiToolBridgeTools.has(providerToolName)) {
-      throw new RuntimeRequestError("conflict", "tool_bridge_tool_not_allowed");
-    }
-    const runInput = await this.buildResumeToolRunInput(run, {});
-    await this.ensureBackendEventSequence(run.id);
-    const toolCallId = input.toolCallId || createId("toolcall");
-    const eventBridge = new BackendEventBridge({
-      runId: run.id,
-      sessionId: run.session_id,
-      attemptNo: run.current_attempt ?? 1,
-      nextSequence: () => this.allocateBackendEventSequence(run.id)
-    });
-    const recordEvent = async (event: BackendOutputEvent): Promise<BackendEventRecord> => {
-      const { record, uiRecord } = eventBridge.project({
-        ...event,
-        source_event_id: event.source_event_id ?? `tool-bridge:${toolCallId}:${event.event_type}`
-      });
-      const appended = await this.store.appendCore02Event(record);
-      if (uiRecord) {
-        await this.emit("backend.event.created", uiRecord);
-      }
-      return appended.event;
-    };
-    const startedEvent = normalizeBackendOutputEvent({
-      event_type: "tool_call_started",
-      tool_call_id: toolCallId,
-      payload: {
-        provider_tool_name: providerToolName,
-        action_id: samuraiToolBridgeActionId(providerToolName),
-        tool_origin: "samurai_tool_bridge",
-        input: input.toolInput
-      }
-    });
-    // Query bridge execution is a pure read: do not persist a BackendEvent
-    // for either the request or its result. The surrounding chat turn owns
-    // persistence of the original provider event when applicable.
-    if (!getDomainQueryForProviderToolName(providerToolName)) {
-      await recordEvent(startedEvent);
-    }
-    if (samuraiToolBridgeWriteTools.has(providerToolName)) {
-      const feedback = await this.handleRuntimeToolCall(run, runInput, startedEvent, undefined, undefined);
-      if (!feedback) {
-        throw new RuntimeRequestError("conflict", "tool_bridge_write_tool_failed");
-      }
-      if (isRuntimeToolQueryResult(feedback)) {
-        throw new RuntimeRequestError("conflict", "tool_bridge_write_tool_returned_query");
-      }
-      await recordEvent({
-        event_type: "tool_call_output",
-        tool_call_id: toolCallId,
-        payload: feedback.outputPayload ?? {
-          status: "completed",
-          action_id: feedback.operation.operation,
-          resource_id: feedback.operation.result_ref?.id ?? feedback.operation.id
-        },
-        resource_refs: feedback.resourceRefs ?? (feedback.operation.result_ref ? [feedback.operation.result_ref] : [])
-      });
-      return {
-        status: "completed",
-        output: {
-          operation_id: feedback.operation.id,
-          ...(feedback.outputPayload?.output && typeof feedback.outputPayload.output === "object" && !Array.isArray(feedback.outputPayload.output)
-            ? { result: feedback.outputPayload.output }
-            : {}),
-          ...(feedback.operation.result_ref?.kind === "collection_schema" && feedback.operation.result_ref.id ? { collection_id: feedback.operation.result_ref.id } : {}),
-          ...(feedback.operation.result_ref?.kind === "collection_record" && feedback.operation.result_ref.id ? { record_id: feedback.operation.result_ref.id } : {})
-        },
-        resource_ref: feedback.operation.result_ref,
-        tool_run_ids: [feedback.toolRun.id]
-      };
-    }
-    if (providerToolName !== "samurai.artifact.create") {
-      const providerQuery = getDomainQueryForProviderToolName(providerToolName);
-      if (providerQuery) {
-        const feedback = await this.handleProviderDomainQueryToolCall(run, runInput, startedEvent, providerQuery.id, input.toolInput);
-        if (!feedback) throw new RuntimeRequestError("conflict", "tool_bridge_query_failed");
-        const output = feedback.outputPayload?.result ?? feedback.outputPayload;
-        return {
-          status: "completed",
-          output,
-          resource_ref: feedback.resourceRefs?.[0],
-          tool_run_ids: []
-        };
-      }
-      const output = await this.runReadOnlyBackendTool(providerToolName, input.toolInput, { runId: input.runId });
-      await recordEvent({
-        event_type: "tool_call_output",
-        tool_call_id: toolCallId,
-        payload: {
-          provider_tool_name: providerToolName,
-          action_id: providerToolName,
-          output_summary: summarize(JSON.stringify(output), 220),
-          output
-        }
-      });
-      return {
-        status: "completed",
-        output,
-        tool_run_ids: []
-      };
-    }
-    const feedback = await this.handleBackendToolStartedEvent({
-      run,
-      runInput,
-      event: startedEvent,
-      recordEvent
-    });
-    const artifact = feedback.artifacts[0];
-    return {
-      status: "completed",
-      ...(artifact ? { artifact_id: artifact.id, title: artifact.title, resource_ref: artifact.file_ref } : {}),
-      tool_run_ids: feedback.toolRuns.map((toolRun) => toolRun.id)
-    };
+  }): Promise<BackendToolBridgeCallResult> {
+    return this.backendToolBridgeService.run(input);
   }
 
   private async runReadOnlyBackendTool(
@@ -2294,16 +2176,25 @@ export class AgentRuntime {
     // Compatibility callers may omit a key. This key is unique per call, so
     // it does not promise idempotency across transport retries.
     const idempotencyKey = input.idempotency_key?.trim() || `compat:${createId("idempotency")}`;
-    const outcome = await this.requireAgentHost().runTurn({
-      sessionId: input.sessionId,
-      content: input.content,
-      envelope,
-      backendId: input.backend_id,
-      idempotencyKey,
-      metadata: jsonRecord(input.metadata ?? {}),
-      temporaryContext: input.temporary_context,
-      gatewayBoundaryPolicy: input.gateway_boundary_policy
-    });
+    let outcome: Awaited<ReturnType<AgentHost["runTurn"]>>;
+    try {
+      outcome = await this.requireAgentHost().runTurn({
+        sessionId: input.sessionId,
+        content: input.content,
+        envelope,
+        backendId: input.backend_id,
+        idempotencyKey,
+        metadata: jsonRecord(input.metadata ?? {}),
+        temporaryContext: input.temporary_context,
+        gatewayBoundaryPolicy: input.gateway_boundary_policy
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("backend_not_registered:") || message.startsWith("backend_not_ready:")) {
+        throw new RuntimeRequestError("conflict", message);
+      }
+      throw error;
+    }
     // Host returns only after settlement/post-turn completion. Re-read the
     // durable Run before projecting the legacy facade result so diagnostics
     // and recovery corrections are never based on an in-memory snapshot.
@@ -2375,7 +2266,23 @@ export class AgentRuntime {
   async cancelBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.store.getBackendRun(runId);
     if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
-    return this.requireAgentHost().cancelRun(runId);
+    const cancelled = await this.requireAgentHost().cancelRun(runId);
+    const lockKey = typeof cancelled.metadata.gateway_boundary_concurrency_lock_key === "string"
+      ? cancelled.metadata.gateway_boundary_concurrency_lock_key.trim()
+      : "";
+    if (!lockKey) return cancelled;
+    const released = await this.store.releaseGatewayConcurrencyLock(lockKey);
+    if (!released) return cancelled;
+    const updated = {
+      ...cancelled,
+      metadata: {
+        ...cancelled.metadata,
+        gateway_concurrency_lock_status: released.status,
+        ...(released.released_at ? { gateway_concurrency_lock_released_at: released.released_at } : {})
+      }
+    };
+    await this.store.updateBackendRun(updated);
+    return updated;
   }
 
   async resumeBackendRun(runId: string, input: Record<string, JsonValue> = {}): Promise<BackendRunRecord> {
@@ -2390,6 +2297,23 @@ export class AgentRuntime {
   async syncBackendStream(runId: string, input: { maxEvents?: number; timeoutMs?: number } = {}): Promise<BackendStreamSyncResult> {
     const before = await this.store.listBackendEvents({ runId });
     const run = await this.requireAgentHost().syncRun(runId);
+    const syncEventId = `control:sync:${run.id}:${run.current_attempt ?? 1}`;
+    const syncEvent = await this.store.appendCore02Event({
+      id: syncEventId,
+      run_id: run.id,
+      session_id: run.session_id,
+      event_type: "backend_stream_synced",
+      sequence: 1,
+      attempt_no: run.current_attempt ?? 1,
+      source_event_id: syncEventId,
+      payload: {
+        reason: "stream_sync_completed",
+        run_status: run.status
+      },
+      resource_refs: [],
+      created_at: nowIso()
+    });
+    if (!syncEvent.duplicate) await this.emit("backend.event.created", syncEvent.event);
     const after = await this.store.listBackendEvents({ runId });
     const persisted = after.filter((event) => !before.some((previous) => previous.id === event.id));
     const unsupported = persisted.some((event) => event.event_type === "backend_stream_unavailable");
@@ -3271,7 +3195,7 @@ export class AgentRuntime {
 
   private effectiveDomainCapabilities(): Set<DomainRuntimeCapability> {
     const capabilities = new Set<DomainRuntimeCapability>();
-    if (this.backendRegistry.statuses().some((status) => status.enabled && status.configured && status.connection_state === "ready")) capabilities.add("agent_backend");
+    if (this.backendRegistry.statuses().some((status) => status.enabled && status.configured && (status.connection_state === "ready" || status.connection_state === "unverified"))) capabilities.add("agent_backend");
     if (this.workspaceOptions.pdfExportAdapter) capabilities.add("pdf_export");
     if (this.workspaceOptions.browserAdapter) capabilities.add("browser_adapter");
     if (this.pluginRegistry.listPluginStatuses().some((status) => status.enabled
@@ -4386,21 +4310,6 @@ export class AgentRuntime {
     return saved;
   }
 
-  private async ensureBackendEventSequence(runId: string): Promise<void> {
-    if (this.backendEventSequences.has(runId)) {
-      return;
-    }
-    const existingEvents = await this.store.listBackendEvents({ runId });
-    const nextSequence = existingEvents.reduce((max, event) => Math.max(max, event.sequence), 0) + 1;
-    this.backendEventSequences.set(runId, nextSequence);
-  }
-
-  private allocateBackendEventSequence(runId: string): number {
-    const sequence = this.backendEventSequences.get(runId) ?? 1;
-    this.backendEventSequences.set(runId, sequence + 1);
-    return sequence;
-  }
-
   private async gatewayBoundaryPolicyForRun(run: BackendRunRecord): Promise<GatewayBoundaryPolicy | undefined> {
     const policyId = stringPayload(run.metadata.gateway_boundary_policy_id);
     return policyId ? this.store.getGatewayBoundaryPolicy(policyId) : undefined;
@@ -4411,6 +4320,7 @@ export class AgentRuntime {
     resumeInput: Record<string, JsonValue>,
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy
   ): Promise<BackendRunInput> {
+    void resumeInput;
     const [session, messages, settings] = await Promise.all([
       this.store.getSession(run.session_id),
       this.store.listMessages(run.session_id),
@@ -4424,10 +4334,7 @@ export class AgentRuntime {
     const inputLocale = inputMessage?.input_locale ?? session.ui_locale ?? settings.ui_locale;
     const outputLocale = inputMessage?.output_locale ?? session.output_locale ?? settings.output_locale;
     const userInput = inputMessage?.content || run.input_summary || "Resume backend run";
-    const envelope = inputMessage?.envelope ?? createGatewayEnvelope(webGatewayContext, userInput, inputLocale, outputLocale, {
-      ...run.metadata,
-      resume_input: resumeInput
-    });
+    const envelope = inputMessage?.envelope ?? createGatewayEnvelope(webGatewayContext, userInput, inputLocale, outputLocale, run.metadata);
     const workspaceRoot = stringPayload(run.metadata.workspace_root) || this.store.rootDir;
     const workingDirectory = stringPayload(run.metadata.working_directory) || workspaceRoot;
     return {
@@ -4454,11 +4361,13 @@ export class AgentRuntime {
   private async handleBackendToolStartedEvent(input: {
     run: BackendRunRecord;
     runInput: BackendRunInput;
-    event: BackendOutputEvent;
+    event: BackendToolCallStartedEvent;
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
     recordEvent: BackendEventRecorder;
   }): Promise<BackendToolEventHandlingResult> {
     const providerToolName = stringPayload(input.event.payload.provider_tool_name);
+    const toolCallId = stringPayload(input.event.payload.tool_call_id) || input.event.tool_call_id;
+    if (!toolCallId) throw new RuntimeRequestError("bad_request", "tool_call_id_required");
     const requestedActionId = stringPayload(input.event.payload.action_id);
     const result: BackendToolEventHandlingResult = {
       operations: [],
@@ -4474,7 +4383,7 @@ export class AgentRuntime {
         id: createId("toolrun"),
         run_id: input.run.id,
         session_id: input.run.session_id,
-        tool_call_id: stringPayload(input.event.payload.tool_call_id) || input.event.tool_call_id,
+        tool_call_id: toolCallId,
         provider_tool_name: providerToolName,
         action_id: actionId,
         status: "ignored",
@@ -4494,7 +4403,7 @@ export class AgentRuntime {
           already_executed: true,
           tool_origin: "samurai_tool_bridge"
         },
-        tool_call_id: input.event.tool_call_id
+        tool_call_id: toolCallId
       });
       return result;
     }
@@ -4510,7 +4419,7 @@ export class AgentRuntime {
         id: createId("toolrun"),
         run_id: input.run.id,
         session_id: input.run.session_id,
-        tool_call_id: stringPayload(input.event.payload.tool_call_id) || input.event.tool_call_id,
+        tool_call_id: toolCallId,
         provider_tool_name: providerToolName || "unknown_tool",
         action_id: boundaryDecision.action_id,
         status: "ignored",
@@ -4530,7 +4439,7 @@ export class AgentRuntime {
           gateway_boundary: boundaryFeedback.payload
         },
         resource_refs: boundaryFeedback.resourceRefs,
-        tool_call_id: input.event.tool_call_id
+        tool_call_id: toolCallId
       });
       return result;
     }
@@ -4566,7 +4475,7 @@ export class AgentRuntime {
           gateway_boundary: boundaryFeedback.payload
         },
         resource_refs: boundaryFeedback.resourceRefs,
-        tool_call_id: input.event.tool_call_id
+        tool_call_id: toolCallId
       });
       return result;
     }
@@ -4583,7 +4492,7 @@ export class AgentRuntime {
             gateway_boundary: boundaryFeedback.payload
           },
           resource_refs: withGatewayBoundaryRefs(runtimeTool.resourceRefs ?? [], boundaryFeedback),
-          tool_call_id: input.event.tool_call_id
+          tool_call_id: toolCallId
         });
         return result;
       }
@@ -4608,7 +4517,7 @@ export class AgentRuntime {
           gateway_boundary: boundaryFeedback.payload
         },
         resource_refs: withGatewayBoundaryRefs(resourceRefs, boundaryFeedback),
-        tool_call_id: input.event.tool_call_id
+        tool_call_id: toolCallId
       });
       return result;
     }
@@ -4643,7 +4552,7 @@ export class AgentRuntime {
   private async dispatchRuntimeToolCall(input: {
     run: BackendRunRecord;
     runInput: BackendRunInput;
-    event: BackendOutputEvent;
+    event: BackendToolCallStartedEvent;
     providerToolName: string;
     requestedActionId: string;
     boundaryDecision: GatewayBoundaryToolDecision;
@@ -4662,6 +4571,8 @@ export class AgentRuntime {
       return value ? { kind: "handled", value } : { kind: "unhandled" };
     } catch (error) {
       const failure = normalizeRuntimeToolFailure(error);
+      const toolCallId = stringPayload(input.event.payload.tool_call_id) || input.event.tool_call_id;
+      if (!toolCallId) throw new RuntimeRequestError("bad_request", "tool_call_id_required");
       const mappedQuery = getDomainQueryEntry(input.requestedActionId)
         ?? getDomainQueryForProviderToolName(input.providerToolName);
       if (mappedQuery) {
@@ -4690,7 +4601,7 @@ export class AgentRuntime {
         id: createId("toolrun"),
         run_id: input.run.id,
         session_id: input.run.session_id,
-        tool_call_id: stringPayload(input.event.payload.tool_call_id) || input.event.tool_call_id,
+        tool_call_id: toolCallId,
         provider_tool_name: input.providerToolName || "unknown_tool",
         action_id: input.boundaryDecision.action_id,
         status: "failed",
@@ -4713,7 +4624,7 @@ export class AgentRuntime {
           gateway_boundary: input.boundary.payload
         },
         resource_refs: input.boundary.resourceRefs,
-        tool_call_id: input.event.tool_call_id
+        tool_call_id: toolCallId
       });
       return { kind: "failed", toolRun };
     }
@@ -4722,7 +4633,7 @@ export class AgentRuntime {
   private async handleRuntimeToolCall(
     run: BackendRunRecord,
     runInput: BackendRunInput,
-    event: BackendOutputEvent,
+    event: BackendToolCallStartedEvent,
     boundary?: BackendToolBoundaryFeedback,
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy
   ): Promise<RuntimeToolCallResult | RuntimeToolQueryResult | undefined> {
@@ -4732,12 +4643,13 @@ export class AgentRuntime {
     const toolName = stringPayload(event.payload.action_id) || providerCommand?.id || providerQuery?.id || providerToolName;
     const args = runtimeToolArguments(event.payload, toolName);
     const toolCallId = stringPayload(event.payload.tool_call_id) || event.tool_call_id;
+    if (!toolCallId) throw new RuntimeRequestError("bad_request", "tool_call_id_required");
     // The bridge event keeps the canonical bridge name in `provider_tool_name`
     // while `action_id` is the compatibility operation id (`collection.manage`).
     // Resolve the compatibility adapter from the provider name so both direct
     // bridge calls and provider-emitted bridge events use the same path.
     if (normalizeSamuraiToolBridgeName(providerToolName || toolName) === "samurai.collection.manage") {
-      const output = await this.runCollectionManageCompatibility(args, "provider_tool_call", providerToolIdempotencyKey(run.id, toolCallId, "collection.manage", args));
+      const output = await this.runCollectionManageCompatibility(args, "provider_tool_call", providerToolIdempotencyKey(run.id, run.current_attempt ?? 1, toolCallId, "collection.manage"));
       const session = await this.store.getSession(run.session_id);
       if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
       const operation = await this.createOperation(session, runInput.envelope, "collection.manage", ["Run the legacy Collection compatibility adapter."]);
@@ -4794,7 +4706,7 @@ export class AgentRuntime {
       const domainResult = await this.runDomainCommandWithTrustedContext({
         command_id: effectiveCommandId,
         input_source: "provider_tool_call",
-        idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, effectiveCommandId, commandArgs),
+        idempotency_key: providerToolIdempotencyKey(run.id, run.current_attempt ?? 1, toolCallId, effectiveCommandId),
         payload: commandArgs
       }, { runId: run.id, sessionId: run.session_id, envelopeId: runInput.input_message_id });
       const directRuntimeTool = runtimeToolCallResult(domainResult.result);
@@ -4891,7 +4803,7 @@ export class AgentRuntime {
   private async handleProviderDomainQueryToolCall(
     run: BackendRunRecord,
     runInput: BackendRunInput,
-    event: BackendOutputEvent,
+    event: BackendToolCallStartedEvent,
     queryId: string,
     args: Record<string, JsonValue>,
     boundary?: BackendToolBoundaryFeedback
@@ -4901,13 +4813,19 @@ export class AgentRuntime {
       input_source: "provider_tool_call",
       payload: normalizeProviderDomainQueryPayload(queryId, args)
     }, { runId: run.id, sessionId: run.session_id, envelopeId: runInput.input_message_id });
+    // A Collection view query is also a presentation request. Project its
+    // validated query result into the existing tool-output descriptor rather
+    // than bypassing the Domain Query contract for a provider-specific path.
+    const presentation = queryResult.query.output_resource_kind === "collection_view"
+      ? collectionPresentationDescriptorFromQueryResult(queryResult.result, args)
+      : undefined;
     return {
       queryOnly: true,
       outputPayload: {
         status: "completed",
         query_id: queryId,
-        result: jsonSafe(queryResult.result),
-        render_specs: jsonSafe(queryResult.render_specs)
+        result: jsonSafe(presentation ?? queryResult.result),
+        render_specs: jsonSafe(presentation ? [] : queryResult.render_specs)
       },
       resourceRefs: withGatewayBoundaryRefs([], boundary)
     };
@@ -6020,6 +5938,12 @@ export class AgentRuntime {
   }
 }
 
+function isRunnableBackendStatus(status: AgentBackendStatus): boolean {
+  return status.configured
+    && status.enabled !== false
+    && (status.connection_state === "ready" || status.connection_state === "unverified");
+}
+
 function createEnvelope(
   userIntent: string,
   inputLocale: SupportedLocale,
@@ -6647,6 +6571,38 @@ interface CollectionPresentationDescriptor {
   record_count?: number;
   record_id?: string;
   view_state?: Record<string, JsonValue>;
+}
+
+function collectionPresentationDescriptorFromQueryResult(
+  result: unknown,
+  providerInput: Record<string, JsonValue>
+): CollectionPresentationDescriptor {
+  const output = recordPayload(jsonSafe(result));
+  const collectionId = stringPayload(output.collection_id);
+  const viewId = stringPayload(output.view_id);
+  const schema = CollectionSchemaSchema.safeParse(output.schema);
+  const recordCount = output.record_count;
+  const renderSpec = recordPayload(output.render_spec);
+  const renderSpecProps = recordPayload(renderSpec.props);
+  const renderer = stringPayload(renderSpecProps.renderer);
+  if (!collectionId || !viewId || !schema.success || typeof recordCount !== "number" || !Number.isInteger(recordCount)
+    || recordCount < 0 || !renderer || !isMessagePresentationRenderer(renderer)) {
+    throw new RuntimeRequestError("internal", "collection_view_query_output_invalid");
+  }
+  const recordId = stringPayload(providerInput.record_id);
+  const viewState = recordPayload(renderSpecProps.view_state);
+  return {
+    status: "ready",
+    kind: "collection_app",
+    collection_id: collectionId,
+    view_id: viewId,
+    renderer,
+    title: collectionDisplayTitle(schema.data),
+    subtitle: `${collectionId} ・ ${recordCount}件`,
+    record_count: recordCount,
+    ...(recordId ? { record_id: recordId } : {}),
+    ...(Object.keys(viewState).length > 0 ? { view_state: viewState } : {})
+  };
 }
 
 interface CollectionPresentationAmbiguity {
@@ -9506,8 +9462,6 @@ function normalizeProviderDomainCommandPayload(
     if (args.metadata === undefined || isRecord(args.metadata)) {
       payload.metadata = {
         ...recordPayload(args.metadata),
-        backend_run_id: trusted.runId,
-        provider_tool_name: trusted.providerToolName,
         ...(trusted.toolCallId ? { tool_call_id: trusted.toolCallId } : {})
       };
     }
@@ -9524,6 +9478,13 @@ function normalizeProviderDomainQueryPayload(
 ): Record<string, JsonValue> {
   const query = requireDomainQueryEntry(queryId);
   assertProviderDomainServerFieldsAbsent("query", query.id, args);
+  if (query.output_resource_kind === "collection_view") {
+    // Older provider tools can include display-only fields. They remain
+    // available to the presentation projection, but do not enter the strict
+    // Domain Query input contract.
+    const { query: _query, record_id: _recordId, ...payload } = args;
+    return payload;
+  }
   // Do not sanitize unknown tool fields: the operation schema must reject them.
   return { ...args };
 }
@@ -9687,8 +9648,6 @@ function backendStatusWithRunHistory(status: AgentBackendStatus, runs: BackendRu
   }
   return {
     ...status,
-    connection_state: status.connection_state === "ready" && latest.status === "failed" ? "degraded" : status.connection_state,
-    reason: status.reason ?? (latest.status === "failed" ? latest.error_code ?? "latest_run_failed" : undefined),
     metadata: {
       ...(status.metadata ?? {}),
       last_run_id: latest.id,
@@ -10989,11 +10948,11 @@ function slackBotToken(): string | undefined {
 
 function providerToolIdempotencyKey(
   runId: string,
-  toolCallId: string | undefined,
-  commandId: string,
-  payload: Record<string, JsonValue>
+  attemptNo: number,
+  toolCallId: string,
+  commandId: string
 ): string {
-  return `${runId}:${toolCallId ?? stableHash(payload)}:${commandId}`;
+  return `${runId}:${attemptNo}:${toolCallId}:${commandId}`;
 }
 
 function slackApiUrl(): string {
@@ -11105,9 +11064,6 @@ function safeExternalSendDispatchError(error: unknown, fallback: string): string
   );
 }
 
-function timingSafeTokenEqual(expected: string, actual: string): boolean {
-  const expectedBytes = Buffer.from(expected);
-  const actualBytes = Buffer.from(actual);
-  if (expectedBytes.length !== actualBytes.length) return false;
-  return timingSafeEqual(expectedBytes, actualBytes);
+function isSettledBackendRun(run: BackendRunRecord): boolean {
+  return run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "outcome_unknown";
 }

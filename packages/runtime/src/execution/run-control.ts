@@ -9,8 +9,8 @@ import type { BackendEventRecord, BackendRunRecord, JsonValue, MessageRecord, Se
 import { nowIso } from "@samurai-agent/core-schemas";
 import { BackendEventJournal } from "./backend-event-journal";
 import { RunLifecycle, type LifecycleRunStore, type PreparedTerminalSettlement } from "./run-lifecycle";
-import { TurnExecutor, consumeBackendEvents, type TurnExecutionResult } from "./turn-executor";
-import type { CommitTurnSettlementPort, CommittedEventPublisherPort, HostDiagnosticsPort, TurnCleanupPort, TurnSettlementInput, TurnToolExecutionPort } from "../host/host-types";
+import { TurnExecutor, type TurnExecutionResult } from "./turn-executor";
+import type { CommitTurnSettlementPort, CommittedEventPublisherPort, HostDiagnosticsPort, ResumePreparation, TurnCleanupPort, TurnSettlementInput, TurnToolExecutionPort } from "../host/host-types";
 import { backendFailureFromUnknown, lifecycleEventForTerminalEvidence } from "./run-state-machine";
 
 export type RunControlSettlementInput = TurnSettlementInput;
@@ -33,6 +33,8 @@ export interface RunControlOptions {
   diagnostics: HostDiagnosticsPort;
   committedEventPublisher: CommittedEventPublisherPort;
   toolExecution: TurnToolExecutionPort;
+  prepareResumeInput?: (input: { run: BackendRunRecord; resumeInput: Record<string, JsonValue> }) => Promise<ResumePreparation>;
+  lifecycle?: RunLifecycle;
 }
 
 /** Direct control path for a known Run. It never queues cancel/resume/sync. */
@@ -47,29 +49,26 @@ export class RunControl {
   private readonly executor: TurnExecutor;
   private readonly committedEventPublisher: CommittedEventPublisherPort;
   private readonly diagnostics: HostDiagnosticsPort;
+  private readonly prepareResumeInput?: RunControlOptions["prepareResumeInput"];
 
   constructor(
     private readonly store: RunControlStore,
     private readonly backendFor: (id: string) => AgentBackend | undefined,
     options: RunControlOptions,
-    journal: BackendEventJournal
+    journal: BackendEventJournal,
+    executor: TurnExecutor
   ) {
     this.settleTimeoutMs = Math.max(1, options.settleTimeoutMs ?? 2500);
     this.clock = options.clock ?? nowIso;
     this.nowMs = options.nowMs ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.waitForEvidence = options.waitForEvidence;
-    this.lifecycle = new RunLifecycle(this.clock);
+    this.lifecycle = options.lifecycle ?? new RunLifecycle(this.clock);
     this.eventJournal = journal;
     this.committedEventPublisher = options.committedEventPublisher;
     this.diagnostics = options.diagnostics;
-    this.executor = new TurnExecutor(store, this.eventJournal, {
-      lifecycle: this.lifecycle,
-      committedEventPublisher: options.committedEventPublisher,
-      toolExecution: options.toolExecution,
-      cleanup: options.cleanup,
-      diagnostics: options.diagnostics
-    });
+    this.prepareResumeInput = options.prepareResumeInput;
+    this.executor = executor;
   }
 
   async cancel(runId: string): Promise<BackendRunRecord> {
@@ -156,20 +155,34 @@ export class RunControl {
   }
 
   async resume(runId: string, input: Record<string, unknown> = {}): Promise<BackendRunRecord> {
-    const run = await this.requireRun(runId);
+    let run = await this.requireRun(runId);
     if (hasSettledOutcome(run)) return run;
     if (run.status !== "waiting_for_backend_input") throw new Error(`run_not_waiting:${runId}`);
     const safeInput = validateResumeInput(input);
     const backend = this.backendFor(run.backend_id);
-    if (!backend?.resumeRun) {
+    const recordedResume = await this.recordResumeInput(run, safeInput);
+    run = recordedResume;
+    if (!backend?.resumeRun || backend.sessionPolicy.resume !== "native") {
       const failure = { code: "backend_resume_unsupported", message: "Backend does not support resume.", retryable: false, causeCategory: "configuration" as const };
       const pending = await this.prepareTerminal(run, { kind: "not_started", source: "preflight_rejection" }, failure, false, undefined, "resume_unsupported");
       return this.commitPending(pending, undefined, failure);
     }
+    if (!run.backend_session_id) {
+      const failure = { code: "backend_native_session_missing", message: "Backend cannot resume because its native Session ID is missing.", retryable: false, causeCategory: "configuration" as const };
+      const pending = await this.prepareTerminal(run, { kind: "not_started", source: "preflight_rejection" }, failure, false, undefined, "resume_session_missing");
+      return this.commitPending(pending, undefined, failure);
+    }
 
     try {
-      const backendInput = run.backend_session_id ? { ...safeInput, backend_session_id: run.backend_session_id } : safeInput;
-      const execution = await this.executor.resumeRun({ run, backend, input: backendInput });
+      const backendInput = { ...safeInput, backend_session_id: run.backend_session_id };
+      const prepared = await this.prepareResumeInput?.({ run, resumeInput: safeInput });
+      const resumeCallInput = prepared ? { ...prepared.backendInput, ...backendInput } : backendInput;
+      const execution = await this.executor.resumeRun({
+        run,
+        backend,
+        input: resumeCallInput as unknown as Record<string, JsonValue>,
+        ...(prepared ? { backendInput: prepared.backendInput, gatewayBoundaryPolicy: prepared.gatewayBoundaryPolicy } : {})
+      });
       return this.finishControlExecution(execution, "resume_terminal_missing");
     } catch (error) {
       const latest = await this.store.getBackendRun(runId) ?? run;
@@ -189,11 +202,25 @@ export class RunControl {
     if (hasSettledOutcome(run)) return run;
     const backend = this.backendFor(run.backend_id);
     if (!backend?.streamEvents) {
-      const pending = await this.prepareUnknown(run, "stream_sync_unsupported");
-      return this.commitPending(pending, undefined, { code: "stream_sync_unsupported", message: "Backend stream synchronization is unavailable." });
+      const diagnostic = await this.eventJournal.appendCanonicalEvent({
+        runId: run.id,
+        sessionId: run.session_id,
+        attemptNo: run.current_attempt ?? 1,
+        eventType: "backend_stream_unavailable",
+        payload: {
+          reason: "stream_sync_unsupported",
+          message: "Backend stream synchronization is unavailable.",
+          run_status: run.status
+        },
+        resourceRefs: [],
+        sourceEventId: `control:sync-unavailable:${run.id}:${run.current_attempt ?? 1}`
+      });
+      if (!diagnostic.duplicate) await this.publishCommittedEvent(diagnostic.event, run, "control_event_publisher");
+      return (await this.store.getBackendRun(run.id)) ?? run;
     }
     try {
-      const execution = await this.consumeControlStream(run, backend.streamEvents(runId));
+      const execution = await this.executor.syncRun({ run, backend });
+      if (!execution) return (await this.store.getBackendRun(run.id)) ?? run;
       return this.finishControlExecution(execution, "stream_terminal_missing");
     } catch (error) {
       const latest = await this.store.getBackendRun(runId) ?? run;
@@ -204,24 +231,13 @@ export class RunControl {
     }
   }
 
-  private async consumeControlStream(run: BackendRunRecord, stream: AsyncIterable<BackendOutputEvent>): Promise<TurnExecutionResult> {
-    return consumeBackendEvents({
-      run,
-      sessionId: run.session_id,
-      stream,
-      journal: this.eventJournal,
-      clock: this.clock,
-      emitCommitted: async (event, committedRun) => this.publishCommittedEvent(event, committedRun, "control_event_publisher")
-    });
-  }
-
   private async finishControlExecution(execution: TurnExecutionResult, missingReason: string): Promise<BackendRunRecord> {
     if (execution.run.status === "waiting_for_backend_input") return execution.run;
     if (execution.terminalSettlement) {
-      return this.commitPending(execution.terminalSettlement, execution.text || outputSummaryFromEvents(execution.events), undefined);
+      return this.commitPending(execution.terminalSettlement, outputSummaryFromEvents(execution.events) || execution.text, undefined);
     }
     const pending = await this.prepareUnknown(execution.run, missingReason);
-    return this.commitPending(pending, execution.text || outputSummaryFromEvents(execution.events), { code: "outcome_unknown", message: "Backend finished without a terminal result." });
+    return this.commitPending(pending, outputSummaryFromEvents(execution.events) || execution.text, { code: "outcome_unknown", message: "Backend finished without a terminal result." });
   }
 
   private async prepareUnknown(run: BackendRunRecord, reason: string): Promise<PreparedTerminalSettlement> {
@@ -258,7 +274,10 @@ export class RunControl {
       sessionId: run.session_id,
       attemptNo: run.current_attempt ?? 1,
       eventType: selectedDecision.toStatus === "completed" ? "run_completed" : "run_failed",
-      payload: { ...(error ? { error_code: error.code, message: error.message } : {}) },
+      payload: {
+        backend_id: run.backend_id,
+        ...(error ? { error_code: error.code, message: error.message } : {})
+      },
       sourceEventId: `control:${source}:${run.id}:${run.current_attempt ?? 1}:${selectedDecision.toStatus}`,
       terminalEvidence: evidence
     }, selectedDecision);
@@ -318,6 +337,20 @@ export class RunControl {
   private async requireRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.store.getBackendRun(runId);
     if (!run) throw new Error(`run_not_found:${runId}`);
+    return run;
+  }
+
+  private async recordResumeInput(run: BackendRunRecord, input: Record<string, JsonValue>): Promise<BackendRunRecord> {
+    const result = await this.eventJournal.appendCanonicalEvent({
+      runId: run.id,
+      sessionId: run.session_id,
+      attemptNo: run.current_attempt ?? 1,
+      eventType: "backend_native_input_submitted",
+      payload: { submitted_at: this.clock(), has_input: Object.keys(input).length > 0 },
+      resourceRefs: [],
+      sourceEventId: `control:resume-input:${run.id}:${run.current_attempt ?? 1}`
+    });
+    if (!result.duplicate) await this.publishCommittedEvent(result.event, run, "control_event_publisher");
     return run;
   }
 

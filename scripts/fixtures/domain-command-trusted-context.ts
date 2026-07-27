@@ -117,6 +117,8 @@ const bridgeBackend: AgentBackend = {
   id: "trusted-context-generated-surface-backend",
   kind: "codex",
   label: "Trusted context generated surface fixture",
+  sessionPolicy: { acquisition: "none", resume: "unsupported" },
+  execution_owner: "host",
   async *runTurn(input) {
     const currentPhase = phase;
     runIds[currentPhase] = input.run_id;
@@ -190,6 +192,8 @@ const normalProviderBackend: AgentBackend = {
   id: "trusted-context-normal-provider-backend",
   kind: "codex",
   label: "Trusted context ordinary Provider fixture",
+  sessionPolicy: { acquisition: "none", resume: "unsupported" },
+  execution_owner: "host",
   async *runTurn(input) {
     const probe = activeNormalProviderProbe;
     assert.ok(probe, "ordinary Provider backend was invoked without a probe");

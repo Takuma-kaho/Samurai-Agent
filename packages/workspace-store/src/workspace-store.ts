@@ -19,6 +19,7 @@ import {
   type AuditRecord,
   type AutomationJobRecord,
   type BackendEventRecord,
+  BackendEventRecordSchema,
   type BackendRunRecord,
   type ChangeHistoryEntry,
   type ClientEventRecord,
@@ -2232,6 +2233,7 @@ export class WorkspaceStore {
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
+        backend_session_id TEXT,
         event_type TEXT NOT NULL,
         sequence INTEGER NOT NULL,
         attempt_no INTEGER,
@@ -2308,6 +2310,7 @@ export class WorkspaceStore {
       await this.ensureDomainCommandExecutionColumns();
       await this.ensureDomainCorrelationColumns();
       await this.ensureCore02Columns();
+      await this.repairCore03FakeBackendSessions();
       await this.ensureSessionSearchIndexes();
       const migrationVersion = 1;
       const migrationName = "core_baseline";
@@ -2522,6 +2525,7 @@ export class WorkspaceStore {
       ["backend_runs", "request_idempotency_key TEXT"],
       ["backend_runs", "request_hash TEXT"],
       ["backend_events", "attempt_no INTEGER"],
+      ["backend_events", "backend_session_id TEXT"],
       ["backend_events", "source_event_id TEXT"],
       ["backend_events", "source_sequence INTEGER"]
     ];
@@ -2537,6 +2541,17 @@ export class WorkspaceStore {
     await sql.raw("CREATE UNIQUE INDEX idx_backend_events_source_sequence ON backend_events(run_id, attempt_no, source_sequence) WHERE source_sequence IS NOT NULL AND source_event_id IS NULL").execute(this.db);
     await sql.raw("UPDATE backend_runs SET phase = CASE WHEN status = 'queued' THEN 'admitted' WHEN status = 'waiting_for_backend_input' THEN 'waiting' WHEN status IN ('completed','failed','cancelled','outcome_unknown') THEN 'settled' ELSE NULL END WHERE phase IS NULL").execute(this.db);
     await sql.raw("UPDATE backend_runs SET current_attempt = 1 WHERE current_attempt IS NULL").execute(this.db);
+  }
+
+  /** Remove only the old adapter-generated Session IDs from unfinished Runs. */
+  private async repairCore03FakeBackendSessions(): Promise<void> {
+    await sql.raw(`
+      UPDATE backend_runs
+      SET backend_session_id = NULL
+      WHERE status IN ('queued', 'running', 'waiting_for_backend_input')
+        AND backend_session_id IS NOT NULL
+        AND backend_session_id = backend_id || ':' || session_id
+    `).execute(this.db);
   }
 
   async ensureDefaultSettings(): Promise<void> {
@@ -3384,6 +3399,9 @@ export class WorkspaceStore {
   }
 
   async commitCore02BackendSession(input: { expectedRun: BackendRunRecord; nextRun: BackendRunRecord }): Promise<BackendRunRecord> {
+    if (input.expectedRun.backend_session_id && input.nextRun.backend_session_id !== input.expectedRun.backend_session_id) {
+      throw new Error(`backend_session_conflict:${input.expectedRun.id}`);
+    }
     return this.commitCore02RunTransition(input);
   }
 
@@ -3418,6 +3436,7 @@ export class WorkspaceStore {
       if (!currentRow) throw new Error(`settlement_run_not_found:${input.expectedRun.id}`);
       const current = backendRunFromRow(currentRow);
       const safeEvent = normalizeSettlementEvent(input.terminalEvent, current, input.nextRun);
+      BackendEventRecordSchema.parse(safeEvent);
       const safeOutput = input.output ? { ...input.output, envelope: input.output.envelope } : undefined;
 
       const isUnknownCorrection = current.status === "outcome_unknown" && input.nextRun.status !== "outcome_unknown";
@@ -3477,7 +3496,7 @@ export class WorkspaceStore {
             ...(input.diagnostic.metadata ?? {})
           } : {})
         },
-        ...(safeOutput ? { output_message_id: safeOutput.id } : {}),
+        ...(safeOutput ? { output_message_id: safeOutput.id, output_summary: safeOutput.content } : {}),
         ...(nextStatus === "outcome_unknown" ? { completed_at: undefined } : { completed_at: input.nextRun.completed_at ?? now })
       };
       let update = transaction.updateTable("backend_runs")
@@ -3555,7 +3574,7 @@ export class WorkspaceStore {
   }
 
   async saveBackendEvent(event: BackendEventRecord): Promise<BackendEventRecord> {
-    const safeEvent = { ...event, payload: redactPrivateData(event.payload, { redactPii: true }) };
+    const safeEvent = BackendEventRecordSchema.parse({ ...event, payload: redactPrivateData(event.payload, { redactPii: true }) });
     await this.db.insertInto("backend_events").values(backendEventToRow(safeEvent)).execute();
     return safeEvent;
   }
@@ -3577,6 +3596,7 @@ export class WorkspaceStore {
       }
       const max = await transaction.selectFrom("backend_events").select(({ fn }) => fn.max("sequence").as("max_sequence")).where("run_id", "=", safeInput.run_id).executeTakeFirst();
       const next = { ...safeInput, sequence: Number(max?.max_sequence ?? 0) + 1 };
+      BackendEventRecordSchema.parse(next);
       await transaction.insertInto("backend_events").values(backendEventToRow(next)).execute();
       return { event: next, duplicate: false };
     });
@@ -3603,7 +3623,7 @@ export class WorkspaceStore {
       payload: {
         operation_id: input.operationId,
         message: input.message,
-        ...(input.metadata ?? {})
+        ...(input.metadata ? { metadata: input.metadata } : {})
       },
       resource_refs: [],
       created_at: nowIso()
@@ -3632,6 +3652,7 @@ export class WorkspaceStore {
       }
       const max = await transaction.selectFrom("backend_events").select(({ fn }) => fn.max("sequence").as("max_sequence")).where("run_id", "=", input.event.run_id).executeTakeFirst();
       const event = { ...input.event, sequence: Number(max?.max_sequence ?? 0) + 1 };
+      BackendEventRecordSchema.parse(event);
       await transaction.insertInto("backend_events").values(backendEventToRow(event)).execute();
       let update = transaction.updateTable("backend_runs").set(backendRunToRow(input.nextRun)).where("id", "=", input.expectedRun.id).where("status", "=", input.expectedRun.status);
       update = input.expectedRun.phase === undefined ? update.where("phase", "is", null) : update.where("phase", "=", input.expectedRun.phase);
@@ -8187,6 +8208,7 @@ function sameBackendEvent(row: BackendEventsTable, event: BackendEventRecord): b
   const comparableRow = {
     run_id: row.run_id,
     session_id: row.session_id,
+    backend_session_id: row.backend_session_id,
     event_type: row.event_type,
     attempt_no: row.attempt_no,
     source_event_id: row.source_event_id,
@@ -8198,6 +8220,7 @@ function sameBackendEvent(row: BackendEventsTable, event: BackendEventRecord): b
   return stableHash(comparableRow) === stableHash({
     run_id: comparableEvent.run_id,
     session_id: comparableEvent.session_id,
+    backend_session_id: comparableEvent.backend_session_id,
     event_type: comparableEvent.event_type,
     attempt_no: comparableEvent.attempt_no,
     source_event_id: comparableEvent.source_event_id,
@@ -8211,6 +8234,7 @@ function sameBackendEventIgnoringIdentity(row: BackendEventsTable, event: Backen
   const comparableRow = {
     run_id: row.run_id,
     session_id: row.session_id,
+    backend_session_id: row.backend_session_id,
     event_type: row.event_type,
     attempt_no: row.attempt_no,
     payload_json: row.payload_json,
@@ -8220,6 +8244,7 @@ function sameBackendEventIgnoringIdentity(row: BackendEventsTable, event: Backen
   return stableHash(comparableRow) === stableHash({
     run_id: comparableEvent.run_id,
     session_id: comparableEvent.session_id,
+    backend_session_id: comparableEvent.backend_session_id,
     event_type: comparableEvent.event_type,
     attempt_no: comparableEvent.attempt_no,
     payload_json: comparableEvent.payload_json,
