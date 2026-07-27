@@ -198,7 +198,7 @@ export class NativePromptBuilder {
         cause_category: cancelledBeforeStart || disposition === "cancel_unconfirmed" ? "cancellation" : disposition === "transport_lost" ? "transport" : disposition === "not_started" ? "configuration" : "provider",
         provider: providerError?.diagnostics.provider ?? provider.id,
         model: providerError?.diagnostics.model ?? provider.model,
-        status: providerError?.diagnostics.status ?? null
+        ...(providerError?.diagnostics.status ? { status: providerError.diagnostics.status } : {})
       }
     };
   }

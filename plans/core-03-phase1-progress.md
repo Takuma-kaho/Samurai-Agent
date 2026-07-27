@@ -1,40 +1,57 @@
-# Core03 Phase1 進捗・検証Evidence
+# Core03 Phase1残件＋Phase2外部Backend 実装Evidence
 
-更新日: 2026-07-26
+更新日: 2026-07-27
 
 ## 判定
 
-5つの問題は、コード上で修正済み。実装者による差分全体のセルフレビューと、担当Moduleのfocused test・typecheckを完了した。
+プランで指定された4点を実装済み。実CLI・E2E・全テスト・remote CIは実施していない。
 
-| 問題 | 判定 | 根拠 |
+| 対象 | 判定 | 根拠 |
 | --- | --- | --- |
-| 再開入力にToken・本文が保存される | 修正済み | `RunControl`は`submitted_at`と`has_input`だけをJournalへ記録し、本文・TokenをmetadataやEventへ保存しない。 |
-| `sessionPolicy`・`execution_owner`が飾り | 修正済み | Registryが宣言と実装を検証し、`TurnExecutor`はSession方針と`host`所有Toolだけを実行判断に使う。失敗後は`degraded`として受付を止める。 |
-| Eventが自由なデータ箱 | 修正済み | Event種類ごとのdiscriminated unionを追加し、新規Journal・Store保存時にSchemaを通す。既存履歴は読み取り互換を維持する。 |
-| Codexが空回答でも成功する | 修正済み | JSONL本文を優先し、本文がない場合だけ公式`--output-last-message`を`text_delta`へ変換する。unknown JSON・stderr・raw stdoutは回答にしない。 |
-| Tool Bridgeが専用台帳・Token保存を持つ | 修正済み | 専用Serviceへ移し、Tokenはprocess内だけで保持。書き込みは既存Domain Commandの冪等性を使い、EventはHostの記録入口からJournalへ流す。 |
+| 開始責任者 | 実装済み | `ClaudeCodeBackend`／`CodexBackend`だけが`execution_owner = "backend"`を持ち、開始Eventは各Providerの初期Eventから生成する。共通runnerは開始Eventを生成しない。 |
+| Module分割 | 実装済み | `contract.ts`はBackend契約・入力型・Registry、`process-runner.ts`はraw process lifecycle、`external-cli.ts`は共通CLI実行・close後terminal判定・接続状態、`external-backend-context.ts`はprompt／env、`mock-backend.ts`はMock、`claude-code.ts`／`codex.ts`はProvider固有引数・Session・decoder・最終メッセージを担当する。 |
+| Event契約 | 実装済み | `BackendOutputEventSchema`と`BackendEventRecordSchema`はEvent種別ごとのstrict schema。未知・非JSON・必須項目不足は`backend_protocol_diagnostic`経由で成功扱いにしない。旧履歴はStore読み取り互換を維持する。 |
+| Event対応表 | 整備済み | 下表に固定OSS Event、Samurai Event、必須項目、producer／consumer、保存場所、不正時の動作を記録した。 |
 
-## 実行経路
+## Event対応表
 
-- 初回実行・再開・同期・復旧は、すべて1つの`TurnExecutor`から同じBackend Event Journalへ到達する。
-- Session IDは初回保存・同一ID維持・異なるIDの`backend_session_conflict`停止を共通処理する。
-- native resumeにSession IDがない場合はBackendを呼ばず、既存Settlementで失敗確定する。
-- 同期・復旧ではHost所有Toolを再実行しない。
+| 元Event | Samurai Event | 必須項目 | producer | consumer／保存 | 不正・未知時 |
+| --- | --- | --- | --- | --- | --- |
+| Claude `system/init` | `run_started` | `session_id` | `claude-code-decoder.ts` | `TurnExecutor`／`RunLifecycle`のSession CAS → `BackendEventJournal` → `backend_events` | Sessionなしは診断、close後にfailed |
+| Claude `stream_event` のtext delta | `text_delta` | deltaの`text` | `claude-code-decoder.ts` | `TurnExecutor`／`BackendEventBridge` → `backend_events` | 空deltaは出力せず、異常JSONは診断 |
+| Claude `assistant` text | `text_delta` | text | `claude-code-decoder.ts` | `TurnExecutor`／`BackendEventBridge` | stream出力済み部分は重複排除 |
+| Claude `assistant` tool use | `tool_call_started` | tool ID、tool name | `claude-code-decoder.ts` | `TurnExecutor`／`BackendEventBridge` → `backend_events`（`execution_owner=backend`のためHostは再実行しない） | ID・nameなしは診断、Toolは実行しない |
+| Claude `user` tool result | `tool_call_output` | `tool_use_id` | `claude-code-decoder.ts` | `TurnExecutor`／`BackendEventBridge` → `backend_events` | IDなしは診断 |
+| Claude `result` | terminal判定材料 | result／error | `claude-code-decoder.ts` | `external-cli.ts`のprocess close判定 → 既存Settlement | close前に確定しない。重複resultは無視 |
+| Codex `thread.started` | `run_started` | `thread_id` | `codex-decoder.ts` | `TurnExecutor`／`RunLifecycle`のSession CAS → `BackendEventJournal` → `backend_events` | IDなしは診断 |
+| Codex `item.started` のTool | `tool_call_started` | `item.id`、item type | `codex-decoder.ts` | `TurnExecutor`／`BackendEventBridge` → `backend_events`（`execution_owner=backend`のためHostは再実行しない） | IDなし・未知Toolは診断 |
+| Codex `item.completed` のTool | `tool_call_output` | `item.id`、completed | `codex-decoder.ts` | `TurnExecutor`／`BackendEventBridge` → `backend_events` | IDなし・途中結果は成功扱いしない |
+| Codex `item.completed` agent message／reasoning | `text_delta`／`agent_reasoning` | completed text | `codex-decoder.ts` | `TurnExecutor`／`BackendEventBridge` → `backend_events` | 未完了・空文字は出力しない |
+| Codex `item.updated`／`todo_list` | `host_progress` | 表示可能なtext | `codex-decoder.ts` | `BackendEventBridge` → `backend_events` | 表示内容なしは出力しない |
+| Codex `turn.completed`／`turn.failed` | terminal判定材料 | terminal種別 | `codex-decoder.ts` | `external-cli.ts`のprocess close判定 → 既存Settlement | close前に確定しない |
+| 非JSON／未対応Provider Event | `backend_protocol_diagnostic` | provider、reason、短い概要 | `cli-parser.ts`（非JSON／canonical）／Provider decoder（未対応Provider Event） | `TurnExecutor`／`BackendEventBridge` → `backend_events` | 回答・Tool・状態判断には使わず、close後failed |
+
+## 共通producer／consumer
+
+- producer: `claude-code-decoder.ts`、`codex-decoder.ts`、既存Native／Tool Bridgeのcanonical Event生成箇所。
+- 共通処理: `process-runner.ts`はspawn、stdin／stdout／stderr、abort、closeだけを担当し、`external-cli.ts`はCLI preflight、Provider decoderの呼び出し、close後terminal判定、接続状態を担当する。prompt／envは`external-backend-context.ts`、Mockは`mock-backend.ts`へ分離した。
+- consumer: `TurnExecutor`、`BackendEventBridge`、`BackendEventJournal`、Workspace Storeの`backend_events`保存。
+- `contract.ts`はBackend契約・入力型・Schema・Registry・Statusだけを公開し、Provider固有処理を持たない。Provider decoderの選択は`claude-code.ts`／`codex.ts`が所有し、`cli-parser.ts`はgeneric canonical JSONだけを扱う。
 
 ## 過剰実装を避けた範囲
 
-- 新しい承認、Sandbox、再接続基盤、専用監査Frameworkは追加していない。
-- migration version 6は新設せず、既存ローカルDBの旧表も破壊していない。
-- 読み取りToolの専用結果キャッシュや、Backend Eventの再生用メモリ台帳は追加していない。
+- 実CLI、E2E、全テスト、全build、PR、remote CIは実施していない。
+- retry、fallback、新DB、汎用Protocol Frameworkは追加していない。
+- 既存の実CLI／E2E検証器の差分は変更していない。
 
-## 最終ローカル確認
+## 最小確認
 
-- `core-schemas` focused test: 29 tests passed
-- `workspace-store` focused test: 1 test passed
-- `agent-backends` focused test: 43 tests passed
-- `runtime` RunControl focused test: 14 tests passed
-- `runtime` Bridge・streaming integration spot: 2 tests passed
-- 対象4パッケージのtypecheck: すべてexit code 0
-- `git diff --check`: exit code 0
-- 全テスト、全build、外部CLI probe、PR CI待機: Phase1対象外
-- package-wide `runtime.test.ts`には、Core03外のdetached Background Review 2件のtimeoutが残るため、Phase1完了根拠には使っていない。
+- `@samurai-agent/core-schemas` typecheck: exit code 0
+- `@samurai-agent/agent-backends` typecheck: exit code 0
+- `@samurai-agent/runtime` typecheck: exit code 0
+- `@samurai-agent/workspace-store` typecheck: exit code 0
+- Claude／Codex・開始責任者・canonical Eventのfocused test: 6 tests passed
+- backend delegated-capabilities fixture: passed
+- Core Event schema focused test: 2 tests passed
+- EventBridge／TurnExecutor focused test: 13 tests passed
+- Workspace Store focused test: 1 test passed

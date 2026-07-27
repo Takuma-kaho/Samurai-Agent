@@ -3718,8 +3718,7 @@ describe("agent runtime", () => {
     await store.close();
 
     expect(statuses.find((status) => status.id === "mock")).toMatchObject({
-      connection_state: "degraded",
-      reason: "provider_failed",
+      connection_state: "ready",
       metadata: {
         last_run_id: "run_failed_status",
         last_run_status: "failed",

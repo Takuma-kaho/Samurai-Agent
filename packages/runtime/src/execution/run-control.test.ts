@@ -83,7 +83,7 @@ describe("RunControl", () => {
 
     expect(result.status).toBe("completed");
     expect(result.metadata).not.toHaveProperty("warning");
-    expect(store.events).toHaveLength(3);
+    expect(store.events).toHaveLength(2);
   });
 
   it("keeps a synced terminal outcome when iterator cleanup throws after journal commit", async () => {

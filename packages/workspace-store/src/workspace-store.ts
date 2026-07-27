@@ -3623,7 +3623,7 @@ export class WorkspaceStore {
       payload: {
         operation_id: input.operationId,
         message: input.message,
-        ...(input.metadata ?? {})
+        ...(input.metadata ? { metadata: input.metadata } : {})
       },
       resource_refs: [],
       created_at: nowIso()

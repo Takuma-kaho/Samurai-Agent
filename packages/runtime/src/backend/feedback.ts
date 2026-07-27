@@ -1,5 +1,5 @@
 import { getDomainCommandForProviderToolName, requireDomainCommandEntry } from "@samurai-agent/action-catalog";
-import type { BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
+import type { BackendOutputEvent, BackendRunInput, BackendToolCallStartedEvent } from "@samurai-agent/agent-backends";
 import {
   type ArtifactRecord,
   type BackendRunRecord,
@@ -35,7 +35,7 @@ export async function handleBackendToolCall(input: {
   store: WorkspaceStore;
   run: BackendRunRecord;
   runInput: BackendRunInput;
-  event: BackendOutputEvent;
+  event: BackendToolCallStartedEvent;
   boundary?: BackendToolBoundaryFeedback;
 }): Promise<FeedbackResult> {
   const providerToolName = stringValue(input.event.payload.provider_tool_name);

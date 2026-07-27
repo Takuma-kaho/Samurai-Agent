@@ -1,4 +1,4 @@
-import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
+import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput, BackendToolCallStartedEvent } from "@samurai-agent/agent-backends";
 import {
   createId,
   nowIso,
@@ -66,7 +66,7 @@ export interface HostLearningReviewInput {
 export interface HostToolInput {
   run: BackendRunRecord;
   runInput: BackendRunInput;
-  event: BackendOutputEvent;
+  event: BackendToolCallStartedEvent;
   gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
   recordEvent: (event: BackendOutputEvent) => Promise<BackendEventRecord>;
 }

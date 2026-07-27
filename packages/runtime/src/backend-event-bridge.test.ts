@@ -9,8 +9,8 @@ describe("BackendEventBridge", () => {
       event_type: "tool_call_output",
       tool_call_id: "tool_1",
       payload: {
-        ok: true,
-        nested: { unsupported: undefined }
+        status: "ok",
+        output: { nested: { unsupported: undefined } }
       },
       resource_refs: [
         { kind: "artifact", id: "artifact_1", uri: "artifacts/artifact_1.md" },
@@ -27,12 +27,12 @@ describe("BackendEventBridge", () => {
       run_id: "run_1",
       session_id: "session_1",
       sequence: 5,
-      payload: { ok: true, nested: { unsupported: null } },
+      payload: { status: "ok", output: { nested: { unsupported: null } } },
       resource_refs: [{ kind: "artifact", id: "artifact_1", uri: "artifacts/artifact_1.md" }]
     });
     expect(first.visible).toBe(true);
     expect(first.uiRecord).toMatchObject({
-      payload: { ok: true },
+      payload: { status: "ok" },
       resource_refs: []
     });
     expect(first.terminal).toBeUndefined();
@@ -89,7 +89,7 @@ describe("BackendEventBridge", () => {
     });
     const hidden = bridge.project({
       event_type: "text_delta",
-      payload: { text: "", ui_visible: false }
+      payload: { text: "internal", ui_visible: false }
     });
 
     expect(started.record.payload).toMatchObject({

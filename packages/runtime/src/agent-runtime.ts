@@ -97,6 +97,7 @@ import {
   type AgentBackendStatus,
   type BackendOutputEvent,
   type BackendRunInput,
+  type BackendToolCallStartedEvent,
   type TemporaryContextAttachment
 } from "@samurai-agent/agent-backends";
 import {
@@ -980,6 +981,7 @@ export class AgentRuntime {
     this.pluginRegistry = pluginRegistry ?? new PluginRuntimeRegistry();
     this.backendToolBridgeService = new BackendToolBridgeService({
       getRun: (runId) => this.store.getBackendRun(runId),
+      listEvents: (runId) => this.store.listBackendEvents({ runId }),
       buildRunInput: (run) => this.buildResumeToolRunInput(run, {}),
       recordEvent: (run, event) => this.requireAgentHost().recordToolBridgeEvent({ run, event }),
       executeRuntimeTool: (input) => this.handleRuntimeToolCall(input.run, input.runInput, input.event),
@@ -4359,7 +4361,7 @@ export class AgentRuntime {
   private async handleBackendToolStartedEvent(input: {
     run: BackendRunRecord;
     runInput: BackendRunInput;
-    event: BackendOutputEvent;
+    event: BackendToolCallStartedEvent;
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
     recordEvent: BackendEventRecorder;
   }): Promise<BackendToolEventHandlingResult> {
@@ -4550,7 +4552,7 @@ export class AgentRuntime {
   private async dispatchRuntimeToolCall(input: {
     run: BackendRunRecord;
     runInput: BackendRunInput;
-    event: BackendOutputEvent;
+    event: BackendToolCallStartedEvent;
     providerToolName: string;
     requestedActionId: string;
     boundaryDecision: GatewayBoundaryToolDecision;
@@ -4631,7 +4633,7 @@ export class AgentRuntime {
   private async handleRuntimeToolCall(
     run: BackendRunRecord,
     runInput: BackendRunInput,
-    event: BackendOutputEvent,
+    event: BackendToolCallStartedEvent,
     boundary?: BackendToolBoundaryFeedback,
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy
   ): Promise<RuntimeToolCallResult | RuntimeToolQueryResult | undefined> {
@@ -4647,7 +4649,7 @@ export class AgentRuntime {
     // Resolve the compatibility adapter from the provider name so both direct
     // bridge calls and provider-emitted bridge events use the same path.
     if (normalizeSamuraiToolBridgeName(providerToolName || toolName) === "samurai.collection.manage") {
-      const output = await this.runCollectionManageCompatibility(args, "provider_tool_call", providerToolIdempotencyKey(run.id, toolCallId, "collection.manage"));
+      const output = await this.runCollectionManageCompatibility(args, "provider_tool_call", providerToolIdempotencyKey(run.id, run.current_attempt ?? 1, toolCallId, "collection.manage"));
       const session = await this.store.getSession(run.session_id);
       if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
       const operation = await this.createOperation(session, runInput.envelope, "collection.manage", ["Run the legacy Collection compatibility adapter."]);
@@ -4704,7 +4706,7 @@ export class AgentRuntime {
       const domainResult = await this.runDomainCommandWithTrustedContext({
         command_id: effectiveCommandId,
         input_source: "provider_tool_call",
-        idempotency_key: providerToolIdempotencyKey(run.id, toolCallId, effectiveCommandId),
+        idempotency_key: providerToolIdempotencyKey(run.id, run.current_attempt ?? 1, toolCallId, effectiveCommandId),
         payload: commandArgs
       }, { runId: run.id, sessionId: run.session_id, envelopeId: runInput.input_message_id });
       const directRuntimeTool = runtimeToolCallResult(domainResult.result);
@@ -4801,7 +4803,7 @@ export class AgentRuntime {
   private async handleProviderDomainQueryToolCall(
     run: BackendRunRecord,
     runInput: BackendRunInput,
-    event: BackendOutputEvent,
+    event: BackendToolCallStartedEvent,
     queryId: string,
     args: Record<string, JsonValue>,
     boundary?: BackendToolBoundaryFeedback
@@ -9613,8 +9615,6 @@ function backendStatusWithRunHistory(status: AgentBackendStatus, runs: BackendRu
   }
   return {
     ...status,
-    connection_state: status.connection_state === "ready" && latest.status === "failed" ? "degraded" : status.connection_state,
-    reason: status.reason ?? (latest.status === "failed" ? latest.error_code ?? "latest_run_failed" : undefined),
     metadata: {
       ...(status.metadata ?? {}),
       last_run_id: latest.id,
@@ -10915,10 +10915,11 @@ function slackBotToken(): string | undefined {
 
 function providerToolIdempotencyKey(
   runId: string,
+  attemptNo: number,
   toolCallId: string,
   commandId: string
 ): string {
-  return `${runId}:${toolCallId}:${commandId}`;
+  return `${runId}:${attemptNo}:${toolCallId}:${commandId}`;
 }
 
 function slackApiUrl(): string {

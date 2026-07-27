@@ -1,4 +1,5 @@
-import type { BackendEventRecord } from "@samurai-agent/core-schemas";
+import { BackendEventRecordSchema, type BackendEventRecord, type JsonValue, jsonValueSchema } from "@samurai-agent/core-schemas";
+import { z } from "zod";
 
 export interface BackendEventsTable {
   id: string;
@@ -23,7 +24,14 @@ export function backendEventToRow(event: BackendEventRecord): BackendEventsTable
 }
 
 export function backendEventFromRow(row: BackendEventsTable): BackendEventRecord {
-  const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  const payload = JSON.parse(row.payload_json) as Record<string, JsonValue>;
   const legacySessionId = typeof payload.backend_session_id === "string" && payload.backend_session_id.trim() ? payload.backend_session_id : undefined;
-  return { id: row.id, run_id: row.run_id, session_id: row.session_id, ...(row.backend_session_id ?? legacySessionId ? { backend_session_id: row.backend_session_id ?? legacySessionId } : {}), event_type: row.event_type as BackendEventRecord["event_type"], sequence: row.sequence, ...(row.attempt_no !== null ? { attempt_no: row.attempt_no } : {}), ...(row.source_event_id ? { source_event_id: row.source_event_id } : {}), ...(row.source_sequence !== null ? { source_sequence: row.source_sequence } : {}), payload: payload as BackendEventRecord["payload"], resource_refs: JSON.parse(row.resource_refs_json), created_at: row.created_at } as BackendEventRecord;
+  const candidate = { id: row.id, run_id: row.run_id, session_id: row.session_id, ...(row.backend_session_id ?? legacySessionId ? { backend_session_id: row.backend_session_id ?? legacySessionId } : {}), event_type: row.event_type as BackendEventRecord["event_type"], sequence: row.sequence, ...(row.attempt_no !== null ? { attempt_no: row.attempt_no } : {}), ...(row.source_event_id ? { source_event_id: row.source_event_id } : {}), ...(row.source_sequence !== null ? { source_sequence: row.source_sequence } : {}), payload, resource_refs: JSON.parse(row.resource_refs_json), created_at: row.created_at };
+  const current = BackendEventRecordSchema.safeParse(candidate);
+  // Existing rows may use the pre-Core03 payload shape. They remain readable;
+  // only new writes are required to pass the strict current schema.
+  return current.success ? current.data : candidate as BackendEventRecord;
 }
+
+/** Kept as a named compatibility validator for callers auditing old rows. */
+export const LegacyBackendEventPayloadSchema = z.record(jsonValueSchema);

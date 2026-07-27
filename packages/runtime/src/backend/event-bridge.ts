@@ -1,8 +1,10 @@
-import type { BackendOutputEvent } from "@samurai-agent/agent-backends";
+import { BackendOutputEventSchema, type BackendOutputEvent } from "@samurai-agent/agent-backends";
 import {
   type BackendEventRecord,
+  type BackendEventType,
   type JsonValue,
   type ResourceRef,
+  type BackendTerminalEvidence,
   ResourceRefSchema,
   createId,
   nowIso
@@ -60,6 +62,17 @@ export class BackendEventBridge {
   }
 }
 
+type BackendOutputEventCandidate = {
+  event_type: BackendEventType;
+  payload: Record<string, JsonValue>;
+  tool_call_id?: string;
+  backend_session_id?: string;
+  resource_refs?: ResourceRef[];
+  source_event_id?: string;
+  source_sequence?: number;
+  terminal_evidence?: BackendTerminalEvidence;
+};
+
 export function projectBackendEventForUi(record: BackendEventRecord): BackendEventRecord | undefined {
   const payload = projectUiPayload(record);
   return payload
@@ -67,7 +80,7 @@ export function projectBackendEventForUi(record: BackendEventRecord): BackendEve
     : undefined;
 }
 
-export function normalizeBackendOutputEvent(event: BackendOutputEvent): BackendOutputEvent {
+export function normalizeBackendOutputEvent(event: BackendOutputEvent | BackendOutputEventCandidate): BackendOutputEvent {
   const payload = jsonRecord(event.payload);
   const payloadToolCallId = typeof payload.tool_call_id === "string" && payload.tool_call_id.trim() ? payload.tool_call_id : undefined;
   const toolCallId = event.tool_call_id ?? payloadToolCallId;
@@ -82,13 +95,14 @@ export function normalizeBackendOutputEvent(event: BackendOutputEvent): BackendO
   if (toolCallId && payload.tool_call_id === undefined) {
     payload.tool_call_id = toolCallId;
   }
-  return {
+  const normalized = {
     ...event,
     ...(backendSessionId ? { backend_session_id: backendSessionId } : {}),
     ...(toolCallId ? { tool_call_id: toolCallId } : {}),
     payload,
     resource_refs: normalizeResourceRefs(event.resource_refs)
   };
+  return BackendOutputEventSchema.parse(normalized) as BackendOutputEvent;
 }
 
 function terminalStatusForEvent(record: BackendEventRecord): BackendEventProjection["terminal"] {
@@ -305,7 +319,8 @@ function normalizeResourceRefs(value: ResourceRef[] | undefined): ResourceRef[] 
   });
 }
 
-function jsonRecord(value: Record<string, unknown>): Record<string, JsonValue> {
+function jsonRecord(value: unknown): Record<string, JsonValue> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, jsonSafe(entry)]));
 }
 

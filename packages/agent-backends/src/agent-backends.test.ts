@@ -9,6 +9,10 @@ import {
   buildExternalBackendPrompt,
   ClaudeCodeBackend,
   CodexBackend,
+  parseClaudeCodeOutputEvents,
+  parseClaudeCodeOutputLine,
+  parseCodexOutputEvents,
+  parseCodexOutputLine,
   externalBackendEnv,
   ExternalCliBackend,
   MockBackend,
@@ -62,6 +66,9 @@ describe("agent backend registry", () => {
         }
       }
     });
+    expect(new ClaudeCodeBackend().execution_owner).toBe("backend");
+    expect(new CodexBackend().execution_owner).toBe("backend");
+    expect(new ExternalCliBackend({ id: "external-test", kind: "external", label: "External Test" }).execution_owner).toBe("tool_bridge");
   });
 
   it("probes external CLI command availability without spawning it", async () => {
@@ -77,7 +84,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-probe-"));
     roots.push(root);
     const executable = path.join(root, "backend-probe");
-    await writeFile(executable, "#!/bin/sh\nprintf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"ok\"}}\\n'\n", "utf8");
+    await writeFile(executable, "#!/bin/sh\nprintf '{\"event_type\":\"run_started\",\"payload\":{}}\\n'\nprintf '{\"event_type\":\"run_completed\",\"payload\":{\"output_summary\":\"ok\"}}\\n'\n", "utf8");
     await chmod(executable, 0o755);
     const directProbe = resolveExternalCommandProbe(executable);
 
@@ -137,25 +144,24 @@ describe("agent backend registry", () => {
     expect(cli.getStatus().active_run_count).toBe(0);
   });
 
-  it("does not spawn CLI work when abort follows the emitted run_started event", async () => {
+  it("does not synthesize run_started before a provider start event", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-abort-before-spawn-"));
     roots.push(root);
-    const executable = path.join(root, "must-not-spawn");
+    const executable = path.join(root, "no-provider-start");
     const marker = path.join(root, "spawned");
-    await writeFile(executable, `#!/bin/sh\nprintf spawned > "${marker}"\n`, "utf8");
+    await writeFile(executable, `#!/bin/sh\nprintf spawned > "${marker}"\nexit 0\n`, "utf8");
     await chmod(executable, 0o755);
     const controller = new AbortController();
     const backend = new ExternalCliBackend({ id: "abort-before-spawn-cli", kind: "external", label: "Abort Before Spawn CLI", command: executable });
     const iterator = backend.runTurn({ ...backendInput("run-abort-before-spawn"), abort_signal: controller.signal })[Symbol.asyncIterator]();
 
-    const started = await iterator.next();
-    expect(started.value?.event_type).toBe("run_started");
-    controller.abort();
-    const terminal = await iterator.next();
+    const first = await iterator.next();
 
-    expect(terminal.value?.terminal_evidence).toEqual({ kind: "cancelled", source: "owned_loop_return" });
+    expect(first.value?.event_type).toBe("run_failed");
+    expect(first.value?.terminal_evidence).toEqual({ kind: "failed", source: "process_exit", error: { code: "backend_terminal_missing", message: "Backend exited without a terminal event.", retryable: false, causeCategory: "process" } });
     expect((await iterator.next()).done).toBe(true);
-    expect(await fileExists(marker)).toBe(false);
+    expect(await fileExists(marker)).toBe(true);
+    controller.abort();
     expect(backend.getStatus().active_run_count).toBe(0);
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
   });
@@ -215,7 +221,8 @@ describe("agent backend registry", () => {
     const executable = path.join(root, "backend-cwd");
     await writeFile(executable, [
       "#!/bin/sh",
-      "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"cwd:%s workspace:%s\"}}\\n' \"$PWD\" \"$SAMURAI_WORKSPACE_ROOT\""
+      "printf '{\"event_type\":\"run_started\",\"payload\":{}}\\n'",
+      "printf '{\"event_type\":\"run_completed\",\"payload\":{\"output_summary\":\"cwd:%s workspace:%s\"}}\\n' \"$PWD\" \"$SAMURAI_WORKSPACE_ROOT\""
     ].join("\n"), "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({
@@ -250,8 +257,10 @@ describe("agent backend registry", () => {
       executable,
       [
         "#!/bin/sh",
-        "printf '{\"type\":\"assistant_delta\",\"text\":\"hello\",\"source_event_id\":\"provider-1\",\"source_sequence\":1}\\n'",
-        "printf '{\"type\":\"tool_result\",\"tool_call_id\":\"tool_1\",\"payload\":{\"status\":\"ok\"},\"source_sequence\":1}\\n'"
+        "printf '{\"event_type\":\"run_started\",\"payload\":{\"backend_id\":\"stream-cli\",\"input_summary\":\"probe backend\"}}\\n'",
+        "printf '{\"event_type\":\"text_delta\",\"payload\":{\"text\":\"hello\"},\"source_event_id\":\"provider-1\",\"source_sequence\":1}\\n'",
+        "printf '{\"event_type\":\"tool_call_output\",\"tool_call_id\":\"tool_1\",\"payload\":{\"status\":\"ok\"},\"source_sequence\":1}\\n'",
+        "printf '{\"event_type\":\"run_completed\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
       ].join("\n"),
       "utf8"
     );
@@ -295,7 +304,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-bounded-stream-"));
     roots.push(root);
     const executable = path.join(root, "bounded-stream-backend");
-    await writeFile(executable, "#!/bin/sh\ncat >/dev/null\nprintf '{\"type\":\"result\",\"backend_session_id\":\"bounded-session\",\"result\":\"done\"}\\n'\n", "utf8");
+    await writeFile(executable, "#!/bin/sh\ncat >/dev/null\nprintf '{\"event_type\":\"run_started\",\"backend_session_id\":\"bounded-session\",\"payload\":{}}\\n'\nprintf '{\"event_type\":\"run_completed\",\"backend_session_id\":\"bounded-session\",\"payload\":{\"output_summary\":\"done\"}}\\n'\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({
       id: "bounded-stream-cli",
@@ -344,14 +353,15 @@ describe("agent backend registry", () => {
       [
         "#!/bin/sh",
         "printf 'Searching project files\\n' >&2",
-        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+        "printf '{\"event_type\":\"run_started\",\"payload\":{}}\\n'",
+        "printf '{\"event_type\":\"run_completed\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
       ].join("\n"),
       "utf8"
     );
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({
       id: "stderr-progress-cli",
-      kind: "codex",
+      kind: "external",
       label: "Stderr Progress CLI",
       command: executable
     });
@@ -371,14 +381,15 @@ describe("agent backend registry", () => {
       [
         "#!/bin/sh",
         "sleep 3",
-        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+        "printf '{\"event_type\":\"run_started\",\"payload\":{}}\\n'",
+        "printf '{\"event_type\":\"run_completed\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
       ].join("\n"),
       "utf8"
     );
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({
       id: "silent-cli",
-      kind: "codex",
+      kind: "external",
       label: "Silent CLI",
       command: executable
     });
@@ -399,7 +410,7 @@ describe("agent backend registry", () => {
       [
         "#!/bin/sh",
         "if [ \"$1\" = \"--stream-probe\" ]; then",
-        "  printf '{\"type\":\"assistant_delta\",\"text\":\"probe-ok\"}\\n'",
+      "  printf '{\"event_type\":\"text_delta\",\"payload\":{\"text\":\"probe-ok\"}}\\n'",
         "  exit 0",
         "fi",
         "printf 'human version output\\n'"
@@ -424,40 +435,41 @@ describe("agent backend registry", () => {
   });
 
   it("maps CLI JSON lines to canonical backend events", () => {
-    expect(parseCliOutputLine(JSON.stringify({ type: "assistant_delta", text: "hello" }))).toEqual({
+    expect(parseCliOutputLine(JSON.stringify({ event_type: "text_delta", payload: { text: "hello" } }))).toEqual({
       event_type: "text_delta",
-      payload: { type: "assistant_delta", text: "hello" }
+      payload: { text: "hello" }
     });
-    expect(parseCliOutputLine(JSON.stringify({ type: "tool_result", tool_call_id: "tool_1", payload: { status: "ok" } }))).toEqual({
+    expect(parseCliOutputLine(JSON.stringify({ event_type: "tool_call_output", tool_call_id: "tool_1", payload: { status: "ok" } }))).toEqual({
       event_type: "tool_call_output",
-      payload: { status: "ok" },
+      payload: { status: "ok", tool_call_id: "tool_1" },
       tool_call_id: "tool_1"
     });
-    expect(parseCliOutputLine(JSON.stringify({ type: "resume_input", submitted_at: "2026-01-01T00:00:00.000Z", has_input: true }))).toEqual({
+    expect(parseCliOutputLine(JSON.stringify({ event_type: "backend_native_input_submitted", payload: { submitted_at: "2026-01-01T00:00:00.000Z", has_input: true } }))).toEqual({
       event_type: "backend_native_input_submitted",
       payload: { submitted_at: "2026-01-01T00:00:00.000Z", has_input: true }
     });
-    expect(parseCliOutputLine(JSON.stringify({ type: "result", conversation_id: "native-session-1", payload: { output_summary: "done" } }))).toEqual({
+    expect(parseCliOutputLine(JSON.stringify({ event_type: "run_completed", backend_session_id: "native-session-1", payload: { output_summary: "done" } }))).toEqual({
       event_type: "run_completed",
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       backend_session_id: "native-session-1",
       payload: {
-        provider_event_type: "result",
         output_summary: "done"
       }
     });
-    expect(parseCliOutputLine("plain text")).toBeUndefined();
+    expect(parseCliOutputLine("plain text")).toMatchObject({
+      event_type: "backend_protocol_diagnostic",
+      payload: { reason: "invalid_json" }
+    });
   });
 
   it("converts provider failures into stable terminal evidence", () => {
-    expect(parseCliOutputLine(JSON.stringify({ type: "result", is_error: true, error_code: "provider_denied", message: "denied" }))).toEqual({
+    expect(parseCliOutputLine(JSON.stringify({ event_type: "run_failed", payload: { error_code: "provider_denied", message: "denied", reason: "provider_denied", retryable: false } }))).toMatchObject({
       event_type: "run_failed",
       terminal_evidence: { kind: "failed", source: "provider_terminal_response", error: { code: "provider_denied", message: "denied", retryable: false, causeCategory: "provider" } },
       payload: {
-        provider_event_type: "result",
-        output_summary: "Backend result reported an error.",
         error_code: "provider_denied",
-        reason: "result_error",
+        message: "denied",
+        reason: "provider_denied",
         retryable: false
       }
     });
@@ -474,7 +486,7 @@ describe("agent backend registry", () => {
     await chmod(failedCommand, 0o755);
     const completed = await collectEvents(new ExternalCliBackend({ id: "exit-ok", kind: "external", label: "Exit OK", command: completedCommand }).runTurn(backendInput("run-exit-ok")));
     const failed = await collectEvents(new ExternalCliBackend({ id: "exit-failed", kind: "external", label: "Exit Failed", command: failedCommand }).runTurn(backendInput("run-exit-failed")));
-    expect(completed.at(-1)?.terminal_evidence).toEqual({ kind: "completed", source: "process_exit" });
+    expect(completed.at(-1)?.terminal_evidence).toEqual({ kind: "failed", source: "process_exit", error: { code: "backend_terminal_missing", message: "Backend exited without a terminal event.", retryable: false, causeCategory: "process" } });
     expect(failed.at(-1)?.terminal_evidence).toEqual({ kind: "failed", source: "process_exit", error: { code: "backend_failed", message: "Exit Failed failed.", retryable: false, causeCategory: "process" } });
   });
 
@@ -500,7 +512,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-post-spawn-error-"));
     roots.push(root);
     const executable = path.join(root, "post-spawn-error");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');\nsetTimeout(() => process.exit(0), 100);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'run_completed', payload: { output_summary: 'done' } }) + '\\n');\nsetTimeout(() => process.exit(0), 100);\n", "utf8");
     await chmod(executable, 0o755);
     const prototype = ChildProcess.prototype as unknown as { emit(event: string | symbol, ...args: unknown[]): boolean };
     const originalEmit = prototype.emit;
@@ -521,7 +533,7 @@ describe("agent backend registry", () => {
       const diagnostic = String(terminal?.payload.process_error_summary ?? "");
 
       expect(injected).toBe(true);
-      expect(terminal?.terminal_evidence).toEqual({ kind: "completed", source: "process_exit" });
+      expect(terminal?.terminal_evidence).toEqual({ kind: "completed", source: "provider_terminal_response" });
       expect(events.some((event) => event.terminal_evidence?.kind === "not_started")).toBe(false);
       expect(diagnostic).toContain("[redacted]");
       expect(diagnostic).toContain("[path]");
@@ -557,7 +569,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-evidence-"));
     roots.push(root);
     const executable = path.join(root, "long-running");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "cancel-cli", kind: "external", label: "Cancel CLI", command: executable });
     const iterator = backend.runTurn(backendInput("run-cancel"))[Symbol.asyncIterator]();
@@ -591,7 +603,8 @@ describe("agent backend registry", () => {
       "const [stopped, pidFile] = process.argv.slice(2);",
       "fs.writeFileSync(pidFile, String(process.pid));",
       "process.on('SIGTERM', () => { fs.writeFileSync(stopped, 'stopped'); process.exit(143); });",
-      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');",
       "setInterval(() => {}, 1000);"
     ].join("\n"), "utf8");
     await chmod(executable, 0o755);
@@ -627,7 +640,7 @@ describe("agent backend registry", () => {
     }
   });
 
-  it("keeps a bare natural exit 0 completed when cancel races process close", async () => {
+  it("marks a bare natural exit 0 as cancelled when cancel stops the child", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-natural-close-"));
     roots.push(root);
     const executable = path.join(root, "cancel-then-complete");
@@ -640,7 +653,8 @@ describe("agent backend registry", () => {
       "const [signalMarker, release, pidFile] = process.argv.slice(2);",
       "fs.writeFileSync(pidFile, String(process.pid));",
       "process.on('SIGTERM', () => { fs.writeFileSync(signalMarker, 'requested'); });",
-      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');",
       "const timer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(timer); process.exit(0); } }, 5);"
     ].join("\n"), "utf8");
     await chmod(executable, 0o755);
@@ -665,7 +679,7 @@ describe("agent backend registry", () => {
         events.push(next.value);
       }
 
-      expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "completed", source: "process_exit" });
+      expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "cancelled", source: "process_exit" });
       expect(events.filter((event) => event.terminal_evidence)).toHaveLength(1);
       expect(backend.getStatus().active_run_count).toBe(0);
     } finally {
@@ -684,8 +698,9 @@ describe("agent backend registry", () => {
       "const fs = require('node:fs');",
       "const marker = process.argv[2];",
       "const release = process.argv[3];",
-      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
-      "process.stdout.write(JSON.stringify({ type: 'result', result: 'done' }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'run_completed', payload: { output_summary: 'done' } }) + '\\n');",
       "fs.writeFileSync(marker, 'terminal');",
       "const timer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(timer); process.exit(0); } }, 5);"
     ].join("\n"), "utf8");
@@ -721,7 +736,8 @@ describe("agent backend registry", () => {
       "#!/usr/bin/env node",
       "const fs = require('node:fs');",
       "const marker = process.argv[2];",
-      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');",
       "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'stopped'); process.exit(143); });",
       "setInterval(() => {}, 1000);"
     ].join("\n"), "utf8");
@@ -756,7 +772,8 @@ describe("agent backend registry", () => {
       "let signalled = false;",
       "process.on('SIGTERM', () => { signalled = true; });",
       "const releaseTimer = setInterval(() => { if (fs.existsSync(release)) { clearInterval(releaseTimer); process.exit(0); } }, 5);",
-      "process.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');",
+      "process.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');",
       "const chunk = Buffer.alloc(65536);",
       "const pump = () => {",
       "  if (fs.existsSync(release)) return;",
@@ -810,7 +827,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-race-"));
     roots.push(root);
     const executable = path.join(root, "completed-then-close");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ type: 'assistant_delta', text: 'READY' }) + '\\n');\nprocess.stdout.write(JSON.stringify({ type: 'result', result: 'done' }) + '\\n');\nprocess.stdout.write(JSON.stringify({ type: 'result', is_error: true, error_code: 'late_error', message: 'late provider failure' }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'run_completed', payload: { output_summary: 'done' } }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'run_failed', payload: { error_code: 'late_error', message: 'late provider failure', reason: 'late_provider_failure', retryable: false } }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "cancel-race-cli", kind: "external", label: "Cancel Race CLI", command: executable });
     const iterator = backend.runTurn(backendInput("run-cancel-race"))[Symbol.asyncIterator]();
@@ -838,14 +855,14 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-terminal-conflict-"));
     roots.push(root);
     const executable = path.join(root, "completed-then-nonzero");
-    await writeFile(executable, "#!/bin/sh\nprintf '{\"type\":\"result\",\"result\":\"done\"}\\n'\nexit 9\n", "utf8");
+    await writeFile(executable, "#!/bin/sh\nprintf '{\"event_type\":\"run_started\",\"payload\":{}}\\n'\nprintf '{\"event_type\":\"run_completed\",\"payload\":{\"output_summary\":\"done\"}}\\n'\nexit 9\n", "utf8");
     await chmod(executable, 0o755);
 
     const backend = new ExternalCliBackend({ id: "terminal-conflict-cli", kind: "external", label: "Terminal Conflict CLI", command: executable });
     const events = await collectEvents(backend.runTurn(backendInput("run-terminal-conflict")));
 
     expect(events.filter((event) => event.terminal_evidence)).toHaveLength(1);
-    expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "completed", source: "provider_terminal_response" });
+    expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "failed", source: "process_exit", error: { code: "backend_failed", message: "Terminal Conflict CLI failed.", retryable: false, causeCategory: "process" } });
     expect(backend.getStatus().active_run_count).toBe(0);
   });
 
@@ -856,7 +873,7 @@ describe("agent backend registry", () => {
   });
 
   it("maps Claude-style stream JSON content blocks to canonical backend events", () => {
-    const events = parseCliOutputEvents(JSON.stringify({
+    const events = parseClaudeCodeOutputEvents(JSON.stringify({
       type: "assistant",
       session_id: "claude-session-1",
       source_event_id: "claude-raw-1",
@@ -868,7 +885,7 @@ describe("agent backend registry", () => {
         ]
       }
     }));
-    const result = parseCliOutputLine(JSON.stringify({
+    const result = parseClaudeCodeOutputLine(JSON.stringify({
       type: "result",
       session_id: "claude-session-1",
       source_event_id: "claude-result-1",
@@ -880,7 +897,7 @@ describe("agent backend registry", () => {
     expect(events).toEqual([
       {
         event_type: "text_delta",
-        source_event_id: "provider-id:claude-raw-1:part:1",
+        source_event_id: "claude-raw-1:part:1",
         source_sequence: 9,
         backend_session_id: "claude-session-1",
         payload: {
@@ -890,12 +907,13 @@ describe("agent backend registry", () => {
       },
       {
         event_type: "tool_call_started",
-        source_event_id: "provider-id:claude-raw-1:part:2",
+        source_event_id: "claude-raw-1:part:2",
         source_sequence: 9,
         tool_call_id: "tool_1",
         backend_session_id: "claude-session-1",
         payload: {
           provider_event_type: "assistant",
+          tool_call_id: "tool_1",
           provider_tool_name: "mcp__docs__search",
           input: { q: "samurai" },
           action_id: "mcp.call",
@@ -923,8 +941,9 @@ describe("agent backend registry", () => {
     const executable = path.join(root, "invalid-sequence");
     await writeFile(executable, [
       "#!/bin/sh",
-      "printf '{\"type\":\"assistant_delta\",\"text\":\"hello\",\"source_sequence\":0}\\n'",
-      "printf '{\"type\":\"result\",\"result\":\"done\"}\\n'"
+      "printf '{\"event_type\":\"text_delta\",\"payload\":{\"text\":\"hello\"},\"source_sequence\":0}\\n'",
+      "printf '{\"event_type\":\"run_started\",\"payload\":{}}\\n'",
+      "printf '{\"event_type\":\"run_completed\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
     ].join("\n"), "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "invalid-sequence-cli", kind: "external", label: "Invalid Sequence CLI", command: executable });
@@ -934,18 +953,18 @@ describe("agent backend registry", () => {
 
     expect(text?.source_sequence).toBeUndefined();
     expect(text?.source_event_id).toBeUndefined();
-    expect(parseCliOutputLine(JSON.stringify({ type: "assistant_delta", text: "bad", source_sequence: Number.MAX_SAFE_INTEGER + 1 }))?.source_sequence).toBeUndefined();
+    expect(parseCliOutputLine(JSON.stringify({ event_type: "text_delta", payload: { text: "bad" }, source_sequence: Number.MAX_SAFE_INTEGER + 1 }) )?.source_sequence).toBeUndefined();
   });
 
   it("normalizes delegated search and subagent tool metadata", () => {
-    const claude = parseCliOutputEvents(JSON.stringify({
+    const claude = parseClaudeCodeOutputEvents(JSON.stringify({
       type: "assistant",
       message: { content: [
         { type: "tool_use", id: "search_1", name: "WebSearch", input: { query: "Samurai", source: "https://example.test/source" } },
         { type: "tool_use", id: "agent_1", name: "Agent", input: { description: "Inspect tests" } }
       ] }
     }));
-    const codex = parseCliOutputEvents(JSON.stringify({
+    const codex = parseCodexOutputEvents(JSON.stringify({
       type: "item.completed",
       item: { type: "web_search", id: "search_2", mode: "live", sources: [{ url: "https://example.test/result" }] }
     }));
@@ -963,6 +982,7 @@ describe("agent backend registry", () => {
       executable,
       [
         "#!/bin/sh",
+        "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\"}\\n' \"$2\"",
         "printf '{\"type\":\"assistant\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"resumed\"}]}}\\n' \"$2\"",
         "printf '{\"type\":\"result\",\"session_id\":\"%s\",\"result\":\"resume ok\"}\\n' \"$2\""
       ].join("\n"),
@@ -976,9 +996,10 @@ describe("agent backend registry", () => {
 
     const events = await collectEvents(backend.resumeRun("run_resume", { backend_session_id: "claude-session-2", answer: "続けて" }));
 
-    expect(events.map((event) => event.event_type)).toEqual(["text_delta", "run_completed"]);
-    expect(events[0]).toMatchObject({ backend_session_id: "claude-session-2", payload: { text: "resumed" } });
-    expect(events[1]).toMatchObject({ backend_session_id: "claude-session-2", payload: { output_summary: "resume ok" } });
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "text_delta", "run_completed"]);
+    expect(events[0]).toMatchObject({ event_type: "run_started", backend_session_id: "claude-session-2" });
+    expect(events[1]).toMatchObject({ backend_session_id: "claude-session-2", payload: { text: "resumed" } });
+    expect(events[2]).toMatchObject({ backend_session_id: "claude-session-2", payload: { output_summary: "resume ok" } });
   });
 
   it("reports missing native resume sessions as confirmed preflight rejection", async () => {
@@ -996,48 +1017,44 @@ describe("agent backend registry", () => {
   });
 
   it("maps Codex-style JSONL stream events to canonical backend events", () => {
-    const started = parseCliOutputLine(JSON.stringify({
+    const started = parseCodexOutputLine(JSON.stringify({
       type: "thread.started",
       thread_id: "codex-thread-1"
     }));
-    const assistant = parseCliOutputEvents(JSON.stringify({
+    const assistant = parseCodexOutputEvents(JSON.stringify({
       type: "item.completed",
       thread_id: "codex-thread-1",
       item: {
         id: "msg_1",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "調べました" }]
+        type: "agent_message",
+        text: "調べました"
       }
     }));
-    const commandStart = parseCliOutputLine(JSON.stringify({
-      type: "exec_command.begin",
+    const commandStart = parseCodexOutputLine(JSON.stringify({
+      type: "item.started",
       thread_id: "codex-thread-1",
-      call_id: "call_1",
-      command: "pnpm test"
+      item: { id: "call_1", type: "command_execution", command: "pnpm test" }
     }));
-    const commandEnd = parseCliOutputLine(JSON.stringify({
-      type: "exec_command.end",
+    const commandEnd = parseCodexOutputLine(JSON.stringify({
+      type: "item.completed",
       thread_id: "codex-thread-1",
-      call_id: "call_1",
-      exit_code: 0,
-      stdout: "ok"
+      item: { id: "call_1", type: "command_execution", status: "completed", exit_code: 0, aggregated_output: "ok" }
     }));
-    const completed = parseCliOutputLine(JSON.stringify({
+    const completed = parseCodexOutputLine(JSON.stringify({
       type: "turn.completed",
       thread_id: "codex-thread-1",
       output_summary: "done"
     }));
-    const reasoning = parseCliOutputEvents(JSON.stringify({
+    const reasoning = parseCodexOutputEvents(JSON.stringify({
       type: "item.completed",
       thread_id: "codex-thread-1",
       item: {
         id: "rs_1",
         type: "reasoning",
-        summary: [{ type: "summary_text", text: "差分の原因を確認しました" }]
+        summary: "差分の原因を確認しました"
       }
     }));
-    const emptyReasoning = parseCliOutputEvents(JSON.stringify({
+    const emptyReasoning = parseCodexOutputEvents(JSON.stringify({
       type: "item.completed",
       thread_id: "codex-thread-1",
       item: {
@@ -1060,7 +1077,7 @@ describe("agent backend registry", () => {
       backend_session_id: "codex-thread-1",
       payload: {
         provider_event_type: "item.completed",
-        item_type: "message",
+        item_type: "agent_message",
         text: "調べました"
       }
     }]);
@@ -1069,13 +1086,10 @@ describe("agent backend registry", () => {
       tool_call_id: "call_1",
       backend_session_id: "codex-thread-1",
       payload: {
-        provider_event_type: "exec_command.begin",
-        provider_tool_name: "exec_command",
-        action_id: "sandbox.exec",
-        input: {
-          command: "pnpm test",
-          args: null
-        }
+        provider_event_type: "item.started",
+        provider_tool_name: "command_execution",
+        tool_call_id: "call_1",
+        input: "pnpm test"
       }
     });
     expect(commandEnd).toEqual({
@@ -1083,13 +1097,11 @@ describe("agent backend registry", () => {
       tool_call_id: "call_1",
       backend_session_id: "codex-thread-1",
       payload: {
-        provider_event_type: "exec_command.end",
-        provider_tool_name: "exec_command",
-        action_id: "sandbox.exec",
+        provider_event_type: "item.completed",
+        provider_tool_name: "command_execution",
+        tool_call_id: "call_1",
         status: "completed",
         exit_code: 0,
-        stdout: "ok",
-        stderr: "",
         output: "ok"
       }
     });
@@ -1115,10 +1127,10 @@ describe("agent backend registry", () => {
   });
 
   it("does not turn Codex completion-only events into assistant text", () => {
-    expect(parseCliOutputLine(JSON.stringify({
+    expect(parseCodexOutputLine(JSON.stringify({
       type: "turn.completed",
       thread_id: "codex-thread-empty"
-    }))).toEqual({
+    }), "codex")).toEqual({
       event_type: "run_completed",
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       backend_session_id: "codex-thread-empty",
@@ -1126,42 +1138,40 @@ describe("agent backend registry", () => {
         provider_event_type: "turn.completed"
       }
     });
-    expect(parseCliOutputLine(JSON.stringify({
+    expect(parseCodexOutputLine(JSON.stringify({
       type: "turn.completed",
       thread_id: "codex-thread-empty",
       output_summary: "Codex completed."
-    }))).toEqual({
+    }), "codex")).toEqual({
       event_type: "run_completed",
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       backend_session_id: "codex-thread-empty",
       payload: {
-        provider_event_type: "turn.completed"
+        provider_event_type: "turn.completed",
+        output_summary: "Codex completed."
       }
     });
   });
 
   it("parses current Codex assistant output item types as text", () => {
-    const direct = parseCliOutputLine(JSON.stringify({
+    const direct = parseCodexOutputLine(JSON.stringify({
       type: "output_message",
       thread_id: "codex-thread-output",
       content: [{ type: "output_text", text: "本文です" }]
     }));
-    const item = parseCliOutputLine(JSON.stringify({
+    const item = parseCodexOutputLine(JSON.stringify({
       type: "item.completed",
       thread_id: "codex-thread-output",
       item: {
+        id: "msg-output",
         type: "agent_message",
-        content: [{ type: "output_text", text: "続きの本文です" }]
+        text: "続きの本文です"
       }
     }));
 
-    expect(direct).toEqual({
-      event_type: "text_delta",
-      backend_session_id: "codex-thread-output",
-      payload: {
-        provider_event_type: "output_message",
-        text: "本文です"
-      }
+    expect(direct).toMatchObject({
+      event_type: "backend_protocol_diagnostic",
+      payload: { reason: "unknown_event", raw_type: "output_message" }
     });
     expect(item).toEqual({
       event_type: "text_delta",
@@ -1183,7 +1193,7 @@ describe("agent backend registry", () => {
       [
         "#!/bin/sh",
         "printf '{\"type\":\"thread.started\",\"thread_id\":\"%s\"}\\n' \"$3\"",
-        "printf '{\"type\":\"item.completed\",\"thread_id\":\"%s\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"resumed codex\"}]}}\\n' \"$3\"",
+        "printf '{\"type\":\"item.completed\",\"thread_id\":\"%s\",\"item\":{\"id\":\"msg-resume\",\"type\":\"agent_message\",\"text\":\"resumed codex\"}}\\n' \"$3\"",
         "printf '{\"type\":\"turn.completed\",\"thread_id\":\"%s\",\"output_summary\":\"resume ok\"}\\n' \"$3\""
       ].join("\n"),
       "utf8"
@@ -1230,7 +1240,8 @@ describe("agent backend registry", () => {
       [
         "#!/bin/sh",
         `printf '%s\\n' "$*" > '${quotedArgvFile}'`,
-        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+        "printf '{\"type\":\"thread.started\",\"thread_id\":\"codex-fixture\"}\\n'",
+        "printf '{\"type\":\"turn.completed\",\"thread_id\":\"codex-fixture\",\"output_summary\":\"done\"}\\n'"
       ].join("\n"),
       "utf8"
     );
@@ -1258,7 +1269,8 @@ describe("agent backend registry", () => {
       [
         "#!/bin/sh",
         `printf '%s\\n' "$*" > '${quotedArgvFile}'`,
-        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+        "printf '{\"type\":\"thread.started\",\"thread_id\":\"codex-fixture\"}\\n'",
+        "printf '{\"type\":\"turn.completed\",\"thread_id\":\"codex-fixture\",\"output_summary\":\"done\"}\\n'"
       ].join("\n"),
       "utf8"
     );
@@ -1401,7 +1413,10 @@ describe("agent backend registry", () => {
       [
         "#!/bin/sh",
         `printf '%s\\n' "$*" > '${quotedArgvFile}'`,
-        "printf '{\"type\":\"result\",\"payload\":{\"output_summary\":\"done\"}}\\n'"
+        "case \"$1\" in",
+        "  exec) printf '{\"type\":\"thread.started\",\"thread_id\":\"codex-fixture\"}\\n'; printf '{\"type\":\"turn.completed\",\"thread_id\":\"codex-fixture\",\"output_summary\":\"done\"}\\n' ;;",
+        "  *) printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-fixture\"}\\n'; printf '{\"type\":\"result\",\"session_id\":\"claude-fixture\",\"result\":\"done\"}\\n' ;;",
+        "esac"
       ].join("\n"),
       "utf8"
     );
@@ -1472,6 +1487,7 @@ describe("agent backend registry", () => {
         "  prev=\"$arg\"",
         "done",
         `printf '%s\\n' "$last_message" > '${quotedArgsFile}'`,
+        "printf '{\"type\":\"thread.started\",\"thread_id\":\"codex-thread-empty\"}\\n'",
         "printf '{\"type\":\"turn.completed\",\"thread_id\":\"codex-thread-empty\",\"output_summary\":\"Codex completed.\"}\\n'",
         "printf '作業メモを作成しました。\\n' > \"$last_message\""
       ].join("\n"),
@@ -1494,7 +1510,8 @@ describe("agent backend registry", () => {
       terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
       backend_session_id: "codex-thread-empty",
       payload: {
-        provider_event_type: "turn.completed"
+        provider_event_type: "turn.completed",
+        output_summary: "Codex completed."
       }
     });
     expect(events.at(-1)).not.toHaveProperty("source_sequence");

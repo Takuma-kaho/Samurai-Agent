@@ -101,6 +101,7 @@ export const backendEventTypes = [
   "host_post_turn_failed",
   "host_cleanup_failed",
   "host_emit_failed",
+  "backend_protocol_diagnostic",
   "run_completed",
   "run_failed"
 ] as const;
@@ -473,77 +474,272 @@ const BackendEventRecordBaseSchema = z.object({
   attempt_no: z.number().int().positive().optional(),
   source_event_id: z.string().min(1).optional(),
   source_sequence: z.number().int().positive().optional(),
-  payload: z.record(jsonValueSchema),
+  // Each known event below replaces this opaque slot with an explicit shape.
+  // Keeping the base opaque prevents a free-form payload from becoming part of
+  // the public union type by accident.
+  payload: z.unknown(),
   resource_refs: z.array(ResourceRefSchema),
   created_at: z.string().datetime()
 }).strict();
-const backendEventPayload = (shape: z.ZodRawShape = {}) => z.object(shape).catchall(jsonValueSchema);
-const backendEventPayloadWithText = backendEventPayload({ text: z.string().optional() }).superRefine((payload, context) => {
-  if (typeof payload.text !== "string" || !payload.text.trim()) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["text"], message: "canonical text is required" });
-  }
+const backendEventProviderShape: z.ZodRawShape = {
+  provider: z.string().min(1).optional(),
+  provider_event_type: z.string().min(1).optional(),
+  provider_tool_name: z.string().min(1).optional(),
+  provider_thread_id: z.string().min(1).optional(),
+  backend_id: z.string().min(1).optional()
+};
+const backendEventPayload = (shape: z.ZodRawShape = {}) => z.object({ ...backendEventProviderShape, ...shape }).strict();
+const backendEventTextPayload = backendEventPayload({
+  text: z.string().min(1),
+  item_type: z.string().min(1).optional(),
+  display_kind: z.string().min(1).optional(),
+  activity_kind: z.string().min(1).optional(),
+  ui_visible: z.boolean().optional()
 });
-const backendToolEventPayload = backendEventPayload({ tool_call_id: z.string().optional() }).superRefine((payload, context) => {
-  if (typeof payload.tool_call_id !== "string" || !payload.tool_call_id.trim()) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["tool_call_id"], message: "tool_call_id is required for tool events" });
-  }
-});
-const backendToolStartedPayload = backendToolEventPayload.superRefine((payload, context) => {
+const backendToolStartedPayload = backendEventPayload({
+  tool_call_id: z.string().min(1),
+  provider_tool_name: z.string().min(1).optional(),
+  action_id: z.string().min(1).optional(),
+  tool_identity: z.string().min(1).optional(),
+  tool_input_hash: z.string().min(1).optional(),
+  tool_origin: z.string().min(1).optional(),
+  input: jsonValueSchema.optional(),
+  arguments: jsonValueSchema.optional(),
+  capability_id: z.string().min(1).optional(),
+  child_task_summary: z.string().optional(),
+  parent_relation: z.string().min(1).optional(),
+  search_mode: z.string().min(1).optional(),
+  execution_boundary: z.string().min(1).optional(),
+  requires_host_execution: z.boolean().optional(),
+  server_name: z.string().min(1).optional(),
+  tool_name: z.string().min(1).optional()
+}).superRefine((payload, context) => {
   if (typeof payload.provider_tool_name !== "string" && typeof payload.action_id !== "string") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: [], message: "provider_tool_name or action_id is required for tool_call_started" });
   }
 });
-const backendWaitingPayload = backendEventPayload({ prompt: z.string().optional(), message: z.string().optional() }).superRefine((payload, context) => {
+const backendToolOutputPayload = backendEventPayload({
+  tool_call_id: z.string().min(1),
+  provider_tool_name: z.string().min(1).optional(),
+  action_id: z.string().min(1).optional(),
+  tool_identity: z.string().min(1).optional(),
+  tool_input_hash: z.string().min(1).optional(),
+  tool_origin: z.string().min(1).optional(),
+  server_name: z.string().min(1).optional(),
+  tool_name: z.string().min(1).optional(),
+  status: jsonValueSchema.optional(),
+  ok: z.boolean().optional(),
+  reason: z.string().min(1).nullable().optional(),
+  retryable: z.boolean().optional(),
+  retry_count: z.number().int().nonnegative().optional(),
+  already_executed: z.boolean().optional(),
+  input: jsonValueSchema.optional(),
+  arguments: jsonValueSchema.optional(),
+  output: jsonValueSchema.optional(),
+  result: jsonValueSchema.optional(),
+  output_summary: z.string().optional(),
+  summary: z.string().optional(),
+  text: z.string().optional(),
+  stdout: z.string().optional(),
+  stderr: z.string().optional(),
+  error: jsonValueSchema.optional(),
+  token: z.string().optional(),
+  error_code: z.string().min(1).optional(),
+  exit_code: z.number().int().nullable().optional(),
+  signal: z.string().min(1).nullable().optional(),
+  capability_id: z.string().min(1).optional(),
+  search_mode: z.string().min(1).optional(),
+  source_urls: z.array(z.string()).optional(),
+  operation_id: z.string().min(1).optional(),
+  resource_id: z.string().min(1).optional(),
+  resource_kind: z.string().min(1).optional(),
+  collection_id: z.string().min(1).optional(),
+  record_id: z.string().min(1).optional(),
+  query_id: z.string().min(1).optional(),
+  surface_id: z.string().min(1).optional(),
+  revision_id: z.string().min(1).optional(),
+  preview_url: z.string().optional(),
+  command: z.string().optional(),
+  sandbox: jsonValueSchema.optional(),
+  sandbox_instance: jsonValueSchema.optional(),
+  secret_resolution: jsonValueSchema.optional(),
+  gateway_boundary: jsonValueSchema.optional(),
+  render_specs: jsonValueSchema.optional(),
+  tool_run_ids: z.array(z.string()).optional(),
+  resource_ref: ResourceRefSchema.optional(),
+  resource_refs: z.array(ResourceRefSchema).optional(),
+  execution_boundary: z.string().min(1).optional(),
+  requires_host_execution: z.boolean().optional(),
+  ui_visible: z.boolean().optional()
+});
+const backendWaitingPayload = backendEventPayload({
+  prompt: z.string().min(1).optional(),
+  message: z.string().min(1).optional(),
+  waiting_execution: z.enum(["live", "suspended"]).optional()
+}).superRefine((payload, context) => {
   if (typeof payload.prompt !== "string" && typeof payload.message !== "string") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: [], message: "prompt or message is required for backend waiting" });
   }
 });
-const backendCompletedPayload = backendEventPayload({ terminal_evidence: BackendTerminalEvidenceSchema.optional() }).superRefine((payload, context) => {
+const backendProcessFailurePayload = backendEventPayload({
+  reason: z.string().min(1).nullable().optional(),
+  message: z.string().optional(),
+  error_code: z.string().min(1).optional(),
+  retryable: z.boolean().optional(),
+  cause_category: z.string().min(1).optional(),
+  exit_code: z.number().int().nullable().optional(),
+  signal: z.string().min(1).nullable().optional(),
+  stderr_summary: z.string().optional(),
+  process_error_summary: z.string().optional(),
+  command_name: z.string().min(1).optional(),
+  output_summary: z.string().optional(),
+  finish_reason: z.string().nullable().optional(),
+  usage: jsonValueSchema.optional(),
+  terminal_evidence: BackendTerminalEvidenceSchema.optional()
+});
+const backendCompletedPayload = backendProcessFailurePayload.superRefine((payload, context) => {
   const evidence = BackendTerminalEvidenceSchema.safeParse(payload.terminal_evidence);
   if (!evidence.success || evidence.data.kind !== "completed") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["terminal_evidence"], message: "run_completed requires completed evidence" });
   }
 });
-const backendFailedPayload = backendEventPayload({ terminal_evidence: BackendTerminalEvidenceSchema.optional() }).superRefine((payload, context) => {
+const backendFailedPayload = backendProcessFailurePayload.superRefine((payload, context) => {
   const evidence = BackendTerminalEvidenceSchema.safeParse(payload.terminal_evidence);
   if (!evidence.success || evidence.data.kind === "completed") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["terminal_evidence"], message: "run_failed requires non-completed evidence" });
   }
 });
+const backendProtocolDiagnosticPayload = z.object({
+  provider: z.string().min(1),
+  reason: z.enum(["unknown_event", "invalid_json", "required_field_missing", "tool_id_missing", "session_conflict", "terminal_missing"]),
+  summary: z.string().min(1).max(240),
+  raw_type: z.string().min(1).optional()
+}).strict();
 const backendNativeInputSubmittedPayload = z.object({
   submitted_at: z.string().datetime(),
   has_input: z.boolean()
 }).strict();
 
+export const BackendEventPayloadSchemas = {
+  run_started: backendEventPayload({
+    subtype: z.string().min(1).optional(),
+    input_summary: z.string().optional(),
+    input_locale: z.string().min(1).optional(),
+    output_locale: z.string().min(1).optional(),
+    locale_contract: jsonValueSchema.optional()
+  }),
+  agent_reasoning: backendEventTextPayload,
+  host_progress: backendEventTextPayload,
+  text_delta: backendEventTextPayload,
+  tool_call_started: backendToolStartedPayload,
+  tool_call_output: backendToolOutputPayload,
+  artifact_created: backendEventPayload({
+    artifact_id: z.string().min(1).optional(),
+    title: z.string().optional(),
+    content: z.string().optional(),
+    resource_id: z.string().min(1).optional(),
+    resource_kind: z.string().min(1).optional(),
+    resource_ref: ResourceRefSchema.optional(),
+    resource_refs: z.array(ResourceRefSchema).optional(),
+    tool_call_id: z.string().min(1).optional(),
+    ui_visible: z.boolean().optional()
+  }),
+  workspace_change_suggested: backendEventPayload({
+    operation_id: z.string().min(1).optional(),
+    resource_id: z.string().min(1).optional(),
+    resource_kind: z.string().min(1).optional(),
+    resource_ref: ResourceRefSchema.optional(),
+    resource_refs: z.array(ResourceRefSchema).optional(),
+    summary: z.string().optional(),
+    tool_call_id: z.string().min(1).optional()
+  }),
+  memory_suggested: backendEventPayload({
+    memory_id: z.string().min(1).optional(),
+    topic: z.string().optional(),
+    content: z.string().optional(),
+    resource_ref: ResourceRefSchema.optional(),
+    resource_refs: z.array(ResourceRefSchema).optional(),
+    tool_call_id: z.string().min(1).optional()
+  }),
+  skill_candidate_created: backendEventPayload({
+    skill_id: z.string().min(1).optional(),
+    title: z.string().optional(),
+    content: z.string().optional(),
+    resource_ref: ResourceRefSchema.optional(),
+    resource_refs: z.array(ResourceRefSchema).optional(),
+    tool_call_id: z.string().min(1).optional()
+  }),
+  backend_waiting_for_native_input: backendWaitingPayload,
+  backend_native_input_submitted: backendNativeInputSubmittedPayload,
+  backend_stream_synced: backendEventPayload({
+    reason: z.string().min(1).nullable().optional(),
+    run_status: z.string().min(1).optional(),
+    observed_event_count: z.number().int().nonnegative().optional(),
+    persisted_event_count: z.number().int().nonnegative().optional(),
+    ui_visible: z.boolean().optional()
+  }),
+  backend_stream_unavailable: backendEventPayload({
+    reason: z.string().min(1).nullable().optional(),
+    message: z.string().optional(),
+    ui_visible: z.boolean().optional()
+  }),
+  host_post_turn_failed: backendProcessFailurePayload,
+  host_cleanup_failed: backendProcessFailurePayload,
+  host_emit_failed: backendProcessFailurePayload,
+  backend_protocol_diagnostic: backendProtocolDiagnosticPayload,
+  run_completed: backendProcessFailurePayload,
+  run_failed: backendProcessFailurePayload
+} as const;
+
+export type BackendEventPayloadByType = {
+  [T in keyof typeof BackendEventPayloadSchemas]: z.infer<(typeof BackendEventPayloadSchemas)[T]>
+};
+
 function backendEventVariant<T extends BackendEventType, P extends z.ZodTypeAny>(eventType: T, payload: P) {
   return BackendEventRecordBaseSchema.extend({ event_type: z.literal(eventType), payload });
 }
 
+type BackendEventVariant = z.ZodDiscriminatedUnionOption<"event_type">;
 const backendEventVariants = [
-  backendEventVariant("run_started", backendEventPayload()),
-  backendEventVariant("agent_reasoning", backendEventPayloadWithText),
-  backendEventVariant("host_progress", backendEventPayloadWithText),
-  backendEventVariant("text_delta", backendEventPayloadWithText),
-  backendEventVariant("tool_call_started", backendToolStartedPayload),
-  backendEventVariant("tool_call_output", backendToolEventPayload),
-  backendEventVariant("artifact_created", backendEventPayload()),
-  backendEventVariant("workspace_change_suggested", backendEventPayload()),
-  backendEventVariant("memory_suggested", backendEventPayload()),
-  backendEventVariant("skill_candidate_created", backendEventPayload()),
-  backendEventVariant("backend_waiting_for_native_input", backendWaitingPayload),
-  backendEventVariant("backend_native_input_submitted", backendNativeInputSubmittedPayload),
-  backendEventVariant("backend_stream_synced", backendEventPayload()),
-  backendEventVariant("backend_stream_unavailable", backendEventPayload()),
-  backendEventVariant("host_post_turn_failed", backendEventPayload()),
-  backendEventVariant("host_cleanup_failed", backendEventPayload()),
-  backendEventVariant("host_emit_failed", backendEventPayload()),
+  backendEventVariant("run_started", BackendEventPayloadSchemas.run_started),
+  backendEventVariant("agent_reasoning", BackendEventPayloadSchemas.agent_reasoning),
+  backendEventVariant("host_progress", BackendEventPayloadSchemas.host_progress),
+  backendEventVariant("text_delta", BackendEventPayloadSchemas.text_delta),
+  backendEventVariant("tool_call_started", BackendEventPayloadSchemas.tool_call_started),
+  backendEventVariant("tool_call_output", BackendEventPayloadSchemas.tool_call_output),
+  backendEventVariant("artifact_created", BackendEventPayloadSchemas.artifact_created),
+  backendEventVariant("workspace_change_suggested", BackendEventPayloadSchemas.workspace_change_suggested),
+  backendEventVariant("memory_suggested", BackendEventPayloadSchemas.memory_suggested),
+  backendEventVariant("skill_candidate_created", BackendEventPayloadSchemas.skill_candidate_created),
+  backendEventVariant("backend_waiting_for_native_input", BackendEventPayloadSchemas.backend_waiting_for_native_input),
+  backendEventVariant("backend_native_input_submitted", BackendEventPayloadSchemas.backend_native_input_submitted),
+  backendEventVariant("backend_stream_synced", BackendEventPayloadSchemas.backend_stream_synced),
+  backendEventVariant("backend_stream_unavailable", BackendEventPayloadSchemas.backend_stream_unavailable),
+  backendEventVariant("host_post_turn_failed", BackendEventPayloadSchemas.host_post_turn_failed),
+  backendEventVariant("host_cleanup_failed", BackendEventPayloadSchemas.host_cleanup_failed),
+  backendEventVariant("host_emit_failed", BackendEventPayloadSchemas.host_emit_failed),
+  backendEventVariant("backend_protocol_diagnostic", BackendEventPayloadSchemas.backend_protocol_diagnostic),
   backendEventVariant("run_completed", backendCompletedPayload),
   backendEventVariant("run_failed", backendFailedPayload)
-] as const;
+] as const satisfies readonly [BackendEventVariant, ...BackendEventVariant[]];
 
 /** New rows are checked by event kind; callers may still read older rows through the Store compatibility path. */
-export const BackendEventRecordSchema = z.discriminatedUnion("event_type", backendEventVariants as any);
-export type BackendEventRecord = z.infer<typeof BackendEventRecordSchema>;
+export interface BackendEventRecord {
+  id: string;
+  run_id: string;
+  session_id: string;
+  backend_session_id?: string;
+  event_type: BackendEventType;
+  sequence: number;
+  attempt_no?: number;
+  source_event_id?: string;
+  source_sequence?: number;
+  /** The runtime schema above is strict; this read view also supports legacy rows. */
+  payload: Record<string, JsonValue>;
+  resource_refs: ResourceRef[];
+  created_at: string;
+}
+export const BackendEventRecordSchema: z.ZodType<BackendEventRecord, z.ZodTypeDef, unknown> = z.discriminatedUnion("event_type", backendEventVariants);
 
 export const ClientEventRecordSchema = z.object({
   id: z.string().min(1),

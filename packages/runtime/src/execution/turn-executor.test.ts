@@ -101,6 +101,8 @@ describe("TurnExecutor", () => {
       id: "backend",
       kind: "mock",
       label: "Executor Backend",
+      sessionPolicy: { acquisition: "start_session", resume: "unsupported" },
+      execution_owner: "host",
       startSession: async () => {
         store.order.push("startSession");
         return { backend_session_id: "backend-session-1", metadata: {}, started_at: "2026-01-01T00:00:00.000Z" };
@@ -146,6 +148,8 @@ describe("TurnExecutor", () => {
       id: "backend",
       kind: "mock",
       label: "Executor Backend",
+      sessionPolicy: { acquisition: "none", resume: "native" },
+      execution_owner: "host",
       resumeRun: (_runId, input) => {
         receivedInput = input;
         return eventsOf({ event_type: "run_completed", payload: {}, terminal_evidence: { kind: "completed", source: "provider_terminal_response" } });
@@ -156,7 +160,7 @@ describe("TurnExecutor", () => {
 
     expect(result.run.status).toBe("completed");
     expect(receivedInput).toEqual({ answer: "ok" });
-    expect(store.events.map((event) => event.event_type)).toEqual(["run_started"]);
+    expect(store.events.map((event) => event.event_type)).toEqual([]);
     expect(result.terminalSettlement?.terminalEvent.event_type).toBe("run_completed");
   });
 

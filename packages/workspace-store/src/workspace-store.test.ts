@@ -565,7 +565,7 @@ describe("workspace store", () => {
       session_id: session.id,
       event_type: "run_completed",
       sequence: 1,
-      payload: {},
+      payload: { terminal_evidence: { kind: "completed", source: "canonical_event" } },
       resource_refs: [],
       created_at: now
     };

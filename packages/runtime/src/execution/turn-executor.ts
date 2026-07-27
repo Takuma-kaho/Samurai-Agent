@@ -140,20 +140,10 @@ export class TurnExecutor {
 
   async resumeRun(input: TurnResumeExecutionInput): Promise<TurnExecutionResult> {
     if (!input.backend.resumeRun) throw new Error("backend_resume_unsupported");
-    const decision = this.lifecycle.decide(input.run, { type: "started" });
-    const resumed = await this.journal.commitLifecycleTransitionEvent(input.run, {
-      runId: input.run.id,
-      sessionId: input.run.session_id,
-      attemptNo: input.run.current_attempt ?? 1,
-      eventType: "run_started",
-      payload: { reason: "resume" },
-      sourceEventId: `control:resume:${input.run.id}:${input.run.current_attempt ?? 1}`
-    }, decision);
-    if (!resumed.duplicate) await this.publishCommittedEvent(resumed.event, resumed.run, "control_event_publisher");
     const execution = await consumeBackendEvents({
-      run: resumed.run,
-      sessionId: resumed.run.session_id,
-      stream: input.backend.resumeRun(resumed.run.id, input.input),
+      run: input.run,
+      sessionId: input.run.session_id,
+      stream: input.backend.resumeRun(input.run.id, input.input),
       journal: this.journal,
       lifecycle: this.lifecycle,
       store: this.store,
@@ -259,7 +249,7 @@ export class TurnExecutor {
           eventType: normalizedToolEvent.event_type,
           payload: normalizedToolEvent.payload,
           resourceRefs: normalizedToolEvent.resource_refs,
-          sourceEventId: `host-tool:${input.run.id}:${input.run.current_attempt ?? 1}:${normalizedToolEvent.tool_call_id ?? toolCallId ?? input.event.id}:${normalizedToolEvent.event_type}:${String(normalizedToolEvent.payload.action_id ?? normalizedToolEvent.payload.status ?? "result")}`
+          sourceEventId: `host-tool:${input.run.id}:${input.run.current_attempt ?? 1}:${normalizedToolEvent.tool_call_id ?? toolCallId ?? input.event.id}:${normalizedToolEvent.event_type}:${String(backendOutputPayload(normalizedToolEvent).action_id ?? backendOutputPayload(normalizedToolEvent).status ?? "result")}`
         });
         if (!recorded.duplicate) {
           await this.publishCommittedEvent(recorded.event, input.run, "tool_event_publisher");
@@ -292,17 +282,22 @@ export function lifecycleEventForBackendEvent(event: BackendOutputEvent, request
 
 function backendFailureForEvent(event: BackendOutputEvent): BackendRuntimeFailure | undefined {
   if (event.terminal_evidence?.kind === "failed") return event.terminal_evidence.error;
-  const code = typeof event.payload.error_code === "string" ? event.payload.error_code : undefined;
-  const message = typeof event.payload.message === "string" ? event.payload.message : undefined;
-  const causeCategory = failureCauseCategory(event.payload.cause_category, event);
+  const payload = backendOutputPayload(event);
+  const code = typeof payload.error_code === "string" ? payload.error_code : undefined;
+  const message = typeof payload.message === "string" ? payload.message : undefined;
+  const causeCategory = failureCauseCategory(payload.cause_category, event);
   return code || message
     ? {
         code: code ?? "backend_failed",
         message: message ?? "Backend operation failed.",
-        retryable: event.payload.retryable === true,
+        retryable: payload.retryable === true,
         causeCategory
       }
     : undefined;
+}
+
+function backendOutputPayload(event: BackendOutputEvent): Record<string, JsonValue> {
+  return event.payload as Record<string, JsonValue>;
 }
 
 function failureCauseCategory(value: unknown, event: BackendOutputEvent): RuntimeFailureCauseCategory {
@@ -346,6 +341,49 @@ export async function consumeBackendEvents(input: { run: BackendRunRecord; sessi
       const observedBackendSessionId = backendSessionIdFromEvent(event);
       if (observedBackendSessionId) {
         const sessionSourceEvent = event.source_event_id ?? event.event_type;
+        if (run.backend_session_id && run.backend_session_id !== observedBackendSessionId) {
+          const conflictEvent: BackendOutputEvent = {
+            event_type: "run_failed",
+            terminal_evidence: {
+              kind: "failed",
+              source: "canonical_event",
+              error: {
+                code: "backend_session_conflict",
+                message: "Backend emitted a different native Session ID.",
+                retryable: false,
+                causeCategory: "runtime"
+              }
+            },
+            payload: {
+              error_code: "backend_session_conflict",
+              message: "Backend emitted a different native Session ID.",
+              reason: "session_conflict",
+              retryable: false,
+              ...(typeof backendOutputPayload(event).provider_event_type === "string" ? { provider_event_type: backendOutputPayload(event).provider_event_type } : {})
+            }
+          };
+          const conflictSourceSequence = sourceSequence + 1;
+          const conflictJournalInput = {
+            runId: run.id,
+            sessionId: input.sessionId,
+            ...(run.backend_session_id ? { backendSessionId: run.backend_session_id } : {}),
+            attemptNo: run.current_attempt ?? 1,
+            eventType: conflictEvent.event_type,
+            payload: conflictEvent.payload,
+            resourceRefs: [],
+            sourceEventId: `backend-session-conflict:${run.id}:${run.current_attempt ?? 1}`,
+            sourceSequence: conflictSourceSequence,
+            terminalEvidence: conflictEvent.terminal_evidence
+          };
+          const conflictLifecycleEvent = lifecycleEventForBackendEvent(conflictEvent);
+          if (!conflictLifecycleEvent) throw new Error("backend_session_conflict_terminal_missing");
+          const decision = lifecycle.decide(run, conflictLifecycleEvent);
+          terminalSettlement = await input.journal.prepareTerminalSettlement(run, conflictJournalInput, decision);
+          events.push(terminalSettlement.terminalEvent);
+          run = terminalSettlement.nextRun;
+          terminal = true;
+          break;
+        }
         if (event.terminal_evidence) {
           run = mergeBackendSession(run, observedBackendSessionId, sessionSourceEvent);
         } else if (input.store) {
@@ -419,7 +457,7 @@ export async function consumeBackendEvents(input: { run: BackendRunRecord; sessi
 }
 
 function backendSessionIdFromEvent(event: BackendOutputEvent): string | undefined {
-  const value = event.backend_session_id ?? event.payload.backend_session_id;
+  const value = event.backend_session_id;
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
