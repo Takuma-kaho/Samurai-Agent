@@ -264,7 +264,7 @@ function validateManifest(value: StaticSchemaManifest): void {
   assert.equal(value.review.required_endpoints, 238, "schema_manifest_required_endpoint_count_invalid");
   assert.equal(value.review.reviewed_endpoints, 238, "schema_manifest_reviewed_endpoint_count_invalid");
   assert.equal(value.review.unreviewed_endpoints, 0, "schema_manifest_unreviewed_endpoints");
-  assert.equal(value.review.required_schema_nodes, 672, "schema_catalog_required_node_count_invalid");
+  assert.equal(value.review.required_schema_nodes, 744, "schema_catalog_required_node_count_invalid");
   assert.equal(value.review.reviewed_schema_nodes, value.review.required_schema_nodes, "schema_catalog_reviewed_node_count_invalid");
   assert.equal(value.review.unreviewed_schema_nodes, 0, "schema_catalog_unreviewed_nodes");
   assert.equal(value.global_payload_limits.review, "reviewed", "schema_manifest_global_limit_unreviewed");

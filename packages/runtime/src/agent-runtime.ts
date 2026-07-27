@@ -4808,24 +4808,24 @@ export class AgentRuntime {
     args: Record<string, JsonValue>,
     boundary?: BackendToolBoundaryFeedback
   ): Promise<RuntimeToolQueryResult | undefined> {
-    const queryResult = queryId === "collection.view.present"
-      // Provider-facing Collection presentation historically returned a
-      // renderable descriptor, including optional query/record compatibility
-      // fields. Keep that read compatibility while the Domain Query contract
-      // remains strict for new callers.
-      ? { result: await this.resolveCollectionPresentationDescriptor(args), render_specs: [] }
-      : (await this.runDomainQueryWithTrustedContext({
-          query_id: queryId,
-          input_source: "provider_tool_call",
-          payload: normalizeProviderDomainQueryPayload(queryId, args)
-        }, { runId: run.id, sessionId: run.session_id, envelopeId: runInput.input_message_id }));
+    const queryResult = await this.runDomainQueryWithTrustedContext({
+      query_id: queryId,
+      input_source: "provider_tool_call",
+      payload: normalizeProviderDomainQueryPayload(queryId, args)
+    }, { runId: run.id, sessionId: run.session_id, envelopeId: runInput.input_message_id });
+    // A Collection view query is also a presentation request. Project its
+    // validated query result into the existing tool-output descriptor rather
+    // than bypassing the Domain Query contract for a provider-specific path.
+    const presentation = queryResult.query.output_resource_kind === "collection_view"
+      ? collectionPresentationDescriptorFromQueryResult(queryResult.result, args)
+      : undefined;
     return {
       queryOnly: true,
       outputPayload: {
         status: "completed",
         query_id: queryId,
-        result: jsonSafe(queryResult.result),
-        render_specs: jsonSafe(queryResult.render_specs)
+        result: jsonSafe(presentation ?? queryResult.result),
+        render_specs: jsonSafe(presentation ? [] : queryResult.render_specs)
       },
       resourceRefs: withGatewayBoundaryRefs([], boundary)
     };
@@ -6571,6 +6571,38 @@ interface CollectionPresentationDescriptor {
   record_count?: number;
   record_id?: string;
   view_state?: Record<string, JsonValue>;
+}
+
+function collectionPresentationDescriptorFromQueryResult(
+  result: unknown,
+  providerInput: Record<string, JsonValue>
+): CollectionPresentationDescriptor {
+  const output = recordPayload(jsonSafe(result));
+  const collectionId = stringPayload(output.collection_id);
+  const viewId = stringPayload(output.view_id);
+  const schema = CollectionSchemaSchema.safeParse(output.schema);
+  const recordCount = output.record_count;
+  const renderSpec = recordPayload(output.render_spec);
+  const renderSpecProps = recordPayload(renderSpec.props);
+  const renderer = stringPayload(renderSpecProps.renderer);
+  if (!collectionId || !viewId || !schema.success || typeof recordCount !== "number" || !Number.isInteger(recordCount)
+    || recordCount < 0 || !renderer || !isMessagePresentationRenderer(renderer)) {
+    throw new RuntimeRequestError("internal", "collection_view_query_output_invalid");
+  }
+  const recordId = stringPayload(providerInput.record_id);
+  const viewState = recordPayload(renderSpecProps.view_state);
+  return {
+    status: "ready",
+    kind: "collection_app",
+    collection_id: collectionId,
+    view_id: viewId,
+    renderer,
+    title: collectionDisplayTitle(schema.data),
+    subtitle: `${collectionId} ・ ${recordCount}件`,
+    record_count: recordCount,
+    ...(recordId ? { record_id: recordId } : {}),
+    ...(Object.keys(viewState).length > 0 ? { view_state: viewState } : {})
+  };
 }
 
 interface CollectionPresentationAmbiguity {
@@ -9446,9 +9478,10 @@ function normalizeProviderDomainQueryPayload(
 ): Record<string, JsonValue> {
   const query = requireDomainQueryEntry(queryId);
   assertProviderDomainServerFieldsAbsent("query", query.id, args);
-  if (queryId === "collection.view.present") {
-    // Older provider prompts included display-only compatibility fields. They
-    // are not part of the strict query contract and must not reach validation.
+  if (query.output_resource_kind === "collection_view") {
+    // Older provider tools can include display-only fields. They remain
+    // available to the presentation projection, but do not enter the strict
+    // Domain Query input contract.
     const { query: _query, record_id: _recordId, ...payload } = args;
     return payload;
   }

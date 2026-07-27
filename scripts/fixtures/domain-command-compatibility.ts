@@ -17,8 +17,12 @@ const readyBackend: AgentBackend = {
   id: "ready",
   kind: "mock",
   label: "Ready",
+  sessionPolicy: { acquisition: "none", resume: "unsupported" },
+  execution_owner: "host",
   getStatus: () => ({
     id: "ready", kind: "mock", label: "Ready", configured: backendReady, enabled: backendReady, connection_state: backendReady ? "ready" : "disabled",
+    session_policy: { acquisition: "none", resume: "unsupported" },
+    execution_owner: "host",
     supports: { start_session: false, resume_run: false, cancel_run: false, stream_events: false }
   }),
   async *runTurn() { backendRuns += 1; yield { event_type: "run_completed", payload: { output_summary: "done" } }; }
