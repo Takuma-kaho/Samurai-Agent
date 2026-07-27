@@ -12,7 +12,7 @@
     "@samurai-agent/core-schemas": "workspace:*",
     "@samurai-agent/localization": "workspace:*",
     "@samurai-agent/ui-protocol": "workspace:*",
-    "lucide-vue-next": "^0.468.0",
+    "lucide-vue-next": "^1.0.0",
     "socket.io-client": "^4.8.3",
     "vue": "^3.5.38"
   },
