@@ -2,42 +2,71 @@
   "schema_version": 1,
   "test_id": "B08",
   "command": "pnpm backend:external:verify",
-  "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "status": "partial",
+  "reason": "live_unverified",
+  "commit_sha": "244db12add081d8c2496e2c79e84e073589e671c",
   "worktree_clean": false,
-  "source_sha256": "1dd36074e304126e2d2dfd866f9a86e648eaa9fc6cba3191b119800217838c03",
+  "source_sha256": "b994e11212e4b1311ffc8b8e5cc377f4cb6771341ca3266e26709e1483c537bc",
+  "source_graph_sha256": "24a747e6e79d2b549ea51c989d7d1e91029481c81e42c177bb0da7ee4f009294",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
+    "packages/agent-backends/src/claude-code-decoder.ts",
+    "packages/agent-backends/src/claude-code.ts",
+    "packages/agent-backends/src/cli-parser.ts",
+    "packages/agent-backends/src/codex-decoder.ts",
+    "packages/agent-backends/src/codex.ts",
+    "packages/agent-backends/src/contract.ts",
+    "packages/agent-backends/src/external-cli.ts",
     "packages/agent-backends/src/index.ts",
+    "packages/agent-backends/src/process-runner.ts",
+    "packages/agent-backends/src/provider-decoder-helpers.ts",
+    "packages/core-schemas/src/index.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-external-backends.mjs"
   ],
-  "started_at": "2026-07-11T12:53:56.518Z",
-  "completed_at": "2026-07-11T12:53:56.518Z",
+  "source_read_errors": [],
+  "started_at": "2026-07-27T02:04:27.256Z",
+  "completed_at": "2026-07-27T02:04:27.256Z",
   "assertions": [
     {
-      "name": "Real Backend run",
-      "actual": "passed",
-      "expected": "passed"
-    },
-    {
-      "name": "Tool events",
-      "actual": 20,
-      "expected": ">0"
-    },
-    {
-      "name": "Wait and restart recovery",
-      "actual": true,
+      "name": "Explicit live verification requested",
+      "actual": false,
       "expected": true
     },
     {
+      "name": "Live verification",
+      "actual": "skipped",
+      "expected": "passed"
+    },
+    {
+      "name": "Real Backend run",
+      "actual": "skipped",
+      "expected": "passed"
+    },
+    {
       "name": "Native resume",
-      "actual": "passed",
+      "actual": "skipped",
       "expected": "passed"
     },
     {
       "name": "Real cancellation",
-      "actual": "passed",
+      "actual": "skipped",
       "expected": "passed"
+    },
+    {
+      "name": "Native Session is preserved",
+      "actual": false,
+      "expected": true
+    },
+    {
+      "name": "Tool results with explicit status",
+      "actual": 0,
+      "expected": ">0"
+    },
+    {
+      "name": "Process close",
+      "actual": false,
+      "expected": true
     }
   ],
   "result": {
@@ -47,70 +76,38 @@
     "status": {
       "configured": true,
       "enabled": true,
-      "connection_state": "ready",
+      "connection_state": "unverified",
       "supports": {
-        "start_session": true,
+        "start_session": false,
         "resume_run": true,
         "cancel_run": true,
-        "stream_events": true
+        "stream_events": false
       },
       "metadata": {
-        "args_count": 6,
+        "args_count": 5,
         "command_probe": {
           "configured": true,
           "command_name": "codex",
           "path_kind": "direct_path",
           "resolved": true
-        },
-        "stream_probe": {
-          "enabled": false,
-          "status": "not_configured",
-          "reason": "stream_probe_not_configured"
         }
       }
     },
     "run": {
-      "status": "passed",
-      "event_count": 6,
-      "event_types": {
-        "run_started": 3,
-        "host_progress": 1,
-        "text_delta": 1,
-        "run_completed": 1
-      },
-      "terminal_event": "run_completed",
-      "backend_session_id": "019f513c-ceb0-7a61-8727-ecebfed6b507"
+      "status": "skipped",
+      "reason": "run_not_requested"
+    },
+    "live": {
+      "status": "skipped",
+      "reason": "live_not_requested"
     },
     "resume": {
-      "status": "passed",
-      "event_count": 50,
-      "event_types": {
-        "run_started": 2,
-        "host_progress": 1,
-        "text_delta": 6,
-        "tool_call_started": 20,
-        "tool_call_output": 20,
-        "run_completed": 1
-      },
-      "terminal_event": "run_completed",
-      "backend_session_id": "019f513c-ceb0-7a61-8727-ecebfed6b507",
-      "backend_recreated": true,
-      "wait_state_persisted": true
+      "status": "skipped",
+      "reason": "resume_not_requested"
     },
     "cancel": {
-      "status": "passed",
-      "event_count": 5,
-      "event_types": {
-        "run_started": 3,
-        "host_progress": 1,
-        "run_failed": 1
-      },
-      "terminal_event": "run_failed",
-      "backend_session_id": "019f513d-dc2e-7872-b9c4-3994af4e3f42",
-      "error_code": "backend_cancelled",
-      "error_message": "Codex was cancelled.",
-      "stderr_summary": "2026-07-11T12:53:56.452021Z WARN codex_rollout::list: state db discrepancy during find_thread_path_by_id_str_in_subdir: falling_back 2026-07-11T12:53:56.475252Z",
-      "cancellation_requested": true
+      "status": "skipped",
+      "reason": "cancel_not_requested"
     }
   }
 }

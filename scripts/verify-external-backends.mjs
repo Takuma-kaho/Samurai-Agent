@@ -16,7 +16,7 @@ loadEnvFile(path.join(rootDir, ".env"));
 loadEnvFile(path.join(rootDir, ".env.local"));
 
 const options = parseArgs(process.argv.slice(2));
-const backends = selectedBackends(options.backend).map((id) => createBackend(id, options.timeoutMs));
+const backends = selectedBackends(options.backend).map((id) => createBackend(id));
 const results = [];
 
 for (const backend of backends) {
@@ -116,7 +116,7 @@ function selectedBackends(value) {
   return ids;
 }
 
-function createBackend(id, timeoutMs) {
+function createBackend(id) {
   if (id === "claude") {
     return new ClaudeCodeBackend(definedOptions({
       command: process.env.SAMURAI_CLAUDE_CODE_COMMAND,
@@ -166,28 +166,28 @@ async function verifyBackend(backend, options) {
     result.live = await verifyLiveVersion(backend, options);
   }
   const runCollection = await collectRunEvents(backend, backendRunInput(backend.id, options.input), options.timeoutMs);
-  result.run = summarizeEvents(runCollection.events);
+  result.run = summarizeEvents(runCollection.events, runCollection.process_close_confirmed);
   if (runCollection.timed_out) result.run = { ...result.run, status: "failed", error_code: "backend_timeout", error_message: "Backend run exceeded the verification timeout." };
 
   if (options.resume) {
-    const restartedBackend = createBackend(backend.kind === "codex" ? "codex" : "claude", options.timeoutMs);
+    const restartedBackend = createBackend(backend.kind === "codex" ? "codex" : "claude");
     if (!restartedBackend.resumeRun) result.resume = { status: "skipped", reason: "resume_unsupported" };
     else if (!result.run.backend_session_id) result.resume = { status: "skipped", reason: "backend_session_id_missing" };
     else {
       const resumeCollection = await collectRunEvents(restartedBackend, backendRunInput(backend.id, "Continue the Samurai Agent external backend E2E probe.", `${backend.id}_e2e_run`, result.run.backend_session_id), options.timeoutMs, (input) => restartedBackend.resumeRun(`${backend.id}_e2e_run`, { backend_session_id: input.backend_session_id, answer: "Continue the Samurai Agent external backend E2E probe.", abort_signal: input.abort_signal }));
-      result.resume = { ...summarizeEvents(resumeCollection.events), backend_recreated: true, wait_state_persisted: true };
+      result.resume = { ...summarizeEvents(resumeCollection.events, resumeCollection.process_close_confirmed), backend_recreated: true };
       if (resumeCollection.timed_out) result.resume = { ...result.resume, status: "failed", error_code: "backend_timeout", error_message: "Backend resume exceeded the verification timeout." };
       if (result.resume.backend_session_id && result.resume.backend_session_id !== result.run.backend_session_id) {
         result.resume = { ...result.resume, status: "failed", error_code: "backend_session_conflict", error_message: "Resume emitted a different native Session ID." };
       }
     }
   }
-  if (options.cancel) result.cancel = await verifyCancellation(createBackend(backend.kind === "codex" ? "codex" : "claude", options.timeoutMs), options);
-  if (options.live && result.live.status === "passed" && result.run.status === "passed" && (!options.resume || result.resume.status === "passed")) {
+  if (options.cancel) result.cancel = await verifyCancellation(createBackend(backend.kind === "codex" ? "codex" : "claude"), options);
+  if (options.live && result.live.status === "passed" && result.run.status === "passed" && result.run.process_close_confirmed === true && (!options.resume || (result.resume.status === "passed" && result.resume.process_close_confirmed === true))) {
     backend.recordLiveVerification?.({ version: result.live.version, verified_at: new Date().toISOString(), effective_args: result.live.effective_args });
     const verifiedStatus = backend.getStatus?.();
     if (verifiedStatus) result.status = { ...result.status, connection_state: verifiedStatus.connection_state, metadata: verifiedStatus.metadata };
-    result.live = { ...result.live, status: "passed", evidence: { initial_event: result.run.initial_event, raw_jsonl_shape: result.run.raw_jsonl_shape, session_id: result.run.backend_session_id, terminal_event: result.run.terminal_event, close_observed: true } };
+    result.live = { ...result.live, status: "passed", evidence: { initial_event: result.run.initial_event, raw_jsonl_shape: result.run.raw_jsonl_shape, session_id: result.run.backend_session_id, terminal_event: result.run.terminal_event, close_observed: result.run.process_close_confirmed } };
   }
   return result;
 }
@@ -195,14 +195,60 @@ async function verifyBackend(backend, options) {
 async function verifyCancellation(backend, options) {
   const runId = `${backend.id}_e2e_cancel`;
   const events = [];
-  let timer;
-  for await (const event of backend.runTurn(backendRunInput(backend.id, "Perform a careful long analysis before replying." , runId))) {
-    events.push(event);
-    if (!timer && event.event_type === "run_started") timer = setTimeout(() => backend.cancelRun?.(runId), 250);
+  const controller = new AbortController();
+  let cancelTimer;
+  let deadlineTimer;
+  let processCloseConfirmed = false;
+  let cancellationRequested = false;
+  let timedOut = false;
+  let cancellationResult;
+  let cancellationError;
+  let cancellationPromise;
+  deadlineTimer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, options.timeoutMs);
+  try {
+    for await (const event of backend.runTurn({
+      ...backendRunInput(backend.id, "Perform a careful long analysis before replying.", runId),
+      abort_signal: controller.signal
+    })) {
+      events.push(event);
+      if (!cancelTimer && event.event_type === "run_started") {
+        cancelTimer = setTimeout(() => {
+          cancellationRequested = true;
+          cancellationPromise = Promise.resolve(backend.cancelRun?.(runId) ?? { kind: "unsupported" }).then(
+            (result) => {
+              cancellationResult = result;
+              return result;
+            },
+            (error) => {
+              cancellationError = error;
+              return undefined;
+            }
+          );
+        }, 250);
+      }
+    }
+    processCloseConfirmed = true;
+  } finally {
+    clearTimeout(cancelTimer);
+    clearTimeout(deadlineTimer);
   }
-  if (timer) clearTimeout(timer);
-  const summary = summarizeEvents(events);
-  return { ...summary, status: summary.error_code === "backend_cancelled" ? "passed" : "failed", cancellation_requested: true };
+  if (cancellationPromise) await cancellationPromise;
+  const summary = summarizeEvents(events, processCloseConfirmed);
+  if (timedOut) {
+    return { ...summary, status: "failed", error_code: "backend_timeout", error_message: "Backend cancellation exceeded the verification timeout.", cancellation_requested: cancellationRequested };
+  }
+  if (cancellationError) {
+    return { ...summary, status: "failed", error_code: "backend_cancel_failed", error_message: safeEvidenceText(cancellationError?.message), cancellation_requested: cancellationRequested };
+  }
+  return {
+    ...summary,
+    status: summary.error_code === "backend_cancelled" && cancellationRequested && cancellationResult?.kind !== "unsupported" ? "passed" : "failed",
+    cancellation_requested: cancellationRequested,
+    cancellation_result: cancellationResult?.kind
+  };
 }
 
 async function verifyLiveVersion(backend, options) {
@@ -222,17 +268,10 @@ function effectiveArgsForBackend(backendId) {
   return splitOptionalArgs(raw)?.map((arg) => /token|secret|password|api[_-]?key|authorization/i.test(arg) ? "[redacted-arg]" : arg) ?? [];
 }
 
-async function collectEvents(iterable) {
-  const events = [];
-  for await (const event of iterable) {
-    events.push(event);
-  }
-  return events;
-}
-
 async function collectRunEvents(backend, input, timeoutMs, resumeFactory) {
   const controller = new AbortController();
   let timedOut = false;
+  let processCloseConfirmed = false;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
@@ -244,13 +283,14 @@ async function collectRunEvents(backend, input, timeoutMs, resumeFactory) {
   const events = [];
   try {
     for await (const event of iterable) events.push(event);
+    processCloseConfirmed = true;
   } finally {
     clearTimeout(timer);
   }
-  return { events, timed_out: timedOut };
+  return { events, timed_out: timedOut, process_close_confirmed: processCloseConfirmed };
 }
 
-function summarizeEvents(events) {
+function summarizeEvents(events, processCloseConfirmed = false) {
   const terminal = [...events].reverse().find((event) =>
     event.event_type === "run_completed" || event.event_type === "run_failed"
   );
@@ -258,12 +298,19 @@ function summarizeEvents(events) {
   for (const event of events) {
     eventTypes[event.event_type] = (eventTypes[event.event_type] ?? 0) + 1;
   }
+  const verifiedToolResultCount = events.filter((event) =>
+    event.event_type === "tool_call_output"
+    && typeof event.payload?.status === "string"
+    && event.payload.status.trim().length > 0
+  ).length;
   return {
     status: terminal?.event_type === "run_completed" ? "passed" : "failed",
     event_count: events.length,
     event_types: eventTypes,
+    verified_tool_result_count: verifiedToolResultCount,
     terminal_event: terminal?.event_type,
     backend_session_id: firstEventSessionId(events),
+    process_close_confirmed: processCloseConfirmed,
     output_summary: typeof terminal?.payload.output_summary === "string" ? terminal.payload.output_summary : undefined,
     error_code: typeof terminal?.payload.error_code === "string" ? terminal.payload.error_code : undefined,
     error_message: typeof terminal?.payload.message === "string" ? terminal.payload.message : undefined,
@@ -418,12 +465,66 @@ function exitCode(summary) {
 }
 
 function writeB08Evidence(summary) {
-  const result = summary.results.find((item) => item.run.status === "passed" && item.resume.status === "passed" && item.cancel.status === "passed");
-  const toolEvents = result?.resume?.event_types?.tool_call_output ?? 0;
-  const passed = Boolean(result && result.resume.backend_recreated && result.resume.wait_state_persisted && toolEvents > 0);
+  const result = summary.results.find((item) => item.live.status !== "skipped" || item.run.status !== "skipped" || item.resume.status !== "skipped" || item.cancel.status !== "skipped") ?? summary.results[0];
+  const toolResults = (result?.run?.verified_tool_result_count ?? 0) + (result?.resume?.verified_tool_result_count ?? 0);
+  const sameNativeSession = Boolean(
+    result?.run?.backend_session_id
+    && result.resume?.backend_session_id
+    && result.resume.backend_session_id === result.run.backend_session_id
+  );
+  const processCloseConfirmed = Boolean(
+    result?.run?.process_close_confirmed
+    && result.resume?.process_close_confirmed
+    && result.cancel?.process_close_confirmed
+  );
+  const passed = Boolean(
+    summary.live_requested
+    && result?.live.status === "passed"
+    && result.run.status === "passed"
+    && result.resume.status === "passed"
+    && result.cancel.status === "passed"
+    && result.resume.backend_recreated
+    && sameNativeSession
+    && toolResults > 0
+    && processCloseConfirmed
+  );
   const evidenceDir = path.join(rootDir, "reports/core-completion/evidence");
   mkdirSync(evidenceDir, { recursive: true });
   const now = new Date().toISOString();
-  const sources = ["packages/agent-backends/src/index.ts", "packages/agent-backends/src/process-runner.ts", "packages/agent-backends/src/claude-code.ts", "packages/agent-backends/src/codex.ts", "scripts/verify-external-backends.mjs", "scripts/lib/core-evidence.mjs"];
-  writeFileSync(path.join(evidenceDir, "B08.json"), `${JSON.stringify({ schema_version: 1, test_id: "B08", command: "pnpm backend:external:verify", status: passed ? "passed" : "partial", ...committedSourceEvidence(rootDir, sources), started_at: summary.checked_at, completed_at: now, assertions: [{ name: "Real Backend run", actual: result?.run.status, expected: "passed" }, { name: "Tool events", actual: toolEvents, expected: ">0" }, { name: "Wait and restart recovery", actual: Boolean(result?.resume.backend_recreated && result?.resume.wait_state_persisted), expected: true }, { name: "Native resume", actual: result?.resume.status, expected: "passed" }, { name: "Real cancellation", actual: result?.cancel.status, expected: "passed" }], result: result ?? summary }, null, 2)}\n`);
+  const sources = [
+    "packages/core-schemas/src/index.ts",
+    "packages/agent-backends/src/index.ts",
+    "packages/agent-backends/src/contract.ts",
+    "packages/agent-backends/src/process-runner.ts",
+    "packages/agent-backends/src/external-cli.ts",
+    "packages/agent-backends/src/cli-parser.ts",
+    "packages/agent-backends/src/provider-decoder-helpers.ts",
+    "packages/agent-backends/src/claude-code-decoder.ts",
+    "packages/agent-backends/src/codex-decoder.ts",
+    "packages/agent-backends/src/claude-code.ts",
+    "packages/agent-backends/src/codex.ts",
+    "scripts/verify-external-backends.mjs",
+    "scripts/lib/core-evidence.mjs"
+  ];
+  writeFileSync(path.join(evidenceDir, "B08.json"), `${JSON.stringify({
+    schema_version: 1,
+    test_id: "B08",
+    command: "pnpm backend:external:verify",
+    status: passed ? "passed" : "partial",
+    ...(!passed ? { reason: "live_unverified" } : {}),
+    ...committedSourceEvidence(rootDir, sources),
+    started_at: summary.checked_at,
+    completed_at: now,
+    assertions: [
+      { name: "Explicit live verification requested", actual: summary.live_requested, expected: true },
+      { name: "Live verification", actual: result?.live.status, expected: "passed" },
+      { name: "Real Backend run", actual: result?.run.status, expected: "passed" },
+      { name: "Native resume", actual: result?.resume.status, expected: "passed" },
+      { name: "Real cancellation", actual: result?.cancel.status, expected: "passed" },
+      { name: "Native Session is preserved", actual: sameNativeSession, expected: true },
+      { name: "Tool results with explicit status", actual: toolResults, expected: ">0" },
+      { name: "Process close", actual: processCloseConfirmed, expected: true }
+    ],
+    result: result ?? summary
+  }, null, 2)}\n`);
 }

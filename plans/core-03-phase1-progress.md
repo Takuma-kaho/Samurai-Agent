@@ -42,7 +42,17 @@
 
 - 実CLI、E2E、全テスト、全build、PR、remote CIは実施していない。
 - retry、fallback、新DB、汎用Protocol Frameworkは追加していない。
-- 既存の実CLI／E2E検証器の差分は変更していない。
+- 既存の実CLI／E2E検証器は、B08の判定条件とsource hash対象を変更した。Backend実行経路は、process close未確認時にProviderの成功Eventを通さない最小条件だけを追加し、Provider呼び出し自体は変更していない。
+
+## 今回の実装停止時点のEvidence境界
+
+- B08は、明示的なlive要求、live成功、run／resume／cancel成功、同一Backend Session、Tool結果、process close確認がすべて揃った場合だけ`passed`とする。
+- いずれか未確認の場合は`partial / live_unverified`とする。実CLI・外部Backend E2Eはこの実装停止時点では免除・未確認であり、Evidence生成は再開後の最小検証で行う。
+- `reports/core-completion/evidence/B08.json`は、再開後に実行した非live生成で現行条件へ更新済みであり、`partial / live_unverified`を記録している。
+- Backend cancellationはrun／resume／Host abortの全入口をprocess runnerの同一停止経路へ通し、SIGTERM後のgrace periodを超えたSIGKILLもclose確認済みcancelとして扱う。停止確認不能は成功にしない。
+- B08のTool確認は`tool_call_output`の件数ではなく、明示的な結果statusを持つcanonical Eventだけを数える。cancel確認には既存timeoutを適用し、timeout・cancel失敗・close未確認は`partial / live_unverified`にする。
+- Phase3 CI接続は、Linux上のCore Backend Event Schema、Agent Backend decoder／process lifecycle、Backend Event Bridge、Backend Event Journal、TurnExecutor、RunRecoveryの既存テストだけを対象にする。
+- 参照OSSから採用したのは、開始・終了・Toolを型付きEventで扱うこと、process close後にterminalを確定する責務分離、Provider decoder／adapterの境界である。新しいEvidence Framework、retry／fallback、新DB、汎用callback、実CLI／E2Eの追加は持ち込んでいない。
 
 ## 最小確認
 
