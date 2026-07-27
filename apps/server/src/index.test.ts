@@ -850,6 +850,8 @@ describe("backend run API", () => {
       id: "collection-movie-api-bridge",
       kind: "codex",
       label: "Collection Movie API Bridge Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         backendRuns += 1;
         if (input.envelope.user_intent.includes("作って")) {
@@ -881,6 +883,8 @@ describe("backend run API", () => {
       id: "collection-movie-action-codex",
       kind: "codex",
       label: "Collection Movie Action Codex Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn(input) {
         actionBackendInputs.push(input);
         const actionId = typeof input.envelope.metadata.collection_action_id === "string"
@@ -1480,6 +1484,8 @@ describe("backend run API", () => {
       id: "collection-open-api-ambiguous-unneeded",
       kind: "codex",
       label: "Unused Ambiguous Collection Open Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         backendRuns += 1;
         yield {
@@ -1559,6 +1565,8 @@ describe("backend run API", () => {
       id: "collection-open-multilingual-unneeded",
       kind: "codex",
       label: "Unused Multilingual Collection Open Fixture",
+      sessionPolicy: { acquisition: "none", resume: "unsupported" },
+      execution_owner: "host",
       async *runTurn() {
         backendRuns += 1;
         yield {
