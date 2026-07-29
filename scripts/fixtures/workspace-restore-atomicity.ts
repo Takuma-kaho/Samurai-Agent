@@ -35,4 +35,27 @@ for (const phase of phases) {
   }
 }
 
-process.stdout.write(`${JSON.stringify({ status: "passed", failure_points: phases, outcomes, preserved_count: outcomes.length })}\n`);
+const successfulRoot = await mkdtemp(path.join(tmpdir(), "samurai-restore-success-"));
+let successfulStore = await WorkspaceStore.create({ rootDir: successfulRoot });
+try {
+  const base = "2026-07-11T00:00:00.000Z";
+  await successfulStore.createSession({ id: "backup-session", session_key: "web:backup:main", title: "Backup state", ui_locale: "en", output_locale: "en", created_at: base, updated_at: base });
+  await writeFile(path.join(successfulRoot, "profile", "user.md"), "backup profile\n");
+  const backup = await successfulStore.createWorkspaceBackup();
+  await successfulStore.createSession({ id: "current-session", session_key: "web:current:main", title: "Current state", ui_locale: "en", output_locale: "en", created_at: base, updated_at: base });
+  await writeFile(path.join(successfulRoot, "profile", "user.md"), "current profile\n");
+
+  const restored = await successfulStore.restoreWorkspaceBackup(backup.id);
+  assert.equal(restored.db_restored, true);
+  assert.equal((await successfulStore.getSession("backup-session"))?.title, "Backup state");
+  assert.equal(await successfulStore.getSession("current-session"), undefined);
+  assert.equal(await readFile(path.join(successfulRoot, "profile", "user.md"), "utf8"), "backup profile\n");
+  await successfulStore.createSession({ id: "post-restore-session", session_key: "web:post-restore:main", title: "Post restore state", ui_locale: "en", output_locale: "en", created_at: base, updated_at: base });
+  assert.equal((await successfulStore.getSession("post-restore-session"))?.title, "Post restore state");
+  assert.equal((await successfulStore.getSqliteRuntimeSettings()).foreign_keys, 1);
+} finally {
+  await successfulStore.close().catch(() => undefined);
+  await rm(successfulRoot, { recursive: true, force: true });
+}
+
+process.stdout.write(`${JSON.stringify({ status: "passed", failure_points: phases, outcomes, preserved_count: outcomes.length, successful_restore_store_reusable: true })}\n`);

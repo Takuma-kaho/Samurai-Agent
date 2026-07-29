@@ -1,16 +1,84 @@
-import Database from "better-sqlite3";
 export * from "./profile-registry";
 import { access, copyFile, cp, mkdir, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { gatewayDeliveryMigration } from "./migrations/gateway-delivery";
-import { skillOptimizationMigration } from "./migrations/skill-optimization";
-import { toolRunErrorCodeMigration } from "./migrations/tool-run-error-code";
-import { gatewayPairingPolicyAllowedToolsMigration } from "./migrations/gateway-pairing-policy-allowed-tools";
+import { WorkspaceDatabase } from "./kernel/workspace-database";
+import type {
+  ApprovalRequestsTable,
+  ArtifactRevisionsTable,
+  ArtifactsTable,
+  AuditRecordsTable,
+  AutomationJobsTable,
+  AutomationRunsTable,
+  BackendEventsTable,
+  BackendRunsTable,
+  BackgroundReviewChangeTable,
+  ClientEventsTable,
+  CollectionPatchesTable,
+  CollectionRecordsTable,
+  CollectionSchemasTable,
+  CuratorStateTable,
+  DomainCommandExecutionsTable,
+  ExternalAssistRecordsTable,
+  ExternalSendsTable,
+  GatewayBoundaryPoliciesTable,
+  GatewayConcurrencyLocksTable,
+  GatewayDeliveriesTable,
+  GatewayInboundMessagesTable,
+  GatewayMcpConfigsTable,
+  GatewayPairingPoliciesTable,
+  GatewayPairingsTable,
+  GatewayRoutingPoliciesTable,
+  GatewaySandboxInstancesTable,
+  GatewaySandboxWorkspaceSyncsTable,
+  GeneratedSurfaceRevisionsTable,
+  GeneratedSurfacesTable,
+  GrantsTable,
+  LearningEvaluationTable,
+  LearningResourceUseTable,
+  LearningSnapshotTable,
+  MemoryIndexTable,
+  MessagePresentationsTable,
+  MessagesTable,
+  MigrationJournalTable,
+  ObjectivesTable,
+  OperationsTable,
+  PolicyDecisionsTable,
+  ReflectionRunsTable,
+  ReflectionSuggestionsTable,
+  ResourceTranslationsTable,
+  RollbackPointsTable,
+  RunCheckpointsTable,
+  SessionsTable,
+  SkillIndexTable,
+  SkillUsageTable,
+  SurfaceInteractionsTable,
+  ToolRunsTable,
+  WikiIndexTable,
+  WorkDependenciesTable,
+  WorkItemsTable,
+  WorkspaceChangesTable,
+  WorkspaceDb as KernelWorkspaceDb
+} from "./kernel/workspace-db-schema";
+import { WorkspaceMigrationRunner } from "./kernel/migration-runner";
+import {
+  WorkspacePaths,
+  isWorkspaceResourceBoundary as isKernelWorkspaceResourceBoundary,
+  workspaceBackupRoots as kernelWorkspaceBackupRoots,
+  workspaceResourceBoundaries as kernelWorkspaceResourceBoundaries,
+  type WorkspaceResourceBoundary
+} from "./kernel/workspace-paths";
+import { SessionSearchIndex, type SessionSearchEntry } from "./kernel/session-search-index";
+import { workspaceMigrations } from "./migrations";
 import { compareScoredSearch, scoreSearchFields, searchTerms, stateSearchBoost } from "./search/scoring";
 import { normalizeBackupId } from "./backup/backup-id";
-import { backendEventFromRow, backendEventToRow, type BackendEventsTable } from "./repositories/backend-events";
-import { workspaceFileRecoveryAction } from "./transactions/recovery-policy";
+import { backendEventFromRow, backendEventToRow } from "./repositories/backend-events";
+import { CollectionRecordRecoveryHandler } from "./transactions/collection-record-recovery-handler";
+import {
+  WorkspaceFileTransactionCoordinator,
+  WorkspaceSimulatedCrashError,
+  type WorkspaceFileTransactionFailureInjector
+} from "./transactions/workspace-file-transaction-coordinator";
 import {
   type ActivityInboxItem,
   type ApprovalRequest,
@@ -115,10 +183,8 @@ import {
   nowIso,
   stableHash
 } from "@samurai-agent/core-schemas";
-import { Kysely, SqliteDialect, sql } from "kysely";
+import { Kysely, sql } from "kysely";
 import type { Transaction } from "kysely";
-
-type JsonColumn = string;
 
 export interface Core02SettlementInput {
   expectedRun: BackendRunRecord;
@@ -134,929 +200,13 @@ export interface Core02SettlementInput {
   reservation: { sessionId: string; runId: string; version: number; status: "held" | "released" };
 }
 
-interface SessionsTable {
-  id: string;
-  session_key: string;
-  title: string;
-  ui_locale: string;
-  output_locale: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface MessagesTable {
-  id: string;
-  session_id: string;
-  role: "user" | "agent" | "system";
-  content: string;
-  input_locale: string;
-  output_locale: string;
-  envelope_json: JsonColumn | null;
-  created_at: string;
-}
-
-interface MessagePresentationsTable {
-  id: string;
-  session_id: string;
-  message_id: string;
-  kind: string;
-  title: string;
-  subtitle: string;
-  collection_id: string;
-  view_id: string;
-  renderer: string;
-  view_state_json: JsonColumn | null;
-  surface_id: string | null;
-  revision_id: string | null;
-  preview_url: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface SkillOptimizationRunsTable {
-  id: string;
-  target_skill_id: string;
-  session_id: string | null;
-  status: string;
-  run_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface SkillOptimizationDatasetsTable {
-  id: string;
-  skill_id: string;
-  dataset_json: JsonColumn;
-  created_at: string;
-}
-
-interface OptimizationCandidatesTable {
-  id: string;
-  run_id: string;
-  skill_id: string;
-  content_hash: string;
-  body: string;
-  candidate_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface OptimizationEvaluationsTable {
-  id: string;
-  run_id: string;
-  candidate_id: string;
-  evaluation_json: JsonColumn;
-  created_at: string;
-}
-
-interface OptimizationPromotionsTable {
-  id: string;
-  run_id: string;
-  candidate_id: string;
-  skill_id: string;
-  promotion_json: JsonColumn;
-  created_at: string;
-}
-
-interface SkillOptimizationSnapshotsTable {
-  id: string;
-  skill_id: string;
-  candidate_id: string;
-  content_hash: string;
-  markdown: string;
-  snapshot_json: JsonColumn;
-  created_at: string;
-  restored_at: string | null;
-}
-
-interface SkillOptimizationLocksTable {
-  skill_id: string;
-  run_id: string;
-  acquired_at: string;
-}
-
-interface OperationsTable {
-  id: string;
-  session_id: string;
-  capability_id: string;
-  operation: string;
-  actor_identity: string;
-  instruction_source: string;
-  instruction_authority: string;
-  channel: string;
-  input_hash: string;
-  input_ref_json: JsonColumn | null;
-  target_resource_refs_json: JsonColumn;
-  proposed_effects_json: JsonColumn;
-  status: string;
-  policy_decision_id: string | null;
-  approval_request_id: string | null;
-  result_ref_json: JsonColumn | null;
-  error: string | null;
-  correlation_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface DomainCommandExecutionsTable {
-  id: string;
-  idempotency_key: string;
-  command_id: string;
-  input_source: string;
-  correlation_id: string;
-  payload_hash: string;
-  phase: string;
-  status: string;
-  result_json: JsonColumn | null;
-  error: string | null;
-  heartbeat_at: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ObjectivesTable {
-  id: string;
-  session_id: string | null;
-  title: string;
-  objective: string;
-  completion_criteria_json: JsonColumn;
-  status: string;
-  token_budget: number | null;
-  time_budget_ms: number | null;
-  max_attempts: number | null;
-  current_checkpoint_id: string | null;
-  created_at: string;
-  updated_at: string;
-  completed_at: string | null;
-}
-
-interface WorkItemsTable {
-  id: string;
-  objective_id: string;
-  parent_work_item_id: string | null;
-  instruction: string;
-  status: string;
-  priority: number;
-  attempt: number;
-  max_attempts: number;
-  idempotency_key: string;
-  lease_owner: string | null;
-  lease_expires_at: string | null;
-  heartbeat_at: string | null;
-  retry_after_at: string | null;
-  backend_run_id: string | null;
-  current_checkpoint_id: string | null;
-  failure_kind: string | null;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-  started_at: string | null;
-  completed_at: string | null;
-}
-
-interface WorkDependenciesTable {
-  id: string;
-  objective_id: string;
-  predecessor_work_item_id: string;
-  successor_work_item_id: string;
-  kind: string;
-  created_at: string;
-}
-
-interface RunCheckpointsTable {
-  id: string;
-  objective_id: string;
-  work_item_id: string;
-  sequence: number;
-  phase: string;
-  idempotency_key: string;
-  backend_run_id: string | null;
-  backend_session_id: string | null;
-  event_cursor: number | null;
-  summary: string;
-  generated_resource_refs_json: JsonColumn;
-  pending_operation_ids_json: JsonColumn;
-  state_json: JsonColumn;
-  created_at: string;
-}
-
-interface WorkspaceFileTransactionsTable {
-  id: string;
-  kind: string;
-  status: string;
-  target_path: string;
-  staged_path: string;
-  collection_id: string | null;
-  record_id: string | null;
-  patch_id: string | null;
-  before_json: JsonColumn;
-  after_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface GeneratedSurfacesTable {
-  id: string;
-  state: string;
-  session_id: string;
-  title: string;
-  definition_json: JsonColumn;
-  content_hash: string;
-  current_revision_id: string;
-  current_revision: number;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ArtifactRevisionsTable {
-  id: string;
-  artifact_id: string;
-  revision: number;
-  revision_json: JsonColumn;
-  content_hash: string;
-  file_path: string;
-  blob_path: string;
-  created_at: string;
-}
-
-interface GeneratedSurfaceRevisionsTable {
-  id: string;
-  surface_id: string;
-  revision: number;
-  revision_json: JsonColumn;
-  bundle_hash: string;
-  created_at: string;
-}
-
-interface SurfaceInteractionsTable {
-  id: string;
-  surface_id: string;
-  revision_id: string;
-  session_id: string;
-  kind: string;
-  interaction_json: JsonColumn;
-  created_at: string;
-}
-
-interface PolicyDecisionsTable {
-  id: string;
-  operation_id: string;
-  capability_id: string;
-  operation: string;
-  decision: string;
-  reason: string;
-  policy_inputs_json: JsonColumn;
-  matched_rules_json: JsonColumn;
-  required_approval_level: string;
-  grant_id: string | null;
-  created_at: string;
-}
-
-interface ApprovalRequestsTable {
-  id: string;
-  operation_id: string;
-  requested_level: string;
-  status: string;
-  reason: string;
-  requested_by: string;
-  decided_by: string | null;
-  created_at: string;
-  expires_at: string;
-  decided_at: string | null;
-}
-
-interface AuditRecordsTable {
-  id: string;
-  actor_identity: string;
-  operation_id: string;
-  capability_id: string;
-  instruction_source: string;
-  inputs_summary: string;
-  outputs_summary: string;
-  policy_decision_id: string;
-  affected_resources_json: JsonColumn;
-  rollback_point_id: string | null;
-  created_at: string;
-}
-
-interface RollbackPointsTable {
-  id: string;
-  operation_id: string;
-  affected_resources_json: JsonColumn;
-  before_snapshot_json: JsonColumn;
-  after_snapshot_json: JsonColumn;
-  reversible: number;
-  irreversible_effects_json: JsonColumn;
-  created_at: string;
-  expires_at: string;
-}
-
-interface ArtifactsTable {
-  id: string;
-  title: string;
-  kind: string;
-  locale: string;
-  source_locales_json: JsonColumn;
-  file_ref_json: JsonColumn;
-  metadata_json: JsonColumn;
-  source_operation_id: string;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface MemoryIndexTable {
-  id: string;
-  state: string;
-  topic: string;
-  source: string;
-  source_locale: string;
-  content_locale: string;
-  source_kind: string;
-  instruction_authority: string;
-  file_path: string;
-  frontmatter_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface SkillIndexTable {
-  id: string;
-  state: string;
-  title: string;
-  description: string;
-  tags_json: JsonColumn;
-  required_capabilities_json: JsonColumn;
-  file_path: string;
-  frontmatter_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface SkillUsageTable {
-  skill_id: string;
-  use_count: number;
-  last_used_at: string | null;
-  last_run_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface LearningResourceUseTable {
-  id: string;
-  run_id: string;
-  session_id: string;
-  resource_kind: string;
-  resource_id: string;
-  resource_version: string | null;
-  content_hash: string | null;
-  stage: string;
-  source_operation_id: string | null;
-  metadata_json: JsonColumn;
-  created_at: string;
-}
-
-interface LearningEvaluationTable {
-  id: string;
-  learning_resource_ref_json: JsonColumn;
-  learning_resource_version: string | null;
-  task_class: string;
-  compared_run_ids_json: JsonColumn;
-  before_metrics_json: JsonColumn;
-  after_metrics_json: JsonColumn;
-  effect_estimate: number;
-  confidence: number;
-  assessment: string;
-  evidence_refs_json: JsonColumn;
-  evaluator: string;
-  created_at: string;
-}
-
-interface LearningSnapshotTable {
-  id: string;
-  run_id: string;
-  path: string;
-  resource_counts_json: JsonColumn;
-  created_at: string;
-  restored_at: string | null;
-}
-
-interface BackgroundReviewChangeTable {
-  id: string;
-  origin: string;
-  source_run_id: string;
-  source_session_id: string;
-  review_run_id: string;
-  mutation_kind: string;
-  resource_ref_json: JsonColumn;
-  before_version: string | null;
-  after_version: string;
-  reason_summary: string;
-  evidence_refs_json: JsonColumn;
-  created_at: string;
-}
-
-interface LearningJobReportTable {
-  id: string;
-  job_kind: string;
-  run_id: string;
-  report_json: JsonColumn;
-  created_at: string;
-}
-
-interface CuratorStateTable {
-  id: string;
-  paused: number;
-  interval_hours: number;
-  min_idle_hours: number;
-  stale_after_days: number;
-  archive_after_days: number;
-  last_run_at: string | null;
-  last_run_summary: string | null;
-  run_count: number;
-  updated_at: string;
-}
-
-interface WikiIndexTable {
-  id: string;
-  slug: string;
-  title: string;
-  state: string;
-  content_locale: string;
-  tags_json: JsonColumn;
-  source_refs_json: JsonColumn;
-  provenance_json: JsonColumn;
-  file_path: string;
-  frontmatter_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface CollectionSchemasTable {
-  id: string;
-  version: string;
-  file_path: string;
-  schema_json: JsonColumn;
-  updated_at: string;
-}
-
-interface CollectionRecordsTable {
-  id: string;
-  collection_id: string;
-  file_path: string;
-  record_json: JsonColumn;
-  version: number;
-  created_at: string;
-  updated_at: string;
-}
-
-interface CollectionPatchesTable {
-  id: string;
-  collection_id: string;
-  record_id: string;
-  patch_json: JsonColumn;
-  source_operation_id: string;
-  created_at: string;
-}
-
-interface AutomationRunsTable {
-  id: string;
-  kind: string;
-  source: string;
-  session_id: string | null;
-  backend_run_id: string | null;
-  status: string;
-  operation_id: string | null;
-  started_at: string;
-  completed_at: string | null;
-  error: string | null;
-}
-
-interface AutomationJobsTable {
-  id: string;
-  title: string;
-  kind: string;
-  status: string;
-  schedule: string;
-  target_instruction: string;
-  delivery_target_json: JsonColumn;
-  next_run_at: string | null;
-  last_run_at: string | null;
-  retry_after_at: string | null;
-  locked_until: string | null;
-  failure_count: number;
-  max_attempts: number;
-  last_error: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ExternalSendsTable {
-  id: string;
-  channel: string;
-  status: string;
-  target_json: JsonColumn;
-  title: string;
-  body: string;
-  operation_id: string | null;
-  approval_request_id: string | null;
-  dispatch_result_json: JsonColumn | null;
-  created_at: string;
-  updated_at: string;
-  dispatched_at: string | null;
-}
-
-interface GatewayPairingsTable {
-  id: string;
-  channel: string;
-  source_identity: string;
-  source_label: string;
-  status: string;
-  pairing_code: string | null;
-  session_key: string;
-  metadata_json: JsonColumn;
-  requested_at: string;
-  expires_at: string | null;
-  resolved_at: string | null;
-  updated_at: string;
-}
-
-interface GatewayPairingPoliciesTable {
-  id: string;
-  channel: string;
-  status: string;
-  trust_mode: string;
-  allowlist_json: JsonColumn;
-  allowed_tools_json: JsonColumn;
-  pairing_ttl_ms: number | null;
-  duplicate_window_ms: number | null;
-  rate_limit_window_ms: number | null;
-  rate_limit_max: number | null;
-  metadata_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface GatewayRoutingPoliciesTable {
-  id: string;
-  channel: string;
-  status: string;
-  session_key_strategy: string;
-  default_account_id: string | null;
-  default_thread_id: string | null;
-  default_route: string;
-  metadata_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface GatewayInboundMessagesTable {
-  id: string;
-  channel: string;
-  source_identity: string;
-  body: string;
-  status: string;
-  trusted: number;
-  session_key: string | null;
-  pairing_id: string | null;
-  message_id: string | null;
-  error: string | null;
-  metadata_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-interface GatewayDeliveriesTable {id:string;inbound_id:string|null;session_key:string;channel:string;status:string;idempotency_key:string;payload_json:JsonColumn;attempt:number;max_attempts:number;next_attempt_at:string|null;lease_until:string|null;receipt_json:JsonColumn|null;last_error:string|null;created_at:string;updated_at:string;delivered_at:string|null}
-
-interface GatewayBoundaryPoliciesTable {
-  id: string;
-  source_channel: string;
-  source_identity: string | null;
-  session_key: string;
-  allowed_tools_json: JsonColumn;
-  mcp_config_refs_json: JsonColumn;
-  secret_refs_json: JsonColumn;
-  sandbox_json: JsonColumn;
-  path_normalization_json: JsonColumn;
-  allowlist_json: JsonColumn;
-  timeout_ms: number | null;
-  concurrency_lock_json: JsonColumn | null;
-  metadata_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface GatewayMcpConfigsTable {
-  id: string;
-  server_name: string;
-  transport: string;
-  enabled: number;
-  allowed_tools_json: JsonColumn;
-  config_ref_json: JsonColumn | null;
-  secret_refs_json: JsonColumn;
-  stdio_json: JsonColumn | null;
-  http_json: JsonColumn | null;
-  metadata_json: JsonColumn;
-  created_at: string;
-  updated_at: string;
-}
-
-interface GatewayConcurrencyLocksTable {
-  id: string;
-  lock_key: string;
-  scope: string;
-  policy_id: string | null;
-  owner_ref_json: JsonColumn | null;
-  status: string;
-  acquired_at: string;
-  expires_at: string;
-  released_at: string | null;
-  metadata_json: JsonColumn;
-}
-
-interface GatewaySandboxInstancesTable {
-  id: string;
-  instance_key: string;
-  scope: string;
-  backend: string;
-  status: string;
-  sandbox_json: JsonColumn;
-  session_key: string | null;
-  owner_ref_json: JsonColumn | null;
-  workspace_root: string | null;
-  created_at: string;
-  updated_at: string;
-  last_used_at: string | null;
-  deleted_at: string | null;
-  metadata_json: JsonColumn;
-}
-
-interface GatewaySandboxWorkspaceSyncsTable {
-  id: string;
-  instance_id: string;
-  instance_key: string;
-  direction: string;
-  status: string;
-  workspace_root: string | null;
-  remote_workspace_root: string | null;
-  file_count: number | null;
-  byte_count: number | null;
-  error: string | null;
-  started_at: string;
-  completed_at: string | null;
-  metadata_json: JsonColumn;
-}
-
-interface ReflectionRunsTable {
-  id: string;
-  kind: string;
-  source_run_id: string | null;
-  session_id: string | null;
-  status: string;
-  input_summary: string;
-  output_summary: string | null;
-  started_at: string;
-  completed_at: string | null;
-  error: string | null;
-}
-
-interface ReflectionSuggestionsTable {
-  id: string;
-  reflection_run_id: string;
-  suggestion_type: string;
-  status: string;
-  title: string;
-  content: string;
-  target_ref_json: JsonColumn | null;
-  source_refs_json: JsonColumn;
-  confidence: number;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ToolRunsTable {
-  id: string;
-  run_id: string;
-  session_id: string;
-  tool_call_id: string | null;
-  provider_tool_name: string;
-  action_id: string | null;
-  status: string;
-  input_summary: string;
-  output_summary: string;
-  error_code: string | null;
-  resource_refs_json: JsonColumn;
-  created_at: string;
-}
-
-interface ExternalAssistRecordsTable {
-  id: string;
-  phase: string;
-  status: string;
-  provider_id: string;
-  session_id: string;
-  run_id: string | null;
-  input_message_id: string | null;
-  query: string;
-  role: string;
-  hints_json: JsonColumn;
-  error: string | null;
-  isolated_from_memory: number;
-  included_in_active_memory: number;
-  created_at: string;
-  updated_at: string;
-}
-
-interface SettingsTable {
-  id: "default";
-  ui_locale: string;
-  output_locale: string;
-  memory_capture_mode: string;
-  knowledge_wiki_capture_mode: string;
-  llm_wiki_capture_mode?: string;
-  skill_capture_mode: string;
-  external_provider_role: string;
-  default_backend_id: string | null;
-  updated_at: string;
-}
-
-interface PluginStatesTable {
-  manifest_id: string;
-  enabled: number;
-  version: string;
-  updated_at: string;
-}
-
-interface MigrationJournalTable {
-  id: string;
-  name: string;
-  status: string;
-  details_json: JsonColumn;
-  created_at: string;
-}
-
-interface GrantsTable {
-  id: string;
-  capability_id: string;
-  operation: string;
-  actor_identity: string;
-  channel: string;
-  resource_scope: string;
-  manifest_version: string;
-  risk_snapshot: string;
-  scope_snapshot: string;
-  external_impact_snapshot: number;
-  secret_requirement_snapshot: string;
-  granted_by: string;
-  reason: string;
-  created_at: string;
-  expires_at: string | null;
-  revoked_at: string | null;
-}
-
-interface BackendRunsTable {
-  id: string;
-  session_id: string;
-  input_message_id: string;
-  output_message_id: string | null;
-  backend_id: string;
-  backend_kind: string;
-  backend_session_id: string | null;
-  status: string;
-  phase: string | null;
-  current_attempt: number | null;
-  request_idempotency_key: string | null;
-  request_hash: string | null;
-  started_at: string;
-  completed_at: string | null;
-  input_summary: string;
-  output_summary: string | null;
-  error_code: string | null;
-  metadata_json: JsonColumn;
-}
-
-interface SessionRunReservationsTable {
-  session_id: string;
-  run_id: string;
-  status: string;
-  version: number;
-  held_at: string;
-  released_at: string | null;
-}
-
-interface ClientEventsTable {
-  id: string;
-  target_client_kind: string;
-  target_client_id: string | null;
-  event_type: string;
-  status: string;
-  payload_json: JsonColumn;
-  resource_refs_json: JsonColumn;
-  created_at: string;
-  delivered_at: string | null;
-  acked_at: string | null;
-  expires_at: string | null;
-  error_code: string | null;
-}
-
-interface WorkspaceChangesTable {
-  id: string;
-  run_id: string;
-  session_id: string;
-  resource_ref_json: JsonColumn;
-  change_type: string;
-  summary: string;
-  legacy_operation_id: string | null;
-  correlation_id: string | null;
-  created_at: string;
-}
-
-interface ResourceTranslationsTable {
-  id: string;
-  source_ref_json: JsonColumn;
-  source_locale: string;
-  target_locale: string;
-  status: string;
-  original_hash: string;
-  translated_text: string;
-  provenance_json: JsonColumn | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface WorkspaceDb {
-  sessions: SessionsTable;
-  messages: MessagesTable;
-  message_presentations: MessagePresentationsTable;
-  skill_optimization_runs: SkillOptimizationRunsTable;
-  skill_optimization_datasets: SkillOptimizationDatasetsTable;
-  optimization_candidates: OptimizationCandidatesTable;
-  optimization_evaluations: OptimizationEvaluationsTable;
-  optimization_promotions: OptimizationPromotionsTable;
-  skill_optimization_snapshots: SkillOptimizationSnapshotsTable;
-  skill_optimization_locks: SkillOptimizationLocksTable;
-  operations: OperationsTable;
-  domain_command_executions: DomainCommandExecutionsTable;
-  objectives: ObjectivesTable;
-  work_items: WorkItemsTable;
-  work_dependencies: WorkDependenciesTable;
-  run_checkpoints: RunCheckpointsTable;
-  workspace_file_transactions: WorkspaceFileTransactionsTable;
-  generated_surfaces: GeneratedSurfacesTable;
-  artifact_revisions: ArtifactRevisionsTable;
-  generated_surface_revisions: GeneratedSurfaceRevisionsTable;
-  surface_interactions: SurfaceInteractionsTable;
-  policy_decisions: PolicyDecisionsTable;
-  approval_requests: ApprovalRequestsTable;
-  audit_records: AuditRecordsTable;
-  rollback_points: RollbackPointsTable;
-  artifacts: ArtifactsTable;
-  memory_index: MemoryIndexTable;
-  skill_index: SkillIndexTable;
-  learning_resource_uses: LearningResourceUseTable;
-  learning_evaluations: LearningEvaluationTable;
-  learning_snapshots: LearningSnapshotTable;
-  background_review_changes: BackgroundReviewChangeTable;
-  learning_job_reports: LearningJobReportTable;
-  wiki_index: WikiIndexTable;
-  collection_schemas: CollectionSchemasTable;
-  collection_records: CollectionRecordsTable;
-  collection_patches: CollectionPatchesTable;
-  automation_jobs: AutomationJobsTable;
-  automation_runs: AutomationRunsTable;
-  external_sends: ExternalSendsTable;
-  gateway_pairings: GatewayPairingsTable;
-  gateway_pairing_policies: GatewayPairingPoliciesTable;
-  gateway_routing_policies: GatewayRoutingPoliciesTable;
-  gateway_inbound_messages: GatewayInboundMessagesTable;
-  gateway_deliveries:GatewayDeliveriesTable;
-  gateway_boundary_policies: GatewayBoundaryPoliciesTable;
-  gateway_mcp_configs: GatewayMcpConfigsTable;
-  gateway_concurrency_locks: GatewayConcurrencyLocksTable;
-  gateway_sandbox_instances: GatewaySandboxInstancesTable;
-  gateway_sandbox_workspace_syncs: GatewaySandboxWorkspaceSyncsTable;
-  reflection_runs: ReflectionRunsTable;
-  reflection_suggestions: ReflectionSuggestionsTable;
-  tool_runs: ToolRunsTable;
-  external_assist_records: ExternalAssistRecordsTable;
-  settings: SettingsTable;
-  plugin_states: PluginStatesTable;
-  grants: GrantsTable;
-  backend_runs: BackendRunsTable;
-  session_run_reservations: SessionRunReservationsTable;
-  backend_events: BackendEventsTable;
-  client_events: ClientEventsTable;
-  workspace_changes: WorkspaceChangesTable;
-  resource_translations: ResourceTranslationsTable;
-  migration_journal: MigrationJournalTable;
-}
-
 export interface WorkspaceStoreOptions {
   rootDir: string;
   fileTransactionFailureInjector?: (phase: "planned" | "staged" | "db_transaction" | "db_committed" | "renamed") => void;
   restoreFailureInjector?: (phase: "extract" | "hash_verify" | "swap") => void;
 }
 
-export class WorkspaceSimulatedCrashError extends Error {}
+export { WorkspaceSimulatedCrashError };
 
 export interface SearchResult {
   kind: "session" | "message" | "artifact" | "audit";
@@ -1225,14 +375,7 @@ export interface WorkspaceRepairStep {
   effect: string;
 }
 
-export interface WorkspaceResourceBoundary {
-  resource: string;
-  source_of_truth: "filesystem" | "sqlite" | "derived";
-  file_roots: string[];
-  sqlite_tables: string[];
-  sqlite_role: "none" | "index" | "history" | "queue" | "audit" | "metadata";
-  note: string;
-}
+export type { WorkspaceResourceBoundary };
 
 export interface WikiReindexResult {
   active: number;
@@ -1454,924 +597,58 @@ export interface ArchiveMemoryResult {
 export class WorkspaceStore {
   readonly rootDir: string;
   readonly dbPath: string;
-  db: Kysely<WorkspaceDb>;
+  private db: Kysely<KernelWorkspaceDb>;
+  private readonly paths: WorkspacePaths;
+  private readonly database: WorkspaceDatabase;
+  private sessionSearchIndex: SessionSearchIndex;
+  private fileTransactions: WorkspaceFileTransactionCoordinator;
+  private collectionRecordRecoveryHandler: CollectionRecordRecoveryHandler;
   private sessionSearchIndexMode: "fts5_trigram" | "fts5" | "like" = "like";
   private readonly fileTransactionFailureInjector?: WorkspaceStoreOptions["fileTransactionFailureInjector"];
   private readonly restoreFailureInjector?: WorkspaceStoreOptions["restoreFailureInjector"];
 
   constructor(options: WorkspaceStoreOptions) {
-    this.rootDir = options.rootDir;
-    this.dbPath = path.join(this.rootDir, "workspace.sqlite");
+    this.paths = new WorkspacePaths(options.rootDir);
+    this.rootDir = this.paths.rootDir;
+    this.dbPath = this.paths.dbPath;
     this.fileTransactionFailureInjector = options.fileTransactionFailureInjector;
     this.restoreFailureInjector = options.restoreFailureInjector;
-    this.db = this.openDatabase();
+    this.database = new WorkspaceDatabase(this.paths);
+    this.db = this.database.open();
+    this.sessionSearchIndex = new SessionSearchIndex(this.db);
+    this.collectionRecordRecoveryHandler = new CollectionRecordRecoveryHandler(this.db, this.rootDir);
+    this.fileTransactions = new WorkspaceFileTransactionCoordinator(this.db, this.rootDir, this.fileTransactionFailureInjector as WorkspaceFileTransactionFailureInjector | undefined, [this.collectionRecordRecoveryHandler]);
   }
 
-  private openDatabase(): Kysely<WorkspaceDb> {
-    const database = new Database(this.dbPath);
-    database.pragma("foreign_keys = ON");
-    database.pragma("journal_mode = WAL");
-    database.pragma("synchronous = NORMAL");
-    database.pragma("busy_timeout = 5000");
-    return new Kysely<WorkspaceDb>({
-      dialect: new SqliteDialect({
-        database
-      })
-    });
+  private installKernelServices(): void {
+    this.sessionSearchIndex = new SessionSearchIndex(this.db);
+    this.collectionRecordRecoveryHandler = new CollectionRecordRecoveryHandler(this.db, this.rootDir);
+    this.fileTransactions = new WorkspaceFileTransactionCoordinator(this.db, this.rootDir, this.fileTransactionFailureInjector as WorkspaceFileTransactionFailureInjector | undefined, [this.collectionRecordRecoveryHandler]);
   }
 
-  private reopenDatabase(): void {
-    this.db = this.openDatabase();
+  private async reopenDatabase(): Promise<void> {
+    this.db = await this.database.reopen();
+    this.installKernelServices();
   }
 
   static async create(options: WorkspaceStoreOptions): Promise<WorkspaceStore> {
-    await ensureWorkspaceLayout(options.rootDir);
+    const paths = new WorkspacePaths(options.rootDir);
+    await paths.ensureWorkspaceLayout();
     const store = new WorkspaceStore(options);
-    await store.migrate();
-    await store.recoverWorkspaceFileTransactions();
-    await store.ensureDefaultSettings();
-    return store;
-  }
-
-  async migrate(): Promise<void> {
-    const migrationJournalStatement = `CREATE TABLE IF NOT EXISTS migration_journal (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        details_json TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )`;
-    await sql.raw(migrationJournalStatement).execute(this.db);
-    await sql.raw(`CREATE TABLE IF NOT EXISTS schema_migrations (
-      version INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      checksum TEXT NOT NULL,
-      applied_at TEXT NOT NULL
-    )`).execute(this.db);
-
-    const statements = [
-      `CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        session_key TEXT NOT NULL,
-        title TEXT NOT NULL,
-        ui_locale TEXT NOT NULL,
-        output_locale TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        input_locale TEXT NOT NULL,
-        output_locale TEXT NOT NULL,
-        envelope_json TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS message_presentations (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        title TEXT NOT NULL,
-        subtitle TEXT NOT NULL,
-        collection_id TEXT NOT NULL,
-        view_id TEXT NOT NULL,
-        renderer TEXT NOT NULL,
-        view_state_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id),
-        FOREIGN KEY (message_id) REFERENCES messages(id)
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_message_presentations_session_message ON message_presentations(session_id, message_id)`,
-      `CREATE TABLE IF NOT EXISTS operations (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        capability_id TEXT NOT NULL,
-        operation TEXT NOT NULL,
-        actor_identity TEXT NOT NULL,
-        instruction_source TEXT NOT NULL,
-        instruction_authority TEXT NOT NULL,
-        channel TEXT NOT NULL,
-        input_hash TEXT NOT NULL,
-        input_ref_json TEXT,
-        target_resource_refs_json TEXT NOT NULL,
-        proposed_effects_json TEXT NOT NULL,
-        status TEXT NOT NULL,
-        policy_decision_id TEXT,
-        approval_request_id TEXT,
-        result_ref_json TEXT,
-        error TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS domain_command_executions (
-        id TEXT PRIMARY KEY,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        command_id TEXT NOT NULL,
-        input_source TEXT NOT NULL,
-        payload_hash TEXT NOT NULL,
-        phase TEXT NOT NULL DEFAULT 'external_running',
-        status TEXT NOT NULL,
-        result_json TEXT,
-        error TEXT,
-        heartbeat_at TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_domain_command_executions_status_updated ON domain_command_executions(status, updated_at)`,
-      `CREATE TABLE IF NOT EXISTS objectives (
-        id TEXT PRIMARY KEY,
-        session_id TEXT,
-        title TEXT NOT NULL,
-        objective TEXT NOT NULL,
-        completion_criteria_json TEXT NOT NULL,
-        status TEXT NOT NULL,
-        token_budget INTEGER,
-        time_budget_ms INTEGER,
-        max_attempts INTEGER,
-        current_checkpoint_id TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        completed_at TEXT
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_objectives_status_updated ON objectives(status, updated_at)`,
-      `CREATE TABLE IF NOT EXISTS work_items (
-        id TEXT PRIMARY KEY,
-        objective_id TEXT NOT NULL,
-        parent_work_item_id TEXT,
-        instruction TEXT NOT NULL,
-        status TEXT NOT NULL,
-        priority INTEGER NOT NULL,
-        attempt INTEGER NOT NULL,
-        max_attempts INTEGER NOT NULL,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        lease_owner TEXT,
-        lease_expires_at TEXT,
-        heartbeat_at TEXT,
-        retry_after_at TEXT,
-        backend_run_id TEXT,
-        current_checkpoint_id TEXT,
-        failure_kind TEXT,
-        error TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        started_at TEXT,
-        completed_at TEXT,
-        FOREIGN KEY (objective_id) REFERENCES objectives(id),
-        FOREIGN KEY (parent_work_item_id) REFERENCES work_items(id)
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_work_items_claim ON work_items(status, retry_after_at, priority, created_at)`,
-      `CREATE INDEX IF NOT EXISTS idx_work_items_objective ON work_items(objective_id, status)`,
-      `CREATE TABLE IF NOT EXISTS work_dependencies (
-        id TEXT PRIMARY KEY,
-        objective_id TEXT NOT NULL,
-        predecessor_work_item_id TEXT NOT NULL,
-        successor_work_item_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(predecessor_work_item_id, successor_work_item_id),
-        FOREIGN KEY (objective_id) REFERENCES objectives(id),
-        FOREIGN KEY (predecessor_work_item_id) REFERENCES work_items(id),
-        FOREIGN KEY (successor_work_item_id) REFERENCES work_items(id)
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_work_dependencies_successor ON work_dependencies(successor_work_item_id)`,
-      `CREATE TABLE IF NOT EXISTS run_checkpoints (
-        id TEXT PRIMARY KEY,
-        objective_id TEXT NOT NULL,
-        work_item_id TEXT NOT NULL,
-        sequence INTEGER NOT NULL,
-        phase TEXT NOT NULL,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        backend_run_id TEXT,
-        backend_session_id TEXT,
-        event_cursor INTEGER,
-        summary TEXT NOT NULL,
-        generated_resource_refs_json TEXT NOT NULL,
-        pending_operation_ids_json TEXT NOT NULL,
-        state_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(work_item_id, sequence),
-        FOREIGN KEY (objective_id) REFERENCES objectives(id),
-        FOREIGN KEY (work_item_id) REFERENCES work_items(id)
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_run_checkpoints_work_item ON run_checkpoints(work_item_id, sequence)`,
-      `CREATE TABLE IF NOT EXISTS workspace_file_transactions (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        target_path TEXT NOT NULL,
-        staged_path TEXT NOT NULL,
-        collection_id TEXT,
-        record_id TEXT,
-        patch_id TEXT,
-        before_json TEXT NOT NULL,
-        after_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_workspace_file_transactions_status ON workspace_file_transactions(status, created_at)`,
-      `CREATE TABLE IF NOT EXISTS generated_surfaces (
-        id TEXT PRIMARY KEY,
-        state TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        definition_json TEXT NOT NULL,
-        content_hash TEXT NOT NULL,
-        current_revision_id TEXT NOT NULL,
-        current_revision INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS artifact_revisions (
-        id TEXT PRIMARY KEY,
-        artifact_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        revision_json TEXT NOT NULL,
-        content_hash TEXT NOT NULL,
-        file_path TEXT NOT NULL,
-        blob_path TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(artifact_id, revision),
-        FOREIGN KEY (artifact_id) REFERENCES artifacts(id)
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_artifact_revisions_artifact ON artifact_revisions(artifact_id, revision)`,
-      `CREATE TABLE IF NOT EXISTS generated_surface_revisions (
-        id TEXT PRIMARY KEY,
-        surface_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        revision_json TEXT NOT NULL,
-        bundle_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(surface_id, revision),
-        FOREIGN KEY (surface_id) REFERENCES generated_surfaces(id)
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_generated_surface_revisions_surface ON generated_surface_revisions(surface_id, revision)`,
-      `CREATE TABLE IF NOT EXISTS surface_interactions (
-        id TEXT PRIMARY KEY,
-        surface_id TEXT NOT NULL,
-        revision_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        interaction_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (surface_id) REFERENCES generated_surfaces(id),
-        FOREIGN KEY (revision_id) REFERENCES generated_surface_revisions(id),
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_surface_interactions_surface ON surface_interactions(surface_id, created_at)`,
-      `CREATE TABLE IF NOT EXISTS policy_decisions (
-        id TEXT PRIMARY KEY,
-        operation_id TEXT NOT NULL,
-        capability_id TEXT NOT NULL,
-        operation TEXT NOT NULL,
-        decision TEXT NOT NULL,
-        reason TEXT NOT NULL,
-        policy_inputs_json TEXT NOT NULL,
-        matched_rules_json TEXT NOT NULL,
-        required_approval_level TEXT NOT NULL,
-        grant_id TEXT,
-        created_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS approval_requests (
-        id TEXT PRIMARY KEY,
-        operation_id TEXT NOT NULL,
-        requested_level TEXT NOT NULL,
-        status TEXT NOT NULL,
-        reason TEXT NOT NULL,
-        requested_by TEXT NOT NULL,
-        decided_by TEXT,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        decided_at TEXT
-      )`,
-      `CREATE TABLE IF NOT EXISTS audit_records (
-        id TEXT PRIMARY KEY,
-        actor_identity TEXT NOT NULL,
-        operation_id TEXT NOT NULL,
-        capability_id TEXT NOT NULL,
-        instruction_source TEXT NOT NULL,
-        inputs_summary TEXT NOT NULL,
-        outputs_summary TEXT NOT NULL,
-        policy_decision_id TEXT NOT NULL,
-        affected_resources_json TEXT NOT NULL,
-        rollback_point_id TEXT,
-        created_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS rollback_points (
-        id TEXT PRIMARY KEY,
-        operation_id TEXT NOT NULL,
-        affected_resources_json TEXT NOT NULL,
-        before_snapshot_json TEXT NOT NULL,
-        after_snapshot_json TEXT NOT NULL,
-        reversible INTEGER NOT NULL,
-        irreversible_effects_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS artifacts (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        locale TEXT NOT NULL,
-        source_locales_json TEXT NOT NULL,
-        file_ref_json TEXT NOT NULL,
-        metadata_json TEXT NOT NULL,
-        source_operation_id TEXT NOT NULL,
-        created_by TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS memory_index (
-        id TEXT PRIMARY KEY,
-        state TEXT NOT NULL,
-        topic TEXT NOT NULL,
-        source TEXT NOT NULL,
-        source_locale TEXT NOT NULL,
-        content_locale TEXT NOT NULL,
-        source_kind TEXT NOT NULL,
-        instruction_authority TEXT NOT NULL,
-        file_path TEXT NOT NULL,
-        frontmatter_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS skill_index (
-        id TEXT PRIMARY KEY,
-        state TEXT NOT NULL,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL,
-        tags_json TEXT NOT NULL,
-        required_capabilities_json TEXT NOT NULL,
-        file_path TEXT NOT NULL UNIQUE,
-        frontmatter_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS skill_usage (
-        skill_id TEXT PRIMARY KEY,
-        use_count INTEGER NOT NULL,
-        last_used_at TEXT,
-        last_run_id TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (skill_id) REFERENCES skill_index(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS learning_resource_uses (
-        id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        resource_kind TEXT NOT NULL,
-        resource_id TEXT NOT NULL,
-        resource_version TEXT,
-        content_hash TEXT,
-        stage TEXT NOT NULL,
-        source_operation_id TEXT,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(run_id, resource_kind, resource_id, stage, source_operation_id),
-        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE INDEX IF NOT EXISTS learning_resource_uses_run_idx ON learning_resource_uses(run_id, created_at DESC)`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS learning_resource_uses_dedupe_idx ON learning_resource_uses(run_id, resource_kind, resource_id, stage, COALESCE(source_operation_id, ''))`,
-      `CREATE TABLE IF NOT EXISTS learning_evaluations (
-        id TEXT PRIMARY KEY,
-        learning_resource_ref_json TEXT NOT NULL,
-        learning_resource_version TEXT,
-        task_class TEXT NOT NULL,
-        compared_run_ids_json TEXT NOT NULL,
-        before_metrics_json TEXT NOT NULL,
-        after_metrics_json TEXT NOT NULL,
-        effect_estimate REAL NOT NULL,
-        confidence REAL NOT NULL,
-        assessment TEXT NOT NULL,
-        evidence_refs_json TEXT NOT NULL,
-        evaluator TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )`,
-      `CREATE INDEX IF NOT EXISTS learning_evaluations_resource_idx ON learning_evaluations(learning_resource_version, created_at DESC)`,
-      `CREATE TABLE IF NOT EXISTS learning_snapshots (
-        id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL,
-        path TEXT NOT NULL,
-        resource_counts_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        restored_at TEXT
-      )`,
-      `CREATE TABLE IF NOT EXISTS background_review_changes (
-        id TEXT PRIMARY KEY,
-        origin TEXT NOT NULL,
-        source_run_id TEXT NOT NULL,
-        source_session_id TEXT NOT NULL,
-        review_run_id TEXT NOT NULL,
-        mutation_kind TEXT NOT NULL,
-        resource_ref_json TEXT NOT NULL,
-        before_version TEXT,
-        after_version TEXT NOT NULL,
-        reason_summary TEXT NOT NULL,
-        evidence_refs_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(source_run_id, mutation_kind, after_version)
-      )`,
-      `CREATE TABLE IF NOT EXISTS learning_job_reports (
-        id TEXT PRIMARY KEY,
-        job_kind TEXT NOT NULL,
-        run_id TEXT NOT NULL,
-        report_json TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )`,
-      `CREATE INDEX IF NOT EXISTS learning_job_reports_kind_idx ON learning_job_reports(job_kind, created_at DESC)`,
-      `CREATE TABLE IF NOT EXISTS curator_state (
-        id TEXT PRIMARY KEY,
-        paused INTEGER NOT NULL,
-        interval_hours INTEGER NOT NULL,
-        min_idle_hours REAL NOT NULL,
-        stale_after_days INTEGER NOT NULL,
-        archive_after_days INTEGER NOT NULL,
-        last_run_at TEXT,
-        last_run_summary TEXT,
-        run_count INTEGER NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS wiki_index (
-        id TEXT PRIMARY KEY,
-        slug TEXT NOT NULL UNIQUE,
-        title TEXT NOT NULL,
-        state TEXT NOT NULL,
-        content_locale TEXT NOT NULL,
-        tags_json TEXT NOT NULL,
-        source_refs_json TEXT NOT NULL,
-        provenance_json TEXT NOT NULL,
-        file_path TEXT NOT NULL UNIQUE,
-        frontmatter_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS collection_schemas (
-        id TEXT PRIMARY KEY,
-        version TEXT NOT NULL,
-        file_path TEXT NOT NULL UNIQUE,
-        schema_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS collection_records (
-        id TEXT NOT NULL,
-        collection_id TEXT NOT NULL,
-        file_path TEXT NOT NULL UNIQUE,
-        record_json TEXT NOT NULL,
-        version INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (collection_id, id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS collection_patches (
-        id TEXT NOT NULL,
-        collection_id TEXT NOT NULL,
-        record_id TEXT NOT NULL,
-        patch_json TEXT NOT NULL,
-        source_operation_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (collection_id, record_id, id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS automation_runs (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        source TEXT NOT NULL,
-        session_id TEXT,
-        backend_run_id TEXT,
-        status TEXT NOT NULL,
-        operation_id TEXT,
-        started_at TEXT NOT NULL,
-        completed_at TEXT,
-        error TEXT
-      )`,
-      `CREATE TABLE IF NOT EXISTS automation_jobs (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        schedule TEXT NOT NULL,
-        target_instruction TEXT NOT NULL,
-        delivery_target_json TEXT NOT NULL,
-        next_run_at TEXT,
-        last_run_at TEXT,
-        retry_after_at TEXT,
-        locked_until TEXT,
-        failure_count INTEGER NOT NULL DEFAULT 0,
-        max_attempts INTEGER NOT NULL DEFAULT 3,
-        last_error TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS external_sends (
-        id TEXT PRIMARY KEY,
-        channel TEXT NOT NULL,
-        status TEXT NOT NULL,
-        target_json TEXT NOT NULL,
-        title TEXT NOT NULL,
-        body TEXT NOT NULL,
-        operation_id TEXT,
-        approval_request_id TEXT,
-        dispatch_result_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        dispatched_at TEXT
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_pairings (
-        id TEXT PRIMARY KEY,
-        channel TEXT NOT NULL,
-        source_identity TEXT NOT NULL,
-        source_label TEXT NOT NULL,
-        status TEXT NOT NULL,
-        pairing_code TEXT,
-        session_key TEXT NOT NULL,
-        metadata_json TEXT NOT NULL,
-        requested_at TEXT NOT NULL,
-        expires_at TEXT,
-        resolved_at TEXT,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_pairing_policies (
-        id TEXT PRIMARY KEY,
-        channel TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL,
-        trust_mode TEXT NOT NULL,
-        allowlist_json TEXT NOT NULL,
-        pairing_ttl_ms INTEGER,
-        duplicate_window_ms INTEGER,
-        rate_limit_window_ms INTEGER,
-        rate_limit_max INTEGER,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_routing_policies (
-        id TEXT PRIMARY KEY,
-        channel TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL,
-        session_key_strategy TEXT NOT NULL,
-        default_account_id TEXT,
-        default_thread_id TEXT,
-        default_route TEXT NOT NULL,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_inbound_messages (
-        id TEXT PRIMARY KEY,
-        channel TEXT NOT NULL,
-        source_identity TEXT NOT NULL,
-        body TEXT NOT NULL,
-        status TEXT NOT NULL,
-        trusted INTEGER NOT NULL,
-        session_key TEXT,
-        pairing_id TEXT,
-        message_id TEXT,
-        error TEXT,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_boundary_policies (
-        id TEXT PRIMARY KEY,
-        source_channel TEXT NOT NULL,
-        source_identity TEXT,
-        session_key TEXT NOT NULL,
-        allowed_tools_json TEXT NOT NULL,
-        mcp_config_refs_json TEXT NOT NULL,
-        secret_refs_json TEXT NOT NULL,
-        sandbox_json TEXT NOT NULL,
-        path_normalization_json TEXT NOT NULL,
-        allowlist_json TEXT NOT NULL,
-        timeout_ms INTEGER,
-        concurrency_lock_json TEXT,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_mcp_configs (
-        id TEXT PRIMARY KEY,
-        server_name TEXT NOT NULL UNIQUE,
-        transport TEXT NOT NULL,
-        enabled INTEGER NOT NULL,
-        allowed_tools_json TEXT NOT NULL,
-        config_ref_json TEXT,
-        secret_refs_json TEXT NOT NULL,
-        stdio_json TEXT,
-        http_json TEXT,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_concurrency_locks (
-        id TEXT PRIMARY KEY,
-        lock_key TEXT NOT NULL UNIQUE,
-        scope TEXT NOT NULL,
-        policy_id TEXT,
-        owner_ref_json TEXT,
-        status TEXT NOT NULL,
-        acquired_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        released_at TEXT,
-        metadata_json TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_sandbox_instances (
-        id TEXT PRIMARY KEY,
-        instance_key TEXT NOT NULL UNIQUE,
-        scope TEXT NOT NULL,
-        backend TEXT NOT NULL,
-        status TEXT NOT NULL,
-        sandbox_json TEXT NOT NULL,
-        session_key TEXT,
-        owner_ref_json TEXT,
-        workspace_root TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        last_used_at TEXT,
-        deleted_at TEXT,
-        metadata_json TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS gateway_sandbox_workspace_syncs (
-        id TEXT PRIMARY KEY,
-        instance_id TEXT NOT NULL,
-        instance_key TEXT NOT NULL,
-        direction TEXT NOT NULL,
-        status TEXT NOT NULL,
-        workspace_root TEXT,
-        remote_workspace_root TEXT,
-        file_count INTEGER,
-        byte_count INTEGER,
-        error TEXT,
-        started_at TEXT NOT NULL,
-        completed_at TEXT,
-        metadata_json TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS reflection_runs (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        source_run_id TEXT,
-        session_id TEXT,
-        status TEXT NOT NULL,
-        input_summary TEXT NOT NULL,
-        output_summary TEXT,
-        started_at TEXT NOT NULL,
-        completed_at TEXT,
-        error TEXT
-      )`,
-      `CREATE TABLE IF NOT EXISTS reflection_suggestions (
-        id TEXT PRIMARY KEY,
-        reflection_run_id TEXT NOT NULL,
-        suggestion_type TEXT NOT NULL,
-        status TEXT NOT NULL,
-        title TEXT NOT NULL,
-        content TEXT NOT NULL,
-        target_ref_json TEXT,
-        source_refs_json TEXT NOT NULL,
-        confidence REAL NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (reflection_run_id) REFERENCES reflection_runs(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS tool_runs (
-        id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        tool_call_id TEXT,
-        provider_tool_name TEXT NOT NULL,
-        action_id TEXT,
-        status TEXT NOT NULL,
-        input_summary TEXT NOT NULL,
-        output_summary TEXT NOT NULL,
-        resource_refs_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS external_assist_records (
-        id TEXT PRIMARY KEY,
-        phase TEXT NOT NULL,
-        status TEXT NOT NULL,
-        provider_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        run_id TEXT,
-        input_message_id TEXT,
-        query TEXT NOT NULL,
-        role TEXT NOT NULL,
-        hints_json TEXT NOT NULL,
-        error TEXT,
-        isolated_from_memory INTEGER NOT NULL,
-        included_in_active_memory INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id),
-        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
-        FOREIGN KEY (input_message_id) REFERENCES messages(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS settings (
-        id TEXT PRIMARY KEY,
-        ui_locale TEXT NOT NULL,
-        output_locale TEXT NOT NULL,
-        memory_capture_mode TEXT NOT NULL DEFAULT 'auto',
-        knowledge_wiki_capture_mode TEXT NOT NULL DEFAULT 'auto',
-        skill_capture_mode TEXT NOT NULL DEFAULT 'auto',
-        external_provider_role TEXT NOT NULL DEFAULT 'assistive',
-        default_backend_id TEXT,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS plugin_states (
-        manifest_id TEXT PRIMARY KEY,
-        enabled INTEGER NOT NULL,
-        version TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS grants (
-        id TEXT PRIMARY KEY,
-        capability_id TEXT NOT NULL,
-        operation TEXT NOT NULL,
-        actor_identity TEXT NOT NULL,
-        channel TEXT NOT NULL,
-        resource_scope TEXT NOT NULL,
-        manifest_version TEXT NOT NULL,
-        risk_snapshot TEXT NOT NULL,
-        scope_snapshot TEXT NOT NULL,
-        external_impact_snapshot INTEGER NOT NULL,
-        secret_requirement_snapshot TEXT NOT NULL,
-        granted_by TEXT NOT NULL,
-        reason TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT,
-        revoked_at TEXT
-      )`,
-      `CREATE TABLE IF NOT EXISTS backend_runs (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        input_message_id TEXT NOT NULL,
-        output_message_id TEXT,
-        backend_id TEXT NOT NULL,
-        backend_kind TEXT NOT NULL,
-        backend_session_id TEXT,
-        status TEXT NOT NULL,
-        phase TEXT,
-        current_attempt INTEGER,
-        request_idempotency_key TEXT,
-        request_hash TEXT,
-        started_at TEXT NOT NULL,
-        completed_at TEXT,
-        input_summary TEXT NOT NULL,
-        output_summary TEXT,
-        error_code TEXT,
-        metadata_json TEXT NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS backend_events (
-        id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        backend_session_id TEXT,
-        event_type TEXT NOT NULL,
-        sequence INTEGER NOT NULL,
-        attempt_no INTEGER,
-        source_event_id TEXT,
-        source_sequence INTEGER,
-        payload_json TEXT NOT NULL,
-        resource_refs_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE (run_id, sequence),
-        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS session_run_reservations (
-        session_id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL,
-        version INTEGER NOT NULL,
-        held_at TEXT NOT NULL,
-        released_at TEXT,
-        FOREIGN KEY (session_id) REFERENCES sessions(id),
-        FOREIGN KEY (run_id) REFERENCES backend_runs(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS client_events (
-        id TEXT PRIMARY KEY,
-        target_client_kind TEXT NOT NULL,
-        target_client_id TEXT,
-        event_type TEXT NOT NULL,
-        status TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        resource_refs_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        delivered_at TEXT,
-        acked_at TEXT,
-        expires_at TEXT,
-        error_code TEXT
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_client_events_delivery ON client_events(target_client_kind, status, created_at)`,
-      `CREATE INDEX IF NOT EXISTS idx_client_events_expiry ON client_events(status, expires_at)`,
-      `CREATE TABLE IF NOT EXISTS workspace_changes (
-        id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        resource_ref_json TEXT NOT NULL,
-        change_type TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        legacy_operation_id TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (run_id) REFERENCES backend_runs(id),
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS resource_translations (
-        id TEXT PRIMARY KEY,
-        source_ref_json TEXT NOT NULL,
-        source_locale TEXT NOT NULL,
-        target_locale TEXT NOT NULL,
-        status TEXT NOT NULL,
-        original_hash TEXT NOT NULL,
-        translated_text TEXT NOT NULL,
-        provenance_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`
-    ];
-
     try {
-      for (const statement of statements) {
-        await sql.raw(statement).execute(this.db);
-      }
-
-      await this.ensureSettingsColumns();
-      await this.ensureAutomationJobColumns();
-      await this.ensureAutomationRunColumns();
-      await this.ensureCollectionRecordColumns();
-      await this.ensureDomainCommandExecutionColumns();
-      await this.ensureDomainCorrelationColumns();
-      await this.ensureCore02Columns();
-      await this.repairCore03FakeBackendSessions();
-      await this.ensureSessionSearchIndexes();
-      const migrationVersion = 1;
-      const migrationName = "core_baseline";
-      const checksum = createHash("sha256").update(JSON.stringify({ statements, migrationName })).digest("hex");
-      const existing = await sql<{ checksum: string }>`SELECT checksum FROM schema_migrations WHERE version = ${migrationVersion}`.execute(this.db);
-      const existingChecksum = existing.rows[0]?.checksum;
-      if (existingChecksum && existingChecksum !== checksum) {
-        throw new Error(`schema_migration_checksum_mismatch:${migrationVersion}`);
-      }
-      if (!existingChecksum) {
-        await sql`INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (${migrationVersion}, ${migrationName}, ${checksum}, ${nowIso()})`.execute(this.db);
-      }
-      const deliveryMigration=gatewayDeliveryMigration;
-      const deliveryChecksum=createHash("sha256").update(JSON.stringify({statements:deliveryMigration.statements,migrationName:deliveryMigration.name})).digest("hex");
-      const deliveryExisting=await sql<{checksum:string}>`SELECT checksum FROM schema_migrations WHERE version = ${deliveryMigration.version}`.execute(this.db);
-      if(deliveryExisting.rows[0]?.checksum&&deliveryExisting.rows[0].checksum!==deliveryChecksum)throw new Error(`schema_migration_checksum_mismatch:${deliveryMigration.version}`);
-      if(!deliveryExisting.rows[0]){for(const statement of deliveryMigration.statements)await sql.raw(statement).execute(this.db);await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${deliveryMigration.version},${deliveryMigration.name},${deliveryChecksum},${nowIso()})`.execute(this.db)}
-      const optimizationChecksum = createHash("sha256").update(JSON.stringify({ statements: skillOptimizationMigration.statements, migrationName: skillOptimizationMigration.name })).digest("hex");
-      const optimizationExisting = await sql<{ checksum: string }>`SELECT checksum FROM schema_migrations WHERE version = ${skillOptimizationMigration.version}`.execute(this.db);
-      if (optimizationExisting.rows[0]?.checksum && optimizationExisting.rows[0].checksum !== optimizationChecksum) throw new Error(`schema_migration_checksum_mismatch:${skillOptimizationMigration.version}`);
-      if (!optimizationExisting.rows[0]) {
-        for (const statement of skillOptimizationMigration.statements) await sql.raw(statement).execute(this.db);
-        await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${skillOptimizationMigration.version},${skillOptimizationMigration.name},${optimizationChecksum},${nowIso()})`.execute(this.db);
-      }
-      const toolRunErrorCodeChecksum = createHash("sha256").update(JSON.stringify({ statements: toolRunErrorCodeMigration.statements, migrationName: toolRunErrorCodeMigration.name })).digest("hex");
-      const toolRunErrorCodeExisting = await sql<{ checksum: string }>`SELECT checksum FROM schema_migrations WHERE version = ${toolRunErrorCodeMigration.version}`.execute(this.db);
-      if (toolRunErrorCodeExisting.rows[0]?.checksum && toolRunErrorCodeExisting.rows[0].checksum !== toolRunErrorCodeChecksum) {
-        throw new Error(`schema_migration_checksum_mismatch:${toolRunErrorCodeMigration.version}`);
-      }
-      if (!toolRunErrorCodeExisting.rows[0]) {
-        for (const statement of toolRunErrorCodeMigration.statements) await sql.raw(statement).execute(this.db);
-        await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${toolRunErrorCodeMigration.version},${toolRunErrorCodeMigration.name},${toolRunErrorCodeChecksum},${nowIso()})`.execute(this.db);
-      }
-      const gatewayPairingPolicyAllowedToolsChecksum = createHash("sha256").update(JSON.stringify({ statements: gatewayPairingPolicyAllowedToolsMigration.statements, migrationName: gatewayPairingPolicyAllowedToolsMigration.name })).digest("hex");
-      const gatewayPairingPolicyAllowedToolsExisting = await sql<{ checksum: string }>`SELECT checksum FROM schema_migrations WHERE version = ${gatewayPairingPolicyAllowedToolsMigration.version}`.execute(this.db);
-      if (gatewayPairingPolicyAllowedToolsExisting.rows[0]?.checksum && gatewayPairingPolicyAllowedToolsExisting.rows[0].checksum !== gatewayPairingPolicyAllowedToolsChecksum) {
-        throw new Error(`schema_migration_checksum_mismatch:${gatewayPairingPolicyAllowedToolsMigration.version}`);
-      }
-      if (!gatewayPairingPolicyAllowedToolsExisting.rows[0]) {
-        for (const statement of gatewayPairingPolicyAllowedToolsMigration.statements) await sql.raw(statement).execute(this.db);
-        await sql`INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (${gatewayPairingPolicyAllowedToolsMigration.version},${gatewayPairingPolicyAllowedToolsMigration.name},${gatewayPairingPolicyAllowedToolsChecksum},${nowIso()})`.execute(this.db);
-      }
-      await this.ensureGeneratedSurfacePresentationColumns();
-      await this.recordMigrationJournal("schema.ensure", "completed", { statement_count: statements.length });
+      await store.migrate();
+      await store.initializeSessionSearch();
+      await store.recoverWorkspaceFileTransactions();
+      await store.ensureDefaultSettings();
+      return store;
     } catch (error) {
-      await this.recordMigrationJournal("schema.ensure", "failed", {
-        statement_count: statements.length,
-        error: errorMessage(error)
-      }).catch(() => undefined);
+      await store.close().catch(() => undefined);
       throw error;
     }
   }
 
-  private async ensureGeneratedSurfacePresentationColumns(): Promise<void> {
-    const columns = await sql<{ name: string }>`PRAGMA table_info(message_presentations)`.execute(this.db);
-    const existing = new Set(columns.rows.map((row) => row.name));
-    for (const column of ["surface_id", "revision_id", "preview_url"] as const) {
-      if (!existing.has(column)) {
-        await sql.raw(`ALTER TABLE message_presentations ADD COLUMN ${column} TEXT`).execute(this.db);
-      }
-    }
+  async migrate(): Promise<void> {
+    await new WorkspaceMigrationRunner(this.db, workspaceMigrations).migrate();
   }
 
   async listSchemaMigrations(): Promise<Array<{ version: number; name: string; checksum: string; applied_at: string }>> {
@@ -2392,166 +669,6 @@ export class WorkspaceStore {
       busy_timeout: Number(busyTimeout.rows[0]?.timeout ?? 0),
       synchronous: Number(synchronous.rows[0]?.synchronous ?? 0)
     };
-  }
-
-  private async ensureSessionSearchIndexes(): Promise<void> {
-    try {
-      await sql.raw("DROP TABLE IF EXISTS session_search_fts").execute(this.db);
-      await sql.raw("DROP TABLE IF EXISTS session_search_trigram").execute(this.db);
-      await sql.raw("CREATE VIRTUAL TABLE session_search_fts USING fts5(kind UNINDEXED, id UNINDEXED, session_id UNINDEXED, operation_id UNINDEXED, title, body, tokenize='unicode61')").execute(this.db);
-      try {
-        await sql.raw("CREATE VIRTUAL TABLE session_search_trigram USING fts5(kind UNINDEXED, id UNINDEXED, session_id UNINDEXED, operation_id UNINDEXED, title, body, tokenize='trigram')").execute(this.db);
-        this.sessionSearchIndexMode = "fts5_trigram";
-      } catch {
-        this.sessionSearchIndexMode = "fts5";
-      }
-      await this.reindexSessionSearch();
-    } catch {
-      this.sessionSearchIndexMode = "like";
-    }
-  }
-
-  private async ensureSettingsColumns(): Promise<void> {
-    const hadKnowledgeWikiCaptureMode = await this.hasTableColumn("settings", "knowledge_wiki_capture_mode");
-    const hadLegacyLlmWikiCaptureMode = await this.hasTableColumn("settings", "llm_wiki_capture_mode");
-    const columns = [
-      ["memory_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
-      ["knowledge_wiki_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
-      ["skill_capture_mode", "TEXT NOT NULL DEFAULT 'auto'"],
-      ["external_provider_role", "TEXT NOT NULL DEFAULT 'assistive'"],
-      ["default_backend_id", "TEXT"]
-    ] as const;
-
-    for (const [name, definition] of columns) {
-      try {
-        await sql.raw(`ALTER TABLE settings ADD COLUMN ${name} ${definition}`).execute(this.db);
-      } catch (error) {
-        if (!isDuplicateColumnError(error)) {
-          throw error;
-        }
-      }
-    }
-
-    if (!hadKnowledgeWikiCaptureMode && hadLegacyLlmWikiCaptureMode) {
-      await sql.raw(
-        "UPDATE settings SET knowledge_wiki_capture_mode = llm_wiki_capture_mode WHERE llm_wiki_capture_mode IS NOT NULL"
-      ).execute(this.db);
-    }
-    await sql.raw("UPDATE settings SET memory_capture_mode = 'auto' WHERE memory_capture_mode = 'suggest'").execute(this.db);
-    await sql.raw("UPDATE settings SET knowledge_wiki_capture_mode = 'auto' WHERE knowledge_wiki_capture_mode = 'suggest'").execute(this.db);
-    await sql.raw("UPDATE settings SET skill_capture_mode = 'auto' WHERE skill_capture_mode = 'suggest'").execute(this.db);
-  }
-
-  private async ensureAutomationJobColumns(): Promise<void> {
-    const columns = [
-      ["retry_after_at", "TEXT"],
-      ["locked_until", "TEXT"],
-      ["failure_count", "INTEGER NOT NULL DEFAULT 0"],
-      ["max_attempts", "INTEGER NOT NULL DEFAULT 3"],
-      ["last_error", "TEXT"]
-    ] as const;
-
-    for (const [name, definition] of columns) {
-      try {
-        await sql.raw(`ALTER TABLE automation_jobs ADD COLUMN ${name} ${definition}`).execute(this.db);
-      } catch (error) {
-        if (!isDuplicateColumnError(error)) {
-          throw error;
-        }
-      }
-    }
-  }
-
-  private async ensureAutomationRunColumns(): Promise<void> {
-    const columns = [
-      ["backend_run_id", "TEXT"]
-    ] as const;
-
-    for (const [name, definition] of columns) {
-      try {
-        await sql.raw(`ALTER TABLE automation_runs ADD COLUMN ${name} ${definition}`).execute(this.db);
-      } catch (error) {
-        if (!isDuplicateColumnError(error)) {
-          throw error;
-        }
-      }
-    }
-  }
-
-  private async ensureCollectionRecordColumns(): Promise<void> {
-    try {
-      await sql.raw("ALTER TABLE collection_records ADD COLUMN version INTEGER NOT NULL DEFAULT 1").execute(this.db);
-    } catch (error) {
-      if (!isDuplicateColumnError(error)) {
-        throw error;
-      }
-    }
-  }
-
-  private async ensureDomainCommandExecutionColumns(): Promise<void> {
-    if (!await this.hasTableColumn("domain_command_executions", "correlation_id")) {
-      await sql.raw("ALTER TABLE domain_command_executions ADD COLUMN correlation_id TEXT").execute(this.db);
-      await sql.raw("UPDATE domain_command_executions SET correlation_id = id WHERE correlation_id IS NULL").execute(this.db);
-    }
-    if (!await this.hasTableColumn("domain_command_executions", "heartbeat_at")) {
-      await sql.raw("ALTER TABLE domain_command_executions ADD COLUMN heartbeat_at TEXT").execute(this.db);
-      await sql.raw("UPDATE domain_command_executions SET heartbeat_at = updated_at WHERE heartbeat_at IS NULL").execute(this.db);
-    }
-    if (!await this.hasTableColumn("domain_command_executions", "phase")) {
-      await sql.raw("ALTER TABLE domain_command_executions ADD COLUMN phase TEXT NOT NULL DEFAULT 'external_running'").execute(this.db);
-    }
-    await sql.raw("UPDATE domain_command_executions SET status = 'outcome_unknown', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'running' AND phase = 'external_running' AND unixepoch(COALESCE(heartbeat_at, updated_at)) < unixepoch('now', '-5 minutes')").execute(this.db);
-  }
-
-  private async ensureDomainCorrelationColumns(): Promise<void> {
-    if (!await this.hasTableColumn("operations", "correlation_id")) {
-      await sql.raw("ALTER TABLE operations ADD COLUMN correlation_id TEXT").execute(this.db);
-    }
-    if (!await this.hasTableColumn("workspace_changes", "correlation_id")) {
-      await sql.raw("ALTER TABLE workspace_changes ADD COLUMN correlation_id TEXT").execute(this.db);
-    }
-  }
-
-  private async hasTableColumn(table: string, name: string): Promise<boolean> {
-    const result = await sql<{ name: string }>`PRAGMA table_info(${sql.raw(table)})`.execute(this.db);
-    return result.rows.some((row) => row.name === name);
-  }
-
-  private async ensureCore02Columns(): Promise<void> {
-    const additions: Array<[string, string]> = [
-      ["backend_runs", "phase TEXT"],
-      ["backend_runs", "backend_session_id TEXT"],
-      ["backend_runs", "current_attempt INTEGER"],
-      ["backend_runs", "request_idempotency_key TEXT"],
-      ["backend_runs", "request_hash TEXT"],
-      ["backend_events", "attempt_no INTEGER"],
-      ["backend_events", "backend_session_id TEXT"],
-      ["backend_events", "source_event_id TEXT"],
-      ["backend_events", "source_sequence INTEGER"]
-    ];
-    for (const [table, definition] of additions) {
-      const name = definition.split(" ", 1)[0] ?? definition;
-      if (!await this.hasTableColumn(table, name)) {
-        await sql.raw(`ALTER TABLE ${table} ADD COLUMN ${definition}`).execute(this.db);
-      }
-    }
-    await sql.raw("CREATE UNIQUE INDEX IF NOT EXISTS idx_backend_runs_session_idempotency ON backend_runs(session_id, request_idempotency_key) WHERE request_idempotency_key IS NOT NULL").execute(this.db);
-    await sql.raw("CREATE UNIQUE INDEX IF NOT EXISTS idx_backend_events_source_identity ON backend_events(run_id, attempt_no, source_event_id) WHERE source_event_id IS NOT NULL").execute(this.db);
-    await sql.raw("DROP INDEX IF EXISTS idx_backend_events_source_sequence").execute(this.db);
-    await sql.raw("CREATE UNIQUE INDEX idx_backend_events_source_sequence ON backend_events(run_id, attempt_no, source_sequence) WHERE source_sequence IS NOT NULL AND source_event_id IS NULL").execute(this.db);
-    await sql.raw("UPDATE backend_runs SET phase = CASE WHEN status = 'queued' THEN 'admitted' WHEN status = 'waiting_for_backend_input' THEN 'waiting' WHEN status IN ('completed','failed','cancelled','outcome_unknown') THEN 'settled' ELSE NULL END WHERE phase IS NULL").execute(this.db);
-    await sql.raw("UPDATE backend_runs SET current_attempt = 1 WHERE current_attempt IS NULL").execute(this.db);
-  }
-
-  /** Remove only the old adapter-generated Session IDs from unfinished Runs. */
-  private async repairCore03FakeBackendSessions(): Promise<void> {
-    await sql.raw(`
-      UPDATE backend_runs
-      SET backend_session_id = NULL
-      WHERE status IN ('queued', 'running', 'waiting_for_backend_input')
-        AND backend_session_id IS NOT NULL
-        AND backend_session_id = backend_id || ':' || session_id
-    `).execute(this.db);
   }
 
   async ensureDefaultSettings(): Promise<void> {
@@ -3293,7 +1410,7 @@ export class WorkspaceStore {
   }
 
   /** Core 02 admission: reservation, user message and queued run commit together. */
-  private async executeCore02Transaction<T>(operation: (transaction: Transaction<WorkspaceDb>) => Promise<T>): Promise<T> {
+  private async executeCore02Transaction<T>(operation: (transaction: Transaction<KernelWorkspaceDb>) => Promise<T>): Promise<T> {
     const maxAttempts = 3;
     const defaultBusyTimeoutMs = 5000;
     await sql.raw("PRAGMA busy_timeout = 100").execute(this.db);
@@ -5963,31 +4080,30 @@ export class WorkspaceStore {
         resource_refs: before.resource_refs.filter((ref) => !brokenKeys.has(`${ref.kind}\0${ref.id}\0${ref.uri}`)),
         updated_at: nowIso()
       };
-      const targetPath = path.join(this.rootDir, before.file_path);
-      const transactionId = createId("file_transaction");
-      const stagedRelativePath = `${before.file_path}.pending-${transactionId}`;
-      const stagedPath = path.join(this.rootDir, stagedRelativePath);
-      const createdAt = nowIso();
-      await this.db.insertInto("workspace_file_transactions").values({
-        id: transactionId, kind: "collection_record_repair", status: "planned", target_path: before.file_path,
-        staged_path: stagedRelativePath, collection_id: before.collection_id, record_id: before.id, patch_id: null,
-        before_json: stringify(before), after_json: stringify(after), created_at: createdAt, updated_at: createdAt
-      }).execute();
-      await writeFile(stagedPath, `${JSON.stringify(after, null, 2)}\n`, { flag: "wx" });
-      await this.db.transaction().execute(async (transaction) => {
-        const update = await transaction.updateTable("collection_records").set({ record_json: stringify(after), version: after.version, updated_at: after.updated_at }).where("collection_id", "=", before.collection_id).where("id", "=", before.id).where("version", "=", before.version).executeTakeFirst();
-        if (Number(update.numUpdatedRows) !== 1) throw new Error("collection_record_repair_version_conflict");
-        await transaction.updateTable("workspace_file_transactions").set({ status: "db_committed", updated_at: nowIso() }).where("id", "=", transactionId).execute();
+      const stagedRelativePath = `${before.file_path}.pending-${createId("file_transaction")}`;
+      await this.fileTransactions.execute({
+        kind: "collection_record_repair",
+        targetPath: before.file_path,
+        stagedPath: stagedRelativePath,
+        collectionId: before.collection_id,
+        recordId: before.id,
+        beforeJson: stringify(before),
+        afterJson: stringify(after),
+        stagedContent: `${JSON.stringify(after, null, 2)}\n`,
+        commit: async (transaction) => {
+          if (!await this.collectionRecordRecoveryHandler.commitRepair(transaction, { collectionId: before.collection_id, recordId: before.id, before, after })) {
+            throw new Error("collection_record_repair_version_conflict");
+          }
+        },
+        rollback: (transaction) => this.collectionRecordRecoveryHandler.rollbackRepair(transaction, { collectionId: before.collection_id, recordId: before.id, before, after })
       });
-      await rename(stagedPath, targetPath);
-      await this.db.deleteFrom("workspace_file_transactions").where("id", "=", transactionId).execute();
       repaired += 1;
     }
     return repaired;
   }
 
   async createWorkspaceBackup(): Promise<WorkspaceBackupRecord> {
-    await sql`PRAGMA wal_checkpoint(FULL)`.execute(this.db).catch(() => undefined);
+    await this.database.checkpoint();
     const [health, dbIntegrity] = await Promise.all([
       this.inspectWorkspace(),
       this.checkDatabaseIntegrity()
@@ -6107,14 +4223,12 @@ export class WorkspaceStore {
       if (Object.keys(manifest.file_hashes).length === 0 || JSON.stringify(stagedHashes) !== JSON.stringify(manifest.file_hashes)) {
         throw new Error("workspace_backup_hash_mismatch");
       }
-      const stagedDatabase = new Database(path.join(stagedRoot, "workspace.sqlite"), { readonly: true });
-      const integrity = stagedDatabase.pragma("integrity_check", { simple: true });
-      stagedDatabase.close();
+      const integrity = WorkspaceDatabase.verifyIntegrity(path.join(stagedRoot, "workspace.sqlite"));
       if (integrity !== "ok") throw new Error(`workspace_backup_integrity_failed:${String(integrity)}`);
       this.restoreFailureInjector?.("hash_verify");
 
-      await sql`PRAGMA wal_checkpoint(FULL)`.execute(this.db).catch(() => undefined);
-      await this.db.destroy();
+      await this.database.checkpoint();
+      await this.database.close();
       await mkdir(rollbackRoot, { recursive: true });
       let swapped = false;
       try {
@@ -6142,11 +4256,12 @@ export class WorkspaceStore {
         }
         throw error;
       } finally {
-        this.reopenDatabase();
+        await this.reopenDatabase();
       }
       if (!swapped) throw new Error("workspace_restore_swap_incomplete");
-      await ensureWorkspaceLayout(this.rootDir);
+      await this.paths.ensureWorkspaceLayout();
       await this.migrate();
+      await this.initializeSessionSearch();
       await this.recoverWorkspaceFileTransactions();
       await this.ensureDefaultSettings();
       await rm(rollbackRoot, { recursive: true, force: true });
@@ -6711,34 +4826,11 @@ export class WorkspaceStore {
   }
 
   async recoverWorkspaceFileTransactions(): Promise<{ completed: number; rolled_back: number }> {
-    const rows = await this.db.selectFrom("workspace_file_transactions").selectAll().where("status", "!=", "completed").orderBy("created_at", "asc").execute();
-    let completed = 0;
-    let rolledBack = 0;
-    for (const row of rows) {
-      const targetPath = path.join(this.rootDir, row.target_path);
-      const stagedPath = path.join(this.rootDir, row.staged_path);
-      const target = await readFile(targetPath, "utf8").then((value) => JSON.parse(value) as CollectionRecord).catch(() => undefined);
-      const after = parse<CollectionRecord>(row.after_json);
-      const action = workspaceFileRecoveryAction({ status: row.status, stagedExists: await pathExists(stagedPath), targetVersion: target?.version, afterVersion: after.version });
-      if (action === "finalize_staged") { await rename(stagedPath, targetPath); completed += 1; }
-      else if (action === "accept_target") completed += 1;
-      else if (action === "rollback_database" && row.collection_id && row.record_id) {
-        const before = parse<CollectionRecord>(row.before_json);
-        await this.db.updateTable("collection_records").set({ record_json: stringify(before), version: typeof before.version === "number" ? before.version : 1, updated_at: before.updated_at }).where("collection_id", "=", row.collection_id).where("id", "=", row.record_id).execute();
-        if (row.patch_id) await this.db.deleteFrom("collection_patches").where("collection_id", "=", row.collection_id).where("record_id", "=", row.record_id).where("id", "=", row.patch_id).execute();
-        rolledBack += 1;
-      } else if (action === "discard_staged") {
-        await rm(stagedPath, { force: true });
-        rolledBack += 1;
-      }
-      await this.db.deleteFrom("workspace_file_transactions").where("id", "=", row.id).execute();
-    }
-    return { completed, rolled_back: rolledBack };
+    return this.fileTransactions.recoverPending();
   }
 
   async countPendingWorkspaceFileTransactions(): Promise<number> {
-    const row = await this.db.selectFrom("workspace_file_transactions").select(({ fn }) => fn.countAll<number>().as("count")).where("status", "!=", "completed").executeTakeFirstOrThrow();
-    return Number(row.count);
+    return this.fileTransactions.countPending();
   }
 
   async applyCollectionRecordPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<{
@@ -6760,90 +4852,30 @@ export class WorkspaceStore {
     }
     const after = applyCollectionPatchLocal(before, input.patch, schema);
     await this.validateCollectionRecordLinks(after, schema);
-    const absolutePath = path.join(this.rootDir, before.file_path);
-    const stagedPath = `${absolutePath}.pending-${input.patch.id}`;
     const stagedRelativePath = `${before.file_path}.pending-${input.patch.id}`;
-    const transactionId = createId("file_transaction");
-    const transactionNow = nowIso();
-    await this.db.insertInto("workspace_file_transactions").values({
-      id: transactionId,
-      kind: "collection_record_patch",
-      status: "planned",
-      target_path: before.file_path,
-      staged_path: stagedRelativePath,
-      collection_id: input.collectionId,
-      record_id: input.recordId,
-      patch_id: input.patch.id,
-      before_json: stringify(before),
-      after_json: stringify(after),
-      created_at: transactionNow,
-      updated_at: transactionNow
-    }).execute();
-    let simulatedCrash = false;
     try {
-      this.fileTransactionFailureInjector?.("planned");
-      await writeFile(stagedPath, `${JSON.stringify(after, null, 2)}\n`, { flag: "wx" });
-      await this.db.updateTable("workspace_file_transactions").set({ status: "staged", updated_at: nowIso() }).where("id", "=", transactionId).execute();
-      this.fileTransactionFailureInjector?.("staged");
-      const updated = await this.db.transaction().execute(async (transaction) => {
-        const result = await transaction
-          .updateTable("collection_records")
-          .set({ record_json: stringify(after), version: after.version, updated_at: after.updated_at })
-          .where("collection_id", "=", input.collectionId)
-          .where("id", "=", input.recordId)
-          .where("version", "=", before.version)
-          .executeTakeFirst();
-        if (Number(result.numUpdatedRows) !== 1) {
-          return false;
-        }
-        this.fileTransactionFailureInjector?.("db_transaction");
-        await transaction
-          .insertInto("collection_patches")
-          .values(collectionPatchToRow(input.collectionId, input.patch))
-          .onConflict((oc) => oc.columns(["collection_id", "record_id", "id"]).doNothing())
-          .execute();
-        await transaction.updateTable("workspace_file_transactions").set({ status: "db_committed", updated_at: nowIso() }).where("id", "=", transactionId).execute();
-        return true;
+      await this.fileTransactions.execute({
+        kind: "collection_record_patch",
+        targetPath: before.file_path,
+        stagedPath: stagedRelativePath,
+        collectionId: input.collectionId,
+        recordId: input.recordId,
+        patchId: input.patch.id,
+        beforeJson: stringify(before),
+        afterJson: stringify(after),
+        stagedContent: `${JSON.stringify(after, null, 2)}\n`,
+        commit: async (transaction) => {
+          const updated = await this.collectionRecordRecoveryHandler.commitPatch(transaction, { collectionId: input.collectionId, recordId: input.recordId, before, after, patch: input.patch });
+          if (!updated) throw new Error("collection_record_patch_version_conflict");
+        },
+        rollback: (transaction) => this.collectionRecordRecoveryHandler.rollbackPatch(transaction, { collectionId: input.collectionId, recordId: input.recordId, before, after, patchId: input.patch.id })
       });
-      if (!updated) {
+    } catch (error) {
+      if (error instanceof Error && error.message === "collection_record_patch_version_conflict") {
         const latest = await this.getCollectionRecord(input.collectionId, input.recordId);
         throw new CollectionRecordVersionConflictError(input.patch.expected_version ?? before.version, latest ?? before);
       }
-      this.fileTransactionFailureInjector?.("db_committed");
-      try {
-        await rename(stagedPath, absolutePath);
-        this.fileTransactionFailureInjector?.("renamed");
-        await this.db.deleteFrom("workspace_file_transactions").where("id", "=", transactionId).execute();
-      } catch (error) {
-        if (error instanceof WorkspaceSimulatedCrashError) {
-          simulatedCrash = true;
-          throw error;
-        }
-        await this.db.transaction().execute(async (transaction) => {
-          await transaction.updateTable("collection_records")
-            .set({ record_json: stringify(before), version: before.version, updated_at: before.updated_at })
-            .where("collection_id", "=", input.collectionId)
-            .where("id", "=", input.recordId)
-            .where("version", "=", after.version)
-            .execute();
-          await transaction.deleteFrom("collection_patches")
-            .where("collection_id", "=", input.collectionId)
-            .where("record_id", "=", input.recordId)
-            .where("id", "=", input.patch.id)
-            .execute();
-          await transaction.deleteFrom("workspace_file_transactions").where("id", "=", transactionId).execute();
-        });
-        throw error;
-      }
-    } catch (error) {
-      if (error instanceof WorkspaceSimulatedCrashError) {
-        simulatedCrash = true;
-        throw error;
-      }
-      await this.db.deleteFrom("workspace_file_transactions").where("id", "=", transactionId).execute();
       throw error;
-    } finally {
-      if (!simulatedCrash) await rm(stagedPath, { force: true });
     }
     return { before, after: { ...after, file_path: before.file_path } };
   }
@@ -7666,91 +5698,49 @@ export class WorkspaceStore {
     return this.getGrant(id);
   }
 
+  private async initializeSessionSearch(): Promise<void> {
+    await this.sessionSearchIndex.initialize(() => this.collectSessionSearchEntries());
+    this.sessionSearchIndexMode = this.sessionSearchIndex.getMode();
+  }
+
+  private async collectSessionSearchEntries(): Promise<SessionSearchEntry[]> {
+    const [sessions, messages, artifacts] = await Promise.all([
+      this.db.selectFrom("sessions").selectAll().execute(),
+      this.db.selectFrom("messages").selectAll().execute(),
+      this.db.selectFrom("artifacts").leftJoin("operations", "operations.id", "artifacts.source_operation_id").selectAll("artifacts").select(["operations.session_id as session_id"]).execute()
+    ]);
+    const artifactEntries = await Promise.all(artifacts.map(async (row) => ({ kind: "artifact" as const, id: row.id, sessionId: row.session_id ?? undefined, operationId: row.source_operation_id, title: row.title, body: (await this.readArtifactContent(row.id).catch(() => "")) ?? "" })));
+    return [
+      ...sessions.map((row) => ({ kind: "session" as const, id: row.id, title: row.title, body: row.session_key })),
+      ...messages.map((row) => ({ kind: "message" as const, id: row.id, sessionId: row.session_id, title: row.role, body: row.content })),
+      ...artifactEntries
+    ];
+  }
+
   async reindexSessionSearch(): Promise<{ mode: "fts5_trigram" | "fts5" | "like"; indexed: number }> {
-    if (this.sessionSearchIndexMode === "like") return { mode: "like", indexed: 0 };
-    try {
-      await sql.raw("DELETE FROM session_search_fts").execute(this.db);
-      if (this.sessionSearchIndexMode === "fts5_trigram") {
-        await sql.raw("DELETE FROM session_search_trigram").execute(this.db);
-      }
-      const [sessions, messages, artifacts] = await Promise.all([
-        this.db.selectFrom("sessions").selectAll().execute(),
-        this.db.selectFrom("messages").selectAll().execute(),
-        this.db.selectFrom("artifacts").leftJoin("operations", "operations.id", "artifacts.source_operation_id").selectAll("artifacts").select(["operations.session_id as session_id"]).execute()
-      ]);
-      const artifactEntries = await Promise.all(artifacts.map(async (row) => ({
-        kind: "artifact" as const,
-        id: row.id,
-        sessionId: row.session_id ?? undefined,
-        operationId: row.source_operation_id,
-        title: row.title,
-        body: (await this.readArtifactContent(row.id).catch(() => "")) ?? ""
-      })));
-      const entries: Array<{ kind: "session" | "message" | "artifact"; id: string; sessionId?: string; operationId?: string; title: string; body: string }> = [
-        ...sessions.map((row) => ({ kind: "session" as const, id: row.id, title: row.title, body: row.session_key })),
-        ...messages.map((row) => ({ kind: "message" as const, id: row.id, sessionId: row.session_id, title: row.role, body: row.content })),
-        ...artifactEntries
-      ];
-      for (const entry of entries) {
-        await sql`INSERT INTO session_search_fts (kind, id, session_id, operation_id, title, body) VALUES (${entry.kind}, ${entry.id}, ${entry.sessionId ?? null}, ${entry.operationId ?? null}, ${entry.title}, ${entry.body})`.execute(this.db);
-        if (this.sessionSearchIndexMode === "fts5_trigram") {
-          await sql`INSERT INTO session_search_trigram (kind, id, session_id, operation_id, title, body) VALUES (${entry.kind}, ${entry.id}, ${entry.sessionId ?? null}, ${entry.operationId ?? null}, ${entry.title}, ${entry.body})`.execute(this.db);
-        }
-      }
-      return { mode: this.sessionSearchIndexMode, indexed: entries.length };
-    } catch {
-      this.sessionSearchIndexMode = "like";
-      return { mode: "like", indexed: 0 };
-    }
+    const result = await this.sessionSearchIndex.reindex(await this.collectSessionSearchEntries());
+    this.sessionSearchIndexMode = result.mode;
+    return result;
   }
 
-  private async upsertSessionSearchEntry(entry: { kind: "session" | "message" | "artifact"; id: string; sessionId?: string; operationId?: string; title: string; body: string }): Promise<void> {
-    if (this.sessionSearchIndexMode === "like") return;
-    await sql`DELETE FROM session_search_fts WHERE kind = ${entry.kind} AND id = ${entry.id}`.execute(this.db);
-    await sql`INSERT INTO session_search_fts (kind, id, session_id, operation_id, title, body) VALUES (${entry.kind}, ${entry.id}, ${entry.sessionId ?? null}, ${entry.operationId ?? null}, ${entry.title}, ${entry.body})`.execute(this.db);
-    if (this.sessionSearchIndexMode === "fts5_trigram") {
-      await sql`DELETE FROM session_search_trigram WHERE kind = ${entry.kind} AND id = ${entry.id}`.execute(this.db);
-      await sql`INSERT INTO session_search_trigram (kind, id, session_id, operation_id, title, body) VALUES (${entry.kind}, ${entry.id}, ${entry.sessionId ?? null}, ${entry.operationId ?? null}, ${entry.title}, ${entry.body})`.execute(this.db);
-    }
+  private async upsertSessionSearchEntry(entry: SessionSearchEntry): Promise<void> {
+    await this.sessionSearchIndex.upsert(entry);
+    this.sessionSearchIndexMode = this.sessionSearchIndex.getMode();
   }
 
-  private async deleteSessionSearchEntry(kind: "session" | "message" | "artifact", id: string): Promise<void> {
-    if (this.sessionSearchIndexMode === "like") return;
-    await sql`DELETE FROM session_search_fts WHERE kind = ${kind} AND id = ${id}`.execute(this.db);
-    if (this.sessionSearchIndexMode === "fts5_trigram") await sql`DELETE FROM session_search_trigram WHERE kind = ${kind} AND id = ${id}`.execute(this.db);
+  private async deleteSessionSearchEntry(kind: SessionSearchEntry["kind"], id: string): Promise<void> {
+    await this.sessionSearchIndex.remove(kind, id);
+    this.sessionSearchIndexMode = this.sessionSearchIndex.getMode();
   }
 
   getSessionSearchMode(): "fts5_trigram" | "fts5" | "like" {
-    return this.sessionSearchIndexMode;
+    return this.sessionSearchIndex.getMode();
   }
 
   private async searchSessionIndex(query: string): Promise<SearchResult[]> {
-    if (this.sessionSearchIndexMode === "like") return [];
-    const table = this.sessionSearchIndexMode === "fts5_trigram" && containsJapanese(query)
-      ? "session_search_trigram"
-      : "session_search_fts";
-    const matchQuery = `"${query.replaceAll('"', '""')}"`;
-    try {
-      const rows = containsJapanese(query) && [...query].length < 3
-        ? await sql<{ kind: SearchResult["kind"]; id: string; session_id: string | null; operation_id: string | null; title: string; body: string }>`
-            SELECT kind, id, session_id, operation_id, title, body FROM ${sql.raw(table)}
-            WHERE title LIKE ${`%${query}%`} OR body LIKE ${`%${query}%`} ORDER BY kind, id LIMIT 30
-          `.execute(this.db)
-        : await sql<{ kind: SearchResult["kind"]; id: string; session_id: string | null; operation_id: string | null; title: string; body: string }>`
-            SELECT kind, id, session_id, operation_id, title, body FROM ${sql.raw(table)}
-            WHERE ${sql.raw(table)} MATCH ${matchQuery} ORDER BY bm25(${sql.raw(table)}), kind, id LIMIT 30
-          `.execute(this.db);
-      return rows.rows.map((row) => ({
-        kind: row.kind,
-        id: row.id,
-        title: row.title,
-        summary: row.body.slice(0, 120),
-        session_id: row.session_id ?? undefined,
-        operation_id: row.operation_id ?? undefined
-      }));
-    } catch {
-      return [];
-    }
+    const results = await this.sessionSearchIndex.search(query);
+    this.sessionSearchIndexMode = this.sessionSearchIndex.getMode();
+    return results;
   }
 
   async search(query: string): Promise<SearchResult[]> {
@@ -7762,23 +5752,25 @@ export class WorkspaceStore {
     let indexedResults: SearchResult[] = [];
     if (this.sessionSearchIndexMode !== "like") {
       indexedResults = await this.searchSessionIndex(trimmed);
-      const needle = `%${trimmed}%`;
-      const audits = await this.db
-        .selectFrom("audit_records")
-        .leftJoin("operations", "operations.id", "audit_records.operation_id")
-        .selectAll("audit_records")
-        .select(["operations.session_id as session_id"])
-        .where((eb) => eb.or([eb("inputs_summary", "like", needle), eb("outputs_summary", "like", needle)]))
-        .limit(10)
-        .execute();
-      return [...indexedResults, ...audits.map((row) => ({
-        kind: "audit" as const,
-        id: row.id,
-        title: row.operation_id,
-        summary: `${row.inputs_summary} -> ${row.outputs_summary}`.slice(0, 140),
-        session_id: row.session_id ?? undefined,
-        operation_id: row.operation_id
-      }))];
+      if (this.getSessionSearchMode() !== "like") {
+        const needle = `%${trimmed}%`;
+        const audits = await this.db
+          .selectFrom("audit_records")
+          .leftJoin("operations", "operations.id", "audit_records.operation_id")
+          .selectAll("audit_records")
+          .select(["operations.session_id as session_id"])
+          .where((eb) => eb.or([eb("inputs_summary", "like", needle), eb("outputs_summary", "like", needle)]))
+          .limit(10)
+          .execute();
+        return [...indexedResults, ...audits.map((row) => ({
+          kind: "audit" as const,
+          id: row.id,
+          title: row.operation_id,
+          summary: `${row.inputs_summary} -> ${row.outputs_summary}`.slice(0, 140),
+          session_id: row.session_id ?? undefined,
+          operation_id: row.operation_id
+        }))];
+      }
     }
 
     const needle = `%${trimmed}%`;
@@ -7859,151 +5851,24 @@ export class WorkspaceStore {
   }
 
   async close(): Promise<void> {
-    await this.db.destroy();
+    await this.database.close();
   }
 }
 
 export async function ensureWorkspaceLayout(rootDir: string): Promise<void> {
-  await Promise.all(workspaceLayoutDirs(rootDir).map((dir) => mkdir(dir, { recursive: true })));
+  await new WorkspacePaths(rootDir).ensureWorkspaceLayout();
 }
 
 function workspaceLayoutDirs(rootDir: string): string[] {
-  return [
-    rootDir,
-    path.join(rootDir, "artifacts"),
-    path.join(rootDir, "profile"),
-    path.join(rootDir, "memory", "session"),
-    path.join(rootDir, "memory", "provisional"),
-    path.join(rootDir, "memory", "topic"),
-    path.join(rootDir, "memory", "active"),
-    path.join(rootDir, "memory", "sensitive"),
-    path.join(rootDir, "memory", "archived"),
-    path.join(rootDir, "skills", "candidate"),
-    path.join(rootDir, "skills", "project"),
-    path.join(rootDir, "skills", "active"),
-    path.join(rootDir, "skills", "stale"),
-    path.join(rootDir, "skills", "archived"),
-    path.join(rootDir, "skills", "pinned"),
-    path.join(rootDir, "skills", "support"),
-    path.join(rootDir, "wiki", "pages"),
-    path.join(rootDir, "rollback"),
-    path.join(rootDir, "collections"),
-    path.join(rootDir, "surfaces"),
-    path.join(rootDir, "backups")
-  ];
+  return [...new WorkspacePaths(rootDir).requiredDirectories];
 }
 
 function workspaceBackupRoots(): string[] {
-  return ["artifacts", "profile", "memory", "skills", "wiki", "rollback", "collections", "surfaces"];
+  return kernelWorkspaceBackupRoots();
 }
 
 function workspaceResourceBoundaries(): WorkspaceResourceBoundary[] {
-  return [
-    {
-      resource: "generated_surfaces",
-      source_of_truth: "filesystem",
-      file_roots: ["surfaces"],
-      sqlite_tables: ["generated_surfaces", "generated_surface_revisions", "surface_interactions"],
-      sqlite_role: "metadata",
-      note: "Versioned Generated Surface bundles live in Workspace files; SQLite tracks revisions, state, and interactions."
-    },
-    {
-      resource: "profile",
-      source_of_truth: "filesystem",
-      file_roots: ["profile"],
-      sqlite_tables: ["settings"],
-      sqlite_role: "metadata",
-      note: "Profile and SOUL-style identity files live in the workspace; settings rows hold operational preferences."
-    },
-    {
-      resource: "memory",
-      source_of_truth: "filesystem",
-      file_roots: ["memory"],
-      sqlite_tables: ["memory_index"],
-      sqlite_role: "index",
-      note: "Memory markdown is the durable source; SQLite is used for search, state, and retrieval metadata."
-    },
-    {
-      resource: "knowledge_wiki",
-      source_of_truth: "filesystem",
-      file_roots: ["wiki/pages"],
-      sqlite_tables: ["wiki_index"],
-      sqlite_role: "index",
-      note: "Knowledge Wiki markdown is the durable source; SQLite is a repairable active/search index."
-    },
-    {
-      resource: "skill",
-      source_of_truth: "filesystem",
-      file_roots: ["skills"],
-      sqlite_tables: ["skill_usage"],
-      sqlite_role: "metadata",
-      note: "Skill markdown and support files are the durable source; usage stats are derived operational metadata."
-    },
-    {
-      resource: "artifact",
-      source_of_truth: "filesystem",
-      file_roots: ["artifacts"],
-      sqlite_tables: ["artifacts"],
-      sqlite_role: "metadata",
-      note: "Artifact body files are durable output; SQLite stores metadata, session links, and render hints."
-    },
-    {
-      resource: "collection",
-      source_of_truth: "filesystem",
-      file_roots: ["collections"],
-      sqlite_tables: ["collection_schemas", "collection_records", "collection_patches"],
-      sqlite_role: "index",
-      note: "Collection schemas, records, and notes live in files; SQLite rows are rebuildable indexes."
-    },
-    {
-      resource: "session_run_history",
-      source_of_truth: "sqlite",
-      file_roots: [],
-      sqlite_tables: ["sessions", "messages", "operations", "backend_runs", "backend_events", "tool_runs", "workspace_changes"],
-      sqlite_role: "history",
-      note: "Session and run history are structured append-oriented records used for resume, search, and audit views."
-    },
-    {
-      resource: "learning_core",
-      source_of_truth: "derived",
-      file_roots: ["learning-snapshots"],
-      sqlite_tables: ["learning_resource_uses", "learning_evaluations", "background_review_changes", "learning_snapshots", "learning_job_reports", "session_search_fts", "session_search_trigram"],
-      sqlite_role: "history",
-      note: "Learning usage, evaluation, provenance, snapshots, and Session Search are derived or restorable records; Memory and Skill markdown remain the durable source."
-    },
-    {
-      resource: "policy_audit_rollback",
-      source_of_truth: "sqlite",
-      file_roots: ["rollback"],
-      sqlite_tables: ["policy_decisions", "audit_records", "rollback_points"],
-      sqlite_role: "audit",
-      note: "Policy/audit records are SQLite history; rollback snapshots may reference filesystem payloads."
-    },
-    {
-      resource: "gateway_automation",
-      source_of_truth: "sqlite",
-      file_roots: [],
-      sqlite_tables: ["gateway_pairings", "gateway_pairing_policies", "gateway_routing_policies", "gateway_inbound_messages", "gateway_concurrency_locks", "gateway_sandbox_instances", "gateway_sandbox_workspace_syncs", "automation_jobs", "automation_runs"],
-      sqlite_role: "queue",
-      note: "Gateway and scheduler state are operational queues/control-plane records, not workspace prose."
-    },
-    {
-      resource: "client_event_queue",
-      source_of_truth: "sqlite",
-      file_roots: [],
-      sqlite_tables: ["client_events"],
-      sqlite_role: "queue",
-      note: "Client events are queued OS/UI requests for Web, Desktop, or future clients; Runtime and Desktop stay decoupled through this table."
-    },
-    {
-      resource: "localized_derivatives",
-      source_of_truth: "derived",
-      file_roots: [],
-      sqlite_tables: ["resource_translations"],
-      sqlite_role: "metadata",
-      note: "Resource translations are derived records tied to source resource hashes and can fall back to original text."
-    }
-  ];
+  return kernelWorkspaceResourceBoundaries();
 }
 
 function createBackupId(): string {
@@ -8056,18 +5921,7 @@ async function hashFilesUnderRoot(root: string, excluded: string[] = []): Promis
 }
 
 function isWorkspaceResourceBoundary(value: unknown): value is WorkspaceResourceBoundary {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const boundary = value as Record<string, unknown>;
-  return typeof boundary.resource === "string"
-    && (boundary.source_of_truth === "filesystem" || boundary.source_of_truth === "sqlite" || boundary.source_of_truth === "derived")
-    && Array.isArray(boundary.file_roots)
-    && boundary.file_roots.every((item) => typeof item === "string")
-    && Array.isArray(boundary.sqlite_tables)
-    && boundary.sqlite_tables.every((item) => typeof item === "string")
-    && (boundary.sqlite_role === "none" || boundary.sqlite_role === "index" || boundary.sqlite_role === "history" || boundary.sqlite_role === "queue" || boundary.sqlite_role === "audit" || boundary.sqlite_role === "metadata")
-    && typeof boundary.note === "string";
+  return isKernelWorkspaceResourceBoundary(value);
 }
 
 export function renderFrontmatter(frontmatter: object): string {
@@ -8121,7 +5975,7 @@ function inferredSettlementEvidence(status: BackendRunRecord["status"], errorCod
   return { kind: "failed", source: "canonical_event", error: { code: errorCode ?? "backend_failed", message: "Backend operation failed.", retryable: false, causeCategory: "runtime" } };
 }
 
-async function findSettlementEvent(transaction: Transaction<WorkspaceDb>, event: BackendEventRecord): Promise<BackendEventsTable | undefined> {
+async function findSettlementEvent(transaction: Transaction<KernelWorkspaceDb>, event: BackendEventRecord): Promise<BackendEventsTable | undefined> {
   if (event.source_event_id) {
     const bySource = await transaction.selectFrom("backend_events").selectAll().where("run_id", "=", event.run_id).where("attempt_no", "=", event.attempt_no ?? 1).where("source_event_id", "=", event.source_event_id).executeTakeFirst();
     if (bySource) return bySource;
@@ -8133,7 +5987,7 @@ async function findSettlementEvent(transaction: Transaction<WorkspaceDb>, event:
   return transaction.selectFrom("backend_events").selectAll().where("id", "=", event.id).executeTakeFirst();
 }
 
-async function releaseReservationInTransaction(transaction: Transaction<WorkspaceDb>, runId: string, expectedVersion: number, releasedAt: string): Promise<void> {
+async function releaseReservationInTransaction(transaction: Transaction<KernelWorkspaceDb>, runId: string, expectedVersion: number, releasedAt: string): Promise<void> {
   let update = transaction.updateTable("session_run_reservations")
     .set({ status: "released", released_at: releasedAt, version: sql<number>`version + 1` })
     .where("run_id", "=", runId)
@@ -8152,7 +6006,7 @@ async function assertCore02SettlementReplay(
   event: BackendEventRecord,
   output: MessageRecord | undefined,
   diagnostic: Core02SettlementInput["diagnostic"],
-  transaction: Transaction<WorkspaceDb>
+  transaction: Transaction<KernelWorkspaceDb>
 ): Promise<void> {
   const resultWasCorrected = current.status === "outcome_unknown" && nextRun.status !== "outcome_unknown";
   if (current.status !== nextRun.status && !resultWasCorrected) throw new Error(`settlement_conflict:${current.id}`);
@@ -8266,7 +6120,7 @@ function settlementEvidenceMatchesStatus(value: unknown, status: BackendRunRecor
 }
 
 async function assertSettlementReplayMatches(
-  transaction: Transaction<WorkspaceDb>,
+  transaction: Transaction<KernelWorkspaceDb>,
   current: BackendRunRecord,
   requestedStatus: BackendRunRecord["status"],
   output: MessageRecord | undefined,
@@ -10398,10 +8252,6 @@ function migrationJournalFromRow(row: MigrationJournalTable): MigrationJournalRe
     details: parse(row.details_json),
     created_at: row.created_at
   };
-}
-
-function isDuplicateColumnError(error: unknown): boolean {
-  return error instanceof Error && /duplicate column name/i.test(error.message);
 }
 
 function artifactFromRow(row: ArtifactsTable): ArtifactRecord {

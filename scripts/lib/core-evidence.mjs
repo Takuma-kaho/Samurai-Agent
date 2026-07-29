@@ -8,7 +8,27 @@ const sourceReadScript = "process.stdout.write(require('node:fs').readFileSync(p
 export function committedSourceEvidence(root, sourceFiles) {
   const facadeImplementations = new Map([
     ["packages/runtime/src/index.ts", ["packages/runtime/src/agent-runtime.ts"]],
-    ["packages/workspace-store/src/index.ts", ["packages/workspace-store/src/workspace-store.ts", "packages/workspace-store/src/backup/backup-id.ts", "packages/workspace-store/src/migrations/gateway-delivery.ts", "packages/workspace-store/src/repositories/backend-events.ts", "packages/workspace-store/src/search/scoring.ts", "packages/workspace-store/src/transactions/recovery-policy.ts"]],
+    ["packages/workspace-store/src/index.ts", [
+      "packages/workspace-store/src/workspace-store.ts",
+      "packages/workspace-store/src/backup/backup-id.ts",
+      "packages/workspace-store/src/kernel/workspace-paths.ts",
+      "packages/workspace-store/src/kernel/workspace-database.ts",
+      "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+      "packages/workspace-store/src/kernel/migration-runner.ts",
+      "packages/workspace-store/src/kernel/session-search-index.ts",
+      "packages/workspace-store/src/migrations/index.ts",
+      "packages/workspace-store/src/migrations/001-core-baseline.ts",
+      "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+      "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+      "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+      "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+      "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+      "packages/workspace-store/src/repositories/backend-events.ts",
+      "packages/workspace-store/src/search/scoring.ts",
+      "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
+      "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
+      "packages/workspace-store/src/transactions/recovery-policy.ts"
+    ]],
     ["packages/runtime/src/provider.ts", ["packages/runtime/src/backend/provider.ts"]],
     ["packages/runtime/src/native-backend.ts", ["packages/runtime/src/backend/native-backend.ts"]],
     ["packages/runtime/src/external-assist-provider.ts", ["packages/runtime/src/backend/external-assist-provider.ts"]],

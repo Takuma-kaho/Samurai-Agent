@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { sql } from "kysely";
+import Database from "better-sqlite3";
 import { nowIso, type CollectionSchema, type MemoryFrontmatter, type SkillFrontmatter } from "../../packages/core-schemas/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 
@@ -32,11 +32,16 @@ try {
     resource_refs: [{ kind: "artifact", id: "missing-artifact", uri: "artifacts/missing-artifact.md" }], created_at: now, updated_at: now
   });
 
-  await store.db.deleteFrom("memory_index").where("id", "=", memory.id).execute();
-  await store.db.deleteFrom("skill_index").where("id", "=", skill.id).execute();
+  const database = new Database(store.dbPath);
+  try {
+    database.prepare("DELETE FROM memory_index WHERE id = ?").run(memory.id);
+    database.prepare("DELETE FROM skill_index WHERE id = ?").run(skill.id);
+    database.exec("DELETE FROM session_search_fts");
+    if (store.getSessionSearchMode() === "fts5_trigram") database.exec("DELETE FROM session_search_trigram");
+  } finally {
+    database.close();
+  }
   await rm(path.join(root, "skills", "archived"), { recursive: true, force: true });
-  await sql.raw("DELETE FROM session_search_fts").execute(store.db);
-  if (store.getSessionSearchMode() === "fts5_trigram") await sql.raw("DELETE FROM session_search_trigram").execute(store.db);
 
   const before = await store.inspectWorkspace();
   const codes = new Set(before.issues.map((issue) => issue.code));

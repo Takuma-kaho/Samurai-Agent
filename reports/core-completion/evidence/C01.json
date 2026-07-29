@@ -3,24 +3,39 @@
   "test_id": "C01",
   "command": "pnpm core:test:migration",
   "status": "passed",
-  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "commit_sha": "bef9e992ab38c739bb676aeb3f757ca064bb5d76",
   "worktree_clean": false,
-  "source_sha256": "12039746ac45e70b77cb5560f211aa8af8ac543fd5624f334e6f66b3b61495e8",
+  "source_sha256": "7d3f5546c136f2c196d28ea4e3c23079d081cd86739f88279e1e16da7ca247ad",
+  "source_graph_sha256": "02bb920055fa4dd898c47d0a75d75f8af24cea268c39c9746a2f220e155c0f26",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/workspace-migration.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-workspace-migration.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-13T15:15:14.089Z",
-  "completed_at": "2026-07-13T15:15:14.235Z",
+  "started_at": "2026-07-29T05:18:23.421Z",
+  "completed_at": "2026-07-29T05:18:23.876Z",
   "assertions": [
     {
       "name": "Fresh install reaches latest schema",
@@ -29,8 +44,8 @@
     },
     {
       "name": "All supported legacy versions upgrade",
-      "actual": 2,
-      "expected": 2
+      "actual": 5,
+      "expected": 5
     },
     {
       "name": "Fresh and upgraded checksums match",
@@ -41,23 +56,65 @@
       "name": "Migration checksum tampering rejected",
       "actual": true,
       "expected": true
+    },
+    {
+      "name": "Migration name tampering rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Migration history gaps rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Future migration versions rejected",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Failed migration rolls back schema and history",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Current Knowledge Wiki setting is preserved when legacy column remains",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Legacy Knowledge Wiki setting is adopted only when the current column is absent",
+      "actual": true,
+      "expected": true
     }
   ],
   "result": {
     "status": "passed",
     "fresh_install": true,
     "supported_legacy_versions": [
-      "unversioned_baseline",
-      "v1"
+      "unversioned",
+      "unversioned_with_v4_v5_columns",
+      "v1",
+      "v3",
+      "v5"
     ],
-    "upgraded_versions": 2,
+    "upgraded_versions": 5,
     "checksum_equal": true,
     "checksum_tamper_rejected": true,
-    "latest_version": 3,
+    "name_tamper_rejected": true,
+    "history_gap_rejected": true,
+    "future_version_rejected": true,
+    "migration_failure_rollback": true,
+    "knowledge_wiki_capture_migration_preserves_current_value": true,
+    "knowledge_wiki_capture_migration_adopts_legacy_value": true,
+    "latest_version": 6,
     "checksums": [
-      "66ae2c8877e02d61acb47b77131149f5152c392c7434bc005c14fbe8d2b1b505",
+      "718605c93db76d3548d493701b1130b9d0e19d1d02240a02e3dfa069f4f5f539",
       "9ca7054dfb37369ebafa0ce3452918e6048f2629c3f71602a8e3f3812f9713d1",
-      "106ed93c492c08b93dfb60f7aaf3256f961fb5c9905efdb3dfd1d6cbeb274110"
+      "106ed93c492c08b93dfb60f7aaf3256f961fb5c9905efdb3dfd1d6cbeb274110",
+      "53c4d1bf86547a9f7ffd56f0a96b2c30c5b7dac8541ed10cc0080da87796f653",
+      "6393e3fb037d082b68a7d976d6f7dc2f4d1ad63c144341238d797c61be4eebd2",
+      "4b1446a70c25ab931a2338edce891f09f99036172d72f48e864e0f959b475e9a"
     ]
   }
 }

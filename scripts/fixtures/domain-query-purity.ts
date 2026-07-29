@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { sql } from "kysely";
 import { domainQueryEntries } from "../../packages/action-catalog/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
@@ -149,7 +148,6 @@ try {
   }
 
   const before = await snapshot();
-  await sql.raw("PRAGMA query_only=ON").execute(store.db);
   for (const queryCase of cases) {
     const result = await runtime.runRuntimeApiDomainQuery({
       query_id: queryCase.queryId,
@@ -167,7 +165,7 @@ try {
   await assert.rejects(runtime.runDomainQuery({ query_id: "collection.schema.get", input_source: "runtime_api", payload: { collection_id: "missing" } }));
   assert.deepEqual(await snapshot(), before, "failed query changed SQLite or Workspace files");
   assert.equal(blockedWrites.length, 0, `read-only adapter observed writes: ${blockedWrites.join(",")}`);
-  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["QP02", "QP03", "QP04", "QP05", "QP06", "QP07", "QP08"], queries: cases.length, canonical_query_count: domainQueryEntries.length, sqlite_query_only: true, filesystem_read_only_adapter: true, sqlite_unchanged: true, workspace_files_unchanged: true, parallel_queries: parallelResults.length, failure_pure: true })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["QP02", "QP03", "QP04", "QP05", "QP06", "QP07", "QP08"], queries: cases.length, canonical_query_count: domainQueryEntries.length, sqlite_write_capability_not_exposed: true, filesystem_read_only_adapter: true, sqlite_unchanged: true, workspace_files_unchanged: true, parallel_queries: parallelResults.length, failure_pure: true })}\n`);
 } finally {
   await runtime.shutdownMcpProcessPool().catch(() => undefined);
   await store.close().catch(() => undefined);

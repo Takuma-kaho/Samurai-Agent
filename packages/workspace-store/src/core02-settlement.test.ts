@@ -1,9 +1,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { createId, nowIso, type BackendEventRecord, type BackendRunRecord, type JsonValue, type MessageEnvelope, type MessageRecord, type SessionRecord } from "@samurai-agent/core-schemas";
-import { sql } from "kysely";
 import { RunLifecycle } from "../../runtime/src/execution/run-lifecycle";
 import { lifecycleEventForTerminalEvidence } from "../../runtime/src/execution/run-state-machine";
 import { WorkspaceStore } from "./workspace-store";
@@ -29,8 +29,26 @@ function output(session: SessionRecord, id = createId("output"), content = "done
   return { id, session_id: session.id, role: "agent", content, input_locale: "ja", output_locale: "ja", created_at: nowIso() };
 }
 
-function terminalEvent(runId: string, sessionId: string, id = createId("event"), payload: Record<string, JsonValue> = { status: "done", password: "secret" }): BackendEventRecord {
+function terminalEvent(runId: string, sessionId: string, id = createId("event"), payload: Record<string, JsonValue> = { message: "password=secret" }): BackendEventRecord {
   return { id, run_id: runId, session_id: sessionId, event_type: "run_completed", sequence: 1, attempt_no: 1, payload, resource_refs: [], created_at: nowIso() };
+}
+
+function reservationStatus(dbPath: string, runId: string): string | undefined {
+  const database = new Database(dbPath);
+  try {
+    return (database.prepare("SELECT status FROM session_run_reservations WHERE run_id = ?").get(runId) as { status?: string } | undefined)?.status;
+  } finally {
+    database.close();
+  }
+}
+
+function installSettlementFault(dbPath: string): void {
+  const database = new Database(dbPath);
+  try {
+    database.exec("CREATE TRIGGER core02_settlement_fault BEFORE INSERT ON backend_events BEGIN SELECT RAISE(ABORT, 'core02_settlement_fault'); END");
+  } finally {
+    database.close();
+  }
 }
 
 describe("Core 02 settlement transaction", () => {
@@ -45,20 +63,20 @@ describe("Core 02 settlement transaction", () => {
     expect(result.map((entry) => entry.id)).toEqual([run.id, run.id]);
     expect(result.every((entry) => entry.status === "completed")).toBe(true);
     expect(await firstStore.listBackendEvents({ runId: run.id })).toHaveLength(1);
-    expect((await firstStore.listBackendEvents({ runId: run.id }))[0]?.payload).toMatchObject({ password: "[redacted]" });
+    expect((await firstStore.listBackendEvents({ runId: run.id }))[0]?.payload).toMatchObject({ message: "password=[redacted]" });
     expect((await firstStore.listMessages(session.id)).filter((message) => message.role === "agent")).toHaveLength(1);
-    expect(await sql<{ status: string }>`SELECT status FROM session_run_reservations WHERE run_id = ${run.id}`.execute(firstStore.db).then((result) => result.rows[0]?.status)).toBe("released");
+    expect(reservationStatus(firstStore.dbPath, run.id)).toBe("released");
     await firstStore.close(); await secondStore.close();
   });
 
   it("C02-H12 redacts events and keeps commit-before failure atomic", async () => {
     const { firstStore, secondStore, session, run } = await fixture();
-    await sql.raw("CREATE TRIGGER core02_settlement_fault BEFORE INSERT ON backend_events BEGIN SELECT RAISE(ABORT, 'core02_settlement_fault'); END").execute(firstStore.db);
+    installSettlementFault(firstStore.dbPath);
     await expect(settle(firstStore, { run, status: "completed", output: output(session, "output-fault"), events: [terminalEvent(run.id, session.id, "event-fault")] })).rejects.toThrow("core02_settlement_fault");
     expect((await firstStore.getBackendRun(run.id))?.status).toBe("running");
     expect(await firstStore.listBackendEvents({ runId: run.id })).toHaveLength(0);
     expect((await firstStore.listMessages(session.id)).filter((message) => message.role === "agent")).toHaveLength(0);
-    expect(await sql<{ status: string }>`SELECT status FROM session_run_reservations WHERE run_id = ${run.id}`.execute(firstStore.db).then((result) => result.rows[0]?.status)).toBe("held");
+    expect(reservationStatus(firstStore.dbPath, run.id)).toBe("held");
     await firstStore.close(); await secondStore.close();
   });
 
@@ -84,10 +102,10 @@ describe("Core 02 settlement transaction", () => {
   it("C02-H13 preserves outcome_unknown diagnostics and releases without retry rows", async () => {
     const { firstStore, secondStore, session, run } = await fixture();
     const diagnosticRun = { ...run, status: "outcome_unknown" as const, phase: "settled" as const, metadata: { warning: "cancel outcome could not be confirmed", error_code: "outcome_unknown" } };
-    const settled = await settle(firstStore, { expectedRun: run, run: diagnosticRun, status: "outcome_unknown", events: [terminalEvent(run.id, session.id, "event-unknown", { warning: "cancel outcome could not be confirmed" })] });
+    const settled = await settle(firstStore, { expectedRun: run, run: diagnosticRun, status: "outcome_unknown", events: [terminalEvent(run.id, session.id, "event-unknown", { message: "cancel outcome could not be confirmed" })] });
     expect(settled.status).toBe("outcome_unknown");
     expect(settled.metadata).toMatchObject({ warning: "cancel outcome could not be confirmed", error_code: "outcome_unknown" });
-    expect(await sql<{ status: string }>`SELECT status FROM session_run_reservations WHERE run_id = ${run.id}`.execute(firstStore.db).then((result) => result.rows[0]?.status)).toBe("released");
+    expect(reservationStatus(firstStore.dbPath, run.id)).toBe("released");
     expect(await firstStore.listBackendRuns(session.id)).toHaveLength(1);
     await firstStore.close(); await secondStore.close();
   });

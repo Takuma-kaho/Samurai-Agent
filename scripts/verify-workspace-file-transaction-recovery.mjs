@@ -14,7 +14,7 @@ const cacheRoot = path.join(root, "node_modules/.cache");
 mkdirSync(cacheRoot, { recursive: true });
 const temporaryRoot = mkdtempSync(path.join(cacheRoot, "samurai-file-transaction-"));
 const output = path.join(temporaryRoot, "verify.mjs");
-const sourceFiles = ["packages/core-schemas/src/index.ts", "packages/workspace-store/src/index.ts", "scripts/fixtures/workspace-file-transaction-recovery.ts", "scripts/verify-workspace-file-transaction-recovery.mjs", "scripts/lib/core-evidence.mjs"];
+const sourceFiles = ["packages/core-schemas/src/index.ts", "packages/workspace-store/src/index.ts", "packages/workspace-store/src/workspace-store.ts", "packages/workspace-store/src/kernel/workspace-database.ts", "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts", "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts", "scripts/fixtures/workspace-file-transaction-recovery.ts", "scripts/verify-workspace-file-transaction-recovery.mjs", "scripts/lib/core-evidence.mjs"];
 try {
   execFileSync(esbuild, [path.join(root, "scripts/fixtures/workspace-file-transaction-recovery.ts"), "--bundle", "--platform=node", "--format=esm", "--external:better-sqlite3", `--outfile=${output}`], { cwd: root, stdio: "inherit" });
   const startedAt = new Date().toISOString();
@@ -29,7 +29,11 @@ try {
     assertions: [
       { name: "Failure injection points", actual: result.failure_points.map((item) => item.phase), expected: ["planned", "staged", "db_committed", "renamed"] },
       { name: "Every crash completes or rolls back", actual: result.consistent_outcomes, expected: 4 },
-      { name: "No pending file transaction remains", actual: result.pending_transactions, expected: 0 }
+      { name: "No pending file transaction remains", actual: result.pending_transactions, expected: 0 },
+      { name: "Ordinary post-commit errors recover through the same journal", actual: result.ordinary_error_recovery, expected: true },
+      { name: "Rollback failure retains recovery state", actual: result.rollback_failure_preserves_recovery, expected: true },
+      { name: "Newer Collection record blocks unsafe rollback", actual: result.rollback_conflict_rejected, expected: true },
+      { name: "Unknown transaction kinds stop recovery", actual: result.unknown_kind_rejected, expected: true }
     ], result
   }, null, 2)}\n`);
   process.stdout.write(`${rawResult}\n`);

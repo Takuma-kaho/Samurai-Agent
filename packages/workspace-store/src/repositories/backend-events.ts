@@ -1,20 +1,8 @@
 import { BackendEventRecordSchema, type BackendEventRecord, type JsonValue, jsonValueSchema } from "@samurai-agent/core-schemas";
 import { z } from "zod";
+import type { BackendEventsTable } from "../kernel/workspace-db-schema";
 
-export interface BackendEventsTable {
-  id: string;
-  run_id: string;
-  session_id: string;
-  backend_session_id: string | null;
-  event_type: string;
-  sequence: number;
-  attempt_no: number | null;
-  source_event_id: string | null;
-  source_sequence: number | null;
-  payload_json: string;
-  resource_refs_json: string;
-  created_at: string;
-}
+export type { BackendEventsTable } from "../kernel/workspace-db-schema";
 
 export function backendEventToRow(event: BackendEventRecord): BackendEventsTable {
   const payload = { ...event.payload };

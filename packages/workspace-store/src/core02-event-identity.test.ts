@@ -1,9 +1,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { createId, nowIso, type BackendEventRecord, type MessageEnvelope, type SessionRecord } from "@samurai-agent/core-schemas";
-import { sql } from "kysely";
 import { WorkspaceStore } from "./workspace-store";
 
 const roots: string[] = [];
@@ -12,13 +12,24 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 describe("Core 02 event source identity", () => {
   it("migrates ID-first dedupe and preserves every canonical part", async () => {
     const fixture = await createFixture();
-    await sql.raw("DROP INDEX IF EXISTS idx_backend_events_source_sequence").execute(fixture.store.db);
-    await sql.raw("CREATE UNIQUE INDEX idx_backend_events_source_sequence ON backend_events(run_id, attempt_no, source_sequence) WHERE source_sequence IS NOT NULL").execute(fixture.store.db);
     await fixture.store.close();
+    const database = new Database(path.join(fixture.root, "workspace.sqlite"));
+    try {
+      database.exec("DROP INDEX IF EXISTS idx_backend_events_source_sequence");
+      database.exec("CREATE UNIQUE INDEX idx_backend_events_source_sequence ON backend_events(run_id, attempt_no, source_sequence) WHERE source_sequence IS NOT NULL");
+      database.exec("DELETE FROM schema_migrations WHERE version = 6");
+    } finally {
+      database.close();
+    }
     const store = await WorkspaceStore.create({ rootDir: fixture.root });
 
-    const index = await sql<{ sql: string }>`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_backend_events_source_sequence'`.execute(store.db);
-    expect(index.rows[0]?.sql).toContain("source_event_id IS NULL");
+    const verification = new Database(store.dbPath, { readonly: true });
+    try {
+      const index = verification.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_backend_events_source_sequence'").get() as { sql?: string } | undefined;
+      expect(index?.sql).toContain("source_event_id IS NULL");
+    } finally {
+      verification.close();
+    }
 
     const expanded: CanonicalEventFixture[] = [
       { event_type: "text_delta", source_event_id: "provider-id:provider-event-1:part:0", source_sequence: 7, payload: { text: "hello" }, resource_refs: [] },
@@ -49,7 +60,7 @@ describe("Core 02 event source identity", () => {
     const committed = await store.commitCore02LifecycleEvent({
       expectedRun,
       nextRun: { ...expectedRun, status: "running", phase: "external_running" },
-      event: { ...eventRecord(fixture.runId, fixture.sessionId, 1, { source_event_id: "provider-commit", source_sequence: 20 }), event_type: "run_started" }
+      event: { ...eventRecord(fixture.runId, fixture.sessionId, 1, { source_event_id: "provider-commit", source_sequence: 20 }), event_type: "run_started", payload: { input_summary: "identity" } }
     });
     expect(committed.duplicate).toBe(false);
     expect(committed.run.status).toBe("running");

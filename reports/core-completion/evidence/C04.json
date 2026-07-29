@@ -3,26 +3,39 @@
   "test_id": "C04",
   "command": "pnpm core:test:restore",
   "status": "passed",
-  "commit_sha": "e6f8fb92f35e3337b887dda8087e0e606a3a11a5",
-  "worktree_clean": true,
-  "source_sha256": "a8e35977b7c9df7f5f967a4d754c8778b3b2e53d1c59346ccb770bc3979196b4",
-  "source_graph_sha256": "3d80ad65dab8356144c04709a1afb1046f0e0fb9980c306af134fb6232a54e04",
+  "commit_sha": "bef9e992ab38c739bb676aeb3f757ca064bb5d76",
+  "worktree_clean": false,
+  "source_sha256": "605bdaccea015dbd1ea90691103738f737663d51f103661cbd585ecd9dc189b2",
+  "source_graph_sha256": "3cfc412eeb068caa20902337b0bf159f31b7f4beaf5f2380fd891eef029b2bcc",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/workspace-restore-atomicity.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-workspace-restore-atomicity.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-28T15:19:05.326Z",
-  "completed_at": "2026-07-28T15:19:05.879Z",
+  "started_at": "2026-07-29T05:18:37.336Z",
+  "completed_at": "2026-07-29T05:18:37.671Z",
   "assertions": [
     {
       "name": "Restore failure points",
@@ -41,6 +54,11 @@
       "name": "Current Workspace preserved after every failure",
       "actual": 3,
       "expected": 3
+    },
+    {
+      "name": "Same Store remains usable after successful restore",
+      "actual": true,
+      "expected": true
     }
   ],
   "result": {
@@ -64,6 +82,7 @@
         "current_preserved": true
       }
     ],
-    "preserved_count": 3
+    "preserved_count": 3,
+    "successful_restore_store_reusable": true
   }
 }

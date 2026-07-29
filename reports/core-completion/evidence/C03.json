@@ -3,27 +3,40 @@
   "test_id": "C03",
   "command": "pnpm core:test:file-transaction",
   "status": "passed",
-  "commit_sha": "e6f8fb92f35e3337b887dda8087e0e606a3a11a5",
-  "worktree_clean": true,
-  "source_sha256": "71280732ddada697645ce6554f053067df7bfa3572616970c51259950962f795",
-  "source_graph_sha256": "1920e625bfff1d0c2f4049c86a40d7c2919e0aa466133c1d49812c571c7d6b54",
+  "commit_sha": "bef9e992ab38c739bb676aeb3f757ca064bb5d76",
+  "worktree_clean": false,
+  "source_sha256": "8f2ad020b4d5f979dcb213968681c2dcabcd4f60d7ad13b092ea1ddc993b9d27",
+  "source_graph_sha256": "921d2053aeb3b260d47fe2c8c52b08037b475e78bbcadcefdc2d0be25a14e30d",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/core-schemas/src/index.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/workspace-file-transaction-recovery.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-workspace-file-transaction-recovery.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-28T15:19:05.343Z",
-  "completed_at": "2026-07-28T15:19:05.736Z",
+  "started_at": "2026-07-29T05:18:27.904Z",
+  "completed_at": "2026-07-29T05:18:28.224Z",
   "assertions": [
     {
       "name": "Failure injection points",
@@ -49,6 +62,26 @@
       "name": "No pending file transaction remains",
       "actual": 0,
       "expected": 0
+    },
+    {
+      "name": "Ordinary post-commit errors recover through the same journal",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Rollback failure retains recovery state",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Newer Collection record blocks unsafe rollback",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Unknown transaction kinds stop recovery",
+      "actual": true,
+      "expected": true
     }
   ],
   "result": {
@@ -76,6 +109,10 @@
       }
     ],
     "consistent_outcomes": 4,
-    "pending_transactions": 0
+    "pending_transactions": 0,
+    "ordinary_error_recovery": true,
+    "rollback_failure_preserves_recovery": true,
+    "rollback_conflict_rejected": true,
+    "unknown_kind_rejected": true
   }
 }
