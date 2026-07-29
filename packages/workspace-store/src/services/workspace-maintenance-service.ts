@@ -1,12 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
-import { access, copyFile, cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { defaultSettings, nowIso } from "@samurai-agent/core-schemas";
-import { normalizeBackupId } from "../backup/backup-id";
+import type { WorkspaceBundleService } from "../backup/workspace-bundle-service";
 import { WorkspaceKernelService } from "../kernel/workspace-kernel-service";
 import {
-  isWorkspaceResourceBoundary as isKernelWorkspaceResourceBoundary,
-  workspaceBackupRoots as kernelWorkspaceBackupRoots,
   workspaceResourceBoundaries as kernelWorkspaceResourceBoundaries,
   WorkspacePaths,
   type WorkspaceResourceBoundary
@@ -17,14 +14,11 @@ import type {
   MigrationJournalRecord,
   SkillReindexResult,
   WikiReindexResult,
-  WorkspaceBackupManifest,
-  WorkspaceBackupRecord,
   WorkspaceDriftIssue,
   WorkspaceHealthReport,
   WorkspaceIntegrityReport,
   WorkspaceRepairResult,
-  WorkspaceRepairStep,
-  WorkspaceRestoreResult
+  WorkspaceRepairStep
 } from "../workspace-store-contracts";
 import { pathExists } from "../repositories/workspace-file-codecs";
 
@@ -82,13 +76,12 @@ export interface WorkspaceMaintenanceServices {
   };
 }
 
-/** Workspace health, repair, backup/restore, import/export, and retention coordinator. */
+/** Owns health, reconciliation, and retention policy only. */
 export class WorkspaceMaintenanceService {
   constructor(
     private readonly kernel: WorkspaceKernelService,
     private readonly serviceProvider: () => WorkspaceMaintenanceServices,
-    private readonly restoreFailureInjector: ((phase: "extract" | "hash_verify" | "swap") => void) | undefined,
-    private readonly afterDatabaseReopen: () => Promise<void>
+    private readonly bundles: WorkspaceBundleService
   ) {}
 
   private services(): WorkspaceMaintenanceServices {
@@ -498,76 +491,6 @@ private async removeBrokenCollectionResourceRefs(): Promise<number> {
   return this.services().collection.removeBrokenResourceRefs(await this.services().queries.findBrokenCollectionResourceRefs());
 }
 
-async createWorkspaceBackup(): Promise<WorkspaceBackupRecord> {
-  await this.kernel.checkpoint();
-  const [health, dbIntegrity] = await Promise.all([
-    this.inspectWorkspace(),
-    this.kernel.checkDatabaseIntegrity()
-  ]);
-  const id = createBackupId();
-  const relativeBackupPath = path.join("backups", id);
-  const backupPath = path.join(this.rootDir, relativeBackupPath);
-  const filesPath = path.join(backupPath, "files");
-  await mkdir(filesPath, { recursive: true });
-  await copyFile(this.kernel.dbPath, path.join(backupPath, "workspace.sqlite"));
-  const copiedRoots: string[] = [];
-
-  for (const rootName of workspaceBackupRoots()) {
-    const source = path.join(this.rootDir, rootName);
-    if (!await pathExists(source)) {
-      continue;
-    }
-    await cp(source, path.join(filesPath, rootName), { recursive: true, force: true });
-    copiedRoots.push(rootName);
-  }
-
-  const fileHashes = await hashFilesUnderRoot(backupPath, ["manifest.json"]);
-
-  const manifest: WorkspaceBackupManifest = {
-    id,
-    created_at: nowIso(),
-    source_root: this.rootDir,
-    db_file: "workspace.sqlite",
-    file_roots: copiedRoots,
-    resource_boundaries: health.resource_boundaries,
-    health_ok: health.ok,
-    integrity_ok: health.ok && dbIntegrity.ok,
-    file_hashes: fileHashes
-  };
-  await writeFile(path.join(backupPath, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  return {
-    id,
-    path: relativeBackupPath,
-    manifest
-  };
-}
-
-async listWorkspaceBackups(): Promise<WorkspaceBackupRecord[]> {
-  const backupsRoot = path.join(this.rootDir, "backups");
-  let entries: string[];
-  try {
-    entries = await readdir(backupsRoot);
-  } catch {
-    return [];
-  }
-  const records = await Promise.all(entries.map(async (entry) => {
-    try {
-      const id = normalizeBackupId(entry);
-      const manifest = parseWorkspaceBackupManifest(JSON.parse(await readFile(path.join(backupsRoot, id, "manifest.json"), "utf8")));
-      return {
-        id,
-        path: path.join("backups", id),
-        manifest
-      };
-    } catch {
-      return undefined;
-    }
-  }));
-  return records
-    .filter((record): record is WorkspaceBackupRecord => Boolean(record))
-    .sort((a, b) => b.manifest.created_at.localeCompare(a.manifest.created_at));
-}
-
 async applyResourceRetention(policy: {
   max_queue: number;
   max_concurrency: number;
@@ -610,10 +533,10 @@ async applyResourceRetention(policy: {
     removedEvents += await session.removeBackendEvents(toRemove.map((event) => event.id));
   }
 
-  const backups = await this.listWorkspaceBackups();
+  const backups = await this.bundles.listWorkspaceBackups();
   const removedBackups = backups.slice(policy.max_backups);
   for (const backup of removedBackups) {
-    await rm(path.join(this.rootDir, backup.path), { recursive: true, force: true });
+    await this.bundles.deleteWorkspaceBackup(backup.id);
   }
   const snapshotResult = await this.services().learning.pruneLearningSnapshots(policy.max_snapshots);
   const indexResult = await this.services().queries.reindexSessionSearch();
@@ -635,189 +558,14 @@ async applyResourceRetention(policy: {
   };
 }
 
-async exportWorkspaceBundle(destinationRoot: string): Promise<{ path: string; backup: WorkspaceBackupRecord }> {
-  const backup = await this.createWorkspaceBackup();
-  const destination = path.join(path.resolve(destinationRoot), `samurai-workspace-${backup.id}`);
-  if (await pathExists(destination)) throw new Error("workspace_export_destination_exists");
-  await mkdir(path.dirname(destination), { recursive: true });
-  await cp(path.join(this.rootDir, backup.path), destination, { recursive: true, force: false, errorOnExist: true });
-  return { path: destination, backup };
-}
-
-async importWorkspaceBundle(bundlePath: string): Promise<WorkspaceRestoreResult> {
-  const source = path.resolve(bundlePath);
-  const manifest = parseWorkspaceBackupManifest(JSON.parse(await readFile(path.join(source, "manifest.json"), "utf8")));
-  const destination = path.join(this.rootDir, "backups", manifest.id);
-  if (await pathExists(destination)) throw new Error("workspace_import_backup_exists");
-  await cp(source, destination, { recursive: true, force: false, errorOnExist: true });
-  try {
-    return await this.restoreWorkspaceBackup(manifest.id);
-  } catch (error) {
-    await rm(destination, { recursive: true, force: true });
-    throw error;
-  }
-}
-
-async restoreWorkspaceBackup(backupId: string): Promise<WorkspaceRestoreResult> {
-  const safeId = normalizeBackupId(backupId);
-  const backupPath = path.join(this.rootDir, "backups", safeId);
-  const manifest = parseWorkspaceBackupManifest(JSON.parse(await readFile(path.join(backupPath, "manifest.json"), "utf8")));
-  const backupDbPath = path.join(backupPath, manifest.db_file);
-  const preRestoreHealth = await this.inspectWorkspace();
-  const restoredPaths: string[] = [];
-  const restoreId = `${safeId}-${randomUUID().slice(0, 8)}`;
-  const stagedRoot = path.join(this.rootDir, `.restore-stage-${restoreId}`);
-  const rollbackRoot = path.join(this.rootDir, `.restore-rollback-${restoreId}`);
-  await mkdir(path.join(stagedRoot, "files"), { recursive: true });
-  try {
-    await copyFile(backupDbPath, path.join(stagedRoot, "workspace.sqlite"));
-    for (const rootName of manifest.file_roots) {
-      const source = path.join(backupPath, "files", rootName);
-      if (!await pathExists(source)) {
-        continue;
-      }
-      await cp(source, path.join(stagedRoot, "files", rootName), { recursive: true, force: true });
-    }
-    this.restoreFailureInjector?.("extract");
-
-    const stagedHashes = await hashFilesUnderRoot(stagedRoot);
-    if (Object.keys(manifest.file_hashes).length === 0 || JSON.stringify(stagedHashes) !== JSON.stringify(manifest.file_hashes)) {
-      throw new Error("workspace_backup_hash_mismatch");
-    }
-    const integrity = this.kernel.verifyDatabaseFileIntegrity(path.join(stagedRoot, "workspace.sqlite"));
-    if (integrity !== "ok") throw new Error(`workspace_backup_integrity_failed:${String(integrity)}`);
-    this.restoreFailureInjector?.("hash_verify");
-
-    await this.kernel.checkpoint();
-    await this.kernel.close();
-    await mkdir(rollbackRoot, { recursive: true });
-    let swapped = false;
-    try {
-      if (await pathExists(this.kernel.dbPath)) await rename(this.kernel.dbPath, path.join(rollbackRoot, "workspace.sqlite"));
-      for (const rootName of workspaceBackupRoots()) {
-        const current = path.join(this.rootDir, rootName);
-        if (await pathExists(current)) await rename(current, path.join(rollbackRoot, rootName));
-      }
-      this.restoreFailureInjector?.("swap");
-      await rename(path.join(stagedRoot, "workspace.sqlite"), this.kernel.dbPath);
-      for (const rootName of manifest.file_roots) {
-        const source = path.join(stagedRoot, "files", rootName);
-        if (!await pathExists(source)) continue;
-        await rename(source, path.join(this.rootDir, rootName));
-        restoredPaths.push(rootName);
-      }
-      swapped = true;
-    } catch (error) {
-      await rm(this.kernel.dbPath, { force: true });
-      for (const rootName of workspaceBackupRoots()) await rm(path.join(this.rootDir, rootName), { recursive: true, force: true });
-      if (await pathExists(path.join(rollbackRoot, "workspace.sqlite"))) await rename(path.join(rollbackRoot, "workspace.sqlite"), this.kernel.dbPath);
-      for (const rootName of workspaceBackupRoots()) {
-        const original = path.join(rollbackRoot, rootName);
-        if (await pathExists(original)) await rename(original, path.join(this.rootDir, rootName));
-      }
-      throw error;
-    } finally {
-      await this.kernel.reopen(); await this.afterDatabaseReopen();
-    }
-    if (!swapped) throw new Error("workspace_restore_swap_incomplete");
-    await this.kernel.paths.ensureWorkspaceLayout();
-    await this.kernel.migrate();
-    await this.kernel.recoverWorkspaceFileTransactions();
-    await this.services().metadata.ensureDefaultSettings(defaultSettings());
-    await this.services().managedResources.synchronizeAll();
-    await this.services().queries.initializeSessionSearch();
-    await rm(rollbackRoot, { recursive: true, force: true });
-  } finally {
-    await rm(stagedRoot, { recursive: true, force: true });
-  }
-
-  const health = await this.inspectWorkspace();
-  const integrity = await this.checkIntegrity();
-  return {
-    backup_id: safeId,
-    restored_at: nowIso(),
-    restored_paths: restoredPaths,
-    db_restored: true,
-    manifest,
-    pre_restore_health: preRestoreHealth,
-    integrity,
-    health
-  };
-}
-
-
 }
 
 function workspaceLayoutDirs(rootDir: string): string[] {
   return [...new WorkspacePaths(rootDir).requiredDirectories];
 }
 
-function workspaceBackupRoots(): string[] {
-  return kernelWorkspaceBackupRoots();
-}
-
 function workspaceResourceBoundaries(): WorkspaceResourceBoundary[] {
   return kernelWorkspaceResourceBoundaries();
-}
-
-function createBackupId(): string {
-  return `backup_${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID().slice(0, 8)}`;
-}
-
-function parseWorkspaceBackupManifest(value: unknown): WorkspaceBackupManifest {
-  if (!value || typeof value !== "object") throw new Error("workspace_backup_manifest_invalid");
-  const manifest = value as Record<string, unknown>;
-  if (
-    typeof manifest.id !== "string"
-    || typeof manifest.created_at !== "string"
-    || typeof manifest.source_root !== "string"
-    || manifest.db_file !== "workspace.sqlite"
-    || !Array.isArray(manifest.file_roots)
-    || typeof manifest.health_ok !== "boolean"
-  ) {
-    throw new Error("workspace_backup_manifest_invalid");
-  }
-  return {
-    id: normalizeBackupId(manifest.id),
-    created_at: manifest.created_at,
-    source_root: manifest.source_root,
-    db_file: manifest.db_file,
-    file_roots: manifest.file_roots.filter((item): item is string => typeof item === "string"),
-    resource_boundaries: Array.isArray(manifest.resource_boundaries)
-      ? manifest.resource_boundaries.filter(isWorkspaceResourceBoundary)
-      : workspaceResourceBoundaries(),
-    health_ok: manifest.health_ok,
-    integrity_ok: typeof manifest.integrity_ok === "boolean" ? manifest.integrity_ok : manifest.health_ok,
-    file_hashes: manifest.file_hashes && typeof manifest.file_hashes === "object"
-      ? Object.fromEntries(Object.entries(manifest.file_hashes as Record<string, unknown>)
-        .filter((entry): entry is [string, string] => typeof entry[1] === "string"))
-      : {}
-  };
-}
-
-async function hashFilesUnderRoot(root: string, excluded: string[] = []): Promise<Record<string, string>> {
-  const excludedSet = new Set(excluded);
-  const files = (await listRelativeFiles(root)).filter((file) => !excludedSet.has(file)).sort();
-  const entries = await Promise.all(files.map(async (file) => {
-    const content = await readFile(path.join(root, file));
-    return [file, createHash("sha256").update(content).digest("hex")] as const;
-  }));
-  return Object.fromEntries(entries);
-}
-
-function isWorkspaceResourceBoundary(value: unknown): value is WorkspaceResourceBoundary {
-  return isKernelWorkspaceResourceBoundary(value);
-}
-
-async function listRelativeFiles(rootDir: string, currentDir = rootDir): Promise<string[]> {
-  const entries = await readdir(currentDir, { withFileTypes: true }).catch(() => []);
-  const nested = await Promise.all(entries.map(async (entry) => {
-    const absolutePath = path.join(currentDir, entry.name);
-    if (entry.isDirectory()) return listRelativeFiles(rootDir, absolutePath);
-    if (!entry.isFile()) return [];
-    return [path.relative(rootDir, absolutePath)];
-  }));
-  return nested.flat();
 }
 
 async function directoryByteSize(rootDir: string, excludedRoots: string[] = []): Promise<number> {

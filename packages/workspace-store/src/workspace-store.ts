@@ -6,6 +6,7 @@ export { renderFrontmatter } from "./repositories/workspace-file-codecs";
 export { CollectionRecordVersionConflictError } from "./repositories/collection-errors";
 
 import { defaultSettings, type BackendRunRecord } from "@samurai-agent/core-schemas";
+import { WorkspaceBundleService } from "./backup/workspace-bundle-service";
 import { WorkspaceKernelService } from "./kernel/workspace-kernel-service";
 import { WorkspacePaths } from "./kernel/workspace-paths";
 import { AccessHistoryRepository } from "./repositories/access-history-repository";
@@ -24,8 +25,10 @@ import { SessionExecutionRepository } from "./repositories/session-execution-rep
 import { SkillRepository } from "./repositories/skill-repository";
 import { WorkspaceMetadataRepository } from "./repositories/workspace-metadata-repository";
 import { ManagedResourcePostTurnService } from "./services/managed-resource-post-turn-service";
+import { WorkspaceMaintenanceGuard } from "./services/workspace-maintenance-guard";
 import { WorkspaceMaintenanceService } from "./services/workspace-maintenance-service";
 import { WorkspaceQueryService } from "./services/workspace-query-service";
+import { WorkspaceRestoreCoordinator } from "./restore/workspace-restore-coordinator";
 import type { Core02SettlementInput, WorkspaceStoreOptions } from "./workspace-store-contracts";
 
 interface WorkspaceComposition {
@@ -45,6 +48,8 @@ interface WorkspaceComposition {
   accessHistory: AccessHistoryRepository;
   managedResources: ManagedResourceSynchronizer;
   queries: WorkspaceQueryService;
+  bundles: WorkspaceBundleService;
+  restore: WorkspaceRestoreCoordinator;
   maintenance: WorkspaceMaintenanceService;
   postTurn: ManagedResourcePostTurnService;
 }
@@ -61,9 +66,13 @@ export class WorkspaceStore {
 
   private readonly kernel: WorkspaceKernelService;
   private readonly restoreFailureInjector: WorkspaceStoreOptions["restoreFailureInjector"];
+  private readonly maintenanceGuard = new WorkspaceMaintenanceGuard();
   private composition!: WorkspaceComposition;
 
   constructor(options: WorkspaceStoreOptions) {
+    if (WorkspaceRestoreCoordinator.hasPendingRestoreJournal(options.rootDir)) {
+      throw new Error("workspace_restore_recovery_required");
+    }
     this.kernel = new WorkspaceKernelService(options.rootDir, options.fileTransactionFailureInjector);
     this.rootDir = this.kernel.rootDir;
     this.dbPath = this.kernel.dbPath;
@@ -72,14 +81,12 @@ export class WorkspaceStore {
   }
 
   static async create(options: WorkspaceStoreOptions): Promise<WorkspaceStore> {
+    await WorkspaceRestoreCoordinator.recoverInterruptedWorkspaceRestore(options.rootDir);
+    await WorkspaceBundleService.cleanupIncompleteStages(options.rootDir);
     await new WorkspacePaths(options.rootDir).ensureWorkspaceLayout();
     const store = new WorkspaceStore(options);
     try {
-      await store.migrate();
-      await store.recoverWorkspaceFileTransactions();
-      await store.ensureDefaultSettings();
-      await store.synchronizeManagedResources();
-      await store.composition.queries.initializeSessionSearch();
+      await store.initializeOpenWorkspace();
       return store;
     } catch (error) {
       await store.kernel.close().catch(() => undefined);
@@ -116,6 +123,29 @@ export class WorkspaceStore {
 
   async reindexCollections() {
     return this.composition.managedResources.synchronizeCollections();
+  }
+
+  private async initializeOpenWorkspace(): Promise<void> {
+    await this.kernel.migrate();
+    await this.kernel.recoverWorkspaceFileTransactions();
+    await this.composition.metadata.ensureDefaultSettings(defaultSettings());
+    await this.composition.managedResources.synchronizeAll();
+    await this.composition.queries.initializeSessionSearch();
+  }
+
+  private async initializeRestoreStage(stageRoot: string): Promise<void> {
+    const stagedStore = await WorkspaceStore.create({ rootDir: stageRoot });
+    try {
+      await stagedStore.close();
+    } catch (error) {
+      await stagedStore.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async restartCurrentWorkspace(): Promise<void> {
+    this.rebuildComposition();
+    await this.initializeOpenWorkspace();
   }
 
   private rebuildComposition(): void {
@@ -170,6 +200,38 @@ export class WorkspaceStore {
       durableWork,
       learning
     );
+    const bundles = new WorkspaceBundleService(this.kernel, {
+      inspectWorkspace: () => this.composition.maintenance.inspectWorkspace(),
+      restoreImportedBundle: (backupId) => this.composition.restore.restoreWorkspaceBackup(backupId)
+    });
+    const restore = new WorkspaceRestoreCoordinator(
+      this.kernel,
+      bundles,
+      {
+        initializeStage: (stageRoot) => this.initializeRestoreStage(stageRoot),
+        restartCurrentWorkspace: () => this.restartCurrentWorkspace(),
+        inspectWorkspace: () => this.composition.maintenance.inspectWorkspace(),
+        checkIntegrity: () => this.composition.maintenance.checkIntegrity()
+      },
+      this.restoreFailureInjector
+    );
+    const maintenance = new WorkspaceMaintenanceService(
+      this.kernel,
+      () => ({
+        wiki: this.composition.wiki,
+        collection: this.composition.collections,
+        artifacts: this.composition.artifacts,
+        memory: this.composition.memory,
+        skills: this.composition.skills,
+        gateway: this.composition.gateway,
+        session: this.composition.session,
+        learning: this.composition.learning,
+        metadata: this.composition.metadata,
+        queries: this.composition.queries,
+        managedResources: this.composition.managedResources
+      }),
+      bundles
+    );
 
     this.composition = {
       session,
@@ -188,24 +250,9 @@ export class WorkspaceStore {
       accessHistory,
       managedResources,
       queries,
-      maintenance: new WorkspaceMaintenanceService(
-        this.kernel,
-        () => ({
-          wiki: this.composition.wiki,
-          collection: this.composition.collections,
-          artifacts: this.composition.artifacts,
-          memory: this.composition.memory,
-          skills: this.composition.skills,
-          gateway: this.composition.gateway,
-          session: this.composition.session,
-          learning: this.composition.learning,
-          metadata: this.composition.metadata,
-          queries: this.composition.queries,
-          managedResources: this.composition.managedResources
-        }),
-        this.restoreFailureInjector,
-        async () => this.rebuildComposition()
-      ),
+      bundles,
+      restore,
+      maintenance,
       postTurn: new ManagedResourcePostTurnService(managedResources, session)
     };
     this.bindCompatibilityApi();
@@ -214,7 +261,7 @@ export class WorkspaceStore {
   /** Keep every legacy entry point explicit; no Proxy or string dispatch is used. */
   private bindCompatibilityApi(): void {
     const facade = this as WorkspaceStore;
-    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, gateway, metadata, accessHistory, queries, maintenance } = this.composition;
+    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, gateway, metadata, accessHistory, queries, bundles, restore, maintenance } = this.composition;
 
     facade.migrate = this.kernel.migrate.bind(this.kernel);
     facade.listSchemaMigrations = this.kernel.listSchemaMigrations.bind(this.kernel);
@@ -508,13 +555,13 @@ export class WorkspaceStore {
     facade.inspectWorkspace = maintenance.inspectWorkspace.bind(maintenance);
     facade.checkIntegrity = maintenance.checkIntegrity.bind(maintenance);
     facade.listMigrationJournal = maintenance.listMigrationJournal.bind(maintenance);
-    facade.repairWorkspace = maintenance.repairWorkspace.bind(maintenance);
-    facade.createWorkspaceBackup = maintenance.createWorkspaceBackup.bind(maintenance);
-    facade.listWorkspaceBackups = maintenance.listWorkspaceBackups.bind(maintenance);
-    facade.applyResourceRetention = maintenance.applyResourceRetention.bind(maintenance);
-    facade.exportWorkspaceBundle = maintenance.exportWorkspaceBundle.bind(maintenance);
-    facade.importWorkspaceBundle = maintenance.importWorkspaceBundle.bind(maintenance);
-    facade.restoreWorkspaceBackup = maintenance.restoreWorkspaceBackup.bind(maintenance);
+    facade.repairWorkspace = (options) => this.maintenanceGuard.run(() => maintenance.repairWorkspace(options));
+    facade.createWorkspaceBackup = () => this.maintenanceGuard.run(() => bundles.createWorkspaceBackup());
+    facade.listWorkspaceBackups = bundles.listWorkspaceBackups.bind(bundles);
+    facade.applyResourceRetention = (policy) => this.maintenanceGuard.run(() => maintenance.applyResourceRetention(policy));
+    facade.exportWorkspaceBundle = (destinationRoot) => this.maintenanceGuard.run(() => bundles.exportWorkspaceBundle(destinationRoot));
+    facade.importWorkspaceBundle = (bundlePath) => this.maintenanceGuard.run(() => bundles.importWorkspaceBundle(bundlePath));
+    facade.restoreWorkspaceBackup = (backupId) => this.maintenanceGuard.run(() => restore.restoreWorkspaceBackup(backupId));
   }
 }
 
@@ -813,10 +860,10 @@ export interface WorkspaceStore {
   checkIntegrity: WorkspaceMaintenanceService["checkIntegrity"];
   listMigrationJournal: WorkspaceMaintenanceService["listMigrationJournal"];
   repairWorkspace: WorkspaceMaintenanceService["repairWorkspace"];
-  createWorkspaceBackup: WorkspaceMaintenanceService["createWorkspaceBackup"];
-  listWorkspaceBackups: WorkspaceMaintenanceService["listWorkspaceBackups"];
+  createWorkspaceBackup: WorkspaceBundleService["createWorkspaceBackup"];
+  listWorkspaceBackups: WorkspaceBundleService["listWorkspaceBackups"];
   applyResourceRetention: WorkspaceMaintenanceService["applyResourceRetention"];
-  exportWorkspaceBundle: WorkspaceMaintenanceService["exportWorkspaceBundle"];
-  importWorkspaceBundle: WorkspaceMaintenanceService["importWorkspaceBundle"];
-  restoreWorkspaceBackup: WorkspaceMaintenanceService["restoreWorkspaceBackup"];
+  exportWorkspaceBundle: WorkspaceBundleService["exportWorkspaceBundle"];
+  importWorkspaceBundle: WorkspaceBundleService["importWorkspaceBundle"];
+  restoreWorkspaceBackup: WorkspaceRestoreCoordinator["restoreWorkspaceBackup"];
 }

@@ -32,7 +32,7 @@ const collectionActionRun = defineCommand<CollectionActionRunPorts>()({
   ...{
   "kind": "command",
   "id": "collection.action.run",
-  "version": "4.0",
+  "version": "4.1",
   "availability": "active",
   "title": "Run collection action",
   "description": "Run a schema-defined Collection action such as patch, create, or reindex.",

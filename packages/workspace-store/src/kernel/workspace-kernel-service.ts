@@ -121,6 +121,16 @@ export class WorkspaceKernelService {
     await this.database.checkpoint();
   }
 
+  /** Strict restore-boundary checkpoint; busy or SQLite failures stop the swap. */
+  checkpointTruncate(): void {
+    this.database.checkpointTruncate();
+  }
+
+  /** SQLite online backup used by Workspace Bundle creation. */
+  async backupDatabaseTo(destination: string): Promise<void> {
+    await this.database.backupTo(destination);
+  }
+
   async close(): Promise<void> {
     await this.database.close();
   }

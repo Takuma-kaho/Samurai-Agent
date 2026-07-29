@@ -35,7 +35,7 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
   ...{
   "kind": "command",
   "id": "chat.turn.run",
-  "version": "5.0",
+  "version": "5.1",
   "availability": "active",
   "runtimeRequirements": ["agent_backend"],
   "title": "Run chat turn",

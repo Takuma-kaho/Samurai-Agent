@@ -525,6 +525,18 @@ sqlite:
 同じ情報をfilesystemとSQLiteの両方に置く場合、片方は必ずread modelまたはindexとして扱う。
 正本がどちらか不明なデータは追加しない。
 
+### Workspace Bundle / Restore
+
+WorkspaceのBackupは、単なるDB file copyではなく、復元できるdirectory Bundleである。
+
+- Bundleのpayloadは`workspace.sqlite`と`artifacts`、`profile`、`memory`、`skills`、`wiki`、`rollback`、`collections`、`surfaces`だけに固定する。`backups`、cache、派生学習データ、未知fileは含めない。
+- SQLiteはOnline Backup APIでSnapshotを作り、WAL内の確定内容も含める。Snapshotのintegrity checkに失敗したBundleは公開しない。
+- 作成中は隠しStageへ置き、全payloadのSHA-256確認後にManifestを最後に書く。完成時だけatomic renameするため、一覧へ未完成Bundleは出ない。
+- Manifest v2は相対POSIX path、`source_root: "."`、DB migration番号、固定root一覧、file hashを持つ。復元前にpath escape、重複、未知root、file集合差、hash不一致、special file、未来format、未来schemaを拒否する。v1は読込時に正規化し、欠けた管理rootを空として扱う。
+- Restoreは候補をStageで通常起動し、migration・未完了file transaction回収・default settings・managed resource同期・Session検索初期化を完了してから行う。現在状態の自動Backupを成功させてからjournalを記録し、DB/WAL/SHMと管理rootを入れ替える。
+- journalが`committed`前で中断した場合は次回起動時に元へ戻す。`committed`後は復元状態を保持して残骸だけを片付ける。古いWAL/SHMを復元DBへ流用しない。
+- 同一Store instanceではBackup、Import、Export、Restore、Repair、Retentionを同時実行しない。前提は単一Runtimeであり、待機queue、retry framework、プロセス間・分散lockは持たない。
+
 ### 7.1 Canonical Core Schemas
 
 構造上の中心schema。

@@ -94,6 +94,9 @@ try {
     runFixture("workspace-migration", "scripts/fixtures/workspace-migration.ts"),
     runFixture("workspace-file-transaction-recovery", "scripts/fixtures/workspace-file-transaction-recovery.ts"),
     runFixture("workspace-restore-atomicity", "scripts/fixtures/workspace-restore-atomicity.ts"),
+    runFixture("workspace-bundle-restore", "scripts/fixtures/workspace-bundle-restore.ts"),
+    runFixture("workspace-restore-recovery", "scripts/fixtures/workspace-restore-recovery.ts"),
+    runFixture("workspace-portability", "scripts/fixtures/workspace-portability.ts"),
     runFixture("session-search-index", "scripts/fixtures/session-search-index.ts"),
     runVitest("workspace-store-compatibility", ["packages/workspace-store/src/workspace-store.test.ts"]),
     runVitest("core02_transaction_contracts", [
@@ -103,7 +106,11 @@ try {
     ]),
     runVitest("host_terminal_diagnostic", ["packages/runtime/src/host/agent-host.test.ts"])
   ];
-  const status = checks.every((check) => check.status === "passed") ? "passed" : "failed";
+  const status = checks.some((check) => check.status === "failed")
+    ? "failed"
+    : checks.some((check) => check.status === "unverified")
+      ? "unverified"
+      : "passed";
   process.stdout.write(`${JSON.stringify({
     status,
     command: "pnpm core:workspace-persistence:verify",

@@ -45,7 +45,7 @@ export interface Core02SettlementInput {
 export interface WorkspaceStoreOptions {
   rootDir: string;
   fileTransactionFailureInjector?: (phase: "planned" | "staged" | "db_transaction" | "db_committed" | "renamed") => void;
-  restoreFailureInjector?: (phase: "extract" | "hash_verify" | "swap") => void;
+  restoreFailureInjector?: (phase: "extract" | "hash_verify" | "prepared" | "swap" | "replacement_moved" | "restart" | "committed") => void;
 }
 
 export interface SearchResult {
@@ -349,7 +349,7 @@ export interface WorkspaceRepairResult {
   health: WorkspaceHealthReport;
 }
 
-export interface WorkspaceBackupManifest {
+export interface WorkspaceBackupManifestV1 {
   id: string;
   created_at: string;
   source_root: string;
@@ -361,6 +361,23 @@ export interface WorkspaceBackupManifest {
   file_hashes: Record<string, string>;
 }
 
+/** Historical bundles remain readable, but newly created bundles are v2 only. */
+export interface WorkspaceBackupManifestV2 {
+  format_version: 2;
+  schema_version: number;
+  id: string;
+  created_at: string;
+  source_root: ".";
+  db_file: "workspace.sqlite";
+  file_roots: string[];
+  resource_boundaries: WorkspaceResourceBoundary[];
+  health_ok: boolean;
+  integrity_ok: boolean;
+  file_hashes: Record<string, string>;
+}
+
+export type WorkspaceBackupManifest = WorkspaceBackupManifestV1 | WorkspaceBackupManifestV2;
+
 export interface WorkspaceBackupRecord {
   id: string;
   path: string;
@@ -369,6 +386,7 @@ export interface WorkspaceBackupRecord {
 
 export interface WorkspaceRestoreResult {
   backup_id: string;
+  pre_restore_backup_id: string;
   restored_at: string;
   restored_paths: string[];
   db_restored: boolean;

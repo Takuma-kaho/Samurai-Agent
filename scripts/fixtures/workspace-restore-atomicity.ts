@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 
-const phases = ["extract", "hash_verify", "swap"] as const;
+const phases = ["extract", "hash_verify", "prepared", "swap", "replacement_moved", "restart"] as const;
 const outcomes: Array<{ phase: string; current_preserved: boolean }> = [];
 
 for (const phase of phases) {

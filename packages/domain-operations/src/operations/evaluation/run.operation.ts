@@ -32,7 +32,7 @@ const evaluationRun = defineCommand<EvaluationRunPorts>()({
   ...{
   "kind": "command",
   "id": "evaluation.run",
-  "version": "2.0",
+  "version": "2.1",
   "availability": "active",
   "title": "Run learning evaluation",
   "description": "Evaluate comparable Learning runs and guardrails.",
