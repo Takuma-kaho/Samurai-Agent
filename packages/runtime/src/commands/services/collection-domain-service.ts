@@ -15,7 +15,6 @@ import {
 } from "@samurai-agent/core-schemas";
 import { jsonValue } from "./json-value.js";
 import type { SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
-import type { CollectionReindexResult } from "@samurai-agent/workspace-store";
 import type { ChatTurnResult } from "./conversation-domain-service.js";
 
 type CollectionActionSession = SessionRecord;
@@ -24,6 +23,19 @@ interface CollectionActionChat extends ChatTurnResult {
 }
 interface CollectionPluginExecution { status: string; handler_id?: string; output?: JsonValue; error?: string }
 type StoredCollectionRecord = Omit<CollectionRecord, "version"> & { version: number; file_path: string };
+interface CollectionIndexRebuildResult {
+  files: number;
+  indexed: number;
+  created: number;
+  updated: number;
+  removed: number;
+  skipped: number;
+  errors: Array<{ file_path: string; message: string }>;
+}
+interface CollectionReindexResult {
+  schemas: CollectionIndexRebuildResult;
+  records: CollectionIndexRebuildResult;
+}
 type CollectionActionResource = StoredCollectionRecord
   | CollectionReindexResult
   | { collection_id: string; action_id: string; action_kind: string; status: "completed"; backend_run_id: string; session_id: string; custom_view?: Record<string, JsonValue>; output: { backend_status: string; message_ids: string[]; custom_view?: Record<string, JsonValue> } }

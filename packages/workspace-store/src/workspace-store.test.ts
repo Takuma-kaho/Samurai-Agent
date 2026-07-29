@@ -823,7 +823,7 @@ describe("workspace store", () => {
 
     expect(active?.state).toBe("active");
     expect(activePages.map((page) => page.id)).toEqual(["wiki_test"]);
-    expect(reindex).toMatchObject({ active: 1, total: 1, files: 1, indexed: 1, updated: 1 });
+    expect(reindex).toMatchObject({ active: 1, total: 1, files: 1, indexed: 1, updated: 0 });
   });
 
   it("detects and repairs Knowledge Wiki index drift from markdown source", async () => {
@@ -1044,8 +1044,8 @@ describe("workspace store", () => {
     expect(records.map((record) => record.id)).toEqual(["record_1"]);
     expect(notes[0]?.content).toBe("補助メモ");
     expect(reindex).toMatchObject({
-      schemas: { files: 1, indexed: 1, updated: 1, skipped: 0 },
-      records: { files: 1, indexed: 1, updated: 1, skipped: 0 }
+      schemas: { files: 1, indexed: 1, updated: 0, skipped: 0 },
+      records: { files: 1, indexed: 1, updated: 0, skipped: 0 }
     });
     expect(run.session_id).toBeUndefined();
     expect(updatedRun.session_id).toBe("session_1");

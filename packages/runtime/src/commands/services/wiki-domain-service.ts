@@ -9,9 +9,19 @@ import {
   type SupportedLocale,
   type WikiFrontmatter
 } from "@samurai-agent/core-schemas";
-import type { WikiReindexResult } from "@samurai-agent/workspace-store";
 
 type StoredWiki = WikiFrontmatter & { file_path: string };
+interface WikiReindexResult {
+  active: number;
+  total: number;
+  files: number;
+  indexed: number;
+  created: number;
+  updated: number;
+  removed: number;
+  skipped: number;
+  errors: Array<{ file_path: string; message: string }>;
+}
 type WikiInput = {
   id: string; title?: string; content?: string; tags?: string[]; content_locale?: SupportedLocale;
   source_refs?: WikiFrontmatter["source_refs"]; provenance?: WikiFrontmatter["provenance"];

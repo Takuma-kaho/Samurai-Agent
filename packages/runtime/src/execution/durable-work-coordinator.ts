@@ -1,13 +1,22 @@
-import { nowIso, type BackendRunRecord, type ObjectiveRecord, type WorkItemRecord } from "@samurai-agent/core-schemas";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+import { nowIso, type BackendRunRecord, type ObjectiveRecord, type WorkDependencyRecord, type WorkItemRecord } from "@samurai-agent/core-schemas";
 import { createFollowUpWorkItem, steerWorkItem, transitionObjectiveState } from "./work-state-machine";
 
 export interface BackendRunCancellationPort {
   cancelRun(runId: string): Promise<BackendRunRecord>;
 }
 
+export interface DurableWorkStorePort {
+  getObjective(id: string): Promise<ObjectiveRecord | undefined>;
+  listWorkItems(input: { objectiveId?: string; status?: WorkItemRecord["status"] }): Promise<WorkItemRecord[]>;
+  saveObjective(record: ObjectiveRecord): Promise<ObjectiveRecord>;
+  saveWorkItem(record: WorkItemRecord): Promise<WorkItemRecord>;
+  getBackendRun(runId: string): Promise<BackendRunRecord | undefined>;
+  getWorkItem(id: string): Promise<WorkItemRecord | undefined>;
+  saveWorkDependency(record: WorkDependencyRecord): Promise<WorkDependencyRecord>;
+}
+
 export class DurableWorkCoordinator {
-  constructor(private readonly store: WorkspaceStore, private readonly runControl: BackendRunCancellationPort) {}
+  constructor(private readonly store: DurableWorkStorePort, private readonly runControl: BackendRunCancellationPort) {}
 
   async transitionObjective(objectiveId: string, action: "pause" | "resume" | "cancel", now = nowIso()) {
     const objective = await this.requireObjective(objectiveId);

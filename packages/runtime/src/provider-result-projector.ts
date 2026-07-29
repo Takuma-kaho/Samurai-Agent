@@ -3,6 +3,7 @@ import {
   AuditRecordSchema,
   type ArtifactRecord,
   type AuditRecord,
+  type CollectionSchema,
   type JsonValue,
   type MemoryFrontmatter,
   OperationRecordSchema,
@@ -11,7 +12,8 @@ import {
   type ToolRunRecord,
   type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
-import type { CollectionSchemaWithFilePath } from "@samurai-agent/workspace-store";
+
+type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string };
 
 export interface RuntimeToolCallResult {
   operation: OperationRecord;

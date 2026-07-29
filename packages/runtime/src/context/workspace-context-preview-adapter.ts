@@ -1,12 +1,29 @@
 import { proposalCapabilityManifest } from "@samurai-agent/capability-registry";
-import { loadFreezeSnapshot, retrieveActiveMemoryWithReport } from "@samurai-agent/memory";
-import { nowIso, type ExternalAssistRecord } from "@samurai-agent/core-schemas";
+import { loadFreezeSnapshot, retrieveActiveMemoryWithReport, type MemoryRetrievalPort, type WorkspaceRootPort } from "@samurai-agent/memory";
+import { nowIso, type ExternalAssistRecord, type SkillFrontmatter } from "@samurai-agent/core-schemas";
 import { parseSkillMarkdown } from "@samurai-agent/skills";
 import { type ExternalAssistProviderPort, buildExternalAssistContext } from "./external-assist-context.js";
-import { buildKnowledgeWikiContext } from "./workspace-context-candidates.js";
+import { buildKnowledgeWikiContext, type WorkspaceContextCandidatesStore } from "./workspace-context-candidates.js";
 import { type ContextPreviewPorts } from "./context-preview.js";
-import type { SkillContextEnvironment } from "./skill-context.js";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+import type { SkillContextEnvironment, SkillContextSkill } from "./skill-context.js";
+import type { ExternalAssistContextStore } from "./external-assist-context.js";
+
+export interface WorkspaceContextPreviewStorePort extends MemoryRetrievalPort, WorkspaceRootPort, WorkspaceContextCandidatesStore, ExternalAssistContextStore {
+  getSession: ContextPreviewPorts["session"]["getSession"];
+  getSettings: ContextPreviewPorts["session"]["getSettings"];
+  listMessages: ContextPreviewPorts["summary"]["listMessages"];
+  listOperations: ContextPreviewPorts["summary"]["listOperations"];
+  listBackendRuns: ContextPreviewPorts["summary"]["listBackendRuns"];
+  listToolRuns(input: { sessionId: string }): ReturnType<ContextPreviewPorts["summary"]["listToolRuns"]>;
+  listWorkspaceChanges: ContextPreviewPorts["summary"]["listWorkspaceChanges"];
+  searchSkills(query: string, limit?: number, options?: { states?: SkillFrontmatter["state"][] }): Promise<SkillContextSkill[]>;
+  listSkillUsage: ContextPreviewPorts["skills"]["listUsage"];
+  readSkillMarkdown(skillId: string): Promise<string | undefined>;
+  listSkillSupportFiles: ContextPreviewPorts["skills"]["listSupportFiles"];
+  listCollectionSchemas: ContextPreviewPorts["collections"]["listSchemas"];
+  listCollectionNotes(collectionId: string): Promise<Array<{ collection_id: string; file_path: string; content: string; role: "context_only" }>>;
+  search: ContextPreviewPorts["sessionSearch"]["search"];
+}
 
 export interface WorkspaceContextPreviewAdapterOptions {
   externalAssistProviders?: readonly ExternalAssistProviderPort[];
@@ -17,7 +34,7 @@ export interface WorkspaceContextPreviewAdapterOptions {
 export class WorkspaceContextPreviewAdapter {
   readonly ports: ContextPreviewPorts;
 
-  constructor(private readonly store: WorkspaceStore, options: WorkspaceContextPreviewAdapterOptions) {
+  constructor(private readonly store: WorkspaceContextPreviewStorePort, options: WorkspaceContextPreviewAdapterOptions) {
     const environment: SkillContextEnvironment = {
       runtime: "local_workspace",
       platform: process.platform,

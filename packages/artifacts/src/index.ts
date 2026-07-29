@@ -7,7 +7,11 @@ import {
   nowIso
 } from "@samurai-agent/core-schemas";
 import { createHash } from "node:crypto";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+
+export interface ArtifactDraftStorePort {
+  writeArtifactContent(id: string, content: string | Uint8Array, options?: { extension?: string }): Promise<string>;
+  saveArtifactMetadata(record: ArtifactRecord): Promise<ArtifactRecord>;
+}
 
 export type ArtifactKind = ArtifactRecord["kind"];
 export interface ArtifactBinaryPayload {
@@ -20,7 +24,7 @@ export interface ArtifactBinaryPayload {
 export type ArtifactPayload = string | Record<string, unknown> | unknown[] | ArtifactBinaryPayload;
 
 export interface CreateArtifactDraftInput {
-  store: WorkspaceStore;
+  store: ArtifactDraftStorePort;
   operation: OperationRecord;
   title: string;
   content: ArtifactPayload;

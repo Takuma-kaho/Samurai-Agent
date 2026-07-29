@@ -1,4 +1,4 @@
-import type { SkillWithFilePath } from "@samurai-agent/workspace-store";
+import type { SkillFrontmatter } from "@samurai-agent/core-schemas";
 import type { ArtifactDomainService } from "./commands/services/artifact-domain-service.js";
 import type { AutomationDomainService } from "./commands/services/automation-domain-service.js";
 import type { BrowserDomainService } from "./commands/services/browser-domain-service.js";
@@ -22,6 +22,19 @@ import type { TranslationDomainService } from "./commands/services/translation-d
 import type { WikiDomainService } from "./commands/services/wiki-domain-service.js";
 import type { SearchDomainService } from "./commands/services/search-domain-service.js";
 
+type RuntimeSkill = {
+  id: string;
+  title: string;
+  description: string;
+  tags: string[];
+  state: SkillFrontmatter["state"];
+  allowed_scopes: SkillFrontmatter["allowed_scopes"];
+  required_capabilities: string[];
+  owner_pinned: boolean;
+  frontmatter: SkillFrontmatter;
+  file_path: string;
+};
+
 export interface RuntimeDomainServices {
   artifactDomainService: ArtifactDomainService;
   automationDomainService: AutomationDomainService;
@@ -40,7 +53,7 @@ export interface RuntimeDomainServices {
   pluginDomainService: PluginDomainService;
   presentationDomainService: PresentationDomainService;
   settingsDomainService: SettingsDomainService;
-  skillDomainService: SkillDomainService<SkillWithFilePath>;
+  skillDomainService: SkillDomainService<RuntimeSkill>;
   systemDomainService: SystemDomainService;
   translationDomainService: TranslationDomainService;
   wikiDomainService: WikiDomainService;

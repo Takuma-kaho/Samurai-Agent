@@ -15,6 +15,19 @@ export class SessionSearchIndex {
     return this.mode;
   }
 
+  /** Returns the active derived-index size without exposing its table to callers. */
+  async countEntries(): Promise<number | undefined> {
+    if (this.mode === "like") return 0;
+    const table = this.mode === "fts5_trigram" ? "session_search_trigram" : "session_search_fts";
+    try {
+      const result = await sql<{ count: number }>`SELECT COUNT(*) as count FROM ${sql.raw(table)}`.execute(this.db);
+      return Number(result.rows[0]?.count ?? 0);
+    } catch {
+      this.mode = "like";
+      return undefined;
+    }
+  }
+
   async initialize(loadEntries: () => Promise<SessionSearchEntry[]>): Promise<void> {
     try {
       if (await tableExists(this.db, "session_search_fts")) {
