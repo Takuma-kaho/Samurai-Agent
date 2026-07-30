@@ -16,5 +16,3 @@ export function safeArtifactExtension(extension: string): string {
   }
   return normalized;
 }
-
-

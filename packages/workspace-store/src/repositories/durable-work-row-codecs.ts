@@ -183,4 +183,3 @@ function parseDomainCommandExecutionError(value: string): NonNullable<DomainComm
   }
   return { code: "domain_command_failed", message: value, retryable: false };
 }
-

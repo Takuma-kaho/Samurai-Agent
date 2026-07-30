@@ -88,5 +88,3 @@ export function externalAssistDiagnosticsRecommendation(records: ExternalAssistR
   }
   return "External Assist records are isolated from Memory and available as unverified assistive context.";
 }
-
-

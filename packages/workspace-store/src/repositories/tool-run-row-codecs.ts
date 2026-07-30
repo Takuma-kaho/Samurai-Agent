@@ -18,7 +18,6 @@ return {
   created_at: run.created_at
 };
 }
-
 export function toolRunFromRow(row: ToolRunsTable): ToolRunRecord {
 return {
   id: row.id,
@@ -35,4 +34,3 @@ return {
   created_at: row.created_at
 };
 }
-

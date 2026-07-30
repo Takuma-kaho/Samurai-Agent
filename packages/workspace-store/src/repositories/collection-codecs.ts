@@ -400,4 +400,3 @@ export function countBy<T>(items: T[], keyFor: (item: T) => string): Map<string,
   }
   return counts;
 }
-

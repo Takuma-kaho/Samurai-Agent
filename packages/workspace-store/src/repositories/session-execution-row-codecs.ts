@@ -199,5 +199,3 @@ export function messagePresentationFromRow(row: MessagePresentationsTable): Mess
     updated_at: row.updated_at
   };
 }
-
-

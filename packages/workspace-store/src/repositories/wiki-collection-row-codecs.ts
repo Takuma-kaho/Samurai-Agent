@@ -56,4 +56,3 @@ export function collectionPatchToRow(collectionId: string, patch: CollectionPatc
 export function collectionPatchFromRow(row: CollectionPatchesTable): CollectionPatch {
   return parse(row.patch_json);
 }
-

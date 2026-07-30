@@ -24,4 +24,3 @@ export function generatedSurfaceRevisionToRow(record: GeneratedSurfaceRevisionRe
 export function surfaceInteractionToRow(record: SurfaceInteractionRecord): SurfaceInteractionsTable {
   return { id: record.id, surface_id: record.surface_id, revision_id: record.revision_id, session_id: record.session_id, kind: record.kind, interaction_json: stringify(record), created_at: record.created_at };
 }
-

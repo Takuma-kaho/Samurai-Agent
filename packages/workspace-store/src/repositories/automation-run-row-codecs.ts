@@ -15,7 +15,6 @@ export function automationRunToRow(run: AutomationRunRecord): AutomationRunsTabl
     error: run.error ?? null
   };
 }
-
 export function automationRunFromRow(row: AutomationRunsTable): AutomationRunRecord {
   return {
     id: row.id,
@@ -30,4 +29,3 @@ export function automationRunFromRow(row: AutomationRunsTable): AutomationRunRec
     error: row.error ?? undefined
   };
 }
-

@@ -352,5 +352,3 @@ export function gatewaySandboxWorkspaceSyncFromRow(row: GatewaySandboxWorkspaceS
     metadata: parse(row.metadata_json)
   });
 }
-
-

@@ -43,5 +43,3 @@ export function automationJobFromRow(row: AutomationJobsTable): AutomationJobRec
     updated_at: row.updated_at
   };
 }
-
-

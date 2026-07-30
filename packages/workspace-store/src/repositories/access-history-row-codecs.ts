@@ -17,7 +17,6 @@ export function policyDecisionFromRow(row: PolicyDecisionsTable): PolicyDecision
     created_at: row.created_at
   };
 }
-
 export function approvalRequestFromRow(row: ApprovalRequestsTable): ApprovalRequest {
   return {
     id: row.id,
@@ -83,4 +82,3 @@ export function grantFromRow(row: GrantsTable): GrantRecord {
     revoked_at: row.revoked_at ?? undefined
   };
 }
-
