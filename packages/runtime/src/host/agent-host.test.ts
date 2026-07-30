@@ -86,7 +86,7 @@ describe("AgentHost production path", () => {
       expect(result.output.content).toContain("Mock response: hello");
       const events = await store.listBackendEvents({ runId: result.run.id });
       expect(events.map((event) => event.event_type)).toEqual(["run_started", "text_delta", "run_completed", "host_post_turn_failed"]);
-      expect(events.at(-1)?.payload.operation_id).toBe("presentation");
+      expect(events.at(-1)?.payload.command_name).toBe("presentation");
       expect((await store.getBackendRun(result.run.id))?.status).toBe("completed");
       expect((await store.listMessages(session.id)).filter((message) => message.role === "agent")).toHaveLength(1);
       expect((await store.getSessionRunReservation({ runId: result.run.id }))?.status).toBe("released");

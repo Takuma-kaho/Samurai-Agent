@@ -1,9 +1,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { createId, nowIso, type BackendEventRecord, type MessageEnvelope, type SessionRecord } from "@samurai-agent/core-schemas";
-import { sql } from "kysely";
 import { RunLifecycle } from "../../runtime/src/execution/run-lifecycle";
 import { WorkspaceStore } from "./workspace-store";
 
@@ -28,6 +28,25 @@ async function twoStoreFixture() {
   await firstStore.createSession(session);
   const envelope: MessageEnvelope = { id: createId("envelope"), source: "web", actor_identity: "owner", session_key: session.session_key, user_intent: "chat", attachments: [], input_locale: "ja", output_locale: "ja", metadata: {}, received_at: now };
   return { firstStore, secondStore, session, envelope };
+}
+
+function reservationCount(dbPath: string, sessionId: string): number {
+  const database = new Database(dbPath);
+  try {
+    const row = database.prepare("SELECT COUNT(*) AS count FROM session_run_reservations WHERE session_id = ?").get(sessionId) as { count: number };
+    return Number(row.count);
+  } finally {
+    database.close();
+  }
+}
+
+function installAdmissionFault(dbPath: string): void {
+  const database = new Database(dbPath);
+  try {
+    database.exec("CREATE TRIGGER core02_admission_fault BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'core02_admission_fault'); END");
+  } finally {
+    database.close();
+  }
 }
 
 describe("Core 02 admission transaction", () => {
@@ -103,7 +122,7 @@ describe("Core 02 admission transaction", () => {
     expect(rejected?.reason).toMatchObject({ message: "idempotency_conflict" });
     expect(await firstStore.listBackendRuns(session.id)).toHaveLength(1);
     expect((await firstStore.listMessages(session.id)).filter((message) => message.role === "user")).toHaveLength(1);
-    expect(await sql<{ count: number }>`SELECT COUNT(*) AS count FROM session_run_reservations WHERE session_id = ${session.id}`.execute(firstStore.db).then((result) => Number(result.rows[0]?.count))).toBe(1);
+    expect(reservationCount(firstStore.dbPath, session.id)).toBe(1);
     await firstStore.close(); await secondStore.close();
   });
 
@@ -135,11 +154,11 @@ describe("Core 02 admission transaction", () => {
 
   it("C02-H03 rolls back every admission row when SQLite rejects the message write", async () => {
     const { store, session, envelope } = await fixture();
-    await sql.raw("CREATE TRIGGER core02_admission_fault BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'core02_admission_fault'); END").execute(store.db);
+    installAdmissionFault(store.dbPath);
     await expect(store.admitTurn({ session, binding: { id: "mock", kind: "mock" }, request: { sessionId: session.id, content: "fault", envelope, idempotencyKey: "fault-key", metadata: {} }, requestHash: "fault-hash", runId: createId("run"), now: nowIso() })).rejects.toThrow("core02_admission_fault");
     expect(await store.listBackendRuns(session.id)).toHaveLength(0);
     expect((await store.listMessages(session.id)).filter((message) => message.role === "user")).toHaveLength(0);
-    expect(await sql<{ count: number }>`SELECT COUNT(*) AS count FROM session_run_reservations WHERE session_id = ${session.id}`.execute(store.db).then((result) => Number(result.rows[0]?.count))).toBe(0);
+    expect(reservationCount(store.dbPath, session.id)).toBe(0);
     await store.close();
   });
 });

@@ -12,7 +12,19 @@ import {
 } from "@samurai-agent/core-schemas";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+
+export interface MemoryRetrievalPort {
+  searchMemory(query: string, limit?: number, options?: { includeArchived?: boolean }): Promise<Array<MemoryFrontmatter & { file_path: string }>>;
+  readMemoryContent(id: string): Promise<string | undefined>;
+}
+
+export interface MemoryWritePort {
+  saveMemory(frontmatter: MemoryFrontmatter, content: string): Promise<MemoryFrontmatter>;
+}
+
+export interface WorkspaceRootPort {
+  readonly rootDir: string;
+}
 
 export interface MemoryCandidate {
   frontmatter: MemoryFrontmatter;
@@ -26,11 +38,11 @@ export interface ActiveMemoryRetrievalResult {
   report: ActiveMemoryRetrievalReport;
 }
 
-export async function retrieveActiveMemory(store: WorkspaceStore, query: string): Promise<MemoryCandidate[]> {
+export async function retrieveActiveMemory(store: MemoryRetrievalPort, query: string): Promise<MemoryCandidate[]> {
   return (await retrieveActiveMemoryWithReport(store, query)).candidates;
 }
 
-export async function retrieveActiveMemoryWithReport(store: WorkspaceStore, query: string): Promise<ActiveMemoryRetrievalResult> {
+export async function retrieveActiveMemoryWithReport(store: MemoryRetrievalPort, query: string): Promise<ActiveMemoryRetrievalResult> {
   const retrievedAt = nowIso();
   const rows = await store.searchMemory(query, 20, { includeArchived: true });
   const candidates: MemoryCandidate[] = [];
@@ -134,7 +146,7 @@ export interface FreezeSnapshotInput {
 }
 
 export async function loadFreezeSnapshot(
-  store: Pick<WorkspaceStore, "rootDir">,
+  store: WorkspaceRootPort,
   input: FreezeSnapshotInput = {}
 ): Promise<FreezeSnapshot> {
   const loadedAt = nowIso();
@@ -169,7 +181,7 @@ export async function loadFreezeSnapshot(
 }
 
 export async function createSessionMemory(
-  store: WorkspaceStore,
+  store: MemoryWritePort,
   envelope: MessageEnvelope,
   content: string
 ): Promise<MemoryFrontmatter> {
@@ -187,7 +199,7 @@ export async function createSessionMemory(
 }
 
 export async function createProvisionalMemory(
-  store: WorkspaceStore,
+  store: MemoryWritePort,
   envelope: MessageEnvelope,
   content: string
 ): Promise<MemoryFrontmatter> {
@@ -205,7 +217,7 @@ export async function createProvisionalMemory(
 }
 
 export async function createTopicMemory(
-  store: WorkspaceStore,
+  store: MemoryWritePort,
   envelope: MessageEnvelope,
   topic: string,
   content: string

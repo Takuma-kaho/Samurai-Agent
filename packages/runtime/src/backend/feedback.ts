@@ -10,9 +10,9 @@ import {
   type ToolRunRecord,
   type WorkspaceChangeRecord,
   createId,
-  nowIso
+  nowIso,
+  type SettingsRecord
 } from "@samurai-agent/core-schemas";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
 
 const artifactCreateCommand = getDomainCommandForProviderToolName("create_artifact") ?? requireDomainCommandEntry("artifact.create");
 const memoryTopicCreateCommand = getDomainCommandForProviderToolName("remember_topic") ?? requireDomainCommandEntry("memory.topic.create");
@@ -31,8 +31,13 @@ export interface BackendToolBoundaryFeedback {
   resourceRefs: ResourceRef[];
 }
 
+export interface BackendFeedbackStorePort {
+  getSettings(): Promise<SettingsRecord>;
+  saveToolRun(run: ToolRunRecord): Promise<ToolRunRecord>;
+}
+
 export async function handleBackendToolCall(input: {
-  store: WorkspaceStore;
+  store: BackendFeedbackStorePort;
   run: BackendRunRecord;
   runInput: BackendRunInput;
   event: BackendToolCallStartedEvent;
@@ -66,7 +71,7 @@ async function ignoredToolOutput(
   toolCallId: string,
   toolName: string,
   reason: string,
-  store?: WorkspaceStore,
+  store?: BackendFeedbackStorePort,
   boundary?: BackendToolBoundaryFeedback,
   actionId?: string
 ): Promise<FeedbackResult> {
@@ -110,7 +115,7 @@ function withBoundaryRefs(refs: ResourceRef[], boundary: BackendToolBoundaryFeed
 }
 
 async function saveToolRun(
-  store: WorkspaceStore,
+  store: BackendFeedbackStorePort,
   input: {
     run: BackendRunRecord;
     toolCallId?: string;

@@ -1,0 +1,106 @@
+/**
+ * WorkspaceDb only composes row contracts owned by the corresponding
+ * persistence area.  SQL shape definitions live beside their owners in
+ * ../rows, keeping the kernel free of resource conversion logic.
+ */
+export type { JsonColumn } from "../rows/json-column";
+export type { SessionsTable, MessagesTable, MessagePresentationsTable, OperationsTable, BackendRunsTable, SessionRunReservationsTable, BackendEventsTable, ToolRunsTable, WorkspaceChangesTable } from "../rows/session-execution-rows";
+export type { DomainCommandExecutionsTable, ObjectivesTable, WorkItemsTable, WorkDependenciesTable, RunCheckpointsTable } from "../rows/durable-work-rows";
+export type { ArtifactsTable, ArtifactRevisionsTable } from "../rows/artifact-rows";
+export type { GeneratedSurfacesTable, GeneratedSurfaceRevisionsTable, SurfaceInteractionsTable } from "../rows/generated-surface-rows";
+export type { PolicyDecisionsTable, ApprovalRequestsTable, AuditRecordsTable, RollbackPointsTable, GrantsTable } from "../rows/access-history-rows";
+export type { MemoryIndexTable } from "../rows/memory-rows";
+export type { SkillIndexTable, SkillUsageTable, SkillOptimizationRunsTable, SkillOptimizationDatasetsTable, OptimizationCandidatesTable, OptimizationEvaluationsTable, OptimizationPromotionsTable, SkillOptimizationSnapshotsTable, SkillOptimizationLocksTable } from "../rows/skill-rows";
+export type { LearningResourceUseTable, LearningEvaluationTable, LearningSnapshotTable, BackgroundReviewChangeTable, LearningJobReportTable, CuratorStateTable, ReflectionRunsTable, ReflectionSuggestionsTable, ExternalAssistRecordsTable } from "../rows/learning-rows";
+export type { WikiIndexTable } from "../rows/wiki-rows";
+export type { CollectionSchemasTable, CollectionRecordsTable, CollectionPatchesTable } from "../rows/collection-rows";
+export type { AutomationJobsTable, AutomationRunsTable } from "../rows/automation-rows";
+export type { ExternalSendsTable, GatewayPairingsTable, GatewayPairingPoliciesTable, GatewayRoutingPoliciesTable, GatewayInboundMessagesTable, GatewayDeliveriesTable, GatewayBoundaryPoliciesTable, GatewayMcpConfigsTable, GatewayConcurrencyLocksTable, GatewaySandboxInstancesTable, GatewaySandboxWorkspaceSyncsTable } from "../rows/gateway-rows";
+export type { SettingsTable, PluginStatesTable, ResourceTranslationsTable } from "../rows/workspace-metadata-rows";
+export type { ClientEventsTable } from "../rows/client-event-rows";
+export type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
+
+import type { SessionsTable, MessagesTable, MessagePresentationsTable, OperationsTable, BackendRunsTable, SessionRunReservationsTable, BackendEventsTable, ToolRunsTable, WorkspaceChangesTable } from "../rows/session-execution-rows";
+import type { DomainCommandExecutionsTable, ObjectivesTable, WorkItemsTable, WorkDependenciesTable, RunCheckpointsTable } from "../rows/durable-work-rows";
+import type { ArtifactsTable, ArtifactRevisionsTable } from "../rows/artifact-rows";
+import type { GeneratedSurfacesTable, GeneratedSurfaceRevisionsTable, SurfaceInteractionsTable } from "../rows/generated-surface-rows";
+import type { PolicyDecisionsTable, ApprovalRequestsTable, AuditRecordsTable, RollbackPointsTable, GrantsTable } from "../rows/access-history-rows";
+import type { MemoryIndexTable } from "../rows/memory-rows";
+import type { SkillIndexTable, SkillUsageTable, SkillOptimizationRunsTable, SkillOptimizationDatasetsTable, OptimizationCandidatesTable, OptimizationEvaluationsTable, OptimizationPromotionsTable, SkillOptimizationSnapshotsTable, SkillOptimizationLocksTable } from "../rows/skill-rows";
+import type { LearningResourceUseTable, LearningEvaluationTable, LearningSnapshotTable, BackgroundReviewChangeTable, LearningJobReportTable, CuratorStateTable, ReflectionRunsTable, ReflectionSuggestionsTable, ExternalAssistRecordsTable } from "../rows/learning-rows";
+import type { WikiIndexTable } from "../rows/wiki-rows";
+import type { CollectionSchemasTable, CollectionRecordsTable, CollectionPatchesTable } from "../rows/collection-rows";
+import type { AutomationJobsTable, AutomationRunsTable } from "../rows/automation-rows";
+import type { ExternalSendsTable, GatewayPairingsTable, GatewayPairingPoliciesTable, GatewayRoutingPoliciesTable, GatewayInboundMessagesTable, GatewayDeliveriesTable, GatewayBoundaryPoliciesTable, GatewayMcpConfigsTable, GatewayConcurrencyLocksTable, GatewaySandboxInstancesTable, GatewaySandboxWorkspaceSyncsTable } from "../rows/gateway-rows";
+import type { SettingsTable, PluginStatesTable, ResourceTranslationsTable } from "../rows/workspace-metadata-rows";
+import type { ClientEventsTable } from "../rows/client-event-rows";
+import type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
+
+export interface WorkspaceDb {
+  sessions: SessionsTable;
+  messages: MessagesTable;
+  message_presentations: MessagePresentationsTable;
+  skill_optimization_runs: SkillOptimizationRunsTable;
+  skill_optimization_datasets: SkillOptimizationDatasetsTable;
+  optimization_candidates: OptimizationCandidatesTable;
+  optimization_evaluations: OptimizationEvaluationsTable;
+  optimization_promotions: OptimizationPromotionsTable;
+  skill_optimization_snapshots: SkillOptimizationSnapshotsTable;
+  skill_optimization_locks: SkillOptimizationLocksTable;
+  operations: OperationsTable;
+  domain_command_executions: DomainCommandExecutionsTable;
+  objectives: ObjectivesTable;
+  work_items: WorkItemsTable;
+  work_dependencies: WorkDependenciesTable;
+  run_checkpoints: RunCheckpointsTable;
+  workspace_file_transactions: WorkspaceFileTransactionsTable;
+  generated_surfaces: GeneratedSurfacesTable;
+  artifact_revisions: ArtifactRevisionsTable;
+  generated_surface_revisions: GeneratedSurfaceRevisionsTable;
+  surface_interactions: SurfaceInteractionsTable;
+  policy_decisions: PolicyDecisionsTable;
+  approval_requests: ApprovalRequestsTable;
+  audit_records: AuditRecordsTable;
+  rollback_points: RollbackPointsTable;
+  artifacts: ArtifactsTable;
+  memory_index: MemoryIndexTable;
+  skill_index: SkillIndexTable;
+  skill_usage: SkillUsageTable;
+  learning_resource_uses: LearningResourceUseTable;
+  learning_evaluations: LearningEvaluationTable;
+  learning_snapshots: LearningSnapshotTable;
+  background_review_changes: BackgroundReviewChangeTable;
+  learning_job_reports: LearningJobReportTable;
+  curator_state: CuratorStateTable;
+  wiki_index: WikiIndexTable;
+  collection_schemas: CollectionSchemasTable;
+  collection_records: CollectionRecordsTable;
+  collection_patches: CollectionPatchesTable;
+  automation_jobs: AutomationJobsTable;
+  automation_runs: AutomationRunsTable;
+  external_sends: ExternalSendsTable;
+  gateway_pairings: GatewayPairingsTable;
+  gateway_pairing_policies: GatewayPairingPoliciesTable;
+  gateway_routing_policies: GatewayRoutingPoliciesTable;
+  gateway_inbound_messages: GatewayInboundMessagesTable;
+  gateway_deliveries: GatewayDeliveriesTable;
+  gateway_boundary_policies: GatewayBoundaryPoliciesTable;
+  gateway_mcp_configs: GatewayMcpConfigsTable;
+  gateway_concurrency_locks: GatewayConcurrencyLocksTable;
+  gateway_sandbox_instances: GatewaySandboxInstancesTable;
+  gateway_sandbox_workspace_syncs: GatewaySandboxWorkspaceSyncsTable;
+  reflection_runs: ReflectionRunsTable;
+  reflection_suggestions: ReflectionSuggestionsTable;
+  tool_runs: ToolRunsTable;
+  external_assist_records: ExternalAssistRecordsTable;
+  settings: SettingsTable;
+  plugin_states: PluginStatesTable;
+  grants: GrantsTable;
+  backend_runs: BackendRunsTable;
+  session_run_reservations: SessionRunReservationsTable;
+  backend_events: BackendEventsTable;
+  client_events: ClientEventsTable;
+  workspace_changes: WorkspaceChangesTable;
+  resource_translations: ResourceTranslationsTable;
+  migration_journal: MigrationJournalTable;
+}

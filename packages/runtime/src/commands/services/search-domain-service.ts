@@ -1,18 +1,45 @@
-import type { JsonValue } from "@samurai-agent/core-schemas";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+import type {
+  CollectionRecord,
+  CollectionSchema,
+  JsonValue,
+  MemoryFrontmatter,
+  SkillFrontmatter,
+  WikiFrontmatter
+} from "@samurai-agent/core-schemas";
 
-type SearchStoreMethods = Pick<WorkspaceStore, "search" | "searchMemory" | "searchWiki" | "searchSkills" | "getCollectionSchema" | "listCollectionSchemas" | "listCollectionRecords">;
-type SearchArgs<K extends keyof SearchStoreMethods> = Parameters<SearchStoreMethods[K]>;
+interface SearchResult {
+  kind: "session" | "message" | "artifact" | "audit";
+  id: string;
+  title: string;
+  summary: string;
+  session_id?: string;
+}
+type MemoryWithFilePath = MemoryFrontmatter & { file_path: string };
+type WikiWithFilePath = WikiFrontmatter & { file_path: string };
+type SkillWithFilePath = {
+  id: string;
+  title: string;
+  description: string;
+  tags: string[];
+  state: SkillFrontmatter["state"];
+  allowed_scopes: SkillFrontmatter["allowed_scopes"];
+  required_capabilities: string[];
+  owner_pinned: boolean;
+  frontmatter: SkillFrontmatter;
+  file_path: string;
+};
+type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string };
+type CollectionRecordWithFilePath = Omit<CollectionRecord, "version"> & { version: number; file_path: string };
 
 /** Narrow adapter exposed to Query services; no WorkspaceStore mutation API crosses this boundary. */
 export interface SearchReadStore {
-  search: SearchStoreMethods["search"];
-  searchMemory: SearchStoreMethods["searchMemory"];
-  searchWiki: SearchStoreMethods["searchWiki"];
-  searchSkills: SearchStoreMethods["searchSkills"];
-  getCollectionSchema: SearchStoreMethods["getCollectionSchema"];
-  listCollectionSchemas: SearchStoreMethods["listCollectionSchemas"];
-  listCollectionRecords: SearchStoreMethods["listCollectionRecords"];
+  search(query: string): Promise<SearchResult[]>;
+  searchMemory(query: string, limit?: number, options?: { includeArchived?: boolean }): Promise<MemoryWithFilePath[]>;
+  searchWiki(query: string, limit?: number, options?: { activeOnly?: boolean }): Promise<WikiWithFilePath[]>;
+  searchSkills(query: string, limit?: number, options?: { states?: SkillWithFilePath["state"][] }): Promise<SkillWithFilePath[]>;
+  getCollectionSchema(collectionId: string): Promise<CollectionSchemaWithFilePath | undefined>;
+  listCollectionSchemas(): Promise<CollectionSchemaWithFilePath[]>;
+  listCollectionRecords(collectionId?: string): Promise<CollectionRecordWithFilePath[]>;
 }
 
 export interface SessionSearchResult { kind: "session" | "message" | "artifact" | "audit"; id: string; title: string; summary: string; session_id?: string }
@@ -23,15 +50,15 @@ export type CollectionSearchResult =
   | { kind: "collection_schema"; id: string; file_path: string }
   | { kind: "collection_record"; collection_id: string; id: string; file_path: string; summary: string; data: Record<string, JsonValue> };
 
-export function createSearchReadStore(store: SearchStoreMethods): SearchReadStore {
-  return Object.freeze({
-    search: (...args: SearchArgs<"search">) => store.search(...args),
-    searchMemory: (...args: SearchArgs<"searchMemory">) => store.searchMemory(...args),
-    searchWiki: (...args: SearchArgs<"searchWiki">) => store.searchWiki(...args),
-    searchSkills: (...args: SearchArgs<"searchSkills">) => store.searchSkills(...args),
-    getCollectionSchema: (...args: SearchArgs<"getCollectionSchema">) => store.getCollectionSchema(...args),
-    listCollectionSchemas: (...args: SearchArgs<"listCollectionSchemas">) => store.listCollectionSchemas(...args),
-    listCollectionRecords: (...args: SearchArgs<"listCollectionRecords">) => store.listCollectionRecords(...args)
+export function createSearchReadStore(store: SearchReadStore): SearchReadStore {
+  return Object.freeze<SearchReadStore>({
+    search: (query) => store.search(query),
+    searchMemory: (query, limit, options) => store.searchMemory(query, limit, options),
+    searchWiki: (query, limit, options) => store.searchWiki(query, limit, options),
+    searchSkills: (query, limit, options) => store.searchSkills(query, limit, options),
+    getCollectionSchema: (collectionId) => store.getCollectionSchema(collectionId),
+    listCollectionSchemas: () => store.listCollectionSchemas(),
+    listCollectionRecords: (collectionId) => store.listCollectionRecords(collectionId)
   });
 }
 

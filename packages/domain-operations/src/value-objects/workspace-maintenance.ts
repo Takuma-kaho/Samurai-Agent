@@ -43,15 +43,23 @@ export const workspaceHealthSchema = z.object({
   issues: z.array(driftIssueSchema), repair_plan: z.array(repairStepSchema)
 }).strict();
 
-const backupManifestSchema = z.object({
+const backupManifestV1Schema = z.object({
+  format_version: z.literal(1).optional(),
   id: z.string().min(1), created_at: z.string().datetime(), source_root: z.string(), db_file: z.string(),
   file_roots: z.array(z.string()), resource_boundaries: z.array(boundarySchema), health_ok: z.boolean(),
   integrity_ok: z.boolean(), file_hashes: z.record(z.string())
 }).strict();
+const backupManifestV2Schema = z.object({
+  format_version: z.literal(2), schema_version: z.number().int().nonnegative(),
+  id: z.string().min(1), created_at: z.string().datetime(), source_root: z.literal("."), db_file: z.literal("workspace.sqlite"),
+  file_roots: z.array(z.string()), resource_boundaries: z.array(boundarySchema), health_ok: z.boolean(),
+  integrity_ok: z.boolean(), file_hashes: z.record(z.string())
+}).strict();
+const backupManifestSchema = z.union([backupManifestV1Schema, backupManifestV2Schema]);
 
 export const workspaceBackupValueSchema = z.object({ id: z.string().min(1), path: z.string().min(1), manifest: backupManifestSchema }).strict();
 export const workspaceRestoreValueSchema = z.object({
-  backup_id: z.string().min(1), restored_at: z.string().datetime(), restored_paths: z.array(z.string()), db_restored: z.boolean(),
+  backup_id: z.string().min(1), pre_restore_backup_id: z.string().min(1), restored_at: z.string().datetime(), restored_paths: z.array(z.string()), db_restored: z.boolean(),
   manifest: backupManifestSchema, pre_restore_health: workspaceHealthSchema,
   integrity: z.object({ ok: z.boolean(), checked_at: z.string().datetime(), db: z.object({ ok: z.boolean(), result: z.string(), path: z.string() }).strict(), workspace: workspaceHealthSchema }).strict(),
   health: workspaceHealthSchema

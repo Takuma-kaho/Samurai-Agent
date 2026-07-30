@@ -1,8 +1,8 @@
 # Core 実装進捗台帳
 
-最終更新: 2026-07-22
+最終更新: 2026-07-29
 
-現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-03〜Core-08は「基盤あり・個別完了作業は未着手」**である。
+現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-04は「完了」**、**Core-03とCore-05〜Core-08は「基盤あり・個別完了作業は未着手」**である。
 
 ## 0. この文書の目的
 
@@ -29,7 +29,7 @@
 | 1 | 契約・Domain Command基盤 | 実装済み。Schema、操作カタログ、共通UI契約がある |
 | 2 | Host・Runtime | 機能は実装済み。ただし約17,700行で肥大化している |
 | 3 | Backend実行・Event正規化 | 概ね実装済み。Codex、Claude Code、Nativeを差し替え可能 |
-| 4 | Workspace・永続化 | 概ね実装済み。filesystemとSQLiteを扱うが約9,700行で肥大化 |
+| 4 | Workspace・永続化 | 完了。Phase 1〜3で責務分離、原子的更新、検索・同期、Bundle/Restoreを確認 |
 | 5 | Memory・Wiki・Skill・学習ループ | 基盤実装済み。Background Review、Evaluation、Curatorが存在 |
 | 6 | Artifact・Collection | 概ね実装済み。成果物、履歴、構造化データ操作を保持 |
 | 7 | Presentation・Generated Surface | 概ね実装済み。表示形式の選択、Surface契約、生成Surfaceがある |
@@ -44,7 +44,7 @@
 | Core-01 | **残課題あり** | 119操作の契約、個別Module、共通Dispatcher、入口統一、検証基盤 | 作成済み |
 | Core-02 | **実装中** | Phase 0〜2と終了結果保存経路を実装中。Phase 3〜7、本番切替、旧Runtime削除は対象外 | [core-02-phase-0-2-scope-ledger.json](./core-02-phase-0-2-scope-ledger.json) |
 | Core-03 | 基盤あり・個別完了作業は未着手 | Backend差し替えとEvent正規化 | 未作成。着手時に作成する |
-| Core-04 | 基盤あり・個別完了作業は未着手 | filesystemとSQLiteの永続化 | 未作成。着手時に作成する |
+| Core-04 | **完了** | Phase 1〜3でfilesystem/SQLiteの正本境界、原子的更新、検索・同期、移植可能なBundle/Restoreを実装・検証 | [core-04-phase-3-implementation-review.md](./core-04-phase-3-implementation-review.md) |
 | Core-05 | 基盤あり・個別完了作業は未着手 | Memory、Wiki、Skill、Review、Evaluation、Curator | 未作成。着手時に作成する |
 | Core-06 | 基盤あり・個別完了作業は未着手 | Artifact、履歴、Collection操作 | 未作成。着手時に作成する |
 | Core-07 | 基盤あり・個別完了作業は未着手 | Presentation選択、Surface契約、Generated Surface | 未作成。着手時に作成する |
@@ -96,7 +96,7 @@
 
 - Core-02は、専用台帳でPhase 0〜2と`C02-FINAL-01`だけを管理する。
 - Core-02のPhase 3〜7、本番切替、旧Runtime削除、全体Hard Gateは`unverified`のまま残す。
-- Core-03〜Core-08の詳細チェックリストと完了条件は、引き続き作成しない。
+- Core-04の完了根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)に残す。Core-03とCore-05〜Core-08の詳細チェックリストと完了条件は、引き続き作成しない。
 
 ## 6. 更新ルール
 
@@ -122,6 +122,7 @@
 | 2026-07-22 | Core-02 | 終了結果の同一再実行比較に診断内容と「回答なし／あり」の差分を追加し、異なる結果を`settlement_conflict`へ分けた | `core:host-runtime:check`成功（required 18 / parsed 41 / untracked Core-02 34）、focused bundle生成成功。focused Vitest・TypeScript・Git差分検査の停止は未解消 | Phase 0〜2＋`C02-FINAL-01`の全終了条件を、成功終了するfocused test・typecheck・Git検査で再判定する |
 | 2026-07-22 | Core-02 | fixtureの実行前状態を修正し、SQLite settlement競合テストを実Run状態から開始するよう整理 | 現在Sourceの独立focused VitestはWorkspace 3ファイル / 14件、Runtime 7ファイル / 55件の計69件が成功（Vitest内部計測 98.50秒 / 52.08秒）。ただし外側の起動遅延がVerifierの120秒制限を超えるため、Verifier全体は未完走。TypeScriptとGit差分検査も未達 | 起動遅延・typecheck・Git差分検査を解消し、Phase 0〜2の終了条件を再判定する |
 | 2026-07-22 | Core-02 | focused Runnerのgroup・bundle rootを明示し、cache再利用後の実行を再確認した | `core:host-runtime:check`成功（required 18 / parsed 41 / untracked Core-02 34）。Workspace 14件は2.79秒、Runtime 55件は2.76秒で各exit code 0。Core Schema / Workspace Store / Runtime typecheckとGit差分検査は未達のため、Phase 0〜2は完了扱いにしない | 型検査・Git差分検査を成功終了させ、最新SourceでVerifier全体を再判定する |
+| 2026-07-29 | Core-04 | Phase 1〜3を完了。Bundle作成・検証・Import/Export、journal付きRestore・中断回復、Facade委譲を完成 | operation catalog確認、canonical ledger再生成（102 Command / 17 Query / 5 Deprecated）、対象3 packageのtypecheck、`pnpm core:workspace-persistence:verify`、`git diff --check`が成功。独立レビューで見つけたjournal書込み失敗時の再起動漏れも修正・再検証済み。根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)。ベースHEADは`ec35ea0e30e98d27f6fc160e3b43639529d29f7b`、ユーザー指定により変更は未コミット | 次に着手するCoreを別途決める |
 
 追記用テンプレート:
 

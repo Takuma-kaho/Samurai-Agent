@@ -23,7 +23,7 @@ const automationMemoryReviewRun = defineCommand<AutomationMemoryReviewRunPorts>(
   ...{
   "kind": "command",
   "id": "automation.memory_review.run",
-  "version": "3.0",
+  "version": "3.1",
   "availability": "active",
   "title": "Run memory review",
   "description": "Run the scheduled memory review automation.",

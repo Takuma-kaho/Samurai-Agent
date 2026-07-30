@@ -3,7 +3,12 @@ import {
   type WorkDependencyRecord,
   type WorkItemRecord
 } from "@samurai-agent/core-schemas";
-import type { WorkspaceBackupRecord, WorkspaceRepairResult, WorkspaceRestoreResult } from "@samurai-agent/workspace-store";
+import type { DomainOperationOutput } from "@samurai-agent/domain-operations";
+
+/** Runtime exposes the established Domain result contracts, not persistence types. */
+export type WorkspaceBackupRecord = DomainOperationOutput<"workspace.backup.create">;
+export type WorkspaceRestoreResult = DomainOperationOutput<"workspace.backup.restore">;
+export type WorkspaceRepairResult = DomainOperationOutput<"workspace.repair">;
 
 export interface ExecutionStorePort {
   getObjective(id: string): Promise<ObjectiveRecord | undefined>;

@@ -61,7 +61,7 @@ describe("workspace store", () => {
 
     await store.createSession(session);
     const sessions = await store.listSessions();
-    const migrations = await store.listMigrationJournal();
+    const schemaMigrations = await store.listSchemaMigrations();
     await store.close();
 
     expect(settings).toMatchObject({
@@ -71,7 +71,7 @@ describe("workspace store", () => {
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
-    expect(migrations.some((entry) => entry.name === "schema.ensure" && entry.status === "completed")).toBe(true);
+    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("persists message presentations for chat cards", async () => {
@@ -372,19 +372,13 @@ describe("workspace store", () => {
   it("ignores missing or broken message envelopes when scoping memory", async () => {
     const store = await createTempStore();
     const session = await createSessionRecord(store, "Broken envelope");
-    await store.db
-      .insertInto("messages")
-      .values({
-        id: createId("message"),
-        session_id: session.id,
-        role: "user",
-        content: "broken",
-        input_locale: "ja",
-        output_locale: "ja",
-        envelope_json: "{not-json",
-        created_at: nowIso()
-      })
-      .execute();
+    const database = new Database(store.dbPath);
+    try {
+      database.prepare("INSERT INTO messages(id, session_id, role, content, input_locale, output_locale, envelope_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(createId("message"), session.id, "user", "broken", "ja", "ja", "{not-json", nowIso());
+    } finally {
+      database.close();
+    }
 
     const memories = await store.listMemoryForSession(session.id);
     await store.close();
@@ -829,7 +823,7 @@ describe("workspace store", () => {
 
     expect(active?.state).toBe("active");
     expect(activePages.map((page) => page.id)).toEqual(["wiki_test"]);
-    expect(reindex).toMatchObject({ active: 1, total: 1, files: 1, indexed: 1, updated: 1 });
+    expect(reindex).toMatchObject({ active: 1, total: 1, files: 1, indexed: 1, updated: 0 });
   });
 
   it("detects and repairs Knowledge Wiki index drift from markdown source", async () => {
@@ -1050,8 +1044,8 @@ describe("workspace store", () => {
     expect(records.map((record) => record.id)).toEqual(["record_1"]);
     expect(notes[0]?.content).toBe("補助メモ");
     expect(reindex).toMatchObject({
-      schemas: { files: 1, indexed: 1, updated: 1, skipped: 0 },
-      records: { files: 1, indexed: 1, updated: 1, skipped: 0 }
+      schemas: { files: 1, indexed: 1, updated: 0, skipped: 0 },
+      records: { files: 1, indexed: 1, updated: 0, skipped: 0 }
     });
     expect(run.session_id).toBeUndefined();
     expect(updatedRun.session_id).toBe("session_1");

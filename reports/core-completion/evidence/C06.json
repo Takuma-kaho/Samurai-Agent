@@ -3,17 +3,39 @@
   "test_id": "C06",
   "command": "pnpm core:test:search-index",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "bef9e992ab38c739bb676aeb3f757ca064bb5d76",
   "worktree_clean": false,
-  "source_sha256": "cf302c6d2c68c5d156f58f62fe50e6169647d0b1d4c2a82931e3f9182d062feb",
+  "source_sha256": "de7d797eab00ea2616598e1d10663f6968ddb016bc3a16d6f92b557b1ad32011",
+  "source_graph_sha256": "a0ff08a054319f38f3eca1dd4f5d463b49abb42251a795cc8df614a8e747dbf4",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
+    "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
+    "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/session-search-index.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-session-search-index.mjs"
   ],
-  "started_at": "2026-07-11T08:25:46.935Z",
-  "completed_at": "2026-07-11T08:25:47.045Z",
+  "source_read_errors": [],
+  "started_at": "2026-07-29T05:18:32.973Z",
+  "completed_at": "2026-07-29T05:18:33.072Z",
   "assertions": [
     {
       "name": "Create updates index immediately",
@@ -27,6 +49,16 @@
     },
     {
       "name": "Delete removes index immediately",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "Restart preserves existing FTS rows instead of rebuilding",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "FTS unavailable falls back to LIKE",
       "actual": true,
       "expected": true
     },
@@ -50,7 +82,9 @@
     "create_immediate": true,
     "update_immediate": true,
     "delete_immediate": true,
-    "corrupt_detected": true,
+    "startup_preserves_fts": true,
+    "fts_restart_tested": true,
+    "fts_fallback": true,
     "rank_before": [
       "rank-a",
       "rank-b",

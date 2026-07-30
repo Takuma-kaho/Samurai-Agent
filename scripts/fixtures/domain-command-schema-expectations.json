@@ -132,8 +132,8 @@
     "required_endpoints": 238,
     "reviewed_endpoints": 238,
     "unreviewed_endpoints": 0,
-    "required_schema_nodes": 744,
-    "reviewed_schema_nodes": 744,
+    "required_schema_nodes": 750,
+    "reviewed_schema_nodes": 750,
     "unreviewed_schema_nodes": 0
   },
   "global_payload_limits": {
@@ -1127,13 +1127,58 @@
         "type": "string"
       }
     },
-    "sha256:0e4f22adaae643a2ae13aef140a645b08a5c64cd776bda2604a00a1f709b86cd": {
-      "structural_hash": "0e4f22adaae643a2ae13aef140a645b08a5c64cd776bda2604a00a1f709b86cd",
+    "sha256:5897cf59ab423ed36a299cbe2edf703e5ea51a668f0f956683cf33f9ebd104aa": {
+      "structural_hash": "5897cf59ab423ed36a299cbe2edf703e5ea51a668f0f956683cf33f9ebd104aa",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.backup.create",
+        "endpoint": "output",
+        "path": "$[\"manifest\"].branch[1][\"format_version\"]"
+      },
+      "schema": {
+        "const": 2,
+        "type": "number"
+      }
+    },
+    "sha256:62ab6ea4c74c7780d9f7d2be29b40a5255de1a7b56a7a6c9170ba57268f08cee": {
+      "structural_hash": "62ab6ea4c74c7780d9f7d2be29b40a5255de1a7b56a7a6c9170ba57268f08cee",
       "review": "reviewed",
       "first_seen": {
         "operation": "workspace.backup.create",
         "endpoint": "output",
         "path": "$[\"manifest\"]"
+      },
+      "schema": {
+        "anyOf": [
+          {
+            "$schema_ref": "sha256:93653752158168bb10a8b8ba008a6755a3ca5e1dddc60960abd1c7138d9c9218"
+          },
+          {
+            "$schema_ref": "sha256:dfead6737c6aa2913a398c8690ba36848f585b60a1f0e04a25525cdb6166c1ae"
+          }
+        ]
+      }
+    },
+    "sha256:6bbf20efd884042555bd9964dda6b1a122769f335d81523942dfc12a6d3cd809": {
+      "structural_hash": "6bbf20efd884042555bd9964dda6b1a122769f335d81523942dfc12a6d3cd809",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.backup.create",
+        "endpoint": "output",
+        "path": "$[\"manifest\"].branch[1][\"db_file\"]"
+      },
+      "schema": {
+        "const": "workspace.sqlite",
+        "type": "string"
+      }
+    },
+    "sha256:93653752158168bb10a8b8ba008a6755a3ca5e1dddc60960abd1c7138d9c9218": {
+      "structural_hash": "93653752158168bb10a8b8ba008a6755a3ca5e1dddc60960abd1c7138d9c9218",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.backup.create",
+        "endpoint": "output",
+        "path": "$[\"manifest\"].branch[0]"
       },
       "schema": {
         "additionalProperties": false,
@@ -1149,6 +1194,9 @@
           },
           "file_roots": {
             "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
+          },
+          "format_version": {
+            "$schema_ref": "sha256:c58ff5aa192a4d0136d93573658110f8f4a27fe274b29f8cf2d1fb58065a5926"
           },
           "health_ok": {
             "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
@@ -1178,6 +1226,93 @@
           "file_hashes"
         ],
         "type": "object"
+      }
+    },
+    "sha256:c58ff5aa192a4d0136d93573658110f8f4a27fe274b29f8cf2d1fb58065a5926": {
+      "structural_hash": "c58ff5aa192a4d0136d93573658110f8f4a27fe274b29f8cf2d1fb58065a5926",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.backup.create",
+        "endpoint": "output",
+        "path": "$[\"manifest\"].branch[0][\"format_version\"]"
+      },
+      "schema": {
+        "const": 1,
+        "type": "number"
+      }
+    },
+    "sha256:dfead6737c6aa2913a398c8690ba36848f585b60a1f0e04a25525cdb6166c1ae": {
+      "structural_hash": "dfead6737c6aa2913a398c8690ba36848f585b60a1f0e04a25525cdb6166c1ae",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.backup.create",
+        "endpoint": "output",
+        "path": "$[\"manifest\"].branch[1]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "db_file": {
+            "$schema_ref": "sha256:6bbf20efd884042555bd9964dda6b1a122769f335d81523942dfc12a6d3cd809"
+          },
+          "file_hashes": {
+            "$schema_ref": "sha256:d8277ae52d69193bc7f56a45e40475abd2bc77e3c0eb234836aa9258afdb5bbf"
+          },
+          "file_roots": {
+            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
+          },
+          "format_version": {
+            "$schema_ref": "sha256:5897cf59ab423ed36a299cbe2edf703e5ea51a668f0f956683cf33f9ebd104aa"
+          },
+          "health_ok": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "integrity_ok": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "resource_boundaries": {
+            "$schema_ref": "sha256:cbcbb14cc423db6cc085612bf5d0f1d55e13045538460741feb895a6043eb03b"
+          },
+          "schema_version": {
+            "$schema_ref": "sha256:0d3ac1e9e006c0119b57d0512759bd7e261ea0d8cb38951a5183d17cdb4391f0"
+          },
+          "source_root": {
+            "$schema_ref": "sha256:fb5ee4ab3584665667c2ab9dd1ce257dbed9cd67c42dd4cf0f105da2fe10dc7f"
+          }
+        },
+        "required": [
+          "format_version",
+          "schema_version",
+          "id",
+          "created_at",
+          "source_root",
+          "db_file",
+          "file_roots",
+          "resource_boundaries",
+          "health_ok",
+          "integrity_ok",
+          "file_hashes"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:fb5ee4ab3584665667c2ab9dd1ce257dbed9cd67c42dd4cf0f105da2fe10dc7f": {
+      "structural_hash": "fb5ee4ab3584665667c2ab9dd1ce257dbed9cd67c42dd4cf0f105da2fe10dc7f",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.backup.create",
+        "endpoint": "output",
+        "path": "$[\"manifest\"].branch[1][\"source_root\"]"
+      },
+      "schema": {
+        "const": ".",
+        "type": "string"
       }
     },
     "sha256:0eb2e82399a6985674744fd90d806ab9bac38ca6acec28a6b2e80dbae1143ce2": {
@@ -7918,8 +8053,8 @@
         "type": "object"
       }
     },
-    "sha256:57b2ae4664535d9f82c82416e834bdfb49a17e05c45a37e5395bc06fa199e5b6": {
-      "structural_hash": "57b2ae4664535d9f82c82416e834bdfb49a17e05c45a37e5395bc06fa199e5b6",
+    "sha256:ee7927ea8c65d13b77fd40063d82a2f54b75ab493044e676ce728cbe4279ab68": {
+      "structural_hash": "ee7927ea8c65d13b77fd40063d82a2f54b75ab493044e676ce728cbe4279ab68",
       "review": "reviewed",
       "first_seen": {
         "operation": "workspace.backup.create",
@@ -7933,7 +8068,7 @@
             "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
           },
           "manifest": {
-            "$schema_ref": "sha256:0e4f22adaae643a2ae13aef140a645b08a5c64cd776bda2604a00a1f709b86cd"
+            "$schema_ref": "sha256:62ab6ea4c74c7780d9f7d2be29b40a5255de1a7b56a7a6c9170ba57268f08cee"
           },
           "path": {
             "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
@@ -15044,8 +15179,8 @@
         "type": "array"
       }
     },
-    "sha256:b49962454320e0283757d4f576ed86c8e7639882fc9a231fae59927b4afdd61a": {
-      "structural_hash": "b49962454320e0283757d4f576ed86c8e7639882fc9a231fae59927b4afdd61a",
+    "sha256:445b1943c4a495716a55254ca6ddd2a62ae6f24d07210e35883489d932168136": {
+      "structural_hash": "445b1943c4a495716a55254ca6ddd2a62ae6f24d07210e35883489d932168136",
       "review": "reviewed",
       "first_seen": {
         "operation": "workspace.backup.restore",
@@ -15068,7 +15203,10 @@
             "$schema_ref": "sha256:8a152097046e3067f6c008e4a3d7410696d3b1c7dc7986b0f0280565e742eb8d"
           },
           "manifest": {
-            "$schema_ref": "sha256:0e4f22adaae643a2ae13aef140a645b08a5c64cd776bda2604a00a1f709b86cd"
+            "$schema_ref": "sha256:62ab6ea4c74c7780d9f7d2be29b40a5255de1a7b56a7a6c9170ba57268f08cee"
+          },
+          "pre_restore_backup_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
           },
           "pre_restore_health": {
             "$schema_ref": "sha256:a9e7edeb234a359d94df876e2efbd70f6f3808b9a75e0256ba3a3268acf99aab"
@@ -15082,6 +15220,7 @@
         },
         "required": [
           "backup_id",
+          "pre_restore_backup_id",
           "restored_at",
           "restored_paths",
           "db_restored",
@@ -23163,7 +23302,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:57b2ae4664535d9f82c82416e834bdfb49a17e05c45a37e5395bc06fa199e5b6"
+        "root_schema": "sha256:ee7927ea8c65d13b77fd40063d82a2f54b75ab493044e676ce728cbe4279ab68"
       }
     },
     {
@@ -23179,7 +23318,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:b49962454320e0283757d4f576ed86c8e7639882fc9a231fae59927b4afdd61a"
+        "root_schema": "sha256:445b1943c4a495716a55254ca6ddd2a62ae6f24d07210e35883489d932168136"
       }
     },
     {

@@ -3,23 +3,32 @@
   "test_id": "C05",
   "command": "pnpm core:test:portability",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
-  "worktree_clean": false,
-  "source_sha256": "9b88947b8fa8766d70d2431ab0a582e40de29b8c37c05e8341b741638c0649a5",
+  "commit_sha": "e6f8fb92f35e3337b887dda8087e0e606a3a11a5",
+  "worktree_clean": true,
+  "source_sha256": "8f6c73586d00348903f8a38967159f52016d7b78956d51a960fa7bb3f135901d",
+  "source_graph_sha256": "3d15cf2b40d73d53e15488acfa8edb58361a0f2f9d6b796c85493875c7e86099",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/core-schemas/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
+    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/workspace-portability.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-workspace-portability.mjs"
   ],
-  "started_at": "2026-07-11T08:20:56.495Z",
-  "completed_at": "2026-07-11T08:20:56.691Z",
+  "source_read_errors": [],
+  "started_at": "2026-07-28T15:19:05.300Z",
+  "completed_at": "2026-07-28T15:19:05.784Z",
   "assertions": [
     {
       "name": "Portable resource hash",
-      "actual": "e63810a5",
-      "expected": "e63810a5"
+      "actual": "e8ed1a5c",
+      "expected": "e8ed1a5c"
     },
     {
       "name": "Cross-resource refs preserved",
@@ -46,8 +55,8 @@
   ],
   "result": {
     "status": "passed",
-    "source_hash": "e63810a5",
-    "target_hash": "e63810a5",
+    "source_hash": "e8ed1a5c",
+    "target_hash": "e8ed1a5c",
     "refs_preserved": true,
     "resources": [
       "session",

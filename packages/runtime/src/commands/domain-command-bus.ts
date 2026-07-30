@@ -5,7 +5,6 @@ import {
   type DomainCommandExecutionRecord,
   type JsonValue
 } from "@samurai-agent/core-schemas";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
 
 export interface DurableDomainCommandInput {
   commandId: string;
@@ -23,6 +22,14 @@ export interface DurableDomainCommandInput {
 export type DomainCommandCheckpoint = "claimed" | "handler_started" | "handler_succeeded" | "result_saved" | "handler_failed";
 export interface DomainCommandLifecycleObserver {
   checkpoint(name: DomainCommandCheckpoint, record: DomainCommandExecutionRecord): void | Promise<void>;
+}
+
+export interface DomainCommandExecutionPort {
+  claimDomainCommandExecution(record: DomainCommandExecutionRecord): Promise<{ record: DomainCommandExecutionRecord; claimed: boolean }>;
+  updateDomainCommandExecution(record: DomainCommandExecutionRecord): Promise<DomainCommandExecutionRecord>;
+  heartbeatDomainCommandExecution(id: string, heartbeatAt: string): Promise<boolean>;
+  getDomainCommandExecution(idempotencyKey: string): Promise<DomainCommandExecutionRecord | undefined>;
+  compareAndSetDomainCommandExecution(input: { id: string; expectedStatus: DomainCommandExecutionRecord["status"]; expectedHeartbeatAt: string; next: DomainCommandExecutionRecord }): Promise<boolean>;
 }
 
 export class DomainCommandConflictError extends Error {
@@ -58,7 +65,7 @@ export class DurableDomainCommandBus {
   private readonly inFlight = new Map<string, { payloadHash: string; promise: Promise<unknown> }>();
 
   constructor(
-    private readonly store: WorkspaceStore,
+    private readonly store: DomainCommandExecutionPort,
     private readonly runningTimeoutMs = 30_000,
     private readonly observer?: DomainCommandLifecycleObserver
   ) {}

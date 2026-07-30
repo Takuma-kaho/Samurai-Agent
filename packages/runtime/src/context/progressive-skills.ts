@@ -1,10 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { LearningResourceUseRecord } from "@samurai-agent/core-schemas";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+
+export interface ProgressiveSkillStorePort {
+  searchSkills(query: string, limit: number, options: { states: Array<"candidate" | "project" | "active" | "stale" | "archived" | "pinned"> }): Promise<Array<{ id: string; title: string; description: string; tags: string[]; required_capabilities: string[] }>>;
+  readSkillMarkdown(skillId: string): Promise<string | undefined>;
+  readSkillSupportFile(input: { skillId: string; path: string }): Promise<{ path: string; content: string } | undefined>;
+  recordSkillUsage(input: { skillId: string; runId?: string; usedAt?: string }): Promise<unknown>;
+  recordLearningResourceUse(record: LearningResourceUseRecord): Promise<LearningResourceUseRecord>;
+}
 
 export class ProgressiveSkillDisclosure {
   private readonly selected = new Set<string>(); private readonly bodyLoaded = new Set<string>(); private readonly used = new Set<string>();
-  constructor(private readonly store: WorkspaceStore, private readonly input: { runId: string; sessionId: string; backendCapabilities: string[] }) {}
+  constructor(private readonly store: ProgressiveSkillStorePort, private readonly input: { runId: string; sessionId: string; backendCapabilities: string[] }) {}
 
   async list(query: string) {
     const available = new Set(this.input.backendCapabilities); const skills = await this.store.searchSkills(query, 20, { states: ["project"] });

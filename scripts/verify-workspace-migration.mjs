@@ -14,7 +14,7 @@ const cacheRoot = path.join(root, "node_modules/.cache");
 mkdirSync(cacheRoot, { recursive: true });
 const temporaryRoot = mkdtempSync(path.join(cacheRoot, "samurai-migration-"));
 const output = path.join(temporaryRoot, "verify.mjs");
-const sourceFiles = ["packages/workspace-store/src/index.ts", "scripts/fixtures/workspace-migration.ts", "scripts/verify-workspace-migration.mjs", "scripts/lib/core-evidence.mjs"];
+const sourceFiles = ["packages/workspace-store/src/index.ts", "packages/workspace-store/src/workspace-store.ts", "packages/workspace-store/src/kernel/migration-runner.ts", "packages/workspace-store/src/migrations/index.ts", "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts", "scripts/fixtures/workspace-migration.ts", "scripts/verify-workspace-migration.mjs", "scripts/lib/core-evidence.mjs"];
 try {
   execFileSync(esbuild, [path.join(root, "scripts/fixtures/workspace-migration.ts"), "--bundle", "--platform=node", "--format=esm", "--external:better-sqlite3", `--outfile=${output}`], { cwd: root, stdio: "inherit" });
   const startedAt = new Date().toISOString();
@@ -30,7 +30,13 @@ try {
       { name: "Fresh install reaches latest schema", actual: result.fresh_install, expected: true },
       { name: "All supported legacy versions upgrade", actual: result.upgraded_versions, expected: result.supported_legacy_versions.length },
       { name: "Fresh and upgraded checksums match", actual: result.checksum_equal, expected: true },
-      { name: "Migration checksum tampering rejected", actual: result.checksum_tamper_rejected, expected: true }
+      { name: "Migration checksum tampering rejected", actual: result.checksum_tamper_rejected, expected: true },
+      { name: "Migration name tampering rejected", actual: result.name_tamper_rejected, expected: true },
+      { name: "Migration history gaps rejected", actual: result.history_gap_rejected, expected: true },
+      { name: "Future migration versions rejected", actual: result.future_version_rejected, expected: true },
+      { name: "Failed migration rolls back schema and history", actual: result.migration_failure_rollback, expected: true },
+      { name: "Current Knowledge Wiki setting is preserved when legacy column remains", actual: result.knowledge_wiki_capture_migration_preserves_current_value, expected: true },
+      { name: "Legacy Knowledge Wiki setting is adopted only when the current column is absent", actual: result.knowledge_wiki_capture_migration_adopts_legacy_value, expected: true }
     ], result
   }, null, 2)}\n`);
   process.stdout.write(`${rawResult}\n`);

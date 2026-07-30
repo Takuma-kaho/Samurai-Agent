@@ -1,8 +1,10 @@
-export const skillOptimizationMigration = {
+import type { WorkspaceMigration } from "../kernel/migration-runner";
+
+export const skillOptimizationMigration: WorkspaceMigration = {
   version: 3,
   name: "skill_optimization_records",
-  statements: [
-    `CREATE TABLE IF NOT EXISTS skill_optimization_runs (
+  steps: [
+    { kind: "sql", statement: `CREATE TABLE IF NOT EXISTS skill_optimization_runs (
       id TEXT PRIMARY KEY,
       target_skill_id TEXT NOT NULL,
       session_id TEXT,
@@ -10,15 +12,15 @@ export const skillOptimizationMigration = {
       run_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
-    )`,
-    `CREATE INDEX IF NOT EXISTS idx_skill_optimization_runs_skill ON skill_optimization_runs(target_skill_id, created_at DESC)`,
-    `CREATE TABLE IF NOT EXISTS skill_optimization_datasets (
+    )` },
+    { kind: "sql", statement: `CREATE INDEX IF NOT EXISTS idx_skill_optimization_runs_skill ON skill_optimization_runs(target_skill_id, created_at DESC)` },
+    { kind: "sql", statement: `CREATE TABLE IF NOT EXISTS skill_optimization_datasets (
       id TEXT PRIMARY KEY,
       skill_id TEXT NOT NULL,
       dataset_json TEXT NOT NULL,
       created_at TEXT NOT NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS optimization_candidates (
+    )` },
+    { kind: "sql", statement: `CREATE TABLE IF NOT EXISTS optimization_candidates (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
       skill_id TEXT NOT NULL,
@@ -28,17 +30,17 @@ export const skillOptimizationMigration = {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (run_id) REFERENCES skill_optimization_runs(id)
-    )`,
-    `CREATE INDEX IF NOT EXISTS idx_optimization_candidates_run ON optimization_candidates(run_id, created_at DESC)`,
-    `CREATE TABLE IF NOT EXISTS optimization_evaluations (
+    )` },
+    { kind: "sql", statement: `CREATE INDEX IF NOT EXISTS idx_optimization_candidates_run ON optimization_candidates(run_id, created_at DESC)` },
+    { kind: "sql", statement: `CREATE TABLE IF NOT EXISTS optimization_evaluations (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
       candidate_id TEXT NOT NULL,
       evaluation_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (candidate_id) REFERENCES optimization_candidates(id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS optimization_promotions (
+    )` },
+    { kind: "sql", statement: `CREATE TABLE IF NOT EXISTS optimization_promotions (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
       candidate_id TEXT NOT NULL,
@@ -46,8 +48,8 @@ export const skillOptimizationMigration = {
       promotion_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (candidate_id) REFERENCES optimization_candidates(id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS skill_optimization_snapshots (
+    )` },
+    { kind: "sql", statement: `CREATE TABLE IF NOT EXISTS skill_optimization_snapshots (
       id TEXT PRIMARY KEY,
       skill_id TEXT NOT NULL,
       candidate_id TEXT NOT NULL,
@@ -56,11 +58,11 @@ export const skillOptimizationMigration = {
       snapshot_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       restored_at TEXT
-    )`,
-    `CREATE TABLE IF NOT EXISTS skill_optimization_locks (
+    )` },
+    { kind: "sql", statement: `CREATE TABLE IF NOT EXISTS skill_optimization_locks (
       skill_id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
       acquired_at TEXT NOT NULL
-    )`
+    )` }
   ]
-} as const;
+};

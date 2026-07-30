@@ -44,7 +44,7 @@ const reflectionRun = defineCommand<ReflectionRunPorts>()({
   ...{
   "kind": "command",
   "id": "reflection.run",
-  "version": "3.0",
+  "version": "3.1",
   "availability": "active",
   "title": "Run background review",
   "description": "Run scoped Background Review for a completed Session or Backend run.",

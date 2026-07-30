@@ -14,7 +14,7 @@ const cacheRoot = path.join(root, "node_modules/.cache");
 mkdirSync(cacheRoot, { recursive: true });
 const temporaryRoot = mkdtempSync(path.join(cacheRoot, "samurai-search-index-"));
 const output = path.join(temporaryRoot, "verify.mjs");
-const sourceFiles = ["packages/workspace-store/src/index.ts", "scripts/fixtures/session-search-index.ts", "scripts/verify-session-search-index.mjs", "scripts/lib/core-evidence.mjs"];
+const sourceFiles = ["packages/workspace-store/src/index.ts", "packages/workspace-store/src/workspace-store.ts", "packages/workspace-store/src/kernel/session-search-index.ts", "scripts/fixtures/session-search-index.ts", "scripts/verify-session-search-index.mjs", "scripts/lib/core-evidence.mjs"];
 try {
   execFileSync(esbuild, [path.join(root, "scripts/fixtures/session-search-index.ts"), "--bundle", "--platform=node", "--format=esm", "--external:better-sqlite3", `--outfile=${output}`], { cwd: root, stdio: "inherit" });
   const startedAt = new Date().toISOString();
@@ -30,6 +30,8 @@ try {
       { name: "Create updates index immediately", actual: result.create_immediate, expected: true },
       { name: "Update replaces index immediately", actual: result.update_immediate, expected: true },
       { name: "Delete removes index immediately", actual: result.delete_immediate, expected: true },
+      { name: "Restart preserves existing FTS rows instead of rebuilding", actual: result.startup_preserves_fts, expected: true },
+      { name: "FTS unavailable falls back to LIKE", actual: result.fts_fallback, expected: true },
       { name: "Rebuild restores deterministic rank", actual: result.rank_after, expected: result.rank_before }
     ], result
   }, null, 2)}\n`);
