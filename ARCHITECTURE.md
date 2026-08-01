@@ -1,22 +1,24 @@
-# Samurai Agent Architecture v0.8
+# Samurai Agent Architecture v0.9
 
 ## Chat-first Personal Agent Interface
 
 ### Workspace-backed, UI on demand
 
-### MulmoClaude型Host、Agent Backend cassette、Hermes的Memory/Skill改善ループ、OpenClaw中心のGatewayを参照して再構成する
+### 参照OSSと参照プロダクトの強みをWorkspace-firstに再構成する
 
 ---
 
 ## 0. この文書の位置づけ
 
-この文書は、Samurai Agent の **最終アーキテクチャ構造の正本** である。
+この文書は、`PRINCIPLES.md`と`SAMURAI_AGENT_MANUAL.md`の下で、Samurai Agentの**最終アーキテクチャ構造、責務、境界、データ流れの正本**となる。
 
 文書の役割は以下。
 
 - `PRINCIPLES.md`: 設計思想、判断基準、前提。
+- `SAMURAI_AGENT_MANUAL.md`: プロダクト全体像、概念、用語、関係性。
 - `ARCHITECTURE.md`: システム構造、責務、境界、データ流れ。
 - `PUBLIC_NAMING.md`: 公開面の命名ルール。
+- `WEB_UI_DESIGN.md`: 固定Web UIの視覚設計、UI shell、CSS再利用ルール。
 - `plans/`: 実装順、レビュー、作業計画。
 
 この文書では、実装順や短期計画ではなく、最終的にどういう構造であるべきかを記述する。
@@ -25,13 +27,15 @@
 
 ## 1. Reference Sources
 
-この設計で参照するOSSと補助資料は以下。
+この設計で参照するOSS、参照プロダクト、補助資料は以下。
 
 | 参照対象 | 正式参照元 | この設計での扱い |
 | --- | --- | --- |
 | OpenClaw | `https://github.com/openclaw/openclaw.git` | Gateway / Session / Pairing / Sandbox / External boundary の参照元 |
 | Hermes Agent | `https://github.com/NousResearch/hermes-agent.git` | Memory / Skill / Reflection / Self-improvement loop の参照元 |
 | MulmoClaude | `https://github.com/receptron/mulmoclaude.git` | Host / Workspace state / Artifact / Collection / Renderer / Plugin composition の参照元 |
+| Buzz | `https://github.com/block/buzz.git` | Room / Human-Agent collaboration / signed Event / Relay / Identity boundary の参照OSS |
+| Type.com | `https://type.com/` | Shared Space / Knowledge / Skill / Integration / external Agent work import の参照プロダクト。OSSではない |
 | Hermes Agent 解説 | `Hermes_Agent_解説.md` | Hermes Agent理解のローカル補助資料 |
 | MulmoClaude記事 | `https://singularitysociety.org/articles/blog/2026-04-10-mulmoclaude/` | MulmoClaude理解の補助資料 |
 | OpenClaw記事 | `https://unicornee.ai/articles/openclaw-ai-agent/` | OpenClaw理解の補助資料 |
@@ -42,6 +46,8 @@
 | MulmoClaude | Host / Workspace / Artifact / Collection / Plugin composition | 仕組みと状態構造の参照元。アプリ中心UXは完成形にしない |
 | Hermes Agent | Memory / Skills / Reflection / Self-improvement loop | 育つAgent体験の中心 |
 | OpenClaw | Gateway / Session routing / Pairing / Sandbox / External entry | 外部連携と運用境界の中心 |
+| Buzz | Room / signed Event log / Relay / Identity / Human-Agent collaboration | Roomを活動範囲、共通Eventを外部との共通言語として設計する参照元。RelayをWorkspace正本にはしない |
+| Type.com | Shared Space / Knowledge / Skills / Integrations / work import | 既存Agentの仕事を共有Spaceへ持ち込み、KnowledgeやSkillを共有する製品体験の参照元。内部実装は推測しない |
 | Claude Code / Codex | Agent Backend cassette | 実行部を固定しないための差し替え候補 |
 
 ---
@@ -50,7 +56,7 @@
 
 Samurai Agent は、以下を目指す。
 
-> **会話を中心に、外部Agentや自前Agentを差し替えながら、個人のWorkspace、Memory、Skill、Artifactを育てるPersonal Agent Interface。**
+> **会話を中心に、人とAgentがRoomで活動し、Backendを差し替えてもKnowledge、Skill、Artifactがユーザー所有のWorkspaceへ残るWorkspace-first Personal Agent Interface。**
 
 中核となる構造。
 
@@ -68,17 +74,19 @@ Samurai Agent Host
 
 主語は、以下である。
 
-> **人間とAIが同じ仕事状態を扱い、必要な操作面だけが会話から現れる個人用Agent Interface。**
+> **個人利用を起点に、人間とAIが同じ仕事状態を扱い、必要な相手へ選択的に共有でき、必要な操作面だけが会話から現れるAgent Interface。**
 
 ---
 
 ## 3. Architecture Principles
 
-思想の詳細は `PRINCIPLES.md` を正本にする。
+思想の詳細は`PRINCIPLES.md`、プロダクト全体の概念と関係性は`SAMURAI_AGENT_MANUAL.md`を正本にする。
 この文書では、アーキテクチャ上の不変条件だけを扱う。
 
 - Chatが継続的な主要インターフェースであり、UIは必要時だけ会話から現れる。
 - Workspaceは、人間とAIが共有する永続状態の正本であり、常設の主画面ではない。
+- RoomはWorkspace内の活動・共有範囲、SessionはRoom内の一回の会話・作業として扱う。
+- Agentは継続する役割・Identity・利用範囲を持ち、交換可能なAgent Backendとは分離する。
 - Surface Protocolは、共通操作を受け取り、状態を端末に合う表現へ投影する双方向契約である。
 - Agent Backendは固定せず、cassetteとして差し替え可能にする。
 - MemoryとSkillは、外部Backendの中ではなくWorkspace側に残す。
@@ -882,12 +890,16 @@ Agent Backendをcassetteとして差し替えられる
 > **Agent BackendはClaudeCodeBackend / CodexBackend / SamuraiNativeBackendとして差し替え可能にする。**
 > **HermesのMemory / Skill / Reflection / Curator / Automationを、Chatと必要時のSurfaceで理解できる形に変換して採用する。**
 > **OpenClawのGateway / Session / Pairing / Sandbox / SecretRef思想は、外部入口と運用境界として取り込む。**
+> **BuzzのRoom / signed Event / Relay / Identity思想は、Human・Agent・External・Systemが活動する共通Event境界として参照する。**
+> **Type.comのShared Space / Knowledge / Skill / Integration / work import体験は、既存Agentの仕事をWorkspaceへ持ち帰る見せ方として参照する。**
 
 借りるのは、実装そのものよりも以下の勝ち筋である。
 
 - MulmoClaude: Host、Workspace状態、Artifact、Collection、Rendererの仕組みを参照すること。
 - Hermes: Memory / Skill / Reflection / CuratorでAgentが育つこと。
 - OpenClaw: GatewayとSessionで外部入口を束ねること。
+- Buzz: 人とAgentがRoomで活動し、署名EventとIdentityを同じ履歴へ残すこと。
+- Type.com: Knowledge・Skill・Integrationと既存Agentの仕事を共有Spaceへ持ち込む製品体験。
 - Claude Code / Codex: Agent Backendとして差し替え可能に扱うこと。
 
 最初に作るべきものは、独自安全制御ではない。

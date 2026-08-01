@@ -12,43 +12,50 @@
 - このリポジトリは、Samurai Agent の設計・検討・実装準備を置く場所。
 - 中核テーマは `Chat-first Personal Agent Interface / Workspace-backed, UI on demand`。
 - `PRINCIPLES.md` を設計思想・判断基準の最重要 source of truth として扱う。
+- `SAMURAI_AGENT_MANUAL.md` をプロダクト全体像・概念・用語・関係性の source of truth として扱う。
 - `ARCHITECTURE.md` を実装前アーキテクチャ仕様の source of truth として扱う。
 - `PUBLIC_NAMING.md` を公開面の命名ルールとして扱う。
+- `WEB_UI_DESIGN.md` を固定Web UIの視覚設計・UI shellの source of truth として扱う。
 - `plans/` はレビュー、改訂方針、作業計画の置き場として扱う。
 - `Hermes_Agent_解説.md` は Hermes Agent 理解の補助資料として扱う。
 
 ### Source of truth の優先順位
 
 1. `PRINCIPLES.md`: 設計思想・判断基準・前提
-2. `ARCHITECTURE.md`: 実装前アーキテクチャ仕様
-3. `PUBLIC_NAMING.md`: 公開面の命名ルール
-4. `plans/`: レビュー・改訂方針・作業計画
-5. `Hermes_Agent_解説.md`: Hermes Agent 理解の補助資料
+2. `SAMURAI_AGENT_MANUAL.md`: プロダクト全体像・概念・用語・関係性
+3. `ARCHITECTURE.md`: 実装前アーキテクチャ仕様
+4. `PUBLIC_NAMING.md`: 公開面の命名ルール
+5. `WEB_UI_DESIGN.md`: 固定Web UIの視覚設計・UI shell
+6. `plans/`: レビュー・改訂方針・作業計画
+7. `Hermes_Agent_解説.md`: Hermes Agent 理解の補助資料
 
 ### 作業開始時に必ず読むファイル
 
 Samurai Agentで設計、実装、UI、命名に関わる作業を始める前に、必ず以下を読む。
 
-1. `ARCHITECTURE.md`
-2. `PRINCIPLES.md`
-3. `PUBLIC_NAMING.md`
-4. `WEB_UI_DESIGN.md`
+1. `PRINCIPLES.md`
+2. `SAMURAI_AGENT_MANUAL.md`
+3. `ARCHITECTURE.md`
+4. `PUBLIC_NAMING.md`
+5. `WEB_UI_DESIGN.md`
 
 変更内容が小さくても、命名や責務に触れる場合は `PUBLIC_NAMING.md` を必ず確認する。
 
 ## 設計方針
 
-- 基本方針は `MulmoClaude型Host + Agent Backend cassette + Hermes的Memory/Skill改善ループ`。
+- 基本方針は `Workspace-first + MulmoClaude型Host + Agent Backend cassette + Hermes的Memory/Skill改善ループ`。
 - Claude Code / Codex / SamuraiNativeBackend などの実行部は、Hostから差し替えられるBackend cassetteとして扱う。
 - 独自性は安全制御ではなく、Memory、Skill、Artifact、Collection、Workspace UX、外部連携の拡張で出す。
 - Chatは継続的な主要インターフェース、Workspaceは永続状態の正本、Generative UIは必要時だけ現れる返答・操作Surfaceとして扱う。
 - MulmoClaudeはHost、Artifact、Collection、Rendererの仕組みを参照する対象であり、アプリ中心のWorkspace UXを完成形として模倣しない。
+- BuzzはRoom、Human／Agentの共通活動面、署名Event、Relay境界の参照OSSとし、BuzzのEvent logをSamuraiのWorkspace正本として模倣しない。
+- Type.comは共有Space、Knowledge・Skill・Integration、既存Agent作業の持ち込み方を参照する非OSSサービスとし、内部実装を推測・模倣しない。
 - Collectionは独立アプリではなく構造化データ、Artifactはアプリではなく成果物として扱う。
-- 実装を考える時は、Chat / Surface / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / Collection の責務を混ぜない。
+- 実装を考える時は、Workspace / Room / Session / Agent / Chat / Surface / Host / Agent Backend / Gateway / Memory / Skill / Artifact / Collection の責務を混ぜない。
 
 ## 公開命名ルール
 
-- 参照元固有名は、`ARCHITECTURE.md` / `plans/` / 調査メモでは残してよい。
+- 参照元固有名は、`SAMURAI_AGENT_MANUAL.md` / `ARCHITECTURE.md` / `PRINCIPLES.md` / `plans/` / 調査メモでは残してよい。
 - README、UI文言、API名、route名、package名、DB名、env/config key には参照元固有名を出さない。
 - 公開面に出る名前を決める時は、先に `PUBLIC_NAMING.md` を確認する。
 - `Memory` / `Skill` / `Runtime` / `Gateway` などの一般的な技術語は、無理に日本語化しない。
@@ -60,7 +67,7 @@ Samurai Agentで設計、実装、UI、命名に関わる作業を始める前�
 - 暫定対応が必要に見える場合でも、勝手に実装せず、なぜ暫定になるのか・恒久対応は何かを先にユーザーへ説明して合意を取る。
 - LLM / Backend / Runtime / Workspace の責務を迂回して、見かけ上だけ成功したように見せる処理を入れない。
 - 大きな変更をする前に、関連する設計箇所を読む。
-- 設計、実装、UI、命名に関わる作業では、作業前に `ARCHITECTURE.md`、`PRINCIPLES.md`、`PUBLIC_NAMING.md`、`WEB_UI_DESIGN.md` を読む。
+- 設計、実装、UI、命名に関わる作業では、作業前に `PRINCIPLES.md`、`SAMURAI_AGENT_MANUAL.md`、`ARCHITECTURE.md`、`PUBLIC_NAMING.md`、`WEB_UI_DESIGN.md` を読む。
 - 複数ファイルにまたがる変更や仕様判断がある場合は、先に短く方針を説明する。
 - ユーザーが作った変更は勝手に戻さない。
 - 不要なリファクタや、目的外の整理はしない。

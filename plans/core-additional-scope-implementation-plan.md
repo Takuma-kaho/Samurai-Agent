@@ -19,11 +19,12 @@
 正本の優先順位は変えない。
 
 1. [`PRINCIPLES.md`](../PRINCIPLES.md)
-2. [`ARCHITECTURE.md`](../ARCHITECTURE.md)
-3. [`PUBLIC_NAMING.md`](../PUBLIC_NAMING.md)
-4. [`WEB_UI_DESIGN.md`](../WEB_UI_DESIGN.md)
-5. [`core-completion-plan.md`](./core-completion-plan.md)と既存実装
-6. 本計画
+2. [`SAMURAI_AGENT_MANUAL.md`](../SAMURAI_AGENT_MANUAL.md)
+3. [`ARCHITECTURE.md`](../ARCHITECTURE.md)
+4. [`PUBLIC_NAMING.md`](../PUBLIC_NAMING.md)
+5. [`WEB_UI_DESIGN.md`](../WEB_UI_DESIGN.md)
+6. [`core-completion-plan.md`](./core-completion-plan.md)と既存実装
+7. 本計画
 
 [`core-reference-integration-plan.md`](./core-reference-integration-plan.md)は、参照OSS比較から見つかった追加スコープの台帳として使う。本計画は、その台帳からCoreに必要な項目だけを依存順へ並べ直した実行用文書である。
 
