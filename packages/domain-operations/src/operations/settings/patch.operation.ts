@@ -5,6 +5,8 @@ import { defineCommand, type DomainResult, type TrustedDomainContext } from "../
 import { settingsValueSchema } from "../../value-objects/system-records.js";
 
 const Input = z.object({
+  "default_agent_id": z.string().trim().min(1).optional(),
+  "default_room_id": z.string().trim().min(1).optional(),
   "external_provider_role": z.enum(["assistive", "disabled"]) .optional(),
   "knowledge_wiki_capture_mode": z.enum(["auto", "manual", "off"]) .optional(),
   "memory_capture_mode": z.enum(["auto", "manual", "off"]) .optional(),
@@ -15,6 +17,8 @@ const Input = z.object({
 const Output = settingsValueSchema;
 
 export interface SettingsPatchRequest {
+  defaultAgentId?: z.infer<typeof Input>["default_agent_id"];
+  defaultRoomId?: z.infer<typeof Input>["default_room_id"];
   externalProviderRole?: z.infer<typeof Input>["external_provider_role"];
   knowledgeWikiCaptureMode?: z.infer<typeof Input>["knowledge_wiki_capture_mode"];
   memoryCaptureMode?: z.infer<typeof Input>["memory_capture_mode"];
@@ -31,7 +35,7 @@ const settingsPatch = defineCommand<SettingsPatchPorts>()({
   ...{
   "kind": "command",
   "id": "settings.patch",
-  "version": "2.0",
+  "version": "2.1",
   "availability": "active",
   "title": "Update settings",
   "description": "Update validated owner Workspace settings.",
@@ -69,6 +73,8 @@ const settingsPatch = defineCommand<SettingsPatchPorts>()({
     return {
       execute: async function handleSettingsPatch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const value = await ports.applySettingsPatch({
+          ...(input.default_agent_id === undefined ? {} : { defaultAgentId: input.default_agent_id }),
+          ...(input.default_room_id === undefined ? {} : { defaultRoomId: input.default_room_id }),
           ...(input.external_provider_role === undefined ? {} : { externalProviderRole: input.external_provider_role }),
           ...(input.knowledge_wiki_capture_mode === undefined ? {} : { knowledgeWikiCaptureMode: input.knowledge_wiki_capture_mode }),
           ...(input.memory_capture_mode === undefined ? {} : { memoryCaptureMode: input.memory_capture_mode }),

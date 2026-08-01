@@ -17,7 +17,7 @@ describe("Core 02 event source identity", () => {
     try {
       database.exec("DROP INDEX IF EXISTS idx_backend_events_source_sequence");
       database.exec("CREATE UNIQUE INDEX idx_backend_events_source_sequence ON backend_events(run_id, attempt_no, source_sequence) WHERE source_sequence IS NOT NULL");
-      database.exec("DELETE FROM schema_migrations WHERE version = 6");
+      database.exec("DELETE FROM schema_migrations WHERE version IN (6, 7)");
     } finally {
       database.close();
     }

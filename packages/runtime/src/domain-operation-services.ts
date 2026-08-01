@@ -21,6 +21,7 @@ import type { SystemDomainService } from "./commands/services/system-domain-serv
 import type { TranslationDomainService } from "./commands/services/translation-domain-service.js";
 import type { WikiDomainService } from "./commands/services/wiki-domain-service.js";
 import type { SearchDomainService } from "./commands/services/search-domain-service.js";
+import type { RoomAgentDomainService } from "./commands/services/room-agent-domain-service.js";
 
 type RuntimeSkill = {
   id: string;
@@ -58,4 +59,5 @@ export interface RuntimeDomainServices {
   translationDomainService: TranslationDomainService;
   wikiDomainService: WikiDomainService;
   searchDomainService: SearchDomainService;
+  roomAgentDomainService: RoomAgentDomainService;
 }

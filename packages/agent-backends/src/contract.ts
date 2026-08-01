@@ -149,6 +149,16 @@ export interface BackendToolBridge {
 export interface BackendRunInput {
   run_id: string;
   session_id: string;
+  room_id?: string;
+  agent_context?: {
+    id: string;
+    name: string;
+    role: string;
+    instructions: string;
+    authority: "supporting_context";
+  };
+  /** Host-owned identity for one Room, Session, Agent, and Backend pairing. */
+  backend_session_key?: string;
   backend_session_id?: string;
   input_message_id: string;
   workspace_root?: string;
@@ -212,6 +222,9 @@ export interface BackendRunInput {
 export interface BackendSessionInput {
   session_id: string;
   session_key: string;
+  room_id?: string;
+  agent_id?: string;
+  backend_session_key?: string;
   output_locale: import("@samurai-agent/core-schemas").SupportedLocale;
   metadata: Record<string, JsonValue>;
 }

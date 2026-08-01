@@ -21,6 +21,7 @@ export type WorkspacePersistenceOwner =
   | "automation"
   | "gateway"
   | "workspace_metadata"
+  | "room_agent"
   | "access_history";
 
 export interface WorkspaceResourceOwner {
@@ -42,6 +43,12 @@ const owners: readonly WorkspaceResourceOwner[] = [
     directories: [],
     backup_roots: [],
     sqlite_tables: ["sessions", "messages", "message_presentations", "operations", "backend_runs", "session_run_reservations", "backend_events", "tool_runs", "workspace_changes"]
+  },
+  {
+    owner: "room_agent",
+    directories: [],
+    backup_roots: [],
+    sqlite_tables: ["rooms", "agents"]
   },
   {
     owner: "client_event_queue",
@@ -131,6 +138,7 @@ const legacyBoundaries: readonly WorkspaceResourceBoundary[] = [
   { resource: "skill", source_of_truth: "filesystem", file_roots: ["skills"], sqlite_tables: ["skill_index", "skill_usage", "skill_optimization_runs", "skill_optimization_datasets", "optimization_candidates", "optimization_evaluations", "optimization_promotions", "skill_optimization_snapshots", "skill_optimization_locks"], sqlite_role: "metadata", note: "Skill markdown and support files are the durable source; usage and optimization state are operational metadata." },
   { resource: "artifact", source_of_truth: "filesystem", file_roots: ["artifacts"], sqlite_tables: ["artifacts", "artifact_revisions"], sqlite_role: "metadata", note: "Artifact body files are durable output; SQLite stores metadata, revisions, session links, and render hints." },
   { resource: "collection", source_of_truth: "filesystem", file_roots: ["collections"], sqlite_tables: ["collection_schemas", "collection_records", "collection_patches", "workspace_file_transactions"], sqlite_role: "index", note: "Collection schemas, records, and notes live in files; SQLite rows are rebuildable indexes and change history." },
+  { resource: "room_agent", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["rooms", "agents"], sqlite_role: "metadata", note: "Rooms and stable Agent identities are SQLite records; an Agent retains its role when its selected Backend changes." },
   { resource: "session_run_history", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["sessions", "messages", "message_presentations", "operations", "backend_runs", "session_run_reservations", "backend_events", "tool_runs", "workspace_changes"], sqlite_role: "history", note: "Session and run history are structured records used for resume, search, and history views." },
   { resource: "learning_core", source_of_truth: "derived", file_roots: ["learning-snapshots"], sqlite_tables: ["learning_resource_uses", "learning_evaluations", "background_review_changes", "learning_snapshots", "learning_job_reports", "curator_state", "reflection_runs", "reflection_suggestions", "external_assist_records", "session_search_fts", "session_search_trigram"], sqlite_role: "history", note: "Learning usage, evaluation, provenance, snapshots, and Session Search are derived or restorable records; Memory and Skill markdown remain the durable source." },
   { resource: "policy_audit_rollback", source_of_truth: "sqlite", file_roots: ["rollback"], sqlite_tables: ["policy_decisions", "approval_requests", "audit_records", "rollback_points", "grants"], sqlite_role: "audit", note: "Access and audit records are SQLite history; rollback snapshots may reference filesystem payloads." },

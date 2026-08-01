@@ -6,6 +6,7 @@ import {
   createId,
   nowIso,
   redactPrivateData,
+  type ActivityContextRef,
   type BackgroundReviewChangeRecord,
   type CuratorStateRecord,
   type ExternalAssistDiagnosticsReport,
@@ -90,21 +91,32 @@ async recordLearningResourceUse(record: LearningResourceUseRecord): Promise<Lear
   }
   await sql`
     INSERT INTO learning_resource_uses (
-      id, run_id, session_id, resource_kind, resource_id, resource_version,
+      id, run_id, session_id, room_id, agent_id, resource_kind, resource_id, resource_version,
       content_hash, stage, source_operation_id, metadata_json, created_at
     ) VALUES (
-      ${record.id}, ${record.run_id}, ${record.session_id}, ${record.resource_kind}, ${record.resource_id}, ${record.resource_version ?? null},
+      ${record.id}, ${record.run_id}, ${record.session_id}, ${record.activity_context?.room_id ?? null}, ${record.activity_context?.agent_id ?? null}, ${record.resource_kind}, ${record.resource_id}, ${record.resource_version ?? null},
       ${safeRecord.content_hash ?? null}, ${safeRecord.stage}, ${safeRecord.source_operation_id ?? null}, ${stringify(safeRecord.metadata)}, ${safeRecord.created_at}
     )
   `.execute(this.db);
   return safeRecord;
 }
 
-async listLearningResourceUses(input: { runId?: string; sessionId?: string; resourceId?: string } = {}): Promise<LearningResourceUseRecord[]> {
+async listLearningResourceUses(input: {
+  runId?: string;
+  sessionId?: string;
+  resourceId?: string;
+  activityContext?: ActivityContextRef;
+} = {}): Promise<LearningResourceUseRecord[]> {
   let query = this.db.selectFrom("learning_resource_uses").selectAll().orderBy("created_at", "desc");
   if (input.runId) query = query.where("run_id", "=", input.runId);
   if (input.sessionId) query = query.where("session_id", "=", input.sessionId);
   if (input.resourceId) query = query.where("resource_id", "=", input.resourceId);
+  if (input.activityContext) {
+    query = query
+      .where("session_id", "=", input.activityContext.session_id)
+      .where("room_id", "=", input.activityContext.room_id)
+      .where("agent_id", "=", input.activityContext.agent_id);
+  }
   return (await query.execute()).map(learningResourceUseFromRow);
 }
 
@@ -220,6 +232,8 @@ async saveBackgroundReviewChange(record: BackgroundReviewChangeRecord): Promise<
     origin: record.origin,
     source_run_id: record.source_run_id,
     source_session_id: record.source_session_id,
+    room_id: record.activity_context?.room_id ?? null,
+    agent_id: record.activity_context?.agent_id ?? null,
     review_run_id: record.review_run_id,
     mutation_kind: record.mutation_kind,
     resource_ref_json: stringify(record.resource_ref),

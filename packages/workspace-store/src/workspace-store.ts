@@ -21,6 +21,7 @@ import { KnowledgeWikiRepository } from "./repositories/knowledge-wiki-repositor
 import { LearningRepository } from "./repositories/learning-repository";
 import { ManagedResourceSynchronizer } from "./repositories/managed-resource-synchronizer";
 import { MemoryRepository } from "./repositories/memory-repository";
+import { RoomAgentRepository } from "./repositories/room-agent-repository";
 import { SessionExecutionRepository } from "./repositories/session-execution-repository";
 import { SkillRepository } from "./repositories/skill-repository";
 import { WorkspaceMetadataRepository } from "./repositories/workspace-metadata-repository";
@@ -45,6 +46,7 @@ interface WorkspaceComposition {
   automation: AutomationRepository;
   gateway: GatewayRepository;
   metadata: WorkspaceMetadataRepository;
+  roomAgent: RoomAgentRepository;
   accessHistory: AccessHistoryRepository;
   managedResources: ManagedResourceSynchronizer;
   queries: WorkspaceQueryService;
@@ -103,6 +105,7 @@ export class WorkspaceStore {
 
   async ensureDefaultSettings(): Promise<void> {
     await this.composition.metadata.ensureDefaultSettings(defaultSettings());
+    await this.composition.roomAgent.ensureDefaults(await this.composition.metadata.getSettings());
   }
 
   async synchronizeManagedResources(): ReturnType<ManagedResourceSynchronizer["synchronizeAll"]> {
@@ -129,6 +132,7 @@ export class WorkspaceStore {
     await this.kernel.migrate();
     await this.kernel.recoverWorkspaceFileTransactions();
     await this.composition.metadata.ensureDefaultSettings(defaultSettings());
+    await this.composition.roomAgent.ensureDefaults(await this.composition.metadata.getSettings());
     await this.composition.managedResources.synchronizeAll();
     await this.composition.queries.initializeSessionSearch();
   }
@@ -166,6 +170,7 @@ export class WorkspaceStore {
     const automation = new AutomationRepository(db);
     const gateway = new GatewayRepository(db);
     const metadata = new WorkspaceMetadataRepository(db);
+    const roomAgent = new RoomAgentRepository(db);
     const accessHistory = new AccessHistoryRepository(db, this.rootDir);
     const collections = new CollectionRepository(
       db,
@@ -247,6 +252,7 @@ export class WorkspaceStore {
       automation,
       gateway,
       metadata,
+      roomAgent,
       accessHistory,
       managedResources,
       queries,
@@ -261,7 +267,7 @@ export class WorkspaceStore {
   /** Keep every legacy entry point explicit; no Proxy or string dispatch is used. */
   private bindCompatibilityApi(): void {
     const facade = this as WorkspaceStore;
-    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, gateway, metadata, accessHistory, queries, bundles, restore, maintenance } = this.composition;
+    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, gateway, metadata, roomAgent, accessHistory, queries, bundles, restore, maintenance } = this.composition;
 
     facade.migrate = this.kernel.migrate.bind(this.kernel);
     facade.listSchemaMigrations = this.kernel.listSchemaMigrations.bind(this.kernel);
@@ -269,6 +275,16 @@ export class WorkspaceStore {
     facade.recoverWorkspaceFileTransactions = this.kernel.recoverWorkspaceFileTransactions.bind(this.kernel);
     facade.countPendingWorkspaceFileTransactions = this.kernel.countPendingWorkspaceFileTransactions.bind(this.kernel);
     facade.close = this.kernel.close.bind(this.kernel);
+
+    facade.createRoom = roomAgent.createRoom.bind(roomAgent);
+    facade.getRoom = roomAgent.getRoom.bind(roomAgent);
+    facade.listRooms = roomAgent.listRooms.bind(roomAgent);
+    facade.patchRoom = roomAgent.patchRoom.bind(roomAgent);
+    facade.createAgent = roomAgent.createAgent.bind(roomAgent);
+    facade.getAgent = roomAgent.getAgent.bind(roomAgent);
+    facade.listAgents = roomAgent.listAgents.bind(roomAgent);
+    facade.patchAgent = roomAgent.patchAgent.bind(roomAgent);
+    facade.bindAgentBackend = roomAgent.bindAgentBackend.bind(roomAgent);
 
     facade.createSession = session.createSession.bind(session);
     facade.listSessions = session.listSessions.bind(session);
@@ -573,6 +589,16 @@ export interface WorkspaceStore {
   recoverWorkspaceFileTransactions: WorkspaceKernelService["recoverWorkspaceFileTransactions"];
   countPendingWorkspaceFileTransactions: WorkspaceKernelService["countPendingWorkspaceFileTransactions"];
   close: WorkspaceKernelService["close"];
+
+  createRoom: RoomAgentRepository["createRoom"];
+  getRoom: RoomAgentRepository["getRoom"];
+  listRooms: RoomAgentRepository["listRooms"];
+  patchRoom: RoomAgentRepository["patchRoom"];
+  createAgent: RoomAgentRepository["createAgent"];
+  getAgent: RoomAgentRepository["getAgent"];
+  listAgents: RoomAgentRepository["listAgents"];
+  patchAgent: RoomAgentRepository["patchAgent"];
+  bindAgentBackend: RoomAgentRepository["bindAgentBackend"];
 
   createSession: SessionExecutionRepository["createSession"];
   listSessions: SessionExecutionRepository["listSessions"];

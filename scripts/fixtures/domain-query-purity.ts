@@ -27,9 +27,27 @@ const snapshot = async (): Promise<Record<string, string>> => {
 };
 
 try {
+  const fixtureCreatedAt = "2026-01-01T00:00:00.000Z";
+  const room = await store.createRoom({
+    id: "query-purity-room",
+    name: "Query purity Room",
+    created_at: fixtureCreatedAt,
+    updated_at: fixtureCreatedAt
+  });
+  const agent = await store.createAgent({
+    id: "query-purity-agent",
+    name: "Query purity Agent",
+    role: "Fixture",
+    instructions: "Provide read-only fixture context.",
+    backend_id: "query-purity-backend",
+    enabled: true,
+    created_at: fixtureCreatedAt,
+    updated_at: fixtureCreatedAt
+  });
   const session = await store.createSession({
     id: "query-purity-session",
     session_key: "query-purity-session",
+    room_id: room.id,
     title: "Query purity",
     ui_locale: "en",
     output_locale: "en",
@@ -40,6 +58,7 @@ try {
   await store.saveBackendRun({
     id: runId,
     session_id: session.id,
+    agent_id: agent.id,
     input_message_id: "query-purity-input",
     backend_id: "query-purity-backend",
     backend_kind: "samurai_native",
@@ -106,6 +125,8 @@ try {
   });
 
   const cases = [
+    { queryId: "agent.list", payload: {} },
+    { queryId: "agent.view", payload: { id: agent.id } },
     { queryId: "collection.view.present", payload: { collection_id: "query-purity" } },
     // BackendRun identity is Runtime-owned context, never a public Query DTO field.
     { queryId: "skill.view", payload: { skill_id: projectSkill.id }, trusted: { runId } },
@@ -115,6 +136,8 @@ try {
     { queryId: "browser.extract", payload: { url: "data:text/html,%3Ctitle%3EQuery%20purity%3C%2Ftitle%3Eread%20only" } },
     { queryId: "curator.snapshot.list", payload: {} },
     { queryId: "presentation.plan", payload: { requested_kind: "built_in_surface" } },
+    { queryId: "room.list", payload: {} },
+    { queryId: "room.view", payload: { id: room.id } },
     { queryId: "generated_surface.export", payload: { surface_id: surfaceId } },
     { queryId: "collection.schema.docs", payload: {} },
     { queryId: "collection.schema.get", payload: { collection_id: "query-purity" } },

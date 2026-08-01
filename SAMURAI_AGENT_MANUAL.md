@@ -418,6 +418,19 @@ Roomごとに、次のものを分離できる。
 
 これらをWorkspace内のどこへ具体的に配置するかは、後続設計で検討する。
 
+### Core 05着手前のバックエンド基盤
+
+現時点では、RoomとAgentをSQLiteのWorkspace管理情報として保存する。
+
+- RoomはID・名前・作成／更新日時を持つ。
+- AgentはID・名前・役割・指示・Backend ID・有効状態を持つ。
+- `settings.patch`で既定Room／既定Agentを選び、SessionにはRoom、Backend RunにはAgentを保存する。
+- `room.create / patch / list / view` と `agent.create / patch / backend.bind / list / view` で操作する。
+
+Room参加者、招待、削除、画面、閲覧権限は、この基盤には含めない。
+
+この基盤は新しいWorkspace形式から使い始める。旧Session／RunへのRoom・Agent出所のbackfillや、旧Bundleの復元互換は行わない。
+
 ## 6.2 Room Knowledge
 
 日常的に最も多く育つのはRoom Knowledgeである。
@@ -714,6 +727,8 @@ Agent向けの情報も、Agent自身が所有するのではない。
 
 Workspace内に保存し、Agentが利用できる範囲として管理する。
 
+現時点のバックエンド基盤では、Memory・Knowledge Wiki・Skillにこの利用範囲を保存し、SQLite indexで先に絞ってから実行文脈へ渡す。閲覧権限の判定や自動昇格は、別の後続設計で扱う。
+
 ## 9.3 閲覧権限
 
 Workspaceに保存されていても、すべてのメンバーが閲覧できるわけではない。
@@ -787,6 +802,8 @@ Roomの情報を、AgentやWorkspaceへ自動的に持ち出してはならな�
 - 誰またはどのAgentが作ったか
 - どの範囲で利用できるか
 - 後から編集・取消できるか
+
+Core 05着手前の基盤では、学習利用記録・Reflection・Background ReviewにRoom／Session／Agentの出所を残す。Background Reviewが新しく作るMemory・Knowledge Wiki・Skillは、元のRoom範囲に保存する。別のRoom、Agent、Workspaceへの自動昇格はまだ行わない。
 
 ## 10.4 今後の要検討事項
 
@@ -1016,6 +1033,10 @@ BackendをCodexからClaudeへ交換しても、次のものは変わらない�
 - Roomへの参加権限
 - Agent向けの情報
 - 過去の活動とのつながり
+
+永続的にAgentのBackendを変える操作は`agent.backend.bind`だけとする。`chat.turn.run`の`backend_id`は既存呼び出し向けの一回限りの互換入力であり、Agent設定を書き換えない。
+
+Backend Sessionは`Room + Session + Agent + Backend`ごとに分ける。Agentの名前・役割・指示はBackendへ補助的なContextとして渡すが、System・所有者・現在のユーザー依頼より強い命令にはしない。
 
 ## 12.3 Compute
 

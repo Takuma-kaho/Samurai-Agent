@@ -1295,6 +1295,15 @@ describe("agent backend registry", () => {
     const input: BackendRunInput = {
       run_id: "run_1",
       session_id: "session_1",
+      room_id: "room_1",
+      agent_context: {
+        id: "agent_1",
+        name: "Research Agent",
+        role: "Research",
+        instructions: "Inspect evidence and report the result.",
+        authority: "supporting_context"
+      },
+      backend_session_key: "room_1:session_1:agent_1:codex",
       input_message_id: "message_1",
       envelope: {
         id: "message_1",
@@ -1358,6 +1367,9 @@ describe("agent backend registry", () => {
     expect(env).toMatchObject({
       SAMURAI_RUN_ID: "run_1",
       SAMURAI_SESSION_ID: "session_1",
+      SAMURAI_ROOM_ID: "room_1",
+      SAMURAI_AGENT_ID: "agent_1",
+      SAMURAI_BACKEND_SESSION_KEY: "room_1:session_1:agent_1:codex",
       SAMURAI_BACKEND_SESSION_ID: "codex-session-1",
       SAMURAI_TOOL_BRIDGE_URL: "http://127.0.0.1:4317/api/backend-runs/run_1/tool-calls",
       SAMURAI_TOOL_BRIDGE_TOKEN: "secret-bridge-token"

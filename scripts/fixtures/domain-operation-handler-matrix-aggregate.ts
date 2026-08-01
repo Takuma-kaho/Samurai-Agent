@@ -20,7 +20,7 @@ const actual = [...counts.keys()].sort();
 const missing = expected.filter((id) => !counts.has(id));
 const extra = actual.filter((id) => !expected.includes(id));
 
-assert.equal(expected.length, 119, "handler_matrix_expected_operation_count");
+assert.equal(expected.length, 128, "handler_matrix_expected_operation_count");
 assert.deepEqual(duplicates, [], "handler_matrix_partition_duplicate");
 assert.deepEqual(missing, [], "handler_matrix_partition_missing");
 assert.deepEqual(extra, [], "handler_matrix_partition_extra");

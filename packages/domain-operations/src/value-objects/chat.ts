@@ -21,7 +21,7 @@ import { messagePresentationRecordSchema } from "./presentation.js";
 
 const localeSchema = z.enum(supportedLocales);
 export const sessionRecordSchema = z.object({
-  id: z.string().min(1), session_key: z.string().min(1), title: z.string(),
+  id: z.string().min(1), session_key: z.string().min(1), room_id: z.string().min(1).optional(), title: z.string(),
   ui_locale: localeSchema, output_locale: localeSchema,
   created_at: z.string().datetime(), updated_at: z.string().datetime()
 }).strict();

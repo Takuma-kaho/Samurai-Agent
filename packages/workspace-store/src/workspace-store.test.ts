@@ -71,7 +71,7 @@ describe("workspace store", () => {
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
-    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
   it("persists message presentations for chat cards", async () => {

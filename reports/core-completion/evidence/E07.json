@@ -3,57 +3,77 @@
   "test_id": "E07",
   "command": "pnpm core:test:wiki-learning-loop",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "c54112fcaf6a492959f09af185de427a7787b9bf",
   "worktree_clean": false,
-  "source_sha256": "d97ddebdf8893198fe3ed10a3f284f39cc84df658297e5ab4840b251e6976e16",
+  "source_sha256": "ce4cda43518cd69d5d1cd894d44d9c5d9efcd19202508574d6eb77a756a578cf",
+  "source_graph_sha256": "bd6124024d56f25a817c73b0a1a4d46ff93fa892b1943501c6ff4a425a7e5a37",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/core-schemas/src/index.ts",
     "packages/learning/src/background-review.ts",
     "packages/runtime/src/agent-runtime.ts",
     "packages/runtime/src/index.ts",
+    "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
+    "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
+    "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/wiki-learning-loop.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-wiki-learning-loop.mjs"
   ],
-  "started_at": "2026-07-11T13:23:22.202Z",
-  "completed_at": "2026-07-11T13:23:47.955Z",
+  "source_read_errors": [],
+  "started_at": "2026-08-01T09:18:06.041Z",
+  "completed_at": "2026-08-01T09:18:07.066Z",
   "assertions": [
     {
-      "name": "Active Wiki retrieval and purpose-specific usage trace work",
+      "name": "20-task closed-loop evidence",
+      "actual": {
+        "tasks": 20,
+        "complete": true
+      },
+      "expected": {
+        "tasks": 20,
+        "complete": true
+      }
+    },
+    {
+      "name": "Accepted corrections appear in next use",
+      "actual": 1,
+      "expected": ">=0.90"
+    },
+    {
+      "name": "Unrelated task misapplication",
+      "actual": 0,
+      "expected": 0
+    },
+    {
+      "name": "Active Wiki retrieval and purpose-specific usage trace",
       "actual": true,
       "expected": true
     },
     {
-      "name": "Background Review supports create, patch, merge, archive",
+      "name": "Background Review mutation kinds",
       "actual": [
         "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_patch",
-        "wiki_archive",
-        "wiki_merge",
         "wiki_create",
-        "wiki_patch"
+        "wiki_merge",
+        "wiki_archive"
       ],
       "expected": [
         "wiki_patch",
@@ -63,12 +83,7 @@
       ]
     },
     {
-      "name": "Curator completes after Wiki mutations",
-      "actual": true,
-      "expected": true
-    },
-    {
-      "name": "Updated Wiki is reused and snapshot rollback restores it",
+      "name": "Curator and rollback close the loop",
       "actual": true,
       "expected": true
     }

@@ -11,7 +11,7 @@ export interface WikiContextPage {
 }
 
 export interface WorkspaceContextCandidatesStore {
-  searchWiki(query: string, limit: number, options: { activeOnly: boolean }): Promise<WikiContextPage[]>;
+  searchWiki(query: string, limit: number, options: { activeOnly: boolean; activityContext?: { room_id: string; session_id: string; agent_id: string } }): Promise<WikiContextPage[]>;
   readWikiContent(id: string): Promise<string | undefined>;
 }
 
@@ -25,8 +25,8 @@ export function emptyKnowledgeWikiContext(query: string): KnowledgeWikiContext {
   return { pages: [], entries: [], report: { query, retrieved_at: nowIso(), candidate_count: 0, included_count: 0, included_wiki_ids: [], excluded: [], source_refs: [] } };
 }
 
-export async function buildKnowledgeWikiContext(store: WorkspaceContextCandidatesStore, query: string): Promise<KnowledgeWikiContext> {
-  const matches = await store.searchWiki(query, 20, { activeOnly: false });
+export async function buildKnowledgeWikiContext(store: WorkspaceContextCandidatesStore, query: string, activityContext?: { room_id: string; session_id: string; agent_id: string }): Promise<KnowledgeWikiContext> {
+  const matches = await store.searchWiki(query, 20, { activeOnly: false, ...(activityContext ? { activityContext } : {}) });
   const pages: WikiContextPage[] = [];
   const entries: ContextPreview["knowledge_wiki"] = [];
   const excluded: ContextPreview["knowledge_wiki_report"]["excluded"] = [];

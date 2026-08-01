@@ -50,6 +50,7 @@ export interface SystemMcpCallRequest {
 }
 export interface SystemOperationPort {
   getSession(id: string): Promise<SessionRecord | undefined>;
+  getBackendRun(id: string): Promise<BackendRunRecord | undefined>;
   listMessages(sessionId: string): Promise<MessageRecord[]>;
   listSessions(): Promise<SessionRecord[]>;
   listBackendRuns(): Promise<BackendRunRecord[]>;
@@ -111,6 +112,11 @@ export class SystemDomainService {
   currentTimeMillis() { return Date.now(); }
   getReflectionSession(id: string) { return this.dependencies.operations.getSession(id); }
   reflectionSessionNotFoundError(id: string) { return this.dependencies.rollback.requestError("not_found", `Session not found: ${id}`); }
+  getReflectionBackendRun(id: string) { return this.dependencies.operations.getBackendRun(id); }
+  reflectionSourceRunNotFoundError(id: string) { return this.dependencies.rollback.requestError("not_found", `Backend run not found: ${id}`); }
+  reflectionSourceRunSessionMismatchError(input: { sourceRunId: string; sessionId: string }) {
+    return this.dependencies.rollback.requestError("conflict", `reflection_source_run_session_mismatch:${input.sourceRunId}:${input.sessionId}`);
+  }
   listReflectionMessages(id: string) { return this.dependencies.operations.listMessages(id); }
   listReflectionToolRuns(runId?: string) { return this.dependencies.operations.listToolRuns(runId); }
   listReflectionWorkspaceChanges(sessionId?: string) { return this.dependencies.operations.listWorkspaceChanges(sessionId); }
@@ -130,22 +136,33 @@ export class SystemDomainService {
   reflectionNow() { return this.dependencies.operations.now(); }
 
   async runScheduledReflection(session: SessionRecord): Promise<ReflectionExecutionResult> {
-    const [sessions, backendRuns, workspaceChanges, toolRuns] = await Promise.all([
-      this.dependencies.operations.listSessions(), this.dependencies.operations.listBackendRuns(),
-      this.dependencies.operations.listWorkspaceChanges(), this.dependencies.operations.listToolRuns()
+    const [sessions, backendRuns] = await Promise.all([
+      this.dependencies.operations.listSessions(), this.dependencies.operations.listBackendRuns()
     ]);
-    const messages = (await Promise.all(sessions.slice(0, 10).map((item) => this.dependencies.operations.listMessages(item.id))))
-      .flat().sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)).slice(0, 30).reverse();
-    const recentRuns = backendRuns.slice(0, 8);
+    const sessionsById = new Map(sessions.map((item) => [item.id, item]));
+    const scopedSource = backendRuns
+      .map((run) => ({ run, session: sessionsById.get(run.session_id) }))
+      .find((candidate): candidate is { run: BackendRunRecord; session: SessionRecord } => (
+        candidate.run.status === "completed" && Boolean(candidate.run.agent_id) && Boolean(candidate.session?.room_id)
+      ));
+    const sourceRun = scopedSource?.run;
+    const sourceSession = scopedSource?.session ?? session;
+    const recentRuns = sourceRun
+      ? backendRuns.filter((run) => run.session_id === sourceSession.id).slice(0, 8)
+      : [];
+    const [messages, workspaceChanges, toolRuns] = await Promise.all([
+      this.dependencies.operations.listMessages(sourceSession.id),
+      this.dependencies.operations.listWorkspaceChanges(sourceSession.id),
+      Promise.all(recentRuns.map((run) => this.dependencies.operations.listToolRuns(run.id))).then((runs) => runs.flat())
+    ]);
     const backendEvents = (await Promise.all(recentRuns.map((run) => this.dependencies.operations.listBackendEvents({ runId: run.id })))).flat().slice(0, 80);
     const userMessage = [...messages].reverse().find((message) => message.role === "user");
     const agentMessage = [...messages].reverse().find((message) => message.role === "agent");
-    const sourceRun = recentRuns[0];
     return this.dependencies.operations.executeReflection({
-      kind: "scheduled", session, sourceRunId: sourceRun?.id, backendRun: sourceRun, userMessage, agentMessage,
-      backendEvents, workspaceChanges: workspaceChanges.slice(0, 50), toolRuns: toolRuns.slice(0, 50), transcriptMessages: messages,
+      kind: "scheduled", session: sourceSession, sourceRunId: sourceRun?.id, backendRun: sourceRun, userMessage, agentMessage,
+      backendEvents, workspaceChanges: workspaceChanges.slice(0, 50), toolRuns: toolRuns.slice(0, 50), transcriptMessages: messages.slice(-30),
       artifacts: await this.dependencies.operations.loadArtifacts({
-        sessionId: sourceRun?.session_id ?? userMessage?.session_id ?? session.id,
+        sessionId: sourceSession.id,
         sourceRunId: sourceRun?.id, workspaceChanges
       })
     });

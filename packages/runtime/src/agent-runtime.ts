@@ -102,7 +102,9 @@ import {
 } from "@samurai-agent/agent-backends";
 import {
   type ActivityInboxItem,
+  type ActivityContextRef,
   type AgentBackendKind,
+  type AgentRecord,
   type ApprovalRequest,
   type ArtifactRecord,
   type ArtifactRevisionRecord,
@@ -179,6 +181,7 @@ import {
   type WikiFrontmatter,
   type WorkspaceChangeRecord,
   type ToolRunRecord,
+  type UsageScopeRef,
   GatewayRepairResultSchema,
   GatewaySandboxWorkspaceSyncResultSchema,
   gatewayChannels,
@@ -294,6 +297,7 @@ import { ConversationDomainService } from "./commands/services/conversation-doma
 import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
+import { RoomAgentDomainService } from "./commands/services/room-agent-domain-service";
 import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type HostLearningReviewInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
 import { BackendToolBridgeService, type BackendToolBridgeCallResult } from "./host/backend-tool-bridge-service";
 import type {
@@ -341,6 +345,7 @@ export type { GatewayContext } from "@samurai-agent/gateway";
 export interface RunChatTurnInput {
   sessionId: string;
   content: string;
+  agent_id?: string;
   backend_id?: string;
   input_locale?: SupportedLocale;
   output_locale?: SupportedLocale;
@@ -926,6 +931,7 @@ export class AgentRuntime {
   private readonly fileDomainService: FileDomainService;
   private readonly browserDomainService: BrowserDomainService;
   private readonly externalSendDomainService: ExternalSendDomainService;
+  private readonly roomAgentDomainService: RoomAgentDomainService;
   private agentHost: AgentHost | undefined;
 
   constructor(
@@ -998,9 +1004,26 @@ export class AgentRuntime {
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
-    this.settingsDomainService = new SettingsDomainService({
-      patch: (patch) => this.store.patchSettings(patch)
-    });
+    this.settingsDomainService = new SettingsDomainService(
+      { patch: (patch) => this.store.patchSettings(patch) },
+      { getRoom: (id) => this.store.getRoom(id), getAgent: (id) => this.store.getAgent(id) },
+      (code, message) => new RuntimeRequestError(code, message)
+    );
+    this.roomAgentDomainService = new RoomAgentDomainService(
+      {
+        createRoom: (record) => this.store.createRoom(record),
+        getRoom: (id) => this.store.getRoom(id),
+        listRooms: () => this.store.listRooms(),
+        patchRoom: (input) => this.store.patchRoom(input),
+        createAgent: (record) => this.store.createAgent(record),
+        getAgent: (id) => this.store.getAgent(id),
+        listAgents: () => this.store.listAgents(),
+        patchAgent: (input) => this.store.patchAgent(input),
+        bindAgentBackend: (input) => this.store.bindAgentBackend(input)
+      },
+      (backendId) => Boolean(this.backendRegistry.get(backendId)),
+      (code, message) => new RuntimeRequestError(code, message)
+    );
     this.objectiveDomainService = new ObjectiveDomainService({
       objectives: {
         save: (record) => this.store.saveObjective(record),
@@ -1093,6 +1116,7 @@ export class AgentRuntime {
     this.systemDomainService = new SystemDomainService({
       operations: {
         getSession: (id) => this.store.getSession(id),
+        getBackendRun: (id) => this.store.getBackendRun(id),
         listMessages: (sessionId) => this.store.listMessages(sessionId),
         listSessions: () => this.store.listSessions(),
         listBackendRuns: () => this.store.listBackendRuns(),
@@ -1545,7 +1569,8 @@ export class AgentRuntime {
       systemDomainService: this.systemDomainService,
       translationDomainService: this.translationDomainService,
       wikiDomainService: this.wikiDomainService,
-      searchDomainService
+      searchDomainService,
+      roomAgentDomainService: this.roomAgentDomainService
     }));
     this.externalAssistProviders = normalizeExternalAssistProviders(externalAssistProvider);
     this.contextPreviewAdapter = new WorkspaceContextPreviewAdapter(this.store, {
@@ -1651,6 +1676,25 @@ export class AgentRuntime {
 
   private async prepareHostRequest(request: TurnRequest): Promise<TurnRequest> {
     if (request.gatewayBoundaryPolicy) await this.store.saveGatewayBoundaryPolicy(request.gatewayBoundaryPolicy);
+    const [session, settings] = await Promise.all([this.store.getSession(request.sessionId), this.store.getSettings()]);
+    if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${request.sessionId}`);
+    if (!session.room_id) throw new RuntimeRequestError("conflict", `session_room_missing:${session.id}`);
+    const room = await this.store.getRoom(session.room_id);
+    if (!room) throw new RuntimeRequestError("conflict", `room_not_found:${session.room_id}`);
+    const agentId = request.agentId?.trim() || settings.default_agent_id;
+    if (!agentId) throw new RuntimeRequestError("conflict", "default_agent_missing");
+    const agent = await this.store.getAgent(agentId);
+    if (!agent) throw new RuntimeRequestError("conflict", `agent_not_found:${agentId}`);
+    if (!agent.enabled) throw new RuntimeRequestError("conflict", `agent_disabled:${agent.id}`);
+    const requestedBackendId = request.backendId?.trim();
+    // Workspaces created before Agent routing selected the first runnable
+    // Backend when neither a Backend nor an Agent was supplied. Preserve that
+    // one compatibility path without mutating the default Agent binding.
+    const useLegacyDefaultBackend = !requestedBackendId
+      && !request.agentId?.trim()
+      && agent.id === settings.default_agent_id
+      && settings.default_backend_id === undefined
+      && !this.backendRegistry.get(agent.backend_id);
     const temporaryContext = await resolveTemporaryContextPort({
       resolve: (ref) => this.workspaceOptions.resolveTemporaryContextRef?.(ref),
       conflict: (message) => new RuntimeRequestError("conflict", message)
@@ -1659,36 +1703,57 @@ export class AgentRuntime {
     request.temporaryContext);
     return {
       ...request,
-      backendId: request.backendId?.trim() || undefined,
+      roomId: room.id,
+      agentId: agent.id,
+      agent,
+      // backend_id is a one-turn compatibility override. It never writes the
+      // Agent record; agent.backend_id remains the durable binding.
+      backendId: requestedBackendId || (useLegacyDefaultBackend ? this.selectedBackendIdForRun() : agent.backend_id),
       temporaryContext,
-      metadata: jsonRecord(request.metadata ?? {})
+      metadata: {
+        ...jsonRecord(request.metadata ?? {}),
+        room_id: room.id,
+        agent_id: agent.id,
+        agent_name: agent.name,
+        agent_role: agent.role,
+        agent_instructions: agent.instructions,
+        agent_backend_id: agent.backend_id,
+        backend_selection: requestedBackendId
+          ? "compatibility_input"
+          : useLegacyDefaultBackend
+            ? "legacy_default_backend"
+            : "agent_binding"
+      }
     };
   }
 
   private async recordLearningResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void> {
+    const activityContext = turn.session.room_id && turn.run.agent_id
+      ? { room_id: turn.session.room_id, session_id: turn.session.id, agent_id: turn.run.agent_id }
+      : undefined;
     for (const skill of preview.selected_skills) {
       await this.store.recordLearningResourceUse({
         id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "skill", resource_id: skill.id,
         content_hash: stableHash({ id: skill.id, title: skill.title, description: skill.description }), stage: "selected",
-        metadata: { disclosure_level: skill.disclosure_level }, created_at: nowIso()
+        ...(activityContext ? { activity_context: activityContext } : {}), metadata: { disclosure_level: skill.disclosure_level }, created_at: nowIso()
       });
     }
     for (const memory of preview.active_memory) {
       await this.store.recordLearningResourceUse({
         id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "memory", resource_id: memory.id,
-        content_hash: stableHash(memory.content), stage: "body_loaded", metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
+        content_hash: stableHash(memory.content), stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
       });
     }
     for (const wiki of preview.knowledge_wiki) {
       await this.store.recordLearningResourceUse({
         id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "wiki", resource_id: wiki.id,
-        content_hash: stableHash(wiki.content), stage: "body_loaded", metadata: { slug: wiki.slug }, created_at: nowIso()
+        content_hash: stableHash(wiki.content), stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { slug: wiki.slug }, created_at: nowIso()
       });
     }
     for (const result of preview.session_search) {
       await this.store.recordLearningResourceUse({
         id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "session_result", resource_id: `${result.kind}:${result.id}`,
-        content_hash: stableHash(result.summary), stage: "selected", metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
+        content_hash: stableHash(result.summary), stage: "selected", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
       });
     }
   }
@@ -1957,12 +2022,18 @@ export class AgentRuntime {
     title?: string;
     ui_locale?: SupportedLocale;
     output_locale?: SupportedLocale;
+    room_id?: string;
   } = {}): Promise<SessionRecord> {
     const settings = await this.store.getSettings();
+    const roomId = input.room_id ?? settings.default_room_id;
+    if (!roomId || !(await this.store.getRoom(roomId))) {
+      throw new RuntimeRequestError("conflict", `room_not_found:${roomId ?? "default"}`);
+    }
     const now = nowIso();
     const session: SessionRecord = {
       id: createId("session"),
       session_key: "web:owner:main",
+      room_id: roomId,
       title: input.title ?? "New chat",
       ui_locale: input.ui_locale ?? settings.ui_locale,
       output_locale: input.output_locale ?? settings.output_locale,
@@ -2181,6 +2252,7 @@ export class AgentRuntime {
       outcome = await this.requireAgentHost().runTurn({
         sessionId: input.sessionId,
         content: input.content,
+        agentId: input.agent_id,
         envelope,
         backendId: input.backend_id,
         idempotencyKey,
@@ -3841,6 +3913,7 @@ export class AgentRuntime {
     required_capabilities?: string[];
     source_refs?: SkillFrontmatter["source_refs"];
     provenance_detail?: SkillFrontmatter["provenance_detail"];
+    usage_scope?: SkillFrontmatter["usage_scope"];
   }): Promise<SkillRuntimeResult> {
     return await this.runtimeDomainApi.createSkillCandidate(input) as SkillRuntimeResult;
   }
@@ -4321,10 +4394,11 @@ export class AgentRuntime {
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy
   ): Promise<BackendRunInput> {
     void resumeInput;
-    const [session, messages, settings] = await Promise.all([
+    const [session, messages, settings, agent] = await Promise.all([
       this.store.getSession(run.session_id),
       this.store.listMessages(run.session_id),
-      this.store.getSettings()
+      this.store.getSettings(),
+      run.agent_id ? this.store.getAgent(run.agent_id) : Promise.resolve(undefined)
     ]);
     if (!session) {
       throw new RuntimeRequestError("not_found", "session_not_found");
@@ -4340,6 +4414,8 @@ export class AgentRuntime {
     return {
       run_id: run.id,
       session_id: run.session_id,
+      ...(session.room_id ? { room_id: session.room_id } : {}),
+      ...(agent ? { agent_context: agentBackendContext(agent) } : {}),
       input_message_id: run.input_message_id,
       workspace_root: workspaceRoot,
       working_directory: workingDirectory,
@@ -5186,7 +5262,11 @@ export class AgentRuntime {
     artifacts?: ReflectionArtifactSnapshot[];
     abortSignal?: AbortSignal;
   }): Promise<ReflectionRuntimeResult> {
-    const sourceRunId = input.sourceRunId ?? input.backendRun?.id;
+    const backendRun = input.backendRun ?? (
+      input.sourceRunId ? undefined : await this.latestCompletedAgentRunForSession(input.session.id)
+    );
+    const sourceRunId = input.sourceRunId ?? backendRun?.id;
+    const activityContext = activityContextForReview(input.session, backendRun);
     const cancelledResult = (): ReflectionRuntimeResult => {
       const now = nowIso();
       return {
@@ -5195,6 +5275,7 @@ export class AgentRuntime {
           kind: input.kind === "chat_turn" ? "background_review" : input.kind,
           ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
           session_id: input.session.id,
+          ...(activityContext ? { activity_context: activityContext } : {}),
           status: "completed",
           input_summary: summarize(input.userMessage?.content ?? input.session.title),
           output_summary: "Background Review cancelled during shutdown.",
@@ -5205,12 +5286,20 @@ export class AgentRuntime {
       };
     };
     if (input.abortSignal?.aborted) return cancelledResult();
+    if (!sourceRunId && !backendRun) {
+      return this.skipBackgroundReviewWithoutScopedAgentRun({
+        kind: input.kind,
+        session: input.session,
+        userMessage: input.userMessage
+      });
+    }
     const startedAt = nowIso();
     let reflectionRun: ReflectionRunRecord = {
       id: createId("reflection"),
       kind: input.kind === "chat_turn" ? "background_review" : input.kind,
-      source_run_id: input.sourceRunId ?? input.backendRun?.id,
+      ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
       session_id: input.session.id,
+      ...(activityContext ? { activity_context: activityContext } : {}),
       status: "started",
       input_summary: summarize(input.userMessage?.content ?? input.session.title),
       started_at: startedAt
@@ -5235,13 +5324,22 @@ export class AgentRuntime {
     }
     try {
       throwIfAborted(input.abortSignal);
-      const snapshot = await this.buildReviewSnapshot(input);
+      if (!backendRun || !activityContext) {
+        throw new Error(`background_review_activity_context_required:${sourceRunId ?? "unknown"}`);
+      }
+      const scopedSourceRunId = sourceRunId ?? backendRun.id;
+      const snapshot = await this.buildReviewSnapshot({
+        ...input,
+        sourceRunId: scopedSourceRunId,
+        backendRun,
+        activityContext
+      });
       throwIfAborted(input.abortSignal);
       const runner = this.workspaceOptions.backgroundReviewRunner;
       const rawResult = runner
         ? await runner.run(snapshot, defaultBackgroundReviewPolicy, input.abortSignal)
         : this.workspaceOptions.enableBackendBackgroundReview
-          ? await this.runBackgroundReviewWithBackend(snapshot, input.backendRun, input.abortSignal)
+          ? await this.runBackgroundReviewWithBackend(snapshot, backendRun, input.abortSignal)
           : { reviewer: "background-review-unconfigured", summary: "Background Review runner is not configured.", mutations: [] };
       const settings = await this.store.getSettings();
       const restricted = restrictBackgroundReviewResult(rawResult, defaultBackgroundReviewPolicy);
@@ -5254,7 +5352,7 @@ export class AgentRuntime {
           return settings.skill_capture_mode === "auto";
         })
       };
-      await this.preflightBackgroundReviewMutations(result.mutations);
+      await this.preflightBackgroundReviewMutations(result.mutations, reflectionRun.activity_context);
       const learningSnapshot = await this.store.createLearningSnapshot(reflectionRun.id);
       throwIfAborted(input.abortSignal);
       let suggestions: ReflectionSuggestionRecord[];
@@ -5313,10 +5411,49 @@ export class AgentRuntime {
     }
   }
 
+  private async latestCompletedAgentRunForSession(sessionId: string): Promise<BackendRunRecord | undefined> {
+    return (await this.store.listBackendRuns(sessionId)).find((run) => run.status === "completed" && Boolean(run.agent_id));
+  }
+
+  private async skipBackgroundReviewWithoutScopedAgentRun(input: {
+    kind: ReflectionRunRecord["kind"];
+    session: SessionRecord;
+    userMessage?: MessageRecord;
+  }): Promise<ReflectionRuntimeResult> {
+    const now = nowIso();
+    const reflectionRun = await this.store.createReflectionRun({
+      id: createId("reflection"),
+      kind: input.kind === "chat_turn" ? "background_review" : input.kind,
+      session_id: input.session.id,
+      status: "completed",
+      input_summary: summarize(input.userMessage?.content ?? input.session.title),
+      output_summary: "Skipped Background Review: no completed Agent run with Room context is available.",
+      started_at: now,
+      completed_at: now
+    });
+    await this.store.saveLearningJobReport({
+      id: createId("learning_job_report"),
+      job_kind: "background_review",
+      run_id: reflectionRun.id,
+      target_resource_count: 0,
+      mutation_count: 0,
+      archive_count: 0,
+      restore_count: 0,
+      patch_count: 0,
+      merge_count: 0,
+      skipped_reasons: { no_scoped_agent_run: 1 },
+      evaluation_count: 0,
+      duration_ms: 0,
+      created_at: now
+    });
+    return { reflectionRun, suggestions: [] };
+  }
+
   private async buildReviewSnapshot(input: {
     session: SessionRecord;
-    sourceRunId?: string;
-    backendRun?: BackendRunRecord;
+    sourceRunId: string;
+    backendRun: BackendRunRecord;
+    activityContext: ActivityContextRef;
     backendEvents: BackendEventRecord[];
     workspaceChanges: WorkspaceChangeRecord[];
     toolRuns: ToolRunRecord[];
@@ -5324,16 +5461,15 @@ export class AgentRuntime {
     artifacts?: ReflectionArtifactSnapshot[];
   }): Promise<ReviewSnapshot> {
     const [memories, skills, wikiPages, learningUses] = await Promise.all([
-      this.store.listMemory({ includeArchived: true }),
-      this.store.listSkills(),
-      this.store.listWiki({ activeOnly: false }),
-      input.sourceRunId || input.backendRun?.id
-        ? this.store.listLearningResourceUses({ runId: input.sourceRunId ?? input.backendRun?.id })
-        : Promise.resolve([])
+      this.store.listMemory({ includeArchived: true, activityContext: input.activityContext }),
+      this.store.listSkills({ activityContext: input.activityContext }),
+      this.store.listWiki({ activeOnly: false, activityContext: input.activityContext }),
+      this.store.listLearningResourceUses({ runId: input.sourceRunId, activityContext: input.activityContext })
     ]);
     return {
       source_session_id: input.session.id,
-      source_run_id: input.sourceRunId ?? input.backendRun?.id ?? "unknown",
+      source_run_id: input.sourceRunId,
+      activity_context: input.activityContext,
       messages: input.transcriptMessages ?? await this.store.listMessages(input.session.id),
       artifacts: (input.artifacts ?? []).map((artifact) => ({ record: artifact.artifact, content: artifact.content })),
       backend_run: input.backendRun,
@@ -5360,6 +5496,7 @@ export class AgentRuntime {
     const backend = sourceRun ? this.backendRegistry.get(sourceRun.backend_id) : undefined;
     if (!backend) return { reviewer: "background-review-unavailable", summary: "No review Backend was available.", mutations: [] };
     const prompt = backgroundReviewPrompt(snapshot, defaultBackgroundReviewPolicy);
+    const sourceAgent = sourceRun?.agent_id ? await this.store.getAgent(sourceRun.agent_id) : undefined;
     const envelope = createGatewayEnvelope(webGatewayContext, prompt);
     const textParts: string[] = [];
     const reviewRunId = createId("review_run");
@@ -5379,6 +5516,9 @@ export class AgentRuntime {
       for await (const event of backend.runTurn({
         run_id: reviewRunId,
         session_id: snapshot.source_session_id,
+        ...(snapshot.activity_context ? { room_id: snapshot.activity_context.room_id } : {}),
+        ...(sourceAgent ? { agent_context: agentBackendContext(sourceAgent) } : {}),
+        ...(snapshot.activity_context && sourceRun ? { backend_session_id: `review:${snapshot.activity_context.room_id}:${snapshot.source_session_id}:${snapshot.activity_context.agent_id}:${sourceRun.backend_id}` } : {}),
         input_message_id: createId("review_message"),
         workspace_root: this.store.rootDir,
         working_directory: this.backendWorkingDirectory(),
@@ -5389,7 +5529,7 @@ export class AgentRuntime {
         active_memory: [],
         recent_messages: [],
         available_tools: [],
-        metadata: { background_review: true, source_run_id: snapshot.source_run_id },
+        metadata: { background_review: true, source_run_id: snapshot.source_run_id, ...(snapshot.activity_context ? { activity_context: snapshot.activity_context } : {}) },
         context_intent: "workspace_task"
       })) {
         throwIfAborted(abortSignal);
@@ -5433,6 +5573,9 @@ export class AgentRuntime {
   private async applyBackgroundReviewMutations(reflectionRun: ReflectionRunRecord, session: SessionRecord, mutations: BackgroundReviewMutation[]): Promise<ReflectionSuggestionRecord[]> {
     const suggestions: ReflectionSuggestionRecord[] = [];
     const settings = await this.store.getSettings();
+    const sourceScope = reflectionRun.activity_context
+      ? { kind: "room" as const, room_id: reflectionRun.activity_context.room_id }
+      : { kind: "workspace" as const };
     for (const [mutationIndex, mutation] of mutations.entries()) {
       this.workspaceOptions.backgroundReviewMutationFailureInjector?.(mutationIndex, "before");
       let targetRef: ResourceRef | undefined;
@@ -5444,7 +5587,7 @@ export class AgentRuntime {
         if (beforeContent !== undefined) beforeVersion = stableHash(beforeContent);
       }
       if (mutation.kind === "memory_add") {
-        const memory = await createTopicMemory(this.store, createGatewayEnvelope(webGatewayContext, mutation.reason), mutation.topic, mutation.content);
+        const memory = await createTopicMemory(this.store, createGatewayEnvelope(webGatewayContext, mutation.reason), mutation.topic, mutation.content, sourceScope);
         targetRef = memoryRef(memory);
       } else if (mutation.kind === "memory_replace") {
         const memory = await this.store.replaceMemoryContent(mutation.resource_id, mutation.content);
@@ -5459,6 +5602,7 @@ export class AgentRuntime {
           content: mutation.content,
           tags: ["background-review"],
           source_refs: mutation.evidence_refs,
+          usage_scope: sourceScope,
           provenance_detail: { kind: "generated_local", summary: `Background Review ${reflectionRun.id}: ${mutation.reason}`, verified: false }
         });
         const promoted = await this.store.updateSkillState(created.resource.id, "project");
@@ -5477,6 +5621,7 @@ export class AgentRuntime {
           state: settings.knowledge_wiki_capture_mode === "auto" && verifiedLocal ? "active" : "proposed",
           content_locale: session.output_locale, tags: mutation.tags, source_refs: mutation.evidence_refs,
           provenance: { kind: "generated_local", summary: `Background Review ${reflectionRun.id}: ${mutation.reason}`, verified: verifiedLocal },
+          usage_scope: sourceScope,
           created_at: now, updated_at: now
         }, mutation.content);
         targetRef = wikiRef(wiki);
@@ -5515,6 +5660,7 @@ export class AgentRuntime {
         origin: "background_review",
         source_run_id: reflectionRun.source_run_id ?? reflectionRun.id,
         source_session_id: session.id,
+        ...(reflectionRun.activity_context ? { activity_context: reflectionRun.activity_context } : {}),
         review_run_id: reflectionRun.id,
         mutation_kind: mutation.kind,
         resource_ref: targetRef,
@@ -5537,17 +5683,25 @@ export class AgentRuntime {
     return suggestions;
   }
 
-  private async preflightBackgroundReviewMutations(mutations: BackgroundReviewMutation[]): Promise<void> {
+  private async preflightBackgroundReviewMutations(
+    mutations: BackgroundReviewMutation[],
+    activityContext?: { room_id: string; session_id: string; agent_id: string }
+  ): Promise<void> {
     const targets = new Set<string>();
     for (const mutation of mutations) {
       if (mutation.evidence_refs.length === 0) throw new Error(`background_review_evidence_required:${mutation.kind}`);
       if (mutation.kind === "wiki_merge") {
         const ids = [mutation.target_resource_id, ...mutation.source_resource_ids];
         if (new Set(ids).size !== ids.length) throw new Error("background_review_wiki_merge_duplicate");
+        const scopes: UsageScopeRef[] = [];
         for (const id of ids) {
+          scopes.push(await this.assertBackgroundReviewResourceScope("wiki", id, activityContext));
           const content = await this.store.readWikiContent(id);
           if (content === undefined) throw new Error(`background_review_resource_not_found:wiki:${id}`);
           if (mutation.expected_versions[id] !== stableHash(content)) throw new Error(`background_review_version_conflict:wiki:${id}`);
+        }
+        if (!scopes.every((scope) => sameUsageScope(scope, scopes[0]!))) {
+          throw new Error("background_review_scope_merge_cross_scope");
         }
         continue;
       }
@@ -5556,12 +5710,39 @@ export class AgentRuntime {
       const target = `${kind}:${mutation.resource_id}`;
       if (targets.has(target)) throw new Error(`background_review_duplicate_target:${target}`);
       targets.add(target);
+      await this.assertBackgroundReviewResourceScope(kind, mutation.resource_id, activityContext);
       const content = kind === "memory" ? await this.store.readMemoryContent(mutation.resource_id) : kind === "wiki" ? await this.store.readWikiContent(mutation.resource_id) : await this.store.readSkillMarkdown(mutation.resource_id);
       if (content === undefined) throw new Error(`background_review_resource_not_found:${target}`);
       if (mutation.expected_version && mutation.expected_version !== stableHash(content)) {
         throw new Error(`background_review_version_conflict:${target}`);
       }
     }
+  }
+
+  private async assertBackgroundReviewResourceScope(
+    kind: "memory" | "wiki" | "skill",
+    resourceId: string,
+    activityContext?: { room_id: string; session_id: string; agent_id: string }
+  ): Promise<UsageScopeRef> {
+    let scope: UsageScopeRef | undefined;
+    if (kind === "memory") {
+      const memory = await this.store.getMemory(resourceId);
+      if (!memory) throw new Error(`background_review_resource_not_found:${kind}:${resourceId}`);
+      scope = memory.usage_scope;
+    } else if (kind === "wiki") {
+      const wiki = await this.store.getWiki(resourceId);
+      if (!wiki) throw new Error(`background_review_resource_not_found:${kind}:${resourceId}`);
+      scope = wiki.usage_scope;
+    } else {
+      const skill = await this.store.getSkill(resourceId);
+      if (!skill) throw new Error(`background_review_resource_not_found:${kind}:${resourceId}`);
+      scope = skill.frontmatter.usage_scope;
+    }
+    const resolvedScope = scope ?? { kind: "workspace" as const };
+    if (!usageScopeAllowsActivity(resolvedScope, activityContext)) {
+      throw new Error(`background_review_scope_violation:${kind}:${resourceId}`);
+    }
+    return resolvedScope;
   }
 
   private async loadReflectionArtifacts(input: {
@@ -5789,10 +5970,15 @@ export class AgentRuntime {
       return existing;
     }
     const settings = await this.store.getSettings();
+    const roomId = settings.default_room_id;
+    if (!roomId || !await this.store.getRoom(roomId)) {
+      throw new RuntimeRequestError("conflict", `room_not_found:${roomId ?? "default"}`);
+    }
     const now = nowIso();
     const session: SessionRecord = {
       id: createId("session"),
       session_key: context.session_key,
+      room_id: roomId,
       title,
       ui_locale: settings.ui_locale,
       output_locale: settings.output_locale,
@@ -11066,4 +11252,46 @@ function safeExternalSendDispatchError(error: unknown, fallback: string): string
 
 function isSettledBackendRun(run: BackendRunRecord): boolean {
   return run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "outcome_unknown";
+}
+
+function agentBackendContext(agent: AgentRecord): { id: string; name: string; role: string; instructions: string; authority: "supporting_context" } {
+  return {
+    id: agent.id,
+    name: agent.name,
+    role: agent.role,
+    instructions: agent.instructions,
+    authority: "supporting_context"
+  };
+}
+
+function activityContextForReview(
+  session: SessionRecord,
+  backendRun?: BackendRunRecord
+): ActivityContextRef | undefined {
+  if (!session.room_id || !backendRun?.agent_id || backendRun.session_id !== session.id) return undefined;
+  return {
+    room_id: session.room_id,
+    session_id: session.id,
+    agent_id: backendRun.agent_id
+  };
+}
+
+function usageScopeAllowsActivity(
+  scope: UsageScopeRef | undefined,
+  activityContext?: { room_id: string; session_id: string; agent_id: string }
+): boolean {
+  const resolved = scope ?? { kind: "workspace" as const };
+  if (resolved.kind === "workspace") return true;
+  if (!activityContext) return false;
+  if (resolved.kind === "room") return resolved.room_id === activityContext.room_id;
+  if (resolved.kind === "agent") return resolved.agent_id === activityContext.agent_id;
+  return resolved.session_id === activityContext.session_id;
+}
+
+function sameUsageScope(left: UsageScopeRef, right: UsageScopeRef): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "workspace") return true;
+  if (left.kind === "room" && right.kind === "room") return left.room_id === right.room_id;
+  if (left.kind === "agent" && right.kind === "agent") return left.agent_id === right.agent_id;
+  return left.kind === "session" && right.kind === "session" && left.session_id === right.session_id;
 }

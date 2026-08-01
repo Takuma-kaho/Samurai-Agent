@@ -8,6 +8,7 @@ import { compareScoredSearch, scoreSearchFields, searchTerms, stateSearchBoost }
 import { readManagedResourceFiles } from "./managed-resource-file-scan";
 import { errorMessage, listWikiMarkdownFiles, readWorkspaceText, renderFrontmatter, parseWikiMarkdownLocal, stripFrontmatter } from "./workspace-file-codecs";
 import { wikiFromRow, wikiToRow } from "./wiki-collection-row-codecs";
+import { withUsageScope, type UsageScopeQueryContext } from "./usage-scope";
 
 /** Filesystem-backed Knowledge Wiki and its rebuildable SQLite index. */
 export class KnowledgeWikiRepository {
@@ -17,14 +18,15 @@ export class KnowledgeWikiRepository {
   ) {}
 
 async saveWikiPage(frontmatter: WikiFrontmatter, content: string): Promise<WikiWithFilePath> {
-  const relativePath = path.join("wiki", "pages", `${frontmatter.slug}.md`);
+  const scopedFrontmatter = withUsageScope(frontmatter);
+  const relativePath = path.join("wiki", "pages", `${scopedFrontmatter.slug}.md`);
   const absolutePath = path.join(this.rootDir, relativePath);
   await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, `${renderFrontmatter(frontmatter)}\n${content.trim()}\n`, { flag: "wx" });
+  await writeFile(absolutePath, `${renderFrontmatter(scopedFrontmatter)}\n${content.trim()}\n`, { flag: "wx" });
 
   try {
     const parsed = parseWikiMarkdownLocal(await readFile(absolutePath, "utf8"));
-    if (parsed.frontmatter.id !== frontmatter.id || parsed.frontmatter.slug !== frontmatter.slug) {
+    if (parsed.frontmatter.id !== scopedFrontmatter.id || parsed.frontmatter.slug !== scopedFrontmatter.slug) {
       throw new Error("wiki_frontmatter_path_mismatch");
     }
     await this.db
@@ -38,19 +40,35 @@ async saveWikiPage(frontmatter: WikiFrontmatter, content: string): Promise<WikiW
   }
 }
 
-async listWiki(options: { activeOnly?: boolean } = {}): Promise<WikiWithFilePath[]> {
+async listWiki(options: { activeOnly?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<WikiWithFilePath[]> {
   let query = this.db.selectFrom("wiki_index").selectAll();
   if (options.activeOnly) {
     query = query.where("state", "=", "active");
+  }
+  if (options.activityContext) {
+    query = query.where((eb) => eb.or([
+      eb("usage_scope_kind", "=", "workspace"),
+      eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
+      eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
+      eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)])
+    ]));
   }
   const rows = await query.orderBy("updated_at", "desc").execute();
   return rows.map(wikiFromRow);
 }
 
-async searchWiki(query: string, limit = 5, options: { activeOnly?: boolean } = { activeOnly: true }): Promise<WikiWithFilePath[]> {
+async searchWiki(query: string, limit = 5, options: { activeOnly?: boolean; activityContext?: UsageScopeQueryContext } = { activeOnly: true }): Promise<WikiWithFilePath[]> {
   let dbQuery = this.db.selectFrom("wiki_index").selectAll();
   if (options.activeOnly ?? true) {
     dbQuery = dbQuery.where("state", "=", "active");
+  }
+  if (options.activityContext) {
+    dbQuery = dbQuery.where((eb) => eb.or([
+      eb("usage_scope_kind", "=", "workspace"),
+      eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
+      eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
+      eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)])
+    ]));
   }
   const rows = await dbQuery.orderBy("updated_at", "desc").execute();
   const terms = searchTerms(query);
@@ -109,7 +127,7 @@ async updateWikiPage(input: {
     return undefined;
   }
   const { file_path: filePath, ...currentFrontmatter } = current;
-  const next: WikiFrontmatter = {
+  const next = withUsageScope({
     ...currentFrontmatter,
     title: input.title ?? current.title,
     tags: input.tags ?? current.tags,
@@ -117,7 +135,7 @@ async updateWikiPage(input: {
     source_refs: input.source_refs ?? current.source_refs,
     provenance: input.provenance ?? current.provenance,
     updated_at: nowIso()
-  };
+  });
   await this.writeWikiPage(next, filePath, content);
   return { ...next, file_path: filePath };
 }
@@ -132,11 +150,11 @@ async setWikiState(id: string, state: WikiFrontmatter["state"]): Promise<WikiWit
     return undefined;
   }
   const { file_path: filePath, ...currentFrontmatter } = current;
-  const next: WikiFrontmatter = {
+  const next = withUsageScope({
     ...currentFrontmatter,
     state,
     updated_at: nowIso()
-  };
+  });
   await this.writeWikiPage(next, filePath, content);
   return { ...next, file_path: filePath };
 }
@@ -264,12 +282,13 @@ async setWikiState(id: string, state: WikiFrontmatter["state"]): Promise<WikiWit
 
 
   private async writeWikiPage(frontmatter: WikiFrontmatter, filePath: string, content: string): Promise<void> {
+    const scopedFrontmatter = withUsageScope(frontmatter);
     const absolutePath = path.join(this.rootDir, filePath);
-    await writeFile(absolutePath, `${renderFrontmatter(frontmatter)}\n${content.trim()}\n`);
+    await writeFile(absolutePath, `${renderFrontmatter(scopedFrontmatter)}\n${content.trim()}\n`);
     await this.db
       .updateTable("wiki_index")
-      .set(wikiToRow(frontmatter, filePath))
-      .where("id", "=", frontmatter.id)
+      .set(wikiToRow(scopedFrontmatter, filePath))
+      .where("id", "=", scopedFrontmatter.id)
       .execute();
   }
 }

@@ -477,6 +477,7 @@ export const bHandlerExpectations = {
         id: "existing-surface-full-input",
         input: {
           content: "Fixture chat",
+          agent_id: "agent_fixture",
           backend_id: "backend_fixture",
           input_locale: "ja",
           output_locale: "en",
@@ -490,6 +491,7 @@ export const bHandlerExpectations = {
           sessionId: "session_fixture",
           content: "Fixture chat",
           idempotencyKey: "handler-matrix-chat-turn",
+          agent_id: "agent_fixture",
           backend_id: "backend_fixture",
           input_locale: "ja",
           output_locale: "en",
@@ -505,7 +507,7 @@ export const bHandlerExpectations = {
         branches: ["session:create", "surface:absent"],
         calls: [
           call("createChatSession", { output_locale: undefined }),
-          call("runChatTurn", { sessionId: "session_fixture", content: "Create fixture chat", idempotencyKey: "handler-matrix-chat-turn", backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} })
+          call("runChatTurn", { sessionId: "session_fixture", content: "Create fixture chat", idempotencyKey: "handler-matrix-chat-turn", agent_id: undefined, backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} })
         ]
       }
     ]

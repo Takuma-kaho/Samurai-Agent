@@ -27,6 +27,7 @@ import type { SkillReindexResult, SkillSupportFile, SkillWithFilePath, Workspace
 import { compareScoredSearch, scoreSearchFields, searchTerms, stateSearchBoost } from "../search/scoring";
 import { readManagedResourceFiles } from "./managed-resource-file-scan";
 import { skillFromRow, skillToRow, skillUsageFromRow } from "./memory-skill-row-codecs";
+import { usageScopeIndexColumns, withUsageScope, type UsageScopeQueryContext } from "./usage-scope";
 import { parse, stringify } from "./serialization";
 import {
   assertSkillPathMatchesFrontmatter,
@@ -207,9 +208,13 @@ async saveSkillMarkdown(input: { state: "candidate" | "project"; skillId: string
   await writeFile(absolutePath, input.markdown, { flag: "wx" });
 
   try {
-    const { frontmatter } = parseSkillMarkdownLocal(await readFile(absolutePath, "utf8"));
+    const parsed = parseSkillMarkdownLocal(await readFile(absolutePath, "utf8"));
+    const frontmatter = withUsageScope(parsed.frontmatter);
     if (frontmatter.id !== input.skillId || frontmatter.state !== input.state) {
       throw new Error("skill_frontmatter_path_mismatch");
+    }
+    if (!parsed.frontmatter.usage_scope) {
+      await writeFile(absolutePath, this.renderSkillMarkdown(frontmatter, parsed.content));
     }
     const now = nowIso();
     await this.db
@@ -221,6 +226,7 @@ async saveSkillMarkdown(input: { state: "candidate" | "project"; skillId: string
         description: frontmatter.description,
         tags_json: stringify(frontmatter.tags),
         required_capabilities_json: stringify(frontmatter.required_capabilities),
+        ...usageScopeIndexColumns(frontmatter.usage_scope),
         file_path: relativePath,
         frontmatter_json: stringify(frontmatter),
         created_at: now,
@@ -234,8 +240,17 @@ async saveSkillMarkdown(input: { state: "candidate" | "project"; skillId: string
   }
 }
 
-async listSkills(): Promise<SkillWithFilePath[]> {
-  const rows = await this.db.selectFrom("skill_index").selectAll().orderBy("updated_at", "desc").execute();
+async listSkills(options: { activityContext?: UsageScopeQueryContext } = {}): Promise<SkillWithFilePath[]> {
+  let query = this.db.selectFrom("skill_index").selectAll();
+  if (options.activityContext) {
+    query = query.where((eb) => eb.or([
+      eb("usage_scope_kind", "=", "workspace"),
+      eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
+      eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
+      eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)])
+    ]));
+  }
+  const rows = await query.orderBy("updated_at", "desc").execute();
   return rows.map(skillFromRow);
 }
 
@@ -273,13 +288,13 @@ async patchSkill(input: { id: string; title?: string; description?: string; tags
   if (!current || !raw) return undefined;
   const parsed = parseSkillMarkdownLocal(raw);
   const now = nowIso();
-  const frontmatter: SkillFrontmatter = SkillFrontmatterSchema.parse({
+  const frontmatter = withUsageScope(SkillFrontmatterSchema.parse({
     ...parsed.frontmatter,
     ...(input.title !== undefined ? { title: input.title } : {}),
     ...(input.description !== undefined ? { description: input.description } : {}),
     ...(input.tags !== undefined ? { tags: input.tags } : {}),
     last_reviewed_at: now
-  });
+  }));
   const markdown = ["---", JSON.stringify(frontmatter, null, 2), "---", (input.content ?? parsed.content).trim(), ""].join("\n");
   const absolutePath = path.join(this.rootDir, current.file_path);
   const temporaryPath = `${absolutePath}.tmp-${randomUUID()}`;
@@ -291,6 +306,7 @@ async patchSkill(input: { id: string; title?: string; description?: string; tags
       description: frontmatter.description,
       tags_json: stringify(frontmatter.tags),
       required_capabilities_json: stringify(frontmatter.required_capabilities),
+      ...usageScopeIndexColumns(frontmatter.usage_scope),
       frontmatter_json: stringify(frontmatter),
       updated_at: now
     }).where("id", "=", input.id).execute();
@@ -314,11 +330,11 @@ async updateSkillState(id: string, state: SkillFrontmatter["state"]): Promise<Sk
   }
   const parsed = parseSkillMarkdownLocal(raw);
   const now = nowIso();
-  const nextFrontmatter: SkillFrontmatter = {
+  const nextFrontmatter = withUsageScope({
     ...parsed.frontmatter,
     state,
     last_reviewed_at: now
-  };
+  });
   const nextPath = path.join("skills", state, `${id}.md`);
   const nextAbsolutePath = path.join(this.rootDir, nextPath);
   const previousAbsolutePath = path.join(this.rootDir, current.file_path);
@@ -339,6 +355,7 @@ async updateSkillState(id: string, state: SkillFrontmatter["state"]): Promise<Sk
         description: nextFrontmatter.description,
         tags_json: stringify(nextFrontmatter.tags),
         required_capabilities_json: stringify(nextFrontmatter.required_capabilities),
+        ...usageScopeIndexColumns(nextFrontmatter.usage_scope),
         file_path: nextPath,
         frontmatter_json: stringify(nextFrontmatter),
         updated_at: now
@@ -360,10 +377,11 @@ async replaceSkillContent(id: string, content: string): Promise<SkillWithFilePat
   await this.assertSkillWriteUnlocked(id);
   const skill = await this.getSkill(id);
   if (!skill) return undefined;
-  const frontmatter = { ...skill.frontmatter, last_reviewed_at: nowIso() };
+  const frontmatter = withUsageScope({ ...skill.frontmatter, last_reviewed_at: nowIso() });
   await writeFile(path.join(this.rootDir, skill.file_path), this.renderSkillMarkdown(frontmatter, content));
   await this.db.updateTable("skill_index").set({
     frontmatter_json: stringify(frontmatter),
+    ...usageScopeIndexColumns(frontmatter.usage_scope),
     updated_at: frontmatter.last_reviewed_at ?? nowIso()
   }).where("id", "=", id).execute();
   return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
@@ -378,10 +396,11 @@ async replaceSkillContentIfUnchanged(input: { id: string; expectedContentHash: s
   if (currentBodyHash !== input.expectedContentHash) {
     throw new Error(`skill_content_conflict:${input.id}`);
   }
-  const frontmatter = { ...skill.frontmatter, last_reviewed_at: nowIso() };
+  const frontmatter = withUsageScope({ ...skill.frontmatter, last_reviewed_at: nowIso() });
   await writeFile(path.join(this.rootDir, skill.file_path), this.renderSkillMarkdown(frontmatter, input.content));
   await this.db.updateTable("skill_index").set({
     frontmatter_json: stringify(frontmatter),
+    ...usageScopeIndexColumns(frontmatter.usage_scope),
     updated_at: frontmatter.last_reviewed_at ?? nowIso()
   }).where("id", "=", input.id).execute();
   return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
@@ -630,13 +649,21 @@ async listSkillSupportFiles(skillId: string): Promise<SkillSupportFile[]> {
 async searchSkills(
   query: string,
   limit = 5,
-  options: { states?: SkillFrontmatter["state"][] } = {}
+  options: { states?: SkillFrontmatter["state"][]; activityContext?: UsageScopeQueryContext } = {}
 ): Promise<SkillWithFilePath[]> {
-  let rows = await this.db.selectFrom("skill_index").selectAll().orderBy("updated_at", "desc").execute();
-  if (options.states?.length) {
-    const allowed = new Set(options.states);
-    rows = rows.filter((row) => allowed.has(row.state as SkillFrontmatter["state"]));
+  let dbQuery = this.db.selectFrom("skill_index").selectAll();
+  if (options.activityContext) {
+    dbQuery = dbQuery.where((eb) => eb.or([
+      eb("usage_scope_kind", "=", "workspace"),
+      eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
+      eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
+      eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)])
+    ]));
   }
+  if (options.states?.length) {
+    dbQuery = dbQuery.where("state", "in", options.states);
+  }
+  const rows = await dbQuery.orderBy("updated_at", "desc").execute();
   const terms = searchTerms(query);
   const scored = await Promise.all(
     rows.map(async (row) => {
@@ -675,6 +702,8 @@ function sameSkillIndexContent(left: SkillIndexTable, right: SkillIndexTable): b
     && left.description === right.description
     && left.tags_json === right.tags_json
     && left.required_capabilities_json === right.required_capabilities_json
+    && left.usage_scope_kind === right.usage_scope_kind
+    && left.usage_scope_ref_id === right.usage_scope_ref_id
     && left.file_path === right.file_path
     && left.frontmatter_json === right.frontmatter_json;
 }

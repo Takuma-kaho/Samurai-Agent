@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { ProvenanceSchema, ResourceRefSchema, createId, nowIso } from "@samurai-agent/core-schemas";
+import { ProvenanceSchema, ResourceRefSchema, UsageScopeRefSchema, createId, nowIso } from "@samurai-agent/core-schemas";
 import { renderSkillMarkdown } from "@samurai-agent/skills";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillWriteValueSchema } from "../../../value-objects/skill.js";
@@ -13,7 +13,8 @@ const Input = z.object({
   "required_capabilities": z.array(z.string().trim().min(1).max(256)).max(100).default([]),
   "source_refs": z.array(ResourceRefSchema).max(1_000).default([]),
   "tags": z.array(z.string().max(128)).max(100).default([]),
-  "title": z.string().max(512)
+  "title": z.string().max(512),
+  "usage_scope": UsageScopeRefSchema.optional()
 }).strict();
 const Output = skillWriteValueSchema;
 
@@ -66,6 +67,7 @@ const skillCandidateCreate = defineCommand<SkillCandidateCreatePorts>()({
           id: skillId, state: "candidate", title: input.title, description: input.description ?? "", tags: input.tags,
           provenance: "generated_local", trust_level: "generated_local", allowed_scopes: ["skill"],
           required_capabilities: input.required_capabilities, schedule_policy: {}, secret_policy: {}, owner_pinned: false,
+          usage_scope: input.usage_scope,
           last_reviewed_at: nowIso(), source_refs: input.source_refs, provenance_detail: input.provenance_detail ?? {
             kind: "generated_local", summary: "Created from a local runtime operation.", verified: false
           }

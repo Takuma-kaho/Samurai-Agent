@@ -6,6 +6,7 @@ import {
   type ProfileDocument,
   type ResourceRef,
   type SupportedLocale,
+  type UsageScopeRef,
   createId,
   nowIso,
   stableHash
@@ -14,7 +15,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface MemoryRetrievalPort {
-  searchMemory(query: string, limit?: number, options?: { includeArchived?: boolean }): Promise<Array<MemoryFrontmatter & { file_path: string }>>;
+  searchMemory(query: string, limit?: number, options?: { includeArchived?: boolean; activityContext?: { room_id: string; session_id: string; agent_id: string } }): Promise<Array<MemoryFrontmatter & { file_path: string }>>;
   readMemoryContent(id: string): Promise<string | undefined>;
 }
 
@@ -38,13 +39,13 @@ export interface ActiveMemoryRetrievalResult {
   report: ActiveMemoryRetrievalReport;
 }
 
-export async function retrieveActiveMemory(store: MemoryRetrievalPort, query: string): Promise<MemoryCandidate[]> {
-  return (await retrieveActiveMemoryWithReport(store, query)).candidates;
+export async function retrieveActiveMemory(store: MemoryRetrievalPort, query: string, activityContext?: { room_id: string; session_id: string; agent_id: string }): Promise<MemoryCandidate[]> {
+  return (await retrieveActiveMemoryWithReport(store, query, activityContext)).candidates;
 }
 
-export async function retrieveActiveMemoryWithReport(store: MemoryRetrievalPort, query: string): Promise<ActiveMemoryRetrievalResult> {
+export async function retrieveActiveMemoryWithReport(store: MemoryRetrievalPort, query: string, activityContext?: { room_id: string; session_id: string; agent_id: string }): Promise<ActiveMemoryRetrievalResult> {
   const retrievedAt = nowIso();
-  const rows = await store.searchMemory(query, 20, { includeArchived: true });
+  const rows = await store.searchMemory(query, 20, { includeArchived: true, ...(activityContext ? { activityContext } : {}) });
   const candidates: MemoryCandidate[] = [];
   const excluded: ActiveMemoryRetrievalReport["excluded"] = [];
   const sensitiveRedactions: ActiveMemoryRetrievalReport["sensitive_redactions"] = [];
@@ -183,7 +184,8 @@ export async function loadFreezeSnapshot(
 export async function createSessionMemory(
   store: MemoryWritePort,
   envelope: MessageEnvelope,
-  content: string
+  content: string,
+  usageScope: UsageScopeRef = { kind: "workspace" }
 ): Promise<MemoryFrontmatter> {
   const frontmatter = buildMemoryFrontmatter({
     state: "session",
@@ -192,7 +194,8 @@ export async function createSessionMemory(
     sourceLocale: envelope.input_locale,
     contentLocale: envelope.output_locale,
     sourceKind: "owner_instruction",
-    instructionAuthority: envelope.actor_identity
+    instructionAuthority: envelope.actor_identity,
+    usageScope
   });
 
   return store.saveMemory(frontmatter, content);
@@ -220,7 +223,8 @@ export async function createTopicMemory(
   store: MemoryWritePort,
   envelope: MessageEnvelope,
   topic: string,
-  content: string
+  content: string,
+  usageScope: UsageScopeRef = { kind: "workspace" }
 ): Promise<MemoryFrontmatter> {
   const frontmatter = buildMemoryFrontmatter({
     state: "topic",
@@ -229,7 +233,8 @@ export async function createTopicMemory(
     sourceLocale: envelope.input_locale,
     contentLocale: envelope.output_locale,
     sourceKind: "owner_instruction",
-    instructionAuthority: envelope.actor_identity
+    instructionAuthority: envelope.actor_identity,
+    usageScope
   });
 
   return store.saveMemory(frontmatter, content);
@@ -243,6 +248,7 @@ export function buildMemoryFrontmatter(input: {
   contentLocale: SupportedLocale;
   sourceKind: MemoryFrontmatter["source_kind"];
   instructionAuthority: string;
+  usageScope?: UsageScopeRef;
 }): MemoryFrontmatter {
   const now = nowIso();
   return {
@@ -260,7 +266,8 @@ export function buildMemoryFrontmatter(input: {
     updated_at: now,
     related_memories: [],
     conflicts_with: [],
-    sensitive_level: "none"
+    sensitive_level: "none",
+    usage_scope: input.usageScope ?? { kind: "workspace" }
   };
 }
 

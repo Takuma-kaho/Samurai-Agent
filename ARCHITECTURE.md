@@ -142,9 +142,11 @@ User asks through Chat / Gateway
 ↓
 Host builds intent and session context
 ↓
+Host resolves the Session Room and selected Agent
+↓
 Active Memory retrieval + Skill selection
 ↓
-AgentBackendRegistry selects backend
+Host resolves the Agent Backend binding
 ↓
 Backend cassette runs and events are normalized
 ↓
@@ -196,6 +198,7 @@ Hostは、Chat、Surface、Workspace、Memory、Skill、Gateway、Backendを束�
 Hostの責務。
 
 - sessionを作る。
+- SessionのRoomと、実行する有効なAgentを解決する。
 - Workspace contextを集める。
 - Active Memoryを取り出す。
 - Skill候補を選ぶ。
@@ -203,6 +206,8 @@ Hostの責務。
 - Backend eventを正規化層へ渡す。
 - `BackendRunRecord`の永続状態遷移をRun lifecycleとして調整する。
 - 結果をWorkspaceへ戻す。
+
+Core 05着手前の基盤では、HostがAgentの名前・役割・指示を低優先度の型付きContextとしてBackendへ渡す。`Room + Session + Agent + Backend`をBackend Session keyに使い、Backendを交換してもAgent IDとWorkspace側の情報を保持する。
 
 Hostが持たない責務。
 
@@ -218,7 +223,7 @@ Hostが持たない責務。
 責務。
 
 - backend id と backend kind を管理する。
-- sessionやworkspaceに応じてBackendを選ぶ。
+- Hostが解決したAgentのBackend bindingを実行可能なcassetteへ解決する。
 - Backend configを解決する。
 - Backend session、実行handle、capabilityなどBackend実行側のlifecycleを作る。
 - Backendの有効/無効、失敗状態、接続状態をHostへ返す。
@@ -236,6 +241,23 @@ Backend候補。
 
 `ProviderAdapter` は、Agent Backend全体の差し替え口ではない。
 `SamuraiNativeBackend` の内部でモデルを差し替えるための口である。
+
+### 5.3.1 Room / Agent foundation
+
+RoomとAgentはBackendではなく、Workspace SQLiteが所有する軽い永続Recordである。
+
+| Record | 保存項目 | 実行時の役割 |
+| --- | --- | --- |
+| RoomRecord | ID、名前、作成／更新日時 | Sessionの活動範囲 |
+| AgentRecord | ID、名前、役割、指示、Backend ID、有効状態 | Backendを選ぶ継続する役割 |
+| UsageScopeRef | workspace / room / agent / session のいずれか | Memory・Wiki・Skillの利用範囲 |
+| ActivityContextRef | room_id / session_id / agent_id | Runと学習記録の出所 |
+
+Settingsの既定Room／既定Agentを省略時に使い、`settings.patch`で既存Roomと有効なAgentだけを選べる。永続的なBackend変更は`agent.backend.bind`だけが行い、`chat.turn.run`の`backend_id`は一回限りの互換入力である。Room membership、ACL、招待、削除、UIはこの層の責務ではない。
+
+既定AgentもBackend未指定の旧呼び出しだけは、Settingsに既定Backendがなく、そのAgentの初期bindingが未登録の場合に限り、従来どおり利用可能な既定Backendへ一回だけ解決する。この互換経路はAgent Recordを書き換えない。
+
+この基盤は新しいWorkspace形式から開始する。旧Session／RunのRoom・Agent出所をbackfillせず、旧Bundle復元の互換も追加しない。
 
 ### 5.4 Agent Backend Cassette
 
@@ -418,6 +440,7 @@ Hostは、共通の `AgentBackend` interface と `BackendEventRecord` だけを�
 ```text
 id
 session_id
+agent_id
 backend_id
 backend_kind
 status
@@ -500,6 +523,8 @@ filesystem:
   custom views
 
 sqlite:
+  rooms
+  agents
   sessions
   backend runs
   backend events
@@ -524,8 +549,9 @@ sqlite:
 | Skill index | SQLite | filesystem source | 必要なSkillだけ選ぶため |
 | Collection schema | filesystem | SQLite schema metadata | データ構造を人間が確認できるようにするため |
 | Collection record index | SQLite | filesystem export | 一覧、検索、patch適用に使うため |
+| Room / Agent | SQLite | なし | Workspace内の活動範囲とBackendから独立した役割を持つため |
 | Session transcript | SQLite | export file | 履歴、検索、再開で一貫性が必要だから |
-| Backend run | SQLite | export file | どのBackendを動かしたか確認するため |
+| Backend run | SQLite | export file | RoomのSessionで、どのAgentがどのBackendを動かしたか確認するため |
 | Backend event | SQLite | export file | 進行状況、エラー、tool出力を表示するため |
 | Workspace change | SQLite | export file | 何が変わったかを後から確認するため |
 | Queue / scheduled task | SQLite | なし | 実行状態の整合性が最優先だから |
@@ -538,6 +564,7 @@ sqlite:
 WorkspaceのBackupは、単なるDB file copyではなく、復元できるdirectory Bundleである。
 
 - Bundleのpayloadは`workspace.sqlite`と`artifacts`、`profile`、`memory`、`skills`、`wiki`、`rollback`、`collections`、`surfaces`だけに固定する。`backups`、cache、派生学習データ、未知fileは含めない。
+- RoomとAgentはSQLite snapshotへ含める。Room／Agent専用の保存rootやBackup Manifest項目は増やさない。
 - SQLiteはOnline Backup APIでSnapshotを作り、WAL内の確定内容も含める。Snapshotのintegrity checkに失敗したBundleは公開しない。
 - 作成中は隠しStageへ置き、全payloadのSHA-256確認後にManifestを最後に書く。完成時だけatomic renameするため、一覧へ未完成Bundleは出ない。
 - Manifest v2は相対POSIX path、`source_root: "."`、DB migration番号、固定root一覧、file hashを持つ。復元前にpath escape、重複、未知root、file集合差、hash不一致、special file、未来format、未来schemaを拒否する。v1は読込時に正規化し、欠けた管理rootを空として扱う。
@@ -599,6 +626,8 @@ Memory / Skill / Reflection / Curator は、Hermes Agentから強く参照する
 External Provider由来の内容は、acceptedされるまでMemory、Knowledge Wiki、Skillの正本にしない。
 参照元不明のProvider情報は保存せず、`unverified external hint` として診断表示に留める。
 
+Memory・Knowledge Wiki・Skillは`UsageScopeRef`をfrontmatterとSQLite indexの両方へ保存する。実行時の検索は全件を読んでから隠すのではなく、Workspace／同じRoom／同じAgent／同じSessionに一致するindex行だけを先に候補にする。
+
 ### 8.1 Memory
 
 Memoryは、AI秘書の長期的な理解を支える。
@@ -653,7 +682,7 @@ Backend run completes
 ↓
 Background Review reads transcript + artifacts + backend events
 ↓
-Reusable Memory changes are saved automatically with provenance
+Room / Session / Agentの出所を残し、Reusable Memory changes are saved automatically with provenance
 ↓
 Active Memory retrieval uses the updated Memory
 ```
@@ -701,6 +730,8 @@ Curatorは、増えすぎたMemoryやSkillを整理する。
 
 Background ReviewやCuratorは、外部Backendの内部状態として閉じない。
 自動変更はWorkspace上へ保存し、source run、version、根拠、snapshotから後で理解・復元できるようにする。
+
+Background Reviewが新規作成するMemory・Knowledge Wiki・Skillは、元のRoom範囲を既定にする。WorkspaceやAgent範囲への自動昇格、競合解決、Core 05の学習判断そのものは、この基盤では実装しない。
 
 ---
 

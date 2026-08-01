@@ -52,6 +52,11 @@ const reflectionMessages = [
   { id: "message_user", session_id: "session_fixture", role: "user", content: "Fixture user request", input_locale: "en", output_locale: "ja", created_at: now },
   { id: "message_agent", session_id: "session_fixture", role: "agent", content: "Fixture agent answer", input_locale: "en", output_locale: "ja", created_at: now }
 ];
+const reflectionBackendRunFixture = {
+  id: "run_fixture", session_id: "session_fixture", agent_id: "agent_fixture", input_message_id: "message_user",
+  backend_id: "backend_fixture", backend_kind: "samurai_native", status: "completed", started_at: now, completed_at: now,
+  input_summary: "Fixture user request", metadata: {}
+};
 const storedSkillFixture = {
   id: "skill_fixture", title: "Fixture Skill", description: "Fixture skill description", tags: ["fixture"], state: "project", allowed_scopes: ["workspace"], required_capabilities: [], owner_pinned: false,
   frontmatter: { id: "skill_fixture", state: "project", title: "Fixture Skill", description: "Fixture skill description", tags: ["fixture"], provenance: "fixture", trust_level: "user_authored", allowed_scopes: ["workspace"], required_capabilities: [], schedule_policy: {}, secret_policy: {}, owner_pinned: false, source_refs: [resourceRef], provenance_detail: provenance },
@@ -248,12 +253,13 @@ export const cHandlerExpectations = {
       {
         id: "backend-run-scope", input: { source_run_id: "run_fixture" }, branches: ["source_run:backend"], calls: [
           { method: "getReflectionSession", args: ["session_fixture"] },
+          { method: "getReflectionBackendRun", args: ["run_fixture"] },
           { method: "listReflectionMessages", args: ["session_fixture"] },
           { method: "listReflectionToolRuns", args: ["run_fixture"] },
           { method: "listReflectionWorkspaceChanges", args: ["session_fixture"] },
           { method: "listReflectionBackendEvents", args: [{ runId: "run_fixture" }] },
           { method: "loadReflectionArtifacts", args: [{ sessionId: "session_fixture", sourceRunId: "run_fixture", workspaceChanges: [] }] },
-          { method: "executeReflectionWorkflow", args: [{ kind: "manual", session: sessionFixture, sourceRunId: "run_fixture", userMessage: reflectionMessages[0], agentMessage: reflectionMessages[1], backendEvents: [], workspaceChanges: [], toolRuns: [], transcriptMessages: reflectionMessages, artifacts: [] }] }
+          { method: "executeReflectionWorkflow", args: [{ kind: "manual", session: sessionFixture, sourceRunId: "run_fixture", backendRun: reflectionBackendRunFixture, userMessage: reflectionMessages[0], agentMessage: reflectionMessages[1], backendEvents: [], workspaceChanges: [], toolRuns: [], transcriptMessages: reflectionMessages, artifacts: [] }] }
         ]
       }
     ]
@@ -352,7 +358,7 @@ export const cHandlerExpectations = {
   "skill.candidate.create": {
     requiredBranches: ["candidate:create"],
     cases: [{
-      id: "all-public-fields", input: { title: "Candidate Skill", content: "# Candidate\nUse this procedure.", description: "Candidate description", tags: ["fixture"], required_capabilities: ["filesystem"], source_refs: [resourceRef], provenance_detail: provenance }, branches: ["candidate:create"], calls: [
+      id: "all-public-fields", input: { title: "Candidate Skill", content: "# Candidate\nUse this procedure.", description: "Candidate description", tags: ["fixture"], required_capabilities: ["filesystem"], source_refs: [resourceRef], provenance_detail: provenance, usage_scope: { kind: "room", room_id: "room_fixture" } }, branches: ["candidate:create"], calls: [
         { method: "skillMutationContract", args: ["skill.candidate.create"] },
         { method: "ensureSkillMutationSession", args: [] },
         { method: "createSkillMutationEnvelope", args: ["Create skill candidate: Candidate Skill"] },

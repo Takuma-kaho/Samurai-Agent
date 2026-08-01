@@ -22,6 +22,7 @@ import { createSystemDomainServicePorts } from "./domain-operation-ports/system-
 import { createTranslationDomainServicePorts } from "./domain-operation-ports/translation-domain-service-ports.js";
 import { createWikiDomainServicePorts } from "./domain-operation-ports/wiki-domain-service-ports.js";
 import { createSearchDomainServicePorts } from "./domain-operation-ports/search-domain-service-ports.js";
+import { createRoomAgentDomainServicePorts } from "./domain-operation-ports/room-agent-domain-service-ports.js";
 
 export type { RuntimeDomainServices } from "./domain-operation-services.js";
 
@@ -48,7 +49,8 @@ export function createDomainOperationPorts(services: RuntimeDomainServices): Dom
     ...createSystemDomainServicePorts(services),
     ...createTranslationDomainServicePorts(services),
     ...createWikiDomainServicePorts(services),
-    ...createSearchDomainServicePorts(services)
+    ...createSearchDomainServicePorts(services),
+    ...createRoomAgentDomainServicePorts(services)
   };
   const missingQueryPorts = domainQueryIds.filter((id) => !(id in ports));
   if (missingQueryPorts.length > 0) throw new Error(`domain_query_ports_incomplete:${missingQueryPorts.join(",")}`);

@@ -20,6 +20,9 @@ export function createSystemDomainServicePorts(services: Pick<RuntimeDomainServi
     "reflection.run": {
       getReflectionSession: (id) => services.systemDomainService.getReflectionSession(id),
       reflectionSessionNotFoundError: (id) => services.systemDomainService.reflectionSessionNotFoundError(id),
+      getReflectionBackendRun: (id) => services.systemDomainService.getReflectionBackendRun(id),
+      reflectionSourceRunNotFoundError: (id) => services.systemDomainService.reflectionSourceRunNotFoundError(id),
+      reflectionSourceRunSessionMismatchError: (input) => services.systemDomainService.reflectionSourceRunSessionMismatchError(input),
       listReflectionMessages: (id) => services.systemDomainService.listReflectionMessages(id),
       listReflectionToolRuns: (runId) => services.systemDomainService.listReflectionToolRuns(runId),
       listReflectionWorkspaceChanges: (sessionId) => services.systemDomainService.listReflectionWorkspaceChanges(sessionId),

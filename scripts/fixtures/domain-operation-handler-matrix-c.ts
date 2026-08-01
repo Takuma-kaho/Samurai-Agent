@@ -205,6 +205,19 @@ const reflectionSuggestion = {
   created_at: now,
   updated_at: now
 };
+const reflectionBackendRun = {
+  id: "run_fixture",
+  session_id: "session_fixture",
+  agent_id: "agent_fixture",
+  input_message_id: "message_user",
+  backend_id: "backend_fixture",
+  backend_kind: "samurai_native",
+  status: "completed",
+  started_at: now,
+  completed_at: now,
+  input_summary: "Fixture user request",
+  metadata: {}
+};
 const evaluationReport = {
   id: "evaluation_report_fixture",
   checked_at: now,
@@ -713,6 +726,9 @@ async function runReflectionRunCases(): Promise<void> {
     await runCase("reflection.run", caseFor("reflection.run", caseId), (fixture) => ({
       getReflectionSession: async (id: unknown) => { fixture.record("getReflectionSession", [id]); return session; },
       reflectionSessionNotFoundError: (id: unknown) => { fixture.record("reflectionSessionNotFoundError", [id]); return new Error(String(id)); },
+      getReflectionBackendRun: async (id: unknown) => { fixture.record("getReflectionBackendRun", [id]); return String(id) === reflectionBackendRun.id ? reflectionBackendRun : undefined; },
+      reflectionSourceRunNotFoundError: (id: unknown) => { fixture.record("reflectionSourceRunNotFoundError", [id]); return new Error(String(id)); },
+      reflectionSourceRunSessionMismatchError: (input: unknown) => { fixture.record("reflectionSourceRunSessionMismatchError", [input]); return new Error("reflection_source_run_session_mismatch"); },
       listReflectionMessages: async (id: unknown) => { fixture.record("listReflectionMessages", [id]); return messages; },
       listReflectionToolRuns: async (id: unknown) => { fixture.record("listReflectionToolRuns", [id]); return []; },
       listReflectionWorkspaceChanges: async (id: unknown) => { fixture.record("listReflectionWorkspaceChanges", [id]); return []; },

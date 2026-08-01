@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BackendRunInput } from "@samurai-agent/agent-backends";
-import type { BackendRunRecord, MessageEnvelope, SessionRecord } from "@samurai-agent/core-schemas";
+import type { AgentRecord, BackendRunRecord, MessageEnvelope, SessionRecord } from "@samurai-agent/core-schemas";
 import { buildHostContextAssembly } from "../context/context-assembly";
 import { TurnPreparer } from "./turn-preparer";
 import type { AdmittedTurn } from "./host-types";
@@ -45,6 +45,7 @@ describe("TurnPreparer", () => {
     expect(prepared.context.session_id).toBe(admitted.session.id);
     expect(Object.isFrozen(prepared)).toBe(true);
     expect(prepared.backendInput.context_intent).toBe("light_chat");
+    expect(prepared.backendInput.backend_session_key).toBe("room-1:session-1:agent-1:fixed-backend");
     expect(calls).toEqual(["candidates:fixed-backend", "assembly:fixed-backend", "handoff:fixed-backend"]);
   });
 });
@@ -75,12 +76,16 @@ function contextAssembly(turn: AdmittedTurn) {
 
 function admittedTurn(binding: AdmittedTurn["binding"]): AdmittedTurn {
   const now = "2026-01-01T00:00:00.000Z";
-  const session: SessionRecord = { id: "session-1", session_key: "web:owner:session-1", title: "Session", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now };
+  const session: SessionRecord = { id: "session-1", session_key: "web:owner:session-1", room_id: "room-1", title: "Session", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now };
+  const agent: AgentRecord = {
+    id: "agent-1", name: "Research Agent", role: "Research", instructions: "Inspect evidence and report the result.",
+    backend_id: binding.id, enabled: true, created_at: now, updated_at: now
+  };
   const envelope: MessageEnvelope = { id: "envelope-1", source: "web", actor_identity: "owner", session_key: session.session_key, user_intent: "chat", attachments: [], input_locale: "ja", output_locale: "ja", metadata: {}, received_at: now };
   const userMessage = { id: "message-1", session_id: session.id, role: "user" as const, content: "hello", input_locale: "ja" as const, output_locale: "ja" as const, envelope, created_at: now };
-  const run: BackendRunRecord = { id: "run-1", session_id: session.id, input_message_id: userMessage.id, backend_id: binding.id, backend_kind: binding.kind, status: "queued", phase: "admitted", current_attempt: 1, request_idempotency_key: "key-1", request_hash: "hash-1", started_at: now, input_summary: "hello", metadata: {} };
+  const run: BackendRunRecord = { id: "run-1", session_id: session.id, input_message_id: userMessage.id, agent_id: agent.id, backend_id: binding.id, backend_kind: binding.kind, status: "queued", phase: "admitted", current_attempt: 1, request_idempotency_key: "key-1", request_hash: "hash-1", started_at: now, input_summary: "hello", metadata: {} };
   return {
-    request: { sessionId: session.id, content: "hello", envelope, idempotencyKey: "key-1" },
+    request: { sessionId: session.id, roomId: session.room_id, agentId: agent.id, agent, content: "hello", envelope, idempotencyKey: "key-1" },
     session,
     binding,
     requestHash: "hash-1",

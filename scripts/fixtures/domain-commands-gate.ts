@@ -27,19 +27,19 @@ import {
 import { assertContractVersionDiscipline } from "../lib/domain-contract-version.mjs";
 
 const root = process.cwd();
-const expectedCommandCount = Number(process.env.SAMURAI_EXPECT_COMMAND_COUNT ?? "102");
-const expectedQueries = ["browser.extract", "collection.records.list", "collection.schema.docs", "collection.schema.get", "collection.search", "collection.view.present", "curator.snapshot.list", "file.inspect", "file.list", "file.read", "generated_surface.export", "memory.search", "presentation.plan", "session.search", "skill.search", "skill.view", "wiki.search"];
+const expectedCommandCount = Number(process.env.SAMURAI_EXPECT_COMMAND_COUNT ?? "107");
+const expectedQueries = ["agent.list", "agent.view", "browser.extract", "collection.records.list", "collection.schema.docs", "collection.schema.get", "collection.search", "collection.view.present", "curator.snapshot.list", "file.inspect", "file.list", "file.read", "generated_surface.export", "memory.search", "presentation.plan", "room.list", "room.view", "session.search", "skill.search", "skill.view", "wiki.search"];
 const expectedLegacy = ["approval.approve", "approval.deny", "grant.create", "grant.revoke", "workspace.delete"];
 
 assert.equal(domainCommandEntries.length, expectedCommandCount);
-assert.equal(domainQueryEntries.length, 17);
+assert.equal(domainQueryEntries.length, 21);
 assert.equal(domainLegacyCommandEntries.length, 5);
-assert.equal(operationDefinitions.length, 119);
+assert.equal(operationDefinitions.length, 128);
 assert.deepEqual(domainQueryEntries.map((entry) => entry.id).sort(), expectedQueries);
 assert.deepEqual(domainLegacyCommandEntries.map((entry) => entry.id).sort(), expectedLegacy);
-assert.equal(actionCatalogEntries.length, 102);
+assert.equal(actionCatalogEntries.length, 107);
 assert.equal(getDomainCommandCatalogDiagnostics().ok, true);
-assert.equal(new Set(operationDefinitions.map((definition) => definition.id)).size, 119);
+assert.equal(new Set(operationDefinitions.map((definition) => definition.id)).size, 128);
 
 for (const action of actionCatalogEntries) {
   assert.equal("handler_id" in action, false, `${action.id} leaked handler_id into Action Catalog`);
@@ -169,11 +169,13 @@ for (const definition of operationDefinitions) {
   const catalog = [...domainCommandEntries, ...domainQueryEntries].find((entry) => entry.id === definition.id);
   assert.ok(catalog, `missing catalog projection: ${definition.id}`);
   const sampledInput = sample(catalog.input_schema as Record<string, unknown>) as Record<string, unknown>;
-  // The static JSON Schema cannot express this cross-field refinement, so add
-  // one representative discriminator value for the contract fixture.
+  // Static JSON Schema cannot express these cross-field refinements, so add
+  // one representative valid value for the contract fixture.
   const input = definition.id === "skill.optimization.rollback"
     ? { ...sampledInput, promotion_id: "promotion_fixture" }
-    : sampledInput;
+    : definition.id === "agent.patch"
+      ? { ...sampledInput, role: "Fixture role" }
+      : sampledInput;
   assert.equal(definition.input.safeParse(input).success, true, `${definition.id} contract fixture sample is rejected by Zod`);
   const validatePublicInput = ajv.compile(catalog.input_schema);
   assert.equal(validatePublicInput(input), true, `${definition.id} public input schema rejects its sample`);
@@ -335,7 +337,7 @@ assert.doesNotThrow(() => assertContractVersionDiscipline([versionFixture], [{ .
 
 const operationsRoot = path.join(root, "packages/domain-operations/src/operations");
 const operationFiles = filesUnder(operationsRoot).filter((file) => file.endsWith(".operation.ts"));
-assert.equal(operationFiles.length, 119);
+assert.equal(operationFiles.length, 128);
 for (const file of operationFiles) {
   const source = readFileSync(file, "utf8");
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true);
@@ -366,11 +368,11 @@ for (const removed of [
 ]) assert.equal(existsSync(path.join(root, removed)), false, `legacy source remains: ${removed}`);
 
 const indexSource = readFileSync(path.join(root, "packages/domain-operations/src/generated/operation-index.generated.ts"), "utf8");
-assert.equal((indexSource.match(/import operation\d+/g) ?? []).length, 119);
+assert.equal((indexSource.match(/import operation\d+/g) ?? []).length, 128);
 assert.equal(indexSource.includes("handler_id"), false);
 assert.equal(indexSource.includes("runtime_method"), false);
 const binderSource = readFileSync(path.join(root, "packages/domain-operations/src/generated/operation-binder.generated.ts"), "utf8");
-assert.equal((binderSource.match(/import operation\d+/g) ?? []).length, 119);
+assert.equal((binderSource.match(/import operation\d+/g) ?? []).length, 128);
 
 const checkedSources = [
   "packages/action-catalog/src/index.ts",

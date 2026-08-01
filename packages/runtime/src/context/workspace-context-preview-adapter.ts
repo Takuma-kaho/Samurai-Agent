@@ -16,7 +16,7 @@ export interface WorkspaceContextPreviewStorePort extends MemoryRetrievalPort, W
   listBackendRuns: ContextPreviewPorts["summary"]["listBackendRuns"];
   listToolRuns(input: { sessionId: string }): ReturnType<ContextPreviewPorts["summary"]["listToolRuns"]>;
   listWorkspaceChanges: ContextPreviewPorts["summary"]["listWorkspaceChanges"];
-  searchSkills(query: string, limit?: number, options?: { states?: SkillFrontmatter["state"][] }): Promise<SkillContextSkill[]>;
+  searchSkills(query: string, limit?: number, options?: { states?: SkillFrontmatter["state"][]; activityContext?: { room_id: string; session_id: string; agent_id: string } }): Promise<SkillContextSkill[]>;
   listSkillUsage: ContextPreviewPorts["skills"]["listUsage"];
   readSkillMarkdown(skillId: string): Promise<string | undefined>;
   listSkillSupportFiles: ContextPreviewPorts["skills"]["listSupportFiles"];
@@ -65,14 +65,14 @@ export class WorkspaceContextPreviewAdapter {
         listWorkspaceChanges: (sessionId) => this.store.listWorkspaceChanges(sessionId)
       },
       memory: {
-        retrieve: (query) => retrieveActiveMemoryWithReport(this.store, query),
+        retrieve: (query, activityContext) => retrieveActiveMemoryWithReport(this.store, query, activityContext),
         loadFreezeSnapshot: (input) => loadFreezeSnapshot(this.store, input)
       },
       wiki: {
-        build: (query) => buildKnowledgeWikiContext(this.store, query)
+        build: (query, activityContext) => buildKnowledgeWikiContext(this.store, query, activityContext)
       },
       skills: {
-        search: (query, limit) => this.store.searchSkills(query, limit, { states: ["active", "pinned", "project"] }),
+        search: (query, limit, activityContext) => this.store.searchSkills(query, limit, { states: ["active", "pinned", "project"], ...(activityContext ? { activityContext } : {}) }),
         listUsage: () => this.store.listSkillUsage(),
         readBody: async (skillId) => {
           const markdown = await this.store.readSkillMarkdown(skillId);
