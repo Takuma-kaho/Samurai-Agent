@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { BackendRunRecord, SessionRecord } from "@samurai-agent/core-schemas";
 import { bindOperationDefinitions, DomainOperationRegistry, jsonSchemaFor, operationDefinitions, type DomainOperationPorts } from "./index.js";
 import { completeSample, sample } from "../../../scripts/fixtures/domain-commands-gate.js";
 import gatewayMcpConfigSave from "./operations/gateway/mcp_config/save.operation.js";
 import gatewayInboundRoute from "./operations/gateway/inbound/route.operation.js";
 
 describe("Domain Operation strict gate coverage", () => {
-  it("loads and executes the complete 119-operation strict gate", () => {
+  it("loads and executes the complete 128-operation strict gate", () => {
     expect(true).toBe(true);
   });
 
@@ -89,6 +90,7 @@ describe("Domain Operation strict gate coverage", () => {
     let rollbackScenario: "valid" | "missing" | "irreversible" | "expired" | "missing_path" | "invalid_content" | "root" | "delete" = "valid";
     let externalDispatchScenario: "dispatched" | "dry_run" | "failed" | "detailed" = "dispatched";
     let evaluationScenario: "normal" | "existing" | "missing_run" | "no_skills" = "normal";
+    const reflectionSessionId = "reflection-session";
     const operationPorts = new Proxy({}, {
       get: (_target, operationId) => new Proxy({}, {
         get: (_ports, method) => (...args: unknown[]) => {
@@ -96,6 +98,12 @@ describe("Domain Operation strict gate coverage", () => {
           const name = String(method);
           portCalls.set(id, [...(portCalls.get(id) ?? []), name]);
           if (/Error$|NotFound$|Conflict$/.test(name)) return new Error(name);
+          if ([
+            "createRoom", "patchRoom", "listRooms", "viewRoom",
+            "createAgent", "patchAgent", "bindAgentBackend", "listAgents", "viewAgent"
+          ].includes(name)) return outputs.get(id);
+          if (name === "getReflectionSession") return fixtureSession(String(args[0]));
+          if (name === "getReflectionBackendRun") return fixtureBackendRun(String(args[0]), reflectionSessionId);
           if (name === "listCollectionRecords") return { collection_id: "sample", count: 0, items: [], linked_data: {}, schema_fields: {} };
           if (name === "listMemoryForSession") return [{ ...fixtureRecord(id), id: "sample" }];
           if (name === "listReflectionSuggestions") return [{ id: "sample", reflection_run_id: "sample", suggestion_type: reflectionSuggestionType, status: "proposed", title: "fixture", content: "fixture", source_refs: [], confidence: 0.5, created_at: "2026-07-16T00:00:00.000Z", updated_at: "2026-07-16T00:00:00.000Z" }];
@@ -266,6 +274,8 @@ describe("Domain Operation strict gate coverage", () => {
         ? { ...(generatedInput as Record<string, unknown>), source_ref: { kind: "artifact", id: "sample", uri: "artifacts/sample.md" } }
         : definition.id === "skill.optimization.rollback"
           ? { ...(generatedInput as Record<string, unknown>), promotion_id: "sample" }
+          : definition.id === "agent.patch"
+            ? { ...(generatedInput as Record<string, unknown>), name: "sample" }
           : generatedInput);
       const context = {
         inputSource: definition.sources[0]!,
@@ -278,7 +288,7 @@ describe("Domain Operation strict gate coverage", () => {
           : definition.id === "memory.archive"
             ? { sessionId: "memory-session" }
             : definition.id === "reflection.run"
-              ? { sessionId: "reflection-session" }
+              ? { sessionId: reflectionSessionId }
               : definition.id === "skill.usage.record" || definition.id === "skill.view"
                 ? { runId: "skill-run" }
           : {})
@@ -308,8 +318,8 @@ describe("Domain Operation strict gate coverage", () => {
       if (count === 0 && definition.id !== "presentation.plan") throw new Error(`${definition.id} did not call its Port`);
     }
 
-    expect(bindings).toHaveLength(119);
-    expect(portCalls.size).toBe(118);
+    expect(bindings).toHaveLength(128);
+    expect(portCalls.size).toBe(127);
 
     for (const operationId of ["artifact.create", "chat.turn.run"] as const) {
       const binding = bindings.find((candidate) => candidate.definition.id === operationId)!;
@@ -520,6 +530,37 @@ function fixtureRecord(id: string): Record<string, unknown> {
     resource_ref: ref,
     operation: { id: `${id}-operation` },
     activity: [],
+    metadata: {}
+  };
+}
+
+function fixtureSession(id: string): SessionRecord {
+  const timestamp = "2026-07-16T00:00:00.000Z";
+  return {
+    id,
+    session_key: id,
+    room_id: "room-fixture",
+    title: "Fixture session",
+    ui_locale: "en",
+    output_locale: "en",
+    created_at: timestamp,
+    updated_at: timestamp
+  };
+}
+
+function fixtureBackendRun(id: string, sessionId: string): BackendRunRecord {
+  const timestamp = "2026-07-16T00:00:00.000Z";
+  return {
+    id,
+    session_id: sessionId,
+    agent_id: "agent-fixture",
+    input_message_id: "input-fixture",
+    backend_id: "backend-fixture",
+    backend_kind: "samurai_native",
+    status: "completed",
+    started_at: timestamp,
+    completed_at: timestamp,
+    input_summary: "fixture",
     metadata: {}
   };
 }
