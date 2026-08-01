@@ -442,9 +442,49 @@ export const BackendCapabilityStatusSchema = z.object({
 });
 export type BackendCapabilityStatus = z.infer<typeof BackendCapabilityStatusSchema>;
 
+/** A durable collaboration space inside one Workspace. */
+export const RoomRecordSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().trim().min(1).max(200),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+}).strict();
+export type RoomRecord = z.infer<typeof RoomRecordSchema>;
+
+/** A stable agent identity. Its Backend can change without changing this record. */
+export const AgentRecordSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().trim().min(1).max(200),
+  role: z.string().trim().min(1).max(500),
+  instructions: z.string().trim().min(1).max(20_000),
+  backend_id: z.string().trim().min(1),
+  enabled: z.boolean(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+}).strict();
+export type AgentRecord = z.infer<typeof AgentRecordSchema>;
+
+/** One explicit reuse boundary for Workspace knowledge resources. */
+export const UsageScopeRefSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("workspace") }).strict(),
+  z.object({ kind: z.literal("room"), room_id: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("agent"), agent_id: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("session"), session_id: z.string().min(1) }).strict()
+]);
+export type UsageScopeRef = z.infer<typeof UsageScopeRefSchema>;
+
+/** The concrete Room, Session, and Agent that produced an activity. */
+export const ActivityContextRefSchema = z.object({
+  room_id: z.string().min(1),
+  session_id: z.string().min(1),
+  agent_id: z.string().min(1)
+}).strict();
+export type ActivityContextRef = z.infer<typeof ActivityContextRefSchema>;
+
 export const BackendRunRecordSchema = z.object({
   id: z.string().min(1),
   session_id: z.string().min(1),
+  agent_id: z.string().min(1).optional(),
   input_message_id: z.string().min(1),
   output_message_id: z.string().optional(),
   backend_id: z.string().min(1),
@@ -1331,6 +1371,7 @@ export const ReflectionRunRecordSchema = z.object({
   kind: ReflectionRunKindSchema,
   source_run_id: z.string().optional(),
   session_id: z.string().optional(),
+  activity_context: ActivityContextRefSchema.optional(),
   status: ReflectionRunStatusSchema,
   input_summary: z.string(),
   output_summary: z.string().optional(),
@@ -1419,6 +1460,7 @@ export const LearningResourceUseRecordSchema = z.object({
   id: z.string().min(1),
   run_id: z.string().min(1),
   session_id: z.string().min(1),
+  activity_context: ActivityContextRefSchema.optional(),
   resource_kind: LearningResourceKindSchema,
   resource_id: z.string().min(1),
   resource_version: z.string().min(1).optional(),
@@ -1577,6 +1619,7 @@ export const BackgroundReviewProvenanceSchema = z.object({
   origin: z.literal("background_review"),
   source_run_id: z.string().min(1),
   source_session_id: z.string().min(1),
+  activity_context: ActivityContextRefSchema.optional(),
   review_run_id: z.string().min(1),
   before_version: z.string().optional(),
   after_version: z.string().min(1),
@@ -2626,6 +2669,7 @@ export const MemoryFrontmatterSchema = z.object({
   related_memories: z.array(z.string()),
   conflicts_with: z.array(z.string()),
   sensitive_level: z.enum(["none", "low", "high"]),
+  usage_scope: UsageScopeRefSchema.optional(),
   source_refs: z.array(ResourceRefSchema).optional(),
   provenance: ProvenanceSchema.optional()
 }).strict();
@@ -2672,6 +2716,7 @@ export const SkillFrontmatterSchema = z.object({
   secret_policy: z.record(jsonValueSchema),
   last_reviewed_at: z.string().datetime().optional(),
   owner_pinned: z.boolean(),
+  usage_scope: UsageScopeRefSchema.optional(),
   source_refs: z.array(ResourceRefSchema).optional(),
   provenance_detail: ProvenanceSchema.optional()
 });
@@ -2686,6 +2731,7 @@ export const WikiFrontmatterSchema = z.object({
   tags: z.array(z.string()),
   source_refs: z.array(ResourceRefSchema),
   provenance: ProvenanceSchema,
+  usage_scope: UsageScopeRefSchema.optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 });
@@ -3182,12 +3228,15 @@ export interface SettingsRecord {
   skill_capture_mode: CaptureMode;
   external_provider_role: ExternalProviderRole;
   default_backend_id?: string;
+  default_room_id?: string;
+  default_agent_id?: string;
   updated_at: string;
 }
 
 export interface SessionRecord {
   id: string;
   session_key: string;
+  room_id?: string;
   title: string;
   ui_locale: SupportedLocale;
   output_locale: SupportedLocale;

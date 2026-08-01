@@ -1,4 +1,5 @@
 import type {
+  ActivityContextRef,
   ArtifactRecord,
   BackendEventRecord,
   BackendRunRecord,
@@ -22,6 +23,8 @@ export interface LearningCatalogEntry {
 export interface ReviewSnapshot {
   source_session_id: string;
   source_run_id: string;
+  /** The Room, Session, and Agent that produced this review input. */
+  activity_context?: ActivityContextRef;
   messages: MessageRecord[];
   artifacts: Array<{ record: ArtifactRecord; content?: string }>;
   backend_run?: BackendRunRecord;

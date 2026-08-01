@@ -2,6 +2,8 @@ import { type CollectionPatch, type CollectionSchema, type WikiFrontmatter } fro
 import type { CollectionPatchesTable, CollectionRecordsTable, CollectionSchemasTable, WikiIndexTable } from "../kernel/workspace-db-schema";
 import type { CollectionRecordWithFilePath, CollectionSchemaWithFilePath, WikiWithFilePath } from "../workspace-store-contracts";
 import { parse, stringify } from "./serialization";
+import { usageScopeIndexColumns } from "./usage-scope";
+import { withUsageScope } from "./usage-scope";
 
 export function wikiToRow(frontmatter: WikiFrontmatter, filePath: string): WikiIndexTable {
   return {
@@ -13,6 +15,7 @@ export function wikiToRow(frontmatter: WikiFrontmatter, filePath: string): WikiI
     tags_json: stringify(frontmatter.tags),
     source_refs_json: stringify(frontmatter.source_refs),
     provenance_json: stringify(frontmatter.provenance),
+    ...usageScopeIndexColumns(frontmatter.usage_scope),
     file_path: filePath,
     frontmatter_json: stringify(frontmatter),
     created_at: frontmatter.created_at,
@@ -22,7 +25,7 @@ export function wikiToRow(frontmatter: WikiFrontmatter, filePath: string): WikiI
 
 export function wikiFromRow(row: WikiIndexTable): WikiWithFilePath {
   return {
-    ...parse<WikiFrontmatter>(row.frontmatter_json),
+    ...withUsageScope(parse<WikiFrontmatter>(row.frontmatter_json)),
     file_path: row.file_path
   };
 }

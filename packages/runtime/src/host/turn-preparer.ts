@@ -57,12 +57,17 @@ function normalizeBackendInput(admittedTurn: AdmittedTurn, prepared: {
 }, signal?: AbortSignal): BackendRunInput {
   const input = prepared.backendInput;
   if (!input || typeof input !== "object") throw new Error("backend_input_required");
+  const agentContext = agentContextForTurn(admittedTurn);
+  const backendSessionKey = backendSessionKeyForTurn(admittedTurn, agentContext);
   return {
     ...input,
     // These values are owned by Admission and cannot be changed by context
     // assembly or a late Backend adapter.
     run_id: admittedTurn.run.id,
     session_id: admittedTurn.session.id,
+    ...(admittedTurn.session.room_id ? { room_id: admittedTurn.session.room_id } : {}),
+    ...(agentContext ? { agent_context: agentContext } : {}),
+    ...(backendSessionKey ? { backend_session_key: backendSessionKey } : {}),
     input_message_id: admittedTurn.userMessage.id,
     envelope: admittedTurn.request.envelope,
     user_input: admittedTurn.request.content,
@@ -84,4 +89,31 @@ function throwIfAborted(signal?: AbortSignal): void {
   throw typeof DOMException === "function"
     ? new DOMException("The operation was aborted", "AbortError")
     : Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+}
+
+function agentContextForTurn(admittedTurn: AdmittedTurn): { id: string; name: string; role: string; instructions: string; authority: "supporting_context" } | undefined {
+  if (admittedTurn.request.agent) {
+    return {
+      id: admittedTurn.request.agent.id,
+      name: admittedTurn.request.agent.name,
+      role: admittedTurn.request.agent.role,
+      instructions: admittedTurn.request.agent.instructions,
+      authority: "supporting_context"
+    };
+  }
+  const metadata = admittedTurn.request.metadata ?? admittedTurn.run.metadata;
+  const name = typeof metadata.agent_name === "string" ? metadata.agent_name : undefined;
+  const role = typeof metadata.agent_role === "string" ? metadata.agent_role : undefined;
+  const instructions = typeof metadata.agent_instructions === "string" ? metadata.agent_instructions : undefined;
+  const id = admittedTurn.run.agent_id ?? admittedTurn.request.agentId;
+  return id && name && role && instructions ? { id, name, role, instructions, authority: "supporting_context" } : undefined;
+}
+
+function backendSessionKeyForTurn(
+  admittedTurn: AdmittedTurn,
+  agentContext: ReturnType<typeof agentContextForTurn>
+): string | undefined {
+  const roomId = admittedTurn.session.room_id;
+  if (!roomId || !agentContext) return undefined;
+  return `${roomId}:${admittedTurn.session.id}:${agentContext.id}:${admittedTurn.binding.id}`;
 }

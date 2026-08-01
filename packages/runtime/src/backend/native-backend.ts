@@ -72,6 +72,7 @@ export class NativeContextBuilder {
     return {
       abortSignal: input.abort_signal,
       envelope: input.envelope,
+      agentContext: input.agent_context,
       freezeSnapshot: input.freeze_snapshot,
       gatewayBoundary: input.gateway_boundary,
       activeMemory: input.active_memory.map((memory, index) => ({

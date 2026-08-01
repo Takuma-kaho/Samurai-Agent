@@ -32,6 +32,7 @@ export interface ProviderOutput {
 export interface ProviderInput {
   abortSignal?: AbortSignal;
   envelope: MessageEnvelope;
+  agentContext?: { id: string; name: string; role: string; instructions: string; authority: "supporting_context" };
   freezeSnapshot?: FreezeSnapshot;
   gatewayBoundary?: GatewayBoundaryRuntimeSnapshot;
   activeMemory: MemoryCandidate[];

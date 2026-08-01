@@ -33,16 +33,16 @@ export interface ContextPreviewSummaryPort {
 }
 
 export interface ContextPreviewMemoryPort {
-  retrieve(query: string): Promise<ContextPreviewMemoryResult>;
+  retrieve(query: string, activityContext?: { room_id: string; session_id: string; agent_id: string }): Promise<ContextPreviewMemoryResult>;
   loadFreezeSnapshot(input: { memoryRefs: ResourceRef[]; skillRefs: ResourceRef[]; wikiRefs: ResourceRef[] }): Promise<FreezeSnapshot | undefined>;
 }
 
 export interface ContextPreviewWikiPort {
-  build(query: string): Promise<KnowledgeWikiContext>;
+  build(query: string, activityContext?: { room_id: string; session_id: string; agent_id: string }): Promise<KnowledgeWikiContext>;
 }
 
 export interface ContextPreviewSkillsPort {
-  search(query: string, limit: number): Promise<SkillContextSkill[]>;
+  search(query: string, limit: number, activityContext?: { room_id: string; session_id: string; agent_id: string }): Promise<SkillContextSkill[]>;
   listUsage(): Promise<SkillUsageRecord[]>;
   readBody(skillId: string): Promise<string | undefined>;
   listSupportFiles(skillId: string): Promise<SkillSupportFile[]>;
@@ -101,6 +101,7 @@ export interface ContextPreviewPorts {
 
 export interface BuildContextPreviewInput {
   sessionId: string;
+  agentId?: string;
   query: string;
   ports: ContextPreviewPorts;
   skipHeavyContext?: boolean;
@@ -130,15 +131,24 @@ export async function buildContextPreview(input: BuildContextPreviewInput): Prom
   const progress = input.onProgress ? { report: input.onProgress } : ports.progress;
   const emptyMemory = () => emptyActiveMemoryResult(query, ports.clock.now());
   const emptyWiki = (): KnowledgeWikiContext => ({ pages: [], entries: [], report: { query, retrieved_at: ports.clock.now(), candidate_count: 0, included_count: 0, included_wiki_ids: [], excluded: [], source_refs: [] } });
+  const [session, settings] = await Promise.all([
+    ports.session.getSession(sessionId),
+    ports.session.getSettings()
+  ]);
+  if (!session) {
+    throw ports.errors.sessionNotFound(sessionId);
+  }
+  const scopedAgentId = input.agentId ?? settings.default_agent_id;
+  const activityContext = session.room_id && scopedAgentId
+    ? { room_id: session.room_id, session_id: session.id, agent_id: scopedAgentId }
+    : undefined;
   const sessionSearchQuery = !skipHeavyContext && query.trim()
     ? timeboxContextStep(ports.sessionSearch.search(query), [], "session_search")
     : Promise.resolve(timeboxContextValue<ContextPreviewSearchResult[]>([], false));
-  const [session, settings, activeMemoryResult, knowledgeWikiContext, skillCandidates, skillUsage, collectionSchemas, messages, operations, backendRuns, toolRuns, workspaceChanges, searchResults] = await Promise.all([
-    ports.session.getSession(sessionId),
-    ports.session.getSettings(),
-    skipHeavyContext ? Promise.resolve(emptyMemory()) : timeboxContextStep(ports.memory.retrieve(query), emptyMemory(), "active_memory").then((result) => result.value),
-    skipHeavyContext ? Promise.resolve(emptyWiki()) : timeboxContextStep(ports.wiki.build(query), emptyWiki(), "knowledge_wiki").then((result) => result.value),
-    skipHeavyContext ? Promise.resolve([]) : timeboxContextStep(ports.skills.search(query, 12), [], "selected_skills").then((result) => result.value),
+  const [activeMemoryResult, knowledgeWikiContext, skillCandidates, skillUsage, collectionSchemas, messages, operations, backendRuns, toolRuns, workspaceChanges, searchResults] = await Promise.all([
+    skipHeavyContext ? Promise.resolve(emptyMemory()) : timeboxContextStep(ports.memory.retrieve(query, activityContext), emptyMemory(), "active_memory").then((result) => result.value),
+    skipHeavyContext ? Promise.resolve(emptyWiki()) : timeboxContextStep(ports.wiki.build(query, activityContext), emptyWiki(), "knowledge_wiki").then((result) => result.value),
+    skipHeavyContext ? Promise.resolve([]) : timeboxContextStep(ports.skills.search(query, 12, activityContext), [], "selected_skills").then((result) => result.value),
     skipHeavyContext ? Promise.resolve([]) : ports.skills.listUsage(),
     skipHeavyContext ? Promise.resolve([]) : ports.collections.listSchemas(),
     ports.summary.listMessages(sessionId),
@@ -154,9 +164,6 @@ export async function buildContextPreview(input: BuildContextPreviewInput): Prom
     await progress?.report("reasoning_summary", "過去会話検索が遅いため、今回は軽い文脈のまま実行部へ進めます。");
   }
   await progress?.report("activity", "参照候補を整理", "context_handoff");
-  if (!session) {
-    throw ports.errors.sessionNotFound(sessionId);
-  }
   const activeMemory = activeMemoryResult.candidates;
   const skillSelection = selectRuntimeSkills({ candidates: skillCandidates, query, limit: hostContextAssemblyLimits.selected_skills, environment: ports.skills.environment });
   const selectedSkills = skillSelection.selected.map((item) => item.skill);

@@ -20,6 +20,8 @@ export class WorkspaceMetadataRepository {
       skill_capture_mode: settings.skill_capture_mode,
       external_provider_role: settings.external_provider_role,
       default_backend_id: settings.default_backend_id ?? null,
+      default_room_id: settings.default_room_id ?? null,
+      default_agent_id: settings.default_agent_id ?? null,
       updated_at: settings.updated_at
     }).execute();
   }
@@ -34,6 +36,8 @@ export class WorkspaceMetadataRepository {
       skill_capture_mode: row.skill_capture_mode as SettingsRecord["skill_capture_mode"],
       external_provider_role: row.external_provider_role as SettingsRecord["external_provider_role"],
       default_backend_id: row.default_backend_id ?? undefined,
+      default_room_id: row.default_room_id ?? undefined,
+      default_agent_id: row.default_agent_id ?? undefined,
       updated_at: row.updated_at
     };
   }
@@ -49,6 +53,8 @@ export class WorkspaceMetadataRepository {
       skill_capture_mode: next.skill_capture_mode,
       external_provider_role: next.external_provider_role,
       default_backend_id: next.default_backend_id ?? null,
+      default_room_id: next.default_room_id ?? null,
+      default_agent_id: next.default_agent_id ?? null,
       updated_at: next.updated_at
     }).where("id", "=", "default").execute();
     return next;

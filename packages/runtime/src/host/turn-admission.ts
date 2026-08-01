@@ -19,6 +19,10 @@ export class TurnAdmission {
     const binding: BackendBinding = { id: backend.id, kind: backend.kind, backend };
     const requestHash = stableHash({
       session_id: request.sessionId,
+      room_id: request.roomId ?? null,
+      agent: request.agent
+        ? { id: request.agent.id, role: request.agent.role, backend_id: request.agent.backend_id }
+        : { id: request.agentId ?? null },
       content: request.content,
       backend: { id: binding.id, kind: binding.kind },
       attachments: request.envelope.attachments.map((attachment) => ({ kind: attachment.kind, id: attachment.id, uri: attachment.uri, version: attachment.version ?? null })),

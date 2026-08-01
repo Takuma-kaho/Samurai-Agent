@@ -191,6 +191,8 @@ export class AgentHost {
           received_at: userMessage.created_at
         },
         backendId: run.backend_id,
+        agentId: run.agent_id,
+        roomId: session.room_id,
         idempotencyKey: run.request_idempotency_key ?? `recovery:${run.id}`,
         metadata: run.metadata
       },

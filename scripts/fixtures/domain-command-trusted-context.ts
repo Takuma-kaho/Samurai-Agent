@@ -42,14 +42,22 @@ const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-trusted-generat
 const workspace = await WorkspaceStore.create({ rootDir: workspaceRoot });
 const foreignWorkspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-trusted-foreign-workspace-"));
 const foreignWorkspace = await WorkspaceStore.create({ rootDir: foreignWorkspaceRoot });
+const fixtureCreatedAt = new Date(0).toISOString();
+await foreignWorkspace.createRoom({
+  id: "foreign-trusted-room",
+  name: "Foreign Trusted Room",
+  created_at: fixtureCreatedAt,
+  updated_at: fixtureCreatedAt
+});
 const foreignSession = await foreignWorkspace.createSession({
   id: "foreign-trusted-surface-session",
   session_key: "foreign-trusted-surface-session",
+  room_id: "foreign-trusted-room",
   title: "Foreign Trusted Generated Surface",
   ui_locale: "en",
   output_locale: "en",
-  created_at: new Date(0).toISOString(),
-  updated_at: new Date(0).toISOString()
+  created_at: fixtureCreatedAt,
+  updated_at: fixtureCreatedAt
 });
 let runtime: AgentRuntime;
 let restrictedInventoryRuntime: AgentRuntime | undefined;
@@ -240,6 +248,23 @@ try {
     return originalRegistryExecute.apply(this, args);
   };
   runtime = new AgentRuntime(workspace, undefined, undefined, new AgentBackendRegistry([bridgeBackend, normalProviderBackend]));
+  await workspace.createRoom({
+    id: "trusted-room",
+    name: "Trusted Room",
+    created_at: fixtureCreatedAt,
+    updated_at: fixtureCreatedAt
+  });
+  await workspace.createAgent({
+    id: "trusted-agent",
+    name: "Trusted Agent",
+    role: "Integration",
+    instructions: "Handle the trusted context fixture.",
+    backend_id: bridgeBackend.id,
+    enabled: true,
+    created_at: fixtureCreatedAt,
+    updated_at: fixtureCreatedAt
+  });
+  await workspace.patchSettings({ default_room_id: "trusted-room", default_agent_id: "trusted-agent" });
 
   // A Session ID may exist in another Workspace, but it is not trusted by the
   // current Runtime. This is the real isolation boundary in the current
@@ -264,11 +289,12 @@ try {
   const session = await workspace.createSession({
     id: "trusted-surface-session",
     session_key: "trusted-surface-session",
+    room_id: "trusted-room",
     title: "Trusted Generated Surface",
     ui_locale: "en",
     output_locale: "en",
-    created_at: new Date(0).toISOString(),
-    updated_at: new Date(0).toISOString()
+    created_at: fixtureCreatedAt,
+    updated_at: fixtureCreatedAt
   });
 
   // IN07 is an actual effective-inventory check, not a label. The normal

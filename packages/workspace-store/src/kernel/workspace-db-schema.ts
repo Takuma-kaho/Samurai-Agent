@@ -17,6 +17,7 @@ export type { CollectionSchemasTable, CollectionRecordsTable, CollectionPatchesT
 export type { AutomationJobsTable, AutomationRunsTable } from "../rows/automation-rows";
 export type { ExternalSendsTable, GatewayPairingsTable, GatewayPairingPoliciesTable, GatewayRoutingPoliciesTable, GatewayInboundMessagesTable, GatewayDeliveriesTable, GatewayBoundaryPoliciesTable, GatewayMcpConfigsTable, GatewayConcurrencyLocksTable, GatewaySandboxInstancesTable, GatewaySandboxWorkspaceSyncsTable } from "../rows/gateway-rows";
 export type { SettingsTable, PluginStatesTable, ResourceTranslationsTable } from "../rows/workspace-metadata-rows";
+export type { RoomsTable, AgentsTable } from "../rows/room-agent-rows";
 export type { ClientEventsTable } from "../rows/client-event-rows";
 export type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
 
@@ -33,10 +34,13 @@ import type { CollectionSchemasTable, CollectionRecordsTable, CollectionPatchesT
 import type { AutomationJobsTable, AutomationRunsTable } from "../rows/automation-rows";
 import type { ExternalSendsTable, GatewayPairingsTable, GatewayPairingPoliciesTable, GatewayRoutingPoliciesTable, GatewayInboundMessagesTable, GatewayDeliveriesTable, GatewayBoundaryPoliciesTable, GatewayMcpConfigsTable, GatewayConcurrencyLocksTable, GatewaySandboxInstancesTable, GatewaySandboxWorkspaceSyncsTable } from "../rows/gateway-rows";
 import type { SettingsTable, PluginStatesTable, ResourceTranslationsTable } from "../rows/workspace-metadata-rows";
+import type { RoomsTable, AgentsTable } from "../rows/room-agent-rows";
 import type { ClientEventsTable } from "../rows/client-event-rows";
 import type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
 
 export interface WorkspaceDb {
+  rooms: RoomsTable;
+  agents: AgentsTable;
   sessions: SessionsTable;
   messages: MessagesTable;
   message_presentations: MessagePresentationsTable;

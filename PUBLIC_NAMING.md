@@ -26,6 +26,7 @@
 
 - `ARCHITECTURE.md`
 - `PRINCIPLES.md`
+- `SAMURAI_AGENT_MANUAL.md`
 - `AGENTS.md`
 - `plans/`
 - 参照元調査メモ
@@ -72,6 +73,8 @@
 | `MulmoClaude` | 使わない | 参照元としては内部文書に残す |
 | `Hermes Agent` | 使わない | 参照元としては内部文書に残す |
 | `OpenClaw` | 使わない | 参照元としては内部文書に残す |
+| `Buzz` | 使わない | 参照OSSとしては内部文書に残す |
+| `Type.com` | 使わない | 非OSSの参照プロダクトとしては内部文書に残す |
 | `MulmoScript` | 使わない | 固有機能名なので公開面に出さない |
 | `gui-chat-protocol` | 使わない | 参照元由来のプロトコル名として扱う |
 | `Claude Code SDK` | 使わない | 依存しない方針は内部設計で説明する |
@@ -150,13 +153,14 @@ MulmoClaudeでいう `LLM Wiki` は、Samurai Agentでは `Knowledge Wiki` と�
 公開面に関わる変更をした時は、次を確認する。
 
 ```sh
-rg -n "MulmoClaude|Hermes Agent|OpenClaw|MulmoScript|gui-chat-protocol|Claude Code SDK" .
+rg -n "MulmoClaude|Hermes Agent|OpenClaw|Buzz|Type\\.com|MulmoScript|gui-chat-protocol|Claude Code SDK" .
 ```
 
 許可される検出先。
 
 - `ARCHITECTURE.md`
 - `PRINCIPLES.md`
+- `SAMURAI_AGENT_MANUAL.md`
 - `AGENTS.md`
 - `plans/`
 - `PUBLIC_NAMING.md`

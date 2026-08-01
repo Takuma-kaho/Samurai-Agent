@@ -13,6 +13,7 @@ import type { ArchiveMemoryResult, MemoryReindexResult, MemoryWithFilePath, Work
 import { compareScoredSearch, scoreSearchFields, searchTerms, stateSearchBoost } from "../search/scoring";
 import { readManagedResourceFiles } from "./managed-resource-file-scan";
 import { memoryToRow } from "./memory-skill-row-codecs";
+import { withUsageScope, type UsageScopeQueryContext } from "./usage-scope";
 import { parse, stringify } from "./serialization";
 import {
   assertMemoryPathMatchesFrontmatter,
@@ -37,7 +38,7 @@ export class MemoryRepository {
   ) {}
 
 async saveMemory(frontmatter: MemoryFrontmatter, content: string): Promise<MemoryFrontmatter> {
-  const validated = MemoryFrontmatterSchema.parse(frontmatter);
+  const validated = withUsageScope(MemoryFrontmatterSchema.parse(frontmatter));
   const relativePath = path.join("memory", validated.state, `${validated.id}.md`);
   const absolutePath = path.join(this.rootDir, relativePath);
   await mkdir(path.dirname(absolutePath), { recursive: true });
@@ -53,25 +54,30 @@ async replaceMemoryContent(id: string, content: string): Promise<MemoryWithFileP
   const memory = await this.getMemory(id);
   if (!memory) return undefined;
   const { file_path: filePath, ...frontmatter } = memory;
-  const next = { ...frontmatter, updated_at: nowIso() };
+  const next = withUsageScope({ ...frontmatter, updated_at: nowIso() });
   await writeFile(path.join(this.rootDir, filePath), `${renderFrontmatter(next)}\n${content.trim()}\n`);
-  await this.db.updateTable("memory_index").set({
-    frontmatter_json: stringify(next),
-    updated_at: next.updated_at
-  }).where("id", "=", id).execute();
+  await this.db.updateTable("memory_index").set(memoryToRow(next, filePath)).where("id", "=", id).execute();
   return { ...next, file_path: filePath };
 }
 
-async listMemory(options: { includeArchived?: boolean } = {}): Promise<MemoryWithFilePath[]> {
+async listMemory(options: { includeArchived?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<MemoryWithFilePath[]> {
   let query = this.db.selectFrom("memory_index").selectAll();
   if (!options.includeArchived) {
     query = query.where("state", "!=", "archived");
   }
+  if (options.activityContext) {
+    query = query.where((eb) => eb.or([
+      eb("usage_scope_kind", "=", "workspace"),
+      eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
+      eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
+      eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)])
+    ]));
+  }
   const rows = await query.orderBy("updated_at", "desc").execute();
-  return rows.map((row) => ({ ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path }));
+  return rows.map((row) => ({ ...withUsageScope(parse<MemoryFrontmatter>(row.frontmatter_json)), file_path: row.file_path }));
 }
 
-async listMemoryForSession(sessionId: string, options: { includeArchived?: boolean } = {}): Promise<MemoryWithFilePath[]> {
+async listMemoryForSession(sessionId: string, options: { includeArchived?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<MemoryWithFilePath[]> {
   const messages = await this.sessions.listMessages(sessionId);
   const envelopeIds = new Set<string>();
   for (const message of messages) {
@@ -88,22 +94,38 @@ async listMemoryForSession(sessionId: string, options: { includeArchived?: boole
   if (!options.includeArchived) {
     query = query.where("state", "!=", "archived");
   }
+  if (options.activityContext) {
+    query = query.where((eb) => eb.or([
+      eb("usage_scope_kind", "=", "workspace"),
+      eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
+      eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
+      eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)])
+    ]));
+  }
   const rows = await query.orderBy("updated_at", "desc").execute();
   return rows
     .filter((row) => envelopeIds.has(row.source))
-    .map((row) => ({ ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path }));
+    .map((row) => ({ ...withUsageScope(parse<MemoryFrontmatter>(row.frontmatter_json)), file_path: row.file_path }));
 }
 
-async searchMemory(query: string, limit = 5, options: { includeArchived?: boolean } = {}): Promise<MemoryWithFilePath[]> {
+async searchMemory(query: string, limit = 5, options: { includeArchived?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<MemoryWithFilePath[]> {
   let dbQuery = this.db.selectFrom("memory_index").selectAll();
   if (!options.includeArchived) {
     dbQuery = dbQuery.where("state", "!=", "archived");
+  }
+  if (options.activityContext) {
+    dbQuery = dbQuery.where((eb) => eb.or([
+      eb("usage_scope_kind", "=", "workspace"),
+      eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
+      eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
+      eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)])
+    ]));
   }
   const rows = await dbQuery.orderBy("updated_at", "desc").execute();
   const terms = searchTerms(query);
   const scored = await Promise.all(
     rows.map(async (row) => {
-      const memory = { ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path };
+      const memory = { ...withUsageScope(parse<MemoryFrontmatter>(row.frontmatter_json)), file_path: row.file_path };
       const content = await readWorkspaceText(this.rootDir, row.file_path);
       const score = terms.length === 0
         ? stateSearchBoost(memory.state)
@@ -125,7 +147,7 @@ async searchMemory(query: string, limit = 5, options: { includeArchived?: boolea
 
 async getMemory(id: string): Promise<MemoryWithFilePath | undefined> {
   const row = await this.db.selectFrom("memory_index").selectAll().where("id", "=", id).executeTakeFirst();
-  return row ? { ...parse<MemoryFrontmatter>(row.frontmatter_json), file_path: row.file_path } : undefined;
+  return row ? { ...withUsageScope(parse<MemoryFrontmatter>(row.frontmatter_json)), file_path: row.file_path } : undefined;
 }
 
 async readMemoryContent(id: string): Promise<string | undefined> {
@@ -143,7 +165,7 @@ async archiveMemory(id: string): Promise<ArchiveMemoryResult | undefined> {
     return undefined;
   }
 
-  const frontmatter = parse<MemoryFrontmatter>(row.frontmatter_json);
+  const frontmatter = withUsageScope(parse<MemoryFrontmatter>(row.frontmatter_json));
   const content = await this.readMemoryContent(id);
   if (content === undefined) {
     return undefined;
@@ -159,11 +181,11 @@ async archiveMemory(id: string): Promise<ArchiveMemoryResult | undefined> {
     };
   }
 
-  const nextFrontmatter: MemoryFrontmatter = {
+  const nextFrontmatter: MemoryFrontmatter = withUsageScope(MemoryFrontmatterSchema.parse({
     ...frontmatter,
     state: "archived",
     updated_at: nowIso()
-  };
+  }));
   const archivedPath = path.join("memory", "archived", `${id}.md`);
   const previousAbsolutePath = path.join(this.rootDir, row.file_path);
   const archivedAbsolutePath = path.join(this.rootDir, archivedPath);
@@ -173,12 +195,7 @@ async archiveMemory(id: string): Promise<ArchiveMemoryResult | undefined> {
   try {
     await this.db
       .updateTable("memory_index")
-      .set({
-        state: nextFrontmatter.state,
-        file_path: archivedPath,
-        frontmatter_json: stringify(nextFrontmatter),
-        updated_at: nextFrontmatter.updated_at
-      })
+      .set(memoryToRow(nextFrontmatter, archivedPath))
       .where("id", "=", id)
       .execute();
   } catch (error) {

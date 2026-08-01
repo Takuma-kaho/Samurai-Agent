@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import type { TrustedDomainContext } from "../../packages/domain-operations/src/definition/index";
+import agentBackendBind from "../../packages/domain-operations/src/operations/agent/backend/bind.operation";
+import agentCreate from "../../packages/domain-operations/src/operations/agent/create.operation";
+import agentList from "../../packages/domain-operations/src/operations/agent/list.operation";
+import agentPatch from "../../packages/domain-operations/src/operations/agent/patch.operation";
+import agentView from "../../packages/domain-operations/src/operations/agent/view.operation";
 import browserExtract from "../../packages/domain-operations/src/operations/browser/extract.operation";
 import clientEventAck from "../../packages/domain-operations/src/operations/client/event/ack.operation";
 import clientEventDeliver from "../../packages/domain-operations/src/operations/client/event/deliver.operation";
@@ -19,6 +24,10 @@ import gatewayConcurrencyLockExpire from "../../packages/domain-operations/src/o
 import learningSnapshotPrune from "../../packages/domain-operations/src/operations/learning/snapshot/prune.operation";
 import objectiveTransition from "../../packages/domain-operations/src/operations/objective/transition.operation";
 import pluginStatusSet from "../../packages/domain-operations/src/operations/plugin/status/set.operation";
+import roomCreate from "../../packages/domain-operations/src/operations/room/create.operation";
+import roomList from "../../packages/domain-operations/src/operations/room/list.operation";
+import roomPatch from "../../packages/domain-operations/src/operations/room/patch.operation";
+import roomView from "../../packages/domain-operations/src/operations/room/view.operation";
 import sessionCreate from "../../packages/domain-operations/src/operations/session/create.operation";
 import sessionSearchReindex from "../../packages/domain-operations/src/operations/session/search/reindex.operation";
 import sessionSearch from "../../packages/domain-operations/src/operations/search/session.operation";
@@ -69,7 +78,9 @@ const gatewayExpiredLocksOutput = {
     metadata: {}
   }]
 };
-const sessionOutput = { id: "session_fixture", session_key: "session_fixture", title: "Fixture session", ui_locale: "en" as const, output_locale: "ja" as const, created_at: now, updated_at: now };
+const roomOutput = { id: "room_fixture", name: "Fixture Room", created_at: now, updated_at: now };
+const agentOutput = { id: "agent_fixture", name: "Fixture Agent", role: "Fixture", instructions: "Handle fixture work.", backend_id: "backend_fixture", enabled: true, created_at: now, updated_at: now };
+const sessionOutput = { id: "session_fixture", session_key: "session_fixture", room_id: roomOutput.id, title: "Fixture session", ui_locale: "en" as const, output_locale: "ja" as const, created_at: now, updated_at: now };
 const sessionSearchOutput = { mode: "fts5" as const, indexed: 1 };
 const searchSessionOutput = [{ kind: "session" as const, id: "session_fixture", title: "Fixture session", summary: "fixture" }];
 const searchMemoryOutput = [{ id: "memory_fixture", topic: "Fixture memory", state: "active" as const, file_path: "memory/fixture.md" }];
@@ -155,6 +166,22 @@ await run("browser.extract", () => browserExtract.createHandler({
   extractBrowserPage(input) { return record("browser.extract", "extractBrowserPage", [input], browserOutput); }
 }).execute(context, handlerExpectations["browser.extract"].input));
 
+await run("agent.backend.bind", () => agentBackendBind.createHandler({
+  bindAgentBackend(input) { return record("agent.backend.bind", "bindAgentBackend", [input], { ...agentOutput, backend_id: input.backendId }); }
+}).execute(context, handlerExpectations["agent.backend.bind"].input));
+await run("agent.create", () => agentCreate.createHandler({
+  createAgent(input) { return record("agent.create", "createAgent", [input], { ...agentOutput, enabled: input.enabled ?? true }); }
+}).execute(context, handlerExpectations["agent.create"].input));
+await run("agent.list", () => agentList.createHandler({
+  listAgents() { return record("agent.list", "listAgents", [], [agentOutput]); }
+}).execute(context, handlerExpectations["agent.list"].input));
+await run("agent.patch", () => agentPatch.createHandler({
+  patchAgent(input) { return record("agent.patch", "patchAgent", [input], { ...agentOutput, ...input }); }
+}).execute(context, handlerExpectations["agent.patch"].input));
+await run("agent.view", () => agentView.createHandler({
+  viewAgent(id) { return record("agent.view", "viewAgent", [id], agentOutput); }
+}).execute(context, handlerExpectations["agent.view"].input));
+
 await run("client.event.ack", () => clientEventAck.createHandler({
   acknowledgeClientEvent(id) { return record("client.event.ack", "acknowledgeClientEvent", [id], { ...clientEventOutput, status: "acked" as const, acked_at: now }); },
   clientEventNotFoundError() { throw new Error("client_event_not_found"); }
@@ -193,6 +220,19 @@ await run("collection.action.run", () => collectionActionRun.createHandler({
 await run("session.create", () => sessionCreate.createHandler({
   createSession(input) { return record("session.create", "createSession", [input], sessionOutput); }
 }).execute(context, handlerExpectations["session.create"].input));
+
+await run("room.create", () => roomCreate.createHandler({
+  createRoom(input) { return record("room.create", "createRoom", [input], { ...roomOutput, ...input }); }
+}).execute(context, handlerExpectations["room.create"].input));
+await run("room.list", () => roomList.createHandler({
+  listRooms() { return record("room.list", "listRooms", [], [roomOutput]); }
+}).execute(context, handlerExpectations["room.list"].input));
+await run("room.patch", () => roomPatch.createHandler({
+  patchRoom(input) { return record("room.patch", "patchRoom", [input], { ...roomOutput, ...input }); }
+}).execute(context, handlerExpectations["room.patch"].input));
+await run("room.view", () => roomView.createHandler({
+  viewRoom(id) { return record("room.view", "viewRoom", [id], roomOutput); }
+}).execute(context, handlerExpectations["room.view"].input));
 
 await run("session.search.reindex", () => sessionSearchReindex.createHandler({
   reindexSessionSearch() { return record("session.search.reindex", "reindexSessionSearch", [], sessionSearchOutput); }

@@ -9,9 +9,10 @@
 正本の優先順位は以下とする。
 
 1. `PRINCIPLES.md`
-2. `ARCHITECTURE.md`
-3. `PUBLIC_NAMING.md`
-4. この文書と配下の実装計画
+2. `SAMURAI_AGENT_MANUAL.md`
+3. `ARCHITECTURE.md`
+4. `PUBLIC_NAMING.md`
+5. この文書と配下の実装計画
 
 参照する個別計画。
 

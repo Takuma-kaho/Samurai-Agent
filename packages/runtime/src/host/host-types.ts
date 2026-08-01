@@ -1,6 +1,7 @@
 import type { AgentBackend, BackendRunInput, TemporaryContextAttachment } from "@samurai-agent/agent-backends";
 import type {
   AgentBackendKind,
+  AgentRecord,
   BackendEventRecord,
   BackendRunRecord,
   ContextHandoff,
@@ -18,6 +19,9 @@ import type { BackendCancelResult, CanonicalLifecycleEvent } from "../execution/
 
 export interface TurnRequest {
   sessionId: string;
+  roomId?: string;
+  agentId?: string;
+  agent?: AgentRecord;
   content: string;
   envelope: MessageEnvelope;
   backendId?: string;

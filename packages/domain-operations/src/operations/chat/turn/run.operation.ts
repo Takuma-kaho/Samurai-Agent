@@ -6,6 +6,7 @@ import { chatTurnValueSchema } from "../../../value-objects/chat.js";
 
 const Input = z.object({
   "attachments": z.array(ResourceRefSchema.strict()).default([]),
+  "agent_id": z.string().trim().min(1).optional(),
   "backend_id": z.string().trim().min(1).optional(),
   "content": z.string().trim().min(1),
   "input_locale": SupportedLocaleSchema.optional(),
@@ -25,7 +26,7 @@ type OutputValue = z.infer<typeof Output>;
 export interface ChatTurnRunPorts {
   createChatSession(input: { output_locale?: InputValue["output_locale"] }): Promise<OutputValue["session"]>;
   runChatTurn(input: {
-    sessionId: string; content: string; idempotencyKey: string; backend_id?: string; input_locale?: InputValue["input_locale"];
+    sessionId: string; content: string; idempotencyKey: string; backend_id?: string; agent_id?: string; input_locale?: InputValue["input_locale"];
     output_locale?: InputValue["output_locale"]; attachments: InputValue["attachments"];
     temporary_context: InputValue["temporary_context"]; metadata: InputValue["metadata"];
   }): Promise<OutputValue>;
@@ -35,7 +36,7 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
   ...{
   "kind": "command",
   "id": "chat.turn.run",
-  "version": "5.1",
+  "version": "5.2",
   "availability": "active",
   "runtimeRequirements": ["agent_backend"],
   "title": "Run chat turn",
@@ -91,7 +92,7 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
             : {})
         };
         return { ok: true, value: await ports.runChatTurn({
-          sessionId, content: input.content, idempotencyKey: context.idempotencyKey, backend_id: input.backend_id, input_locale: input.input_locale,
+          sessionId, content: input.content, idempotencyKey: context.idempotencyKey, backend_id: input.backend_id, agent_id: input.agent_id, input_locale: input.input_locale,
           output_locale: input.output_locale, attachments: input.attachments,
           temporary_context: input.temporary_context, metadata
         }) };

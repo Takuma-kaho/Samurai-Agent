@@ -144,6 +144,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
       const thinExternalContext = shouldThinExternalBackendContext(turn.binding.kind, contextIntent);
       return buildContextPreview({
         sessionId: turn.session.id,
+        agentId: turn.request.agentId ?? turn.run.agent_id,
         query: turn.request.content,
         ports: deps.core.contextPreviewPorts,
         skipHeavyContext: thinExternalContext,
@@ -208,7 +209,12 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
           : {})
       };
       await deps.preparation.recordLearningResourceUses(turn, candidates);
-      const sessionMemory = await createSessionMemory(deps.core.store, turn.request.envelope, turn.request.content);
+      const sessionMemory = await createSessionMemory(
+        deps.core.store,
+        turn.request.envelope,
+        turn.request.content,
+        { kind: "session", session_id: turn.session.id }
+      );
       const sessionMemoryChange: WorkspaceChangeRecord = {
         id: createId("change"),
         run_id: turn.run.id,
@@ -224,6 +230,16 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
       const backendInput: BackendRunInput = {
         run_id: turn.run.id,
         session_id: turn.session.id,
+        ...(turn.session.room_id ? { room_id: turn.session.room_id } : {}),
+        ...(turn.request.agent ? {
+          agent_context: {
+            id: turn.request.agent.id,
+            name: turn.request.agent.name,
+            role: turn.request.agent.role,
+            instructions: turn.request.agent.instructions,
+            authority: "supporting_context" as const
+          }
+        } : {}),
         input_message_id: turn.userMessage.id,
         workspace_root: workspaceRoot,
         working_directory: workingDirectory,

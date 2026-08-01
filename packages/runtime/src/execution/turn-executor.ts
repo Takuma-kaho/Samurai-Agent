@@ -90,6 +90,9 @@ export class TurnExecutor {
       const sessionHandle = await backend.startSession!({
         session_id: run.session_id,
         session_key: currentPrepared.session.session_key,
+        ...(currentPrepared.session.room_id ? { room_id: currentPrepared.session.room_id } : {}),
+        ...(currentPrepared.backendInput.agent_context ? { agent_id: currentPrepared.backendInput.agent_context.id } : {}),
+        ...(currentPrepared.backendInput.backend_session_key ? { backend_session_key: currentPrepared.backendInput.backend_session_key } : {}),
         output_locale: currentPrepared.session.output_locale,
         metadata: currentPrepared.backendInput.metadata
       });

@@ -2,6 +2,11 @@
 import { domainOperationIds, type DomainOperationId } from "./operation-index.generated.js";
 
 export const domainOperationClient = Object.freeze({
+  agentBackendBind: (): typeof domainOperationIds.agentBackendBind => domainOperationIds.agentBackendBind,
+  agentCreate: (): typeof domainOperationIds.agentCreate => domainOperationIds.agentCreate,
+  agentList: (): typeof domainOperationIds.agentList => domainOperationIds.agentList,
+  agentPatch: (): typeof domainOperationIds.agentPatch => domainOperationIds.agentPatch,
+  agentView: (): typeof domainOperationIds.agentView => domainOperationIds.agentView,
   artifactCreate: (): typeof domainOperationIds.artifactCreate => domainOperationIds.artifactCreate,
   artifactExportPdf: (): typeof domainOperationIds.artifactExportPdf => domainOperationIds.artifactExportPdf,
   artifactRepair: (): typeof domainOperationIds.artifactRepair => domainOperationIds.artifactRepair,
@@ -90,6 +95,10 @@ export const domainOperationClient = Object.freeze({
   resourceTranslationJobSave: (): typeof domainOperationIds.resourceTranslationJobSave => domainOperationIds.resourceTranslationJobSave,
   resourceTranslationSave: (): typeof domainOperationIds.resourceTranslationSave => domainOperationIds.resourceTranslationSave,
   rollbackRestore: (): typeof domainOperationIds.rollbackRestore => domainOperationIds.rollbackRestore,
+  roomCreate: (): typeof domainOperationIds.roomCreate => domainOperationIds.roomCreate,
+  roomList: (): typeof domainOperationIds.roomList => domainOperationIds.roomList,
+  roomPatch: (): typeof domainOperationIds.roomPatch => domainOperationIds.roomPatch,
+  roomView: (): typeof domainOperationIds.roomView => domainOperationIds.roomView,
   sandboxExec: (): typeof domainOperationIds.sandboxExec => domainOperationIds.sandboxExec,
   sessionCreate: (): typeof domainOperationIds.sessionCreate => domainOperationIds.sessionCreate,
   sessionSearch: (): typeof domainOperationIds.sessionSearch => domainOperationIds.sessionSearch,

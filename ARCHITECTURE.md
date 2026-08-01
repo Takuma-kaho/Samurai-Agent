@@ -1,22 +1,24 @@
-# Samurai Agent Architecture v0.8
+# Samurai Agent Architecture v0.9
 
 ## Chat-first Personal Agent Interface
 
 ### Workspace-backed, UI on demand
 
-### MulmoClaude型Host、Agent Backend cassette、Hermes的Memory/Skill改善ループ、OpenClaw中心のGatewayを参照して再構成する
+### 参照OSSと参照プロダクトの強みをWorkspace-firstに再構成する
 
 ---
 
 ## 0. この文書の位置づけ
 
-この文書は、Samurai Agent の **最終アーキテクチャ構造の正本** である。
+この文書は、`PRINCIPLES.md`と`SAMURAI_AGENT_MANUAL.md`の下で、Samurai Agentの**最終アーキテクチャ構造、責務、境界、データ流れの正本**となる。
 
 文書の役割は以下。
 
 - `PRINCIPLES.md`: 設計思想、判断基準、前提。
+- `SAMURAI_AGENT_MANUAL.md`: プロダクト全体像、概念、用語、関係性。
 - `ARCHITECTURE.md`: システム構造、責務、境界、データ流れ。
 - `PUBLIC_NAMING.md`: 公開面の命名ルール。
+- `WEB_UI_DESIGN.md`: 固定Web UIの視覚設計、UI shell、CSS再利用ルール。
 - `plans/`: 実装順、レビュー、作業計画。
 
 この文書では、実装順や短期計画ではなく、最終的にどういう構造であるべきかを記述する。
@@ -25,13 +27,15 @@
 
 ## 1. Reference Sources
 
-この設計で参照するOSSと補助資料は以下。
+この設計で参照するOSS、参照プロダクト、補助資料は以下。
 
 | 参照対象 | 正式参照元 | この設計での扱い |
 | --- | --- | --- |
 | OpenClaw | `https://github.com/openclaw/openclaw.git` | Gateway / Session / Pairing / Sandbox / External boundary の参照元 |
 | Hermes Agent | `https://github.com/NousResearch/hermes-agent.git` | Memory / Skill / Reflection / Self-improvement loop の参照元 |
 | MulmoClaude | `https://github.com/receptron/mulmoclaude.git` | Host / Workspace state / Artifact / Collection / Renderer / Plugin composition の参照元 |
+| Buzz | `https://github.com/block/buzz.git` | Room / Human-Agent collaboration / signed Event / Relay / Identity boundary の参照OSS |
+| Type.com | `https://type.com/` | Shared Space / Knowledge / Skill / Integration / external Agent work import の参照プロダクト。OSSではない |
 | Hermes Agent 解説 | `Hermes_Agent_解説.md` | Hermes Agent理解のローカル補助資料 |
 | MulmoClaude記事 | `https://singularitysociety.org/articles/blog/2026-04-10-mulmoclaude/` | MulmoClaude理解の補助資料 |
 | OpenClaw記事 | `https://unicornee.ai/articles/openclaw-ai-agent/` | OpenClaw理解の補助資料 |
@@ -42,6 +46,8 @@
 | MulmoClaude | Host / Workspace / Artifact / Collection / Plugin composition | 仕組みと状態構造の参照元。アプリ中心UXは完成形にしない |
 | Hermes Agent | Memory / Skills / Reflection / Self-improvement loop | 育つAgent体験の中心 |
 | OpenClaw | Gateway / Session routing / Pairing / Sandbox / External entry | 外部連携と運用境界の中心 |
+| Buzz | Room / signed Event log / Relay / Identity / Human-Agent collaboration | Roomを活動範囲、共通Eventを外部との共通言語として設計する参照元。RelayをWorkspace正本にはしない |
+| Type.com | Shared Space / Knowledge / Skills / Integrations / work import | 既存Agentの仕事を共有Spaceへ持ち込み、KnowledgeやSkillを共有する製品体験の参照元。内部実装は推測しない |
 | Claude Code / Codex | Agent Backend cassette | 実行部を固定しないための差し替え候補 |
 
 ---
@@ -50,7 +56,7 @@
 
 Samurai Agent は、以下を目指す。
 
-> **会話を中心に、外部Agentや自前Agentを差し替えながら、個人のWorkspace、Memory、Skill、Artifactを育てるPersonal Agent Interface。**
+> **会話を中心に、人とAgentがRoomで活動し、Backendを差し替えてもKnowledge、Skill、Artifactがユーザー所有のWorkspaceへ残るWorkspace-first Personal Agent Interface。**
 
 中核となる構造。
 
@@ -68,17 +74,19 @@ Samurai Agent Host
 
 主語は、以下である。
 
-> **人間とAIが同じ仕事状態を扱い、必要な操作面だけが会話から現れる個人用Agent Interface。**
+> **個人利用を起点に、人間とAIが同じ仕事状態を扱い、必要な相手へ選択的に共有でき、必要な操作面だけが会話から現れるAgent Interface。**
 
 ---
 
 ## 3. Architecture Principles
 
-思想の詳細は `PRINCIPLES.md` を正本にする。
+思想の詳細は`PRINCIPLES.md`、プロダクト全体の概念と関係性は`SAMURAI_AGENT_MANUAL.md`を正本にする。
 この文書では、アーキテクチャ上の不変条件だけを扱う。
 
 - Chatが継続的な主要インターフェースであり、UIは必要時だけ会話から現れる。
 - Workspaceは、人間とAIが共有する永続状態の正本であり、常設の主画面ではない。
+- RoomはWorkspace内の活動・共有範囲、SessionはRoom内の一回の会話・作業として扱う。
+- Agentは継続する役割・Identity・利用範囲を持ち、交換可能なAgent Backendとは分離する。
 - Surface Protocolは、共通操作を受け取り、状態を端末に合う表現へ投影する双方向契約である。
 - Agent Backendは固定せず、cassetteとして差し替え可能にする。
 - MemoryとSkillは、外部Backendの中ではなくWorkspace側に残す。
@@ -134,9 +142,11 @@ User asks through Chat / Gateway
 ↓
 Host builds intent and session context
 ↓
+Host resolves the Session Room and selected Agent
+↓
 Active Memory retrieval + Skill selection
 ↓
-AgentBackendRegistry selects backend
+Host resolves the Agent Backend binding
 ↓
 Backend cassette runs and events are normalized
 ↓
@@ -188,6 +198,7 @@ Hostは、Chat、Surface、Workspace、Memory、Skill、Gateway、Backendを束�
 Hostの責務。
 
 - sessionを作る。
+- SessionのRoomと、実行する有効なAgentを解決する。
 - Workspace contextを集める。
 - Active Memoryを取り出す。
 - Skill候補を選ぶ。
@@ -195,6 +206,8 @@ Hostの責務。
 - Backend eventを正規化層へ渡す。
 - `BackendRunRecord`の永続状態遷移をRun lifecycleとして調整する。
 - 結果をWorkspaceへ戻す。
+
+Core 05着手前の基盤では、HostがAgentの名前・役割・指示を低優先度の型付きContextとしてBackendへ渡す。`Room + Session + Agent + Backend`をBackend Session keyに使い、Backendを交換してもAgent IDとWorkspace側の情報を保持する。
 
 Hostが持たない責務。
 
@@ -210,7 +223,7 @@ Hostが持たない責務。
 責務。
 
 - backend id と backend kind を管理する。
-- sessionやworkspaceに応じてBackendを選ぶ。
+- Hostが解決したAgentのBackend bindingを実行可能なcassetteへ解決する。
 - Backend configを解決する。
 - Backend session、実行handle、capabilityなどBackend実行側のlifecycleを作る。
 - Backendの有効/無効、失敗状態、接続状態をHostへ返す。
@@ -228,6 +241,23 @@ Backend候補。
 
 `ProviderAdapter` は、Agent Backend全体の差し替え口ではない。
 `SamuraiNativeBackend` の内部でモデルを差し替えるための口である。
+
+### 5.3.1 Room / Agent foundation
+
+RoomとAgentはBackendではなく、Workspace SQLiteが所有する軽い永続Recordである。
+
+| Record | 保存項目 | 実行時の役割 |
+| --- | --- | --- |
+| RoomRecord | ID、名前、作成／更新日時 | Sessionの活動範囲 |
+| AgentRecord | ID、名前、役割、指示、Backend ID、有効状態 | Backendを選ぶ継続する役割 |
+| UsageScopeRef | workspace / room / agent / session のいずれか | Memory・Wiki・Skillの利用範囲 |
+| ActivityContextRef | room_id / session_id / agent_id | Runと学習記録の出所 |
+
+Settingsの既定Room／既定Agentを省略時に使い、`settings.patch`で既存Roomと有効なAgentだけを選べる。永続的なBackend変更は`agent.backend.bind`だけが行い、`chat.turn.run`の`backend_id`は一回限りの互換入力である。Room membership、ACL、招待、削除、UIはこの層の責務ではない。
+
+既定AgentもBackend未指定の旧呼び出しだけは、Settingsに既定Backendがなく、そのAgentの初期bindingが未登録の場合に限り、従来どおり利用可能な既定Backendへ一回だけ解決する。この互換経路はAgent Recordを書き換えない。
+
+この基盤は新しいWorkspace形式から開始する。旧Session／RunのRoom・Agent出所をbackfillせず、旧Bundle復元の互換も追加しない。
 
 ### 5.4 Agent Backend Cassette
 
@@ -410,6 +440,7 @@ Hostは、共通の `AgentBackend` interface と `BackendEventRecord` だけを�
 ```text
 id
 session_id
+agent_id
 backend_id
 backend_kind
 status
@@ -492,6 +523,8 @@ filesystem:
   custom views
 
 sqlite:
+  rooms
+  agents
   sessions
   backend runs
   backend events
@@ -516,8 +549,9 @@ sqlite:
 | Skill index | SQLite | filesystem source | 必要なSkillだけ選ぶため |
 | Collection schema | filesystem | SQLite schema metadata | データ構造を人間が確認できるようにするため |
 | Collection record index | SQLite | filesystem export | 一覧、検索、patch適用に使うため |
+| Room / Agent | SQLite | なし | Workspace内の活動範囲とBackendから独立した役割を持つため |
 | Session transcript | SQLite | export file | 履歴、検索、再開で一貫性が必要だから |
-| Backend run | SQLite | export file | どのBackendを動かしたか確認するため |
+| Backend run | SQLite | export file | RoomのSessionで、どのAgentがどのBackendを動かしたか確認するため |
 | Backend event | SQLite | export file | 進行状況、エラー、tool出力を表示するため |
 | Workspace change | SQLite | export file | 何が変わったかを後から確認するため |
 | Queue / scheduled task | SQLite | なし | 実行状態の整合性が最優先だから |
@@ -530,6 +564,7 @@ sqlite:
 WorkspaceのBackupは、単なるDB file copyではなく、復元できるdirectory Bundleである。
 
 - Bundleのpayloadは`workspace.sqlite`と`artifacts`、`profile`、`memory`、`skills`、`wiki`、`rollback`、`collections`、`surfaces`だけに固定する。`backups`、cache、派生学習データ、未知fileは含めない。
+- RoomとAgentはSQLite snapshotへ含める。Room／Agent専用の保存rootやBackup Manifest項目は増やさない。
 - SQLiteはOnline Backup APIでSnapshotを作り、WAL内の確定内容も含める。Snapshotのintegrity checkに失敗したBundleは公開しない。
 - 作成中は隠しStageへ置き、全payloadのSHA-256確認後にManifestを最後に書く。完成時だけatomic renameするため、一覧へ未完成Bundleは出ない。
 - Manifest v2は相対POSIX path、`source_root: "."`、DB migration番号、固定root一覧、file hashを持つ。復元前にpath escape、重複、未知root、file集合差、hash不一致、special file、未来format、未来schemaを拒否する。v1は読込時に正規化し、欠けた管理rootを空として扱う。
@@ -591,6 +626,8 @@ Memory / Skill / Reflection / Curator は、Hermes Agentから強く参照する
 External Provider由来の内容は、acceptedされるまでMemory、Knowledge Wiki、Skillの正本にしない。
 参照元不明のProvider情報は保存せず、`unverified external hint` として診断表示に留める。
 
+Memory・Knowledge Wiki・Skillは`UsageScopeRef`をfrontmatterとSQLite indexの両方へ保存する。実行時の検索は全件を読んでから隠すのではなく、Workspace／同じRoom／同じAgent／同じSessionに一致するindex行だけを先に候補にする。
+
 ### 8.1 Memory
 
 Memoryは、AI秘書の長期的な理解を支える。
@@ -645,7 +682,7 @@ Backend run completes
 ↓
 Background Review reads transcript + artifacts + backend events
 ↓
-Reusable Memory changes are saved automatically with provenance
+Room / Session / Agentの出所を残し、Reusable Memory changes are saved automatically with provenance
 ↓
 Active Memory retrieval uses the updated Memory
 ```
@@ -693,6 +730,8 @@ Curatorは、増えすぎたMemoryやSkillを整理する。
 
 Background ReviewやCuratorは、外部Backendの内部状態として閉じない。
 自動変更はWorkspace上へ保存し、source run、version、根拠、snapshotから後で理解・復元できるようにする。
+
+Background Reviewが新規作成するMemory・Knowledge Wiki・Skillは、元のRoom範囲を既定にする。WorkspaceやAgent範囲への自動昇格、競合解決、Core 05の学習判断そのものは、この基盤では実装しない。
 
 ---
 
@@ -882,12 +921,16 @@ Agent Backendをcassetteとして差し替えられる
 > **Agent BackendはClaudeCodeBackend / CodexBackend / SamuraiNativeBackendとして差し替え可能にする。**
 > **HermesのMemory / Skill / Reflection / Curator / Automationを、Chatと必要時のSurfaceで理解できる形に変換して採用する。**
 > **OpenClawのGateway / Session / Pairing / Sandbox / SecretRef思想は、外部入口と運用境界として取り込む。**
+> **BuzzのRoom / signed Event / Relay / Identity思想は、Human・Agent・External・Systemが活動する共通Event境界として参照する。**
+> **Type.comのShared Space / Knowledge / Skill / Integration / work import体験は、既存Agentの仕事をWorkspaceへ持ち帰る見せ方として参照する。**
 
 借りるのは、実装そのものよりも以下の勝ち筋である。
 
 - MulmoClaude: Host、Workspace状態、Artifact、Collection、Rendererの仕組みを参照すること。
 - Hermes: Memory / Skill / Reflection / CuratorでAgentが育つこと。
 - OpenClaw: GatewayとSessionで外部入口を束ねること。
+- Buzz: 人とAgentがRoomで活動し、署名EventとIdentityを同じ履歴へ残すこと。
+- Type.com: Knowledge・Skill・Integrationと既存Agentの仕事を共有Spaceへ持ち込む製品体験。
 - Claude Code / Codex: Agent Backendとして差し替え可能に扱うこと。
 
 最初に作るべきものは、独自安全制御ではない。

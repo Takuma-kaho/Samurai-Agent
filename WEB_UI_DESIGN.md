@@ -9,6 +9,7 @@
 この文書は以下を上書きしない。
 
 - `PRINCIPLES.md`: 設計思想、判断基準、前提
+- `SAMURAI_AGENT_MANUAL.md`: Workspace、Room、Session、Agentなどの概念と関係性
 - `ARCHITECTURE.md`: Host、Agent Backend、Gateway、Memory、Skill、Workspace などの責務分解
 - `PUBLIC_NAMING.md`: 公開面の命名ルール
 
@@ -35,6 +36,8 @@ Samurai Agent の Web UI は、以下を基本にする。
 - Calm operational UI
 
 最初に見える画面は、複雑なダッシュボードではなく、静かなチャット作業面にする。
+
+Roomは活動・共有範囲、ChatはRoom内の主要インターフェースとして扱う。現在の静止デモが単一Roomを明示していない場合は、暗黙の個人Roomを表示しているものとして解釈し、概念モデルをSession直下へ戻さない。
 
 Chat-first は、初期表示だけではなくUI全体の主軸である。
 Backend進行状況、失敗、Memory/Skill候補、自律実行の見える化も、別のダッシュボードに逃がさず、Chat Shellに付随する補助表示として扱う。

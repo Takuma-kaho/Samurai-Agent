@@ -6,6 +6,7 @@ export function sessionFromRow(row: SessionsTable): SessionRecord {
   return {
     id: row.id,
     session_key: row.session_key,
+    room_id: row.room_id ?? undefined,
     title: row.title,
     ui_locale: row.ui_locale as SessionRecord["ui_locale"],
     output_locale: row.output_locale as SessionRecord["output_locale"],
@@ -90,6 +91,7 @@ export function backendRunToRow(run: BackendRunRecord): BackendRunsTable {
   return {
     id: run.id,
     session_id: run.session_id,
+    agent_id: run.agent_id ?? null,
     input_message_id: run.input_message_id,
     output_message_id: run.output_message_id ?? null,
     backend_id: run.backend_id,
@@ -113,6 +115,7 @@ export function backendRunFromRow(row: BackendRunsTable): BackendRunRecord {
   return {
     id: row.id,
     session_id: row.session_id,
+    agent_id: row.agent_id ?? undefined,
     input_message_id: row.input_message_id,
     output_message_id: row.output_message_id ?? undefined,
     backend_id: row.backend_id,

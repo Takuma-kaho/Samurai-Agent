@@ -15,6 +15,20 @@ export interface HandlerExpectation {
 }
 
 export const handlerExpectations = {
+  "agent.backend.bind": {
+    input: { id: "agent_fixture", backend_id: "backend_next" },
+    calls: [{ method: "bindAgentBackend", args: [{ id: "agent_fixture", backendId: "backend_next" }] }]
+  },
+  "agent.create": {
+    input: { name: "Fixture Agent", role: "Fixture", instructions: "Handle fixture work.", backend_id: "backend_fixture", enabled: false },
+    calls: [{ method: "createAgent", args: [{ name: "Fixture Agent", role: "Fixture", instructions: "Handle fixture work.", backendId: "backend_fixture", enabled: false }] }]
+  },
+  "agent.list": { input: {}, calls: [{ method: "listAgents", args: [] }] },
+  "agent.patch": {
+    input: { id: "agent_fixture", role: "Updated fixture" },
+    calls: [{ method: "patchAgent", args: [{ id: "agent_fixture", role: "Updated fixture" }] }]
+  },
+  "agent.view": { input: { id: "agent_fixture" }, calls: [{ method: "viewAgent", args: ["agent_fixture"] }] },
   "file.read": {
     input: { path: "workspace/notes.txt" },
     calls: [{ method: "readWorkspaceFile", args: [{ path: "workspace/notes.txt" }] }]
@@ -92,9 +106,19 @@ export const handlerExpectations = {
       }]
     }]
   },
+  "room.create": {
+    input: { name: "Fixture Room" },
+    calls: [{ method: "createRoom", args: [{ name: "Fixture Room" }] }]
+  },
+  "room.list": { input: {}, calls: [{ method: "listRooms", args: [] }] },
+  "room.patch": {
+    input: { id: "room_fixture", name: "Updated Room" },
+    calls: [{ method: "patchRoom", args: [{ id: "room_fixture", name: "Updated Room" }] }]
+  },
+  "room.view": { input: { id: "room_fixture" }, calls: [{ method: "viewRoom", args: ["room_fixture"] }] },
   "session.create": {
-    input: { title: "Fixture session", ui_locale: "en", output_locale: "ja" },
-    calls: [{ method: "createSession", args: [{ title: "Fixture session", uiLocale: "en", outputLocale: "ja" }] }]
+    input: { title: "Fixture session", room_id: "room_fixture", ui_locale: "en", output_locale: "ja" },
+    calls: [{ method: "createSession", args: [{ title: "Fixture session", roomId: "room_fixture", uiLocale: "en", outputLocale: "ja" }] }]
   },
   "session.search.reindex": { input: {}, calls: [{ method: "reindexSessionSearch", args: [] }] },
   "session.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSessions", args: ["fixture", 5] }] },
@@ -119,8 +143,8 @@ export const handlerExpectations = {
     ]
   },
   "settings.patch": {
-    input: { ui_locale: "en", output_locale: "ja", memory_capture_mode: "manual" },
-    calls: [{ method: "applySettingsPatch", args: [{ uiLocale: "en", outputLocale: "ja", memoryCaptureMode: "manual" }] }]
+    input: { default_agent_id: "agent_fixture", default_room_id: "room_fixture", ui_locale: "en", output_locale: "ja", memory_capture_mode: "manual" },
+    calls: [{ method: "applySettingsPatch", args: [{ defaultAgentId: "agent_fixture", defaultRoomId: "room_fixture", uiLocale: "en", outputLocale: "ja", memoryCaptureMode: "manual" }] }]
   },
   "skill.usage.record": {
     input: { skill_id: "skill_fixture", resource_id: "resource_fixture", content_hash: "hash_fixture", stage: "body_loaded", metadata: { source: "fixture" } },

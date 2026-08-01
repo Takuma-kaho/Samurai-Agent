@@ -3,6 +3,8 @@ import type { MemoryIndexTable, SkillIndexTable, SkillUsageTable } from "../kern
 import type { SkillWithFilePath } from "../workspace-store-contracts";
 import { parse, stringify } from "./serialization";
 import { buildSkillIndexEntry } from "./workspace-file-codecs";
+import { usageScopeIndexColumns } from "./usage-scope";
+import { withUsageScope } from "./usage-scope";
 
 export function memoryToRow(frontmatter: MemoryFrontmatter, filePath: string): MemoryIndexTable {
   return {
@@ -14,6 +16,7 @@ export function memoryToRow(frontmatter: MemoryFrontmatter, filePath: string): M
     content_locale: frontmatter.content_locale,
     source_kind: frontmatter.source_kind,
     instruction_authority: frontmatter.instruction_authority,
+    ...usageScopeIndexColumns(frontmatter.usage_scope),
     file_path: filePath,
     frontmatter_json: stringify(frontmatter),
     created_at: frontmatter.created_at,
@@ -30,6 +33,7 @@ export function skillToRow(frontmatter: SkillFrontmatter, filePath: string): Ski
     description: frontmatter.description,
     tags_json: stringify(frontmatter.tags),
     required_capabilities_json: stringify(frontmatter.required_capabilities),
+    ...usageScopeIndexColumns(frontmatter.usage_scope),
     file_path: filePath,
     frontmatter_json: stringify(frontmatter),
     created_at: now,
@@ -39,7 +43,7 @@ export function skillToRow(frontmatter: SkillFrontmatter, filePath: string): Ski
 
 export function skillFromRow(row: SkillIndexTable): SkillWithFilePath {
   return {
-    ...buildSkillIndexEntry(parse(row.frontmatter_json)),
+    ...buildSkillIndexEntry(withUsageScope(parse(row.frontmatter_json))),
     file_path: row.file_path
   };
 }

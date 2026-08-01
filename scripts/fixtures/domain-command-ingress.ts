@@ -86,11 +86,11 @@ interface IngressRejectionObservation {
 const artifactCreateInvalidInputCode = "validation";
 
 const expectedWorkspaceChangeTelemetryCount: Record<IngressObservation["entrance"], number> = {
-  // WorkspaceChange is BackendRun telemetry, not a synthetic record required
-  // for direct Domain Command routes.  The three backend-owned routes must
-  // produce exactly one linked record; direct routes must not invent one.
+  // WorkspaceChange is linked to a concrete BackendRun. Structured Surface
+  // operations intentionally create one synthetic run for their durable
+  // Workspace trace; ordinary direct Domain Command routes do not.
   web_runtime_api: 0,
-  surface_operation: 0,
+  surface_operation: 1,
   provider_tool_call: 1,
   gateway_inbound: 1,
   automation: 1,
@@ -129,6 +129,8 @@ const bridgeBackend: AgentBackend = {
   id: "command-ingress-bridge",
   kind: "codex",
   label: "Command ingress bridge fixture",
+  sessionPolicy: { acquisition: "provider_event", resume: "unsupported" },
+  execution_owner: "host",
   async *runTurn(input) {
     latestBridgeRunId = input.run_id;
     // This is the normal Backend event contract.  It deliberately does not
@@ -143,7 +145,11 @@ const bridgeBackend: AgentBackend = {
         input: bridgeArtifactPayload
       }
     };
-    yield { event_type: "run_completed", payload: { output_summary: "fixture completed" } };
+    yield {
+      event_type: "run_completed",
+      terminal_evidence: { kind: "completed", source: "owned_loop_return" },
+      payload: { output_summary: "fixture completed" }
+    };
   }
 };
 
@@ -199,6 +205,24 @@ try {
   }
   debugStage("listen-complete");
   const address = server.httpServer.address() as AddressInfo;
+  const setupNow = now;
+  await server.store.createRoom({ id: "ingress-room", name: "Ingress Room", created_at: setupNow, updated_at: setupNow });
+  await server.store.createAgent({
+    id: "ingress-agent",
+    name: "Ingress Agent",
+    role: "Integration",
+    instructions: "Handle the ingress fixture request.",
+    backend_id: bridgeBackend.id,
+    enabled: true,
+    created_at: setupNow,
+    updated_at: setupNow
+  });
+  await server.store.patchSettings({
+    default_room_id: "ingress-room",
+    default_agent_id: "ingress-agent",
+    ui_locale: "en",
+    output_locale: "en"
+  });
   debugStage("session-create-start");
   const session = await runtime.createSession({ title: "Ingress fixture", ui_locale: "en", output_locale: "en" });
   debugStage("session-create-complete");

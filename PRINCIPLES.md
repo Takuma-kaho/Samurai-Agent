@@ -9,18 +9,20 @@
 文書の優先順位は以下。
 
 1. `PRINCIPLES.md`: なぜそう作るのか、何を優先するのか
-2. `ARCHITECTURE.md`: どう分解し、どう実装するのか
-3. `PUBLIC_NAMING.md`: 公開面でどの名前を使うか、使わないか
-4. `plans/`: レビュー、改訂方針、作業計画
-5. `Hermes_Agent_解説.md`: Hermes Agent を理解するための補助資料
+2. `SAMURAI_AGENT_MANUAL.md`: 何を作り、各概念がどう関係するのか
+3. `ARCHITECTURE.md`: どう分解し、どう実装するのか
+4. `PUBLIC_NAMING.md`: 公開面でどの名前を使うか、使わないか
+5. `WEB_UI_DESIGN.md`: 固定Web UIをどう見せるか
+6. `plans/`: レビュー、改訂方針、作業計画
+7. `Hermes_Agent_解説.md`: Hermes Agent を理解するための補助資料
 
 ---
 
 ## 1. Samurai Agent が作るもの
 Samurai Agentは、
-> 会話を中心に、人間とAIが同じ仕事状態を育てる Personal Agent Interface。
+> 会話を中心に、人間とAIが同じ仕事状態を育てる Workspace-first Personal Agent Interface。
 
-その上に「自分専用に育つAI秘書」という体験を載せる。
+まずは個人が所有するWorkspaceを起点に「自分専用に育つAI秘書」という体験を載せ、必要な人とAgentへ選択的に共有できる構造へ広げる。
 
 重視すること。
 
@@ -247,9 +249,9 @@ Samurai Agent は、多言語対応を後から足す翻訳作業として扱わ
 
 ---
 
-## 10. OSS参照元の扱い
+## 10. 参照元の扱い
 
-MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象ではない。
+MulmoClaude / Hermes Agent / OpenClaw / Buzz は参照OSS、Type.comは参照プロダクトとして扱う。いずれも、そのまま結合・再現する対象ではない。
 
 それぞれの勝ち筋を参照し、Samurai Agent として greenfield に再構成する。
 
@@ -267,6 +269,8 @@ MulmoClaude / Hermes Agent / OpenClaw は、そのまま結合する対象では
 - MulmoClaude: Host、Workspace状態、Artifact、Collection、Renderer、Plugin composition の参照元。アプリ中心UXは完成形にしない。
 - Hermes Agent: Memory、Skill、Reflection、Self-improvement loop の参照元。
 - OpenClaw: Gateway、Session routing、Pairing、Sandbox、External boundary の参照元。
+- Buzz: Room、Human／Agentの共通活動面、署名Event、Relay、Identity境界の参照元。Event logをSamuraiのWorkspace正本として模倣しない。
+- Type.com: 共有Space、Knowledge・Skill・Integration、Codex／Claude Codeからの作業持ち込み体験の参照元。非OSSのため、公開情報から確認できる製品体験だけを参照する。
 - Claude Code / Codex: 差し替え可能な Agent Backend cassette の候補。
 
 ---

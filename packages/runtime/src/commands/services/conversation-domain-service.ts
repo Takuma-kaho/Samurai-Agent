@@ -6,10 +6,10 @@ import {
   type SessionRecord, type SupportedLocale, type ToolRunRecord, type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
 
-interface SessionCreateHostInput { title?: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale }
-export interface CreateSessionInput { title?: string; uiLocale?: SupportedLocale; outputLocale?: SupportedLocale }
+interface SessionCreateHostInput { title?: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale; room_id?: string }
+export interface CreateSessionInput { title?: string; uiLocale?: SupportedLocale; outputLocale?: SupportedLocale; roomId?: string }
 export interface ChatTurnInput {
-  sessionId: string; content: string; idempotencyKey: string; backend_id?: string; input_locale?: SupportedLocale; output_locale?: SupportedLocale;
+  sessionId: string; content: string; idempotencyKey: string; backend_id?: string; agent_id?: string; input_locale?: SupportedLocale; output_locale?: SupportedLocale;
   attachments: ResourceRef[]; temporary_context: TemporaryContextInput[]; metadata: Record<string, JsonValue>;
 }
 interface TemporaryContextInput { id: string; kind: "desktop_screenshot"; label?: string; source_name?: string; mime_type: string; data_url?: string; file_path?: string; created_at: string; expires_at: string; metadata?: Record<string, JsonValue> }
@@ -40,7 +40,8 @@ export class ConversationDomainService {
     return this.host.createSession({
       ...(input.title === undefined ? {} : { title: input.title }),
       ...(input.uiLocale === undefined ? {} : { ui_locale: input.uiLocale }),
-      ...(input.outputLocale === undefined ? {} : { output_locale: input.outputLocale })
+      ...(input.outputLocale === undefined ? {} : { output_locale: input.outputLocale }),
+      ...(input.roomId === undefined ? {} : { room_id: input.roomId })
     });
   }
 

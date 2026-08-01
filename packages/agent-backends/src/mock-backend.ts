@@ -16,9 +16,11 @@ export class MockBackend implements AgentBackend {
 
   async startSession(input: BackendSessionInput): Promise<BackendSessionHandle> {
     return {
-      backend_session_id: `${this.id}:${input.session_id}`,
+      backend_session_id: `${this.id}:${input.backend_session_key ?? input.session_id}`,
       metadata: {
         session_key: input.session_key,
+        ...(input.room_id ? { room_id: input.room_id } : {}),
+        ...(input.agent_id ? { agent_id: input.agent_id } : {}),
         output_locale: input.output_locale
       },
       started_at: new Date().toISOString()

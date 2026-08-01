@@ -32,6 +32,9 @@ export interface ReflectionWorkflowInput {
 export interface ReflectionRunPorts {
   getReflectionSession(id: string): Promise<SessionRecord | undefined>;
   reflectionSessionNotFoundError(id: string): Error;
+  getReflectionBackendRun(id: string): Promise<BackendRunRecord | undefined>;
+  reflectionSourceRunNotFoundError(id: string): Error;
+  reflectionSourceRunSessionMismatchError(input: { sourceRunId: string; sessionId: string }): Error;
   listReflectionMessages(sessionId: string): Promise<MessageRecord[]>;
   listReflectionToolRuns(runId?: string): Promise<ToolRunRecord[]>;
   listReflectionWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]>;
@@ -44,7 +47,7 @@ const reflectionRun = defineCommand<ReflectionRunPorts>()({
   ...{
   "kind": "command",
   "id": "reflection.run",
-  "version": "3.1",
+  "version": "3.2",
   "availability": "active",
   "title": "Run background review",
   "description": "Run scoped Background Review for a completed Session or Backend run.",
@@ -89,6 +92,11 @@ const reflectionRun = defineCommand<ReflectionRunPorts>()({
         if (!sessionId) throw ports.reflectionSessionNotFoundError("trusted_context_session_required");
         const session = await ports.getReflectionSession(sessionId);
         if (!session) throw ports.reflectionSessionNotFoundError(sessionId);
+        const backendRun = input.source_run_id ? await ports.getReflectionBackendRun(input.source_run_id) : undefined;
+        if (input.source_run_id && !backendRun) throw ports.reflectionSourceRunNotFoundError(input.source_run_id);
+        if (backendRun && backendRun.session_id !== session.id) {
+          throw ports.reflectionSourceRunSessionMismatchError({ sourceRunId: backendRun.id, sessionId: session.id });
+        }
         const messages = await ports.listReflectionMessages(sessionId);
         const userMessage = [...messages].reverse().find((message) => message.role === "user");
         const agentMessage = [...messages].reverse().find((message) => message.role === "agent");
@@ -97,7 +105,12 @@ const reflectionRun = defineCommand<ReflectionRunPorts>()({
           ports.listReflectionBackendEvents(input.source_run_id ? { runId: input.source_run_id } : { sessionId })
         ]);
         const artifacts = await ports.loadReflectionArtifacts({ sessionId, sourceRunId: input.source_run_id, workspaceChanges });
-        const value = await ports.executeReflectionWorkflow({ kind: "manual", session, ...(input.source_run_id === undefined ? {} : { sourceRunId: input.source_run_id }), userMessage, agentMessage, backendEvents, workspaceChanges, toolRuns, transcriptMessages: messages, artifacts });
+        const value = await ports.executeReflectionWorkflow({
+          kind: "manual", session,
+          ...(input.source_run_id === undefined ? {} : { sourceRunId: input.source_run_id }),
+          ...(backendRun ? { backendRun } : {}),
+          userMessage, agentMessage, backendEvents, workspaceChanges, toolRuns, transcriptMessages: messages, artifacts
+        });
         return { ok: true, value: Output.parse(value) };
       }
     };

@@ -2,7 +2,7 @@ import { CaptureModeSchema, ExternalProviderRoleSchema, SupportedLocaleSchema } 
 import { z } from "zod";
 
 export const sessionValueSchema = z.object({
-  id: z.string().min(1), session_key: z.string().min(1), title: z.string(),
+  id: z.string().min(1), session_key: z.string().min(1), room_id: z.string().min(1).optional(), title: z.string(),
   ui_locale: SupportedLocaleSchema, output_locale: SupportedLocaleSchema,
   created_at: z.string().datetime(), updated_at: z.string().datetime()
 }).strict();
@@ -11,7 +11,7 @@ export const settingsValueSchema = z.object({
   ui_locale: SupportedLocaleSchema, output_locale: SupportedLocaleSchema,
   memory_capture_mode: CaptureModeSchema, knowledge_wiki_capture_mode: CaptureModeSchema,
   skill_capture_mode: CaptureModeSchema, external_provider_role: ExternalProviderRoleSchema,
-  default_backend_id: z.string().min(1).optional(), updated_at: z.string().datetime()
+  default_backend_id: z.string().min(1).optional(), default_room_id: z.string().min(1).optional(), default_agent_id: z.string().min(1).optional(), updated_at: z.string().datetime()
 }).strict();
 
 export const pluginStatusValueSchema = z.object({
