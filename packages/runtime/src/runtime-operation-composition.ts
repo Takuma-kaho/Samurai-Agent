@@ -4,6 +4,7 @@ import { domainOperationIdFor } from "@samurai-agent/domain-operations";
 export const runtimeOperationIds = Object.freeze({
   reflectionRun: domainOperationIdFor("reflectionRun"),
   curatorRun: domainOperationIdFor("curatorRun"),
+  skillView: domainOperationIdFor("skillView"),
   skillLifecycleApply: domainOperationIdFor("skillLifecycleApply"),
   evaluationRun: domainOperationIdFor("evaluationRun"),
   artifactCreate: domainOperationIdFor("artifactCreate"),

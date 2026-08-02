@@ -201,7 +201,6 @@ import {
   skillConsolidationPrompt,
   parseSkillConsolidationResult,
   type SkillConsolidationRunner,
-  standardLearningJobDefinitions,
   learningRetryDelayMs,
   type BackgroundReviewMutation,
   type BackgroundReviewResult,
@@ -298,8 +297,9 @@ import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
 import { RoomAgentDomainService } from "./commands/services/room-agent-domain-service";
-import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type HostLearningReviewInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
+import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
 import { BackendToolBridgeService, type BackendToolBridgeCallResult } from "./host/backend-tool-bridge-service";
+import { LearningEvidenceAssembler } from "./learning/learning-evidence-assembler";
 import type {
   AdmittedTurn,
   BackendBoundTurn,
@@ -932,6 +932,7 @@ export class AgentRuntime {
   private readonly browserDomainService: BrowserDomainService;
   private readonly externalSendDomainService: ExternalSendDomainService;
   private readonly roomAgentDomainService: RoomAgentDomainService;
+  private readonly learningEvidenceAssembler: LearningEvidenceAssembler;
   private agentHost: AgentHost | undefined;
 
   constructor(
@@ -948,6 +949,18 @@ export class AgentRuntime {
       input: Omit<RecordedMutationInput<TResource, TExtra>, "context">
     ) => this.runRecordedMutation<TResource, TExtra>({ ...input, context: webGatewayContext });
     this.domainCommandBus = new DurableDomainCommandBus(this.store, workspaceOptions.domainCommandRunningTimeoutMs);
+    this.learningEvidenceAssembler = new LearningEvidenceAssembler({
+      getBackendRun: (id) => this.store.getBackendRun(id),
+      getSession: (id) => this.store.getSession(id),
+      getRoom: (id) => this.store.getRoom(id),
+      getAgent: (id) => this.store.getAgent(id),
+      listMessages: (sessionId) => this.store.listMessages(sessionId),
+      listBackendEvents: (input) => this.store.listBackendEvents(input),
+      listToolRuns: (input) => this.store.listToolRuns(input),
+      listWorkspaceChanges: (sessionId) => this.store.listWorkspaceChanges(sessionId),
+      listArtifactsForSession: (sessionId) => this.store.listArtifactsForSession(sessionId),
+      listLearningResourceUses: (input) => this.store.listLearningResourceUses(input)
+    });
     this.domainOperationTelemetry = new DomainOperationTelemetryService({
       getBackendRun: (id) => this.store.getBackendRun(id),
       listWorkspaceChanges: (sessionId) => this.store.listWorkspaceChanges(sessionId),
@@ -1344,9 +1357,11 @@ export class AgentRuntime {
       queries: {
         getSkill: (id) => this.store.getSkill(id),
         getRun: (id) => this.store.getBackendRun(id),
+        getSession: (id) => this.store.getSession(id),
+        getAgent: (id) => this.store.getAgent(id),
         readSupportFile: (input) => this.store.readSkillSupportFile(input),
         readMarkdown: (id) => this.store.readSkillMarkdown(id),
-        listSupportFiles: (id) => this.store.listSkillSupportFiles(id)
+        listSupportFiles: (id) => this.store.listSkillSupportFileRefs(id)
       },
       usage: {
         listUses: (input) => this.store.listLearningResourceUses(input),
@@ -1626,27 +1641,7 @@ export class AgentRuntime {
       },
       postTurn: {
         saveGeneratedSurfacePresentations: async (input) => { await this.saveGeneratedSurfacePresentations(input); },
-        runExternalAssistSync: (input: HostExternalAssistSyncInput) => this.runExternalAssistSync(input),
-        runLearningReview: (input: HostLearningReviewInput) => this.runReflectionForCompletedTurn({
-          kind: "chat_turn",
-          session: input.session,
-          backendRun: input.backendRun,
-          userMessage: input.userMessage,
-          agentMessage: input.agentMessage,
-          backendEvents: input.backendEvents,
-          workspaceChanges: input.workspaceChanges,
-          toolRuns: input.toolRuns,
-          transcriptMessages: input.transcriptMessages,
-          artifacts: input.artifacts as Parameters<AgentRuntime["runReflectionForCompletedTurn"]>[0]["artifacts"],
-          abortSignal: input.abortSignal
-        }),
-        loadReflectionArtifacts: (input) => this.loadReflectionArtifacts(input),
-        backgroundReview: {
-          abortSignal: this.backgroundTaskAbortController.signal,
-          detach: this.workspaceOptions.detachBackgroundReview === true,
-          isClosing: () => this.backgroundTasksClosing,
-          schedule: (input) => this.scheduleBackgroundReview(input.runId, input.run)
-        }
+        runExternalAssistSync: (input: HostExternalAssistSyncInput) => this.runExternalAssistSync(input)
       },
       diagnostics: {
         formatError: (error) => safeRuntimeErrorMessage(error),
@@ -1732,28 +1727,33 @@ export class AgentRuntime {
       ? { room_id: turn.session.room_id, session_id: turn.session.id, agent_id: turn.run.agent_id }
       : undefined;
     for (const skill of preview.selected_skills) {
+      const contentHash = stableHash({ id: skill.id, title: skill.title, description: skill.description });
       await this.store.recordLearningResourceUse({
-        id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "skill", resource_id: skill.id,
-        content_hash: stableHash({ id: skill.id, title: skill.title, description: skill.description }), stage: "selected",
+        id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "skill", resourceId: skill.id, stage: "selected", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "skill", resource_id: skill.id,
+        content_hash: contentHash, stage: "selected",
         ...(activityContext ? { activity_context: activityContext } : {}), metadata: { disclosure_level: skill.disclosure_level }, created_at: nowIso()
       });
     }
     for (const memory of preview.active_memory) {
+      const contentHash = stableHash(memory.content);
       await this.store.recordLearningResourceUse({
-        id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "memory", resource_id: memory.id,
-        content_hash: stableHash(memory.content), stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
+        id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "memory", resourceId: memory.id, stage: "body_loaded", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "memory", resource_id: memory.id,
+        content_hash: contentHash, stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
       });
     }
     for (const wiki of preview.knowledge_wiki) {
+      const contentHash = stableHash(wiki.content);
       await this.store.recordLearningResourceUse({
-        id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "wiki", resource_id: wiki.id,
-        content_hash: stableHash(wiki.content), stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { slug: wiki.slug }, created_at: nowIso()
+        id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "wiki", resourceId: wiki.id, stage: "body_loaded", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "wiki", resource_id: wiki.id,
+        content_hash: contentHash, stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { slug: wiki.slug }, created_at: nowIso()
       });
     }
     for (const result of preview.session_search) {
+      const resourceId = `${result.kind}:${result.id}`;
+      const contentHash = stableHash(result.summary);
       await this.store.recordLearningResourceUse({
-        id: createId("learning_use"), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "session_result", resource_id: `${result.kind}:${result.id}`,
-        content_hash: stableHash(result.summary), stage: "selected", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
+        id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "session_result", resourceId, stage: "selected", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "session_result", resource_id: resourceId,
+        content_hash: contentHash, stage: "selected", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
       });
     }
   }
@@ -3858,32 +3858,6 @@ export class AgentRuntime {
     };
   }
 
-  async ensureStandardLearningJobs(now = nowIso()): Promise<AutomationJobRecord[]> {
-    const existing = await this.store.listAutomationJobs();
-    const definitions: Array<Pick<AutomationJobRecord, "id" | "title" | "kind" | "schedule" | "target_instruction">> = standardLearningJobDefinitions;
-    const records: AutomationJobRecord[] = [];
-    for (const definition of definitions) {
-      const found = existing.find((job) => job.id === definition.id || job.kind === definition.kind && job.title === definition.title);
-      if (found) {
-        records.push(found);
-        continue;
-      }
-      const record: AutomationJobRecord = {
-        ...definition,
-        status: "enabled",
-        delivery_target: { channel: "activity", timezone: "UTC", clock_basis: "absolute_iso" },
-        next_run_at: nextRunFromSchedule(definition.schedule, Date.parse(now)),
-        failure_count: 0,
-        max_attempts: 3,
-        created_at: now,
-        updated_at: now
-      };
-      await this.store.saveAutomationJob(record);
-      records.push(record);
-    }
-    return records;
-  }
-
   async runDueAutomationJobs(
     now = nowIso(),
     context: Pick<TrustedDomainRuntimeContext, "signal" | "deadlineAt"> = {}
@@ -4889,6 +4863,9 @@ export class AgentRuntime {
       input_source: "provider_tool_call",
       payload: normalizeProviderDomainQueryPayload(queryId, args)
     }, { runId: run.id, sessionId: run.session_id, envelopeId: runInput.input_message_id });
+    if (queryId === runtimeOperationIds.skillView) {
+      await this.recordProviderSkillViewUsage(run, event, queryId, queryResult.result);
+    }
     // A Collection view query is also a presentation request. Project its
     // validated query result into the existing tool-output descriptor rather
     // than bypassing the Domain Query contract for a provider-specific path.
@@ -4905,6 +4882,43 @@ export class AgentRuntime {
       },
       resourceRefs: withGatewayBoundaryRefs([], boundary)
     };
+  }
+
+  private async recordProviderSkillViewUsage(
+    run: BackendRunRecord,
+    event: BackendToolCallStartedEvent,
+    queryId: string,
+    value: unknown
+  ): Promise<void> {
+    if (!isRecord(value) || !isRecord(value.usage)) {
+      throw new RuntimeRequestError("conflict", "skill_view_usage_missing");
+    }
+    const usage = value.usage;
+    const skillId = typeof usage.skill_id === "string" ? usage.skill_id : undefined;
+    const resourceId = typeof usage.resource_id === "string" ? usage.resource_id : undefined;
+    const contentHash = typeof usage.content_hash === "string" ? usage.content_hash : undefined;
+    const stage = usage.stage === "body_loaded" || usage.stage === "support_loaded" ? usage.stage : undefined;
+    const usageMetadata = isRecord(usage.metadata) ? jsonRecord(usage.metadata) : undefined;
+    if (!skillId || !resourceId || !contentHash || !stage || !usageMetadata) {
+      throw new RuntimeRequestError("conflict", "skill_view_usage_invalid");
+    }
+    const providerToolName = typeof event.payload.provider_tool_name === "string" ? event.payload.provider_tool_name : undefined;
+    const existing = (await this.store.listLearningResourceUses({ runId: run.id, resourceId }))
+      .find((record) => record.stage === stage);
+    if (existing) return;
+    await this.recordSkillUsage({
+      skillId,
+      runId: run.id,
+      resourceId,
+      contentHash,
+      stage,
+      metadata: {
+        ...usageMetadata,
+        provider_query_id: queryId,
+        provider_tool_call_id: event.tool_call_id,
+        ...(providerToolName ? { provider_tool_name: providerToolName } : {})
+      }
+    });
   }
 
   private async executeSandboxDomainOperation(context: TrustedDomainContext, request: SystemSandboxExecRequest): Promise<RuntimeToolCallResult> {
@@ -5460,33 +5474,46 @@ export class AgentRuntime {
     transcriptMessages?: MessageRecord[];
     artifacts?: ReflectionArtifactSnapshot[];
   }): Promise<ReviewSnapshot> {
+    const evidence = await this.learningEvidenceAssembler.assemble(input.sourceRunId);
+    if (!evidence || evidence.session.id !== input.session.id) {
+      throw new Error(`background_review_activity_context_required:${input.sourceRunId}`);
+    }
     const [memories, skills, wikiPages, learningUses] = await Promise.all([
-      this.store.listMemory({ includeArchived: true, activityContext: input.activityContext }),
-      this.store.listSkills({ activityContext: input.activityContext }),
-      this.store.listWiki({ activeOnly: false, activityContext: input.activityContext }),
-      this.store.listLearningResourceUses({ runId: input.sourceRunId, activityContext: input.activityContext })
+      this.store.listMemory({ includeArchived: true, activityContext: evidence.activity_context }),
+      this.store.listSkills({ activityContext: evidence.activity_context }),
+      this.store.listWiki({ activeOnly: false, activityContext: evidence.activity_context }),
+      Promise.resolve(evidence.used_learning_resources)
     ]);
+    const usedWikiFragments = (await Promise.all(learningUses.filter((use) => use.resource_kind === "wiki").map(async (use) => {
+      const wiki = await this.store.getWiki(use.resource_id);
+      if (!wiki || !usageScopeAllowsActivity(wiki.usage_scope, evidence.activity_context)) return undefined;
+      return {
+        id: use.resource_id,
+        ...(use.resource_version ? { version: use.resource_version } : {}),
+        ...(typeof use.metadata.purpose === "string" ? { purpose: use.metadata.purpose } : {}),
+        ...(typeof use.metadata.section_ref === "string" ? { section_ref: use.metadata.section_ref } : {}),
+        content: (await this.store.readWikiContent(use.resource_id)) ?? ""
+      };
+    }))).filter((item): item is NonNullable<typeof item> => Boolean(item?.content.length));
     return {
-      source_session_id: input.session.id,
-      source_run_id: input.sourceRunId,
-      activity_context: input.activityContext,
-      messages: input.transcriptMessages ?? await this.store.listMessages(input.session.id),
-      artifacts: (input.artifacts ?? []).map((artifact) => ({ record: artifact.artifact, content: artifact.content })),
-      backend_run: input.backendRun,
-      backend_events: input.backendEvents,
-      tool_runs: input.toolRuns,
-      workspace_changes: input.workspaceChanges,
+      source_session_id: evidence.session.id,
+      source_run_id: evidence.backend_run.id,
+      activity_context: evidence.activity_context,
+      messages: [evidence.input_message, ...(evidence.output_message ? [evidence.output_message] : [])],
+      artifacts: (await this.loadReflectionArtifacts({
+        sessionId: evidence.session.id,
+        sourceRunId: evidence.backend_run.id,
+        workspaceChanges: evidence.workspace_changes
+      })).map((artifact) => ({ record: artifact.artifact, content: artifact.content })),
+      backend_run: evidence.backend_run,
+      backend_events: evidence.backend_events,
+      tool_runs: evidence.tool_runs,
+      workspace_changes: evidence.workspace_changes,
       used_learning_resources: actualLearningResourceUses(learningUses),
       existing_memory_catalog: memories.map((memory) => ({ id: memory.id, title: memory.topic, state: memory.state, version: memory.updated_at })),
       existing_skill_catalog: skills.map((skill) => ({ id: skill.id, title: skill.title, state: skill.state, version: skill.frontmatter.last_reviewed_at, summary: skill.description })),
       existing_wiki_catalog: wikiPages.map((wiki) => ({ id: wiki.id, title: wiki.title, state: wiki.state, version: wiki.updated_at, summary: wiki.tags.join(", ") })),
-      used_wiki_fragments: (await Promise.all(learningUses.filter((use) => use.resource_kind === "wiki").map(async (use) => ({
-        id: use.resource_id,
-        version: use.resource_version,
-        purpose: typeof use.metadata.purpose === "string" ? use.metadata.purpose : undefined,
-        section_ref: typeof use.metadata.section_ref === "string" ? use.metadata.section_ref : undefined,
-        content: (await this.store.readWikiContent(use.resource_id)) ?? ""
-      })))).filter((item) => item.content.length > 0)
+      used_wiki_fragments: usedWikiFragments
     };
   }
 
@@ -11294,4 +11321,20 @@ function sameUsageScope(left: UsageScopeRef, right: UsageScopeRef): boolean {
   if (left.kind === "room" && right.kind === "room") return left.room_id === right.room_id;
   if (left.kind === "agent" && right.kind === "agent") return left.agent_id === right.agent_id;
   return left.kind === "session" && right.kind === "session" && left.session_id === right.session_id;
+}
+
+function learningResourceUseRecordId(input: {
+  runId: string;
+  resourceKind: string;
+  resourceId: string;
+  stage: string;
+  contentHash: string;
+}): string {
+  return `learning_use_${stableHash({
+    run_id: input.runId,
+    resource_kind: input.resourceKind,
+    resource_id: input.resourceId,
+    stage: input.stage,
+    content_hash: input.contentHash
+  })}`;
 }

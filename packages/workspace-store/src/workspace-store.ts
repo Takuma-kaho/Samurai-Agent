@@ -433,6 +433,7 @@ export class WorkspaceStore {
     facade.writeSkillSupportFile = skills.writeSkillSupportFile.bind(skills);
     facade.readSkillSupportFile = skills.readSkillSupportFile.bind(skills);
     facade.listSkillSupportFiles = skills.listSkillSupportFiles.bind(skills);
+    facade.listSkillSupportFileRefs = skills.listSkillSupportFileRefs.bind(skills);
     facade.searchSkills = skills.searchSkills.bind(skills);
 
     facade.recordLearningResourceUse = learning.recordLearningResourceUse.bind(learning);
@@ -747,6 +748,7 @@ export interface WorkspaceStore {
   writeSkillSupportFile: SkillRepository["writeSkillSupportFile"];
   readSkillSupportFile: SkillRepository["readSkillSupportFile"];
   listSkillSupportFiles: SkillRepository["listSkillSupportFiles"];
+  listSkillSupportFileRefs: SkillRepository["listSkillSupportFileRefs"];
   searchSkills: SkillRepository["searchSkills"];
 
   recordLearningResourceUse: LearningRepository["recordLearningResourceUse"];

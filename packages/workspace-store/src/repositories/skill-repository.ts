@@ -23,7 +23,7 @@ import {
 } from "@samurai-agent/core-schemas";
 import { sql, type Kysely } from "kysely";
 import type { SkillIndexTable, SkillUsageTable, WorkspaceDb } from "../kernel/workspace-db-schema";
-import type { SkillReindexResult, SkillSupportFile, SkillWithFilePath, WorkspaceHealthReport } from "../workspace-store-contracts";
+import type { SkillReindexResult, SkillSupportFile, SkillSupportFileRef, SkillWithFilePath, WorkspaceHealthReport } from "../workspace-store-contracts";
 import { compareScoredSearch, scoreSearchFields, searchTerms, stateSearchBoost } from "../search/scoring";
 import { readManagedResourceFiles } from "./managed-resource-file-scan";
 import { skillFromRow, skillToRow, skillUsageFromRow } from "./memory-skill-row-codecs";
@@ -37,7 +37,6 @@ import {
   listRelativeFiles,
   normalizeSkillSupportPath,
   parseSkillMarkdownLocal,
-  readWorkspaceText,
   stripFrontmatter
 } from "./workspace-file-codecs";
 
@@ -646,6 +645,14 @@ async listSkillSupportFiles(skillId: string): Promise<SkillSupportFile[]> {
   return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 
+async listSkillSupportFileRefs(skillId: string): Promise<SkillSupportFileRef[]> {
+  const supportRoot = path.join(this.rootDir, "skills", "support", skillId);
+  const filePaths = await listRelativeFiles(supportRoot).catch(() => []);
+  return filePaths
+    .map((supportPath) => ({ skill_id: skillId, path: supportPath, file_path: path.join("skills", "support", skillId, supportPath) }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
 async searchSkills(
   query: string,
   limit = 5,
@@ -665,22 +672,18 @@ async searchSkills(
   }
   const rows = await dbQuery.orderBy("updated_at", "desc").execute();
   const terms = searchTerms(query);
-  const scored = await Promise.all(
-    rows.map(async (row) => {
+  const scored = rows.map((row) => {
       const skill = skillFromRow(row);
-      const markdown = await readWorkspaceText(this.rootDir, row.file_path);
       const score = terms.length === 0
         ? stateSearchBoost(skill.state)
         : scoreSearchFields(terms, [
           { value: row.title, weight: 12 },
           { value: row.description, weight: 9 },
           { value: row.tags_json, weight: 5 },
-          { value: stripFrontmatter(markdown), weight: 8 },
           { value: row.required_capabilities_json, weight: 3 }
         ]) + stateSearchBoost(skill.state);
       return { item: skill, score, updatedAt: row.updated_at };
-    })
-  );
+    });
   return scored
     .filter((entry) => terms.length === 0 ? entry.score > 0 : entry.score > stateSearchBoost(entry.item.state))
     .sort(compareScoredSearch)

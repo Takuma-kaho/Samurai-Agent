@@ -82,7 +82,6 @@ async recordLearningResourceUse(record: LearningResourceUseRecord): Promise<Lear
       AND resource_kind = ${record.resource_kind}
       AND resource_id = ${record.resource_id}
       AND stage = ${record.stage}
-      AND COALESCE(source_operation_id, '') = COALESCE(${record.source_operation_id ?? null}, '')
     LIMIT 1
   `.execute(this.db);
   const row = existing.rows[0];

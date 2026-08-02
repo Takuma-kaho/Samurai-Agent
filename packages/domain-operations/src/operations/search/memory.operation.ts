@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
+import { defineQuery, TrustedDomainContextError, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
 
 const Input = z.object({ query: z.string().max(10_000).default(""), limit: z.number().int().min(1).max(8).default(5) }).strict();
 const SearchResult = z.object({
@@ -11,12 +11,12 @@ const SearchResult = z.object({
 const Output = z.array(SearchResult).max(8);
 
 export interface MemorySearchPorts extends DomainQueryPorts {
-  searchMemory: ReadCapability<(query: string, limit: number) => Promise<z.infer<typeof Output>>>;
+  searchMemory: ReadCapability<(runId: string, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
 }
 
 const memorySearch = defineQuery<MemorySearchPorts>()({
   id: "memory.search",
-  version: "4.0",
+  version: "4.1",
   availability: "active",
   title: "Search memory",
   description: "Search active memory.",
@@ -32,8 +32,9 @@ const memorySearch = defineQuery<MemorySearchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleMemorySearch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await ports.searchMemory(input.query, input.limit)) };
+      execute: async function handleMemorySearch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        if (!context.runId) throw new TrustedDomainContextError("memory.search", "runId");
+        return { ok: true, value: Output.parse(await ports.searchMemory(context.runId, input.query, input.limit)) };
       }
     };
   }

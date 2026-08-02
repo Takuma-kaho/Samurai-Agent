@@ -176,7 +176,7 @@ export function selectSkillSupportFiles(files: SkillSupportFile[], query: string
 export function describeSkillSelection(
   level: SkillDisclosureLevel,
   index: number,
-  supportFiles: SkillSupportFile[],
+  supportFiles: Array<Pick<SkillSupportFile, "path">>,
   usage?: { use_count: number; last_used_at?: string },
   selection?: RuntimeSkillSelection
 ): string {

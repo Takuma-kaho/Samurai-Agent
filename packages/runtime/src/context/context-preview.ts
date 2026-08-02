@@ -2,7 +2,7 @@ import { nowIso, type BackendRunRecord, type ContextPreview, type FreezeSnapshot
 import { activeMemoryPreviewEntry, buildHostContextAssembly, hostContextAssemblyLimits, shouldIncludeSessionSearchInBackendContext } from "./context-assembly.js";
 import { emptyExternalAssistContext } from "./external-assist-context.js";
 import { selectCollectionNotes, type CollectionContextNote } from "./collection-context.js";
-import { selectRuntimeSkills, decideSkillDisclosureLevel, describeSkillSelection, selectSkillSupportFiles, skillAllowedScopes, skillRef, type SkillContextEnvironment, type SkillContextSkill, type SkillSupportFile } from "./skill-context.js";
+import { selectRuntimeSkills, describeSkillSelection, skillAllowedScopes, skillRef, type SkillContextEnvironment, type SkillContextSkill } from "./skill-context.js";
 import { timeboxContextStep, timeboxContextValue } from "./timebox.js";
 import type { KnowledgeWikiContext } from "./workspace-context-candidates.js";
 import { memoryRef } from "./resource-refs.js";
@@ -44,8 +44,7 @@ export interface ContextPreviewWikiPort {
 export interface ContextPreviewSkillsPort {
   search(query: string, limit: number, activityContext?: { room_id: string; session_id: string; agent_id: string }): Promise<SkillContextSkill[]>;
   listUsage(): Promise<SkillUsageRecord[]>;
-  readBody(skillId: string): Promise<string | undefined>;
-  listSupportFiles(skillId: string): Promise<SkillSupportFile[]>;
+  listSupportFileRefs(skillId: string): Promise<Array<{ skill_id: string; path: string; file_path: string }>>;
   environment: SkillContextEnvironment;
 }
 
@@ -142,14 +141,15 @@ export async function buildContextPreview(input: BuildContextPreviewInput): Prom
   const activityContext = session.room_id && scopedAgentId
     ? { room_id: session.room_id, session_id: session.id, agent_id: scopedAgentId }
     : undefined;
+  const knowledgeAvailable = !skipHeavyContext && Boolean(activityContext);
   const sessionSearchQuery = !skipHeavyContext && query.trim()
     ? timeboxContextStep(ports.sessionSearch.search(query), [], "session_search")
     : Promise.resolve(timeboxContextValue<ContextPreviewSearchResult[]>([], false));
   const [activeMemoryResult, knowledgeWikiContext, skillCandidates, skillUsage, collectionSchemas, messages, operations, backendRuns, toolRuns, workspaceChanges, searchResults] = await Promise.all([
-    skipHeavyContext ? Promise.resolve(emptyMemory()) : timeboxContextStep(ports.memory.retrieve(query, activityContext), emptyMemory(), "active_memory").then((result) => result.value),
-    skipHeavyContext ? Promise.resolve(emptyWiki()) : timeboxContextStep(ports.wiki.build(query, activityContext), emptyWiki(), "knowledge_wiki").then((result) => result.value),
-    skipHeavyContext ? Promise.resolve([]) : timeboxContextStep(ports.skills.search(query, 12, activityContext), [], "selected_skills").then((result) => result.value),
-    skipHeavyContext ? Promise.resolve([]) : ports.skills.listUsage(),
+    knowledgeAvailable ? timeboxContextStep(ports.memory.retrieve(query, activityContext), emptyMemory(), "active_memory").then((result) => result.value) : Promise.resolve(emptyMemory()),
+    knowledgeAvailable ? timeboxContextStep(ports.wiki.build(query, activityContext), emptyWiki(), "knowledge_wiki").then((result) => result.value) : Promise.resolve(emptyWiki()),
+    knowledgeAvailable ? timeboxContextStep(ports.skills.search(query, 12, activityContext), [], "selected_skills").then((result) => result.value) : Promise.resolve([]),
+    knowledgeAvailable ? ports.skills.listUsage() : Promise.resolve([]),
     skipHeavyContext ? Promise.resolve([]) : ports.collections.listSchemas(),
     ports.summary.listMessages(sessionId),
     ports.summary.listOperations(sessionId),
@@ -167,7 +167,7 @@ export async function buildContextPreview(input: BuildContextPreviewInput): Prom
   const activeMemory = activeMemoryResult.candidates;
   const skillSelection = selectRuntimeSkills({ candidates: skillCandidates, query, limit: hostContextAssemblyLimits.selected_skills, environment: ports.skills.environment });
   const selectedSkills = skillSelection.selected.map((item) => item.skill);
-  const freezeSnapshot = skipHeavyContext
+  const freezeSnapshot = !knowledgeAvailable
     ? undefined
     : await ports.memory.loadFreezeSnapshot({
         memoryRefs: activeMemory.map((memory) => memoryRef(memory.frontmatter)),
@@ -177,11 +177,9 @@ export async function buildContextPreview(input: BuildContextPreviewInput): Prom
   const skillUsageById = new Map(skillUsage.map((usage) => [usage.skill_id, usage]));
   const skillSelectionById = new Map(skillSelection.selected.map((item) => [item.skill.id, item.selection]));
   const selectedSkillEntries = await Promise.all(selectedSkills.map(async (skill, index) => {
-    const markdownContent = (await ports.skills.readBody(skill.id)) ?? "";
-    const supportFiles = await ports.skills.listSupportFiles(skill.id);
-    const matchedSupportFiles = selectSkillSupportFiles(supportFiles, query);
+    const supportFileRefs = await ports.skills.listSupportFileRefs(skill.id);
     const usage = skillUsageById.get(skill.id);
-    const disclosureLevel = decideSkillDisclosureLevel({ skill, index, query, content: markdownContent, matchedSupportFiles });
+    const disclosureLevel = "catalog" as const;
     return {
       id: skill.id,
       title: skill.title,
@@ -190,12 +188,12 @@ export async function buildContextPreview(input: BuildContextPreviewInput): Prom
       allowed_scopes: skillAllowedScopes(skill),
       required_capabilities: skill.required_capabilities,
       disclosure_level: disclosureLevel,
-      selection_reason: describeSkillSelection(disclosureLevel, index, matchedSupportFiles, usage, skillSelectionById.get(skill.id)),
+      selection_reason: describeSkillSelection(disclosureLevel, index, supportFileRefs, usage, skillSelectionById.get(skill.id)),
       selection: skillSelectionById.get(skill.id),
       usage: usage ? { use_count: usage.use_count, ...(usage.last_used_at ? { last_used_at: usage.last_used_at } : {}) } : undefined,
-      content: disclosureLevel === "catalog" ? undefined : markdownContent,
-      support_file_refs: supportFiles.map((file) => ({ path: file.path, file_path: file.file_path })),
-      support_files: disclosureLevel === "support" ? matchedSupportFiles.map((file) => ({ path: file.path, file_path: file.file_path, content: file.content.trim() })) : undefined
+      content: undefined,
+      support_file_refs: supportFileRefs.map((file) => ({ path: file.path, file_path: file.file_path })),
+      support_files: undefined
     };
   }));
   const allCollectionNotes = (await Promise.all(collectionSchemas.map((schema) => ports.collections.listNotes(schema.id)))).flat();
@@ -232,7 +230,11 @@ export async function buildContextPreview(input: BuildContextPreviewInput): Prom
     externalAssistHintCount: externalAssist.hints.length,
     externalAssistFailureCount: externalAssist.recent_failures.length,
     availableToolCount: availableTools.length,
-    skippedSourceKinds: skipHeavyContext ? new Set(["freeze_snapshot", "active_memory", "knowledge_wiki", "collection_notes", "selected_skills", "session_search", "external_assist"]) : sessionSearchTimedOut ? new Set(["session_search"]) : undefined
+    skippedSourceKinds: !knowledgeAvailable
+      ? new Set<"freeze_snapshot" | "active_memory" | "knowledge_wiki" | "selected_skills" | "collection_notes" | "session_search" | "external_assist">([
+          "freeze_snapshot", "active_memory", "knowledge_wiki", "selected_skills", ...(skipHeavyContext ? ["collection_notes", "session_search", "external_assist"] as const : [])
+        ])
+      : sessionSearchTimedOut ? new Set<"session_search">(["session_search"]) : undefined
   });
   return {
     session_id: sessionId,

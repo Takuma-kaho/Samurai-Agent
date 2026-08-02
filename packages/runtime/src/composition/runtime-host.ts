@@ -9,7 +9,6 @@ import {
   type ExternalAssistRecord,
   type GatewayBoundaryPolicy,
   type JsonValue,
-  type MessageRecord,
   type SessionRecord,
   type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
@@ -50,19 +49,6 @@ export interface HostExternalAssistSyncInput {
   role: "assistive" | "disabled";
 }
 
-export interface HostLearningReviewInput {
-  session: SessionRecord;
-  backendRun: BackendRunRecord;
-  userMessage: MessageRecord;
-  agentMessage?: MessageRecord;
-  backendEvents: BackendEventRecord[];
-  workspaceChanges: WorkspaceChangeRecord[];
-  toolRuns: Awaited<ReturnType<WorkspaceStore["listToolRuns"]>>;
-  transcriptMessages: MessageRecord[];
-  artifacts: unknown[];
-  abortSignal: AbortSignal;
-}
-
 export interface HostToolInput {
   run: BackendRunRecord;
   runInput: BackendRunInput;
@@ -98,14 +84,6 @@ export interface RuntimeHostCompositionDependencies {
   postTurn: {
     saveGeneratedSurfacePresentations(input: { sessionId: string; messageId: string; runId: string }): Promise<void>;
     runExternalAssistSync(input: HostExternalAssistSyncInput): Promise<ExternalAssistRecord[]>;
-    runLearningReview(input: HostLearningReviewInput): Promise<unknown>;
-    loadReflectionArtifacts(input: { sessionId: string; sourceRunId: string; workspaceChanges: WorkspaceChangeRecord[] }): Promise<unknown[]>;
-    backgroundReview: {
-      readonly abortSignal: AbortSignal;
-      readonly detach: boolean;
-      isClosing(): boolean;
-      schedule(input: { runId: string; run: () => Promise<unknown> }): void;
-    };
   };
   diagnostics: {
     formatError(error: unknown): string;
@@ -351,55 +329,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
           run.metadata = updated.metadata;
         }
       },
-      learningReview: {
-        operationId: "learning_review",
-        run: async ({ admitted, run }) => {
-          const settings = await deps.core.store.getSettings();
-          const autoLearningEnabled = settings.memory_capture_mode === "auto" || settings.skill_capture_mode === "auto";
-          if (!autoLearningEnabled) return;
-          const agentMessage = (await deps.core.store.listMessages(run.session_id)).find((message) => message.id === run.output_message_id);
-          const review = async () => {
-            const workspaceChanges = (await deps.core.store.listWorkspaceChanges(run.session_id)).filter((change) => change.run_id === run.id);
-            const result = await deps.postTurn.runLearningReview({
-              session: admitted.session,
-              backendRun: run,
-              userMessage: admitted.userMessage,
-              agentMessage,
-              backendEvents: await deps.core.store.listBackendEvents({ runId: run.id }),
-              workspaceChanges,
-              toolRuns: await deps.core.store.listToolRuns({ runId: run.id }),
-              transcriptMessages: await deps.core.store.listMessages(run.session_id),
-              artifacts: await deps.postTurn.loadReflectionArtifacts({ sessionId: run.session_id, sourceRunId: run.id, workspaceChanges }),
-              abortSignal: deps.postTurn.backgroundReview.abortSignal
-            });
-            const failure = learningReviewFailure(result);
-            if (failure) throw new Error(failure);
-            return result;
-          };
-          // A Web Chat facade must not return while its Learning Review is
-          // still running. Gateway/Automation keep their existing detached
-          // background behavior; their durable work is outside this turn's
-          // response contract.
-          const isChatTurn = admitted.request.envelope.source === "web";
-          if (!isChatTurn && deps.postTurn.backgroundReview.detach && !deps.postTurn.backgroundReview.isClosing()) {
-            deps.postTurn.backgroundReview.schedule({ runId: run.id, run: review });
-            return;
-          }
-          await review();
-        }
-      }
     },
     resolveDefaultBackendId: () => deps.preparation.resolveDefaultBackendId()
   });
-}
-
-function learningReviewFailure(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const reflectionRun = (value as { reflectionRun?: unknown }).reflectionRun;
-  if (!reflectionRun || typeof reflectionRun !== "object" || Array.isArray(reflectionRun)) return undefined;
-  const record = reflectionRun as { status?: unknown; error?: unknown; output_summary?: unknown };
-  if (record.status !== "failed") return undefined;
-  if (typeof record.error === "string" && record.error.trim()) return `learning_review_failed:${record.error}`;
-  if (typeof record.output_summary === "string" && record.output_summary.trim()) return `learning_review_failed:${record.output_summary}`;
-  return "learning_review_failed";
 }

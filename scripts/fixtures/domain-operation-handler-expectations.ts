@@ -122,9 +122,9 @@ export const handlerExpectations = {
   },
   "session.search.reindex": { input: {}, calls: [{ method: "reindexSessionSearch", args: [] }] },
   "session.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSessions", args: ["fixture", 5] }] },
-  "memory.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchMemory", args: ["fixture", 5] }] },
-  "wiki.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchWiki", args: ["fixture", 5] }] },
-  "skill.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSkills", args: ["fixture", 5] }] },
+  "memory.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchMemory", args: ["run_fixture", "fixture", 5] }] },
+  "wiki.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchWiki", args: ["run_fixture", "fixture", 5] }] },
+  "skill.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSkills", args: ["run_fixture", "fixture", 5] }] },
   "collection.search": { input: { collection_id: "collection_fixture", query: "fixture", limit: 5 }, calls: [{ method: "searchCollections", args: ["collection_fixture", "fixture", 5] }] },
   "learning.snapshot.prune": {
     input: { retain: 5 },

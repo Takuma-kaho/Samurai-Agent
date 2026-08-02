@@ -295,13 +295,13 @@ await run("session.search", () => sessionSearch.createHandler({
   searchSessions(query, limit) { return record("session.search", "searchSessions", [query, limit], searchSessionOutput); }
 }).execute(context, handlerExpectations["session.search"].input));
 await run("memory.search", () => memorySearch.createHandler({
-  searchMemory(query, limit) { return record("memory.search", "searchMemory", [query, limit], searchMemoryOutput); }
+  searchMemory(runId, query, limit) { return record("memory.search", "searchMemory", [runId, query, limit], searchMemoryOutput); }
 }).execute(context, handlerExpectations["memory.search"].input));
 await run("wiki.search", () => wikiSearch.createHandler({
-  searchWiki(query, limit) { return record("wiki.search", "searchWiki", [query, limit], searchWikiOutput); }
+  searchWiki(runId, query, limit) { return record("wiki.search", "searchWiki", [runId, query, limit], searchWikiOutput); }
 }).execute(context, handlerExpectations["wiki.search"].input));
 await run("skill.search", () => skillSearch.createHandler({
-  searchSkills(query, limit) { return record("skill.search", "searchSkills", [query, limit], searchSkillOutput); }
+  searchSkills(runId, query, limit) { return record("skill.search", "searchSkills", [runId, query, limit], searchSkillOutput); }
 }).execute(context, handlerExpectations["skill.search"].input));
 await run("collection.search", () => collectionSearch.createHandler({
   searchCollections(collectionId, query, limit) { return record("collection.search", "searchCollections", [collectionId, query, limit], searchCollectionOutput); }

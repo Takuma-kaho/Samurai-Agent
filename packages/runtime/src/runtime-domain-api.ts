@@ -38,9 +38,15 @@ export class RuntimeDomainApi {
   }
 
   async recordSkillUsage(input: { skillId: string; runId: string; resourceId: string; contentHash: string; stage: string; metadata: Record<string, JsonValue> }): Promise<unknown> {
+    const idempotencyKey = `skill_usage:${stableHash({
+      run_id: input.runId,
+      resource_id: input.resourceId,
+      stage: input.stage,
+      content_hash: input.contentHash
+    })}`;
     const result = await this.dispatcher.command({
       command_id: domainOperationIdFor("skillUsageRecord"),
-      idempotency_key: "skill_usage_request",
+      idempotency_key: idempotencyKey,
       payload: {
         skill_id: input.skillId,
         resource_id: input.resourceId,

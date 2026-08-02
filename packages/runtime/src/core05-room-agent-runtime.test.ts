@@ -230,7 +230,7 @@ describe("Core 05 Room and Agent runtime path", () => {
     }));
     expect(reviewSnapshots).toEqual(expect.arrayContaining([
       { room_id: roomA.id, session_id: sessionA.id, agent_id: agentA.id },
-      { room_id: roomB.id, session_id: sessionB.id, agent_id: agentB.id }
+      { room_id: roomB.id, session_id: defaultSession.id, agent_id: agentB.id }
     ]));
     expect(reflections).toContainEqual(expect.objectContaining({
       source_run_id: first.backendRun.id,
@@ -312,6 +312,7 @@ describe("Core 05 Room and Agent runtime path", () => {
     await store.saveMemory(memory("memory_room_b", "Room B only", { kind: "room", room_id: roomB.id }), "Room B original.");
     const session = await runtime.createSession({ room_id: roomA.id });
     const turn = await runtime.runChatTurn({ sessionId: session.id, agent_id: agent.id, content: "Review this task" });
+    await runtime.runReflection({ sessionId: session.id, sourceRunId: turn.backendRun.id });
     const [content, changes, reflections] = await Promise.all([
       store.readMemoryContent("memory_room_b"),
       store.listBackgroundReviewChanges({ sourceRunId: turn.backendRun.id }),
