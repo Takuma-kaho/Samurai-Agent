@@ -226,6 +226,7 @@ const evaluationReport = {
   run_scores: [],
   comparisons: []
 };
+const evaluationOutput = { reflectionRun: { ...reflectionRunRecord, kind: "evaluation" }, suggestions: [], evaluationReport, learningEvaluations: [] };
 const curatorReport = {
   id: "curator_report_fixture",
   checked_at: now,
@@ -542,7 +543,7 @@ function markGeneratedWiki(tracker: DynamicValueTracker, value: Record<string, u
 }
 
 async function runCuratorCases(): Promise<void> {
-  for (const caseId of ["idle-gate-omitted", "idle-gate-enabled"] as const) {
+  for (const caseId of ["idle-gate-omitted", "idle-gate-enabled", "reason-driven-resource"] as const) {
     const testCase = caseFor("curator.run", caseId);
     await runCase("curator.run", testCase, (fixture) => ({
       runCurator(input: unknown) {
@@ -554,7 +555,7 @@ async function runCuratorCases(): Promise<void> {
 }
 
 async function runEvaluationCase(): Promise<void> {
-  const testCase = caseFor("evaluation.run", "empty-input");
+  const testCase = caseFor("evaluation.run", "source-run");
   const evaluationRunRecord = {
     id: "reflection_evaluation_fixture",
     kind: "evaluation",
@@ -564,6 +565,7 @@ async function runEvaluationCase(): Promise<void> {
     started_at: now
   };
   await runCase("evaluation.run", testCase, (fixture) => ({
+    runAppliedEvaluation: async (input: unknown) => { fixture.record("runAppliedEvaluation", [input]); return evaluationOutput; },
     ensureEvaluationSession: async () => {
       fixture.record("ensureEvaluationSession", []);
       return { id: "session_fixture" };
@@ -1222,7 +1224,7 @@ const branchAstEvidence: Record<string, readonly BranchAstEvidence[]> = {
     { branch: "idle_gate:omitted", file: "curator/run.operation.ts", nodeText: "input.respect_idle_gate === undefined" },
     { branch: "idle_gate:present", file: "curator/run.operation.ts", nodeText: "respectIdleGate: input.respect_idle_gate" }
   ],
-  "evaluation.run": [{ branch: "evaluation:empty-input", file: "evaluation/run.operation.ts", nodeText: "const Input = z.object({}).strict()" }],
+  "evaluation.run": [],
   "memory.archive": [{ branch: "archive:session-linked-memory", file: "memory/archive.operation.ts", nodeText: "sessionMemory.some" }],
   "memory.session.create": [
     { branch: "session:existing", file: "memory/create-memory.ts", nodeText: "input.sessionId" },

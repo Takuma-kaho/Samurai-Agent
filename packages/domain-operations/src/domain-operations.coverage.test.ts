@@ -6,7 +6,7 @@ import gatewayMcpConfigSave from "./operations/gateway/mcp_config/save.operation
 import gatewayInboundRoute from "./operations/gateway/inbound/route.operation.js";
 
 describe("Domain Operation strict gate coverage", () => {
-  it("loads and executes the complete 128-operation strict gate", () => {
+  it("loads and executes the complete 132-operation strict gate", () => {
     expect(true).toBe(true);
   });
 
@@ -192,6 +192,7 @@ describe("Domain Operation strict gate coverage", () => {
             "reindexSessionSearch", "saveClientEvent", "transitionObjective", "saveObjective", "searchCollections",
             "saveGeneratedSurfaceInteraction", "saveWorkItem", "searchWiki", "searchSessions", "searchSkills",
             "resumeCurator", "pruneLearningSnapshots", "pauseCurator", "searchMemory", "extractBrowserPage",
+            "applyBackgroundReviewMutations", "recordAppliedLearningResourceUse", "restoreLearningResourceVersion", "updateLearningResourceVersion",
             "runCurator", "repairWorkspace", "restoreWorkspaceBackup", "createCuratorSnapshot", "createWorkspaceBackup",
             "listCuratorSnapshots", "restoreCuratorSnapshot", "presentCollectionView", "viewSkill", "inspectWorkspaceFile", "readCollectionSchemaDocs",
             "readWorkspaceFile", "runChatTurn", "listWorkspaceFiles", "recordSkillUsage", "cancelSkillOptimization",
@@ -272,10 +273,12 @@ describe("Domain Operation strict gate coverage", () => {
       const generatedInput = sample(jsonSchemaFor(definition.input, `${definition.id}.input`));
       const input = definition.input.parse(definition.id === "resource.translation_job.save"
         ? { ...(generatedInput as Record<string, unknown>), source_ref: { kind: "artifact", id: "sample", uri: "artifacts/sample.md" } }
-        : definition.id === "skill.optimization.rollback"
-          ? { ...(generatedInput as Record<string, unknown>), promotion_id: "sample" }
+          : definition.id === "skill.optimization.rollback"
+            ? { ...(generatedInput as Record<string, unknown>), promotion_id: "sample" }
           : definition.id === "agent.patch"
             ? { ...(generatedInput as Record<string, unknown>), name: "sample" }
+          : definition.id === "learning.resource.version.update"
+            ? { ...(generatedInput as Record<string, unknown>), content: "fixture content" }
           : generatedInput);
       const context = {
         inputSource: definition.sources[0]!,
@@ -285,11 +288,15 @@ describe("Domain Operation strict gate coverage", () => {
         ...(definition.id === "chat.turn.run" ? { idempotencyKey: "coverage-chat-turn" } : {}),
         ...(definition.id === "generated_surface.create" || definition.id === "generated_surface.revise"
           ? { sessionId: "surface-session", runId: "surface-run" }
+          : definition.id === "learning.background_review.apply"
+            ? { sessionId: "reflection-session" }
+            : definition.id === "learning.resource.usage.record"
+              ? { runId: "learning-resource-run" }
           : definition.id === "memory.archive"
             ? { sessionId: "memory-session" }
             : definition.id === "reflection.run"
               ? { sessionId: reflectionSessionId }
-              : definition.id === "skill.usage.record" || definition.id === "skill.view"
+              : definition.id === "memory.search" || definition.id === "wiki.search" || definition.id === "skill.search" || definition.id === "skill.usage.record" || definition.id === "skill.view"
                 ? { runId: "skill-run" }
           : {})
       };
@@ -318,8 +325,8 @@ describe("Domain Operation strict gate coverage", () => {
       if (count === 0 && definition.id !== "presentation.plan") throw new Error(`${definition.id} did not call its Port`);
     }
 
-    expect(bindings).toHaveLength(128);
-    expect(portCalls.size).toBe(127);
+    expect(bindings).toHaveLength(132);
+    expect(portCalls.size).toBe(131);
 
     for (const operationId of ["artifact.create", "chat.turn.run"] as const) {
       const binding = bindings.find((candidate) => candidate.definition.id === operationId)!;

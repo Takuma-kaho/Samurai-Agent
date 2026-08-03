@@ -21,6 +21,10 @@ import fileInspect from "../../packages/domain-operations/src/operations/file/in
 import fileList from "../../packages/domain-operations/src/operations/file/list.operation";
 import fileRead from "../../packages/domain-operations/src/operations/file/read.operation";
 import gatewayConcurrencyLockExpire from "../../packages/domain-operations/src/operations/gateway/concurrency_lock/expire.operation";
+import learningBackgroundReviewApply from "../../packages/domain-operations/src/operations/learning/background_review/apply.operation";
+import learningResourceUsageRecord from "../../packages/domain-operations/src/operations/learning/resource/usage/record.operation";
+import learningResourceVersionRestore from "../../packages/domain-operations/src/operations/learning/resource/version/restore.operation";
+import learningResourceVersionUpdate from "../../packages/domain-operations/src/operations/learning/resource/version/update.operation";
 import learningSnapshotPrune from "../../packages/domain-operations/src/operations/learning/snapshot/prune.operation";
 import objectiveTransition from "../../packages/domain-operations/src/operations/objective/transition.operation";
 import pluginStatusSet from "../../packages/domain-operations/src/operations/plugin/status/set.operation";
@@ -88,10 +92,27 @@ const searchWikiOutput = [{ id: "wiki_fixture", slug: "fixture", title: "Fixture
 const searchSkillOutput = [{ id: "skill_fixture", title: "Fixture skill", description: "Fixture", tags: ["fixture"], file_path: "skills/fixture/SKILL.md" }];
 const searchCollectionOutput = [{ kind: "collection_schema" as const, id: "collection_fixture", file_path: "collections/collection_fixture/schema.json" }];
 const learningSnapshotPruneOutput = { retained: 5, removed: ["snapshot_old"] };
+const learningBackgroundReviewApplyOutput = { suggestions: [] };
+const learningResourceUsageOutput = {
+  use_record: {
+    id: "learning_use_fixture", run_id: "run_fixture", session_id: "session_fixture", resource_kind: "skill" as const,
+    resource_id: "resource_fixture", resource_version: "1", content_hash: "hash_fixture", usage_scope: { kind: "room" as const, room_id: "room_fixture" },
+    stage: "applied" as const, source_operation_id: "learning.resource.usage.record", decision_summary: "Use the resource for this decision.", matched_conditions: ["fixture condition"],
+    metadata: { source: "fixture" }, created_at: now
+  }
+};
+const learningResourceVersionOutput = {
+  resource_version: {
+    id: "learning_resource_version_fixture", resource_kind: "wiki" as const, resource_id: "resource_fixture", version: "2", parent_version: "1",
+    file_path: "wiki/pages/resource_fixture.md", content_hash: "hash_fixture", change_reason: "Apply the reviewed update.", source_run_ids: ["run_fixture"],
+    actor: "fixture", is_current: true, restored_from_version: "1", created_at: now
+  }
+};
 const settingsOutput = {
   ui_locale: "en" as const, output_locale: "ja" as const, memory_capture_mode: "manual" as const,
   knowledge_wiki_capture_mode: "auto" as const, skill_capture_mode: "auto" as const,
-  external_provider_role: "assistive" as const, updated_at: now
+  external_provider_role: "assistive" as const, learning_enabled: true, learning_budget_ratio: 0.1,
+  learning_budget_window_days: 7, updated_at: now
 };
 const skillUsageOutput = {
   use_record: {
@@ -241,6 +262,22 @@ await run("session.search.reindex", () => sessionSearchReindex.createHandler({
 await run("learning.snapshot.prune", () => learningSnapshotPrune.createHandler({
   pruneLearningSnapshots(input) { return record("learning.snapshot.prune", "pruneLearningSnapshots", [input], learningSnapshotPruneOutput); }
 }).execute(context, handlerExpectations["learning.snapshot.prune"].input));
+
+await run("learning.background_review.apply", () => learningBackgroundReviewApply.createHandler({
+  applyBackgroundReviewMutations(input) { return record("learning.background_review.apply", "applyBackgroundReviewMutations", [input], learningBackgroundReviewApplyOutput); }
+}).execute(context, handlerExpectations["learning.background_review.apply"].input));
+
+await run("learning.resource.usage.record", () => learningResourceUsageRecord.createHandler({
+  recordAppliedLearningResourceUse(input) { return record("learning.resource.usage.record", "recordAppliedLearningResourceUse", [input], learningResourceUsageOutput); }
+}).execute(context, handlerExpectations["learning.resource.usage.record"].input));
+
+await run("learning.resource.version.restore", () => learningResourceVersionRestore.createHandler({
+  restoreLearningResourceVersion(input) { return record("learning.resource.version.restore", "restoreLearningResourceVersion", [input], learningResourceVersionOutput); }
+}).execute(context, handlerExpectations["learning.resource.version.restore"].input));
+
+await run("learning.resource.version.update", () => learningResourceVersionUpdate.createHandler({
+  updateLearningResourceVersion(input) { return record("learning.resource.version.update", "updateLearningResourceVersion", [input], learningResourceVersionOutput); }
+}).execute(context, handlerExpectations["learning.resource.version.update"].input));
 
 await run("objective.transition", () => objectiveTransition.createHandler({
   transitionObjective(id, action) { return record("objective.transition", "transitionObjective", [id, action], { objective: objectiveOutput, workItems: [workItemOutput], cancelBackendRunIds: ["run_fixture"] }); }
