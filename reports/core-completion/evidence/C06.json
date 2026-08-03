@@ -3,10 +3,10 @@
   "test_id": "C06",
   "command": "pnpm core:test:search-index",
   "status": "passed",
-  "commit_sha": "bef9e992ab38c739bb676aeb3f757ca064bb5d76",
-  "worktree_clean": false,
-  "source_sha256": "de7d797eab00ea2616598e1d10663f6968ddb016bc3a16d6f92b557b1ad32011",
-  "source_graph_sha256": "a0ff08a054319f38f3eca1dd4f5d463b49abb42251a795cc8df614a8e747dbf4",
+  "commit_sha": "f86c50edd514876142347d6e198f924c7667eb1c",
+  "worktree_clean": true,
+  "source_sha256": "78481aba74b73c1ef0d297f21064bf51323c170d5453e874febd38f4ff50de94",
+  "source_graph_sha256": "d25cd2c3c83d4d893d1ac392cf5ae12bd485d7fe96f746570d226bd3ccea218f",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/workspace-store/src/backup/backup-id.ts",
@@ -34,8 +34,8 @@
     "scripts/verify-session-search-index.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-29T05:18:32.973Z",
-  "completed_at": "2026-07-29T05:18:33.072Z",
+  "started_at": "2026-08-02T15:40:05.443Z",
+  "completed_at": "2026-08-02T15:40:05.603Z",
   "assertions": [
     {
       "name": "Create updates index immediately",

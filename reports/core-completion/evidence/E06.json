@@ -3,10 +3,10 @@
   "test_id": "E06",
   "command": "pnpm core:test:background-review",
   "status": "passed",
-  "commit_sha": "c54112fcaf6a492959f09af185de427a7787b9bf",
-  "worktree_clean": false,
-  "source_sha256": "3539d9c28013557ee007db8d77e38813fc7b76db6cad0e06a611bc5d8799ea0e",
-  "source_graph_sha256": "ff86e8441826e8b071a828e365fa324ae28db91fe4985a588933088723b459c3",
+  "commit_sha": "f86c50edd514876142347d6e198f924c7667eb1c",
+  "worktree_clean": true,
+  "source_sha256": "9badb9cff57d194dc859e064bcbd9ef80ca4fbabf2c8c1470edff7831d4067b7",
+  "source_graph_sha256": "9215dfb8cfaeab68ecd13bfaefd910c54d3b44beafd9c0e4f24655758796cce0",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/learning/src/background-review.ts",
@@ -37,8 +37,8 @@
     "scripts/verify-background-review-atomicity.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-01T09:17:56.028Z",
-  "completed_at": "2026-08-01T09:17:56.760Z",
+  "started_at": "2026-08-02T15:39:51.733Z",
+  "completed_at": "2026-08-02T15:39:52.522Z",
   "assertions": [
     {
       "name": "Malformed and prohibited mutations are rejected",
