@@ -602,12 +602,16 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     if (input.stage === "support_loaded" && (!supportPath || input.resourceId !== `${skill.id}:${supportPath}`)) {
       throw this.dependencies.conflictError("skill_usage_resource_mismatch");
     }
+    if (input.stage === "body_loaded" && skill.frontmatter.content_hash && skill.frontmatter.content_hash !== input.contentHash) {
+      throw this.dependencies.conflictError("skill_usage_content_hash_mismatch");
+    }
     const existing = (await this.dependencies.usage.listUses({ runId: run.id, resourceId: input.resourceId }))
       .find((record) => record.stage === input.stage);
     const useRecord = existing ?? await this.dependencies.usage.recordUse({
       id: learningResourceUseId({ runId: run.id, resourceId: input.resourceId, stage: input.stage, contentHash: input.contentHash }), run_id: run.id, session_id: run.session_id,
       resource_kind: input.stage === "support_loaded" ? "skill_support" : "skill",
-      resource_id: input.resourceId, content_hash: input.contentHash, stage: input.stage,
+      resource_id: input.resourceId, ...(skill.frontmatter.version ? { resource_version: skill.frontmatter.version } : {}), content_hash: input.contentHash,
+      ...(skill.frontmatter.usage_scope ? { usage_scope: skill.frontmatter.usage_scope } : {}), stage: input.stage,
       activity_context: activityContext, metadata: input.metadata, created_at: nowIso()
     });
     if (!existing && input.stage === "body_loaded") await this.dependencies.usage.incrementSkillUsage({ skillId: skill.id, runId: run.id });

@@ -29,6 +29,7 @@ export class TurnCompletionCoordinator implements HostCompletionPort {
     const operations = [
       this.postTurn.presentation,
       this.postTurn.externalAssistSync,
+      this.postTurn.learningReview,
       this.postTurn.notification,
       this.postTurn.telemetry
     ];

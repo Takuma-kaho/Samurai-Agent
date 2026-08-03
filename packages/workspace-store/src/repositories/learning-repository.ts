@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   ExternalAssistRecordSchema,
   LearningResourceEdgeRecordSchema,
+  LearningResourceVersionRecordSchema,
   createId,
   nowIso,
   redactPrivateData,
@@ -14,6 +15,7 @@ import {
   type ExternalAssistRecord,
   type ExternalAssistStatus,
   type LearningEvaluationRecord,
+  type LearningResourceVersionRecord,
   type LearningJobReportRecord,
   type LearningResourceEdgeRecord,
   type LearningResourceUseRecord,
@@ -39,6 +41,8 @@ import {
   externalAssistRecordToRow,
   learningEvaluationFromRow,
   learningResourceUseFromRow,
+  learningResourceVersionFromRow,
+  learningResourceVersionToRow,
   learningSnapshotFromRow,
   reflectionRunFromRow,
   reflectionRunToRow,
@@ -86,15 +90,18 @@ async recordLearningResourceUse(record: LearningResourceUseRecord): Promise<Lear
   `.execute(this.db);
   const row = existing.rows[0];
   if (row) {
+    if (record.stage === "applied" && (row.resource_version !== (record.resource_version ?? null) || row.content_hash !== (record.content_hash ?? null))) {
+      throw new Error(`learning_resource_use_version_mismatch:${record.resource_id}`);
+    }
     return learningResourceUseFromRow(row);
   }
   await sql`
     INSERT INTO learning_resource_uses (
       id, run_id, session_id, room_id, agent_id, resource_kind, resource_id, resource_version,
-      content_hash, stage, source_operation_id, metadata_json, created_at
+      content_hash, usage_scope_json, stage, source_operation_id, decision_summary, matched_conditions_json, metadata_json, created_at
     ) VALUES (
       ${record.id}, ${record.run_id}, ${record.session_id}, ${record.activity_context?.room_id ?? null}, ${record.activity_context?.agent_id ?? null}, ${record.resource_kind}, ${record.resource_id}, ${record.resource_version ?? null},
-      ${safeRecord.content_hash ?? null}, ${safeRecord.stage}, ${safeRecord.source_operation_id ?? null}, ${stringify(safeRecord.metadata)}, ${safeRecord.created_at}
+      ${safeRecord.content_hash ?? null}, ${safeRecord.usage_scope ? stringify(safeRecord.usage_scope) : null}, ${safeRecord.stage}, ${safeRecord.source_operation_id ?? null}, ${safeRecord.decision_summary ?? null}, ${safeRecord.matched_conditions ? stringify(safeRecord.matched_conditions) : null}, ${stringify(safeRecord.metadata)}, ${safeRecord.created_at}
     )
   `.execute(this.db);
   return safeRecord;
@@ -133,9 +140,71 @@ async saveLearningEvaluation(record: LearningEvaluationRecord): Promise<Learning
     assessment: record.assessment,
     evidence_refs_json: stringify(record.evidence_refs),
     evaluator: record.evaluator,
+    evaluation_json: record.evaluation_kind === "applied" ? stringify(record) : null,
     created_at: record.created_at
   }).execute();
   return record;
+}
+
+/** Creates or advances a resource-local immutable history without duplicating the current body in SQLite. */
+async saveLearningResourceVersion(input: {
+  record: LearningResourceVersionRecord;
+  previousContent?: string;
+}): Promise<LearningResourceVersionRecord> {
+  const record = input.record;
+  if (!/^[A-Za-z0-9_-]+$/.test(record.resource_id) || !/^[A-Za-z0-9._-]+$/.test(record.version)) {
+    throw new Error("learning_resource_version_identifier_invalid");
+  }
+  const current = record.is_current
+    ? await this.db.selectFrom("learning_resource_versions").selectAll()
+      .where("resource_kind", "=", record.resource_kind)
+      .where("resource_id", "=", record.resource_id)
+      .where("is_current", "=", 1)
+      .executeTakeFirst()
+    : undefined;
+  if (current) {
+    if (input.previousContent === undefined) throw new Error("learning_resource_version_previous_content_required");
+    const historyPath = learningHistoryPath(record.resource_kind, record.resource_id, current.version);
+    await writeHistoryFile(this.rootDir, historyPath, input.previousContent);
+    await this.db.updateTable("learning_resource_versions").set({
+      is_current: 0,
+      file_path: historyPath
+    }).where("id", "=", current.id).execute();
+  }
+  await this.db.insertInto("learning_resource_versions").values(learningResourceVersionToRow(record)).execute();
+  return record;
+}
+
+async getLearningResourceVersion(input: { resourceKind: LearningResourceVersionRecord["resource_kind"]; resourceId: string; version: string }): Promise<LearningResourceVersionRecord | undefined> {
+  const row = await this.db.selectFrom("learning_resource_versions").selectAll()
+    .where("resource_kind", "=", input.resourceKind)
+    .where("resource_id", "=", input.resourceId)
+    .where("version", "=", input.version)
+    .executeTakeFirst();
+  return row ? learningResourceVersionFromRow(row) : undefined;
+}
+
+async getCurrentLearningResourceVersion(input: { resourceKind: LearningResourceVersionRecord["resource_kind"]; resourceId: string }): Promise<LearningResourceVersionRecord | undefined> {
+  const row = await this.db.selectFrom("learning_resource_versions").selectAll()
+    .where("resource_kind", "=", input.resourceKind)
+    .where("resource_id", "=", input.resourceId)
+    .where("is_current", "=", 1)
+    .orderBy("created_at", "desc")
+    .executeTakeFirst();
+  return row ? learningResourceVersionFromRow(row) : undefined;
+}
+
+async listLearningResourceVersions(input: { resourceKind?: LearningResourceVersionRecord["resource_kind"]; resourceId?: string } = {}): Promise<LearningResourceVersionRecord[]> {
+  let query = this.db.selectFrom("learning_resource_versions").selectAll().orderBy("created_at", "desc");
+  if (input.resourceKind) query = query.where("resource_kind", "=", input.resourceKind);
+  if (input.resourceId) query = query.where("resource_id", "=", input.resourceId);
+  return (await query.execute()).map(learningResourceVersionFromRow);
+}
+
+async readLearningResourceVersionContent(input: { resourceKind: LearningResourceVersionRecord["resource_kind"]; resourceId: string; version: string }): Promise<string | undefined> {
+  const record = await this.getLearningResourceVersion(input);
+  if (!record || record.is_current) return undefined;
+  return readFile(path.join(this.rootDir, record.file_path), "utf8").catch(() => undefined);
 }
 
 async listLearningEvaluations(input: { resourceId?: string; taskClass?: string } = {}): Promise<LearningEvaluationRecord[]> {
@@ -160,10 +229,15 @@ async createLearningSnapshot(runId: string): Promise<LearningSnapshotRecord> {
   const relativePath = path.join("learning-snapshots", id);
   const snapshotRoot = path.join(this.rootDir, relativePath);
   await mkdir(snapshotRoot, { recursive: true });
-  for (const rootName of ["memory", "skills", "wiki", "learning-graph"]) {
+  for (const rootName of ["memory", "skills", "wiki", "learning-graph", "learning-history"]) {
     const source = path.join(this.rootDir, rootName);
     if (await pathExists(source)) await cp(source, path.join(snapshotRoot, rootName), { recursive: true, force: true });
   }
+  const resourceVersions = await this.listLearningResourceVersions();
+  await writeFile(
+    path.join(snapshotRoot, "learning-resource-versions.json"),
+    `${JSON.stringify(resourceVersions, null, 2)}\n`
+  );
   const [memories, skills, wiki, skillUsage, evaluations, resourceUses] = await Promise.all([
     this.resources.listMemory({ includeArchived: true }), this.resources.listSkills(), this.resources.listWiki({ activeOnly: false }), this.resources.listSkillUsage(), this.listLearningEvaluations(), this.listLearningResourceUses()
   ]);
@@ -209,7 +283,8 @@ async restoreLearningSnapshot(id: string): Promise<LearningSnapshotRecord | unde
   const row = await this.db.selectFrom("learning_snapshots").selectAll().where("id", "=", id).executeTakeFirst();
   if (!row) return undefined;
   const snapshotRoot = path.join(this.rootDir, row.path);
-  for (const rootName of ["memory", "skills", "wiki", "learning-graph"]) {
+  const serializedVersions = await readFile(path.join(snapshotRoot, "learning-resource-versions.json"), "utf8").catch(() => undefined);
+  for (const rootName of ["memory", "skills", "wiki", "learning-graph", "learning-history"]) {
     const snapshotSource = path.join(snapshotRoot, rootName);
     await rm(path.join(this.rootDir, rootName), { recursive: true, force: true });
     if (await pathExists(snapshotSource)) {
@@ -219,6 +294,15 @@ async restoreLearningSnapshot(id: string): Promise<LearningSnapshotRecord | unde
   const synchronization = await this.resources.synchronizeManagedResources();
   if (synchronization.memory.errors.length || synchronization.skills.errors.length || synchronization.wiki.errors.length) {
     throw new Error(`learning_snapshot_reindex_failed:${JSON.stringify({ memory: synchronization.memory.errors, skills: synchronization.skills.errors, wiki: synchronization.wiki.errors })}`);
+  }
+  if (serializedVersions !== undefined) {
+    const versions = LearningResourceVersionRecordSchema.array().parse(JSON.parse(serializedVersions));
+    await this.db.transaction().execute(async (transaction) => {
+      await transaction.deleteFrom("learning_resource_versions").execute();
+      if (versions.length) {
+        await transaction.insertInto("learning_resource_versions").values(versions.map(learningResourceVersionToRow)).execute();
+      }
+    });
   }
   const restoredAt = nowIso();
   await this.db.updateTable("learning_snapshots").set({ restored_at: restoredAt }).where("id", "=", id).execute();
@@ -335,6 +419,26 @@ async saveCuratorState(patch: Partial<Omit<CuratorStateRecord, "id" | "updated_a
 async createReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord> {
   await this.db.insertInto("reflection_runs").values(reflectionRunToRow(run)).execute();
   return run;
+}
+
+/** At most one Background Review candidate is retained for a completed source run. */
+async createLearningReviewCandidate(run: ReflectionRunRecord): Promise<ReflectionRunRecord> {
+  if (!run.candidate_key || run.kind !== "background_review") throw new Error("learning_review_candidate_invalid");
+  const existing = await this.db.selectFrom("reflection_runs").selectAll().where("candidate_key", "=", run.candidate_key).executeTakeFirst();
+  if (existing) return reflectionRunFromRow(existing);
+  try {
+    await this.db.insertInto("reflection_runs").values(reflectionRunToRow(run)).execute();
+    return run;
+  } catch (error) {
+    const concurrent = await this.db.selectFrom("reflection_runs").selectAll().where("candidate_key", "=", run.candidate_key).executeTakeFirst();
+    if (concurrent) return reflectionRunFromRow(concurrent);
+    throw error;
+  }
+}
+
+async getReflectionRunByCandidateKey(candidateKey: string): Promise<ReflectionRunRecord | undefined> {
+  const row = await this.db.selectFrom("reflection_runs").selectAll().where("candidate_key", "=", candidateKey).executeTakeFirst();
+  return row ? reflectionRunFromRow(row) : undefined;
 }
 
 async updateReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord> {
@@ -457,5 +561,16 @@ async getExternalAssistDiagnostics(input: {
   };
 }
 
+}
 
+function learningHistoryPath(kind: LearningResourceVersionRecord["resource_kind"], resourceId: string, version: string): string {
+  return path.join("learning-history", kind, resourceId, `${version}.md`);
+}
+
+async function writeHistoryFile(rootDir: string, relativePath: string, content: string): Promise<void> {
+  const target = path.join(rootDir, relativePath);
+  const pending = `${target}.pending`;
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(pending, content);
+  await rename(pending, target);
 }

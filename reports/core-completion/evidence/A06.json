@@ -3,9 +3,11 @@
   "test_id": "A06",
   "command": "pnpm core:test:command-contract",
   "status": "passed",
-  "commit_sha": "6682f514733b19b8b23f70654271e693bad532b5",
+  "commit_sha": "475ba30e1540f2f25f07b44841511b909711fde2",
   "worktree_clean": false,
-  "source_sha256": "275747fc013eb7c497bf772029e033d1b40790bf0adf5dc3e172bdaad3a49793",
+  "source_sha256": "e4fb613b680cba0ee547742b2cb16c9f0960550f34ceb4dde833b67479a9f7b6",
+  "source_graph_sha256": "565739255e09498a436f1c6e1abd6721435e89915cbf46b8d4c7b942b663e63c",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/action-catalog/src/index.ts",
     "packages/runtime/src/agent-runtime.ts",
@@ -16,8 +18,8 @@
     "scripts/verify-domain-command-contract.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-18T03:51:26.401Z",
-  "completed_at": "2026-07-18T03:51:56.060Z",
+  "started_at": "2026-08-03T05:38:08.183Z",
+  "completed_at": "2026-08-03T05:38:08.708Z",
   "assertions": [
     {
       "name": "Action Catalog generated from command schema",
@@ -36,7 +38,7 @@
     },
     {
       "name": "Surface mappings",
-      "actual": 6,
+      "actual": 1,
       "expected": 6
     },
     {
@@ -47,12 +49,15 @@
   ],
   "result": {
     "status": "passed",
-    "commands": 102,
+    "commands": 111,
     "action_catalog_matches": true,
-    "bridge_mappings": 17,
+    "gates": [
+      "CT11"
+    ],
+    "bridge_mappings": 18,
     "provider_mappings": 3,
-    "surface_mappings": 6,
+    "surface_mappings": 1,
     "expected_version_in_patch_schema": true,
-    "schema_fingerprint": "0e74681a"
+    "schema_fingerprint": "29b3dd5d"
   }
 }

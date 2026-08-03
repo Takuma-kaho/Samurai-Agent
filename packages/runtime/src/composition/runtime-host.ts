@@ -1,6 +1,5 @@
 import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput, BackendToolCallStartedEvent } from "@samurai-agent/agent-backends";
 import {
-  createId,
   nowIso,
   stableHash,
   type BackendEventRecord,
@@ -9,14 +8,11 @@ import {
   type ExternalAssistRecord,
   type GatewayBoundaryPolicy,
   type JsonValue,
-  type SessionRecord,
-  type WorkspaceChangeRecord
+  type SessionRecord
 } from "@samurai-agent/core-schemas";
 import type { RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import type { WorkspaceStore } from "@samurai-agent/workspace-store";
-import { createSessionMemory } from "@samurai-agent/memory";
 import { buildContextPreview, type ContextPreviewPorts } from "../context/context-preview";
-import { memoryRef } from "../context/resource-refs";
 import { createBackendToolBridge } from "../host/backend-tool-bridge";
 import { projectBackendEventForUi } from "../backend/event-bridge";
 import { createAgentHost } from "./create-agent-host";
@@ -84,6 +80,7 @@ export interface RuntimeHostCompositionDependencies {
   postTurn: {
     saveGeneratedSurfacePresentations(input: { sessionId: string; messageId: string; runId: string }): Promise<void>;
     runExternalAssistSync(input: HostExternalAssistSyncInput): Promise<ExternalAssistRecord[]>;
+    registerLearningCandidate(input: { runId: string }): Promise<void>;
   };
   diagnostics: {
     formatError(error: unknown): string;
@@ -187,24 +184,6 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
           : {})
       };
       await deps.preparation.recordLearningResourceUses(turn, candidates);
-      const sessionMemory = await createSessionMemory(
-        deps.core.store,
-        turn.request.envelope,
-        turn.request.content,
-        { kind: "session", session_id: turn.session.id }
-      );
-      const sessionMemoryChange: WorkspaceChangeRecord = {
-        id: createId("change"),
-        run_id: turn.run.id,
-        session_id: turn.session.id,
-        resource_ref: memoryRef(sessionMemory),
-        change_type: "memory_suggested",
-        summary: `Captured session memory ${sessionMemory.topic}.`,
-        created_at: nowIso()
-      };
-      await deps.core.store.saveWorkspaceChange(sessionMemoryChange);
-      await deps.core.emit("workspace.change.created", sessionMemoryChange);
-      await deps.core.emit("memory.candidate.created", sessionMemory);
       const backendInput: BackendRunInput = {
         run_id: turn.run.id,
         session_id: turn.session.id,
@@ -327,6 +306,12 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
           };
           await deps.core.store.updateBackendRun(updated);
           run.metadata = updated.metadata;
+        }
+      },
+      learningReview: {
+        operationId: "learning_candidate_registration",
+        run: async ({ run }) => {
+          await deps.postTurn.registerLearningCandidate({ runId: run.id });
         }
       },
     },

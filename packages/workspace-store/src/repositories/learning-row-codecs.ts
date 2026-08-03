@@ -5,6 +5,7 @@ import {
   type CuratorStateRecord,
   type ExternalAssistRecord,
   type LearningEvaluationRecord,
+  type LearningResourceVersionRecord,
   type LearningResourceUseRecord,
   type LearningSnapshotRecord,
   type ReflectionRunRecord,
@@ -16,6 +17,7 @@ import type {
   ExternalAssistRecordsTable,
   LearningEvaluationTable,
   LearningResourceUseTable,
+  LearningResourceVersionsTable,
   LearningSnapshotTable,
   ReflectionRunsTable,
   ReflectionSuggestionsTable
@@ -32,14 +34,18 @@ export function learningResourceUseFromRow(row: LearningResourceUseTable): Learn
     resource_id: row.resource_id,
     resource_version: row.resource_version ?? undefined,
     content_hash: row.content_hash ?? undefined,
+    usage_scope: row.usage_scope_json ? parse(row.usage_scope_json) : undefined,
     stage: row.stage as LearningResourceUseRecord["stage"],
     source_operation_id: row.source_operation_id ?? undefined,
+    decision_summary: row.decision_summary ?? undefined,
+    matched_conditions: row.matched_conditions_json ? parse(row.matched_conditions_json) : undefined,
     metadata: parse(row.metadata_json),
     created_at: row.created_at
   };
 }
 
 export function learningEvaluationFromRow(row: LearningEvaluationTable): LearningEvaluationRecord {
+  if (row.evaluation_json) return parse<LearningEvaluationRecord>(row.evaluation_json);
   return {
     id: row.id,
     learning_resource_ref: parse(row.learning_resource_ref_json),
@@ -138,6 +144,11 @@ export function reflectionRunToRow(run: ReflectionRunRecord): ReflectionRunsTabl
     room_id: run.activity_context?.room_id ?? null,
     agent_id: run.activity_context?.agent_id ?? null,
     status: run.status,
+    candidate_key: run.candidate_key ?? null,
+    candidate_signals_json: run.candidate_signals ? stringify(run.candidate_signals) : null,
+    deferred_reason: run.deferred_reason ?? null,
+    budget_unit: run.budget_unit ?? null,
+    budget_estimate: run.budget_estimate ?? null,
     input_summary: run.input_summary,
     output_summary: run.output_summary ?? null,
     started_at: run.started_at,
@@ -154,11 +165,52 @@ export function reflectionRunFromRow(row: ReflectionRunsTable): ReflectionRunRec
     session_id: row.session_id ?? undefined,
     activity_context: row.room_id && row.session_id && row.agent_id ? { room_id: row.room_id, session_id: row.session_id, agent_id: row.agent_id } : undefined,
     status: row.status as ReflectionRunRecord["status"],
+    candidate_key: row.candidate_key ?? undefined,
+    candidate_signals: row.candidate_signals_json ? parse(row.candidate_signals_json) : undefined,
+    deferred_reason: row.deferred_reason ?? undefined,
+    budget_unit: row.budget_unit as ReflectionRunRecord["budget_unit"],
+    budget_estimate: row.budget_estimate ?? undefined,
     input_summary: row.input_summary,
     output_summary: row.output_summary ?? undefined,
     started_at: row.started_at,
     completed_at: row.completed_at ?? undefined,
     error: row.error ?? undefined
+  };
+}
+
+export function learningResourceVersionToRow(record: LearningResourceVersionRecord): LearningResourceVersionsTable {
+  return {
+    id: record.id,
+    resource_kind: record.resource_kind,
+    resource_id: record.resource_id,
+    version: record.version,
+    parent_version: record.parent_version ?? null,
+    file_path: record.file_path,
+    content_hash: record.content_hash,
+    change_reason: record.change_reason,
+    source_run_ids_json: stringify(record.source_run_ids),
+    actor: record.actor,
+    is_current: record.is_current ? 1 : 0,
+    restored_from_version: record.restored_from_version ?? null,
+    created_at: record.created_at
+  };
+}
+
+export function learningResourceVersionFromRow(row: LearningResourceVersionsTable): LearningResourceVersionRecord {
+  return {
+    id: row.id,
+    resource_kind: row.resource_kind as LearningResourceVersionRecord["resource_kind"],
+    resource_id: row.resource_id,
+    version: row.version,
+    parent_version: row.parent_version ?? undefined,
+    file_path: row.file_path,
+    content_hash: row.content_hash,
+    change_reason: row.change_reason,
+    source_run_ids: parse(row.source_run_ids_json),
+    actor: row.actor,
+    is_current: row.is_current === 1,
+    restored_from_version: row.restored_from_version ?? undefined,
+    created_at: row.created_at
   };
 }
 

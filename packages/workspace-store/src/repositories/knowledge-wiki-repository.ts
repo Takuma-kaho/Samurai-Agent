@@ -109,6 +109,51 @@ async readWikiContent(id: string): Promise<string | undefined> {
   return stripFrontmatter(raw).trim();
 }
 
+/** Returns the Workspace-authoritative Wiki document for version history operations. */
+async readWikiMarkdown(id: string): Promise<string | undefined> {
+  const wiki = await this.getWiki(id);
+  if (!wiki) return undefined;
+  return readFile(path.join(this.rootDir, wiki.file_path), "utf8").catch(() => undefined);
+}
+
+/** Restores a historical document as a new current Version; it never rewinds history. */
+async restoreWikiVersionMarkdown(input: { id: string; markdown: string; version: string }): Promise<WikiWithFilePath | undefined> {
+  const current = await this.getWiki(input.id);
+  if (!current) return undefined;
+  const parsed = parseWikiMarkdownLocal(input.markdown);
+  if (parsed.frontmatter.id !== input.id) throw new Error("wiki_restore_id_mismatch");
+  const next = withUsageScope({
+    ...parsed.frontmatter,
+    version: input.version,
+    content_hash: stableHash(parsed.content),
+    updated_at: nowIso()
+  });
+  const nextPath = path.join("wiki", "pages", `${next.slug}.md`);
+  const previousPath = current.file_path;
+  const nextAbsolutePath = path.join(this.rootDir, nextPath);
+  const previousAbsolutePath = path.join(this.rootDir, previousPath);
+  const previousMarkdown = await readFile(previousAbsolutePath, "utf8");
+  const nextMarkdown = `${renderFrontmatter(next)}\n${parsed.content.trim()}\n`;
+  await mkdir(path.dirname(nextAbsolutePath), { recursive: true });
+  if (nextPath === previousPath) {
+    await writeFile(nextAbsolutePath, nextMarkdown);
+  } else {
+    await writeFile(nextAbsolutePath, nextMarkdown, { flag: "wx" });
+  }
+  try {
+    await this.db.updateTable("wiki_index").set(wikiToRow(next, nextPath)).where("id", "=", input.id).execute();
+  } catch (error) {
+    if (nextPath === previousPath) {
+      await writeFile(previousAbsolutePath, previousMarkdown).catch(() => undefined);
+    } else {
+      await unlink(nextAbsolutePath).catch(() => undefined);
+    }
+    throw error;
+  }
+  if (nextPath !== previousPath) await unlink(previousAbsolutePath).catch(() => undefined);
+  return { ...next, file_path: nextPath };
+}
+
 async updateWikiPage(input: {
   id: string;
   title?: string;
@@ -136,6 +181,20 @@ async updateWikiPage(input: {
     provenance: input.provenance ?? current.provenance,
     updated_at: nowIso()
   });
+  await this.writeWikiPage(next, filePath, content);
+  return { ...next, file_path: filePath };
+}
+
+/** Updates only the Core 05 metadata carried by a Workspace-authoritative Knowledge Wiki file. */
+async patchWikiLearningMetadata(input: {
+  id: string;
+  metadata: Partial<Pick<WikiFrontmatter, "knowledge_kind" | "experience_rule" | "evidence_state" | "usage_state" | "usage_scope" | "origin_activity_context" | "source_run_ids" | "source_refs" | "provenance" | "version" | "content_hash" | "pinned">>;
+}): Promise<WikiWithFilePath | undefined> {
+  const current = await this.getWiki(input.id);
+  const content = await this.readWikiContent(input.id);
+  if (!current || content === undefined) return undefined;
+  const { file_path: filePath, ...frontmatter } = current;
+  const next = withUsageScope({ ...frontmatter, ...input.metadata, updated_at: nowIso() });
   await this.writeWikiPage(next, filePath, content);
   return { ...next, file_path: filePath };
 }

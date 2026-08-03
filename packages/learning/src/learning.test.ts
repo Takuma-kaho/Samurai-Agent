@@ -52,7 +52,7 @@ describe("learning foundation", () => {
   });
 
   it("keeps learning jobs separate and uses capped exponential retry", () => {
-    expect(standardLearningJobDefinitions.map((job) => job.kind)).toEqual(["memory_review", "learning_evaluation", "skill_curator"]);
+    expect(standardLearningJobDefinitions).toEqual([]);
     expect(learningRetryDelayMs(2)).toBe(10 * 60_000);
     expect(learningRetryDelayMs(99)).toBe(160 * 60_000);
   });

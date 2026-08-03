@@ -503,6 +503,7 @@ workspace/
   backend-runs/
   backend-events/
   workspace-changes/
+  learning-history/
   files/
   indexes/
   system/
@@ -547,6 +548,8 @@ sqlite:
 | Knowledge Wiki active index | SQLite | filesystem source | AI根拠、検索注入、reindex対象をactiveに限定するため |
 | Skill本文 | filesystem | SQLite index / status | 手順書として人間もAIも読める必要があるから |
 | Skill index | SQLite | filesystem source | 必要なSkillだけ選ぶため |
+| Learning Resourceの過去Version本文 | filesystem | SQLite version metadata | 現行本文をSQLiteへ複製せず、変更理由と復元元だけを追跡するため |
+| Learning Resource Version履歴 | SQLite metadata | filesystem history path | Resource ID、Version、親Version、hash、根拠、変更主体を検索するため |
 | Collection schema | filesystem | SQLite schema metadata | データ構造を人間が確認できるようにするため |
 | Collection record index | SQLite | filesystem export | 一覧、検索、patch適用に使うため |
 | Room / Agent | SQLite | なし | Workspace内の活動範囲とBackendから独立した役割を持つため |
@@ -563,7 +566,7 @@ sqlite:
 
 WorkspaceのBackupは、単なるDB file copyではなく、復元できるdirectory Bundleである。
 
-- Bundleのpayloadは`workspace.sqlite`と`artifacts`、`profile`、`memory`、`skills`、`wiki`、`rollback`、`collections`、`surfaces`だけに固定する。`backups`、cache、派生学習データ、未知fileは含めない。
+- Bundleのpayloadは`workspace.sqlite`と`artifacts`、`profile`、`memory`、`skills`、`wiki`、`rollback`、`learning-history`、`collections`、`surfaces`だけに固定する。`backups`、cache、未知fileは含めない。
 - RoomとAgentはSQLite snapshotへ含める。Room／Agent専用の保存rootやBackup Manifest項目は増やさない。
 - SQLiteはOnline Backup APIでSnapshotを作り、WAL内の確定内容も含める。Snapshotのintegrity checkに失敗したBundleは公開しない。
 - 作成中は隠しStageへ置き、全payloadのSHA-256確認後にManifestを最後に書く。完成時だけatomic renameするため、一覧へ未完成Bundleは出ない。
@@ -611,127 +614,81 @@ read modelは、表示や検索のための派生データであり、source of 
 
 ## 8. Memory / Skill Improvement Loop
 
-Memory / Skill / Reflection / Curator は、Hermes Agentから強く参照する領域である。
-
-この領域は、次の5つを混ぜない。
+Core 05では、Activity HistoryをMemoryへ複製せず、根拠のある経験だけをMemory、経験則（Knowledge Wiki）、Skill候補へ整理する。外部Backendは候補信号と型付きMutation Planを返せるが、Workspaceファイルを直接変更しない。
 
 | 領域 | 役割 | 正本 |
 | --- | --- | --- |
-| Memory | 毎回効かせる短い個人理解。好み、作業スタイル、重要ルール、短い教訓 | `workspace/memory/**/*.md` |
-| Knowledge Wiki | 記事、調査、設計、プロジェクト知識、技術、意思決定などの濃い知識 | `workspace/wiki/pages/<slug>.md` |
-| Skill | 記憶ではなく、再利用できる作業手順 | `workspace/skills/**/*.md` |
-| Session Search | SQLite FTS系の過去会話検索 | SQLite read model |
-| External Provider | 検索、関連付け、抽出の補助 | 正本なし |
+| Activity History | 会話、Run、Event、Tool、Change、Artifactの生履歴 | Session / Run / Eventなどの既存正本 |
+| Memory | 単独で想起・訂正できる経験 | `workspace/memory/**/*.md` |
+| Knowledge Wiki | 設計・資料・意思決定と、`experience_rule`としての経験則 | `workspace/wiki/pages/<slug>.md` |
+| Skill | 反復可能な手順 | `workspace/skills/**/*.md` |
+| Version history | 過去Versionの本文と復元根拠 | `workspace/learning-history/` |
+| Session Search | 過去会話の検索read model | SQLite |
 
-External Provider由来の内容は、acceptedされるまでMemory、Knowledge Wiki、Skillの正本にしない。
-参照元不明のProvider情報は保存せず、`unverified external hint` として診断表示に留める。
-
-Memory・Knowledge Wiki・Skillは`UsageScopeRef`をfrontmatterとSQLite indexの両方へ保存する。実行時の検索は全件を読んでから隠すのではなく、Workspace／同じRoom／同じAgent／同じSessionに一致するindex行だけを先に候補にする。
-
-### 8.1 Memory
-
-Memoryは、AI秘書の長期的な理解を支える。
-
-分類。
-
-| 種類 | 内容 |
-| --- | --- |
-| session memory | 今の会話や作業でだけ有効な文脈 |
-| provisional memory | 保存候補だが、まだ確定していない記憶 |
-| topic memory | ユーザーの好み、事実、作業手順などの長期記憶 |
-| sensitive memory | 個人情報、secret、強い自己理解に関わる記憶 |
-
-Knowledge WikiはMemoryの一種ではなく、独立したWorkspaceリソースとして扱う。
-
-`WikiFrontmatter`。
+Memory、Knowledge Wiki、Skillの新しい学習Resourceは、次をfrontmatterとSQLite indexへ持つ。
 
 ```text
-id
-slug
-title
-state: proposed | active | archived | rejected
-content_locale
-tags
-source_refs
-provenance
+evidence_state: direct_confirmed | inferred | supported | conflict
+usage_state: normal | limited | dormant
+usage_scope
+origin_activity_context
+source_run_ids
+version
+content_hash
+pinned
 created_at
 updated_at
 ```
 
-`state=active` のページだけをAIの根拠、検索注入、外部Provider補助index、Wiki graph/reindexの有効対象にする。
-`proposed / rejected / archived` は管理UIと履歴には出せるが、返答根拠としては使わない。
-archive/rejectは物理削除せず、state更新にする。
+既存Resourceはbackfillしない。既存Resourceを更新した時に新形式のVersionを作る。現行本文をSQLiteへ複製せず、SQLiteにはResource ID、種類、Version、親Version、history path、hash、変更理由、根拠Run、変更主体、復元元を保存する。
 
-Wiki APIはStore直書きではなくRuntime operation経由にする。
+### 8.1 Run完了とBackground Review
 
-```text
-GET /api/wiki
-GET /api/wiki/:id
-POST /api/wiki/proposals
-POST /api/wiki/:id/accept
-POST /api/wiki/:id/reject
-PATCH /api/wiki/:id
-POST /api/wiki/:id/archive
-POST /api/wiki/reindex
-```
+Run完了時は追加LLMを呼ばない。HostはTrusted Run ContextからActivity Contextを解決し、次の事実だけから型付き`candidate_signals`を登録する。
 
-Memory flow。
+- 明示的なMemory保存または経験則化の指示
+- ユーザー訂正・否定
+- Tool失敗後の修正と成功、テストなどの客観結果
+- 実際に`applied`になったResource、意味のあるWorkspace Change、反復手順、Backend Learning Signal
+
+信号がないRun、またはActivity Contextを解決できないRunは候補を作らない。会話自体は成功させる。同じsource Runの候補は1件だけで、既存`reflection_runs`を`queued`、`deferred`、`started`、`completed`、`failed`で使う。新しいQueueやSchedulerは増やさない。
+
+Roomがidleで候補がある時だけ、既存AutomationがBackground Reviewを実行する。Reviewの入力は、確定RunのLearning Evidence、同じRoomの候補とResource、適用履歴、ユーザー修正、客観結果に限定する。別Roomの本文は渡さない。
 
 ```text
-Backend run completes
-↓
-Background Review reads transcript + artifacts + backend events
-↓
-Room / Session / Agentの出所を残し、Reusable Memory changes are saved automatically with provenance
-↓
-Active Memory retrieval uses the updated Memory
+completed Run
+  -> typed candidate signal
+  -> Room-scoped Background Review
+  -> validated Domain Operation
+  -> Workspace Store
+  -> human-readable Workspace file + version metadata
 ```
 
-### 8.2 Skill
+Reviewが許可するMutationは、Memory作成、明示経験則または`inferred / limited / Room`の経験則作成、Skill候補、既存Resourceへの根拠追加Version、条件分割・置き換え・Skill修正候補だけである。Runtimeは型と許可表で検証する。
 
-Skillは、繰り返し使える作業手順である。
+Reviewは削除、Archive、自動統合、自動Scope拡張、複数Room本文の混在、Activity History変更、外部サービス操作、学習効果判定、危険操作の権限学習を行えない。ユーザーの沈黙は成功の根拠ではない。
 
-分類。
+### 8.2 検索、実利用、Evaluation
 
-| 種類 | 内容 |
-| --- | --- |
-| skill candidate | 会話や作業から見つかったSkill候補 |
-| project skill | 特定Workspaceで使えるSkill |
-| active skill | 実行時に選択されるSkill |
-| shared skill | 他ユーザーやmarketplace向け |
+検索はUsage Scopeに一致するindex行だけから選ぶ。`conflict`と`dormant`は通常Contextから除外し、`limited`は参考情報として明示する。ScopeはSession、Room、Agent、Workspaceを区別し、新規学習の標準はRoomである。複数Roomの根拠があってもWorkspaceへ自動昇格しない。
 
-Skill flow。
+Resourceの利用記録は次の段階を分ける。
 
 ```text
-Backend run produces repeated pattern
-↓
-Background Review detects a reusable class-level procedure
-↓
-Skill is created or patched automatically with provenance
-↓
-Skill index makes it searchable
-↓
-Host selects relevant skill for future backend runs
+selected -> body_loaded -> support_loaded (Skillのみ) -> applied
 ```
 
-### 8.3 Reflection / Curator
+`applied`はBackendが実際の判断・行動に使った時だけ、Provider Tool Bridgeから共通Domain Operationで記録する。Operationは同じRunでの本文読込、Resource ID、Version、内容hash、Usage Scope、通常利用可能状態を検証する。保存できなければBackendは利用済みとして返せない。Skillの利用回数は本文を同じRunで初めて読んだ時だけ増やし、`applied`や補助ファイルでは増やさない。
 
-Reflectionは、作業結果から改善候補を見つける。
+Evaluationは`applied`がある正確なResource Versionだけを対象にする。予測結果と因果効果を分け、客観結果、明確なユーザー確認・訂正、独立Runを根拠に`supported`、`refuted`、`indeterminate`を保存する。旧Task Fingerprint、一般品質score、無関係Runのbefore/after比較は完成経路に含めない。`refuted`では、そのVersionが現行なら`conflict / limited`の新Versionを作り、次Runの通常利用から外す。
 
-Curatorは、増えすぎたMemoryやSkillを整理する。
+### 8.3 Version、Curator、コスト制御
 
-扱うこと。
+編集、訂正、Scope変更、復元はResource単位の新Versionとして記録する。復元は古いVersionへ巻き戻さず、過去本文を元にした新Versionを作る。通常の1件復元はResource Version履歴を使い、複数Resourceの変更を戻す時だけWorkspace Snapshotを使う。
 
-- Memory suggestionの生成。
-- Skill candidateの生成。
-- 似たSkillの統合候補。
-- 使われないSkillの整理候補。
-- 古いMemoryの見直し候補。
+Curatorは、置き換え、反証、環境変化、ユーザーによる整理・復元・Archive指示という理由がある時だけ起動する。固定4時間、日次、週次、30日、90日を状態変更の根拠にしない。時間経過は確認候補のきっかけにしかならず、pinned Resourceを自動Archiveしない。Archive前にはWorkspace Snapshotを作り、hard deleteはしない。
 
-Background ReviewやCuratorは、外部Backendの内部状態として閉じない。
-自動変更はWorkspace上へ保存し、source run、version、根拠、snapshotから後で理解・復元できるようにする。
-
-Background Reviewが新規作成するMemory・Knowledge Wiki・Skillは、元のRoom範囲を既定にする。WorkspaceやAgent範囲への自動昇格、競合解決、Core 05の学習判断そのものは、この基盤では実装しない。
+候補がなければ追加AIコストはゼロである。ReviewはRoom単位で候補を処理し、通常は補助モデル、矛盾時だけ設定された高性能モデルを選べる。Settingsの`learning_enabled`で完全停止でき、過去7日間の通常Run使用量に対する予算比率を設定する。金額があれば金額、なければToken数を使い、単位を混ぜない。予算超過は候補を`deferred`にするだけで、通常会話を止めない。
 
 ---
 

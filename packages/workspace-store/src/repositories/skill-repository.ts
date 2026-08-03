@@ -386,6 +386,87 @@ async replaceSkillContent(id: string, content: string): Promise<SkillWithFilePat
   return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
 }
 
+/** Updates only Core 05 metadata; body and support files remain owned by this Skill repository. */
+async patchSkillLearningMetadata(input: {
+  id: string;
+  metadata: Partial<Pick<SkillFrontmatter, "evidence_state" | "usage_state" | "usage_scope" | "origin_activity_context" | "source_run_ids" | "source_refs" | "provenance_detail" | "version" | "content_hash" | "pinned" | "created_at" | "updated_at">>;
+}): Promise<SkillWithFilePath | undefined> {
+  await this.assertSkillWriteUnlocked(input.id);
+  const current = await this.getSkill(input.id);
+  const raw = await this.readSkillMarkdown(input.id);
+  if (!current || !raw) return undefined;
+  const parsed = parseSkillMarkdownLocal(raw);
+  const now = nowIso();
+  const frontmatter = withUsageScope(SkillFrontmatterSchema.parse({
+    ...parsed.frontmatter,
+    ...input.metadata,
+    last_reviewed_at: now,
+    updated_at: now
+  }));
+  await writeFile(path.join(this.rootDir, current.file_path), this.renderSkillMarkdown(frontmatter, parsed.content));
+  await this.db.updateTable("skill_index").set({
+    title: frontmatter.title,
+    description: frontmatter.description,
+    tags_json: stringify(frontmatter.tags),
+    required_capabilities_json: stringify(frontmatter.required_capabilities),
+    ...usageScopeIndexColumns(frontmatter.usage_scope),
+    frontmatter_json: stringify(frontmatter),
+    updated_at: now
+  }).where("id", "=", input.id).execute();
+  return { ...buildSkillIndexEntry(frontmatter), file_path: current.file_path };
+}
+
+/** Restores a historical Skill body and metadata as a new current Version. */
+async restoreSkillVersionMarkdown(input: { id: string; markdown: string; version: string }): Promise<SkillWithFilePath | undefined> {
+  await this.assertSkillWriteUnlocked(input.id);
+  const current = await this.getSkill(input.id);
+  if (!current) return undefined;
+  const parsed = parseSkillMarkdownLocal(input.markdown);
+  if (parsed.frontmatter.id !== input.id) throw new Error("skill_restore_id_mismatch");
+  const now = nowIso();
+  const next = withUsageScope(SkillFrontmatterSchema.parse({
+    ...parsed.frontmatter,
+    version: input.version,
+    content_hash: stableHash(parsed.content),
+    last_reviewed_at: now,
+    updated_at: now
+  }));
+  const nextPath = path.join("skills", next.state, `${next.id}.md`);
+  const previousPath = current.file_path;
+  const nextAbsolutePath = path.join(this.rootDir, nextPath);
+  const previousAbsolutePath = path.join(this.rootDir, previousPath);
+  const previousMarkdown = await readFile(previousAbsolutePath, "utf8");
+  const nextMarkdown = this.renderSkillMarkdown(next, parsed.content);
+  await mkdir(path.dirname(nextAbsolutePath), { recursive: true });
+  if (nextPath === previousPath) {
+    await writeFile(nextAbsolutePath, nextMarkdown);
+  } else {
+    await writeFile(nextAbsolutePath, nextMarkdown, { flag: "wx" });
+  }
+  try {
+    await this.db.updateTable("skill_index").set({
+      state: next.state,
+      title: next.title,
+      description: next.description,
+      tags_json: stringify(next.tags),
+      required_capabilities_json: stringify(next.required_capabilities),
+      ...usageScopeIndexColumns(next.usage_scope),
+      file_path: nextPath,
+      frontmatter_json: stringify(next),
+      updated_at: now
+    }).where("id", "=", input.id).execute();
+  } catch (error) {
+    if (nextPath === previousPath) {
+      await writeFile(previousAbsolutePath, previousMarkdown).catch(() => undefined);
+    } else {
+      await unlink(nextAbsolutePath).catch(() => undefined);
+    }
+    throw error;
+  }
+  if (nextPath !== previousPath) await unlink(previousAbsolutePath).catch(() => undefined);
+  return { ...buildSkillIndexEntry(next), file_path: nextPath };
+}
+
 async replaceSkillContentIfUnchanged(input: { id: string; expectedContentHash: string; content: string; lockRunId?: string }): Promise<SkillWithFilePath | undefined> {
   await this.assertSkillWriteUnlocked(input.id, input.lockRunId);
   const skill = await this.getSkill(input.id);

@@ -4,6 +4,7 @@ import type { AutomationDomainService } from "./commands/services/automation-dom
 import type { BrowserDomainService } from "./commands/services/browser-domain-service.js";
 import type { ClientEventDomainService } from "./commands/services/client-event-domain-service.js";
 import type { CollectionDomainService } from "./commands/services/collection-domain-service.js";
+import type { Core05BackgroundReviewMutationDomainService } from "./commands/services/core05-background-review-mutation-domain-service.js";
 import type { ConversationDomainService } from "./commands/services/conversation-domain-service.js";
 import type { ExecutionDomainService } from "./commands/services/execution-domain-service.js";
 import type { ExternalSendDomainService } from "./commands/services/external-send-domain-service.js";
@@ -11,6 +12,9 @@ import type { FileDomainService } from "./commands/services/file-domain-service.
 import type { GatewayDomainService } from "./commands/services/gateway-domain-service.js";
 import type { GeneratedSurfaceDomainService } from "./commands/services/generated-surface-domain-service.js";
 import type { LearningDomainService } from "./commands/services/learning-domain-service.js";
+import type { LearningResourceUseDomainService } from "./commands/services/learning-resource-use-domain-service.js";
+import type { LearningResourceVersionDomainService } from "./commands/services/learning-resource-version-domain-service.js";
+import type { AppliedLearningEvaluationDomainService } from "./commands/services/applied-learning-evaluation-domain-service.js";
 import type { MemoryDomainService } from "./commands/services/memory-domain-service.js";
 import type { ObjectiveDomainService } from "./commands/services/objective-domain-service.js";
 import type { PluginDomainService } from "./commands/services/plugin-domain-service.js";
@@ -42,6 +46,7 @@ export interface RuntimeDomainServices {
   browserDomainService: BrowserDomainService;
   clientEventDomainService: ClientEventDomainService;
   collectionDomainService: CollectionDomainService;
+  core05BackgroundReviewMutationDomainService: Core05BackgroundReviewMutationDomainService;
   conversationDomainService: ConversationDomainService;
   executionDomainService: ExecutionDomainService;
   externalSendDomainService: ExternalSendDomainService;
@@ -49,6 +54,9 @@ export interface RuntimeDomainServices {
   gatewayDomainService: GatewayDomainService;
   generatedSurfaceDomainService: GeneratedSurfaceDomainService;
   learningDomainService: LearningDomainService;
+  learningResourceUseDomainService: LearningResourceUseDomainService;
+  learningResourceVersionDomainService: LearningResourceVersionDomainService;
+  appliedLearningEvaluationDomainService: AppliedLearningEvaluationDomainService;
   memoryDomainService: MemoryDomainService;
   objectiveDomainService: ObjectiveDomainService;
   pluginDomainService: PluginDomainService;

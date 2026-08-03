@@ -768,16 +768,24 @@ Activity History・Memory・Knowledge・Skill・Artifact・Collectionを、Works
         ↓
 Activity Historyが残る
         ↓
-重要な経験がMemoryになる
+候補信号があるRunだけをRoom単位でBackground Reviewする
         ↓
-Learningによって整理・検証される
+Memory・経験則（Knowledge）・Skill候補を、根拠付きで作る
         ↓
-Knowledge・Skillとして再利用される
+次のRunで本文を読み、実際に使った時だけ評価する
 ```
 
-ただし、すべてのKnowledgeが必ずMemoryを経由するとは限らない。
+Activity Historyは会話、Run、Event、Tool、Workspace Change、Artifactなどの生の履歴である。通常の会話を、毎ターンMemoryへ複製してはならない。明示保存、Session summary、Background Reviewで整理されたMemoryだけをMemoryにする。
 
-外部資料・Artifact・Collectionなどから、直接Knowledge候補が作られる場合もある。
+Memoryは、同じ意味と利用目的を持ち、単独で思い出し訂正できる情報である。Knowledgeのうち経験則は、`knowledge_kind: experience_rule`として管理する。経験則は「条件・推奨判断または行動・予測結果・根拠」を持ち、根拠Memoryを消したり置き換えたりしない。Skillは反復可能な手順である。
+
+新しい学習Resourceは、根拠の状態、利用の状態、保存形式を混同しない。
+
+- 根拠の状態: `direct_confirmed`、`inferred`、`supported`、`conflict`
+- 利用の状態: `normal`、`limited`、`dormant`
+- 保存形式: Memory、Knowledge、Skill
+
+各ResourceにはUsage Scope、発生元Activity Context、根拠Run、Version、内容ハッシュを残す。本文の現行正本はWorkspaceの人間可読ファイルであり、SQLiteは検索、状態、Version履歴のmetadataだけを持つ。
 
 ## 10.2 利用範囲を越える学習
 
@@ -792,6 +800,8 @@ Room内の経験
 
 Roomの情報を、AgentやWorkspaceへ自動的に持ち出してはならない。
 
+Sessionは一時的な証拠の範囲であり、長期経験則の通常保存先にはしない。新しいMemoryと経験則の標準範囲はRoomである。Agent範囲は役割、道具、Runtimeに依存する場合だけ使う。Workspace範囲は明示したユーザー指示または複数Roomの独立根拠があっても「昇格候補」に留め、Scope変更はコピーや移動ではなく、発生元Roomを残す新Versionとして記録する。
+
 ## 10.3 学習に必要な情報
 
 学習結果には、少なくとも次の情報が必要になる。
@@ -803,23 +813,29 @@ Roomの情報を、AgentやWorkspaceへ自動的に持ち出してはならな�
 - どの範囲で利用できるか
 - 後から編集・取消できるか
 
-Core 05着手前の基盤では、学習利用記録・Reflection・Background ReviewにRoom／Session／Agentの出所を残す。Background Reviewが新しく作るMemory・Knowledge Wiki・Skillは、元のRoom範囲に保存する。別のRoom、Agent、Workspaceへの自動昇格はまだ行わない。
+Run完了時は追加LLMを呼ばず、明示保存・訂正・Tool失敗後の成功・客観結果・実利用・意味のあるWorkspace Change・反復手順・Backend Learning Signalから候補信号だけを登録する。Activity Contextを解決できないRunは候補にしないが、会話は成功させる。同じsource RunのBackground Review候補は1件だけである。
 
-## 10.4 今後の要検討事項
+Background Reviewは、同じRoomの証拠とResourceだけを入力にし、型付きMutation Planを通じて次だけを行う。
 
-Workspace・Room・Agentをまたぐ学習ループは、Samurai Agent独自の中核領域である。
+- Memory、経験則、Skill候補を作る
+- 既存Resourceへ根拠を追加した新Versionを作る
+- 条件分割、置き換え、Skill修正の候補を作る
 
-以下の詳細は、この段階では確定しない。
+削除、Archive、自動統合、自動Scope拡張、別Room本文の混在、Activity History変更、外部サービス操作、学習効果の判定はBackground Reviewに許可しない。
 
-- 自動的に学習する条件
-- 人へ明示確認する条件
-- Knowledgeを別の範囲へ昇格する条件
-- 誤学習の検出と取り消し
-- 複数のKnowledgeが競合した場合の処理
-- 権限の異なるRoom間での情報漏えい防止
-- KnowledgeやSkillの評価・整理・統合
+ResourceがIndexで選ばれた`selected`、本文をBackend Contextへ渡した`body_loaded`、Skill補助を読んだ`support_loaded`、実際の判断・行動に使った`applied`は分けて保存する。`applied`は同じRunで本文を読み、Resource ID・Version・内容ハッシュ・Usage Scopeが一致し、`conflict`でも`dormant`でもない場合だけ記録できる。Contextへ入れただけでは`applied`にしない。
 
-これらは、学習ループ専用の設計として後から詳しく定める。
+Evaluationは`applied`を起点に、その正確なVersionと同じRunの客観結果または明確なユーザー修正だけを評価する。予測結果と因果効果を分け、`supported`、`refuted`、`indeterminate`を保存する。沈黙やRun完了だけを裏付けにしない。反証時は対象Versionを新Versionで`conflict / limited`にし、次の通常判断から除外する。
+
+## 10.4 Version・Curator・コスト制御
+
+Resourceの編集、訂正、Scope変更、復元はResource単位の不変Version履歴を通す。過去Versionは`learning-history/`に保存し、復元は古い内容を元にした新Versionを作る。複数ResourceをArchiveする前の復旧にはWorkspace Snapshotを使う。通常のhard deleteはしない。
+
+Curatorは定期的な全件掃除ではない。置き換え、反証、環境変化、ユーザーの整理・復元・Archive指示という理由がある時だけ動く。固定日数や未使用だけでArchiveせず、pinned Resourceを自動Archiveしない。
+
+候補がないRoomでは追加AIを呼ばない。候補はRoom単位で処理し、通常は安価な補助モデルを使う。学習はSettingsで完全停止でき、過去7日間の通常Run使用量に対する比率を予算として設定できる。予算超過は候補を`deferred`にするだけで、通常会話を止めない。通貨とTokenの値を混ぜて比較しない。
+
+経験則から危険操作や権限を許可してはならない。既存の確認・権限経路を常に使う。
 
 ---
 

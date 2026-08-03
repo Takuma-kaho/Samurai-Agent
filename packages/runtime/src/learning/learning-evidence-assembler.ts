@@ -79,7 +79,7 @@ export class LearningEvidenceAssembler {
       .map((change) => change.resource_ref.id));
     const usedLearningResources = learningUses.filter((use) =>
       (use.resource_kind === "memory" || use.resource_kind === "wiki" || use.resource_kind === "skill" || use.resource_kind === "skill_support")
-      && (use.stage === "body_loaded" || use.stage === "support_loaded")
+      && (use.stage === "body_loaded" || use.stage === "support_loaded" || use.stage === "applied")
     );
     return {
       backend_run: run,

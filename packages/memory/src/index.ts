@@ -282,6 +282,9 @@ function memoryPriority(frontmatter: MemoryFrontmatter): MemoryCandidate["priori
 }
 
 function memorySelectionReason(frontmatter: MemoryFrontmatter): string {
+  if (frontmatter.usage_state === "limited") {
+    return `limited_reference:state:${frontmatter.state}`;
+  }
   if (frontmatter.conflicts_with.length > 0) {
     return `conflicts_with:${frontmatter.conflicts_with.join(",")}`;
   }
@@ -292,6 +295,12 @@ function memorySelectionReason(frontmatter: MemoryFrontmatter): string {
 }
 
 function activeMemoryExclusionReason(frontmatter: MemoryFrontmatter): ActiveMemoryRetrievalReport["excluded"][number]["reason"] | undefined {
+  if (frontmatter.evidence_state === "conflict") {
+    return "learning_conflict";
+  }
+  if (frontmatter.usage_state === "dormant") {
+    return "learning_dormant";
+  }
   if (frontmatter.state === "session") {
     return "session_only";
   }

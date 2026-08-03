@@ -9,6 +9,9 @@ export interface SettingsPatchInput {
   defaultRoomId?: string;
   externalProviderRole?: SettingsRecord["external_provider_role"];
   knowledgeWikiCaptureMode?: SettingsRecord["knowledge_wiki_capture_mode"];
+  learningEnabled?: SettingsRecord["learning_enabled"];
+  learningBudgetRatio?: SettingsRecord["learning_budget_ratio"];
+  learningBudgetWindowDays?: SettingsRecord["learning_budget_window_days"];
   memoryCaptureMode?: SettingsRecord["memory_capture_mode"];
   outputLocale?: SettingsRecord["output_locale"];
   skillCaptureMode?: SettingsRecord["skill_capture_mode"];
@@ -41,6 +44,9 @@ export class SettingsDomainService {
       ...(input.defaultRoomId === undefined ? {} : { default_room_id: input.defaultRoomId }),
       ...(input.externalProviderRole === undefined ? {} : { external_provider_role: input.externalProviderRole }),
       ...(input.knowledgeWikiCaptureMode === undefined ? {} : { knowledge_wiki_capture_mode: input.knowledgeWikiCaptureMode }),
+      ...(input.learningEnabled === undefined ? {} : { learning_enabled: input.learningEnabled }),
+      ...(input.learningBudgetRatio === undefined ? {} : { learning_budget_ratio: input.learningBudgetRatio }),
+      ...(input.learningBudgetWindowDays === undefined ? {} : { learning_budget_window_days: input.learningBudgetWindowDays }),
       ...(input.memoryCaptureMode === undefined ? {} : { memory_capture_mode: input.memoryCaptureMode }),
       ...(input.outputLocale === undefined ? {} : { output_locale: input.outputLocale }),
       ...(input.skillCaptureMode === undefined ? {} : { skill_capture_mode: input.skillCaptureMode }),

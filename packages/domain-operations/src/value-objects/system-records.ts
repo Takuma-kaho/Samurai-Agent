@@ -10,7 +10,7 @@ export const sessionValueSchema = z.object({
 export const settingsValueSchema = z.object({
   ui_locale: SupportedLocaleSchema, output_locale: SupportedLocaleSchema,
   memory_capture_mode: CaptureModeSchema, knowledge_wiki_capture_mode: CaptureModeSchema,
-  skill_capture_mode: CaptureModeSchema, external_provider_role: ExternalProviderRoleSchema,
+  skill_capture_mode: CaptureModeSchema, learning_enabled: z.boolean(), learning_budget_ratio: z.number().min(0).max(1), learning_budget_window_days: z.number().int().positive(), external_provider_role: ExternalProviderRoleSchema,
   default_backend_id: z.string().min(1).optional(), default_room_id: z.string().min(1).optional(), default_agent_id: z.string().min(1).optional(), updated_at: z.string().datetime()
 }).strict();
 

@@ -70,7 +70,10 @@ export class WorkspaceContextPreviewAdapter {
         build: (query, activityContext) => buildKnowledgeWikiContext(this.store, query, activityContext)
       },
       skills: {
-        search: (query, limit, activityContext) => this.store.searchSkills(query, limit, { states: ["active", "pinned", "project"], ...(activityContext ? { activityContext } : {}) }),
+        search: async (query, limit, activityContext) => (await this.store.searchSkills(query, limit, {
+          states: ["active", "pinned", "project"],
+          ...(activityContext ? { activityContext } : {})
+        })).filter((skill) => skill.frontmatter.evidence_state !== "conflict" && skill.frontmatter.usage_state !== "dormant"),
         listUsage: () => this.store.listSkillUsage(),
         listSupportFileRefs: (skillId) => this.store.listSkillSupportFileRefs(skillId),
         environment

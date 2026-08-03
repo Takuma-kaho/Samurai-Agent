@@ -1,7 +1,4 @@
-import {
-  getDomainCommandEntry,
-  getDomainCommandForProviderToolName
-} from "@samurai-agent/action-catalog";
+import { getDomainCommandForProviderToolName } from "@samurai-agent/action-catalog";
 import type { ProviderOutput, ProviderToolCall } from "./backend/provider";
 
 export interface OperationPlan {
@@ -15,17 +12,8 @@ export interface OperationPlan {
   };
 }
 
-const memorySessionCreateOperationId = (() => {
-  const command = getDomainCommandEntry("memory.session.create");
-  if (!command) throw new Error("provider_plan_memory_session_command_missing");
-  return command.id;
-})();
-
 export function createOperationPlans(providerOutput: ProviderOutput): OperationPlan[] {
-  const operations: OperationPlan[] = [{
-    operation: memorySessionCreateOperationId,
-    proposedEffects: ["Keep the current user intent in session memory."]
-  }];
+  const operations: OperationPlan[] = [];
   for (const toolCall of providerOutput.toolCalls) {
     const plan = operationPlanFromToolCall(toolCall);
     if (!plan) continue;

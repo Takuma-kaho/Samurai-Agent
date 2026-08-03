@@ -189,6 +189,8 @@ export async function buildContextPreview(input: BuildContextPreviewInput): Prom
       required_capabilities: skill.required_capabilities,
       disclosure_level: disclosureLevel,
       selection_reason: describeSkillSelection(disclosureLevel, index, supportFileRefs, usage, skillSelectionById.get(skill.id)),
+      ...(skill.frontmatter.evidence_state ? { evidence_state: skill.frontmatter.evidence_state } : {}),
+      ...(skill.frontmatter.usage_state ? { usage_state: skill.frontmatter.usage_state } : {}),
       selection: skillSelectionById.get(skill.id),
       usage: usage ? { use_count: usage.use_count, ...(usage.last_used_at ? { last_used_at: usage.last_used_at } : {}) } : undefined,
       content: undefined,

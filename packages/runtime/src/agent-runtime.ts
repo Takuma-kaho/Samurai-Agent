@@ -164,6 +164,8 @@ import {
   type KnowledgeWikiLintReport,
   KnowledgeWikiLintReportSchema,
   type LearningEvaluationRecord,
+  type LearningEvidenceState,
+  type LearningUsageState,
   type SkillOptimizationRun,
   type OptimizationCandidate,
   type LearningJobReportRecord,
@@ -193,6 +195,13 @@ import {
 } from "@samurai-agent/core-schemas";
 import {
   actualLearningResourceUses,
+  Core05BackgroundReviewOrchestrator,
+  core05BackgroundReviewPrompt,
+  deriveLearningCandidateSignals,
+  learningBudgetDecision,
+  learningCandidateKey,
+  parseCore05BackgroundReviewResult,
+  restrictCore05BackgroundReviewResult,
   backgroundReviewPrompt,
   defaultBackgroundReviewPolicy,
   parseBackgroundReviewResult,
@@ -205,6 +214,9 @@ import {
   type BackgroundReviewMutation,
   type BackgroundReviewResult,
   type BackgroundReviewRunner,
+  type Core05BackgroundReviewResult,
+  type Core05BackgroundReviewRunner,
+  type Core05ReviewSnapshot,
   type ReviewSnapshot
 } from "@samurai-agent/learning";
 import {
@@ -234,7 +246,7 @@ import {
   type SandboxWorkspaceSyncExecutionResult
 } from "@samurai-agent/gateway";
 import { isSupportedLocale } from "@samurai-agent/localization";
-import { createSessionMemory, createTopicMemory, retrieveActiveMemoryWithReport } from "@samurai-agent/memory";
+import { buildMemoryFrontmatter, createSessionMemory, createTopicMemory, retrieveActiveMemoryWithReport } from "@samurai-agent/memory";
 import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type MessageSubmitOperation, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   CollectionRecordVersionConflictError,
@@ -278,6 +290,10 @@ import { ObjectiveDomainService } from "./commands/services/objective-domain-ser
 import { PresentationDomainService } from "./commands/services/presentation-domain-service";
 import { TranslationDomainService } from "./commands/services/translation-domain-service";
 import { LearningDomainService } from "./commands/services/learning-domain-service";
+import { LearningResourceUseDomainService } from "./commands/services/learning-resource-use-domain-service";
+import { LearningResourceVersionDomainService } from "./commands/services/learning-resource-version-domain-service";
+import { AppliedLearningEvaluationDomainService } from "./commands/services/applied-learning-evaluation-domain-service";
+import { Core05BackgroundReviewMutationDomainService } from "./commands/services/core05-background-review-mutation-domain-service";
 import {
   SystemDomainService,
   type ReflectionTarget,
@@ -794,6 +810,11 @@ export interface AgentRuntimeWorkspaceOptions {
   repoRoot?: string;
   resolveTemporaryContextRef?: (ref: ResourceRef) => Promise<TemporaryContextAttachment | undefined> | TemporaryContextAttachment | undefined;
   backgroundReviewRunner?: BackgroundReviewRunner;
+  /** Core 05 accepts only the strict non-destructive Mutation Plan. */
+  core05BackgroundReviewRunner?: Core05BackgroundReviewRunner;
+  /** Optional stronger Backend, selected only for explicit correction or contradiction candidates. */
+  backgroundReviewConflictBackendId?: string;
+  backgroundReviewBackendId?: string;
   enableBackendBackgroundReview?: boolean;
   detachBackgroundReview?: boolean;
   deferHost?: boolean;
@@ -917,6 +938,10 @@ export class AgentRuntime {
   private readonly presentationDomainService: PresentationDomainService;
   private readonly translationDomainService: TranslationDomainService;
   private readonly learningDomainService: LearningDomainService;
+  private readonly learningResourceUseDomainService: LearningResourceUseDomainService;
+  private readonly learningResourceVersionDomainService: LearningResourceVersionDomainService;
+  private readonly appliedLearningEvaluationDomainService: AppliedLearningEvaluationDomainService;
+  private readonly core05BackgroundReviewMutationDomainService: Core05BackgroundReviewMutationDomainService;
   private readonly systemDomainService: SystemDomainService;
   private readonly clientEventDomainService: ClientEventDomainService;
   private readonly gatewayDomainService: GatewayDomainService;
@@ -1081,6 +1106,218 @@ export class AgentRuntime {
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
+    this.learningResourceUseDomainService = new LearningResourceUseDomainService({
+      getRun: (id) => this.store.getBackendRun(id),
+      resolveActivityContext: async (run) => {
+        if (!run.agent_id) return undefined;
+        const [session, agent] = await Promise.all([this.store.getSession(run.session_id), this.store.getAgent(run.agent_id)]);
+        if (!session?.room_id || session.id !== run.session_id || !agent) return undefined;
+        return { room_id: session.room_id, session_id: session.id, agent_id: agent.id };
+      },
+      getResource: async ({ resourceKind, resourceId }) => {
+        if (resourceKind === "memory") {
+          const resource = await this.store.getMemory(resourceId);
+          return resource ? {
+            resource_kind: "memory" as const,
+            resource_id: resource.id,
+            resource_version: resource.version,
+            content_hash: resource.content_hash,
+            usage_scope: resource.usage_scope,
+            evidence_state: resource.evidence_state,
+            usage_state: resource.usage_state
+          } : undefined;
+        }
+        if (resourceKind === "wiki") {
+          const resource = await this.store.getWiki(resourceId);
+          return resource ? {
+            resource_kind: "wiki" as const,
+            resource_id: resource.id,
+            resource_version: resource.version,
+            content_hash: resource.content_hash,
+            usage_scope: resource.usage_scope,
+            evidence_state: resource.evidence_state,
+            usage_state: resource.usage_state
+          } : undefined;
+        }
+        const resource = await this.store.getSkill(resourceId);
+        return resource ? {
+          resource_kind: "skill" as const,
+          resource_id: resource.id,
+          resource_version: resource.frontmatter.version,
+          content_hash: resource.frontmatter.content_hash,
+          usage_scope: resource.frontmatter.usage_scope,
+          evidence_state: resource.frontmatter.evidence_state,
+          usage_state: resource.frontmatter.usage_state
+        } : undefined;
+      },
+      listUses: (input) => this.store.listLearningResourceUses(input),
+      recordUse: (record) => this.store.recordLearningResourceUse(record),
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.learningResourceVersionDomainService = new LearningResourceVersionDomainService({
+      getVersion: (input) => this.store.getLearningResourceVersion(input),
+      getCurrentVersion: (input) => this.store.getCurrentLearningResourceVersion(input),
+      listVersions: (input) => this.store.listLearningResourceVersions(input),
+      readHistoricalVersion: (input) => this.store.readLearningResourceVersionContent(input),
+      readCurrentDocument: async ({ resourceKind, resourceId }) => {
+        if (resourceKind === "memory") return this.store.readMemoryMarkdown(resourceId);
+        if (resourceKind === "wiki") return this.store.readWikiMarkdown(resourceId);
+        return this.store.readSkillMarkdown(resourceId);
+      },
+      readCurrentContent: async ({ resourceKind, resourceId }) => {
+        if (resourceKind === "memory") return this.store.readMemoryContent(resourceId);
+        if (resourceKind === "wiki") return this.store.readWikiContent(resourceId);
+        const markdown = await this.store.readSkillMarkdown(resourceId);
+        return markdown ? skillBodyFromMarkdown(markdown) : undefined;
+      },
+      getCurrentResource: async ({ resourceKind, resourceId }) => {
+        if (resourceKind === "memory") {
+          const resource = await this.store.getMemory(resourceId);
+          return resource ? {
+            file_path: resource.file_path,
+            version: resource.version,
+            content_hash: resource.content_hash,
+            source_run_ids: resource.source_run_ids,
+            usage_scope: resource.usage_scope,
+            evidence_state: resource.evidence_state,
+            usage_state: resource.usage_state,
+            pinned: resource.pinned
+          } : undefined;
+        }
+        if (resourceKind === "wiki") {
+          const resource = await this.store.getWiki(resourceId);
+          return resource ? {
+            file_path: resource.file_path,
+            version: resource.version,
+            content_hash: resource.content_hash,
+            source_run_ids: resource.source_run_ids,
+            usage_scope: resource.usage_scope,
+            evidence_state: resource.evidence_state,
+            usage_state: resource.usage_state,
+            pinned: resource.pinned
+          } : undefined;
+        }
+        const resource = await this.store.getSkill(resourceId);
+        return resource ? {
+          file_path: resource.file_path,
+          version: resource.frontmatter.version,
+          content_hash: resource.frontmatter.content_hash,
+          source_run_ids: resource.frontmatter.source_run_ids,
+          usage_scope: resource.frontmatter.usage_scope,
+          evidence_state: resource.frontmatter.evidence_state,
+          usage_state: resource.frontmatter.usage_state,
+          pinned: resource.frontmatter.pinned
+        } : undefined;
+      },
+      writeCurrentResource: async ({ resourceKind, resourceId, content, version, contentHash, usageScope, evidenceState, usageState, pinned, archive }) => {
+        if (resourceKind === "memory") {
+          if (archive) {
+            const archived = await this.store.archiveMemory(resourceId);
+            if (!archived) return undefined;
+          } else {
+            const replaced = await this.store.replaceMemoryContent(resourceId, content);
+            if (!replaced) return undefined;
+          }
+          const resource = await this.store.patchMemoryLearningMetadata({
+            id: resourceId,
+            metadata: {
+              version,
+              content_hash: contentHash,
+              ...(usageScope === undefined ? {} : { usage_scope: usageScope }),
+              ...(evidenceState === undefined ? {} : { evidence_state: evidenceState }),
+              ...(usageState === undefined ? {} : { usage_state: usageState }),
+              ...(pinned === undefined ? {} : { pinned })
+            }
+          });
+          return resource ? { file_path: resource.file_path, content_hash: resource.content_hash ?? contentHash } : undefined;
+        }
+        if (resourceKind === "wiki") {
+          const replaced = archive
+            ? await this.store.setWikiState(resourceId, "archived")
+            : await this.store.updateWikiPage({ id: resourceId, content });
+          if (!replaced) return undefined;
+          const resource = await this.store.patchWikiLearningMetadata({
+            id: resourceId,
+            metadata: {
+              version,
+              content_hash: contentHash,
+              ...(usageScope === undefined ? {} : { usage_scope: usageScope }),
+              ...(evidenceState === undefined ? {} : { evidence_state: evidenceState }),
+              ...(usageState === undefined ? {} : { usage_state: usageState }),
+              ...(pinned === undefined ? {} : { pinned })
+            }
+          });
+          return resource ? { file_path: resource.file_path, content_hash: resource.content_hash ?? contentHash } : undefined;
+        }
+        const replaced = archive
+          ? await this.store.updateSkillState(resourceId, "archived")
+          : await this.store.replaceSkillContent(resourceId, content);
+        if (!replaced) return undefined;
+        const resource = await this.store.patchSkillLearningMetadata({
+          id: resourceId,
+          metadata: {
+            version,
+            content_hash: contentHash,
+            ...(usageScope === undefined ? {} : { usage_scope: usageScope }),
+            ...(evidenceState === undefined ? {} : { evidence_state: evidenceState }),
+            ...(usageState === undefined ? {} : { usage_state: usageState }),
+            ...(pinned === undefined ? {} : { pinned })
+          }
+        });
+        return resource ? { file_path: resource.file_path, content_hash: resource.frontmatter.content_hash ?? contentHash } : undefined;
+      },
+      restoreCurrentDocument: async ({ resourceKind, resourceId, markdown, version }) => {
+        if (resourceKind === "memory") {
+          const resource = await this.store.restoreMemoryVersionMarkdown({ id: resourceId, markdown, version });
+          return resource ? { file_path: resource.file_path, content_hash: resource.content_hash ?? "" } : undefined;
+        }
+        if (resourceKind === "wiki") {
+          const resource = await this.store.restoreWikiVersionMarkdown({ id: resourceId, markdown, version });
+          return resource ? { file_path: resource.file_path, content_hash: resource.content_hash ?? "" } : undefined;
+        }
+        const resource = await this.store.restoreSkillVersionMarkdown({ id: resourceId, markdown, version });
+        return resource ? { file_path: resource.file_path, content_hash: resource.frontmatter.content_hash ?? "" } : undefined;
+      },
+      saveVersion: (input) => this.store.saveLearningResourceVersion(input),
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.core05BackgroundReviewMutationDomainService = new Core05BackgroundReviewMutationDomainService(this.store);
+    this.appliedLearningEvaluationDomainService = new AppliedLearningEvaluationDomainService({
+      isLearningEnabled: async () => (await this.store.getSettings()).learning_enabled,
+      listUses: (input) => this.store.listLearningResourceUses(input),
+      listEvaluations: () => this.store.listLearningEvaluations(),
+      getRun: (id) => this.store.getBackendRun(id),
+      listToolRuns: (input) => this.store.listToolRuns(input),
+      listMessages: (sessionId) => this.store.listMessages(sessionId),
+      getResource: async ({ resourceKind, resourceId }) => {
+        if (resourceKind === "memory") {
+          const resource = await this.store.getMemory(resourceId);
+          return resource ? {
+            ref: { ...memoryRef(resource), ...(resource.version ? { version: resource.version } : {}) },
+            current_version: resource.version
+          } : undefined;
+        }
+        if (resourceKind === "wiki") {
+          const resource = await this.store.getWiki(resourceId);
+          return resource ? {
+            ref: { ...wikiRef(resource), ...(resource.version ? { version: resource.version } : {}) },
+            current_version: resource.version,
+            predicted_result: resource.experience_rule?.predicted_result
+          } : undefined;
+        }
+        const resource = await this.store.getSkill(resourceId);
+        return resource ? {
+          ref: { ...skillRef(resource), ...(resource.frontmatter.version ? { version: resource.frontmatter.version } : {}) },
+          current_version: resource.frontmatter.version
+        } : undefined;
+      },
+      markRefuted: (input) => this.core05BackgroundReviewMutationDomainService.markRefuted(input),
+      createReflectionRun: (record) => this.store.createReflectionRun(record),
+      updateReflectionRun: (record) => this.store.updateReflectionRun(record),
+      saveEvaluation: (record) => this.store.saveLearningEvaluation(record),
+      saveSuggestion: (record) => this.store.saveReflectionSuggestion(record),
+      saveJobReport: (record) => this.store.saveLearningJobReport(record)
+    });
     this.learningDomainService = new LearningDomainService({
       learning: {
         saveCuratorState: (input) => this.store.saveCuratorState(input),
@@ -1111,8 +1348,9 @@ export class AgentRuntime {
         updateReflectionRun: (run) => this.store.updateReflectionRun(run), createSnapshot: (runId) => this.store.createLearningSnapshot(runId),
         restoreSnapshot: async (id) => { await this.store.restoreLearningSnapshot(id); }, saveState: (input) => this.store.saveCuratorState(input),
         saveSuggestion: async (value) => { await this.store.saveReflectionSuggestion(value); }, saveJobReport: async (value) => { await this.store.saveLearningJobReport(value); },
+        archiveResourceVersion: async (input) => { await this.learningResourceVersionDomainService.archive(input); },
         readMemory: (id) => this.store.readMemoryContent(id), replaceMemory: async (id, content) => { await this.store.replaceMemoryContent(id, content); },
-        archiveMemory: async (id) => { await this.store.archiveMemory(id); }, readWiki: (id) => this.store.readWikiContent(id),
+        archiveMemory: async (id) => { await this.store.archiveMemory(id); }, archiveWiki: async (id) => { await this.store.setWikiState(id, "archived"); }, readWiki: (id) => this.store.readWikiContent(id),
         readSkill: (id) => this.store.readSkillMarkdown(id), listSkillSupport: (id) => this.store.listSkillSupportFiles(id),
         replaceSkill: async (id, markdown) => { await this.store.replaceSkillContent(id, markdown); }, writeSkillSupport: async (input) => { await this.store.writeSkillSupportFile(input); },
         updateSkillState: async (id, state) => { await this.store.updateSkillState(id, state); },
@@ -1286,9 +1524,9 @@ export class AgentRuntime {
         createEnvelope: (context, content) => createGatewayEnvelope(context, content),
         runMutation: <T>(input: RecordedMutationInput<T>) => this.runRecordedMutation<T>(input),
         reindexWiki: () => this.store.reindexWiki(),
-        runCurator: () => this.learningDomainService.executeCurator(),
-        runMemoryReview: (session) => this.systemDomainService.runScheduledReflection(session),
-        runEvaluation: () => this.learningDomainService.executeEvaluation(),
+        runCurator: () => this.learningDomainService.runCurator(),
+        runMemoryReview: () => this.runCore05PendingRoomReview(),
+        runEvaluation: () => this.appliedLearningEvaluationDomainService.run(),
         runTranslation: (job, session, context) => this.runResourceTranslationJob(job, session, context),
         runCollectionTrigger: (job) => this.collectionDomainService.executeTriggerJob(job),
         runInstruction: (job, session, context) => this.runAutomationInstructionJob(job, session, context),
@@ -1575,6 +1813,10 @@ export class AgentRuntime {
       gatewayDomainService: this.gatewayDomainService,
       generatedSurfaceDomainService: this.generatedSurfaceDomainService,
       learningDomainService: this.learningDomainService,
+      learningResourceUseDomainService: this.learningResourceUseDomainService,
+      learningResourceVersionDomainService: this.learningResourceVersionDomainService,
+      appliedLearningEvaluationDomainService: this.appliedLearningEvaluationDomainService,
+      core05BackgroundReviewMutationDomainService: this.core05BackgroundReviewMutationDomainService,
       memoryDomainService: this.memoryDomainService,
       objectiveDomainService: this.objectiveDomainService,
       pluginDomainService: this.pluginDomainService,
@@ -1641,7 +1883,8 @@ export class AgentRuntime {
       },
       postTurn: {
         saveGeneratedSurfacePresentations: async (input) => { await this.saveGeneratedSurfacePresentations(input); },
-        runExternalAssistSync: (input: HostExternalAssistSyncInput) => this.runExternalAssistSync(input)
+        runExternalAssistSync: (input: HostExternalAssistSyncInput) => this.runExternalAssistSync(input),
+        registerLearningCandidate: ({ runId }) => this.registerLearningCandidateForCompletedRun(runId)
       },
       diagnostics: {
         formatError: (error) => safeRuntimeErrorMessage(error),
@@ -1727,25 +1970,41 @@ export class AgentRuntime {
       ? { room_id: turn.session.room_id, session_id: turn.session.id, agent_id: turn.run.agent_id }
       : undefined;
     for (const skill of preview.selected_skills) {
-      const contentHash = stableHash({ id: skill.id, title: skill.title, description: skill.description });
+      const resource = await this.store.getSkill(skill.id);
+      const contentHash = resource?.frontmatter.content_hash ?? stableHash({ id: skill.id, title: skill.title, description: skill.description });
       await this.store.recordLearningResourceUse({
         id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "skill", resourceId: skill.id, stage: "selected", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "skill", resource_id: skill.id,
-        content_hash: contentHash, stage: "selected",
+        ...(resource?.frontmatter.version ? { resource_version: resource.frontmatter.version } : {}),
+        content_hash: contentHash, ...(resource?.frontmatter.usage_scope ? { usage_scope: resource.frontmatter.usage_scope } : {}), stage: "selected",
         ...(activityContext ? { activity_context: activityContext } : {}), metadata: { disclosure_level: skill.disclosure_level }, created_at: nowIso()
       });
     }
     for (const memory of preview.active_memory) {
-      const contentHash = stableHash(memory.content);
+      const resource = await this.store.getMemory(memory.id);
+      const contentHash = resource?.content_hash ?? stableHash(memory.content);
+      await this.store.recordLearningResourceUse({
+        id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "memory", resourceId: memory.id, stage: "selected", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "memory", resource_id: memory.id,
+        ...(resource?.version ? { resource_version: resource.version } : {}), content_hash: contentHash,
+        ...(resource?.usage_scope ? { usage_scope: resource.usage_scope } : {}), stage: "selected", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
+      });
       await this.store.recordLearningResourceUse({
         id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "memory", resourceId: memory.id, stage: "body_loaded", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "memory", resource_id: memory.id,
-        content_hash: contentHash, stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
+        ...(resource?.version ? { resource_version: resource.version } : {}), content_hash: contentHash,
+        ...(resource?.usage_scope ? { usage_scope: resource.usage_scope } : {}), stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { state: memory.state, selection_reason: memory.selection_reason }, created_at: nowIso()
       });
     }
     for (const wiki of preview.knowledge_wiki) {
-      const contentHash = stableHash(wiki.content);
+      const resource = await this.store.getWiki(wiki.id);
+      const contentHash = resource?.content_hash ?? stableHash(wiki.content);
+      await this.store.recordLearningResourceUse({
+        id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "wiki", resourceId: wiki.id, stage: "selected", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "wiki", resource_id: wiki.id,
+        ...(resource?.version ? { resource_version: resource.version } : {}), content_hash: contentHash,
+        ...(resource?.usage_scope ? { usage_scope: resource.usage_scope } : {}), stage: "selected", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { slug: wiki.slug }, created_at: nowIso()
+      });
       await this.store.recordLearningResourceUse({
         id: learningResourceUseRecordId({ runId: turn.run.id, resourceKind: "wiki", resourceId: wiki.id, stage: "body_loaded", contentHash }), run_id: turn.run.id, session_id: turn.session.id, resource_kind: "wiki", resource_id: wiki.id,
-        content_hash: contentHash, stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { slug: wiki.slug }, created_at: nowIso()
+        ...(resource?.version ? { resource_version: resource.version } : {}), content_hash: contentHash,
+        ...(resource?.usage_scope ? { usage_scope: resource.usage_scope } : {}), stage: "body_loaded", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { slug: wiki.slug }, created_at: nowIso()
       });
     }
     for (const result of preview.session_search) {
@@ -1756,6 +2015,33 @@ export class AgentRuntime {
         content_hash: contentHash, stage: "selected", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
       });
     }
+  }
+
+  /** Completion is cheap: it stores typed evidence signals only and never calls a review model. */
+  private async registerLearningCandidateForCompletedRun(runId: string): Promise<void> {
+    const settings = await this.store.getSettings();
+    if (!settings.learning_enabled) return;
+    const evidence = await this.learningEvidenceAssembler.assemble(runId);
+    if (!evidence) return;
+    const signals = deriveLearningCandidateSignals(evidence);
+    if (evidence.used_learning_resources.some((resource) => resource.stage === "applied")) {
+      await this.appliedLearningEvaluationDomainService.run({ sourceRunId: runId });
+    } else if (signals.some((signal) => signal.kind === "user_correction" || signal.kind === "user_negation")) {
+      await this.appliedLearningEvaluationDomainService.run({ sessionId: evidence.session.id });
+    }
+    if (signals.length === 0) return;
+    await this.store.createLearningReviewCandidate({
+      id: createId("reflection"),
+      kind: "background_review",
+      source_run_id: evidence.backend_run.id,
+      session_id: evidence.session.id,
+      activity_context: evidence.activity_context,
+      status: "queued",
+      candidate_key: learningCandidateKey(evidence.backend_run.id),
+      candidate_signals: signals,
+      input_summary: `Queued ${signals.length} Learning candidate signal(s) for Room ${evidence.activity_context.room_id}.`,
+      started_at: nowIso()
+    });
   }
 
   shutdownMcpProcessPool(): Promise<void> {
@@ -3511,6 +3797,40 @@ export class AgentRuntime {
     return await this.runtimeDomainApi.recordSkillUsage(input) as { use_record: Awaited<ReturnType<WorkspaceStore["recordLearningResourceUse"]>> };
   }
 
+  async recordAppliedLearningResource(input: {
+    runId: string;
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    resourceVersion: string;
+    contentHash: string;
+    decisionSummary: string;
+    matchedConditions: string[];
+  }): Promise<{ use_record: Awaited<ReturnType<WorkspaceStore["recordLearningResourceUse"]>> }> {
+    return await this.runtimeDomainApi.recordAppliedLearningResource(input) as { use_record: Awaited<ReturnType<WorkspaceStore["recordLearningResourceUse"]>> };
+  }
+
+  async restoreLearningResourceVersion(input: {
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    targetVersion: string;
+    reason?: string;
+  }): Promise<{ resource_version: Awaited<ReturnType<WorkspaceStore["saveLearningResourceVersion"]>> }> {
+    return await this.runtimeDomainApi.restoreLearningResourceVersion(input) as { resource_version: Awaited<ReturnType<WorkspaceStore["saveLearningResourceVersion"]>> };
+  }
+
+  async updateLearningResourceVersion(input: {
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    changeReason: string;
+    content?: string;
+    usageScope?: UsageScopeRef;
+    evidenceState?: LearningEvidenceState;
+    usageState?: LearningUsageState;
+    pinned?: boolean;
+  }): Promise<{ resource_version: Awaited<ReturnType<WorkspaceStore["saveLearningResourceVersion"]>> }> {
+    return await this.runtimeDomainApi.updateLearningResourceVersion(input) as { resource_version: Awaited<ReturnType<WorkspaceStore["saveLearningResourceVersion"]>> };
+  }
+
   async restoreRollbackPoint(id: string): Promise<RollbackRestoreRuntimeResult> {
     return await this.runtimeDomainApi.restoreRollbackPoint(id) as RollbackRestoreRuntimeResult;
   }
@@ -5262,6 +5582,751 @@ export class AgentRuntime {
     }));
   }
 
+  private async runCore05ReflectionForCompletedTurn(input: {
+    kind: ReflectionRunRecord["kind"];
+    session: SessionRecord;
+    sourceRunId?: string;
+    backendRun?: BackendRunRecord;
+    userMessage?: MessageRecord;
+    agentMessage?: MessageRecord;
+    backendEvents: BackendEventRecord[];
+    workspaceChanges: WorkspaceChangeRecord[];
+    toolRuns: ToolRunRecord[];
+    transcriptMessages?: MessageRecord[];
+    artifacts?: ReflectionArtifactSnapshot[];
+    /** Existing queued candidates from the same idle Room may share one Review call. */
+    batchCandidates?: ReflectionRunRecord[];
+    abortSignal?: AbortSignal;
+  }): Promise<ReflectionRuntimeResult> {
+    const sourceRun = input.backendRun ?? (input.sourceRunId ? await this.store.getBackendRun(input.sourceRunId) : await this.latestCompletedAgentRunForSession(input.session.id));
+    const sourceRunId = input.sourceRunId ?? sourceRun?.id;
+    const now = nowIso();
+    const skipped = (summary: string): ReflectionRuntimeResult => ({
+      reflectionRun: {
+        id: createId("reflection"),
+        kind: "background_review",
+        ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+        session_id: input.session.id,
+        status: "completed",
+        input_summary: summarize(input.userMessage?.content ?? input.session.title),
+        output_summary: summary,
+        started_at: now,
+        completed_at: now
+      },
+      suggestions: []
+    });
+    if (!sourceRunId || !sourceRun || sourceRun.session_id !== input.session.id) return skipped("Skipped Background Review: no completed source Run is available.");
+    const candidate = await this.store.getReflectionRunByCandidateKey(learningCandidateKey(sourceRunId));
+    if (!candidate) return skipped("Skipped Background Review: this Run has no Learning candidate signals.");
+    if (candidate.session_id !== input.session.id || !candidate.activity_context) {
+      const failed = await this.store.updateReflectionRun({
+        ...candidate,
+        status: "failed",
+        error: "background_review_activity_context_required",
+        completed_at: nowIso()
+      });
+      return { reflectionRun: failed, suggestions: [] };
+    }
+    if (candidate.status === "completed" || candidate.status === "started") return { reflectionRun: candidate, suggestions: [] };
+    const settings = await this.store.getSettings();
+    if (!settings.learning_enabled) {
+      const deferred = await this.store.updateReflectionRun({
+        ...candidate,
+        status: "deferred",
+        deferred_reason: "learning_disabled",
+        output_summary: "Learning is disabled; the candidate remains deferred.",
+        completed_at: undefined
+      });
+      return { reflectionRun: deferred, suggestions: [] };
+    }
+    if (!this.workspaceOptions.core05BackgroundReviewRunner && !this.workspaceOptions.enableBackendBackgroundReview) {
+      const deferred = await this.store.updateReflectionRun({
+        ...candidate,
+        status: "deferred",
+        deferred_reason: "background_review_not_configured",
+        output_summary: "Learning review is not configured; the candidate remains deferred.",
+        completed_at: undefined
+      });
+      return { reflectionRun: deferred, suggestions: [] };
+    }
+    const allReflectionRuns = await this.store.listReflectionRuns();
+    const budget = learningBudgetDecision({
+      normal_runs: await this.store.listBackendRuns(),
+      source_run: sourceRun,
+      ratio: settings.learning_budget_ratio,
+      window_days: settings.learning_budget_window_days,
+      already_spent: allReflectionRuns
+        .filter((run) => run.id !== candidate.id && run.kind === "background_review" && run.status === "completed")
+        .map((run) => ({ unit: run.budget_unit, amount: run.budget_estimate }))
+    });
+    if (!budget.allowed) {
+      const deferred = await this.store.updateReflectionRun({
+        ...candidate,
+        status: "deferred",
+        deferred_reason: budget.deferred_reason,
+        budget_unit: budget.unit,
+        budget_estimate: budget.estimate,
+        output_summary: "Learning budget exceeded; the candidate remains deferred.",
+        completed_at: undefined
+      });
+      return { reflectionRun: deferred, suggestions: [] };
+    }
+    let reflectionRun = await this.store.updateReflectionRun({
+      ...candidate,
+      status: "started",
+      deferred_reason: undefined,
+      budget_unit: budget.unit,
+      budget_estimate: budget.estimate,
+      output_summary: undefined,
+      completed_at: undefined,
+      error: undefined
+    });
+    try {
+      throwIfAborted(input.abortSignal);
+      const reflectionActivityContext = reflectionRun.activity_context;
+      if (!reflectionActivityContext) throw new Error("background_review_activity_context_required");
+      const evidence = await this.learningEvidenceAssembler.assemble(sourceRunId);
+      if (!evidence || evidence.session.id !== input.session.id || evidence.activity_context.room_id !== reflectionActivityContext.room_id) {
+        throw new Error("background_review_activity_context_required");
+      }
+      const relatedEvidence = (await Promise.all((input.batchCandidates ?? [])
+        .filter((queued) => queued.id !== reflectionRun.id && queued.activity_context?.room_id === evidence.activity_context.room_id && Boolean(queued.source_run_id))
+        .map(async (queued) => ({ candidate: queued, evidence: await this.learningEvidenceAssembler.assemble(queued.source_run_id!) }))))
+        .filter((entry): entry is { candidate: ReflectionRunRecord; evidence: NonNullable<Awaited<ReturnType<LearningEvidenceAssembler["assemble"]>>> } => Boolean(entry.evidence && entry.evidence.activity_context.room_id === evidence.activity_context.room_id));
+      const snapshot = await this.buildCore05ReviewSnapshot(evidence, relatedEvidence.map((entry) => entry.evidence));
+      const batchCandidates = [reflectionRun, ...relatedEvidence.map((entry) => entry.candidate)];
+      const needsConflictReview = batchCandidates.some((queued) => queued.candidate_signals?.some((signal) => signal.kind === "user_correction" || signal.kind === "user_negation"));
+      const reviewRunner: Core05BackgroundReviewRunner = this.workspaceOptions.core05BackgroundReviewRunner
+        ?? { run: (reviewSnapshot, signal) => this.runCore05BackgroundReviewWithBackend(reviewSnapshot, sourceRun, needsConflictReview, signal) };
+      const explicitRule = batchCandidates.some((queued) => queued.candidate_signals?.some((signal) => signal.kind === "explicit_experience_rule"));
+      const explicitMemory = batchCandidates.some((queued) => queued.candidate_signals?.some((signal) => signal.kind === "explicit_memory_save"));
+      const result = await new Core05BackgroundReviewOrchestrator(reviewRunner).createMutationPlan({
+        snapshot,
+        activityContext: evidence.activity_context,
+        hasExplicitRuleInstruction: explicitRule,
+        hasExplicitMemoryInstruction: explicitMemory,
+        signal: input.abortSignal
+      });
+      const applied = await this.runtimeDomainApi.applyCore05BackgroundReview({
+        reflectionRunId: reflectionRun.id,
+        sessionId: evidence.session.id,
+        mutations: result.mutations
+      }) as { suggestions: ReflectionSuggestionRecord[] };
+      const suggestions = applied.suggestions;
+      reflectionRun = await this.store.updateReflectionRun({
+        ...reflectionRun,
+        status: "completed",
+        output_summary: result.summary || (suggestions.length ? `Applied ${suggestions.length} Core 05 learning change(s).` : "No learning changes."),
+        completed_at: nowIso()
+      });
+      await Promise.all(relatedEvidence.map(async ({ candidate: queued }) => {
+        const current = await this.store.getReflectionRun(queued.id);
+        if (!current || !["queued", "deferred"].includes(current.status)) return;
+        await this.store.updateReflectionRun({
+          ...current,
+          status: "completed",
+          output_summary: `Reviewed together with Room candidate ${reflectionRun.id}.`,
+          completed_at: reflectionRun.completed_at
+        });
+      }));
+      await this.store.saveLearningJobReport({
+        id: createId("learning_job_report"),
+        job_kind: "background_review",
+        run_id: reflectionRun.id,
+        target_resource_count: snapshot.memory_catalog.length + snapshot.knowledge_catalog.length + snapshot.skill_catalog.length,
+        mutation_count: suggestions.length,
+        archive_count: 0,
+        restore_count: 0,
+        patch_count: result.mutations.filter((mutation) => mutation.kind === "resource_evidence_append").length,
+        merge_count: 0,
+        skipped_reasons: result.mutations.length === 0 ? { no_learning_change: 1 } : {},
+        evaluation_count: 0,
+        duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(reflectionRun.started_at)),
+        created_at: nowIso()
+      });
+      return { reflectionRun, suggestions };
+    } catch (error) {
+      const status = error instanceof Error && error.message === "background_review_aborted" ? "deferred" : "failed";
+      reflectionRun = await this.store.updateReflectionRun({
+        ...reflectionRun,
+        status,
+        ...(status === "deferred" ? { deferred_reason: "background_review_aborted" } : { error: errorMessage(error) }),
+        ...(status === "failed" ? { completed_at: nowIso() } : {})
+      });
+      return { reflectionRun, suggestions: [] };
+    }
+  }
+
+  /** Existing Automation calls this only when a candidate Room has no active Backend Run. */
+  private async runCore05PendingRoomReview(): Promise<ReflectionRuntimeResult> {
+    const candidates = (await this.store.listReflectionRuns())
+      .filter((candidate) => candidate.kind === "background_review" && (candidate.status === "queued" || candidate.status === "deferred") && Boolean(candidate.source_run_id) && Boolean(candidate.activity_context))
+      .sort((left, right) => Date.parse(left.started_at) - Date.parse(right.started_at));
+    const candidate = candidates[0];
+    const skipped = (summary: string): ReflectionRuntimeResult => {
+      const now = nowIso();
+      return {
+        reflectionRun: {
+          id: createId("reflection"),
+          kind: "background_review",
+          session_id: candidate?.session_id ?? "automation",
+          status: "completed",
+          input_summary: "Core 05 Learning candidate scan",
+          output_summary: summary,
+          started_at: now,
+          completed_at: now
+        },
+        suggestions: []
+      };
+    };
+    if (!candidate?.source_run_id || !candidate.activity_context || !candidate.session_id) return skipped("Skipped Background Review: no queued Learning candidate exists.");
+    const roomCandidates = candidates.filter((queued) => queued.activity_context?.room_id === candidate.activity_context?.room_id);
+    const [sourceRun, session, sessions, backendRuns] = await Promise.all([
+      this.store.getBackendRun(candidate.source_run_id),
+      this.store.getSession(candidate.session_id),
+      this.store.listSessions(),
+      this.store.listBackendRuns()
+    ]);
+    if (!sourceRun || !session || session.id !== sourceRun.session_id || session.room_id !== candidate.activity_context.room_id) {
+      const failed = await this.store.updateReflectionRun({
+        ...candidate,
+        status: "failed",
+        error: "background_review_source_context_invalid",
+        completed_at: nowIso()
+      });
+      return { reflectionRun: failed, suggestions: [] };
+    }
+    const roomSessionIds = new Set(sessions.filter((item) => item.room_id === session.room_id).map((item) => item.id));
+    const roomHasActiveRun = backendRuns.some((run) => roomSessionIds.has(run.session_id) && ["queued", "running", "waiting_for_backend_input"].includes(run.status));
+    if (roomHasActiveRun) {
+      const deferred = await this.store.updateReflectionRun({
+        ...candidate,
+        status: "deferred",
+        deferred_reason: "background_review_room_active",
+        output_summary: "Background Review waits until this Room is idle.",
+        completed_at: undefined
+      });
+      return { reflectionRun: deferred, suggestions: [] };
+    }
+    const [messages, backendEvents, workspaceChanges, toolRuns] = await Promise.all([
+      this.store.listMessages(session.id),
+      this.store.listBackendEvents({ runId: sourceRun.id }),
+      this.store.listWorkspaceChanges(session.id),
+      this.store.listToolRuns({ runId: sourceRun.id })
+    ]);
+    return this.runCore05ReflectionForCompletedTurn({
+      kind: "scheduled",
+      session,
+      sourceRunId: sourceRun.id,
+      backendRun: sourceRun,
+      userMessage: [...messages].reverse().find((message) => message.role === "user"),
+      agentMessage: [...messages].reverse().find((message) => message.role === "agent"),
+      backendEvents,
+      workspaceChanges,
+      toolRuns,
+      transcriptMessages: messages,
+      batchCandidates: roomCandidates
+    });
+  }
+
+  private async buildCore05ReviewSnapshot(
+    evidence: Awaited<ReturnType<LearningEvidenceAssembler["assemble"]>> extends infer T ? Exclude<T, undefined> : never,
+    pendingRoomEvidence: Array<Awaited<ReturnType<LearningEvidenceAssembler["assemble"]>> extends infer T ? Exclude<T, undefined> : never> = []
+  ): Promise<Core05ReviewSnapshot> {
+    const [memory, wiki, skills] = await Promise.all([
+      this.store.listMemory({ activityContext: evidence.activity_context }),
+      this.store.listWiki({ activeOnly: false, activityContext: evidence.activity_context }),
+      this.store.listSkills({ activityContext: evidence.activity_context })
+    ]);
+    return {
+      evidence,
+      pending_room_evidence: pendingRoomEvidence,
+      memory_catalog: memory.map((resource) => ({
+        id: resource.id,
+        title: resource.topic,
+        version: resource.version,
+        evidence_state: resource.evidence_state,
+        usage_state: resource.usage_state,
+        usage_scope: resource.usage_scope
+      })),
+      knowledge_catalog: wiki.map((resource) => ({
+        id: resource.id,
+        title: resource.title,
+        version: resource.version,
+        evidence_state: resource.evidence_state,
+        usage_state: resource.usage_state,
+        usage_scope: resource.usage_scope,
+        summary: resource.knowledge_kind === "experience_rule" ? resource.experience_rule?.summary : resource.tags.join(", ")
+      })),
+      skill_catalog: skills.map((resource) => ({
+        id: resource.id,
+        title: resource.title,
+        version: resource.frontmatter.version,
+        evidence_state: resource.frontmatter.evidence_state,
+        usage_state: resource.frontmatter.usage_state,
+        usage_scope: resource.frontmatter.usage_scope,
+        summary: resource.description
+      })),
+      applied_resources: evidence.used_learning_resources.filter((entry) => entry.stage === "applied")
+    };
+  }
+
+  private async runCore05BackgroundReviewWithBackend(snapshot: Core05ReviewSnapshot, sourceRun: BackendRunRecord, needsConflictReview: boolean, abortSignal?: AbortSignal): Promise<Core05BackgroundReviewResult> {
+    throwIfAborted(abortSignal);
+    if (this.backgroundTasksClosing) throw new Error("background_review_aborted");
+    const backend = this.backendRegistry.get(
+      (needsConflictReview ? this.workspaceOptions.backgroundReviewConflictBackendId : undefined)
+      ?? this.workspaceOptions.backgroundReviewBackendId
+      ?? sourceRun.backend_id
+    );
+    if (!backend) return { reviewer: "background-review-unavailable", summary: "No review Backend was available.", mutations: [] };
+    const sourceAgent = sourceRun.agent_id ? await this.store.getAgent(sourceRun.agent_id) : undefined;
+    const prompt = core05BackgroundReviewPrompt(snapshot);
+    const reviewRunId = createId("review_run");
+    const textParts: string[] = [];
+    this.backgroundReviewBackends.set(reviewRunId, backend);
+    try {
+      for await (const event of backend.runTurn({
+        run_id: reviewRunId,
+        session_id: snapshot.evidence.activity_context.session_id,
+        room_id: snapshot.evidence.activity_context.room_id,
+        ...(sourceAgent ? { agent_context: agentBackendContext(sourceAgent) } : {}),
+        backend_session_id: `review:${snapshot.evidence.activity_context.room_id}:${snapshot.evidence.activity_context.session_id}:${snapshot.evidence.activity_context.agent_id}:${backend.id}`,
+        input_message_id: createId("review_message"),
+        workspace_root: this.store.rootDir,
+        working_directory: this.backendWorkingDirectory(),
+        envelope: createGatewayEnvelope(webGatewayContext, prompt),
+        user_input: prompt,
+        input_locale: "en",
+        output_locale: "en",
+        active_memory: [],
+        recent_messages: [],
+        available_tools: [],
+        metadata: { background_review: true, core05: true, source_run_id: sourceRun.id },
+        context_intent: "workspace_task"
+      })) {
+        throwIfAborted(abortSignal);
+        if (event.event_type === "text_delta" && typeof event.payload.text === "string") textParts.push(event.payload.text);
+      }
+    } finally {
+      this.backgroundReviewBackends.delete(reviewRunId);
+    }
+    const text = textParts.join("").trim();
+    return text ? parseCore05BackgroundReviewResult(text) : { reviewer: backend.id, summary: "Review Backend returned no mutations.", mutations: [] };
+  }
+
+  private async applyCore05BackgroundReviewMutations(
+    reflectionRun: ReflectionRunRecord,
+    session: SessionRecord,
+    result: Core05BackgroundReviewResult
+  ): Promise<ReflectionSuggestionRecord[]> {
+    const applied = await this.runtimeDomainApi.applyCore05BackgroundReview({
+      reflectionRunId: reflectionRun.id,
+      sessionId: session.id,
+      mutations: result.mutations
+    }) as { suggestions: ReflectionSuggestionRecord[] };
+    const legacyDirectMutationPath: boolean = false;
+    if (legacyDirectMutationPath) {
+    const activity = reflectionRun.activity_context;
+    if (!activity) throw new Error("background_review_activity_context_required");
+    const sourceRunId = reflectionRun.source_run_id ?? reflectionRun.id;
+    const suggestions: ReflectionSuggestionRecord[] = [];
+    for (const mutation of result.mutations) {
+      let targetRef: ResourceRef | undefined;
+      let status: ReflectionSuggestionRecord["status"] = "applied";
+      let title: string = mutation.kind;
+      if (mutation.kind === "memory_create") {
+        const contentHash = stableHash(mutation.content);
+        const memory = await this.store.saveMemory({
+          ...buildMemoryFrontmatter({
+            state: "topic",
+            topic: mutation.topic,
+            source: sourceRunId,
+            sourceLocale: session.output_locale,
+            contentLocale: session.output_locale,
+            sourceKind: mutation.evidence_state === "direct_confirmed" ? "owner_instruction" : "agent_reasoning",
+            instructionAuthority: "background_review",
+            usageScope: { kind: "room", room_id: activity.room_id }
+          }),
+          confidence: mutation.evidence_state === "direct_confirmed" ? 0.95 : 0.5,
+          source_refs: mutation.evidence_refs,
+          provenance: { kind: "generated_local", summary: `Background Review ${reflectionRun.id}: ${mutation.reason}`, verified: mutation.evidence_state === "direct_confirmed" },
+          evidence_state: mutation.evidence_state,
+          usage_state: mutation.usage_state,
+          origin_activity_context: activity,
+          source_run_ids: [sourceRunId],
+          version: "1",
+          content_hash: contentHash,
+          pinned: false
+        }, mutation.content);
+        const stored = await this.store.getMemory(memory.id);
+        if (!stored) throw new Error(`background_review_resource_not_found:memory:${memory.id}`);
+        await this.recordNewCore05ResourceVersion({
+          resourceKind: "memory",
+          resourceId: stored.id,
+          version: "1",
+          filePath: stored.file_path,
+          contentHash,
+          reason: mutation.reason,
+          sourceRunIds: [sourceRunId]
+        });
+        targetRef = memoryRef(stored);
+        title = stored.topic;
+      } else if (mutation.kind === "experience_rule_create") {
+        const now = nowIso();
+        const content = [
+          mutation.summary,
+          "",
+          "## Conditions",
+          ...mutation.conditions.map((condition) => `- ${condition}`),
+          "",
+          "## Recommended action",
+          mutation.recommended_action,
+          "",
+          "## Predicted result",
+          mutation.predicted_result
+        ].join("\n");
+        const contentHash = stableHash(content);
+        const id = createId("wiki");
+        const wiki = await this.store.saveWikiPage({
+          id,
+          slug: `${slugify(mutation.title)}-${stableHash(id).slice(0, 6)}`,
+          title: mutation.title,
+          state: "active",
+          content_locale: session.output_locale,
+          tags: ["experience-rule"],
+          source_refs: mutation.evidence_refs,
+          provenance: { kind: "generated_local", summary: `Background Review ${reflectionRun.id}: ${mutation.reason}`, verified: mutation.evidence_state === "direct_confirmed" },
+          usage_scope: { kind: "room", room_id: activity.room_id },
+          knowledge_kind: "experience_rule",
+          experience_rule: {
+            summary: mutation.summary,
+            conditions: mutation.conditions,
+            recommended_action: mutation.recommended_action,
+            predicted_result: mutation.predicted_result,
+            creation_reason: mutation.reason,
+            counterexamples: [],
+            exclusion_conditions: [],
+            verification_history: []
+          },
+          evidence_state: mutation.evidence_state,
+          usage_state: mutation.usage_state,
+          origin_activity_context: activity,
+          source_run_ids: [sourceRunId],
+          version: "1",
+          content_hash: contentHash,
+          pinned: false,
+          created_at: now,
+          updated_at: now
+        }, content);
+        await this.recordNewCore05ResourceVersion({
+          resourceKind: "wiki",
+          resourceId: wiki.id,
+          version: "1",
+          filePath: wiki.file_path,
+          contentHash,
+          reason: mutation.reason,
+          sourceRunIds: [sourceRunId]
+        });
+        targetRef = wikiRef(wiki);
+        title = wiki.title;
+      } else if (mutation.kind === "skill_candidate_create") {
+        const now = nowIso();
+        const id = createId("skill");
+        const contentHash = stableHash(mutation.content);
+        const frontmatter: SkillFrontmatter = {
+          id,
+          state: "candidate",
+          title: mutation.title,
+          description: mutation.description,
+          tags: ["learning-candidate"],
+          provenance: "background_review",
+          trust_level: "generated_local",
+          allowed_scopes: ["workspace"],
+          required_capabilities: [],
+          schedule_policy: {},
+          secret_policy: {},
+          owner_pinned: false,
+          usage_scope: { kind: "room", room_id: activity.room_id },
+          source_refs: mutation.evidence_refs,
+          provenance_detail: { kind: "generated_local", summary: `Background Review ${reflectionRun.id}: ${mutation.reason}`, verified: false },
+          evidence_state: "inferred",
+          usage_state: "limited",
+          origin_activity_context: activity,
+          source_run_ids: [sourceRunId],
+          version: "1",
+          content_hash: contentHash,
+          pinned: false,
+          created_at: now,
+          updated_at: now
+        };
+        const skill = await this.store.saveSkillMarkdown({
+          state: "candidate",
+          skillId: id,
+          markdown: ["---", JSON.stringify(frontmatter, null, 2), "---", mutation.content.trim(), ""].join("\n")
+        });
+        await this.recordNewCore05ResourceVersion({
+          resourceKind: "skill",
+          resourceId: skill.id,
+          version: "1",
+          filePath: skill.file_path,
+          contentHash,
+          reason: mutation.reason,
+          sourceRunIds: [sourceRunId]
+        });
+        targetRef = skillRef(skill);
+        title = skill.title;
+      } else if (mutation.kind === "resource_evidence_append") {
+        targetRef = await this.appendCore05EvidenceVersion({
+          resourceKind: mutation.resource_kind,
+          resourceId: mutation.resource_id,
+          activity,
+          sourceRunId,
+          reason: mutation.reason,
+          evidenceRefs: mutation.evidence_refs
+        });
+      } else {
+        status = "proposed";
+        title = mutation.kind === "skill_patch_candidate" ? "Skill patch candidate" : "Resource replacement candidate";
+        targetRef = await this.core05ResourceRef(mutation.kind === "skill_patch_candidate" ? "skill" : mutation.resource_kind, mutation.resource_id);
+      }
+      const now = nowIso();
+      const suggestion: ReflectionSuggestionRecord = {
+        id: createId("reflection_suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: core05ReflectionSuggestionType(mutation.kind),
+        status,
+        title,
+        content: mutation.reason,
+        ...(targetRef ? { target_ref: targetRef } : {}),
+        source_refs: mutation.evidence_refs,
+        confidence: mutation.kind === "experience_rule_create" && mutation.evidence_state === "direct_confirmed" ? 0.95 : 0.6,
+        created_at: now,
+        updated_at: now
+      };
+      await this.store.saveReflectionSuggestion(suggestion);
+      suggestions.push(suggestion);
+      if (targetRef) {
+        await this.store.saveBackgroundReviewChange({
+          id: createId("background_review_change"),
+          origin: "background_review",
+          source_run_id: sourceRunId,
+          source_session_id: session.id,
+          activity_context: activity,
+          review_run_id: reflectionRun.id,
+          mutation_kind: core05BackgroundReviewChangeKind(mutation.kind),
+          resource_ref: targetRef,
+          after_version: stableHash({ target: targetRef, mutation: mutation.kind, reason: mutation.reason }),
+          reason_summary: mutation.reason,
+          evidence_refs: mutation.evidence_refs,
+          created_at: now
+        });
+      }
+    }
+    return suggestions;
+    }
+    return applied.suggestions;
+  }
+
+  private async recordNewCore05ResourceVersion(input: {
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    version: string;
+    filePath: string;
+    contentHash: string;
+    reason: string;
+    sourceRunIds: string[];
+  }): Promise<void> {
+    await this.store.saveLearningResourceVersion({
+      record: {
+        id: createId("learning_version"),
+        resource_kind: input.resourceKind,
+        resource_id: input.resourceId,
+        version: input.version,
+        file_path: input.filePath,
+        content_hash: input.contentHash,
+        change_reason: input.reason,
+        source_run_ids: input.sourceRunIds,
+        actor: "background_review",
+        is_current: true,
+        created_at: nowIso()
+      }
+    });
+  }
+
+  private async appendCore05EvidenceVersion(input: {
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    activity: ActivityContextRef;
+    sourceRunId: string;
+    reason: string;
+    evidenceRefs: ResourceRef[];
+    evidenceState?: "conflict";
+    usageState?: "limited";
+  }): Promise<ResourceRef | undefined> {
+    await this.assertBackgroundReviewResourceScope(input.resourceKind, input.resourceId, input.activity);
+    if (input.resourceKind === "memory") {
+      const current = await this.store.getMemory(input.resourceId);
+      const body = await this.store.readMemoryContent(input.resourceId);
+      if (!current || body === undefined) return undefined;
+      const before = await readFile(path.join(this.store.rootDir, current.file_path), "utf8");
+      const currentVersion = await this.ensureCore05CurrentVersion("memory", current.id, current.file_path, stableHash(body), current.version, input.reason, current.source_run_ids ?? []);
+      const version = nextLearningVersion(currentVersion.version);
+      const updated = await this.store.patchMemoryLearningMetadata({
+        id: current.id,
+        metadata: {
+          source_run_ids: uniqueStrings([...(current.source_run_ids ?? []), input.sourceRunId]),
+          source_refs: uniqueResourceRefs([...(current.source_refs ?? []), ...input.evidenceRefs]),
+          version,
+          content_hash: stableHash(body),
+          ...(input.evidenceState ? { evidence_state: input.evidenceState } : {}),
+          ...(input.usageState ? { usage_state: input.usageState } : {})
+        }
+      });
+      if (!updated) return undefined;
+      await this.store.saveLearningResourceVersion({
+        record: this.core05VersionRecord("memory", updated.id, version, currentVersion.version, updated.file_path, stableHash(body), input.reason, [input.sourceRunId]),
+        previousContent: before
+      });
+      return memoryRef(updated);
+    }
+    if (input.resourceKind === "wiki") {
+      const current = await this.store.getWiki(input.resourceId);
+      const body = await this.store.readWikiContent(input.resourceId);
+      if (!current || body === undefined) return undefined;
+      const before = await readFile(path.join(this.store.rootDir, current.file_path), "utf8");
+      const currentVersion = await this.ensureCore05CurrentVersion("wiki", current.id, current.file_path, stableHash(body), current.version, input.reason, current.source_run_ids ?? []);
+      const version = nextLearningVersion(currentVersion.version);
+      const updated = await this.store.patchWikiLearningMetadata({
+        id: current.id,
+        metadata: {
+          source_run_ids: uniqueStrings([...(current.source_run_ids ?? []), input.sourceRunId]),
+          source_refs: uniqueResourceRefs([...current.source_refs, ...input.evidenceRefs]),
+          version,
+          content_hash: stableHash(body),
+          ...(input.evidenceState ? { evidence_state: input.evidenceState } : {}),
+          ...(input.usageState ? { usage_state: input.usageState } : {})
+        }
+      });
+      if (!updated) return undefined;
+      await this.store.saveLearningResourceVersion({
+        record: this.core05VersionRecord("wiki", updated.id, version, currentVersion.version, updated.file_path, stableHash(body), input.reason, [input.sourceRunId]),
+        previousContent: before
+      });
+      return wikiRef(updated);
+    }
+    const current = await this.store.getSkill(input.resourceId);
+    const markdown = await this.store.readSkillMarkdown(input.resourceId);
+    if (!current || !markdown) return undefined;
+    const skillContentHash = stableHash(core05SkillBody(markdown));
+    const currentVersion = await this.ensureCore05CurrentVersion("skill", current.id, current.file_path, skillContentHash, current.frontmatter.version, input.reason, current.frontmatter.source_run_ids ?? []);
+    const version = nextLearningVersion(currentVersion.version);
+    const updated = await this.store.patchSkillLearningMetadata({
+      id: current.id,
+      metadata: {
+        source_run_ids: uniqueStrings([...(current.frontmatter.source_run_ids ?? []), input.sourceRunId]),
+        source_refs: uniqueResourceRefs([...(current.frontmatter.source_refs ?? []), ...input.evidenceRefs]),
+        version,
+        content_hash: skillContentHash,
+        ...(input.evidenceState ? { evidence_state: input.evidenceState } : {}),
+        ...(input.usageState ? { usage_state: input.usageState } : {})
+      }
+    });
+    if (!updated) return undefined;
+    await this.store.saveLearningResourceVersion({
+      record: this.core05VersionRecord("skill", updated.id, version, currentVersion.version, updated.file_path, skillContentHash, input.reason, [input.sourceRunId]),
+      previousContent: markdown
+    });
+    return skillRef(updated);
+  }
+
+  private async markCore05ResourceRefuted(input: {
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    expectedVersion: string;
+    activityContext: ActivityContextRef;
+    sourceRunId: string;
+    reason: string;
+    evidenceRefs: ResourceRef[];
+  }): Promise<ResourceRef | undefined> {
+    const delegated = this.core05BackgroundReviewMutationDomainService.markRefuted(input);
+    const legacyDirectRefutationPath: boolean = false;
+    if (legacyDirectRefutationPath) {
+    const currentVersion = input.resourceKind === "memory"
+      ? (await this.store.getMemory(input.resourceId))?.version
+      : input.resourceKind === "wiki"
+        ? (await this.store.getWiki(input.resourceId))?.version
+        : (await this.store.getSkill(input.resourceId))?.frontmatter.version;
+    if (!currentVersion || currentVersion !== input.expectedVersion) return undefined;
+    return this.appendCore05EvidenceVersion({
+      resourceKind: input.resourceKind,
+      resourceId: input.resourceId,
+      activity: input.activityContext,
+      sourceRunId: input.sourceRunId,
+      reason: input.reason,
+      evidenceRefs: input.evidenceRefs,
+      evidenceState: "conflict",
+      usageState: "limited"
+    });
+    }
+    return delegated;
+  }
+
+  private async ensureCore05CurrentVersion(
+    resourceKind: "memory" | "wiki" | "skill",
+    resourceId: string,
+    filePath: string,
+    contentHash: string,
+    declaredVersion: string | undefined,
+    reason: string,
+    sourceRunIds: string[]
+  ) {
+    const current = await this.store.getCurrentLearningResourceVersion({ resourceKind, resourceId });
+    if (current) return current;
+    const version = declaredVersion ?? "legacy";
+    await this.recordNewCore05ResourceVersion({ resourceKind, resourceId, version, filePath, contentHash, reason, sourceRunIds });
+    return (await this.store.getCurrentLearningResourceVersion({ resourceKind, resourceId }))!;
+  }
+
+  private core05VersionRecord(
+    resourceKind: "memory" | "wiki" | "skill",
+    resourceId: string,
+    version: string,
+    parentVersion: string,
+    filePath: string,
+    contentHash: string,
+    reason: string,
+    sourceRunIds: string[]
+  ) {
+    return {
+      id: createId("learning_version"),
+      resource_kind: resourceKind,
+      resource_id: resourceId,
+      version,
+      parent_version: parentVersion,
+      file_path: filePath,
+      content_hash: contentHash,
+      change_reason: reason,
+      source_run_ids: sourceRunIds,
+      actor: "background_review",
+      is_current: true,
+      created_at: nowIso()
+    };
+  }
+
+  private async core05ResourceRef(kind: "memory" | "wiki" | "skill", resourceId: string): Promise<ResourceRef | undefined> {
+    if (kind === "memory") {
+      const resource = await this.store.getMemory(resourceId);
+      return resource ? memoryRef(resource) : undefined;
+    }
+    if (kind === "wiki") {
+      const resource = await this.store.getWiki(resourceId);
+      return resource ? wikiRef(resource) : undefined;
+    }
+    const resource = await this.store.getSkill(resourceId);
+    return resource ? skillRef(resource) : undefined;
+  }
+
   private async runReflectionForCompletedTurn(input: {
     kind: ReflectionRunRecord["kind"];
     session: SessionRecord;
@@ -5276,6 +6341,7 @@ export class AgentRuntime {
     artifacts?: ReflectionArtifactSnapshot[];
     abortSignal?: AbortSignal;
   }): Promise<ReflectionRuntimeResult> {
+    return this.runCore05ReflectionForCompletedTurn(input);
     const backendRun = input.backendRun ?? (
       input.sourceRunId ? undefined : await this.latestCompletedAgentRunForSession(input.session.id)
     );
@@ -5325,7 +6391,7 @@ export class AgentRuntime {
       reflectionRun = await this.store.updateReflectionRun({
         ...reflectionRun,
         status: "completed",
-        output_summary: `Skipped duplicate Background Review; source was reviewed by ${prior.id}.`,
+        output_summary: `Skipped duplicate Background Review; source was reviewed by ${prior?.id ?? "unknown"}.`,
         completed_at: nowIso()
       });
       await this.store.saveLearningJobReport({
@@ -5341,19 +6407,21 @@ export class AgentRuntime {
       if (!backendRun || !activityContext) {
         throw new Error(`background_review_activity_context_required:${sourceRunId ?? "unknown"}`);
       }
-      const scopedSourceRunId = sourceRunId ?? backendRun.id;
+      const scopedBackendRun = backendRun as BackendRunRecord;
+      const scopedActivityContext = activityContext as ActivityContextRef;
+      const scopedSourceRunId = sourceRunId ?? scopedBackendRun.id;
       const snapshot = await this.buildReviewSnapshot({
         ...input,
         sourceRunId: scopedSourceRunId,
-        backendRun,
-        activityContext
+        backendRun: scopedBackendRun,
+        activityContext: scopedActivityContext
       });
       throwIfAborted(input.abortSignal);
       const runner = this.workspaceOptions.backgroundReviewRunner;
       const rawResult = runner
-        ? await runner.run(snapshot, defaultBackgroundReviewPolicy, input.abortSignal)
+        ? await runner!.run(snapshot, defaultBackgroundReviewPolicy, input.abortSignal)
         : this.workspaceOptions.enableBackendBackgroundReview
-          ? await this.runBackgroundReviewWithBackend(snapshot, backendRun, input.abortSignal)
+          ? await this.runBackgroundReviewWithBackend(snapshot, scopedBackendRun, input.abortSignal)
           : { reviewer: "background-review-unconfigured", summary: "Background Review runner is not configured.", mutations: [] };
       const settings = await this.store.getSettings();
       const restricted = restrictBackgroundReviewResult(rawResult, defaultBackgroundReviewPolicy);
@@ -5399,7 +6467,7 @@ export class AgentRuntime {
       });
       return { reflectionRun, suggestions };
     } catch (error) {
-      if (error instanceof Error && error.message === "background_review_aborted") {
+      if ((error as { message?: unknown } | undefined)?.message === "background_review_aborted") {
         reflectionRun = await this.store.updateReflectionRun({
           ...reflectionRun,
           status: "completed",
@@ -8518,6 +9586,36 @@ function uniqueStrings(values: unknown[]): string[] {
   return Array.from(new Set(values.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)));
 }
 
+function nextLearningVersion(version: string): string {
+  const numericVersion = Number(version);
+  return Number.isSafeInteger(numericVersion) && numericVersion >= 0 ? String(numericVersion + 1) : "1";
+}
+
+/** Skill body hashes intentionally exclude serialized frontmatter. */
+function core05SkillBody(markdown: string): string {
+  if (!markdown.startsWith("---\n")) return markdown.trim();
+  const end = markdown.indexOf("\n---", 4);
+  if (end === -1) return markdown.trim();
+  const contentStart = markdown.indexOf("\n", end + 4);
+  return (contentStart === -1 ? "" : markdown.slice(contentStart + 1)).trim();
+}
+
+function core05ReflectionSuggestionType(kind: Core05BackgroundReviewResult["mutations"][number]["kind"]): ReflectionSuggestionRecord["suggestion_type"] {
+  if (kind === "experience_rule_create") return "knowledge_wiki";
+  if (kind === "skill_candidate_create") return "skill";
+  if (kind === "skill_patch_candidate") return "skill_patch";
+  if (kind === "resource_evidence_append" || kind === "resource_replacement_candidate") return "memory_patch";
+  return "memory";
+}
+
+function core05BackgroundReviewChangeKind(kind: Core05BackgroundReviewResult["mutations"][number]["kind"]): "memory_add" | "memory_replace" | "skill_create" | "skill_patch" | "wiki_create" | "wiki_patch" {
+  if (kind === "memory_create") return "memory_add";
+  if (kind === "experience_rule_create") return "wiki_create";
+  if (kind === "skill_candidate_create") return "skill_create";
+  if (kind === "skill_patch_candidate") return "skill_patch";
+  return "memory_replace";
+}
+
 function isJsonValue(value: unknown): value is JsonValue {
   if (value === null || ["string", "number", "boolean"].includes(typeof value)) return true;
   if (Array.isArray(value)) return value.every(isJsonValue);
@@ -11321,6 +12419,11 @@ function sameUsageScope(left: UsageScopeRef, right: UsageScopeRef): boolean {
   if (left.kind === "room" && right.kind === "room") return left.room_id === right.room_id;
   if (left.kind === "agent" && right.kind === "agent") return left.agent_id === right.agent_id;
   return left.kind === "session" && right.kind === "session" && left.session_id === right.session_id;
+}
+
+function skillBodyFromMarkdown(markdown: string): string {
+  const closingFrontmatter = markdown.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/);
+  return (closingFrontmatter?.[1] ?? markdown).trim();
 }
 
 function learningResourceUseRecordId(input: {

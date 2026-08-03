@@ -9,7 +9,7 @@ export const hostContextAssemblyLimits = {
 } as const;
 
 export interface MemoryPreviewCandidate {
-  frontmatter: Pick<MemoryFrontmatter, "id" | "topic" | "state" | "sensitive_level" | "conflicts_with">;
+  frontmatter: Pick<MemoryFrontmatter, "id" | "topic" | "state" | "sensitive_level" | "conflicts_with" | "evidence_state" | "usage_state">;
   content: string;
   priority: "primary" | "sensitive" | "conflict";
   selection_reason: string;
@@ -24,6 +24,8 @@ export function activeMemoryPreviewEntry(memory: MemoryPreviewCandidate): Contex
     sensitive_level: memory.frontmatter.sensitive_level,
     priority: memory.priority,
     selection_reason: memory.selection_reason,
+    ...(memory.frontmatter.evidence_state ? { evidence_state: memory.frontmatter.evidence_state } : {}),
+    ...(memory.frontmatter.usage_state ? { usage_state: memory.frontmatter.usage_state } : {}),
     conflicts_with: memory.frontmatter.conflicts_with
   };
 }
