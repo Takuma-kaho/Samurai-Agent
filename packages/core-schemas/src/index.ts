@@ -117,13 +117,31 @@ export const clientEventTypes = [
 ] as const;
 export const workspaceChangeTypes = ["artifact_created", "memory_suggested", "skill_candidate_created", "collection_changed", "settings_changed", "other"] as const;
 export const reflectionRunKinds = ["chat_turn", "background_review", "manual", "scheduled", "curator", "evaluation"] as const;
-export const reflectionRunStatuses = ["started", "completed", "failed"] as const;
+export const reflectionRunStatuses = ["queued", "deferred", "started", "completed", "failed"] as const;
 export const reflectionSuggestionTypes = ["memory", "knowledge_wiki", "skill", "memory_patch", "skill_patch", "conflict"] as const;
 export const reflectionSuggestionStatuses = ["proposed", "applied", "rejected", "archived"] as const;
 export const toolRunStatuses = ["completed", "ignored", "failed"] as const;
 export const learningResourceKinds = ["memory", "wiki", "skill", "skill_support", "session_result"] as const;
-export const learningResourceUseStages = ["selected", "body_loaded", "support_loaded"] as const;
+export const learningResourceUseStages = ["selected", "body_loaded", "support_loaded", "applied"] as const;
 export const learningAssessments = ["helpful", "neutral", "harmful", "insufficient_evidence"] as const;
+/** Evidence and use are independent axes for Core 05 learning resources. */
+export const learningEvidenceStates = ["direct_confirmed", "inferred", "supported", "conflict"] as const;
+export const learningUsageStates = ["normal", "limited", "dormant"] as const;
+export const learningKnowledgeKinds = ["reference", "experience_rule"] as const;
+export const learningEvaluationVerdicts = ["supported", "refuted", "indeterminate"] as const;
+export const learningBudgetUnits = ["currency", "tokens"] as const;
+export const learningCandidateSignalKinds = [
+  "explicit_memory_save",
+  "explicit_experience_rule",
+  "user_correction",
+  "user_negation",
+  "tool_failure_then_success",
+  "objective_result",
+  "resource_applied",
+  "workspace_change",
+  "repeated_procedure",
+  "backend_learning_signal"
+] as const;
 export const skillOptimizationRunStatuses = ["queued", "running", "completed", "failed", "cancelled"] as const;
 export const skillOptimizationCandidateStatuses = ["proposed", "passed", "rejected", "promoted", "rolled_back"] as const;
 export const skillOptimizationDatasetSources = ["real", "golden", "synthetic"] as const;
@@ -189,6 +207,12 @@ export const ToolRunStatusSchema = z.enum(toolRunStatuses);
 export const LearningResourceKindSchema = z.enum(learningResourceKinds);
 export const LearningResourceUseStageSchema = z.enum(learningResourceUseStages);
 export const LearningAssessmentSchema = z.enum(learningAssessments);
+export const LearningEvidenceStateSchema = z.enum(learningEvidenceStates);
+export const LearningUsageStateSchema = z.enum(learningUsageStates);
+export const LearningKnowledgeKindSchema = z.enum(learningKnowledgeKinds);
+export const LearningEvaluationVerdictSchema = z.enum(learningEvaluationVerdicts);
+export const LearningBudgetUnitSchema = z.enum(learningBudgetUnits);
+export const LearningCandidateSignalKindSchema = z.enum(learningCandidateSignalKinds);
 export const AutomationJobStatusSchema = z.enum(automationJobStatuses);
 export const ExternalSendStatusSchema = z.enum(externalSendStatuses);
 export const ExternalSendChannelSchema = z.enum(externalSendChannels);
@@ -247,6 +271,12 @@ export type ReflectionRunStatus = z.infer<typeof ReflectionRunStatusSchema>;
 export type ReflectionSuggestionType = z.infer<typeof ReflectionSuggestionTypeSchema>;
 export type ReflectionSuggestionStatus = z.infer<typeof ReflectionSuggestionStatusSchema>;
 export type ToolRunStatus = z.infer<typeof ToolRunStatusSchema>;
+export type LearningEvidenceState = z.infer<typeof LearningEvidenceStateSchema>;
+export type LearningUsageState = z.infer<typeof LearningUsageStateSchema>;
+export type LearningKnowledgeKind = z.infer<typeof LearningKnowledgeKindSchema>;
+export type LearningEvaluationVerdict = z.infer<typeof LearningEvaluationVerdictSchema>;
+export type LearningBudgetUnit = z.infer<typeof LearningBudgetUnitSchema>;
+export type LearningCandidateSignalKind = z.infer<typeof LearningCandidateSignalKindSchema>;
 export type AutomationJobStatus = z.infer<typeof AutomationJobStatusSchema>;
 export type ExternalSendStatus = z.infer<typeof ExternalSendStatusSchema>;
 export type ExternalSendChannel = z.infer<typeof ExternalSendChannelSchema>;
@@ -983,6 +1013,9 @@ export const SettingsResponseSchema = z.object({
   memory_capture_mode: CaptureModeSchema,
   knowledge_wiki_capture_mode: CaptureModeSchema,
   skill_capture_mode: CaptureModeSchema,
+  learning_enabled: z.boolean().default(true),
+  learning_budget_ratio: z.number().min(0).max(1).default(0.1),
+  learning_budget_window_days: z.number().int().positive().default(7),
   external_provider_role: ExternalProviderRoleSchema,
   updated_at: z.string().datetime(),
   external_assist_config: ExternalAssistProviderConfigDiagnosticsSchema
@@ -1030,6 +1063,8 @@ export const ActiveMemoryExclusionReasonSchema = z.enum([
   "provisional_pending",
   "archived",
   "not_active_state",
+  "learning_conflict",
+  "learning_dormant",
   "empty_content"
 ]);
 export type ActiveMemoryExclusionReason = z.infer<typeof ActiveMemoryExclusionReasonSchema>;
@@ -1072,6 +1107,8 @@ export const KnowledgeWikiExclusionReasonSchema = z.enum([
   "rejected",
   "archived",
   "not_active",
+  "learning_conflict",
+  "learning_dormant",
   "empty_content"
 ]);
 export type KnowledgeWikiExclusionReason = z.infer<typeof KnowledgeWikiExclusionReasonSchema>;
@@ -1271,6 +1308,8 @@ export const ContextPreviewSchema = z.object({
     sensitive_level: z.enum(["none", "low", "high"]),
     priority: z.enum(["primary", "sensitive", "conflict"]),
     selection_reason: z.string(),
+    evidence_state: LearningEvidenceStateSchema.optional(),
+    usage_state: LearningUsageStateSchema.optional(),
     conflicts_with: z.array(z.string())
   })),
   active_memory_report: ActiveMemoryRetrievalReportSchema,
@@ -1280,7 +1319,9 @@ export const ContextPreviewSchema = z.object({
     title: z.string().min(1),
     content: z.string(),
     source_refs: z.array(ResourceRefSchema),
-    provenance: ProvenanceSchema
+    provenance: ProvenanceSchema,
+    evidence_state: LearningEvidenceStateSchema.optional(),
+    usage_state: LearningUsageStateSchema.optional()
   })),
   knowledge_wiki_report: KnowledgeWikiRetrievalReportSchema,
   collection_notes: z.array(z.object({
@@ -1315,6 +1356,8 @@ export const ContextPreviewSchema = z.object({
     allowed_scopes: z.array(ExecutionScopeSchema),
     required_capabilities: z.array(z.string()),
     disclosure_level: z.enum(["catalog", "body", "support"]),
+    evidence_state: LearningEvidenceStateSchema.optional(),
+    usage_state: LearningUsageStateSchema.optional(),
     selection_reason: z.string().optional(),
     selection: z.object({
       score: z.number(),
@@ -1366,6 +1409,79 @@ export const ContextFreezeResponseSchema = z.object({
 });
 export type ContextFreezeResponse = z.infer<typeof ContextFreezeResponseSchema>;
 
+export const LearningCandidateSignalSchema = z.object({
+  kind: LearningCandidateSignalKindSchema,
+  summary: z.string().min(1),
+  evidence_refs: z.array(ResourceRefSchema),
+  details: z.record(jsonValueSchema).default({})
+}).strict();
+export type LearningCandidateSignal = z.infer<typeof LearningCandidateSignalSchema>;
+
+/** The only mutations a Background Review may request. Runtime validates this plan before writing. */
+export const LearningBackgroundReviewMutationSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("memory_create"),
+    topic: z.string().min(1),
+    content: z.string().min(1),
+    reason: z.string().min(1),
+    evidence_refs: z.array(ResourceRefSchema).min(1),
+    usage_scope: z.object({ kind: z.literal("room"), room_id: z.string().min(1) }).strict(),
+    evidence_state: z.enum(["direct_confirmed", "inferred"]),
+    usage_state: z.enum(["normal", "limited"])
+  }).strict(),
+  z.object({
+    kind: z.literal("experience_rule_create"),
+    title: z.string().min(1),
+    summary: z.string().min(1),
+    conditions: z.array(z.string().min(1)).min(1),
+    recommended_action: z.string().min(1),
+    predicted_result: z.string().min(1),
+    reason: z.string().min(1),
+    evidence_refs: z.array(ResourceRefSchema).min(1),
+    usage_scope: z.object({ kind: z.literal("room"), room_id: z.string().min(1) }).strict(),
+    evidence_state: z.enum(["direct_confirmed", "inferred"]),
+    usage_state: z.enum(["normal", "limited"])
+  }).strict(),
+  z.object({
+    kind: z.literal("skill_candidate_create"),
+    title: z.string().min(1),
+    description: z.string().min(1),
+    content: z.string().min(1),
+    reason: z.string().min(1),
+    evidence_refs: z.array(ResourceRefSchema).min(1),
+    usage_scope: z.object({ kind: z.literal("room"), room_id: z.string().min(1) }).strict()
+  }).strict(),
+  z.object({
+    kind: z.literal("resource_evidence_append"),
+    resource_kind: z.enum(["memory", "wiki", "skill"]),
+    resource_id: z.string().min(1),
+    reason: z.string().min(1),
+    evidence_refs: z.array(ResourceRefSchema).min(1)
+  }).strict(),
+  z.object({
+    kind: z.literal("resource_replacement_candidate"),
+    resource_kind: z.enum(["memory", "wiki", "skill"]),
+    resource_id: z.string().min(1),
+    reason: z.string().min(1),
+    evidence_refs: z.array(ResourceRefSchema).min(1)
+  }).strict(),
+  z.object({
+    kind: z.literal("skill_patch_candidate"),
+    resource_id: z.string().min(1),
+    content: z.string().min(1),
+    reason: z.string().min(1),
+    evidence_refs: z.array(ResourceRefSchema).min(1)
+  }).strict()
+]);
+export type LearningBackgroundReviewMutation = z.infer<typeof LearningBackgroundReviewMutationSchema>;
+
+export const LearningBackgroundReviewMutationPlanSchema = z.object({
+  reviewer: z.string().min(1),
+  summary: z.string(),
+  mutations: z.array(LearningBackgroundReviewMutationSchema).max(50)
+}).strict();
+export type LearningBackgroundReviewMutationPlan = z.infer<typeof LearningBackgroundReviewMutationPlanSchema>;
+
 export const ReflectionRunRecordSchema = z.object({
   id: z.string().min(1),
   kind: ReflectionRunKindSchema,
@@ -1373,6 +1489,12 @@ export const ReflectionRunRecordSchema = z.object({
   session_id: z.string().optional(),
   activity_context: ActivityContextRefSchema.optional(),
   status: ReflectionRunStatusSchema,
+  /** Present only for a deterministic Core 05 review candidate. */
+  candidate_key: z.string().min(1).optional(),
+  candidate_signals: z.array(LearningCandidateSignalSchema).optional(),
+  deferred_reason: z.string().min(1).optional(),
+  budget_unit: LearningBudgetUnitSchema.optional(),
+  budget_estimate: z.number().nonnegative().optional(),
   input_summary: z.string(),
   output_summary: z.string().optional(),
   started_at: z.string().datetime(),
@@ -1465,8 +1587,11 @@ export const LearningResourceUseRecordSchema = z.object({
   resource_id: z.string().min(1),
   resource_version: z.string().min(1).optional(),
   content_hash: z.string().min(1).optional(),
+  usage_scope: UsageScopeRefSchema.optional(),
   stage: LearningResourceUseStageSchema,
   source_operation_id: z.string().min(1).optional(),
+  decision_summary: z.string().min(1).optional(),
+  matched_conditions: z.array(z.string().min(1)).optional(),
   metadata: z.record(z.string(), z.unknown()),
   created_at: z.string().datetime()
 });
@@ -1483,11 +1608,39 @@ export const LearningEvaluationRecordSchema = z.object({
   effect_estimate: z.number(),
   confidence: z.number().min(0).max(1),
   assessment: LearningAssessmentSchema,
+  /** `legacy` retains the prior score-comparison reader without treating it as Core 05 evidence. */
+  evaluation_kind: z.enum(["legacy", "applied"]).optional(),
+  applied_run_id: z.string().min(1).optional(),
+  activity_context: ActivityContextRefSchema.optional(),
+  matched_conditions: z.array(z.string().min(1)).optional(),
+  affected_decision: z.string().min(1).optional(),
+  predicted_result: z.string().min(1).optional(),
+  actual_result: z.string().min(1).optional(),
+  prediction_assessment: LearningEvaluationVerdictSchema.optional(),
+  causal_assessment: LearningEvaluationVerdictSchema.optional(),
   evidence_refs: z.array(ResourceRefSchema),
   evaluator: z.string().min(1),
   created_at: z.string().datetime()
 }).strict();
 export type LearningEvaluationRecord = z.infer<typeof LearningEvaluationRecordSchema>;
+
+/** Immutable metadata for one resource version.  Current bodies remain in their normal Workspace files. */
+export const LearningResourceVersionRecordSchema = z.object({
+  id: z.string().min(1),
+  resource_kind: z.enum(["memory", "wiki", "skill"]),
+  resource_id: z.string().min(1),
+  version: z.string().min(1),
+  parent_version: z.string().min(1).optional(),
+  file_path: z.string().min(1),
+  content_hash: z.string().min(1),
+  change_reason: z.string().min(1),
+  source_run_ids: z.array(z.string().min(1)),
+  actor: z.string().min(1),
+  is_current: z.boolean(),
+  restored_from_version: z.string().min(1).optional(),
+  created_at: z.string().datetime()
+}).strict();
+export type LearningResourceVersionRecord = z.infer<typeof LearningResourceVersionRecordSchema>;
 
 export const SkillOptimizationExampleSchema = z.object({
   id: z.string().min(1),
@@ -2651,6 +2804,35 @@ export const CapabilityManifestSchema = z.object({
 });
 export type CapabilityManifest = z.infer<typeof CapabilityManifestSchema>;
 
+/** Required together for resources newly created by the Core 05 learning path. */
+export const LearningResourceMetadataSchema = z.object({
+  evidence_state: LearningEvidenceStateSchema,
+  usage_state: LearningUsageStateSchema,
+  usage_scope: UsageScopeRefSchema,
+  origin_activity_context: ActivityContextRefSchema,
+  source_run_ids: z.array(z.string().min(1)).min(1),
+  version: z.string().min(1),
+  content_hash: z.string().min(1),
+  pinned: z.boolean(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+}).strict();
+export type LearningResourceMetadata = z.infer<typeof LearningResourceMetadataSchema>;
+
+export const ExperienceRuleSchema = z.object({
+  summary: z.string().min(1),
+  conditions: z.array(z.string().min(1)).min(1),
+  recommended_action: z.string().min(1),
+  predicted_result: z.string().min(1),
+  creation_reason: z.string().min(1),
+  counterexamples: z.array(z.string().min(1)).default([]),
+  exclusion_conditions: z.array(z.string().min(1)).default([]),
+  verification_history: z.array(z.string().min(1)).default([]),
+  replaces_resource_id: z.string().min(1).optional(),
+  replaced_by_resource_id: z.string().min(1).optional()
+}).strict();
+export type ExperienceRule = z.infer<typeof ExperienceRuleSchema>;
+
 export const MemoryFrontmatterSchema = z.object({
   id: z.string().min(1),
   state: MemoryStateSchema,
@@ -2671,7 +2853,14 @@ export const MemoryFrontmatterSchema = z.object({
   sensitive_level: z.enum(["none", "low", "high"]),
   usage_scope: UsageScopeRefSchema.optional(),
   source_refs: z.array(ResourceRefSchema).optional(),
-  provenance: ProvenanceSchema.optional()
+  provenance: ProvenanceSchema.optional(),
+  evidence_state: LearningEvidenceStateSchema.optional(),
+  usage_state: LearningUsageStateSchema.optional(),
+  origin_activity_context: ActivityContextRefSchema.optional(),
+  source_run_ids: z.array(z.string().min(1)).optional(),
+  version: z.string().min(1).optional(),
+  content_hash: z.string().min(1).optional(),
+  pinned: z.boolean().optional()
 }).strict();
 export type MemoryFrontmatter = z.infer<typeof MemoryFrontmatterSchema>;
 
@@ -2718,7 +2907,16 @@ export const SkillFrontmatterSchema = z.object({
   owner_pinned: z.boolean(),
   usage_scope: UsageScopeRefSchema.optional(),
   source_refs: z.array(ResourceRefSchema).optional(),
-  provenance_detail: ProvenanceSchema.optional()
+  provenance_detail: ProvenanceSchema.optional(),
+  evidence_state: LearningEvidenceStateSchema.optional(),
+  usage_state: LearningUsageStateSchema.optional(),
+  origin_activity_context: ActivityContextRefSchema.optional(),
+  source_run_ids: z.array(z.string().min(1)).optional(),
+  version: z.string().min(1).optional(),
+  content_hash: z.string().min(1).optional(),
+  pinned: z.boolean().optional(),
+  created_at: z.string().datetime().optional(),
+  updated_at: z.string().datetime().optional()
 });
 export type SkillFrontmatter = z.infer<typeof SkillFrontmatterSchema>;
 
@@ -2732,6 +2930,15 @@ export const WikiFrontmatterSchema = z.object({
   source_refs: z.array(ResourceRefSchema),
   provenance: ProvenanceSchema,
   usage_scope: UsageScopeRefSchema.optional(),
+  knowledge_kind: LearningKnowledgeKindSchema.optional(),
+  experience_rule: ExperienceRuleSchema.optional(),
+  evidence_state: LearningEvidenceStateSchema.optional(),
+  usage_state: LearningUsageStateSchema.optional(),
+  origin_activity_context: ActivityContextRefSchema.optional(),
+  source_run_ids: z.array(z.string().min(1)).optional(),
+  version: z.string().min(1).optional(),
+  content_hash: z.string().min(1).optional(),
+  pinned: z.boolean().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 });
@@ -3226,6 +3433,11 @@ export interface SettingsRecord {
   memory_capture_mode: CaptureMode;
   knowledge_wiki_capture_mode: CaptureMode;
   skill_capture_mode: CaptureMode;
+  /** Stops automatic candidate review, without disabling explicit saves. */
+  learning_enabled: boolean;
+  /** Provisional share of the preceding normal-run usage available to learning. */
+  learning_budget_ratio: number;
+  learning_budget_window_days: number;
   external_provider_role: ExternalProviderRole;
   default_backend_id?: string;
   default_room_id?: string;
@@ -3381,6 +3593,9 @@ export const defaultSettings = (): SettingsRecord => ({
   memory_capture_mode: "auto",
   knowledge_wiki_capture_mode: "auto",
   skill_capture_mode: "auto",
+  learning_enabled: true,
+  learning_budget_ratio: 0.1,
+  learning_budget_window_days: 7,
   external_provider_role: "assistive",
   updated_at: nowIso()
 });

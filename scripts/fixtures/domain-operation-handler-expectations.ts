@@ -122,13 +122,29 @@ export const handlerExpectations = {
   },
   "session.search.reindex": { input: {}, calls: [{ method: "reindexSessionSearch", args: [] }] },
   "session.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSessions", args: ["fixture", 5] }] },
-  "memory.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchMemory", args: ["fixture", 5] }] },
-  "wiki.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchWiki", args: ["fixture", 5] }] },
-  "skill.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSkills", args: ["fixture", 5] }] },
+  "memory.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchMemory", args: ["run_fixture", "fixture", 5] }] },
+  "wiki.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchWiki", args: ["run_fixture", "fixture", 5] }] },
+  "skill.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSkills", args: ["run_fixture", "fixture", 5] }] },
   "collection.search": { input: { collection_id: "collection_fixture", query: "fixture", limit: 5 }, calls: [{ method: "searchCollections", args: ["collection_fixture", "fixture", 5] }] },
   "learning.snapshot.prune": {
     input: { retain: 5 },
     calls: [{ method: "pruneLearningSnapshots", args: [{ retain: 5 }] }]
+  },
+  "learning.background_review.apply": {
+    input: { reflection_run_id: "reflection_fixture", mutations: [] },
+    calls: [{ method: "applyBackgroundReviewMutations", args: [{ reflectionRunId: "reflection_fixture", sessionId: "session_fixture", mutations: [] }] }]
+  },
+  "learning.resource.usage.record": {
+    input: { resource_kind: "skill", resource_id: "resource_fixture", resource_version: "1", content_hash: "hash_fixture", decision_summary: "Use the resource for this decision.", matched_conditions: ["fixture condition"] },
+    calls: [{ method: "recordAppliedLearningResourceUse", args: [{ runId: "run_fixture", resourceKind: "skill", resourceId: "resource_fixture", resourceVersion: "1", contentHash: "hash_fixture", decisionSummary: "Use the resource for this decision.", matchedConditions: ["fixture condition"] }] }]
+  },
+  "learning.resource.version.restore": {
+    input: { resource_kind: "wiki", resource_id: "resource_fixture", target_version: "1", reason: "Restore the reviewed version." },
+    calls: [{ method: "restoreLearningResourceVersion", args: [{ resourceKind: "wiki", resourceId: "resource_fixture", targetVersion: "1", reason: "Restore the reviewed version." }] }]
+  },
+  "learning.resource.version.update": {
+    input: { resource_kind: "wiki", resource_id: "resource_fixture", change_reason: "Apply the reviewed update.", content: "Updated fixture content." },
+    calls: [{ method: "updateLearningResourceVersion", args: [{ resourceKind: "wiki", resourceId: "resource_fixture", changeReason: "Apply the reviewed update.", content: "Updated fixture content." }] }]
   },
   "objective.transition": {
     input: { objective_id: "objective_fixture", action: "pause" },

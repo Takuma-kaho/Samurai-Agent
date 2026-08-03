@@ -1,5 +1,5 @@
 import { domainOperationIdFor } from "@samurai-agent/domain-operations";
-import { createId, stableHash, type JsonValue } from "@samurai-agent/core-schemas";
+import { createId, stableHash, type JsonValue, type LearningBackgroundReviewMutation } from "@samurai-agent/core-schemas";
 
 type RuntimeDomainActorIdentity = "owner" | "owner_scheduled" | "paired_contact";
 export interface RuntimeDomainTrustedContext {
@@ -38,9 +38,15 @@ export class RuntimeDomainApi {
   }
 
   async recordSkillUsage(input: { skillId: string; runId: string; resourceId: string; contentHash: string; stage: string; metadata: Record<string, JsonValue> }): Promise<unknown> {
+    const idempotencyKey = `skill_usage:${stableHash({
+      run_id: input.runId,
+      resource_id: input.resourceId,
+      stage: input.stage,
+      content_hash: input.contentHash
+    })}`;
     const result = await this.dispatcher.command({
       command_id: domainOperationIdFor("skillUsageRecord"),
-      idempotency_key: "skill_usage_request",
+      idempotency_key: idempotencyKey,
       payload: {
         skill_id: input.skillId,
         resource_id: input.resourceId,
@@ -49,6 +55,104 @@ export class RuntimeDomainApi {
         metadata: input.metadata
       }
     }, { runId: input.runId });
+    return result.result;
+  }
+
+  async recordAppliedLearningResource(input: {
+    runId: string;
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    resourceVersion: string;
+    contentHash: string;
+    decisionSummary: string;
+    matchedConditions: string[];
+  }): Promise<unknown> {
+    const idempotencyKey = `learning_resource_application:${stableHash({
+      run_id: input.runId,
+      resource_kind: input.resourceKind,
+      resource_id: input.resourceId,
+      resource_version: input.resourceVersion,
+      content_hash: input.contentHash,
+      decision_summary: input.decisionSummary,
+      matched_conditions: input.matchedConditions
+    })}`;
+    const result = await this.dispatcher.command({
+      command_id: domainOperationIdFor("learningResourceUsageRecord"),
+      idempotency_key: idempotencyKey,
+      payload: {
+        resource_kind: input.resourceKind,
+        resource_id: input.resourceId,
+        resource_version: input.resourceVersion,
+        content_hash: input.contentHash,
+        decision_summary: input.decisionSummary,
+        matched_conditions: input.matchedConditions
+      }
+    }, { runId: input.runId });
+    return result.result;
+  }
+
+  async restoreLearningResourceVersion(input: {
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    targetVersion: string;
+    reason?: string;
+  }): Promise<unknown> {
+    const payload = {
+      resource_kind: input.resourceKind,
+      resource_id: input.resourceId,
+      target_version: input.targetVersion,
+      ...(input.reason === undefined ? {} : { reason: input.reason })
+    };
+    const result = await this.dispatcher.command({
+      command_id: domainOperationIdFor("learningResourceVersionRestore"),
+      idempotency_key: `learning_resource_version_restore:${stableHash(payload)}`,
+      payload
+    });
+    return result.result;
+  }
+
+  async updateLearningResourceVersion(input: {
+    resourceKind: "memory" | "wiki" | "skill";
+    resourceId: string;
+    changeReason: string;
+    content?: string;
+    usageScope?: { kind: "workspace" } | { kind: "room"; room_id: string } | { kind: "agent"; agent_id: string } | { kind: "session"; session_id: string };
+    evidenceState?: "direct_confirmed" | "inferred" | "supported" | "conflict";
+    usageState?: "normal" | "limited" | "dormant";
+    pinned?: boolean;
+  }): Promise<unknown> {
+    const payload = {
+      resource_kind: input.resourceKind,
+      resource_id: input.resourceId,
+      change_reason: input.changeReason,
+      ...(input.content === undefined ? {} : { content: input.content }),
+      ...(input.usageScope === undefined ? {} : { usage_scope: input.usageScope }),
+      ...(input.evidenceState === undefined ? {} : { evidence_state: input.evidenceState }),
+      ...(input.usageState === undefined ? {} : { usage_state: input.usageState }),
+      ...(input.pinned === undefined ? {} : { pinned: input.pinned })
+    };
+    const result = await this.dispatcher.command({
+      command_id: domainOperationIdFor("learningResourceVersionUpdate"),
+      idempotency_key: `learning_resource_version_update:${stableHash(payload)}`,
+      payload
+    });
+    return result.result;
+  }
+
+  async applyCore05BackgroundReview(input: {
+    reflectionRunId: string;
+    sessionId: string;
+    mutations: LearningBackgroundReviewMutation[];
+  }): Promise<unknown> {
+    const payload = {
+      reflection_run_id: input.reflectionRunId,
+      mutations: input.mutations
+    };
+    const result = await this.dispatcher.command({
+      command_id: "learning.background_review.apply",
+      idempotency_key: `learning_background_review_apply:${stableHash(payload)}`,
+      payload
+    }, { sessionId: input.sessionId });
     return result.result;
   }
 
@@ -136,7 +240,7 @@ export class RuntimeDomainApi {
   }
 
   async runMemoryReviewAutomation(): Promise<unknown> {
-    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("automationMemoryReviewRun"), input_source: "automation", idempotency_key: "automation_memory_review_request", payload: {} });
+    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("automationMemoryReviewRun"), input_source: "automation", idempotency_key: createId("automation_memory_review_request"), payload: {} });
     return result.result;
   }
 }

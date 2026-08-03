@@ -25,12 +25,18 @@ describe("workspace context preview adapter", () => {
     }
   });
 
-  it("preserves skill parser errors instead of treating malformed frontmatter as body", async () => {
-    for (const markdown of ["body without frontmatter", "---\n{}\nbody", "---\nnot-json\n---\nbody"]) {
-      const store = { readSkillMarkdown: async () => markdown } as unknown as WorkspaceStore;
-      const adapter = new WorkspaceContextPreviewAdapter(store, { sessionNotFound: (id) => new Error(`missing:${id}`) });
-      await expect(adapter.ports.skills.readBody("skill-1")).rejects.toThrow();
-    }
+  it("exposes only support-file paths before an explicit Skill view", async () => {
+    let bodyReads = 0;
+    const store = {
+      readSkillMarkdown: async () => { bodyReads += 1; return "ignored"; },
+      listSkillSupportFileRefs: async () => [{ skill_id: "skill-1", path: "references/a.md", file_path: "skills/support/skill-1/references/a.md" }]
+    } as unknown as WorkspaceStore;
+    const adapter = new WorkspaceContextPreviewAdapter(store, { sessionNotFound: (id) => new Error(`missing:${id}`) });
+
+    await expect(adapter.ports.skills.listSupportFileRefs("skill-1")).resolves.toEqual([
+      { skill_id: "skill-1", path: "references/a.md", file_path: "skills/support/skill-1/references/a.md" }
+    ]);
+    expect(bodyReads).toBe(0);
   });
 
   it("trims collection note content before selection", async () => {

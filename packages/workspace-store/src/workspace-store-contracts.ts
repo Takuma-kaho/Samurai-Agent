@@ -81,6 +81,13 @@ export interface SkillSupportFile {
   content: string;
 }
 
+/** A support-file path is catalog metadata; it deliberately excludes file content. */
+export interface SkillSupportFileRef {
+  skill_id: string;
+  path: string;
+  file_path: string;
+}
+
 export type WikiWithFilePath = WikiFrontmatter & { file_path: string };
 export type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string };
 export type CollectionRecordWithFilePath = Omit<CollectionRecord, "version"> & { version: number; file_path: string };

@@ -25,6 +25,7 @@ type StoredWiki = WikiFrontmatter & { file_path: string };
 interface StoredSkill { id: string; title: string; description: string; tags: string[]; allowed_scopes: SkillFrontmatter["allowed_scopes"]; required_capabilities: string[]; owner_pinned: boolean; state: SkillState; file_path: string; frontmatter: SkillFrontmatter }
 interface SkillPackage { id: string; title: string; description: string; markdown: string; support_files: Array<{ path: string; content: string }> }
 interface ConsolidationResult { primary_skill_id: string; markdown: string; support_files: Array<{ path: string; content: string }>; archive_skill_ids: string[] }
+type CuratorReason = "replacement" | "refutation" | "environment_changed" | "user_request" | "restore" | "archive";
 
 export interface CuratorWorkflowPort {
   ensureSession(): Promise<{ id: string }>;
@@ -35,7 +36,8 @@ export interface CuratorWorkflowPort {
   createSnapshot(runId: string): Promise<LearningSnapshotRecord>; restoreSnapshot(id: string): Promise<void>;
   saveState(input: Partial<CuratorStateRecord>): Promise<CuratorStateRecord>; saveSuggestion(value: ReflectionSuggestionRecord): Promise<void>;
   saveJobReport(value: LearningJobReportRecord): Promise<void>; readMemory(id: string): Promise<string | undefined>;
-  replaceMemory(id: string, content: string): Promise<void>; archiveMemory(id: string): Promise<void>; readWiki(id: string): Promise<string | undefined>;
+  archiveResourceVersion(input: { resourceKind: "memory" | "wiki" | "skill"; resourceId: string; changeReason: string }): Promise<void>;
+  replaceMemory(id: string, content: string): Promise<void>; archiveMemory(id: string): Promise<void>; archiveWiki(id: string): Promise<void>; readWiki(id: string): Promise<string | undefined>;
   readSkill(id: string): Promise<string | undefined>; listSkillSupport(id: string): Promise<Array<{ path: string; content: string }>>;
   replaceSkill(id: string, markdown: string): Promise<void>; writeSkillSupport(input: { skillId: string; path: string; content: string }): Promise<void>;
   updateSkillState(id: string, state: SkillState): Promise<void>; applySkillLifecycle(input: { skillId: string; action: Exclude<CuratorLifecycleAction, "review"> }): Promise<void>;
@@ -68,7 +70,7 @@ export class LearningDomainService {
 
   pause() { return this.dependencies.learning.saveCuratorState({ paused: true }); }
   resume() { return this.dependencies.learning.saveCuratorState({ paused: false }); }
-  runCurator(input: { respectIdleGate?: boolean } = {}) { return this.executeCurator(input); }
+  runCurator(input: { respectIdleGate?: boolean; reason?: CuratorReason; resourceKind?: "memory" | "wiki" | "skill"; resourceId?: string } = {}) { return this.executeReasonDrivenCurator(input); }
   runEvaluation() { return this.executeEvaluation(); }
   ensureEvaluationSession() { return this.dependencies.evaluation.ensureSession(); }
   listEvaluationSkills() { return this.dependencies.evaluation.listSkills(); }
@@ -103,7 +105,148 @@ export class LearningDomainService {
     return this.dependencies.learning.createSnapshot(createId("curator_manual"));
   }
 
-  async executeCurator(input: { respectIdleGate?: boolean } = {}): Promise<{ reflectionRun: ReflectionRunRecord; suggestions: ReflectionSuggestionRecord[]; curatorReport: CuratorLifecycleReport; curatorReviewReport: CuratorReviewReport }> {
+  /** Core 05 curator: reason-driven review only. Time alone never changes a Resource. */
+  async executeReasonDrivenCurator(input: { respectIdleGate?: boolean; reason?: CuratorReason; resourceKind?: "memory" | "wiki" | "skill"; resourceId?: string } = {}): Promise<{ reflectionRun: ReflectionRunRecord; suggestions: ReflectionSuggestionRecord[]; curatorReport: CuratorLifecycleReport; curatorReviewReport: CuratorReviewReport }> {
+    const session = await this.dependencies.curator.ensureSession();
+    const [curatorState, memories, skills, skillUsage, wikiPages] = await Promise.all([
+      this.dependencies.curator.getState(),
+      this.dependencies.curator.listMemory(),
+      this.dependencies.curator.listSkills(),
+      this.dependencies.curator.listSkillUsage(),
+      this.dependencies.curator.listWiki()
+    ]);
+    const now = nowIso();
+    const reason = input.reason;
+    let reflectionRun = await this.dependencies.curator.createReflectionRun({
+      id: createId("reflection"),
+      kind: "curator",
+      session_id: session.id,
+      status: "started",
+      input_summary: reason
+        ? `Reason-driven Curator review: ${reason}.`
+        : "Curator skipped: no replacement, refutation, environment change, or user request was supplied.",
+      started_at: now
+    });
+    const suggestions: ReflectionSuggestionRecord[] = [];
+    const archiveCandidates: CuratorReviewReport["archive_candidates"] = [];
+    let snapshotId: string | undefined;
+    let archiveApplied = false;
+    let summary = "Curator did not run a Resource review because no reason was supplied.";
+    if (reason && input.resourceKind && input.resourceId) {
+      const kind = input.resourceKind === "wiki" ? "knowledge_wiki" as const : input.resourceKind;
+      const target = input.resourceKind === "memory"
+        ? memories.find((item) => item.id === input.resourceId)
+        : input.resourceKind === "wiki"
+          ? wikiPages.find((item) => item.id === input.resourceId)
+          : skills.find((item) => item.id === input.resourceId);
+      if (!target) throw this.dependencies.requestError("not_found", `curator_resource_not_found:${input.resourceKind}:${input.resourceId}`);
+      const pinned = input.resourceKind === "skill"
+        ? (() => {
+            const skill = target as StoredSkill;
+            return skill.owner_pinned || skill.frontmatter.owner_pinned || skill.frontmatter.pinned === true || skill.state === "pinned";
+          })()
+        : (target as StoredMemory | StoredWiki).pinned === true;
+      const title = `${reason}: ${input.resourceId}`;
+      const targetRef = input.resourceKind === "memory"
+        ? memoryRef(target as StoredMemory)
+        : input.resourceKind === "wiki"
+          ? wikiRef(target as StoredWiki)
+          : skillRef(target as StoredSkill);
+      if (reason === "archive") {
+        archiveCandidates.push({ kind, id: input.resourceId, title, reason: pinned ? "Pinned Resources are never automatically archived." : "Explicit archive request." });
+        if (pinned) {
+          summary = `Curator kept pinned Resource ${input.resourceId}; Archive was not applied.`;
+        } else {
+          const snapshot = await this.dependencies.curator.createSnapshot(reflectionRun.id);
+          snapshotId = snapshot.id;
+          try {
+            await this.dependencies.curator.archiveResourceVersion({
+              resourceKind: input.resourceKind,
+              resourceId: input.resourceId,
+              changeReason: "user_requested_archive"
+            });
+            archiveApplied = true;
+            summary = `Curator archived ${input.resourceKind} ${input.resourceId} after Snapshot ${snapshot.id}.`;
+          } catch (error) {
+            await this.dependencies.curator.restoreSnapshot(snapshot.id).catch(() => undefined);
+            reflectionRun = await this.dependencies.curator.updateReflectionRun({
+              ...reflectionRun,
+              status: "failed",
+              error: `curator_archive_restored:${this.dependencies.curator.errorMessage(error)}`,
+              completed_at: nowIso()
+            });
+            throw error;
+          }
+        }
+      } else {
+        summary = `Curator recorded a reason-driven ${reason} review without an automatic Resource mutation.`;
+      }
+      const suggestion: ReflectionSuggestionRecord = {
+        id: createId("reflection_suggestion"),
+        reflection_run_id: reflectionRun.id,
+        suggestion_type: reason === "refutation" ? "conflict" : kind === "skill" ? "skill_patch" : kind === "knowledge_wiki" ? "knowledge_wiki" : "memory_patch",
+        status: archiveApplied ? "applied" : "proposed",
+        title,
+        content: archiveApplied
+          ? `Curator applied the explicit Archive request after Snapshot ${snapshotId}.`
+          : `Curator reviewed the explicit ${reason} reason without deleting, merging, or expanding Scope automatically.`,
+        target_ref: targetRef,
+        source_refs: [targetRef],
+        confidence: 0.7,
+        created_at: now,
+        updated_at: now
+      };
+      await this.dependencies.curator.saveSuggestion(suggestion);
+      suggestions.push(suggestion);
+    }
+    reflectionRun = await this.dependencies.curator.updateReflectionRun({ ...reflectionRun, status: "completed", output_summary: summary, completed_at: nowIso() });
+    await this.dependencies.curator.saveState({ last_run_at: now, last_run_summary: summary, run_count: curatorState.run_count + 1 });
+    const curatorReport = buildCuratorLifecycleReport({
+      now,
+      dryRun: !archiveApplied,
+      paused: curatorState.paused,
+      skippedReason: summary,
+      curatorState,
+      memories,
+      wikiPages,
+      skills,
+      skillUsage,
+      suggestions,
+      skillActions: [],
+      protectedSkills: [],
+      ...(snapshotId ? { snapshotId } : {})
+    });
+    const curatorReviewReport = buildCuratorReviewReport({
+      now,
+      dryRun: !archiveApplied,
+      keepCandidates: [],
+      memoryMergeGroups: [],
+      skillConsolidationGroups: [],
+      wikiPatchProposals: [],
+      archiveCandidates
+    });
+    await this.dependencies.curator.saveJobReport({
+      id: createId("learning_job_report"),
+      job_kind: "curator",
+      run_id: reflectionRun.id,
+      target_resource_count: reason && input.resourceId ? 1 : 0,
+      mutation_count: archiveApplied ? 1 : 0,
+      archive_count: archiveApplied ? 1 : 0,
+      restore_count: 0,
+      patch_count: 0,
+      merge_count: 0,
+      skipped_reasons: archiveApplied ? {} : reason ? { reason_requires_explicit_resource_operation: 1 } : { no_curator_reason: 1 },
+      evaluation_count: 0,
+      ...(snapshotId ? { snapshot_id: snapshotId } : {}),
+      duration_ms: Math.max(0, Date.parse(reflectionRun.completed_at ?? nowIso()) - Date.parse(now)),
+      created_at: nowIso()
+    });
+    return { reflectionRun, suggestions, curatorReport, curatorReviewReport };
+  }
+
+  async executeCurator(input: { respectIdleGate?: boolean; reason?: CuratorReason; resourceKind?: "memory" | "wiki" | "skill"; resourceId?: string } = {}): Promise<{ reflectionRun: ReflectionRunRecord; suggestions: ReflectionSuggestionRecord[]; curatorReport: CuratorLifecycleReport; curatorReviewReport: CuratorReviewReport }> {
+    const legacyCompletionPath: boolean = false;
+    if (legacyCompletionPath) {
     const session = await this.dependencies.curator.ensureSession();
     const [curatorState, memories, skills, skillUsage, wikiPages, backendRuns, learningEvaluations, reflectionRuns] = await Promise.all([
       this.dependencies.curator.getState(),
@@ -554,6 +697,8 @@ export class LearningDomainService {
         archiveCandidates
       })
     };
+    }
+    return this.executeReasonDrivenCurator(input);
   }
 
   async executeEvaluation(): Promise<{ reflectionRun: ReflectionRunRecord; suggestions: ReflectionSuggestionRecord[]; evaluationReport: EvaluationTraceReport; learningEvaluations: LearningEvaluationRecord[] }> {

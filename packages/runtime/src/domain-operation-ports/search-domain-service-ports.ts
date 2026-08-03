@@ -10,13 +10,13 @@ export function createSearchDomainServicePorts(services: Pick<RuntimeDomainServi
       searchSessions: (query, limit) => services.searchDomainService.searchSessions(query, limit)
     }),
     "memory.search": readOnlyQueryPort<Ports["memory.search"]>({
-      searchMemory: (query, limit) => services.searchDomainService.searchMemory(query, limit)
+      searchMemory: (runId, query, limit) => services.searchDomainService.searchMemory(runId, query, limit)
     }),
     "wiki.search": readOnlyQueryPort<Ports["wiki.search"]>({
-      searchWiki: (query, limit) => services.searchDomainService.searchWiki(query, limit)
+      searchWiki: (runId, query, limit) => services.searchDomainService.searchWiki(runId, query, limit)
     }),
     "skill.search": readOnlyQueryPort<Ports["skill.search"]>({
-      searchSkills: (query, limit) => services.searchDomainService.searchSkills(query, limit)
+      searchSkills: (runId, query, limit) => services.searchDomainService.searchSkills(runId, query, limit)
     }),
     "collection.search": readOnlyQueryPort<Ports["collection.search"]>({
       searchCollections: (collectionId, query, limit) => services.searchDomainService.searchCollections(collectionId, query, limit)

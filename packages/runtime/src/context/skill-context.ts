@@ -13,7 +13,7 @@ export interface SkillContextSkill {
   allowed_scopes: SkillFrontmatter["allowed_scopes"];
   required_capabilities: string[];
   owner_pinned: boolean;
-  frontmatter: Pick<SkillFrontmatter, "allowed_scopes" | "owner_pinned">;
+  frontmatter: Pick<SkillFrontmatter, "allowed_scopes" | "owner_pinned" | "evidence_state" | "usage_state">;
   file_path: string;
 }
 
@@ -127,6 +127,7 @@ function evaluateSkillSelection(
   if (missingCapabilities.length) reasons.push(`Missing capabilities: ${missingCapabilities.join(", ")}.`);
   if (unsupportedScopes.length) reasons.push(`Unsupported scopes: ${unsupportedScopes.join(", ")}.`);
   if (ownerPinned) reasons.push("Owner pinned skill.");
+  if (skill.frontmatter.usage_state === "limited") reasons.push("Limited evidence: use this Skill as a reference only.");
   if (!reasons.length) reasons.push("Skill catalog matched the query.");
   return {
     score: matchedTerms.length * 10 + matchedCapabilities.length * 6 + (ownerPinned ? 4 : 0) + stateSelectionBoost(skill.state),
@@ -176,7 +177,7 @@ export function selectSkillSupportFiles(files: SkillSupportFile[], query: string
 export function describeSkillSelection(
   level: SkillDisclosureLevel,
   index: number,
-  supportFiles: SkillSupportFile[],
+  supportFiles: Array<Pick<SkillSupportFile, "path">>,
   usage?: { use_count: number; last_used_at?: string },
   selection?: RuntimeSkillSelection
 ): string {

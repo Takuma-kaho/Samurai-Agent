@@ -60,6 +60,21 @@ async replaceMemoryContent(id: string, content: string): Promise<MemoryWithFileP
   return { ...next, file_path: filePath };
 }
 
+/** Updates only the Core 05 metadata carried by a Workspace-authoritative Memory file. */
+async patchMemoryLearningMetadata(input: {
+  id: string;
+  metadata: Partial<Pick<MemoryFrontmatter, "evidence_state" | "usage_state" | "usage_scope" | "origin_activity_context" | "source_run_ids" | "source_refs" | "provenance" | "version" | "content_hash" | "pinned">>;
+}): Promise<MemoryWithFilePath | undefined> {
+  const current = await this.getMemory(input.id);
+  const content = await this.readMemoryContent(input.id);
+  if (!current || content === undefined) return undefined;
+  const { file_path: filePath, ...frontmatter } = current;
+  const next = withUsageScope({ ...frontmatter, ...input.metadata, updated_at: nowIso() });
+  await writeFile(path.join(this.rootDir, filePath), `${renderFrontmatter(next)}\n${content.trim()}\n`);
+  await this.db.updateTable("memory_index").set(memoryToRow(next, filePath)).where("id", "=", input.id).execute();
+  return { ...next, file_path: filePath };
+}
+
 async listMemory(options: { includeArchived?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<MemoryWithFilePath[]> {
   let query = this.db.selectFrom("memory_index").selectAll();
   if (!options.includeArchived) {
@@ -157,6 +172,51 @@ async readMemoryContent(id: string): Promise<string | undefined> {
   }
   const raw = await readFile(path.join(this.rootDir, memory.file_path), "utf8");
   return stripFrontmatter(raw).trim();
+}
+
+/** Returns the Workspace-authoritative Memory document for version history operations. */
+async readMemoryMarkdown(id: string): Promise<string | undefined> {
+  const memory = await this.getMemory(id);
+  if (!memory) return undefined;
+  return readFile(path.join(this.rootDir, memory.file_path), "utf8").catch(() => undefined);
+}
+
+/** Restores a historical document as a new current Version; it never rewinds history. */
+async restoreMemoryVersionMarkdown(input: { id: string; markdown: string; version: string }): Promise<MemoryWithFilePath | undefined> {
+  const current = await this.getMemory(input.id);
+  if (!current) return undefined;
+  const parsed = parseMemoryMarkdownLocal(input.markdown);
+  if (parsed.frontmatter.id !== input.id) throw new Error("memory_restore_id_mismatch");
+  const next = withUsageScope(MemoryFrontmatterSchema.parse({
+    ...parsed.frontmatter,
+    version: input.version,
+    content_hash: stableHash(parsed.content),
+    updated_at: nowIso()
+  }));
+  const nextPath = path.join("memory", next.state, `${next.id}.md`);
+  const previousPath = current.file_path;
+  const nextAbsolutePath = path.join(this.rootDir, nextPath);
+  const previousAbsolutePath = path.join(this.rootDir, previousPath);
+  const previousMarkdown = await readFile(previousAbsolutePath, "utf8");
+  const nextMarkdown = `${renderFrontmatter(next)}\n${parsed.content.trim()}\n`;
+  await mkdir(path.dirname(nextAbsolutePath), { recursive: true });
+  if (nextPath === previousPath) {
+    await writeFile(nextAbsolutePath, nextMarkdown);
+  } else {
+    await writeFile(nextAbsolutePath, nextMarkdown, { flag: "wx" });
+  }
+  try {
+    await this.db.updateTable("memory_index").set(memoryToRow(next, nextPath)).where("id", "=", input.id).execute();
+  } catch (error) {
+    if (nextPath === previousPath) {
+      await writeFile(previousAbsolutePath, previousMarkdown).catch(() => undefined);
+    } else {
+      await unlink(nextAbsolutePath).catch(() => undefined);
+    }
+    throw error;
+  }
+  if (nextPath !== previousPath) await unlink(previousAbsolutePath).catch(() => undefined);
+  return { ...next, file_path: nextPath };
 }
 
 async archiveMemory(id: string): Promise<ArchiveMemoryResult | undefined> {

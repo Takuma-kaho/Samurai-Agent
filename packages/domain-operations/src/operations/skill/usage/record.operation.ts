@@ -30,7 +30,7 @@ const skillUsageRecord = defineCommand<SkillUsageRecordPorts>()({
   ...{
   "kind": "command",
   "id": "skill.usage.record",
-  "version": "3.0",
+  "version": "3.1",
   "availability": "active",
   "title": "Record Skill usage",
   "description": "Record that a Backend run used a Skill body or declared support file.",

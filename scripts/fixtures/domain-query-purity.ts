@@ -143,10 +143,10 @@ try {
     { queryId: "collection.schema.get", payload: { collection_id: "query-purity" } },
     { queryId: "collection.records.list", payload: { collection_id: "query-purity" } },
     { queryId: "collection.search", payload: { collection_id: "query-purity", query: "", limit: 5 } },
-    { queryId: "memory.search", payload: { query: "", limit: 5 } },
+    { queryId: "memory.search", payload: { query: "", limit: 5 }, trusted: { runId } },
     { queryId: "session.search", payload: { query: "", limit: 5 } },
-    { queryId: "skill.search", payload: { query: "", limit: 5 } },
-    { queryId: "wiki.search", payload: { query: "", limit: 5 } }
+    { queryId: "skill.search", payload: { query: "", limit: 5 }, trusted: { runId } },
+    { queryId: "wiki.search", payload: { query: "", limit: 5 }, trusted: { runId } }
   ] as const;
   assert.equal(cases.length, domainQueryEntries.length, "query purity must execute every active Query");
   assert.deepEqual(

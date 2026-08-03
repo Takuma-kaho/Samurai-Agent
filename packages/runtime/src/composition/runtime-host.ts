@@ -1,6 +1,5 @@
 import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput, BackendToolCallStartedEvent } from "@samurai-agent/agent-backends";
 import {
-  createId,
   nowIso,
   stableHash,
   type BackendEventRecord,
@@ -9,15 +8,11 @@ import {
   type ExternalAssistRecord,
   type GatewayBoundaryPolicy,
   type JsonValue,
-  type MessageRecord,
-  type SessionRecord,
-  type WorkspaceChangeRecord
+  type SessionRecord
 } from "@samurai-agent/core-schemas";
 import type { RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import type { WorkspaceStore } from "@samurai-agent/workspace-store";
-import { createSessionMemory } from "@samurai-agent/memory";
 import { buildContextPreview, type ContextPreviewPorts } from "../context/context-preview";
-import { memoryRef } from "../context/resource-refs";
 import { createBackendToolBridge } from "../host/backend-tool-bridge";
 import { projectBackendEventForUi } from "../backend/event-bridge";
 import { createAgentHost } from "./create-agent-host";
@@ -48,19 +43,6 @@ export interface HostExternalAssistSyncInput {
   userContent: string;
   assistantContent: string;
   role: "assistive" | "disabled";
-}
-
-export interface HostLearningReviewInput {
-  session: SessionRecord;
-  backendRun: BackendRunRecord;
-  userMessage: MessageRecord;
-  agentMessage?: MessageRecord;
-  backendEvents: BackendEventRecord[];
-  workspaceChanges: WorkspaceChangeRecord[];
-  toolRuns: Awaited<ReturnType<WorkspaceStore["listToolRuns"]>>;
-  transcriptMessages: MessageRecord[];
-  artifacts: unknown[];
-  abortSignal: AbortSignal;
 }
 
 export interface HostToolInput {
@@ -98,14 +80,7 @@ export interface RuntimeHostCompositionDependencies {
   postTurn: {
     saveGeneratedSurfacePresentations(input: { sessionId: string; messageId: string; runId: string }): Promise<void>;
     runExternalAssistSync(input: HostExternalAssistSyncInput): Promise<ExternalAssistRecord[]>;
-    runLearningReview(input: HostLearningReviewInput): Promise<unknown>;
-    loadReflectionArtifacts(input: { sessionId: string; sourceRunId: string; workspaceChanges: WorkspaceChangeRecord[] }): Promise<unknown[]>;
-    backgroundReview: {
-      readonly abortSignal: AbortSignal;
-      readonly detach: boolean;
-      isClosing(): boolean;
-      schedule(input: { runId: string; run: () => Promise<unknown> }): void;
-    };
+    registerLearningCandidate(input: { runId: string }): Promise<void>;
   };
   diagnostics: {
     formatError(error: unknown): string;
@@ -209,24 +184,6 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
           : {})
       };
       await deps.preparation.recordLearningResourceUses(turn, candidates);
-      const sessionMemory = await createSessionMemory(
-        deps.core.store,
-        turn.request.envelope,
-        turn.request.content,
-        { kind: "session", session_id: turn.session.id }
-      );
-      const sessionMemoryChange: WorkspaceChangeRecord = {
-        id: createId("change"),
-        run_id: turn.run.id,
-        session_id: turn.session.id,
-        resource_ref: memoryRef(sessionMemory),
-        change_type: "memory_suggested",
-        summary: `Captured session memory ${sessionMemory.topic}.`,
-        created_at: nowIso()
-      };
-      await deps.core.store.saveWorkspaceChange(sessionMemoryChange);
-      await deps.core.emit("workspace.change.created", sessionMemoryChange);
-      await deps.core.emit("memory.candidate.created", sessionMemory);
       const backendInput: BackendRunInput = {
         run_id: turn.run.id,
         session_id: turn.session.id,
@@ -352,54 +309,12 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         }
       },
       learningReview: {
-        operationId: "learning_review",
-        run: async ({ admitted, run }) => {
-          const settings = await deps.core.store.getSettings();
-          const autoLearningEnabled = settings.memory_capture_mode === "auto" || settings.skill_capture_mode === "auto";
-          if (!autoLearningEnabled) return;
-          const agentMessage = (await deps.core.store.listMessages(run.session_id)).find((message) => message.id === run.output_message_id);
-          const review = async () => {
-            const workspaceChanges = (await deps.core.store.listWorkspaceChanges(run.session_id)).filter((change) => change.run_id === run.id);
-            const result = await deps.postTurn.runLearningReview({
-              session: admitted.session,
-              backendRun: run,
-              userMessage: admitted.userMessage,
-              agentMessage,
-              backendEvents: await deps.core.store.listBackendEvents({ runId: run.id }),
-              workspaceChanges,
-              toolRuns: await deps.core.store.listToolRuns({ runId: run.id }),
-              transcriptMessages: await deps.core.store.listMessages(run.session_id),
-              artifacts: await deps.postTurn.loadReflectionArtifacts({ sessionId: run.session_id, sourceRunId: run.id, workspaceChanges }),
-              abortSignal: deps.postTurn.backgroundReview.abortSignal
-            });
-            const failure = learningReviewFailure(result);
-            if (failure) throw new Error(failure);
-            return result;
-          };
-          // A Web Chat facade must not return while its Learning Review is
-          // still running. Gateway/Automation keep their existing detached
-          // background behavior; their durable work is outside this turn's
-          // response contract.
-          const isChatTurn = admitted.request.envelope.source === "web";
-          if (!isChatTurn && deps.postTurn.backgroundReview.detach && !deps.postTurn.backgroundReview.isClosing()) {
-            deps.postTurn.backgroundReview.schedule({ runId: run.id, run: review });
-            return;
-          }
-          await review();
+        operationId: "learning_candidate_registration",
+        run: async ({ run }) => {
+          await deps.postTurn.registerLearningCandidate({ runId: run.id });
         }
-      }
+      },
     },
     resolveDefaultBackendId: () => deps.preparation.resolveDefaultBackendId()
   });
-}
-
-function learningReviewFailure(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const reflectionRun = (value as { reflectionRun?: unknown }).reflectionRun;
-  if (!reflectionRun || typeof reflectionRun !== "object" || Array.isArray(reflectionRun)) return undefined;
-  const record = reflectionRun as { status?: unknown; error?: unknown; output_summary?: unknown };
-  if (record.status !== "failed") return undefined;
-  if (typeof record.error === "string" && record.error.trim()) return `learning_review_failed:${record.error}`;
-  if (typeof record.output_summary === "string" && record.output_summary.trim()) return `learning_review_failed:${record.output_summary}`;
-  return "learning_review_failed";
 }

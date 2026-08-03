@@ -10,6 +10,7 @@ const settings: SettingsRecord = {
   knowledge_wiki_capture_mode: "suggest",
   skill_capture_mode: "suggest",
   external_provider_role: "assistive",
+  default_agent_id: "agent-1",
   updated_at: now
 };
 
@@ -28,7 +29,7 @@ function makePorts(overrides: Partial<ContextPreviewPorts> = {}, progress: strin
   };
   const base: ContextPreviewPorts = {
     session: {
-      getSession: async () => ({ id: "session-1", session_key: "main", title: "Main", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now }),
+      getSession: async () => ({ id: "session-1", session_key: "main", room_id: "room-1", title: "Main", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now }),
       getSettings: async () => settings
     },
     summary: {
@@ -48,8 +49,7 @@ function makePorts(overrides: Partial<ContextPreviewPorts> = {}, progress: strin
     skills: {
       search: async () => [skill],
       listUsage: async () => [{ skill_id: "skill-1", use_count: 2, created_at: now, updated_at: now }],
-      readBody: async () => "skill body",
-      listSupportFiles: async () => [{ skill_id: "skill-1", path: "references/deploy.md", file_path: "skills/support/skill-1/references/deploy.md", content: "support" }],
+      listSupportFileRefs: async () => [{ skill_id: "skill-1", path: "references/deploy.md", file_path: "skills/support/skill-1/references/deploy.md" }],
       environment: { runtime: "local_workspace", platform: "test", availableCapabilities: ["deploy"], supportedScopes: new Set(["workspace"]) }
     },
     collections: {
@@ -99,6 +99,23 @@ describe("context preview orchestration", () => {
     await expect(buildContextPreview({ sessionId: "missing", query: "hi", ports: missing })).rejects.toThrow("Session not found: missing");
   });
 
+  it("continues chat context while omitting Knowledge without a full Activity Context", async () => {
+    const ports = makePorts();
+    const calls = { memory: 0, wiki: 0, skills: 0 };
+    ports.session.getSession = async () => ({ id: "session-1", session_key: "main", title: "Main", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now });
+    ports.memory.retrieve = async () => { calls.memory += 1; return emptyMemoryResult(); };
+    ports.wiki.build = async (query) => { calls.wiki += 1; return { pages: [], entries: [], report: { query, retrieved_at: now, candidate_count: 0, included_count: 0, included_wiki_ids: [], excluded: [], source_refs: [] } }; };
+    ports.skills.search = async () => { calls.skills += 1; return []; };
+
+    const preview = await buildContextPreview({ sessionId: "session-1", query: "deploy", ports });
+
+    expect(preview.session_summary.session_key).toBe("main");
+    expect(preview.active_memory).toEqual([]);
+    expect(preview.knowledge_wiki).toEqual([]);
+    expect(preview.selected_skills).toEqual([]);
+    expect(calls).toEqual({ memory: 0, wiki: 0, skills: 0 });
+  });
+
   it("reports session-search timeout progress", async () => {
     const progress: string[] = [];
     const ports = makePorts({}, progress);
@@ -107,3 +124,10 @@ describe("context preview orchestration", () => {
     expect(progress).toContain("reasoning_summary");
   }, 5000);
 });
+
+function emptyMemoryResult() {
+  return {
+    candidates: [],
+    report: { query: "", retrieved_at: now, candidate_count: 0, included_count: 0, included_memory_ids: [], excluded: [], sensitive_redactions: [], conflict_groups: [], resolution_suggestions: [] }
+  };
+}

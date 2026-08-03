@@ -1,4 +1,4 @@
-import { nowIso, type ContextPreview, type Provenance, type ResourceRef } from "@samurai-agent/core-schemas";
+import { nowIso, type ContextPreview, type LearningEvidenceState, type LearningUsageState, type Provenance, type ResourceRef } from "@samurai-agent/core-schemas";
 
 export interface WikiContextPage {
   id: string;
@@ -8,6 +8,8 @@ export interface WikiContextPage {
   source_refs: ResourceRef[];
   provenance: Provenance;
   file_path: string;
+  evidence_state?: LearningEvidenceState;
+  usage_state?: LearningUsageState;
 }
 
 export interface WorkspaceContextCandidatesStore {
@@ -43,13 +45,24 @@ export async function buildKnowledgeWikiContext(store: WorkspaceContextCandidate
     }
     if (entries.length < 5) {
       pages.push(wiki);
-      entries.push({ id: wiki.id, slug: wiki.slug, title: wiki.title, content, source_refs: wiki.source_refs, provenance: wiki.provenance });
+      entries.push({
+        id: wiki.id,
+        slug: wiki.slug,
+        title: wiki.title,
+        content,
+        source_refs: wiki.source_refs,
+        provenance: wiki.provenance,
+        ...(wiki.evidence_state ? { evidence_state: wiki.evidence_state } : {}),
+        ...(wiki.usage_state ? { usage_state: wiki.usage_state } : {})
+      });
     }
   }
   return { pages, entries, report: { query, retrieved_at: nowIso(), candidate_count: matches.length, included_count: entries.length, included_wiki_ids: entries.map((entry) => entry.id), excluded, source_refs: entries.flatMap((entry) => entry.source_refs) } };
 }
 
 function knowledgeWikiExclusionReason(wiki: WikiContextPage): ContextPreview["knowledge_wiki_report"]["excluded"][number]["reason"] | undefined {
+  if (wiki.evidence_state === "conflict") return "learning_conflict";
+  if (wiki.usage_state === "dormant") return "learning_dormant";
   if (wiki.state === "proposed") return "proposed";
   if (wiki.state === "rejected") return "rejected";
   if (wiki.state === "archived") return "archived";

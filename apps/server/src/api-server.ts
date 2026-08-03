@@ -469,7 +469,6 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     productionLogger
   } });
   await runtime.startup();
-  await runtime.ensureStandardLearningJobs();
   const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
   const lifecycle: ApiServerLifecycleState = {
     started_at: nowIso(),

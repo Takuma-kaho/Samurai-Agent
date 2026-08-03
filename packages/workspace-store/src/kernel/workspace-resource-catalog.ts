@@ -94,9 +94,9 @@ const owners: readonly WorkspaceResourceOwner[] = [
   },
   {
     owner: "learning",
-    directories: ["learning-snapshots"],
-    backup_roots: [],
-    sqlite_tables: ["learning_resource_uses", "learning_evaluations", "learning_snapshots", "background_review_changes", "learning_job_reports", "curator_state", "reflection_runs", "reflection_suggestions", "external_assist_records"]
+    directories: ["learning-snapshots", "learning-history"],
+    backup_roots: ["learning-history"],
+    sqlite_tables: ["learning_resource_uses", "learning_evaluations", "learning_resource_versions", "learning_snapshots", "background_review_changes", "learning_job_reports", "curator_state", "reflection_runs", "reflection_suggestions", "external_assist_records"]
   },
   {
     owner: "collection",
@@ -140,7 +140,7 @@ const legacyBoundaries: readonly WorkspaceResourceBoundary[] = [
   { resource: "collection", source_of_truth: "filesystem", file_roots: ["collections"], sqlite_tables: ["collection_schemas", "collection_records", "collection_patches", "workspace_file_transactions"], sqlite_role: "index", note: "Collection schemas, records, and notes live in files; SQLite rows are rebuildable indexes and change history." },
   { resource: "room_agent", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["rooms", "agents"], sqlite_role: "metadata", note: "Rooms and stable Agent identities are SQLite records; an Agent retains its role when its selected Backend changes." },
   { resource: "session_run_history", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["sessions", "messages", "message_presentations", "operations", "backend_runs", "session_run_reservations", "backend_events", "tool_runs", "workspace_changes"], sqlite_role: "history", note: "Session and run history are structured records used for resume, search, and history views." },
-  { resource: "learning_core", source_of_truth: "derived", file_roots: ["learning-snapshots"], sqlite_tables: ["learning_resource_uses", "learning_evaluations", "background_review_changes", "learning_snapshots", "learning_job_reports", "curator_state", "reflection_runs", "reflection_suggestions", "external_assist_records", "session_search_fts", "session_search_trigram"], sqlite_role: "history", note: "Learning usage, evaluation, provenance, snapshots, and Session Search are derived or restorable records; Memory and Skill markdown remain the durable source." },
+  { resource: "learning_core", source_of_truth: "derived", file_roots: ["learning-snapshots", "learning-history"], sqlite_tables: ["learning_resource_uses", "learning_evaluations", "learning_resource_versions", "background_review_changes", "learning_snapshots", "learning_job_reports", "curator_state", "reflection_runs", "reflection_suggestions", "external_assist_records", "session_search_fts", "session_search_trigram"], sqlite_role: "history", note: "Learning usage, evaluation, provenance, and immutable past versions are tracked here; current Memory, Knowledge Wiki, and Skill markdown remain the durable source." },
   { resource: "policy_audit_rollback", source_of_truth: "sqlite", file_roots: ["rollback"], sqlite_tables: ["policy_decisions", "approval_requests", "audit_records", "rollback_points", "grants"], sqlite_role: "audit", note: "Access and audit records are SQLite history; rollback snapshots may reference filesystem payloads." },
   { resource: "gateway_automation", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["automation_jobs", "automation_runs", "external_sends", "gateway_pairings", "gateway_pairing_policies", "gateway_routing_policies", "gateway_inbound_messages", "gateway_deliveries", "gateway_boundary_policies", "gateway_mcp_configs", "gateway_concurrency_locks", "gateway_sandbox_instances", "gateway_sandbox_workspace_syncs"], sqlite_role: "queue", note: "Gateway and scheduler state are operational queues and control-plane records, not workspace prose." },
   { resource: "client_event_queue", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["client_events"], sqlite_role: "queue", note: "Client events are queued OS/UI requests for Web, Desktop, or future clients; Runtime and Desktop stay decoupled through this table." },

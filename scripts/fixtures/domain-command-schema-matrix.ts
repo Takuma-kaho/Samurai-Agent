@@ -158,8 +158,8 @@ async function main(): Promise<void> {
   const inputUsage = assertInputFieldUsage();
   const expectedOperations = [...manifest.operations].sort((left, right) => left.id.localeCompare(right.id));
   const expectedById = new Map(expectedOperations.map((operation) => [operation.id, operation]));
-  assert.equal(expectedOperations.length, 128, "schema_manifest_operation_count_mismatch:128");
-  assert.equal(definitions.length, 128, "schema_matrix_definition_count_mismatch:128");
+  assert.equal(expectedOperations.length, 132, "schema_manifest_operation_count_mismatch:132");
+  assert.equal(definitions.length, 132, "schema_matrix_definition_count_mismatch:132");
   assert.deepEqual([...expectedById.keys()], definitions.map((definition) => definition.id), "schema_manifest_definition_id_set_mismatch");
 
   const counters = { input: emptyCounter(), output: emptyCounter() };
@@ -253,18 +253,18 @@ function validateManifest(value: StaticSchemaManifest): void {
   assert.equal(value.review_policy.canonical_reference_key, "$schema_ref", "schema_manifest_catalog_reference_key_invalid");
   assert.equal(value.review_policy.review_unit, "canonical_schema_node", "schema_manifest_review_unit_invalid");
   assert.equal(value.review_policy.recursive_json_value, "global_json_value", "schema_manifest_recursive_json_value_invalid");
-  assert.equal(value.review.required_operations, 128, "schema_manifest_required_operation_count_invalid");
+  assert.equal(value.review.required_operations, 132, "schema_manifest_required_operation_count_invalid");
   assert.equal(value.operations.length, value.review.required_operations, "schema_manifest_operation_count_mismatch");
   const commands = value.operations.filter((operation) => operation.kind === "command").length;
   const queries = value.operations.filter((operation) => operation.kind === "query").length;
-  assert.equal(commands, 107, "schema_manifest_command_count_mismatch");
+  assert.equal(commands, 111, "schema_manifest_command_count_mismatch");
   assert.equal(queries, 21, "schema_manifest_query_count_mismatch");
-  assert.equal(value.review.reviewed_operations, 128, "schema_manifest_reviewed_operation_count_mismatch");
+  assert.equal(value.review.reviewed_operations, 132, "schema_manifest_reviewed_operation_count_mismatch");
   assert.equal(value.review.unreviewed_operations, 0, "schema_manifest_unreviewed_operations");
-  assert.equal(value.review.required_endpoints, 256, "schema_manifest_required_endpoint_count_invalid");
-  assert.equal(value.review.reviewed_endpoints, 256, "schema_manifest_reviewed_endpoint_count_invalid");
+  assert.equal(value.review.required_endpoints, 264, "schema_manifest_required_endpoint_count_invalid");
+  assert.equal(value.review.reviewed_endpoints, 264, "schema_manifest_reviewed_endpoint_count_invalid");
   assert.equal(value.review.unreviewed_endpoints, 0, "schema_manifest_unreviewed_endpoints");
-  assert.equal(value.review.required_schema_nodes, 772, "schema_catalog_required_node_count_invalid");
+  assert.equal(value.review.required_schema_nodes, 812, "schema_catalog_required_node_count_invalid");
   assert.equal(value.review.reviewed_schema_nodes, value.review.required_schema_nodes, "schema_catalog_reviewed_node_count_invalid");
   assert.equal(value.review.unreviewed_schema_nodes, 0, "schema_catalog_unreviewed_nodes");
   assert.equal(value.global_payload_limits.review, "reviewed", "schema_manifest_global_limit_unreviewed");

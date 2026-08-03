@@ -44,7 +44,7 @@ const skillView = defineQuery<SkillViewPorts>()({
   ...{
   "kind": "query",
   "id": "skill.view",
-  "version": "3.0",
+  "version": "3.1",
   "availability": "active",
   "title": "View Skill",
   "description": "Read a selected Skill body or one declared support file on demand.",

@@ -3026,9 +3026,16 @@ describe("agent runtime", () => {
         content: "補助資料: 調査メモは箇条書きで短くする。"
       }
     });
-    const session = await runtime.createSession();
+    const scopedNow = nowIso();
+    await store.createRoom({ id: "room-skill-lifecycle", name: "Skill lifecycle", created_at: scopedNow, updated_at: scopedNow });
+    await store.createAgent({
+      id: "agent-skill-lifecycle", name: "Skill lifecycle agent", role: "Research", instructions: "Use scoped Skills.",
+      backend_id: "samurai-native", enabled: true, created_at: scopedNow, updated_at: scopedNow
+    });
+    const session = await runtime.createSession({ room_id: "room-skill-lifecycle" });
     const chat = await runtime.runChatTurn({
       sessionId: session.id,
+      agent_id: "agent-skill-lifecycle",
       content: "調査メモ references を使って",
       output_locale: "ja"
     });
@@ -3082,7 +3089,7 @@ describe("agent runtime", () => {
     }));
     expect(usageBeforeView.some((row) => row.skill_id === projectResult.resource.id)).toBe(false);
     expect(view).toMatchObject({ disclosure_level: "support", content: "補助資料: 調査メモは箇条書きで短くする。" });
-    expect(usage).toContainEqual(expect.objectContaining({ skill_id: projectResult.resource.id, use_count: 1 }));
+    expect(usage.some((row) => row.skill_id === projectResult.resource.id)).toBe(false);
   });
 
   it("turns reflection Skill suggestions into supported project Skills with usage", async () => {
@@ -4833,13 +4840,13 @@ rl.on("line", (line) => {
     expect(result.backendEvents.some((event) => event.event_type === "artifact_created")).toBe(true);
     expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
     expect(result.toolRuns.some((toolRun) => toolRun.action_id === "artifact.create" && toolRun.status === "completed")).toBe(true);
-    expect(result.reflectionRuns[0]?.status).toBe("completed");
+    expect(result.reflectionRuns).toEqual([]);
     expect(result.reflectionSuggestions).toEqual([]);
     expect(result.policyDecisions).toEqual([]);
     expect(result.auditRecords).toEqual([]);
   });
 
-  it("keeps Background Review separate from the source Session", async () => {
+  it("does not start Background Review from a normal chat completion", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const result = await runtime.runChatTurn({
@@ -4849,7 +4856,7 @@ rl.on("line", (line) => {
     });
     await store.close();
 
-    expect(result.reflectionRuns[0]).toMatchObject({ kind: "background_review", source_run_id: result.backendRun.id, status: "completed" });
+    expect(result.reflectionRuns).toEqual([]);
     expect(result.reflectionSuggestions).toEqual([]);
   });
 
@@ -6341,13 +6348,15 @@ rl.on("line", (line) => {
     );
     const session = await runtime.createSession();
     const result = await runtime.runChatTurn({ sessionId: session.id, content: "回答は短い箇条書きにして", output_locale: "ja" });
+    const reflection = await runtime.runReflection({ sessionId: session.id, sourceRunId: result.backendRun.id });
     const [messages, memories, changes, reports] = await Promise.all([store.listMessages(session.id), store.listMemory(), store.listBackgroundReviewChanges({ sourceRunId: result.backendRun.id }), store.listLearningJobReports({ jobKind: "background_review" })]);
     await store.close();
 
-    expect(result.reflectionRuns[0]).toMatchObject({ kind: "background_review", status: "completed" });
-    expect(result.reflectionSuggestions).toContainEqual(expect.objectContaining({ status: "applied", suggestion_type: "memory" }));
+    expect(result.reflectionRuns).toEqual([]);
+    expect(reflection.reflectionRun).toMatchObject({ kind: "manual", status: "completed" });
+    expect(reflection.suggestions).toContainEqual(expect.objectContaining({ status: "applied", suggestion_type: "memory" }));
     expect(memories).toContainEqual(expect.objectContaining({ topic: "response-style" }));
-    expect(changes).toContainEqual(expect.objectContaining({ origin: "background_review", review_run_id: result.reflectionRuns[0]?.id, after_version: expect.any(String) }));
+    expect(changes).toContainEqual(expect.objectContaining({ origin: "background_review", review_run_id: reflection.reflectionRun.id, after_version: expect.any(String) }));
     expect(reports).toContainEqual(expect.objectContaining({ job_kind: "background_review", mutation_count: 1 }));
     expect(messages).toHaveLength(2);
   });
@@ -6391,7 +6400,7 @@ rl.on("line", (line) => {
     await store.close();
   });
 
-  it("cancels every detached review BackendRun and closes MCP after a cancellation failure", async () => {
+  it("does not start detached review BackendRuns after normal chat", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
     roots.push(root);
     const store = await WorkspaceStore.create({ rootDir: root });
@@ -6432,27 +6441,9 @@ rl.on("line", (line) => {
     const session = await runtime.createSession();
     await runtime.runChatTurn({ sessionId: session.id, content: "background cancellation", backend_id: backend.id });
     await runtime.runChatTurn({ sessionId: session.id, content: "background cancellation again", backend_id: backend.id });
-    for (let attempt = 0; attempt < 50 && reviewStarted < 2; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(reviewStarted).toBe(2);
-    const pool = (runtime as unknown as { stdioMcpProcessPool: { closeAll: () => Promise<void> } }).stdioMcpProcessPool;
-    const closeAll = vi.spyOn(pool, "closeAll").mockRejectedValue(new Error("fixture_close_failed"));
-    const previousTimeout = process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS;
-    process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS = "50";
-    const shutdownStartedAt = Date.now();
-    try {
-      await expect(runtime.shutdownMcpProcessPool()).rejects.toMatchObject({
-        name: "AggregateError",
-        message: "background_tasks_shutdown_failed",
-        errors: expect.arrayContaining([expect.objectContaining({ message: "fixture_close_failed" })])
-      });
-    } finally {
-      if (previousTimeout === undefined) delete process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS;
-      else process.env.SAMURAI_BACKGROUND_SHUTDOWN_TIMEOUT_MS = previousTimeout;
-    }
-    expect(cancelledRunIds).toHaveLength(2);
-    expect(cancelledRunIds.every((id) => /^review_run_/.test(id))).toBe(true);
-    expect(closeAll).toHaveBeenCalledTimes(1);
-    expect(Date.now() - shutdownStartedAt).toBeLessThan(1000);
+    expect(reviewStarted).toBe(0);
+    expect(cancelledRunIds).toEqual([]);
+    await runtime.shutdownMcpProcessPool();
     await store.close();
   });
 
@@ -7558,17 +7549,6 @@ rl.on("line", (line) => {
     expect(refreshedJob?.locked_until).toBeUndefined();
     expect(refreshedJob?.retry_after_at).toBeUndefined();
     expect(refreshedJob?.failure_count).toBe(0);
-  });
-
-  it("initializes Background Review, Evaluation, and Curator as separate scheduled jobs", async () => {
-    const { store, runtime } = await createRuntime();
-    const jobs = await runtime.ensureStandardLearningJobs("2026-07-10T00:00:00.000Z");
-    const repeated = await runtime.ensureStandardLearningJobs("2026-07-10T01:00:00.000Z");
-    await store.close();
-
-    expect(jobs.map((job) => job.kind)).toEqual(expect.arrayContaining(["memory_review", "learning_evaluation", "skill_curator"]));
-    expect(new Set(jobs.map((job) => job.id)).size).toBe(3);
-    expect(repeated.map((job) => job.id).sort()).toEqual(jobs.map((job) => job.id).sort());
   });
 
   it("runs scheduled natural language jobs through backend chat turns", async () => {

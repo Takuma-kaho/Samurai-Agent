@@ -386,11 +386,14 @@ export class WorkspaceStore {
 
     facade.saveMemory = memory.saveMemory.bind(memory);
     facade.replaceMemoryContent = memory.replaceMemoryContent.bind(memory);
+    facade.patchMemoryLearningMetadata = memory.patchMemoryLearningMetadata.bind(memory);
     facade.listMemory = memory.listMemory.bind(memory);
     facade.listMemoryForSession = memory.listMemoryForSession.bind(memory);
     facade.searchMemory = memory.searchMemory.bind(memory);
     facade.getMemory = memory.getMemory.bind(memory);
     facade.readMemoryContent = memory.readMemoryContent.bind(memory);
+    facade.readMemoryMarkdown = memory.readMemoryMarkdown.bind(memory);
+    facade.restoreMemoryVersionMarkdown = memory.restoreMemoryVersionMarkdown.bind(memory);
     facade.archiveMemory = memory.archiveMemory.bind(memory);
 
     facade.saveWikiPage = wiki.saveWikiPage.bind(wiki);
@@ -398,7 +401,10 @@ export class WorkspaceStore {
     facade.searchWiki = wiki.searchWiki.bind(wiki);
     facade.getWiki = wiki.getWiki.bind(wiki);
     facade.readWikiContent = wiki.readWikiContent.bind(wiki);
+    facade.readWikiMarkdown = wiki.readWikiMarkdown.bind(wiki);
     facade.updateWikiPage = wiki.updateWikiPage.bind(wiki);
+    facade.patchWikiLearningMetadata = wiki.patchWikiLearningMetadata.bind(wiki);
+    facade.restoreWikiVersionMarkdown = wiki.restoreWikiVersionMarkdown.bind(wiki);
     facade.setWikiState = wiki.setWikiState.bind(wiki);
 
     facade.saveSkillOptimizationRun = skills.saveSkillOptimizationRun.bind(skills);
@@ -426,6 +432,8 @@ export class WorkspaceStore {
     facade.patchSkill = skills.patchSkill.bind(skills);
     facade.updateSkillState = skills.updateSkillState.bind(skills);
     facade.replaceSkillContent = skills.replaceSkillContent.bind(skills);
+    facade.patchSkillLearningMetadata = skills.patchSkillLearningMetadata.bind(skills);
+    facade.restoreSkillVersionMarkdown = skills.restoreSkillVersionMarkdown.bind(skills);
     facade.replaceSkillContentIfUnchanged = skills.replaceSkillContentIfUnchanged.bind(skills);
     facade.recordSkillUsage = skills.recordSkillUsage.bind(skills);
     facade.getSkillUsage = skills.getSkillUsage.bind(skills);
@@ -433,12 +441,18 @@ export class WorkspaceStore {
     facade.writeSkillSupportFile = skills.writeSkillSupportFile.bind(skills);
     facade.readSkillSupportFile = skills.readSkillSupportFile.bind(skills);
     facade.listSkillSupportFiles = skills.listSkillSupportFiles.bind(skills);
+    facade.listSkillSupportFileRefs = skills.listSkillSupportFileRefs.bind(skills);
     facade.searchSkills = skills.searchSkills.bind(skills);
 
     facade.recordLearningResourceUse = learning.recordLearningResourceUse.bind(learning);
     facade.listLearningResourceUses = learning.listLearningResourceUses.bind(learning);
     facade.saveLearningEvaluation = learning.saveLearningEvaluation.bind(learning);
     facade.listLearningEvaluations = learning.listLearningEvaluations.bind(learning);
+    facade.saveLearningResourceVersion = learning.saveLearningResourceVersion.bind(learning);
+    facade.getLearningResourceVersion = learning.getLearningResourceVersion.bind(learning);
+    facade.getCurrentLearningResourceVersion = learning.getCurrentLearningResourceVersion.bind(learning);
+    facade.listLearningResourceVersions = learning.listLearningResourceVersions.bind(learning);
+    facade.readLearningResourceVersionContent = learning.readLearningResourceVersionContent.bind(learning);
     facade.saveLearningResourceEdge = learning.saveLearningResourceEdge.bind(learning);
     facade.listLearningResourceEdges = learning.listLearningResourceEdges.bind(learning);
     facade.createLearningSnapshot = learning.createLearningSnapshot.bind(learning);
@@ -453,8 +467,10 @@ export class WorkspaceStore {
     facade.getCuratorState = learning.getCuratorState.bind(learning);
     facade.saveCuratorState = learning.saveCuratorState.bind(learning);
     facade.createReflectionRun = learning.createReflectionRun.bind(learning);
+    facade.createLearningReviewCandidate = learning.createLearningReviewCandidate.bind(learning);
     facade.updateReflectionRun = learning.updateReflectionRun.bind(learning);
     facade.getReflectionRun = learning.getReflectionRun.bind(learning);
+    facade.getReflectionRunByCandidateKey = learning.getReflectionRunByCandidateKey.bind(learning);
     facade.listReflectionRuns = learning.listReflectionRuns.bind(learning);
     facade.saveReflectionSuggestion = learning.saveReflectionSuggestion.bind(learning);
     facade.updateReflectionSuggestion = learning.updateReflectionSuggestion.bind(learning);
@@ -700,11 +716,14 @@ export interface WorkspaceStore {
 
   saveMemory: MemoryRepository["saveMemory"];
   replaceMemoryContent: MemoryRepository["replaceMemoryContent"];
+  patchMemoryLearningMetadata: MemoryRepository["patchMemoryLearningMetadata"];
   listMemory: MemoryRepository["listMemory"];
   listMemoryForSession: MemoryRepository["listMemoryForSession"];
   searchMemory: MemoryRepository["searchMemory"];
   getMemory: MemoryRepository["getMemory"];
   readMemoryContent: MemoryRepository["readMemoryContent"];
+  readMemoryMarkdown: MemoryRepository["readMemoryMarkdown"];
+  restoreMemoryVersionMarkdown: MemoryRepository["restoreMemoryVersionMarkdown"];
   archiveMemory: MemoryRepository["archiveMemory"];
 
   saveWikiPage: KnowledgeWikiRepository["saveWikiPage"];
@@ -712,7 +731,10 @@ export interface WorkspaceStore {
   searchWiki: KnowledgeWikiRepository["searchWiki"];
   getWiki: KnowledgeWikiRepository["getWiki"];
   readWikiContent: KnowledgeWikiRepository["readWikiContent"];
+  readWikiMarkdown: KnowledgeWikiRepository["readWikiMarkdown"];
   updateWikiPage: KnowledgeWikiRepository["updateWikiPage"];
+  patchWikiLearningMetadata: KnowledgeWikiRepository["patchWikiLearningMetadata"];
+  restoreWikiVersionMarkdown: KnowledgeWikiRepository["restoreWikiVersionMarkdown"];
   setWikiState: KnowledgeWikiRepository["setWikiState"];
 
   saveSkillOptimizationRun: SkillRepository["saveSkillOptimizationRun"];
@@ -740,6 +762,8 @@ export interface WorkspaceStore {
   patchSkill: SkillRepository["patchSkill"];
   updateSkillState: SkillRepository["updateSkillState"];
   replaceSkillContent: SkillRepository["replaceSkillContent"];
+  patchSkillLearningMetadata: SkillRepository["patchSkillLearningMetadata"];
+  restoreSkillVersionMarkdown: SkillRepository["restoreSkillVersionMarkdown"];
   replaceSkillContentIfUnchanged: SkillRepository["replaceSkillContentIfUnchanged"];
   recordSkillUsage: SkillRepository["recordSkillUsage"];
   getSkillUsage: SkillRepository["getSkillUsage"];
@@ -747,12 +771,18 @@ export interface WorkspaceStore {
   writeSkillSupportFile: SkillRepository["writeSkillSupportFile"];
   readSkillSupportFile: SkillRepository["readSkillSupportFile"];
   listSkillSupportFiles: SkillRepository["listSkillSupportFiles"];
+  listSkillSupportFileRefs: SkillRepository["listSkillSupportFileRefs"];
   searchSkills: SkillRepository["searchSkills"];
 
   recordLearningResourceUse: LearningRepository["recordLearningResourceUse"];
   listLearningResourceUses: LearningRepository["listLearningResourceUses"];
   saveLearningEvaluation: LearningRepository["saveLearningEvaluation"];
   listLearningEvaluations: LearningRepository["listLearningEvaluations"];
+  saveLearningResourceVersion: LearningRepository["saveLearningResourceVersion"];
+  getLearningResourceVersion: LearningRepository["getLearningResourceVersion"];
+  getCurrentLearningResourceVersion: LearningRepository["getCurrentLearningResourceVersion"];
+  listLearningResourceVersions: LearningRepository["listLearningResourceVersions"];
+  readLearningResourceVersionContent: LearningRepository["readLearningResourceVersionContent"];
   saveLearningResourceEdge: LearningRepository["saveLearningResourceEdge"];
   listLearningResourceEdges: LearningRepository["listLearningResourceEdges"];
   createLearningSnapshot: LearningRepository["createLearningSnapshot"];
@@ -767,8 +797,10 @@ export interface WorkspaceStore {
   getCuratorState: LearningRepository["getCuratorState"];
   saveCuratorState: LearningRepository["saveCuratorState"];
   createReflectionRun: LearningRepository["createReflectionRun"];
+  createLearningReviewCandidate: LearningRepository["createLearningReviewCandidate"];
   updateReflectionRun: LearningRepository["updateReflectionRun"];
   getReflectionRun: LearningRepository["getReflectionRun"];
+  getReflectionRunByCandidateKey: LearningRepository["getReflectionRunByCandidateKey"];
   listReflectionRuns: LearningRepository["listReflectionRuns"];
   saveReflectionSuggestion: LearningRepository["saveReflectionSuggestion"];
   updateReflectionSuggestion: LearningRepository["updateReflectionSuggestion"];

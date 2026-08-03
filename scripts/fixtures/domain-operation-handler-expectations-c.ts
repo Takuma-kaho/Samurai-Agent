@@ -91,35 +91,14 @@ export const cHandlerExpectations = {
     requiredBranches: ["idle_gate:omitted", "idle_gate:present"],
     cases: [
       { id: "idle-gate-omitted", input: {}, branches: ["idle_gate:omitted"], calls: [{ method: "runCurator", args: [{}] }] },
-      { id: "idle-gate-enabled", input: { respect_idle_gate: true }, branches: ["idle_gate:present"], calls: [{ method: "runCurator", args: [{ respectIdleGate: true }] }] }
+      { id: "idle-gate-enabled", input: { respect_idle_gate: true }, branches: ["idle_gate:present"], calls: [{ method: "runCurator", args: [{ respectIdleGate: true }] }] },
+      { id: "reason-driven-resource", input: { reason: "refutation", resource_kind: "memory", resource_id: "memory_fixture" }, branches: ["idle_gate:omitted"], calls: [{ method: "runCurator", args: [{ reason: "refutation", resourceKind: "memory", resourceId: "memory_fixture" }] }] }
     ]
   },
   "evaluation.run": {
-    requiredBranches: ["evaluation:empty-input"],
+    requiredBranches: [],
     cases: [{
-      id: "empty-input", input: {}, branches: ["evaluation:empty-input"], calls: [
-        { method: "ensureEvaluationSession", args: [] },
-        { method: "listEvaluationSkills", args: [] },
-        { method: "listEvaluationBackendRuns", args: [] },
-        { method: "listEvaluationBackendEvents", args: [] },
-        { method: "listEvaluationWorkspaceChanges", args: [] },
-        { method: "listEvaluationToolRuns", args: [] },
-        { method: "listEvaluationAuditRecords", args: [] },
-        { method: "listLearningResourceUses", args: [] },
-        { method: "listExistingLearningEvaluations", args: [] },
-        { method: "evaluationNow", args: [] },
-        { method: "createEvaluationId", args: ["reflection"] },
-        { method: "createEvaluationReflectionRun", args: [{ id: "reflection_evaluation_fixture", kind: "evaluation", session_id: "session_fixture", status: "started", input_summary: "Evaluate 0 backend run(s), 0 backend event(s), 0 workspace change(s), 0 tool run(s), 0 audit record(s), and 0 skill item(s).", started_at: now }] },
-        { method: "createEvaluationSuggestions", args: [{ id: "reflection_evaluation_fixture", kind: "evaluation", session_id: "session_fixture", status: "started", input_summary: "Fixture evaluation run", started_at: now }, { skills: [], backendRuns: [], backendEvents: [], workspaceChanges: [], toolRuns: [], auditRecords: [], now }] },
-        { method: "createEvaluationReport", args: [{ backendRuns: [], backendEvents: [], workspaceChanges: [], toolRuns: [], auditRecords: [], now }] },
-        { method: "actualLearningUses", args: [[]] },
-        { method: "evaluationNow", args: [] },
-        { method: "updateEvaluationReflectionRun", args: [{ id: "reflection_evaluation_fixture", kind: "evaluation", session_id: "session_fixture", status: "completed", input_summary: "Fixture evaluation run", started_at: now, output_summary: "Evaluation created 0 suggestion(s) and 0 run score(s).", completed_at: now }] },
-        { method: "createEvaluationId", args: ["learning_job_report"] },
-        { method: "nextEvaluationRunAt", args: [1784246400000] },
-        { method: "evaluationNow", args: [] },
-        { method: "saveEvaluationJobReport", args: [{ id: "learning_job_report_fixture", job_kind: "evaluation", run_id: "reflection_evaluation_fixture", target_resource_count: 0, mutation_count: 0, archive_count: 0, restore_count: 0, patch_count: 0, merge_count: 0, skipped_reasons: { no_new_evaluable_usage: 1 }, evaluation_count: 0, duration_ms: 0, next_run_at: "2026-07-18T00:00:00.000Z", created_at: now }] }
-      ]
+      id: "source-run", input: { source_run_id: "run_fixture" }, branches: [], calls: [{ method: "runAppliedEvaluation", args: [{ sourceRunId: "run_fixture" }] }]
     }]
   },
   "memory.archive": {

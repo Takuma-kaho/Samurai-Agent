@@ -1,8 +1,11 @@
 import type {
+  ActivityContextRef,
+  AgentRecord,
   CollectionRecord,
   CollectionSchema,
   JsonValue,
   MemoryFrontmatter,
+  RoomRecord,
   SkillFrontmatter,
   WikiFrontmatter
 } from "@samurai-agent/core-schemas";
@@ -34,9 +37,13 @@ type CollectionRecordWithFilePath = Omit<CollectionRecord, "version"> & { versio
 /** Narrow adapter exposed to Query services; no WorkspaceStore mutation API crosses this boundary. */
 export interface SearchReadStore {
   search(query: string): Promise<SearchResult[]>;
-  searchMemory(query: string, limit?: number, options?: { includeArchived?: boolean }): Promise<MemoryWithFilePath[]>;
-  searchWiki(query: string, limit?: number, options?: { activeOnly?: boolean }): Promise<WikiWithFilePath[]>;
-  searchSkills(query: string, limit?: number, options?: { states?: SkillWithFilePath["state"][] }): Promise<SkillWithFilePath[]>;
+  getBackendRun(id: string): Promise<{ id: string; session_id: string; agent_id?: string } | undefined>;
+  getSession(id: string): Promise<{ id: string; room_id?: string } | undefined>;
+  getRoom(id: string): Promise<RoomRecord | undefined>;
+  getAgent(id: string): Promise<AgentRecord | undefined>;
+  searchMemory(query: string, limit?: number, options?: { includeArchived?: boolean; activityContext?: ActivityContextRef }): Promise<MemoryWithFilePath[]>;
+  searchWiki(query: string, limit?: number, options?: { activeOnly?: boolean; activityContext?: ActivityContextRef }): Promise<WikiWithFilePath[]>;
+  searchSkills(query: string, limit?: number, options?: { states?: SkillWithFilePath["state"][]; activityContext?: ActivityContextRef }): Promise<SkillWithFilePath[]>;
   getCollectionSchema(collectionId: string): Promise<CollectionSchemaWithFilePath | undefined>;
   listCollectionSchemas(): Promise<CollectionSchemaWithFilePath[]>;
   listCollectionRecords(collectionId?: string): Promise<CollectionRecordWithFilePath[]>;
@@ -53,6 +60,10 @@ export type CollectionSearchResult =
 export function createSearchReadStore(store: SearchReadStore): SearchReadStore {
   return Object.freeze<SearchReadStore>({
     search: (query) => store.search(query),
+    getBackendRun: (id) => store.getBackendRun(id),
+    getSession: (id) => store.getSession(id),
+    getRoom: (id) => store.getRoom(id),
+    getAgent: (id) => store.getAgent(id),
     searchMemory: (query, limit, options) => store.searchMemory(query, limit, options),
     searchWiki: (query, limit, options) => store.searchWiki(query, limit, options),
     searchSkills: (query, limit, options) => store.searchSkills(query, limit, options),
@@ -69,18 +80,31 @@ export class SearchDomainService {
     return (await this.store.search(query)).slice(0, limit).map((item) => ({ kind: item.kind, id: item.id, title: item.title, summary: item.summary, ...(item.session_id ? { session_id: item.session_id } : {}) }));
   }
 
-  async searchMemory(query: string, limit: number): Promise<MemorySearchResult[]> {
-    return (await this.store.searchMemory(query, limit, { includeArchived: false }))
+  async searchMemory(runId: string, query: string, limit: number): Promise<MemorySearchResult[]> {
+    const activityContext = await this.resolveTrustedActivityContext(runId);
+    return (await this.store.searchMemory(query, limit, { includeArchived: false, activityContext }))
       .filter((item): item is typeof item & { state: Exclude<typeof item.state, "archived"> } => item.state !== "archived")
       .map((item) => ({ id: item.id, topic: item.topic, state: item.state, file_path: item.file_path }));
   }
 
-  async searchWiki(query: string, limit: number): Promise<WikiSearchResult[]> {
-    return (await this.store.searchWiki(query, limit, { activeOnly: true })).map((item) => ({ id: item.id, slug: item.slug, title: item.title, file_path: item.file_path }));
+  async searchWiki(runId: string, query: string, limit: number): Promise<WikiSearchResult[]> {
+    const activityContext = await this.resolveTrustedActivityContext(runId);
+    return (await this.store.searchWiki(query, limit, { activeOnly: true, activityContext })).map((item) => ({ id: item.id, slug: item.slug, title: item.title, file_path: item.file_path }));
   }
 
-  async searchSkills(query: string, limit: number): Promise<SkillSearchResult[]> {
-    return (await this.store.searchSkills(query, limit, { states: ["active", "pinned", "project"] })).map((item) => ({ id: item.id, title: item.title, description: item.description, tags: item.tags, file_path: item.file_path }));
+  async searchSkills(runId: string, query: string, limit: number): Promise<SkillSearchResult[]> {
+    const activityContext = await this.resolveTrustedActivityContext(runId);
+    return (await this.store.searchSkills(query, limit, { states: ["active", "pinned", "project"], activityContext })).map((item) => ({ id: item.id, title: item.title, description: item.description, tags: item.tags, file_path: item.file_path }));
+  }
+
+  private async resolveTrustedActivityContext(runId: string): Promise<ActivityContextRef> {
+    const run = await this.store.getBackendRun(runId);
+    if (!run?.agent_id) throw new Error(`search_activity_context_required:${runId}`);
+    const session = await this.store.getSession(run.session_id);
+    if (!session?.room_id || session.id !== run.session_id) throw new Error(`search_activity_context_required:${runId}`);
+    const [room, agent] = await Promise.all([this.store.getRoom(session.room_id), this.store.getAgent(run.agent_id)]);
+    if (!room || !agent) throw new Error(`search_activity_context_required:${runId}`);
+    return { room_id: room.id, session_id: session.id, agent_id: agent.id };
   }
 
   async searchCollections(collectionId: string | undefined, query: string, limit: number): Promise<CollectionSearchResult[]> {

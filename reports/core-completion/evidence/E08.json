@@ -3,9 +3,11 @@
   "test_id": "E08",
   "command": "pnpm core:test:task-evaluation",
   "status": "passed",
-  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "commit_sha": "f86c50edd514876142347d6e198f924c7667eb1c",
   "worktree_clean": true,
-  "source_sha256": "a904b14f015ed83e0bbd07427e34947d2a4d03e0a9b3a80250621ddf3eb6c64d",
+  "source_sha256": "25795851e4a58322b7561f185a6ab5c7790c2daff628e1f19c07f153fb909465",
+  "source_graph_sha256": "f48471c3a70033e6d54274db5bb344866f17a7955023b0d4567ed0170179e88c",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/runtime/src/agent-runtime.ts",
     "packages/runtime/src/index.ts",
@@ -15,8 +17,8 @@
     "scripts/verify-task-evaluation.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-13T08:14:13.393Z",
-  "completed_at": "2026-07-13T08:14:13.437Z",
+  "started_at": "2026-08-02T15:39:51.645Z",
+  "completed_at": "2026-08-02T15:39:51.748Z",
   "assertions": [
     {
       "name": "Comparable work shares fingerprint, incompatible output differs",

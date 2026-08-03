@@ -120,6 +120,8 @@ export interface SkillMutationPort {
 export interface SkillReadPort<TSkill extends ReadableSkill> {
   getSkill(id: string): Promise<TSkill | undefined>;
   getRun(id: string): Promise<BackendRunRecord | undefined>;
+  getSession(id: string): Promise<{ id: string; room_id?: string } | undefined>;
+  getAgent(id: string): Promise<{ id: string } | undefined>;
   readSupportFile(input: { skillId: string; path: string }): Promise<{ path: string; file_path: string; content: string } | undefined>;
   readMarkdown(id: string): Promise<string | undefined>;
   listSupportFiles(id: string): Promise<Array<{ path: string; file_path: string }>>;
@@ -561,6 +563,10 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     ]);
     if (!skill) throw this.dependencies.mutation.requestError("not_found", `Skill not found: ${input.skillId}`);
     if (!run) throw this.dependencies.mutation.requestError("not_found", `Backend run not found: ${input.runId}`);
+    const activityContext = await this.resolveActivityContext(run);
+    if (!usageScopeAllowsActivity((skill as { frontmatter?: Pick<SkillFrontmatter, "usage_scope"> }).frontmatter?.usage_scope, activityContext)) {
+      throw this.dependencies.conflictError("skill_usage_scope_mismatch");
+    }
     if (skill.state === "archived" || skill.state === "candidate") {
       throw this.dependencies.conflictError("skill_not_readable_in_current_state");
     }
@@ -587,17 +593,39 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     ]);
     if (!skill) throw this.dependencies.mutation.requestError("not_found", `Skill not found: ${input.skillId}`);
     if (!run) throw this.dependencies.mutation.requestError("not_found", `Backend run not found: ${input.runId}`);
+    const activityContext = await this.resolveActivityContext(run);
+    if (!usageScopeAllowsActivity((skill as { frontmatter?: Pick<SkillFrontmatter, "usage_scope"> }).frontmatter?.usage_scope, activityContext)) {
+      throw this.dependencies.conflictError("skill_usage_scope_mismatch");
+    }
     if (input.stage === "body_loaded" && input.resourceId !== skill.id) throw this.dependencies.conflictError("skill_usage_resource_mismatch");
+    const supportPath = typeof input.metadata.path === "string" ? input.metadata.path : undefined;
+    if (input.stage === "support_loaded" && (!supportPath || input.resourceId !== `${skill.id}:${supportPath}`)) {
+      throw this.dependencies.conflictError("skill_usage_resource_mismatch");
+    }
+    if (input.stage === "body_loaded" && skill.frontmatter.content_hash && skill.frontmatter.content_hash !== input.contentHash) {
+      throw this.dependencies.conflictError("skill_usage_content_hash_mismatch");
+    }
     const existing = (await this.dependencies.usage.listUses({ runId: run.id, resourceId: input.resourceId }))
       .find((record) => record.stage === input.stage);
     const useRecord = existing ?? await this.dependencies.usage.recordUse({
-      id: createId("learning_use"), run_id: run.id, session_id: run.session_id,
+      id: learningResourceUseId({ runId: run.id, resourceId: input.resourceId, stage: input.stage, contentHash: input.contentHash }), run_id: run.id, session_id: run.session_id,
       resource_kind: input.stage === "support_loaded" ? "skill_support" : "skill",
-      resource_id: input.resourceId, content_hash: input.contentHash, stage: input.stage,
-      metadata: input.metadata, created_at: nowIso()
+      resource_id: input.resourceId, ...(skill.frontmatter.version ? { resource_version: skill.frontmatter.version } : {}), content_hash: input.contentHash,
+      ...(skill.frontmatter.usage_scope ? { usage_scope: skill.frontmatter.usage_scope } : {}), stage: input.stage,
+      activity_context: activityContext, metadata: input.metadata, created_at: nowIso()
     });
-    if (!existing) await this.dependencies.usage.incrementSkillUsage({ skillId: skill.id, runId: run.id });
+    if (!existing && input.stage === "body_loaded") await this.dependencies.usage.incrementSkillUsage({ skillId: skill.id, runId: run.id });
     return { use_record: useRecord };
+  }
+
+  private async resolveActivityContext(run: BackendRunRecord): Promise<{ room_id: string; session_id: string; agent_id: string }> {
+    if (!run.agent_id) throw this.dependencies.conflictError("skill_activity_context_required");
+    const [session, agent] = await Promise.all([
+      this.dependencies.queries.getSession(run.session_id),
+      this.dependencies.queries.getAgent(run.agent_id)
+    ]);
+    if (!session?.room_id || session.id !== run.session_id || !agent) throw this.dependencies.conflictError("skill_activity_context_required");
+    return { room_id: session.room_id, session_id: session.id, agent_id: agent.id };
   }
 }
 
@@ -621,6 +649,21 @@ function skillMarkdownContent(markdown: string): string {
   if (end === -1) throw new Error("skill_frontmatter_unclosed");
   const contentStart = markdown.indexOf("\n", end + 4);
   return (contentStart === -1 ? "" : markdown.slice(contentStart + 1)).trim();
+}
+
+function usageScopeAllowsActivity(
+  scope: SkillFrontmatter["usage_scope"],
+  activityContext: { room_id: string; session_id: string; agent_id: string }
+): boolean {
+  const resolved = scope ?? { kind: "workspace" as const };
+  if (resolved.kind === "workspace") return true;
+  if (resolved.kind === "room") return resolved.room_id === activityContext.room_id;
+  if (resolved.kind === "agent") return resolved.agent_id === activityContext.agent_id;
+  return resolved.session_id === activityContext.session_id;
+}
+
+function learningResourceUseId(input: { runId: string; resourceId: string; stage: "body_loaded" | "support_loaded"; contentHash: string }): string {
+  return `learning_use_${stableHash({ run_id: input.runId, resource_id: input.resourceId, stage: input.stage, content_hash: input.contentHash })}`;
 }
 
 function optimizationExamplesFromValues(value: readonly JsonValue[] | undefined, source: "golden" | "synthetic"): OptimizationExampleInput[] {

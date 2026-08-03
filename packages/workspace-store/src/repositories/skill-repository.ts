@@ -23,7 +23,7 @@ import {
 } from "@samurai-agent/core-schemas";
 import { sql, type Kysely } from "kysely";
 import type { SkillIndexTable, SkillUsageTable, WorkspaceDb } from "../kernel/workspace-db-schema";
-import type { SkillReindexResult, SkillSupportFile, SkillWithFilePath, WorkspaceHealthReport } from "../workspace-store-contracts";
+import type { SkillReindexResult, SkillSupportFile, SkillSupportFileRef, SkillWithFilePath, WorkspaceHealthReport } from "../workspace-store-contracts";
 import { compareScoredSearch, scoreSearchFields, searchTerms, stateSearchBoost } from "../search/scoring";
 import { readManagedResourceFiles } from "./managed-resource-file-scan";
 import { skillFromRow, skillToRow, skillUsageFromRow } from "./memory-skill-row-codecs";
@@ -37,7 +37,6 @@ import {
   listRelativeFiles,
   normalizeSkillSupportPath,
   parseSkillMarkdownLocal,
-  readWorkspaceText,
   stripFrontmatter
 } from "./workspace-file-codecs";
 
@@ -387,6 +386,87 @@ async replaceSkillContent(id: string, content: string): Promise<SkillWithFilePat
   return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
 }
 
+/** Updates only Core 05 metadata; body and support files remain owned by this Skill repository. */
+async patchSkillLearningMetadata(input: {
+  id: string;
+  metadata: Partial<Pick<SkillFrontmatter, "evidence_state" | "usage_state" | "usage_scope" | "origin_activity_context" | "source_run_ids" | "source_refs" | "provenance_detail" | "version" | "content_hash" | "pinned" | "created_at" | "updated_at">>;
+}): Promise<SkillWithFilePath | undefined> {
+  await this.assertSkillWriteUnlocked(input.id);
+  const current = await this.getSkill(input.id);
+  const raw = await this.readSkillMarkdown(input.id);
+  if (!current || !raw) return undefined;
+  const parsed = parseSkillMarkdownLocal(raw);
+  const now = nowIso();
+  const frontmatter = withUsageScope(SkillFrontmatterSchema.parse({
+    ...parsed.frontmatter,
+    ...input.metadata,
+    last_reviewed_at: now,
+    updated_at: now
+  }));
+  await writeFile(path.join(this.rootDir, current.file_path), this.renderSkillMarkdown(frontmatter, parsed.content));
+  await this.db.updateTable("skill_index").set({
+    title: frontmatter.title,
+    description: frontmatter.description,
+    tags_json: stringify(frontmatter.tags),
+    required_capabilities_json: stringify(frontmatter.required_capabilities),
+    ...usageScopeIndexColumns(frontmatter.usage_scope),
+    frontmatter_json: stringify(frontmatter),
+    updated_at: now
+  }).where("id", "=", input.id).execute();
+  return { ...buildSkillIndexEntry(frontmatter), file_path: current.file_path };
+}
+
+/** Restores a historical Skill body and metadata as a new current Version. */
+async restoreSkillVersionMarkdown(input: { id: string; markdown: string; version: string }): Promise<SkillWithFilePath | undefined> {
+  await this.assertSkillWriteUnlocked(input.id);
+  const current = await this.getSkill(input.id);
+  if (!current) return undefined;
+  const parsed = parseSkillMarkdownLocal(input.markdown);
+  if (parsed.frontmatter.id !== input.id) throw new Error("skill_restore_id_mismatch");
+  const now = nowIso();
+  const next = withUsageScope(SkillFrontmatterSchema.parse({
+    ...parsed.frontmatter,
+    version: input.version,
+    content_hash: stableHash(parsed.content),
+    last_reviewed_at: now,
+    updated_at: now
+  }));
+  const nextPath = path.join("skills", next.state, `${next.id}.md`);
+  const previousPath = current.file_path;
+  const nextAbsolutePath = path.join(this.rootDir, nextPath);
+  const previousAbsolutePath = path.join(this.rootDir, previousPath);
+  const previousMarkdown = await readFile(previousAbsolutePath, "utf8");
+  const nextMarkdown = this.renderSkillMarkdown(next, parsed.content);
+  await mkdir(path.dirname(nextAbsolutePath), { recursive: true });
+  if (nextPath === previousPath) {
+    await writeFile(nextAbsolutePath, nextMarkdown);
+  } else {
+    await writeFile(nextAbsolutePath, nextMarkdown, { flag: "wx" });
+  }
+  try {
+    await this.db.updateTable("skill_index").set({
+      state: next.state,
+      title: next.title,
+      description: next.description,
+      tags_json: stringify(next.tags),
+      required_capabilities_json: stringify(next.required_capabilities),
+      ...usageScopeIndexColumns(next.usage_scope),
+      file_path: nextPath,
+      frontmatter_json: stringify(next),
+      updated_at: now
+    }).where("id", "=", input.id).execute();
+  } catch (error) {
+    if (nextPath === previousPath) {
+      await writeFile(previousAbsolutePath, previousMarkdown).catch(() => undefined);
+    } else {
+      await unlink(nextAbsolutePath).catch(() => undefined);
+    }
+    throw error;
+  }
+  if (nextPath !== previousPath) await unlink(previousAbsolutePath).catch(() => undefined);
+  return { ...buildSkillIndexEntry(next), file_path: nextPath };
+}
+
 async replaceSkillContentIfUnchanged(input: { id: string; expectedContentHash: string; content: string; lockRunId?: string }): Promise<SkillWithFilePath | undefined> {
   await this.assertSkillWriteUnlocked(input.id, input.lockRunId);
   const skill = await this.getSkill(input.id);
@@ -646,6 +726,14 @@ async listSkillSupportFiles(skillId: string): Promise<SkillSupportFile[]> {
   return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 
+async listSkillSupportFileRefs(skillId: string): Promise<SkillSupportFileRef[]> {
+  const supportRoot = path.join(this.rootDir, "skills", "support", skillId);
+  const filePaths = await listRelativeFiles(supportRoot).catch(() => []);
+  return filePaths
+    .map((supportPath) => ({ skill_id: skillId, path: supportPath, file_path: path.join("skills", "support", skillId, supportPath) }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
 async searchSkills(
   query: string,
   limit = 5,
@@ -665,22 +753,18 @@ async searchSkills(
   }
   const rows = await dbQuery.orderBy("updated_at", "desc").execute();
   const terms = searchTerms(query);
-  const scored = await Promise.all(
-    rows.map(async (row) => {
+  const scored = rows.map((row) => {
       const skill = skillFromRow(row);
-      const markdown = await readWorkspaceText(this.rootDir, row.file_path);
       const score = terms.length === 0
         ? stateSearchBoost(skill.state)
         : scoreSearchFields(terms, [
           { value: row.title, weight: 12 },
           { value: row.description, weight: 9 },
           { value: row.tags_json, weight: 5 },
-          { value: stripFrontmatter(markdown), weight: 8 },
           { value: row.required_capabilities_json, weight: 3 }
         ]) + stateSearchBoost(skill.state);
       return { item: skill, score, updatedAt: row.updated_at };
-    })
-  );
+    });
   return scored
     .filter((entry) => terms.length === 0 ? entry.score > 0 : entry.score > stateSearchBoost(entry.item.state))
     .sort(compareScoredSearch)

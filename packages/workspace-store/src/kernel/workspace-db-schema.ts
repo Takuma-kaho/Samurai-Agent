@@ -11,7 +11,7 @@ export type { GeneratedSurfacesTable, GeneratedSurfaceRevisionsTable, SurfaceInt
 export type { PolicyDecisionsTable, ApprovalRequestsTable, AuditRecordsTable, RollbackPointsTable, GrantsTable } from "../rows/access-history-rows";
 export type { MemoryIndexTable } from "../rows/memory-rows";
 export type { SkillIndexTable, SkillUsageTable, SkillOptimizationRunsTable, SkillOptimizationDatasetsTable, OptimizationCandidatesTable, OptimizationEvaluationsTable, OptimizationPromotionsTable, SkillOptimizationSnapshotsTable, SkillOptimizationLocksTable } from "../rows/skill-rows";
-export type { LearningResourceUseTable, LearningEvaluationTable, LearningSnapshotTable, BackgroundReviewChangeTable, LearningJobReportTable, CuratorStateTable, ReflectionRunsTable, ReflectionSuggestionsTable, ExternalAssistRecordsTable } from "../rows/learning-rows";
+export type { LearningResourceUseTable, LearningEvaluationTable, LearningSnapshotTable, BackgroundReviewChangeTable, LearningJobReportTable, CuratorStateTable, ReflectionRunsTable, ReflectionSuggestionsTable, ExternalAssistRecordsTable, LearningResourceVersionsTable } from "../rows/learning-rows";
 export type { WikiIndexTable } from "../rows/wiki-rows";
 export type { CollectionSchemasTable, CollectionRecordsTable, CollectionPatchesTable } from "../rows/collection-rows";
 export type { AutomationJobsTable, AutomationRunsTable } from "../rows/automation-rows";
@@ -28,7 +28,7 @@ import type { GeneratedSurfacesTable, GeneratedSurfaceRevisionsTable, SurfaceInt
 import type { PolicyDecisionsTable, ApprovalRequestsTable, AuditRecordsTable, RollbackPointsTable, GrantsTable } from "../rows/access-history-rows";
 import type { MemoryIndexTable } from "../rows/memory-rows";
 import type { SkillIndexTable, SkillUsageTable, SkillOptimizationRunsTable, SkillOptimizationDatasetsTable, OptimizationCandidatesTable, OptimizationEvaluationsTable, OptimizationPromotionsTable, SkillOptimizationSnapshotsTable, SkillOptimizationLocksTable } from "../rows/skill-rows";
-import type { LearningResourceUseTable, LearningEvaluationTable, LearningSnapshotTable, BackgroundReviewChangeTable, LearningJobReportTable, CuratorStateTable, ReflectionRunsTable, ReflectionSuggestionsTable, ExternalAssistRecordsTable } from "../rows/learning-rows";
+import type { LearningResourceUseTable, LearningEvaluationTable, LearningSnapshotTable, BackgroundReviewChangeTable, LearningJobReportTable, CuratorStateTable, ReflectionRunsTable, ReflectionSuggestionsTable, ExternalAssistRecordsTable, LearningResourceVersionsTable } from "../rows/learning-rows";
 import type { WikiIndexTable } from "../rows/wiki-rows";
 import type { CollectionSchemasTable, CollectionRecordsTable, CollectionPatchesTable } from "../rows/collection-rows";
 import type { AutomationJobsTable, AutomationRunsTable } from "../rows/automation-rows";
@@ -72,6 +72,7 @@ export interface WorkspaceDb {
   skill_usage: SkillUsageTable;
   learning_resource_uses: LearningResourceUseTable;
   learning_evaluations: LearningEvaluationTable;
+  learning_resource_versions: LearningResourceVersionsTable;
   learning_snapshots: LearningSnapshotTable;
   background_review_changes: BackgroundReviewChangeTable;
   learning_job_reports: LearningJobReportTable;
