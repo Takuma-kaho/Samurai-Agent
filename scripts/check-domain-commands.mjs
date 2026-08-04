@@ -195,7 +195,7 @@ try {
   const handlerMatrixAggregate = fixtureResults.get("domain-operation-handler-matrix-aggregate");
   if (schemaMatrix.manifest?.operations !== contracts.commands + contracts.queries
     || schemaMatrix.manifest?.endpoints !== schemaMatrix.manifest.operations * 2
-    || schemaMatrix.manifest?.reviewed_schema_nodes !== 671
+    || schemaMatrix.manifest?.reviewed_schema_nodes !== 860
     || schemaMatrix.manifest?.unreviewed_schema_nodes !== 0) {
     throw new Error("domain_command_schema_matrix_hard_gate_failed");
   }
@@ -214,8 +214,20 @@ try {
     throw new Error(`domain_handler_matrix_hard_gate_failed:executed=${executedOperationIds.length}:duplicate=${duplicateOperationIds.join(",")}:missing=${missingOperationIds.join(",")}:extra=${extraOperationIds.join(",")}`);
   }
   const ingress = fixtureResults.get("domain-command-ingress");
-  if (!Array.isArray(ingress.entrances) || ingress.entrances.length !== 6 || ingress.rejection_parity?.entrances?.length !== 6) {
-    throw new Error("domain_command_ingress_six_entrance_gate_failed");
+  if (
+    !Array.isArray(ingress.entrances) ||
+    ingress.entrances.length !== 5 ||
+    ingress.rejection_parity?.entrances?.length !== 5 ||
+    ingress.gateway_admission?.status !== "blocked" ||
+    ingress.gateway_admission?.error !== "gateway_participant_authentication_required" ||
+    ingress.gateway_admission?.session_created !== false ||
+    ingress.gateway_admission?.chat_started !== false ||
+    ingress.gateway_admission?.boundary_policy_saved !== false ||
+    ingress.gateway_admission?.artifact_handler_calls !== 0 ||
+    ingress.gateway_admission?.artifact_creations !== 0 ||
+    ingress.gateway_admission?.gateway_command_executions !== 1
+  ) {
+    throw new Error("domain_command_ingress_room_boundary_gate_failed");
   }
   if (!structure.gates?.includes("ST06") || !structure.gates?.includes("ST14")) {
     throw new Error("domain_operation_structure_st06_st14_self_test_missing");

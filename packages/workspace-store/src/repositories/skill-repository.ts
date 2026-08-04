@@ -70,9 +70,21 @@ async getSkillOptimizationRun(id: string): Promise<SkillOptimizationRun | undefi
   return row ? SkillOptimizationRunSchema.parse(parse<SkillOptimizationRun>(row.run_json)) : undefined;
 }
 
-async listSkillOptimizationRuns(input: { skillId?: string; status?: SkillOptimizationRun["status"] } = {}): Promise<SkillOptimizationRun[]> {
+async listSkillOptimizationRuns(input: {
+  skillId?: string;
+  skillIds?: string[];
+  sessionId?: string;
+  sessionIds?: string[];
+  status?: SkillOptimizationRun["status"];
+} = {}): Promise<SkillOptimizationRun[]> {
+  const skillIds = input.skillIds === undefined ? undefined : [...new Set(input.skillIds)];
+  const sessionIds = input.sessionIds === undefined ? undefined : [...new Set(input.sessionIds)];
+  if (skillIds?.length === 0 || sessionIds?.length === 0) return [];
   let query = this.db.selectFrom("skill_optimization_runs").selectAll().orderBy("created_at", "desc");
   if (input.skillId) query = query.where("target_skill_id", "=", input.skillId);
+  if (skillIds) query = query.where("target_skill_id", "in", skillIds);
+  if (input.sessionId) query = query.where("session_id", "=", input.sessionId);
+  if (sessionIds) query = query.where("session_id", "in", sessionIds);
   if (input.status) query = query.where("status", "=", input.status);
   return (await query.execute()).map((row) => SkillOptimizationRunSchema.parse(parse<SkillOptimizationRun>(row.run_json)));
 }
@@ -239,8 +251,29 @@ async saveSkillMarkdown(input: { state: "candidate" | "project"; skillId: string
   }
 }
 
-async listSkills(options: { activityContext?: UsageScopeQueryContext } = {}): Promise<SkillWithFilePath[]> {
+async listSkills(options: {
+  activityContext?: UsageScopeQueryContext;
+  resourceIds?: string[];
+  includeLegacy?: boolean;
+} = {}): Promise<SkillWithFilePath[]> {
   let query = this.db.selectFrom("skill_index").selectAll();
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      query = query.where("id", "in", resourceIds);
+    } else {
+      query = query.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "skill")
+            .whereRef("boundary.resource_id", "=", "skill_index.id")
+        ))
+      ]));
+    }
+  }
   if (options.activityContext) {
     query = query.where((eb) => eb.or([
       eb("usage_scope_kind", "=", "workspace"),
@@ -659,13 +692,12 @@ async getSkillUsage(skillId: string): Promise<SkillUsageRecord | undefined> {
   return row ? skillUsageFromRow(row) : undefined;
 }
 
-async listSkillUsage(): Promise<SkillUsageRecord[]> {
-  const result = await sql<SkillUsageTable>`
-    SELECT skill_id, use_count, last_used_at, last_run_id, created_at, updated_at
-    FROM skill_usage
-    ORDER BY updated_at DESC
-  `.execute(this.db);
-  return result.rows.map(skillUsageFromRow);
+async listSkillUsage(input: { skillIds?: string[] } = {}): Promise<SkillUsageRecord[]> {
+  const skillIds = input.skillIds === undefined ? undefined : [...new Set(input.skillIds)];
+  if (skillIds?.length === 0) return [];
+  let query = this.db.selectFrom("skill_usage").selectAll().orderBy("updated_at", "desc");
+  if (skillIds) query = query.where("skill_id", "in", skillIds);
+  return (await query.execute()).map(skillUsageFromRow);
 }
 
 
@@ -737,9 +769,36 @@ async listSkillSupportFileRefs(skillId: string): Promise<SkillSupportFileRef[]> 
 async searchSkills(
   query: string,
   limit = 5,
-  options: { states?: SkillFrontmatter["state"][]; activityContext?: UsageScopeQueryContext } = {}
+  options: {
+    states?: SkillFrontmatter["state"][];
+    activityContext?: UsageScopeQueryContext;
+    /** Explicit Room-bound resources, resolved before this UsageScope narrowing. */
+    resourceIds?: string[];
+    /** Only the current Workspace Owner can include pre-Core 06 unbounded data. */
+    includeLegacy?: boolean;
+  } = {}
 ): Promise<SkillWithFilePath[]> {
   let dbQuery = this.db.selectFrom("skill_index").selectAll();
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      dbQuery = dbQuery.where("id", "in", resourceIds);
+    } else {
+      // Keep candidate selection at the Room boundary before opening a Skill
+      // body. UsageScope is intentionally applied below as an additional
+      // restriction, not an alternate permission path.
+      dbQuery = dbQuery.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "skill")
+            .whereRef("boundary.resource_id", "=", "skill_index.id")
+        ))
+      ]));
+    }
+  }
   if (options.activityContext) {
     dbQuery = dbQuery.where((eb) => eb.or([
       eb("usage_scope_kind", "=", "workspace"),

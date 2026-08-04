@@ -44,7 +44,8 @@ try {
     && result.docker_policy_executed
     && result.domain_command_executions === 1
     && result.workspace_inbound_saved === 1
-    && result.session_saved
+    && result.metadata_does_not_grant_room_access
+    && result.session_saved === false
     && result.reply_delivered;
   const status = coreFlowPassed ? "passed" : "partial";
   const completedAt = new Date().toISOString();
@@ -61,7 +62,7 @@ try {
     assertions: [
       { name: "Signed webhook verifies and invalid signature rejects", actual: result.signature_verified && result.invalid_signature_rejected, expected: true },
       { name: "Sandbox policy crosses configured adapter boundary", actual: result.docker_policy_executed, expected: true },
-      { name: "Gateway crosses Domain Command, saves Workspace and delivers reply", actual: result.domain_command_executions === 1 && result.workspace_inbound_saved === 1 && result.session_saved && result.reply_delivered, expected: true }
+      { name: "Gateway crosses Domain Command, saves Workspace and delivers reply without metadata granting Room access", actual: result.domain_command_executions === 1 && result.workspace_inbound_saved === 1 && result.metadata_does_not_grant_room_access && result.session_saved === false && result.reply_delivered, expected: true }
     ],
     release_certification: {
       real_docker_required_for_core: false,

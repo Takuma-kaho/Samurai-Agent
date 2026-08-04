@@ -2269,8 +2269,7 @@ describe("backend run API", () => {
       {}
     );
     const routedGateway = await postJson<{
-      inbound: { status: string; session_key?: string };
-      chat: { backendRun: { status: string }; messages: Array<{ role: string }> };
+      inbound: { status: string; trusted: boolean; session_key?: string; error?: string };
     }>(
       `${baseUrl}/api/gateway/inbound`,
       {
@@ -2279,17 +2278,22 @@ describe("backend run API", () => {
         body: "Domain Command Gateway から提案書を作って",
         output_locale: "ja"
       },
-      201
+      202
     );
 
     expect(blockedGateway).toMatchObject({
       inbound: { status: "blocked", trusted: false }, pairing: { status: "pending" }
     });
     expect(routedGateway).toMatchObject({
-      inbound: { status: "processed", session_key: "webhook:domain-gateway-1:main" },
-      chat: { backendRun: { status: "completed" } }
+      inbound: {
+        status: "blocked",
+        trusted: true,
+        session_key: "webhook:domain-gateway-1:main",
+        error: "gateway_participant_authentication_required"
+      }
     });
-    expect(routedGateway.chat.messages.some((message) => message.role === "agent")).toBe(true);
+    expect(routedGateway).not.toHaveProperty("session");
+    expect(routedGateway).not.toHaveProperty("chat");
   });
 
   it("resolves BackendRun identity outside skill Domain payloads", async () => {
@@ -2442,18 +2446,8 @@ describe("backend run API", () => {
       {}
     );
     const routed = await postJson<{
-      inbound: { id: string; status: string; trusted: boolean; session_key?: string; message_id?: string };
-      boundaryPolicy: { id: string; source_channel: string; session_key: string; allowed_tools: string[] };
-      concurrencyLock: { lock_key: string; status: string };
-      session: { session_key: string };
-      chat: {
-        backendRun: { status: string; metadata: Record<string, unknown> };
-        backendEvents: Array<{ event_type: string; payload?: Record<string, unknown>; resource_refs?: Array<{ kind: string; id: string }> }>;
-        messages: Array<{ role: string; content: string }>;
-        reflectionRuns: Array<{ status: string }>;
-        toolRuns: Array<{ action_id?: string; status: string; output_summary?: string; resource_refs?: Array<{ kind: string; id: string }> }>;
-        workspaceChanges: Array<{ change_type: string; summary: string; resource_ref: { kind: string; id: string } }>;
-      };
+      inbound: { id: string; status: string; trusted: boolean; session_key?: string; error?: string };
+      pairing: { id: string; status: string };
     }>(
       `${baseUrl}/api/gateway/inbound`,
       {
@@ -2462,9 +2456,9 @@ describe("backend run API", () => {
         body: "提案書を作って",
         output_locale: "ja"
       },
-      201
+      202
     );
-    const processedInbound = await getJson<Array<{ id: string; status: string }>>(`${baseUrl}/api/gateway/inbound?status=processed`);
+    const blockedInbound = await getJson<Array<{ id: string; status: string }>>(`${baseUrl}/api/gateway/inbound?status=blocked`);
     const boundaryPolicies = await getJson<Array<{ id: string; source_channel: string; session_key: string }>>(`${baseUrl}/api/gateway/boundary-policies?source_channel=webhook`);
     const releasedLocks = await getJson<Array<{ lock_key: string; status: string }>>(`${baseUrl}/api/gateway/concurrency-locks?status=released`);
     const health = await getJson<{
@@ -2540,68 +2534,24 @@ describe("backend run API", () => {
     expect(approved).toMatchObject({ id: blocked.pairing.id, status: "approved" });
     expect(approved).not.toHaveProperty("pairing_code");
     expect(routed.inbound).toMatchObject({
-      status: "processed",
+      status: "blocked",
       trusted: true,
-      session_key: "webhook:external-api-1:main"
-    });
-    expect(routed.session.session_key).toBe("webhook:external-api-1:main");
-    expect(routed.chat.backendRun.status).toBe("completed");
-    expect(routed.chat.backendRun.metadata).toMatchObject({
-      gateway_inbound_id: routed.inbound.id,
-      gateway_channel: "webhook",
-      gateway_source_identity: "external-api-1",
-      gateway_boundary_policy_id: routed.boundaryPolicy.id,
-      gateway_boundary_allowed_tools: []
-    });
-    expect(routed.boundaryPolicy).toMatchObject({
-      source_channel: "webhook",
       session_key: "webhook:external-api-1:main",
-      allowed_tools: []
+      error: "gateway_participant_authentication_required"
     });
-    expect(routed.concurrencyLock).toMatchObject({
-      lock_key: "webhook:external-api-1:main",
-      status: "acquired"
-    });
-    expect(routed.chat.toolRuns).toContainEqual(expect.objectContaining({
-      action_id: "artifact.create",
-      status: "ignored",
-      output_summary: "gateway_boundary_tool_not_allowed",
-      resource_refs: [expect.objectContaining({
-        kind: "gateway_boundary_policy",
-        id: routed.boundaryPolicy.id
-      })]
-    }));
-    expect(routed.chat.workspaceChanges).toContainEqual(expect.objectContaining({
-      change_type: "other",
-      resource_ref: expect.objectContaining({
-        kind: "gateway_boundary_policy",
-        id: routed.boundaryPolicy.id
-      }),
-      summary: expect.stringContaining("Gateway boundary blocked tool")
-    }));
-    expect(routed.chat.backendEvents).toContainEqual(expect.objectContaining({
-      event_type: "tool_call_output",
-      payload: expect.objectContaining({
-        status: "ignored",
-        gateway_boundary: expect.objectContaining({
-          decision: "denied",
-          action_id: "artifact.create",
-          policy_id: routed.boundaryPolicy.id,
-          allowed_tools: []
-        })
-      })
-    }));
-    expect(routed.chat.backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
-    expect(routed.chat.reflectionRuns).toEqual([]);
-    expect(processedInbound.map((inbound) => inbound.id)).toContain(routed.inbound.id);
-    expect(boundaryPolicies.map((policy) => policy.id)).toContain(routed.boundaryPolicy.id);
-    expect(releasedLocks.map((lock) => lock.lock_key)).toContain("webhook:external-api-1:main");
+    expect(routed.pairing).toMatchObject({ id: blocked.pairing.id, status: "approved" });
+    expect(routed).not.toHaveProperty("session");
+    expect(routed).not.toHaveProperty("chat");
+    expect(routed).not.toHaveProperty("boundaryPolicy");
+    expect(blockedInbound.map((inbound) => inbound.id)).toContain(routed.inbound.id);
+    expect(boundaryPolicies).toEqual([]);
+    expect(releasedLocks).toEqual([]);
     expect(health.gateway).toMatchObject({
       pending_pairings: 0,
       approved_pairings: 1,
-      blocked_inbound_recent: 1,
+      blocked_inbound_recent: 2,
       failed_inbound_recent: 0,
-      boundary_policies: 1,
+      boundary_policies: 0,
       active_concurrency_locks: 0
     });
   });
@@ -2648,7 +2598,7 @@ describe("backend run API", () => {
         request_id: "req_2",
         authorization: "Bearer raw-secret-token"
       }
-    }, webhookSecret, 201);
+    }, webhookSecret, 202);
 
     expect(invalid).toEqual({ error: "invalid_gateway_webhook" });
     expect(blocked.adapter).toEqual({
@@ -2675,11 +2625,9 @@ describe("backend run API", () => {
       source_identity: "external-webhook-1",
       body_field: "event.text"
     });
+    expectGatewayRoomAccessBlocked(routed, "webhook:external-webhook-1:main");
     expect(routed.inbound).toMatchObject({
-      status: "processed",
-      trusted: true,
       body: "Webhookから提案書を作って",
-      session_key: "webhook:external-webhook-1:main",
       metadata: {
         request_id: "req_2",
         authorization: "[redacted]",
@@ -2688,17 +2636,6 @@ describe("backend run API", () => {
         gateway_webhook_payload_keys: ["event", "source_label"]
       }
     });
-    expect(routed.session.session_key).toBe("webhook:external-webhook-1:main");
-    expect(routed.chat.backendRun.status).toBe("completed");
-    expect(routed.chat.backendRun.metadata).toMatchObject({
-      gateway_inbound_id: routed.inbound.id,
-      gateway_channel: "webhook",
-      gateway_source_identity: "external-webhook-1"
-    });
-    expect(routed.chat.messages).toContainEqual(expect.objectContaining({
-      role: "user",
-      content: "Webhookから提案書を作って"
-    }));
     expect(JSON.stringify(routed)).not.toContain("raw-secret-token");
   });
 
@@ -2767,7 +2704,7 @@ describe("backend run API", () => {
         cookie: "raw-secret-token"
       },
       output_locale: "ja"
-    }, 201);
+    }, 202);
 
     expect(challenge).toEqual({ challenge: "slack-challenge-code" });
     expect(invalid).toEqual({ error: "invalid_gateway_slack_event" });
@@ -2811,11 +2748,9 @@ describe("backend run API", () => {
       channel_id: "C123",
       user_id: "U456"
     });
+    expectGatewayRoomAccessBlocked(routed, "slack:team~3AT123:channel~3AC123~2Fthread~3A111.222");
     expect(routed.inbound).toMatchObject({
-      status: "processed",
-      trusted: true,
       body: "Slackから提案書を作って",
-      session_key: "slack:team~3AT123:channel~3AC123~2Fthread~3A111.222",
       metadata: {
         request_id: "slack_req_2",
         cookie: "[redacted]",
@@ -2830,17 +2765,6 @@ describe("backend run API", () => {
         gateway_slack_thread_ts: "111.222"
       }
     });
-    expect(routed.session.session_key).toBe("slack:team~3AT123:channel~3AC123~2Fthread~3A111.222");
-    expect(routed.chat.backendRun.status).toBe("completed");
-    expect(routed.chat.backendRun.metadata).toMatchObject({
-      gateway_inbound_id: routed.inbound.id,
-      gateway_channel: "slack",
-      gateway_source_identity: "team:T123/user:U456"
-    });
-    expect(routed.chat.messages).toContainEqual(expect.objectContaining({
-      role: "user",
-      content: "Slackから提案書を作って"
-    }));
     expect(JSON.stringify(routed)).not.toContain("raw-secret-token");
   });
 
@@ -2980,7 +2904,7 @@ describe("backend run API", () => {
       inbound: { id: string; status: string; trusted: boolean; body: string; metadata: Record<string, unknown>; session_key?: string };
       session: { session_key: string };
       chat: { backendRun: { status: string; metadata: Record<string, unknown> } };
-    }>(telegramUrl, JSON.stringify(routedPayload), { "X-Telegram-Bot-Api-Secret-Token": webhookSecret }, 201);
+    }>(telegramUrl, JSON.stringify(routedPayload), { "X-Telegram-Bot-Api-Secret-Token": webhookSecret }, 202);
 
     const expectedSessionKey = "telegram:chat~3A-100123:thread~3A7";
     expect(missing).toEqual({
@@ -3027,23 +2951,14 @@ describe("backend run API", () => {
       session_key: expectedSessionKey
     });
     expect(blocked.pairing.pairing_code).toBeTruthy();
+    expectGatewayRoomAccessBlocked(routed, expectedSessionKey);
     expect(routed.inbound).toMatchObject({
-      status: "processed",
-      trusted: true,
       body: "Telegramから提案書を作って",
-      session_key: expectedSessionKey,
       metadata: {
         request_id: "telegram_req_2",
         cookie: "[redacted]",
         gateway_telegram_verification_status: "verified"
       }
-    });
-    expect(routed.session.session_key).toBe(expectedSessionKey);
-    expect(routed.chat.backendRun.status).toBe("completed");
-    expect(routed.chat.backendRun.metadata).toMatchObject({
-      gateway_inbound_id: routed.inbound.id,
-      gateway_channel: "telegram",
-      gateway_source_identity: "user:12345"
     });
     expect(JSON.stringify(routed)).not.toContain("raw-secret-token");
     expect(JSON.stringify(routed)).not.toContain(webhookSecret);
@@ -3113,7 +3028,7 @@ describe("backend run API", () => {
       inbound: { id: string; status: string; trusted: boolean; body: string; metadata: Record<string, unknown>; session_key?: string };
       session: { session_key: string };
       chat: { backendRun: { status: string; metadata: Record<string, unknown> } };
-    }>(lineUrl, routedPayload, channelSecret, 201);
+    }>(lineUrl, routedPayload, channelSecret, 202);
 
     const expectedSessionKey = "line:group~3AG123:main";
     expect(missing).toEqual({
@@ -3161,23 +3076,14 @@ describe("backend run API", () => {
       session_key: expectedSessionKey
     });
     expect(blocked.pairing.pairing_code).toBeTruthy();
+    expectGatewayRoomAccessBlocked(routed, expectedSessionKey);
     expect(routed.inbound).toMatchObject({
-      status: "processed",
-      trusted: true,
       body: "LINEから提案書を作って",
-      session_key: expectedSessionKey,
       metadata: {
         request_id: "line_req_2",
         cookie: "[redacted]",
         gateway_line_signature_status: "verified"
       }
-    });
-    expect(routed.session.session_key).toBe(expectedSessionKey);
-    expect(routed.chat.backendRun.status).toBe("completed");
-    expect(routed.chat.backendRun.metadata).toMatchObject({
-      gateway_inbound_id: routed.inbound.id,
-      gateway_channel: "line",
-      gateway_source_identity: "user:U456"
     });
     expect(JSON.stringify(routed)).not.toContain("raw-secret-token");
     expect(JSON.stringify(routed)).not.toContain(channelSecret);
@@ -3230,7 +3136,7 @@ describe("backend run API", () => {
         cookie: "raw-secret-token"
       },
       output_locale: "ja"
-    }, 201);
+    }, 202);
 
     const expectedSessionKey = "email:mailbox~3Aassistant~40example.test:message~3Amsg-1";
     expect(invalid).toEqual({ error: "invalid_gateway_email_message" });
@@ -3273,11 +3179,9 @@ describe("backend run API", () => {
       subject: "提案書メール",
       message_id: "msg-1"
     });
+    expectGatewayRoomAccessBlocked(routed, expectedSessionKey);
     expect(routed.inbound).toMatchObject({
-      status: "processed",
-      trusted: true,
       body: "Subject: 提案書メール\n\nEmailから提案書を作って",
-      session_key: expectedSessionKey,
       metadata: {
         request_id: "email_req_2",
         cookie: "[redacted]",
@@ -3289,17 +3193,6 @@ describe("backend run API", () => {
         gateway_email_message_id: "msg-1"
       }
     });
-    expect(routed.session.session_key).toBe(expectedSessionKey);
-    expect(routed.chat.backendRun.status).toBe("completed");
-    expect(routed.chat.backendRun.metadata).toMatchObject({
-      gateway_inbound_id: routed.inbound.id,
-      gateway_channel: "email",
-      gateway_source_identity: "email:sender@example.test"
-    });
-    expect(routed.chat.messages).toContainEqual(expect.objectContaining({
-      role: "user",
-      content: "Subject: 提案書メール\n\nEmailから提案書を作って"
-    }));
     expect(JSON.stringify(routed)).not.toContain("raw-secret-token");
   });
 
@@ -3350,7 +3243,7 @@ describe("backend run API", () => {
         cookie: "raw-secret-token"
       },
       output_locale: "ja"
-    }, 201);
+    }, 202);
 
     const expectedSessionKey = "mobile:mobile-user~3Auser-1:conversation~3Aconv-1";
     expect(invalid).toEqual({ error: "invalid_gateway_mobile_message" });
@@ -3393,11 +3286,9 @@ describe("backend run API", () => {
       conversation_id: "conv-1",
       platform: "ios"
     });
+    expectGatewayRoomAccessBlocked(routed, expectedSessionKey);
     expect(routed.inbound).toMatchObject({
-      status: "processed",
-      trusted: true,
       body: "Mobileから提案書を作って",
-      session_key: expectedSessionKey,
       metadata: {
         request_id: "mobile_req_2",
         cookie: "[redacted]",
@@ -3409,17 +3300,6 @@ describe("backend run API", () => {
         gateway_mobile_platform: "ios"
       }
     });
-    expect(routed.session.session_key).toBe(expectedSessionKey);
-    expect(routed.chat.backendRun.status).toBe("completed");
-    expect(routed.chat.backendRun.metadata).toMatchObject({
-      gateway_inbound_id: routed.inbound.id,
-      gateway_channel: "mobile",
-      gateway_source_identity: "mobile:user:user-1"
-    });
-    expect(routed.chat.messages).toContainEqual(expect.objectContaining({
-      role: "user",
-      content: "Mobileから提案書を作って"
-    }));
     expect(JSON.stringify(routed)).not.toContain("raw-secret-token");
   });
 
@@ -3470,7 +3350,7 @@ describe("backend run API", () => {
         cookie: "raw-secret-token"
       },
       output_locale: "ja"
-    }, 201);
+    }, 202);
 
     const expectedSessionKey = "email:mailbox~3Aassistant~40example.test:message~3Aprovider-thread";
     expect(unsupported).toEqual({ error: "unsupported_gateway_email_provider_webhook" });
@@ -3514,11 +3394,9 @@ describe("backend run API", () => {
       subject: "Provider提案",
       message_id: "provider-thread"
     });
+    expectGatewayRoomAccessBlocked(sendgrid, expectedSessionKey);
     expect(sendgrid.inbound).toMatchObject({
-      status: "processed",
-      trusted: true,
       body: "Subject: Provider提案\n\nProvider webhookから提案書を作って",
-      session_key: expectedSessionKey,
       metadata: {
         request_id: "provider_req_2",
         cookie: "[redacted]",
@@ -3530,17 +3408,6 @@ describe("backend run API", () => {
       }
     });
     expect(sendgrid.inbound.metadata.gateway_email_provider_payload_keys).toEqual(["from", "to", "subject", "text", "headers", "output_locale"]);
-    expect(sendgrid.session.session_key).toBe(expectedSessionKey);
-    expect(sendgrid.chat.backendRun.status).toBe("completed");
-    expect(sendgrid.chat.backendRun.metadata).toMatchObject({
-      gateway_channel: "email",
-      gateway_source_identity: "email:sender@example.test",
-      gateway_inbound_id: sendgrid.inbound.id
-    });
-    expect(sendgrid.chat.messages).toContainEqual(expect.objectContaining({
-      role: "user",
-      content: "Subject: Provider提案\n\nProvider webhookから提案書を作って"
-    }));
     expect(JSON.stringify([postmark, sendgrid])).not.toContain("raw-secret-token");
   });
 
@@ -3863,11 +3730,9 @@ describe("backend run API", () => {
       message_count: 1,
       skipped_count: 0
     });
+    expectGatewayRoomAccessBlocked(secondMessage, expectedSessionKey);
     expect(secondMessage.inbound).toMatchObject({
-      status: "processed",
-      trusted: true,
       body: "Subject: IMAP提案\n\nIMAPから提案書を作って",
-      session_key: expectedSessionKey,
       metadata: {
         request_id: "imap_req_2",
         cookie: "[redacted]",
@@ -3878,17 +3743,6 @@ describe("backend run API", () => {
         gateway_email_imap_flags: ["\\Seen"]
       }
     });
-    expect(secondMessage.session.session_key).toBe(expectedSessionKey);
-    expect(secondMessage.chat.backendRun.status).toBe("completed");
-    expect(secondMessage.chat.backendRun.metadata).toMatchObject({
-      gateway_channel: "email",
-      gateway_source_identity: "email:sender@example.test",
-      gateway_inbound_id: secondMessage.inbound.id
-    });
-    expect(secondMessage.chat.messages).toContainEqual(expect.objectContaining({
-      role: "user",
-      content: "Subject: IMAP提案\n\nIMAPから提案書を作って"
-    }));
     expect(firstClient.closed).toBe(true);
     expect(secondClient.closed).toBe(true);
     expect(JSON.stringify([first, second])).not.toContain("raw-secret-token");
@@ -4903,6 +4757,21 @@ function restoreManagedEnv(): void {
 }
 
 let postJsonSequence = 0;
+
+function expectGatewayRoomAccessBlocked(
+  result: { inbound: { status: string; trusted: boolean; session_key?: string; error?: string } },
+  sessionKey: string
+): void {
+  expect(result.inbound).toMatchObject({
+    status: "blocked",
+    trusted: true,
+    session_key: sessionKey,
+    error: "gateway_participant_authentication_required"
+  });
+  expect(result).not.toHaveProperty("session");
+  expect(result).not.toHaveProperty("chat");
+  expect(result).not.toHaveProperty("boundaryPolicy");
+}
 
 async function postJson<T>(url: string, body: unknown, expectedStatus = 200): Promise<T> {
   const response = await fetch(url, {

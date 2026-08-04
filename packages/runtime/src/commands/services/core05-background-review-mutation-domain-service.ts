@@ -39,6 +39,7 @@ export type Core05BackgroundReviewMutationPort = Pick<WorkspaceStore,
   | "saveLearningResourceVersion"
   | "saveReflectionSuggestion"
   | "saveBackgroundReviewChange"
+  | "ensureResourceAccessBoundary"
 >;
 
 type LearningResourceKind = "memory" | "wiki" | "skill";
@@ -50,6 +51,11 @@ export class Core05BackgroundReviewMutationDomainService {
   async apply(input: {
     reflectionRunId: string;
     sessionId: string;
+    roomId: string;
+    /** The human requester owns any newly written Room resource. */
+    ownerParticipantId: string;
+    /** The initiating Agent or human is preserved as the actual creator. */
+    creatorParticipantId: string;
     mutations: LearningBackgroundReviewMutation[];
   }): Promise<{ suggestions: ReflectionSuggestionRecord[] }> {
     const [reflectionRun, session] = await Promise.all([
@@ -59,11 +65,16 @@ export class Core05BackgroundReviewMutationDomainService {
     if (!reflectionRun || reflectionRun.kind !== "background_review" || reflectionRun.status !== "started") {
       throw new Error("background_review_mutation_run_invalid");
     }
-    if (!session || reflectionRun.session_id !== session.id || !reflectionRun.activity_context || !reflectionRun.source_run_id) {
+    if (!session || reflectionRun.session_id !== session.id || !session.room_id || session.room_id !== input.roomId
+      || !reflectionRun.activity_context || reflectionRun.activity_context.room_id !== input.roomId || !reflectionRun.source_run_id) {
       throw new Error("background_review_mutation_context_invalid");
     }
     return {
-      suggestions: await this.applyMutations(reflectionRun, session, input.mutations)
+      suggestions: await this.applyMutations(reflectionRun, session, input.mutations, {
+        roomId: input.roomId,
+        ownerParticipantId: input.ownerParticipantId,
+        creatorParticipantId: input.creatorParticipantId
+      })
     };
   }
 
@@ -76,6 +87,7 @@ export class Core05BackgroundReviewMutationDomainService {
     sourceRunId: string;
     reason: string;
     evidenceRefs: ResourceRef[];
+    ownership?: { roomId: string; ownerParticipantId: string; creatorParticipantId: string };
   }): Promise<ResourceRef | undefined> {
     const currentVersion = input.resourceKind === "memory"
       ? (await this.store.getMemory(input.resourceId))?.version
@@ -89,6 +101,7 @@ export class Core05BackgroundReviewMutationDomainService {
       activity: input.activityContext,
       reason: input.reason,
       evidenceRefs: input.evidenceRefs,
+      ownership: input.ownership,
       sourceRunIds: [input.sourceRunId],
       evidenceState: "conflict",
       usageState: "limited"
@@ -98,7 +111,8 @@ export class Core05BackgroundReviewMutationDomainService {
   private async applyMutations(
     reflectionRun: ReflectionRunRecord,
     session: SessionRecord,
-    mutations: LearningBackgroundReviewMutation[]
+    mutations: LearningBackgroundReviewMutation[],
+    ownership: { roomId: string; ownerParticipantId: string; creatorParticipantId: string }
   ): Promise<ReflectionSuggestionRecord[]> {
     const activity = reflectionRun.activity_context;
     if (!activity) throw new Error("background_review_activity_context_required");
@@ -136,6 +150,7 @@ export class Core05BackgroundReviewMutationDomainService {
         }, mutation.content);
         const stored = await this.store.getMemory(memory.id);
         if (!stored) throw new Error(`background_review_resource_not_found:memory:${memory.id}`);
+        await this.ensureRoomBoundary("memory", stored.id, stored.created_at, ownership);
         await this.recordNewVersion({ resourceKind: "memory", resourceId: stored.id, version: "1", filePath: stored.file_path, contentHash, reason: mutation.reason, sourceRunIds: mutationSourceRunIds });
         targetRef = memoryRef(stored);
         title = stored.topic;
@@ -186,6 +201,7 @@ export class Core05BackgroundReviewMutationDomainService {
           created_at: now,
           updated_at: now
         }, content);
+        await this.ensureRoomBoundary("wiki", wiki.id, wiki.created_at, ownership);
         await this.recordNewVersion({ resourceKind: "wiki", resourceId: wiki.id, version: "1", filePath: wiki.file_path, contentHash, reason: mutation.reason, sourceRunIds: mutationSourceRunIds });
         targetRef = wikiRef(wiki);
         title = wiki.title;
@@ -224,6 +240,7 @@ export class Core05BackgroundReviewMutationDomainService {
           skillId: id,
           markdown: ["---", JSON.stringify(frontmatter, null, 2), "---", mutation.content.trim(), ""].join("\n")
         });
+        await this.ensureRoomBoundary("skill", skill.id, skill.frontmatter.created_at, ownership);
         await this.recordNewVersion({ resourceKind: "skill", resourceId: skill.id, version: "1", filePath: skill.file_path, contentHash, reason: mutation.reason, sourceRunIds: mutationSourceRunIds });
         targetRef = skillRef(skill);
         title = skill.title;
@@ -234,7 +251,8 @@ export class Core05BackgroundReviewMutationDomainService {
           activity,
           sourceRunIds: mutationSourceRunIds,
           reason: mutation.reason,
-          evidenceRefs: mutation.evidence_refs
+          evidenceRefs: mutation.evidence_refs,
+          ownership
         });
       } else {
         status = "proposed";
@@ -284,6 +302,7 @@ export class Core05BackgroundReviewMutationDomainService {
     sourceRunIds: string[];
     reason: string;
     evidenceRefs: ResourceRef[];
+    ownership?: { roomId: string; ownerParticipantId: string; creatorParticipantId: string };
     evidenceState?: "conflict";
     usageState?: "limited";
   }): Promise<ResourceRef | undefined> {
@@ -309,6 +328,7 @@ export class Core05BackgroundReviewMutationDomainService {
         }
       });
       if (!updated) return undefined;
+      if (input.ownership) await this.ensureRoomBoundary("memory", updated.id, updated.created_at, input.ownership);
       await this.store.saveLearningResourceVersion({
         record: versionRecord("memory", updated.id, version, currentVersion.version, updated.file_path, stableHash(body), input.reason, input.sourceRunIds),
         previousContent: before
@@ -336,6 +356,7 @@ export class Core05BackgroundReviewMutationDomainService {
         }
       });
       if (!updated) return undefined;
+      if (input.ownership) await this.ensureRoomBoundary("wiki", updated.id, updated.created_at, input.ownership);
       await this.store.saveLearningResourceVersion({
         record: versionRecord("wiki", updated.id, version, currentVersion.version, updated.file_path, stableHash(body), input.reason, input.sourceRunIds),
         previousContent: before
@@ -362,6 +383,7 @@ export class Core05BackgroundReviewMutationDomainService {
       }
     });
     if (!updated) return undefined;
+    if (input.ownership) await this.ensureRoomBoundary("skill", updated.id, updated.frontmatter.created_at, input.ownership);
     await this.store.saveLearningResourceVersion({
       record: versionRecord("skill", updated.id, version, currentVersion.version, updated.file_path, bodyHash, input.reason, input.sourceRunIds),
       previousContent: markdown
@@ -385,6 +407,28 @@ export class Core05BackgroundReviewMutationDomainService {
     const created = await this.store.getCurrentLearningResourceVersion({ resourceKind, resourceId });
     if (!created) throw new Error("learning_resource_version_missing_after_create");
     return created;
+  }
+
+  /**
+   * A Background Review creates or edits a real Room resource, so it records
+   * the immutable Room origin in the same write path.  It never derives this
+   * from UsageScope: that field remains a narrower use rule, not permission.
+   */
+  private async ensureRoomBoundary(
+    resourceKind: LearningResourceKind,
+    resourceId: string,
+    resourceCreatedAt: string | undefined,
+    ownership: { roomId: string; ownerParticipantId: string; creatorParticipantId: string }
+  ): Promise<void> {
+    await this.store.ensureResourceAccessBoundary({
+      resourceKind,
+      resourceId,
+      sourceRoomId: ownership.roomId,
+      ownerParticipantId: ownership.ownerParticipantId,
+      creatorParticipantId: ownership.creatorParticipantId,
+      ...(resourceCreatedAt ? { resourceCreatedAt } : {}),
+      actorId: ownership.ownerParticipantId
+    });
   }
 
   private async recordNewVersion(input: {

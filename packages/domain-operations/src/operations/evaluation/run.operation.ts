@@ -7,7 +7,7 @@ const Input = z.object({ source_run_id: z.string().trim().min(1).optional() }).s
 const Output = evaluationRunValueSchema;
 
 export interface EvaluationRunPorts {
-  runAppliedEvaluation(input: { sourceRunId?: string }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
+  runAppliedEvaluation(input: { sourceRunId?: string; sessionId?: string }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const evaluationRun = defineCommand<EvaluationRunPorts>()({
@@ -40,13 +40,15 @@ const evaluationRun = defineCommand<EvaluationRunPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleEvaluationRun(
-        _context: TrustedDomainContext,
+        context: TrustedDomainContext,
         input: z.infer<typeof Input>
       ): Promise<DomainResult<z.infer<typeof Output>>> {
+        if (!context.sessionId) throw new Error("trusted_context_session_required");
         return {
           ok: true,
           value: Output.parse(await ports.runAppliedEvaluation({
-            ...(input.source_run_id ? { sourceRunId: input.source_run_id } : {})
+            ...(input.source_run_id ? { sourceRunId: input.source_run_id } : {}),
+            sessionId: context.sessionId
           }))
         };
       }

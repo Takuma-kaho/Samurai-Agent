@@ -13,7 +13,7 @@ const Input = z.object({
 const Output = sessionValueSchema;
 
 export interface SessionCreatePorts {
-  createSession(input: { title?: string; roomId?: string; uiLocale?: z.infer<typeof SupportedLocaleSchema>; outputLocale?: z.infer<typeof SupportedLocaleSchema> }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
+  createSession(context: TrustedDomainContext, input: { title?: string; roomId?: string; uiLocale?: z.infer<typeof SupportedLocaleSchema>; outputLocale?: z.infer<typeof SupportedLocaleSchema> }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const sessionCreate = defineCommand<SessionCreatePorts>()({
@@ -59,7 +59,7 @@ const sessionCreate = defineCommand<SessionCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleSessionCreate(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const value = await ports.createSession({
+        const value = await ports.createSession(_context, {
           ...(input.title === undefined ? {} : { title: input.title }),
           ...(input.room_id === undefined ? {} : { roomId: input.room_id }),
           ...(input.ui_locale === undefined ? {} : { uiLocale: input.ui_locale }),

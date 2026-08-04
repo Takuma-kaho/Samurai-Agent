@@ -28,15 +28,15 @@ interface ConsolidationResult { primary_skill_id: string; markdown: string; supp
 type CuratorReason = "replacement" | "refutation" | "environment_changed" | "user_request" | "restore" | "archive";
 
 export interface CuratorWorkflowPort {
-  ensureSession(): Promise<{ id: string }>;
+  ensureSession(): Promise<{ id: string; room_id?: string }>;
   getState(): Promise<CuratorStateRecord>; listMemory(): Promise<StoredMemory[]>; listSkills(): Promise<StoredSkill[]>;
-  listSkillUsage(): Promise<SkillUsageRecord[]>; listWiki(): Promise<StoredWiki[]>; listBackendRuns(): Promise<BackendRunRecord[]>;
+  listSkillUsage(input: { skillIds: string[] }): Promise<SkillUsageRecord[]>; listWiki(): Promise<StoredWiki[]>; listBackendRuns(): Promise<BackendRunRecord[]>;
   listEvaluations(): Promise<LearningEvaluationRecord[]>; listReflectionRuns(): Promise<ReflectionRunRecord[]>;
   createReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord>; updateReflectionRun(run: ReflectionRunRecord): Promise<ReflectionRunRecord>;
   createSnapshot(runId: string): Promise<LearningSnapshotRecord>; restoreSnapshot(id: string): Promise<void>;
   saveState(input: Partial<CuratorStateRecord>): Promise<CuratorStateRecord>; saveSuggestion(value: ReflectionSuggestionRecord): Promise<void>;
   saveJobReport(value: LearningJobReportRecord): Promise<void>; readMemory(id: string): Promise<string | undefined>;
-  archiveResourceVersion(input: { resourceKind: "memory" | "wiki" | "skill"; resourceId: string; changeReason: string }): Promise<void>;
+  archiveResourceVersion(input: { resourceKind: "memory" | "wiki" | "skill"; resourceId: string; changeReason: string; roomId: string }): Promise<void>;
   replaceMemory(id: string, content: string): Promise<void>; archiveMemory(id: string): Promise<void>; archiveWiki(id: string): Promise<void>; readWiki(id: string): Promise<string | undefined>;
   readSkill(id: string): Promise<string | undefined>; listSkillSupport(id: string): Promise<Array<{ path: string; content: string }>>;
   replaceSkill(id: string, markdown: string): Promise<void>; writeSkillSupport(input: { skillId: string; path: string; content: string }): Promise<void>;
@@ -108,13 +108,16 @@ export class LearningDomainService {
   /** Core 05 curator: reason-driven review only. Time alone never changes a Resource. */
   async executeReasonDrivenCurator(input: { respectIdleGate?: boolean; reason?: CuratorReason; resourceKind?: "memory" | "wiki" | "skill"; resourceId?: string } = {}): Promise<{ reflectionRun: ReflectionRunRecord; suggestions: ReflectionSuggestionRecord[]; curatorReport: CuratorLifecycleReport; curatorReviewReport: CuratorReviewReport }> {
     const session = await this.dependencies.curator.ensureSession();
-    const [curatorState, memories, skills, skillUsage, wikiPages] = await Promise.all([
+    const [curatorState, memories, skills, wikiPages] = await Promise.all([
       this.dependencies.curator.getState(),
       this.dependencies.curator.listMemory(),
       this.dependencies.curator.listSkills(),
-      this.dependencies.curator.listSkillUsage(),
       this.dependencies.curator.listWiki()
     ]);
+    // Usage rows are metadata too. Fetch only the already permitted Skills;
+    // do not load Workspace-wide usage and filter it afterward.
+    const visibleSkillIds = skills.map((skill) => skill.id);
+    const scopedSkillUsage = await this.dependencies.curator.listSkillUsage({ skillIds: visibleSkillIds });
     const now = nowIso();
     const reason = input.reason;
     let reflectionRun = await this.dependencies.curator.createReflectionRun({
@@ -163,7 +166,8 @@ export class LearningDomainService {
             await this.dependencies.curator.archiveResourceVersion({
               resourceKind: input.resourceKind,
               resourceId: input.resourceId,
-              changeReason: "user_requested_archive"
+              changeReason: "user_requested_archive",
+              roomId: session.room_id ?? ""
             });
             archiveApplied = true;
             summary = `Curator archived ${input.resourceKind} ${input.resourceId} after Snapshot ${snapshot.id}.`;
@@ -210,7 +214,7 @@ export class LearningDomainService {
       memories,
       wikiPages,
       skills,
-      skillUsage,
+      skillUsage: scopedSkillUsage,
       suggestions,
       skillActions: [],
       protectedSkills: [],
@@ -252,7 +256,7 @@ export class LearningDomainService {
       this.dependencies.curator.getState(),
       this.dependencies.curator.listMemory(),
       this.dependencies.curator.listSkills(),
-      this.dependencies.curator.listSkillUsage(),
+      this.dependencies.curator.listSkillUsage({ skillIds: [] }),
       this.dependencies.curator.listWiki(),
       this.dependencies.curator.listBackendRuns(),
       this.dependencies.curator.listEvaluations(),

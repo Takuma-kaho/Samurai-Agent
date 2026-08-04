@@ -35,6 +35,16 @@ export class AccessHistoryRepository {
     return rows.map(policyDecisionFromRow);
   }
 
+  /** Reads policy history only after its owning operations were Room-scoped. */
+  async listPolicyDecisionsForOperationIds(operationIds: readonly string[]): Promise<PolicyDecisionRecord[]> {
+    if (operationIds.length === 0) return [];
+    const rows = await this.db.selectFrom("policy_decisions").selectAll()
+      .where("operation_id", "in", operationIds)
+      .orderBy("created_at", "desc")
+      .execute();
+    return rows.map(policyDecisionFromRow);
+  }
+
   async getPolicyDecision(id: string): Promise<PolicyDecisionRecord | undefined> {
     const row = await this.db.selectFrom("policy_decisions").selectAll().where("id", "=", id).executeTakeFirst();
     return row ? policyDecisionFromRow(row) : undefined;
@@ -86,18 +96,36 @@ export class AccessHistoryRepository {
     return rows.map(approvalRequestFromRow);
   }
 
+  /** Reads approval history only after its owning operations were Room-scoped. */
+  async listApprovalRequestsForOperationIds(operationIds: readonly string[]): Promise<ApprovalRequest[]> {
+    if (operationIds.length === 0) return [];
+    const rows = await this.db.selectFrom("approval_requests").selectAll()
+      .where("operation_id", "in", operationIds)
+      .orderBy("created_at", "desc")
+      .execute();
+    return rows.map(approvalRequestFromRow);
+  }
+
   async saveAuditRecord(record: AuditRecord): Promise<AuditRecord> {
     await this.db
       .insertInto("audit_records")
       .values({
         id: record.id,
         actor_identity: record.actor_identity,
+        participant_id: record.participant_id ?? null,
+        participant_kind: record.participant_kind ?? null,
+        requested_by_participant_id: record.requested_by_participant_id ?? null,
+        room_id: record.room_id ?? null,
         operation_id: record.operation_id,
         capability_id: record.capability_id,
         instruction_source: record.instruction_source,
         inputs_summary: record.inputs_summary,
         outputs_summary: record.outputs_summary,
-        policy_decision_id: record.policy_decision_id,
+        policy_decision_id: record.policy_decision_id ?? null,
+        room_access_scope: record.room_access_scope ?? null,
+        room_access_action: record.room_access_action ?? null,
+        room_access_allowed: record.room_access_allowed === undefined ? null : record.room_access_allowed ? 1 : 0,
+        room_access_reason: record.room_access_reason ?? null,
         affected_resources_json: stringify(record.affected_resources),
         rollback_point_id: record.rollback_point_id ?? null,
         created_at: record.created_at
@@ -106,8 +134,43 @@ export class AccessHistoryRepository {
     return record;
   }
 
+  async updateAuditRecord(record: AuditRecord): Promise<AuditRecord> {
+    await this.db
+      .updateTable("audit_records")
+      .set({
+        actor_identity: record.actor_identity,
+        participant_id: record.participant_id ?? null,
+        participant_kind: record.participant_kind ?? null,
+        requested_by_participant_id: record.requested_by_participant_id ?? null,
+        room_id: record.room_id ?? null,
+        capability_id: record.capability_id,
+        instruction_source: record.instruction_source,
+        inputs_summary: record.inputs_summary,
+        outputs_summary: record.outputs_summary,
+        policy_decision_id: record.policy_decision_id ?? null,
+        room_access_scope: record.room_access_scope ?? null,
+        room_access_action: record.room_access_action ?? null,
+        room_access_allowed: record.room_access_allowed === undefined ? null : record.room_access_allowed ? 1 : 0,
+        room_access_reason: record.room_access_reason ?? null,
+        affected_resources_json: stringify(record.affected_resources),
+        rollback_point_id: record.rollback_point_id ?? null
+      })
+      .where("id", "=", record.id)
+      .execute();
+    return record;
+  }
+
   async listAuditRecords(): Promise<AuditRecord[]> {
     const rows = await this.db.selectFrom("audit_records").selectAll().orderBy("created_at", "desc").execute();
+    return rows.map(auditRecordFromRow);
+  }
+
+  /** Room-scoped audit history query; avoids reading other Rooms before filtering. */
+  async listAuditRecordsForRoom(roomId: string): Promise<AuditRecord[]> {
+    const rows = await this.db.selectFrom("audit_records").selectAll()
+      .where("room_id", "=", roomId)
+      .orderBy("created_at", "desc")
+      .execute();
     return rows.map(auditRecordFromRow);
   }
 
@@ -141,8 +204,28 @@ export class AccessHistoryRepository {
     return rows.map(rollbackPointFromRow);
   }
 
+  /** Reads rollback history only after its owning operations were Room-scoped. */
+  async listRollbackPointsForOperationIds(operationIds: readonly string[]): Promise<RollbackPoint[]> {
+    if (operationIds.length === 0) return [];
+    const rows = await this.db.selectFrom("rollback_points").selectAll()
+      .where("operation_id", "in", operationIds)
+      .orderBy("created_at", "desc")
+      .execute();
+    return rows.map(rollbackPointFromRow);
+  }
+
   async getRollbackPoint(id: string): Promise<RollbackPoint | undefined> {
     const row = await this.db.selectFrom("rollback_points").selectAll().where("id", "=", id).executeTakeFirst();
+    return row ? rollbackPointFromRow(row) : undefined;
+  }
+
+  /** A direct rollback lookup is constrained by the already-authorized Room operations. */
+  async getRollbackPointForOperationIds(id: string, operationIds: readonly string[]): Promise<RollbackPoint | undefined> {
+    if (operationIds.length === 0) return undefined;
+    const row = await this.db.selectFrom("rollback_points").selectAll()
+      .where("id", "=", id)
+      .where("operation_id", "in", operationIds)
+      .executeTakeFirst();
     return row ? rollbackPointFromRow(row) : undefined;
   }
 

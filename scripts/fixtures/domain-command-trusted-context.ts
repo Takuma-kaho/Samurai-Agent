@@ -6,6 +6,7 @@ import type { JsonValue } from "@samurai-agent/core-schemas";
 import { PluginRuntimeRegistry } from "../../packages/action-catalog/src/index";
 import { AgentBackendRegistry, type AgentBackend } from "../../packages/agent-backends/src/index";
 import { DomainOperationRegistry } from "../../packages/domain-operations/src/registry/operation-registry";
+import { localOwnerParticipantId } from "../../packages/room-permissions/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 import { assertTrustedRuntimePayload, resolveTrustedRuntimeApiInput } from "../../apps/server/src/domain-ingress";
@@ -263,6 +264,14 @@ try {
     enabled: true,
     created_at: fixtureCreatedAt,
     updated_at: fixtureCreatedAt
+  });
+  await workspace.setRoomAgentPermissions({
+    roomId: "trusted-room",
+    agentId: "trusted-agent",
+    canView: true,
+    canEdit: true,
+    canExecute: true,
+    actorId: localOwnerParticipantId
   });
   await workspace.patchSettings({ default_room_id: "trusted-room", default_agent_id: "trusted-agent" });
 

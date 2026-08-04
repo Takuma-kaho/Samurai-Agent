@@ -1,7 +1,8 @@
 import { mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createId, nowIso, stableHash, type AutomationJobRecord, type CollectionPatch, type CollectionRecord, type CollectionSchema } from "@samurai-agent/core-schemas";
-import type { Kysely } from "kysely";
+import { collectionRecordResourceId, parseCollectionRecordResourceId } from "@samurai-agent/room-permissions";
+import { sql, type Kysely } from "kysely";
 import type { CollectionRecordsTable, CollectionSchemasTable, WorkspaceDb } from "../kernel/workspace-db-schema";
 import type {
   CollectionNote,
@@ -47,6 +48,12 @@ export interface CollectionAutomationPort {
   listAutomationJobs(input?: { dueAt?: string; enabledOnly?: boolean }): Promise<AutomationJobRecord[]>;
 }
 
+/** First-stage Room candidates. Final authorization still occurs in Runtime. */
+export interface CollectionRoomCandidateOptions {
+  resourceIds?: string[];
+  includeLegacy?: boolean;
+}
+
 /** Collection schema, record, patch, and filesystem transaction ownership. */
 export class CollectionRepository {
   constructor(
@@ -88,8 +95,26 @@ async getCollectionSchema(collectionId: string): Promise<CollectionSchemaWithFil
   return row ? collectionSchemaFromRow(row) : undefined;
 }
 
-async listCollectionSchemas(): Promise<CollectionSchemaWithFilePath[]> {
-  const rows = await this.db.selectFrom("collection_schemas").selectAll().orderBy("id").execute();
+async listCollectionSchemas(options: CollectionRoomCandidateOptions = {}): Promise<CollectionSchemaWithFilePath[]> {
+  let query = this.db.selectFrom("collection_schemas").selectAll();
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      query = query.where("id", "in", resourceIds);
+    } else {
+      query = query.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "collection_schema")
+            .whereRef("boundary.resource_id", "=", "collection_schemas.id")
+        ))
+      ]));
+    }
+  }
+  const rows = await query.orderBy("id").execute();
   return rows.map(collectionSchemaFromRow);
 }
 
@@ -211,22 +236,77 @@ async getCollectionRecord(collectionId: string, recordId: string): Promise<Colle
   return row ? collectionRecordFromRow(row) : undefined;
 }
 
-async listCollectionRecords(collectionId?: string): Promise<CollectionRecordWithFilePath[]> {
+async listCollectionRecords(collectionId?: string, options: CollectionRoomCandidateOptions = {}): Promise<CollectionRecordWithFilePath[]> {
   let query = this.db.selectFrom("collection_records").selectAll();
   if (collectionId) {
     query = query.where("collection_id", "=", collectionId);
+  }
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      query = query.where((eb) => eb.or(resourceIds.map((resourceId) => {
+        const parsed = parseCollectionRecordResourceId(resourceId);
+        return parsed
+          ? eb.and([eb("collection_id", "=", parsed.collectionId), eb("id", "=", parsed.recordId)])
+          : eb("id", "=", "__room_boundary_never_matches__");
+      })));
+    } else {
+      query = query.where((eb) => eb.or([
+        ...resourceIds.flatMap((resourceId) => {
+          const parsed = parseCollectionRecordResourceId(resourceId);
+          return parsed ? [eb.and([eb("collection_id", "=", parsed.collectionId), eb("id", "=", parsed.recordId)])] : [];
+        }),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "collection_record")
+            .where("boundary.resource_id", "=", sql<string>`'collection:' || length(collection_records.collection_id) || ':' || collection_records.collection_id || length(collection_records.id) || ':' || collection_records.id`)
+        ))
+      ]));
+    }
   }
   const rows = await query.orderBy("updated_at", "desc").execute();
   return rows.map(collectionRecordFromRow);
 }
 
-async listCollectionPatches(input: { collectionId?: string; recordId?: string } = {}): Promise<CollectionPatch[]> {
+async listCollectionPatches(input: {
+  collectionId?: string;
+  recordId?: string;
+  resourceIds?: string[];
+  includeLegacy?: boolean;
+} = {}): Promise<CollectionPatch[]> {
   let query = this.db.selectFrom("collection_patches").selectAll();
   if (input.collectionId) {
     query = query.where("collection_id", "=", input.collectionId);
   }
   if (input.recordId) {
     query = query.where("record_id", "=", input.recordId);
+  }
+  if (input.resourceIds !== undefined) {
+    const resourceIds = [...new Set(input.resourceIds)];
+    if (!input.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      query = query.where((eb) => eb.or(resourceIds.map((resourceId) => {
+        const parsed = parseCollectionRecordResourceId(resourceId);
+        return parsed
+          ? eb.and([eb("collection_id", "=", parsed.collectionId), eb("record_id", "=", parsed.recordId)])
+          : eb("record_id", "=", "__room_boundary_never_matches__");
+      })));
+    } else {
+      query = query.where((eb) => eb.or([
+        ...resourceIds.flatMap((resourceId) => {
+          const parsed = parseCollectionRecordResourceId(resourceId);
+          return parsed ? [eb.and([eb("collection_id", "=", parsed.collectionId), eb("record_id", "=", parsed.recordId)])] : [];
+        }),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "collection_record")
+            .where("boundary.resource_id", "=", sql<string>`'collection:' || length(collection_patches.collection_id) || ':' || collection_patches.collection_id || length(collection_patches.record_id) || ':' || collection_patches.record_id`)
+        ))
+      ]));
+    }
   }
   const rows = await query.orderBy("created_at", "desc").execute();
   return rows.map(collectionPatchFromRow);
@@ -243,7 +323,11 @@ async getCollectionPatch(collectionId: string, recordId: string, patchId: string
   return row ? collectionPatchFromRow(row) : undefined;
 }
 
-async resolveCollectionRecordRefs(collectionId: string, recordId: string): Promise<CollectionRecordResolution> {
+async resolveCollectionRecordRefs(
+  collectionId: string,
+  recordId: string,
+  options: CollectionRoomCandidateOptions = {}
+): Promise<CollectionRecordResolution> {
   const [schema, record] = await Promise.all([
     this.getCollectionSchema(collectionId),
     this.getCollectionRecord(collectionId, recordId)
@@ -288,6 +372,16 @@ async resolveCollectionRecordRefs(collectionId: string, recordId: string): Promi
       });
       continue;
     }
+    if (!await this.roomCandidateAllowsCollectionRecord(targetCollection, targetId, options)) {
+      missingRefs.push({
+        ref_id: refId,
+        field,
+        target_collection_id: targetCollection,
+        target_record_id: targetId,
+        reason: "not_found"
+      });
+      continue;
+    }
     const target = await this.getCollectionRecord(targetCollection, targetId);
     if (!target) {
       missingRefs.push({
@@ -328,6 +422,24 @@ async resolveCollectionRecordRefs(collectionId: string, recordId: string): Promi
     missing_refs: missingRefs,
     embed_fields: embedFields
   };
+}
+
+/** Restricts linked-record loading before its row or file data is read. */
+private async roomCandidateAllowsCollectionRecord(
+  collectionId: string,
+  recordId: string,
+  options: CollectionRoomCandidateOptions
+): Promise<boolean> {
+  if (options.resourceIds === undefined) return true;
+  const resourceId = collectionRecordResourceId(collectionId, recordId);
+  if (options.resourceIds.includes(resourceId)) return true;
+  if (!options.includeLegacy) return false;
+  const boundary = await this.db.selectFrom("resource_access_boundaries")
+    .select("id")
+    .where("resource_kind", "=", "collection_record")
+    .where("resource_id", "=", resourceId)
+    .executeTakeFirst();
+  return !boundary;
 }
 
 async evaluateCollectionTriggers(input: {

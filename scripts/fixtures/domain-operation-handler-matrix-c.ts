@@ -69,6 +69,7 @@ const context: TrustedDomainContext = {
   workspaceId: "handler-matrix-c-workspace",
   actorId: "handler-matrix-c-actor",
   correlationId: "handler-matrix-c",
+  roomId: "room_fixture",
   sessionId: "session_fixture",
   runId: "run_fixture",
   envelopeId: "envelope_fixture"
@@ -764,7 +765,10 @@ async function runReflectionSuggestionCases(): Promise<void> {
         ? { kind: "wiki", id: storedWiki.id, uri: storedWiki.file_path, label: storedWiki.title }
         : { kind: "skill", id: storedSkill.id, uri: storedSkill.file_path, label: storedSkill.title };
     await runCase("reflection.suggestion.apply", caseFor("reflection.suggestion.apply", caseId), (fixture) => ({
-      listReflectionSuggestions: async () => { fixture.record("listReflectionSuggestions", []); return [suggestion]; },
+      getReflectionSuggestion: async (sessionId: unknown, suggestionId: unknown) => {
+        fixture.record("getReflectionSuggestion", [sessionId, suggestionId]);
+        return sessionId === "session_fixture" && suggestionId === suggestion.id ? suggestion : undefined;
+      },
       reflectionSuggestionError: (code: unknown, message: unknown) => { fixture.record("reflectionSuggestionError", [code, message]); return new Error(String(message)); },
       ensureReflectionMutationSession: async () => { fixture.record("ensureReflectionMutationSession", []); return session; },
       createReflectionMutationEnvelope: (content: unknown) => { fixture.record("createReflectionMutationEnvelope", [content]); return envelope; },

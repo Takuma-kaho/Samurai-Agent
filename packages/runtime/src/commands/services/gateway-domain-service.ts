@@ -168,6 +168,20 @@ export class GatewayDomainService {
     }
     const inbound = await this.dependencies.inbound.saveInbound(createGatewayInboundMessage({ channel: input.channel, source_identity: sourceIdentity, body, pairing, metadata }));
     const context = gatewayContextForPairing(pairing);
+    // Pairing proves transport admission only. Until the trusted execution
+    // path resolves a verified Room participant, retain the inbound history
+    // and stop before a boundary policy, Session, Chat, Agent, or Tool can
+    // receive external content.
+    if (context.actor_identity === "paired_contact") {
+      const blocked = await this.dependencies.inbound.saveInbound({
+        ...inbound,
+        status: "blocked",
+        error: "gateway_participant_authentication_required",
+        updated_at: nowIso()
+      });
+      await this.dependencies.inbound.emit("gateway.inbound.blocked", blocked);
+      return { inbound: blocked, pairing };
+    }
     const boundaryPolicy = await this.dependencies.inbound.saveBoundaryPolicy(createDefaultGatewayBoundaryPolicy({
       source_channel: input.channel,
       source_identity: sourceIdentity,

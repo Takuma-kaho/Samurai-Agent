@@ -7,11 +7,12 @@ import { getDomainCommandEntry } from "../../packages/action-catalog/src/index";
 import { AgentBackendRegistry, type AgentBackend } from "../../packages/agent-backends/src/index";
 import type { ArtifactRecord, JsonValue, OperationRecord } from "../../packages/core-schemas/src/index";
 import { DomainOperationRegistry } from "../../packages/domain-operations/src/registry/operation-registry";
+import { localOwnerParticipantId } from "../../packages/room-permissions/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { closeApiServer, createApiServer } from "../../apps/server/src/api-server";
 
 /**
- * IN01/IN02 characterize the final active operation, not six superficially
+ * IN01/IN02 characterize the final active operation, not five superficially
  * similar adapters.  Each entrance below must cause exactly one real
  * `artifact.create` registry execution.  The registry prototype is observed
  * only at the boundary immediately before the actual Handler; no production
@@ -45,7 +46,7 @@ interface CapturedArtifactExecution {
 }
 
 interface IngressObservation {
-  entrance: "web_runtime_api" | "surface_operation" | "provider_tool_call" | "gateway_inbound" | "automation" | "generated_surface_action";
+  entrance: "web_runtime_api" | "surface_operation" | "provider_tool_call" | "automation" | "generated_surface_action";
   source: string;
   binding: CapturedArtifactExecution["binding"];
   contractFingerprint: string;
@@ -92,7 +93,6 @@ const expectedWorkspaceChangeTelemetryCount: Record<IngressObservation["entrance
   web_runtime_api: 0,
   surface_operation: 1,
   provider_tool_call: 1,
-  gateway_inbound: 1,
   automation: 1,
   generated_surface_action: 0
 };
@@ -217,6 +217,14 @@ try {
     created_at: setupNow,
     updated_at: setupNow
   });
+  await server.store.setRoomAgentPermissions({
+    roomId: "ingress-room",
+    agentId: "ingress-agent",
+    canView: true,
+    canEdit: true,
+    canExecute: true,
+    actorId: localOwnerParticipantId
+  });
   await server.store.patchSettings({
     default_room_id: "ingress-room",
     default_agent_id: "ingress-agent",
@@ -275,39 +283,50 @@ try {
   }));
   debugStage("entrance-provider-tool-call-complete");
 
-  // The default local_cli pairing policy intentionally starts with no tool
-  // allowlist. Configure the exact artifact capability required by this
-  // ingress parity fixture through the public Domain Command boundary before
-  // exercising the Gateway route.
-  await runtime.runDomainCommand({
-    command_id: "gateway.pairing_policy.save",
-    input_source: "runtime_api",
-    idempotency_key: "ingress-gateway-policy-save",
-    payload: { channel: "local_cli", trust_mode: "auto_approve", allowed_tools: ["artifact.create"] }
+  // Gateway transport admission is intentionally not an Artifact entrance.
+  // A paired external source is retained for history, but without a verified
+  // Room participant it cannot create a Session, Chat, Agent run, Tool run,
+  // boundary policy, or Artifact.
+  debugStage("gateway-admission-start");
+  const gatewayCapturesBefore = captured.length;
+  const gatewayArtifactsBefore = new Set((await server.store.listArtifacts()).map((artifact) => artifact.id));
+  const gatewayExecutionsBefore = (await server.store.listDomainCommandExecutions())
+    .filter((execution) => execution.command_id === "gateway.inbound.route").length;
+  const gatewayResult = await runtime.handleGatewayInbound({
+    channel: "local_cli",
+    source_identity: "ingress-gateway-owner",
+    body: "Run the gateway ingress fixture.",
+    backend_id: bridgeBackend.id,
+    input_locale: "en",
+    output_locale: "en",
+    metadata: { message_id: "ingress-gateway-message" }
   });
-  debugStage("gateway-policy-configured");
-
-  debugStage("entrance-gateway-inbound-start");
-  observations.push(await observeArtifactCreate("gateway_inbound", async () => {
-    // local_cli has an actual Gateway pairing/routing policy, but is
-    // auto-approved by the Gateway boundary.  The backend still emits its
-    // ordinary Provider tool event; this proves the complete Gateway path.
-    const gatewayResult = await runtime.handleGatewayInbound({
-      channel: "local_cli",
-      source_identity: "ingress-gateway-owner",
-      body: "Run the gateway ingress fixture.",
-      backend_id: bridgeBackend.id,
-      input_locale: "en",
-      output_locale: "en",
-      metadata: { message_id: "ingress-gateway-message" }
-    });
-    const gatewayUserMessage = (gatewayResult as { chat?: { messages?: Array<{ role?: string; envelope?: { input_locale?: string; output_locale?: string } }> } }).chat?.messages
-      ?.find((message) => message.role === "user");
-    assert.equal(gatewayUserMessage?.envelope?.input_locale, "en", "Gateway input_locale must reach the BackendRun envelope");
-    assert.equal(gatewayUserMessage?.envelope?.output_locale, "en", "Gateway output_locale must reach the BackendRun envelope");
-    if (process.env.SAMURAI_INGRESS_DEBUG === "1") process.stderr.write(`[domain-command-ingress] gateway-result:${JSON.stringify(gatewayResult)}\n`);
-  }));
-  debugStage("entrance-gateway-inbound-complete");
+  const gatewayAdmission = {
+    status: gatewayResult.inbound.status,
+    error: gatewayResult.inbound.error,
+    trusted: gatewayResult.inbound.trusted,
+    pairing_status: gatewayResult.pairing?.status,
+    session_created: gatewayResult.session !== undefined,
+    chat_started: gatewayResult.chat !== undefined,
+    boundary_policy_saved: gatewayResult.boundaryPolicy !== undefined,
+    artifact_handler_calls: captured.length - gatewayCapturesBefore,
+    artifact_creations: (await server.store.listArtifacts()).filter((artifact) => !gatewayArtifactsBefore.has(artifact.id)).length,
+    gateway_command_executions: (await server.store.listDomainCommandExecutions())
+      .filter((execution) => execution.command_id === "gateway.inbound.route").length - gatewayExecutionsBefore
+  };
+  assert.deepEqual(gatewayAdmission, {
+    status: "blocked",
+    error: "gateway_participant_authentication_required",
+    trusted: true,
+    pairing_status: "approved",
+    session_created: false,
+    chat_started: false,
+    boundary_policy_saved: false,
+    artifact_handler_calls: 0,
+    artifact_creations: 0,
+    gateway_command_executions: 1
+  });
+  debugStage("gateway-admission-complete");
 
   // Automation runs are scheduled from the Workspace settings locale when a
   // job has no per-job locale fields. Set the same en/en contract through the
@@ -389,7 +408,7 @@ try {
   debugStage("entrance-generated-surface-action-complete");
 
   // The same invalid artifact.create title must be rejected before the
-  // Handler across every real ingress.  Backend entrances surface their
+  // Handler across every Artifact-producing ingress. Backend entrances surface their
   // rejection through the persisted provider tool result; direct entrances
   // surface the same Runtime/HTTP error.  In either case, no artifact command
   // handler call, Artifact, Artifact Operation, or command execution exists.
@@ -427,19 +446,6 @@ try {
   ));
   debugStage("rejection-provider-tool-call-complete");
 
-  rejections.push(await observeArtifactCreateRejection("gateway_inbound", async () =>
-    withBridgeArtifactPayload(invalidArtifactPayload, () => backendToolDomainError(() => runtime.handleGatewayInbound({
-      channel: "local_cli",
-      source_identity: "ingress-gateway-owner",
-      body: "Run the invalid gateway ingress fixture.",
-      backend_id: bridgeBackend.id,
-      input_locale: "en",
-      output_locale: "en",
-      metadata: { message_id: "ingress-gateway-message-invalid" }
-    })))
-  ));
-  debugStage("rejection-gateway-inbound-complete");
-
   const invalidSavedJob = await runtime.runDomainCommand({
     command_id: "automation.job.save",
     input_source: "runtime_api",
@@ -476,7 +482,7 @@ try {
   ));
   debugStage("rejection-generated-surface-action-complete");
 
-  assert.equal(rejections.length, 6);
+  assert.equal(rejections.length, 5);
   for (const rejection of rejections) {
     assert.equal(
       rejection.error.code,
@@ -487,7 +493,7 @@ try {
     assert.equal(rejection.artifactCommandSideEffects, 0, `${rejection.entrance} must leave no artifact.create side effect`);
   }
 
-  assert.equal(observations.length, 6);
+  assert.equal(observations.length, 5);
   const reference = observations[0]!;
   for (const observation of observations) {
     assert.deepEqual(observation.binding, reference.binding, `${observation.entrance} must reach the exact Registry binding`);
@@ -500,7 +506,7 @@ try {
   }
   assert.deepEqual(
     observations.map((observation) => observation.source).sort(),
-    ["generated_surface", "provider_tool_call", "provider_tool_call", "provider_tool_call", "runtime_api", "surface_operation"].sort(),
+    ["generated_surface", "provider_tool_call", "provider_tool_call", "runtime_api", "surface_operation"].sort(),
     "each entrance must preserve its server-owned final source"
   );
 
@@ -517,6 +523,7 @@ try {
       error: { code: artifactCreateInvalidInputCode },
       entrances: rejections.map(({ entrance, handlerReached, artifactCommandSideEffects }) => ({ entrance, handlerReached, artifactCommandSideEffects }))
     },
+    gateway_admission: gatewayAdmission,
     artifact_operation_parity: true,
     workspace_change_telemetry: observations.map(({ entrance, workspaceChangeTelemetry }) => ({ entrance, ...workspaceChangeTelemetry })),
     direct_store_mutation: false

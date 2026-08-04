@@ -238,7 +238,7 @@ try {
       patch_id: "crash-patch",
       changes: { value: "after" }
     }
-  });
+  }, { sessionId: "crash-domain-command-session" });
   assert.equal((crashTransactionResult.result as { resource: { version: number } }).resource.version, 2);
   crashTransactionReplayCalls += 1;
   const crashTransactionReplayed = await replayRuntime.runRuntimeApiDomainCommand({
@@ -251,7 +251,7 @@ try {
       patch_id: "crash-patch",
       changes: { value: "after" }
     }
-  });
+  }, { sessionId: "crash-domain-command-session" });
   assert.deepEqual(crashTransactionReplayed.result, crashTransactionResult.result);
   assert.equal((await store.listCollectionPatches({ collectionId: "crash", recordId: "partial" })).filter((patch) => patch.id === "crash-patch").length, 1);
   assert.equal(await store.countPendingWorkspaceFileTransactions(), 0);

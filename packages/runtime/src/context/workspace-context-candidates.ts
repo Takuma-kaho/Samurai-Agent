@@ -13,7 +13,12 @@ export interface WikiContextPage {
 }
 
 export interface WorkspaceContextCandidatesStore {
-  searchWiki(query: string, limit: number, options: { activeOnly: boolean; activityContext?: { room_id: string; session_id: string; agent_id: string } }): Promise<WikiContextPage[]>;
+  searchWiki(query: string, limit: number, options: {
+    activeOnly: boolean;
+    activityContext?: { room_id: string; session_id: string; agent_id: string };
+    resourceIds?: string[];
+    includeLegacy?: boolean;
+  }): Promise<WikiContextPage[]>;
   readWikiContent(id: string): Promise<string | undefined>;
 }
 

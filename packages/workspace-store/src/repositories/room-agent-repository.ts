@@ -9,16 +9,22 @@ export const DEFAULT_AGENT_ID = "agent_default";
 export class RoomAgentRepository {
   constructor(private readonly db: Kysely<WorkspaceDb>) {}
 
-  async ensureDefaults(settings: SettingsRecord): Promise<{ room: RoomRecord; agent: AgentRecord }> {
+  async ensureDefaults(
+    settings: SettingsRecord,
+    options: { createRoomWithOwner?: (room: RoomRecord) => Promise<RoomRecord> } = {}
+  ): Promise<{ room: RoomRecord; agent: AgentRecord; createdRoom: boolean; createdAgent: boolean }> {
     const roomId = settings.default_room_id ?? DEFAULT_ROOM_ID;
     const agentId = settings.default_agent_id ?? DEFAULT_AGENT_ID;
     const now = nowIso();
     let room = await this.getRoom(roomId);
+    let createdRoom = false;
     if (!room) {
       room = { id: roomId, name: "Default Room", created_at: now, updated_at: now };
-      await this.createRoom(room);
+      await (options.createRoomWithOwner ?? ((record) => this.createRoom(record)))(room);
+      createdRoom = true;
     }
     let agent = await this.getAgent(agentId);
+    let createdAgent = false;
     if (!agent) {
       agent = {
         id: agentId,
@@ -31,14 +37,15 @@ export class RoomAgentRepository {
         updated_at: now
       };
       await this.createAgent(agent);
+      createdAgent = true;
     }
-    if (settings.default_room_id === room.id && settings.default_agent_id === agent.id) return { room, agent };
+    if (settings.default_room_id === room.id && settings.default_agent_id === agent.id) return { room, agent, createdRoom, createdAgent };
     await this.db.updateTable("settings").set({
       default_room_id: room.id,
       default_agent_id: agent.id,
       updated_at: now
     }).where("id", "=", "default").execute();
-    return { room, agent };
+    return { room, agent, createdRoom, createdAgent };
   }
 
   async createRoom(record: RoomRecord): Promise<RoomRecord> {

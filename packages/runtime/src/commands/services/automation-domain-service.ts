@@ -33,7 +33,7 @@ type ScheduledSession = SessionRecord;
 export interface AutomationExecutionPort {
   createRun(input: Pick<AutomationRunRecord, "id" | "kind" | "source" | "status" | "started_at">): Promise<AutomationRunRecord>;
   updateRun(record: AutomationRunRecord): Promise<AutomationRunRecord>;
-  ensureSession(context: ScheduledContext, title: string): Promise<ScheduledSession>;
+  ensureSession(context: ScheduledContext, title: string, roomId?: string): Promise<ScheduledSession>;
   createEnvelope(context: ScheduledContext, content: string): MessageEnvelope;
   runMutation<T>(input: { session: ScheduledSession; envelope: MessageEnvelope; context: ScheduledContext; operationName: string; inputRef?: ResourceRef; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; summary: string; rollbackPoint?: RollbackPoint }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
   reindexWiki(): Promise<{ active: number; total: number }>;
@@ -71,7 +71,7 @@ export class AutomationDomainService {
   jobError(code: "not_found" | "conflict", message: string) { return this.dependencies.requestError(code, message); }
   createExecutionRun(input: Pick<AutomationRunRecord, "id" | "kind" | "source" | "status" | "started_at">) { return this.dependencies.execution.createRun(input); }
   updateExecutionRun(record: AutomationRunRecord) { return this.dependencies.execution.updateRun(record); }
-  ensureExecutionSession(context: ScheduledContext, title: string) { return this.dependencies.execution.ensureSession(context, title); }
+  ensureExecutionSession(context: ScheduledContext, title: string, roomId?: string) { return this.dependencies.execution.ensureSession(context, title, roomId); }
   createExecutionEnvelope(context: ScheduledContext, content: string) { return this.dependencies.execution.createEnvelope(context, content); }
   runExecutionMutation<T>(input: { session: ScheduledSession; envelope: MessageEnvelope; context: ScheduledContext; operationName: string; inputRef?: ResourceRef; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; summary: string; rollbackPoint?: RollbackPoint }> }) { return this.dependencies.execution.runMutation(input); }
   runExecutionMemoryReview(session: ScheduledSession) { return this.dependencies.execution.runMemoryReview(session); }

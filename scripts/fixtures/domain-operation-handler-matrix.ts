@@ -5,6 +5,7 @@ import agentCreate from "../../packages/domain-operations/src/operations/agent/c
 import agentList from "../../packages/domain-operations/src/operations/agent/list.operation";
 import agentPatch from "../../packages/domain-operations/src/operations/agent/patch.operation";
 import agentView from "../../packages/domain-operations/src/operations/agent/view.operation";
+import agentWorkspacePermissionSet from "../../packages/domain-operations/src/operations/agent/workspace-permission-set.operation";
 import browserExtract from "../../packages/domain-operations/src/operations/browser/extract.operation";
 import clientEventAck from "../../packages/domain-operations/src/operations/client/event/ack.operation";
 import clientEventDeliver from "../../packages/domain-operations/src/operations/client/event/deliver.operation";
@@ -29,8 +30,20 @@ import learningSnapshotPrune from "../../packages/domain-operations/src/operatio
 import objectiveTransition from "../../packages/domain-operations/src/operations/objective/transition.operation";
 import pluginStatusSet from "../../packages/domain-operations/src/operations/plugin/status/set.operation";
 import roomCreate from "../../packages/domain-operations/src/operations/room/create.operation";
+import roomAgentPermissionSet from "../../packages/domain-operations/src/operations/room/agent-permission-set.operation";
+import roomAgentRemove from "../../packages/domain-operations/src/operations/room/agent-remove.operation";
 import roomList from "../../packages/domain-operations/src/operations/room/list.operation";
+import roomMemberAdd from "../../packages/domain-operations/src/operations/room/member-add.operation";
+import roomMemberList from "../../packages/domain-operations/src/operations/room/member-list.operation";
+import roomMemberRemove from "../../packages/domain-operations/src/operations/room/member-remove.operation";
+import roomMemberRoleChange from "../../packages/domain-operations/src/operations/room/member-role-change.operation";
+import roomOwnerRecover from "../../packages/domain-operations/src/operations/room/owner-recover.operation";
+import roomOwnerTransfer from "../../packages/domain-operations/src/operations/room/owner-transfer.operation";
+import roomOwnerlessList from "../../packages/domain-operations/src/operations/room/ownerless-list.operation";
 import roomPatch from "../../packages/domain-operations/src/operations/room/patch.operation";
+import roomResourceShare from "../../packages/domain-operations/src/operations/room/resource-share.operation";
+import roomResourceShareList from "../../packages/domain-operations/src/operations/room/resource-share-list.operation";
+import roomResourceShareRevoke from "../../packages/domain-operations/src/operations/room/resource-share-revoke.operation";
 import roomView from "../../packages/domain-operations/src/operations/room/view.operation";
 import sessionCreate from "../../packages/domain-operations/src/operations/session/create.operation";
 import sessionSearchReindex from "../../packages/domain-operations/src/operations/session/search/reindex.operation";
@@ -43,6 +56,11 @@ import settingsPatch from "../../packages/domain-operations/src/operations/setti
 import skillUsageRecord from "../../packages/domain-operations/src/operations/skill/usage/record.operation";
 import workItemFollowUp from "../../packages/domain-operations/src/operations/work_item/follow_up.operation";
 import workItemSteer from "../../packages/domain-operations/src/operations/work_item/steer.operation";
+import workspaceMemberAdd from "../../packages/domain-operations/src/operations/workspace/member-add.operation";
+import workspaceMemberList from "../../packages/domain-operations/src/operations/workspace/member-list.operation";
+import workspaceMemberRemove from "../../packages/domain-operations/src/operations/workspace/member-remove.operation";
+import workspaceMemberRoleChange from "../../packages/domain-operations/src/operations/workspace/member-role-change.operation";
+import workspaceOwnerTransfer from "../../packages/domain-operations/src/operations/workspace/owner-transfer.operation";
 import { handlerExpectationCount, handlerExpectations, type HandlerCallExpectation } from "./domain-operation-handler-expectations";
 
 const now = "2026-07-17T00:00:00.000Z";
@@ -50,6 +68,8 @@ const context: TrustedDomainContext = {
   inputSource: "runtime_api",
   workspaceId: "handler-matrix-workspace",
   actorId: "handler-matrix-actor",
+  participant: { kind: "human", participantId: "human:owner" },
+  roomId: "room_fixture",
   correlationId: "handler-matrix",
   sessionId: "session_fixture",
   runId: "run_fixture"
@@ -84,6 +104,11 @@ const gatewayExpiredLocksOutput = {
 };
 const roomOutput = { id: "room_fixture", name: "Fixture Room", created_at: now, updated_at: now };
 const agentOutput = { id: "agent_fixture", name: "Fixture Agent", role: "Fixture", instructions: "Handle fixture work.", backend_id: "backend_fixture", enabled: true, created_at: now, updated_at: now };
+const workspaceMemberOutput = { id: "workspace_member_fixture", participant_id: "human:member", role: "member" as const, joined_at: now, created_by_participant_id: "human:owner", updated_at: now };
+const roomMemberOutput = { id: "room_member_fixture", room_id: roomOutput.id, participant_id: "human:member", role: "member" as const, joined_at: now, created_by_participant_id: "human:owner", updated_at: now };
+const roomAgentPermissionOutput = { id: "room_agent_fixture", room_id: roomOutput.id, agent_id: agentOutput.id, can_view: true, can_edit: true, can_execute: true, joined_at: now, created_by_participant_id: "human:owner", updated_at: now };
+const agentWorkspacePermissionOutput = { id: "agent_workspace_permission_fixture", agent_id: agentOutput.id, permission: "room.create" as const, granted_at: now, granted_by_participant_id: "human:owner", updated_at: now };
+const roomResourceShareOutput = { id: "room_resource_share_fixture", resource_access_boundary_id: "resource_boundary_fixture", source_room_id: roomOutput.id, target_room_id: "room_target_fixture", shared_by_participant_id: "human:owner", created_at: now, updated_at: now };
 const sessionOutput = { id: "session_fixture", session_key: "session_fixture", room_id: roomOutput.id, title: "Fixture session", ui_locale: "en" as const, output_locale: "ja" as const, created_at: now, updated_at: now };
 const sessionSearchOutput = { mode: "fts5" as const, indexed: 1 };
 const searchSessionOutput = [{ kind: "session" as const, id: "session_fixture", title: "Fixture session", summary: "fixture" }];
@@ -188,20 +213,23 @@ await run("browser.extract", () => browserExtract.createHandler({
 }).execute(context, handlerExpectations["browser.extract"].input));
 
 await run("agent.backend.bind", () => agentBackendBind.createHandler({
-  bindAgentBackend(input) { return record("agent.backend.bind", "bindAgentBackend", [input], { ...agentOutput, backend_id: input.backendId }); }
+  bindAgentBackend(_context, input) { return record("agent.backend.bind", "bindAgentBackend", [_context, input], { ...agentOutput, backend_id: input.backendId }); }
 }).execute(context, handlerExpectations["agent.backend.bind"].input));
 await run("agent.create", () => agentCreate.createHandler({
-  createAgent(input) { return record("agent.create", "createAgent", [input], { ...agentOutput, enabled: input.enabled ?? true }); }
+  createAgent(_context, input) { return record("agent.create", "createAgent", [_context, input], { ...agentOutput, enabled: input.enabled ?? true }); }
 }).execute(context, handlerExpectations["agent.create"].input));
 await run("agent.list", () => agentList.createHandler({
-  listAgents() { return record("agent.list", "listAgents", [], [agentOutput]); }
+  listAgents(_context) { return record("agent.list", "listAgents", [_context], [agentOutput]); }
 }).execute(context, handlerExpectations["agent.list"].input));
 await run("agent.patch", () => agentPatch.createHandler({
-  patchAgent(input) { return record("agent.patch", "patchAgent", [input], { ...agentOutput, ...input }); }
+  patchAgent(_context, input) { return record("agent.patch", "patchAgent", [_context, input], { ...agentOutput, ...input }); }
 }).execute(context, handlerExpectations["agent.patch"].input));
 await run("agent.view", () => agentView.createHandler({
-  viewAgent(id) { return record("agent.view", "viewAgent", [id], agentOutput); }
+  viewAgent(_context, id) { return record("agent.view", "viewAgent", [_context, id], agentOutput); }
 }).execute(context, handlerExpectations["agent.view"].input));
+await run("agent.workspace_permission.set", () => agentWorkspacePermissionSet.createHandler({
+  setAgentRoomCreatePermission(_context, input) { return record("agent.workspace_permission.set", "setAgentRoomCreatePermission", [_context, input], input.allowed ? agentWorkspacePermissionOutput : null); }
+}).execute(context, handlerExpectations["agent.workspace_permission.set"].input));
 
 await run("client.event.ack", () => clientEventAck.createHandler({
   acknowledgeClientEvent(id) { return record("client.event.ack", "acknowledgeClientEvent", [id], { ...clientEventOutput, status: "acked" as const, acked_at: now }); },
@@ -239,21 +267,72 @@ await run("collection.action.run", () => collectionActionRun.createHandler({
 }).execute(context, handlerExpectations["collection.action.run"].input));
 
 await run("session.create", () => sessionCreate.createHandler({
-  createSession(input) { return record("session.create", "createSession", [input], sessionOutput); }
+  createSession(_context, input) { return record("session.create", "createSession", [_context, input], sessionOutput); }
 }).execute(context, handlerExpectations["session.create"].input));
 
 await run("room.create", () => roomCreate.createHandler({
-  createRoom(input) { return record("room.create", "createRoom", [input], { ...roomOutput, ...input }); }
+  createRoom(_context, input) { return record("room.create", "createRoom", [_context, input], { ...roomOutput, ...input }); }
 }).execute(context, handlerExpectations["room.create"].input));
 await run("room.list", () => roomList.createHandler({
-  listRooms() { return record("room.list", "listRooms", [], [roomOutput]); }
+  listRooms(_context) { return record("room.list", "listRooms", [_context], [roomOutput]); }
 }).execute(context, handlerExpectations["room.list"].input));
 await run("room.patch", () => roomPatch.createHandler({
-  patchRoom(input) { return record("room.patch", "patchRoom", [input], { ...roomOutput, ...input }); }
+  patchRoom(_context, input) { return record("room.patch", "patchRoom", [_context, input], { ...roomOutput, ...input }); }
 }).execute(context, handlerExpectations["room.patch"].input));
 await run("room.view", () => roomView.createHandler({
-  viewRoom(id) { return record("room.view", "viewRoom", [id], roomOutput); }
+  viewRoom(_context, id) { return record("room.view", "viewRoom", [_context, id], roomOutput); }
 }).execute(context, handlerExpectations["room.view"].input));
+await run("room.agent.permission.set", () => roomAgentPermissionSet.createHandler({
+  setRoomAgentPermissions(_context, input) { return record("room.agent.permission.set", "setRoomAgentPermissions", [_context, input], { ...roomAgentPermissionOutput, can_view: input.canView, can_edit: input.canEdit, can_execute: input.canExecute }); }
+}).execute(context, handlerExpectations["room.agent.permission.set"].input));
+await run("room.agent.remove", () => roomAgentRemove.createHandler({
+  removeRoomAgent(_context, input) { return record("room.agent.remove", "removeRoomAgent", [_context, input], { ...roomAgentPermissionOutput, removed_at: now, removed_by_participant_id: "human:owner" }); }
+}).execute(context, handlerExpectations["room.agent.remove"].input));
+await run("room.member.add", () => roomMemberAdd.createHandler({
+  addRoomMember(_context, input) { return record("room.member.add", "addRoomMember", [_context, input], { ...roomMemberOutput, participant_id: input.participantId, role: input.role }); }
+}).execute(context, handlerExpectations["room.member.add"].input));
+await run("room.member.list", () => roomMemberList.createHandler({
+  listRoomParticipants(_context, roomId) { return record("room.member.list", "listRoomParticipants", [_context, roomId], { humans: [roomMemberOutput], agents: [roomAgentPermissionOutput] }); }
+}).execute(context, handlerExpectations["room.member.list"].input));
+await run("room.member.remove", () => roomMemberRemove.createHandler({
+  removeRoomMember(_context, input) { return record("room.member.remove", "removeRoomMember", [_context, input], { ...roomMemberOutput, participant_id: input.participantId, removed_at: now, removed_by_participant_id: "human:owner" }); }
+}).execute(context, handlerExpectations["room.member.remove"].input));
+await run("room.member.role.change", () => roomMemberRoleChange.createHandler({
+  changeRoomMemberRole(_context, input) { return record("room.member.role.change", "changeRoomMemberRole", [_context, input], { ...roomMemberOutput, participant_id: input.participantId, role: input.role }); }
+}).execute(context, handlerExpectations["room.member.role.change"].input));
+await run("room.owner.recover", () => roomOwnerRecover.createHandler({
+  recoverOwnerlessRoom(_context, input) { return record("room.owner.recover", "recoverOwnerlessRoom", [_context, input], { ...roomMemberOutput, participant_id: input.ownerParticipantId, role: "owner" as const }); }
+}).execute(context, handlerExpectations["room.owner.recover"].input));
+await run("room.owner.transfer", () => roomOwnerTransfer.createHandler({
+  transferRoomOwnership(_context, input) { return record("room.owner.transfer", "transferRoomOwnership", [_context, input], { previousOwner: { ...roomMemberOutput, participant_id: "human:owner", role: "admin" as const }, owner: { ...roomMemberOutput, participant_id: input.toParticipantId, role: "owner" as const } }); }
+}).execute(context, handlerExpectations["room.owner.transfer"].input));
+await run("room.ownerless.list", () => roomOwnerlessList.createHandler({
+  listOwnerlessRooms(_context) { return record("room.ownerless.list", "listOwnerlessRooms", [_context], [roomOutput]); }
+}).execute(context, handlerExpectations["room.ownerless.list"].input));
+await run("room.resource.share", () => roomResourceShare.createHandler({
+  shareResource(_context, input) { return record("room.resource.share", "shareResource", [_context, input], { ...roomResourceShareOutput, source_room_id: input.sourceRoomId, target_room_id: input.targetRoomId }); }
+}).execute(context, handlerExpectations["room.resource.share"].input));
+await run("room.resource.share.list", () => roomResourceShareList.createHandler({
+  listResourceShares(_context, input) { return record("room.resource.share.list", "listResourceShares", [_context, input], [roomResourceShareOutput]); }
+}).execute(context, handlerExpectations["room.resource.share.list"].input));
+await run("room.resource.share.revoke", () => roomResourceShareRevoke.createHandler({
+  revokeResourceShare(_context, input) { return record("room.resource.share.revoke", "revokeResourceShare", [_context, input], { ...roomResourceShareOutput, source_room_id: input.sourceRoomId, target_room_id: input.targetRoomId, revoked_at: now, revoked_by_participant_id: "human:owner" }); }
+}).execute(context, handlerExpectations["room.resource.share.revoke"].input));
+await run("workspace.member.add", () => workspaceMemberAdd.createHandler({
+  addWorkspaceMember(_context, input) { return record("workspace.member.add", "addWorkspaceMember", [_context, input], { ...workspaceMemberOutput, participant_id: input.participantId, role: input.role }); }
+}).execute(context, handlerExpectations["workspace.member.add"].input));
+await run("workspace.member.list", () => workspaceMemberList.createHandler({
+  listWorkspaceMembers(_context) { return record("workspace.member.list", "listWorkspaceMembers", [_context], [workspaceMemberOutput]); }
+}).execute(context, handlerExpectations["workspace.member.list"].input));
+await run("workspace.member.remove", () => workspaceMemberRemove.createHandler({
+  removeWorkspaceMember(_context, participantId) { return record("workspace.member.remove", "removeWorkspaceMember", [_context, participantId], { ...workspaceMemberOutput, participant_id: participantId, removed_at: now, removed_by_participant_id: "human:owner" }); }
+}).execute(context, handlerExpectations["workspace.member.remove"].input));
+await run("workspace.member.role.change", () => workspaceMemberRoleChange.createHandler({
+  changeWorkspaceMemberRole(_context, input) { return record("workspace.member.role.change", "changeWorkspaceMemberRole", [_context, input], { ...workspaceMemberOutput, participant_id: input.participantId, role: input.role }); }
+}).execute(context, handlerExpectations["workspace.member.role.change"].input));
+await run("workspace.owner.transfer", () => workspaceOwnerTransfer.createHandler({
+  transferWorkspaceOwnership(_context, participantId) { return record("workspace.owner.transfer", "transferWorkspaceOwnership", [_context, participantId], { previousOwner: { ...workspaceMemberOutput, participant_id: "human:owner", role: "admin" as const }, owner: { ...workspaceMemberOutput, participant_id: participantId, role: "owner" as const } }); }
+}).execute(context, handlerExpectations["workspace.owner.transfer"].input));
 
 await run("session.search.reindex", () => sessionSearchReindex.createHandler({
   reindexSessionSearch() { return record("session.search.reindex", "reindexSessionSearch", [], sessionSearchOutput); }
@@ -329,19 +408,19 @@ await run("gateway.concurrency_lock.expire", () => gatewayConcurrencyLockExpire.
 }).execute(context, handlerExpectations["gateway.concurrency_lock.expire"].input));
 
 await run("session.search", () => sessionSearch.createHandler({
-  searchSessions(query, limit) { return record("session.search", "searchSessions", [query, limit], searchSessionOutput); }
+  searchSessions(_context, query, limit) { return record("session.search", "searchSessions", [_context, query, limit], searchSessionOutput); }
 }).execute(context, handlerExpectations["session.search"].input));
 await run("memory.search", () => memorySearch.createHandler({
-  searchMemory(runId, query, limit) { return record("memory.search", "searchMemory", [runId, query, limit], searchMemoryOutput); }
+  searchMemory(_context, query, limit) { return record("memory.search", "searchMemory", [_context, query, limit], searchMemoryOutput); }
 }).execute(context, handlerExpectations["memory.search"].input));
 await run("wiki.search", () => wikiSearch.createHandler({
-  searchWiki(runId, query, limit) { return record("wiki.search", "searchWiki", [runId, query, limit], searchWikiOutput); }
+  searchWiki(_context, query, limit) { return record("wiki.search", "searchWiki", [_context, query, limit], searchWikiOutput); }
 }).execute(context, handlerExpectations["wiki.search"].input));
 await run("skill.search", () => skillSearch.createHandler({
-  searchSkills(runId, query, limit) { return record("skill.search", "searchSkills", [runId, query, limit], searchSkillOutput); }
+  searchSkills(_context, query, limit) { return record("skill.search", "searchSkills", [_context, query, limit], searchSkillOutput); }
 }).execute(context, handlerExpectations["skill.search"].input));
 await run("collection.search", () => collectionSearch.createHandler({
-  searchCollections(collectionId, query, limit) { return record("collection.search", "searchCollections", [collectionId, query, limit], searchCollectionOutput); }
+  searchCollections(_context, collectionId, query, limit) { return record("collection.search", "searchCollections", [_context, collectionId, query, limit], searchCollectionOutput); }
 }).execute(context, handlerExpectations["collection.search"].input));
 
 await run("work_item.follow_up", () => workItemFollowUp.createHandler({

@@ -17,6 +17,7 @@
     "@samurai-agent/domain-operations": "workspace:*",
     "@samurai-agent/gateway": "workspace:*",
     "@samurai-agent/policy-engine": "workspace:*",
+    "@samurai-agent/room-permissions": "workspace:*",
     "@samurai-agent/runtime": "workspace:*",
     "@samurai-agent/ui-protocol": "workspace:*",
     "@samurai-agent/workspace-store": "workspace:*",

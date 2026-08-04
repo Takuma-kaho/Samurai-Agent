@@ -49,7 +49,7 @@ try {
   if (
     result.status !== "passed" ||
     !Array.isArray(result.entrances) ||
-    result.entrances.length !== 6 ||
+    result.entrances.length !== 5 ||
     result.result_parity !== true ||
     result.error_parity !== true ||
     result.artifact_operation_parity !== true ||
@@ -57,8 +57,18 @@ try {
     !result.rejection_parity ||
     result.rejection_parity.error?.code !== "validation" ||
     !Array.isArray(result.rejection_parity.entrances) ||
-    result.rejection_parity.entrances.length !== 6 ||
+    result.rejection_parity.entrances.length !== 5 ||
     !result.rejection_parity.entrances.every((entrance) => entrance.handlerReached === false && entrance.artifactCommandSideEffects === 0) ||
+    result.gateway_admission?.status !== "blocked" ||
+    result.gateway_admission?.error !== "gateway_participant_authentication_required" ||
+    result.gateway_admission?.trusted !== true ||
+    result.gateway_admission?.pairing_status !== "approved" ||
+    result.gateway_admission?.session_created !== false ||
+    result.gateway_admission?.chat_started !== false ||
+    result.gateway_admission?.boundary_policy_saved !== false ||
+    result.gateway_admission?.artifact_handler_calls !== 0 ||
+    result.gateway_admission?.artifact_creations !== 0 ||
+    result.gateway_admission?.gateway_command_executions !== 1 ||
     result.direct_store_mutation !== false ||
     !Array.isArray(result.workspace_change_telemetry) ||
     !result.workspace_change_telemetry.every((telemetry) => telemetry.allLinkedToRealBackendRuns === true)
@@ -77,11 +87,12 @@ try {
     started_at: startedAt,
     completed_at: completedAt,
     assertions: [
-      { name: "Six real entrances reach one Artifact Command binding", actual: result.entrances.length, expected: 6 },
+      { name: "Five Artifact entrances reach one Artifact Command binding", actual: result.entrances.length, expected: 5 },
       { name: "All entrances use the canonical contract fingerprint", actual: result.contract_fingerprint, expected: "non-empty" },
       { name: "Artifact and Operation semantic result parity", actual: result.artifact_operation_parity, expected: true },
       { name: "Success and error parity", actual: { result: result.result_parity, error: result.error_parity }, expected: { result: true, error: true } },
-      { name: "Invalid artifact.create has the canonical validation code and is rejected before every Handler with no artifact side effect", actual: result.rejection_parity, expected: "validation and six zero-side-effect rejections" },
+      { name: "Invalid artifact.create has the canonical validation code and is rejected before every Handler with no artifact side effect", actual: result.rejection_parity, expected: "validation and five zero-side-effect rejections" },
+      { name: "Gateway transport admission cannot create Room content before participant authentication", actual: result.gateway_admission, expected: "blocked with no Session, Chat, boundary policy, or Artifact" },
       { name: "WorkspaceChange telemetry links only to real BackendRuns", actual: result.workspace_change_telemetry, expected: "all linked" },
       { name: "Direct Store mutations", actual: result.direct_store_mutation, expected: false }
     ],

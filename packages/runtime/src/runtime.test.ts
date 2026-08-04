@@ -6993,7 +6993,7 @@ rl.on("line", (line) => {
     expect(JSON.stringify(sent.dispatch_result)).not.toContain("smtp-raw-secret-password");
   });
 
-  it("blocks unpaired gateway inbound messages and routes approved pairings into chat", async () => {
+  it("records approved gateway inbound without granting Room access", async () => {
     const { store, runtime } = await createRuntime();
 
     const blocked = await runtime.handleGatewayInbound({
@@ -7009,13 +7009,13 @@ rl.on("line", (line) => {
       source_label: "External Source",
       body: "初回の外部入力です"
     });
-    const processed = await runtime.handleGatewayInbound({
+    const blockedAfterPairing = await runtime.handleGatewayInbound({
       channel: "webhook",
       source_identity: "external source/1",
       body: "提案書を作って",
       output_locale: "ja"
     });
-    const savedInbound = await store.listGatewayInboundMessages({ status: "processed" });
+    const savedInbound = await store.listGatewayInboundMessages({ status: "blocked" });
     const boundaryPolicies = await store.listGatewayBoundaryPolicies({ sessionKey: "webhook:external~20source~2F1:main" });
     const releasedLock = await store.getGatewayConcurrencyLock("webhook:external~20source~2F1:main");
     await store.close();
@@ -7035,69 +7035,21 @@ rl.on("line", (line) => {
       status: "approved",
       pairing_code: undefined
     });
-    expect(processed.inbound).toMatchObject({
-      status: "processed",
+    expect(blockedAfterPairing.inbound).toMatchObject({
+      status: "blocked",
       trusted: true,
-      session_key: "webhook:external~20source~2F1:main"
-    });
-    expect(processed.session?.session_key).toBe("webhook:external~20source~2F1:main");
-    expect(processed.boundaryPolicy).toMatchObject({
-      source_channel: "webhook",
-      source_identity: "external source/1",
       session_key: "webhook:external~20source~2F1:main",
-      allowed_tools: [],
-      sandbox: { mode: "non_main", workspace_access: "none", network_access: "none" }
+      error: "gateway_participant_authentication_required"
     });
-    expect(boundaryPolicies.map((policy) => policy.id)).toContain(processed.boundaryPolicy?.id);
-    expect(processed.chat?.backendRun.metadata.gateway_boundary_policy_id).toBe(processed.boundaryPolicy?.id);
-    expect(processed.chat?.backendRun.metadata.gateway_boundary_allowed_tools).toEqual([]);
-    expect(processed.chat?.artifacts).toEqual([]);
-    expect(processed.chat?.toolRuns).toContainEqual(expect.objectContaining({
-      action_id: "artifact.create",
-      status: "ignored",
-      output_summary: "gateway_boundary_tool_not_allowed",
-      resource_refs: [expect.objectContaining({
-        kind: "gateway_boundary_policy",
-        id: processed.boundaryPolicy?.id
-      })]
-    }));
-    expect(processed.chat?.workspaceChanges).toContainEqual(expect.objectContaining({
-      change_type: "other",
-      resource_ref: expect.objectContaining({
-        kind: "gateway_boundary_policy",
-        id: processed.boundaryPolicy?.id
-      }),
-      summary: expect.stringContaining("Gateway boundary blocked tool")
-    }));
-    expect(processed.chat?.backendEvents.some((event) => event.event_type === "run_started")).toBe(true);
-    expect(processed.chat?.backendEvents).toContainEqual(expect.objectContaining({
-      event_type: "tool_call_output",
-      payload: expect.objectContaining({
-        status: "ignored",
-        gateway_boundary: expect.objectContaining({
-          decision: "denied",
-          action_id: "artifact.create",
-          reason: "tool_not_allowed",
-          policy_id: processed.boundaryPolicy?.id,
-          allowed_tools: []
-        })
-      }),
-      resource_refs: [expect.objectContaining({
-        kind: "gateway_boundary_policy",
-        id: processed.boundaryPolicy?.id
-      })]
-    }));
-    expect(processed.chat?.backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
-    expect(processed.chat?.reflectionRuns.some((run) => run.status === "completed")).toBe(true);
-    expect(releasedLock).toMatchObject({
-      lock_key: "webhook:external~20source~2F1:main",
-      status: "released"
-    });
-    expect(processed.chat?.messages.some((message) => message.role === "agent" && message.content === "対応しました。")).toBe(true);
-    expect(savedInbound.map((message) => message.id)).toContain(processed.inbound.id);
+    expect(blockedAfterPairing.session).toBeUndefined();
+    expect(blockedAfterPairing.boundaryPolicy).toBeUndefined();
+    expect(blockedAfterPairing.chat).toBeUndefined();
+    expect(boundaryPolicies).toEqual([]);
+    expect(releasedLock).toBeUndefined();
+    expect(savedInbound.map((message) => message.id)).toContain(blockedAfterPairing.inbound.id);
   });
 
-  it("uses the saved Gateway policy tool snapshot and ignores inbound metadata attempts to widen it", async () => {
+  it("does not let Gateway metadata create a Room boundary before participant authentication", async () => {
     const { store, runtime } = await createRuntime();
     const policy = await runtime.getGatewayPairingPolicy("webhook");
     await runtime.saveGatewayPairingPolicy({
@@ -7111,7 +7063,7 @@ rl.on("line", (line) => {
       body: "初回の外部入力です"
     });
     await runtime.approveGatewayPairing(first.pairing!.id);
-    const processed = await runtime.handleGatewayInbound({
+    const blockedAfterPairing = await runtime.handleGatewayInbound({
       channel: "webhook",
       source_identity: "policy-owned-source",
       body: "提案書を作って",
@@ -7122,13 +7074,14 @@ rl.on("line", (line) => {
     });
     await store.close();
 
-    expect(processed.boundaryPolicy?.allowed_tools).toEqual(["artifact.create"]);
-    expect(processed.chat?.backendRun.metadata.gateway_boundary_allowed_tools).toEqual(["artifact.create"]);
-    expect(processed.chat?.toolRuns).toContainEqual(expect.objectContaining({
-      action_id: "artifact.create",
-      status: "completed"
-    }));
-    expect(processed.chat?.artifacts).toHaveLength(1);
+    expect(blockedAfterPairing.inbound).toMatchObject({
+      status: "blocked",
+      trusted: true,
+      error: "gateway_participant_authentication_required"
+    });
+    expect(blockedAfterPairing.boundaryPolicy).toBeUndefined();
+    expect(blockedAfterPairing.session).toBeUndefined();
+    expect(blockedAfterPairing.chat).toBeUndefined();
   });
 
   it("expires pending gateway pairings before approving or routing new inbound", async () => {
@@ -7222,7 +7175,7 @@ rl.on("line", (line) => {
     expect(repairedLock?.status).toBe("expired");
   });
 
-  it("routes gateway pairings by account and thread session key", async () => {
+  it("keeps gateway pairings separate by account and thread session key", async () => {
     const { store, runtime } = await createRuntime();
 
     const threadA = await runtime.handleGatewayInbound({
@@ -7241,7 +7194,7 @@ rl.on("line", (line) => {
     });
     await runtime.approveGatewayPairing(threadA.pairing!.id);
 
-    const processedA = await runtime.handleGatewayInbound({
+    const blockedA = await runtime.handleGatewayInbound({
       channel: "webhook",
       source_identity: "shared-bot",
       account_id: "workspace/1",
@@ -7261,13 +7214,18 @@ rl.on("line", (line) => {
     expect(threadA.pairing?.session_key).toBe("webhook:workspace~2F1:thread~20A");
     expect(threadB.pairing?.session_key).toBe("webhook:workspace~2F1:thread~20B");
     expect(threadA.pairing?.id).not.toBe(threadB.pairing?.id);
-    expect(processedA.inbound.status).toBe("processed");
-    expect(processedA.session?.session_key).toBe("webhook:workspace~2F1:thread~20A");
+    expect(blockedA.inbound).toMatchObject({
+      status: "blocked",
+      trusted: true,
+      session_key: "webhook:workspace~2F1:thread~20A",
+      error: "gateway_participant_authentication_required"
+    });
+    expect(blockedA.session).toBeUndefined();
     expect(blockedB.inbound.status).toBe("blocked");
     expect(blockedB.pairing?.id).toBe(threadB.pairing?.id);
   });
 
-  it("blocks approved gateway inbound while the session concurrency lock is held", async () => {
+  it("blocks approved unverified gateway inbound before it can use a concurrency lock", async () => {
     const { store, runtime } = await createRuntime();
     const blocked = await runtime.handleGatewayInbound({
       channel: "webhook",
@@ -7297,13 +7255,10 @@ rl.on("line", (line) => {
     expect(busy.inbound).toMatchObject({
       status: "blocked",
       trusted: true,
-      error: "gateway_concurrency_locked"
+      error: "gateway_participant_authentication_required"
     });
     expect(busy.chat).toBeUndefined();
-    expect(busy.concurrencyLock).toMatchObject({
-      lock_key: "webhook:busy-source:main",
-      status: "acquired"
-    });
+    expect(busy.concurrencyLock).toBeUndefined();
     expect(lock).toMatchObject({
       lock_key: "webhook:busy-source:main",
       status: "acquired"
@@ -7366,10 +7321,10 @@ rl.on("line", (line) => {
     }
   });
 
-  it("auto-approves trusted local gateway sources from channel policy", async () => {
+  it("records auto-approved local gateway sources without treating them as Room participants", async () => {
     const { store, runtime } = await createRuntime();
 
-    const processed = await runtime.handleGatewayInbound({
+    const blockedAfterPairing = await runtime.handleGatewayInbound({
       channel: "local_cli",
       source_identity: "owner-terminal",
       body: "メモを作って",
@@ -7383,17 +7338,20 @@ rl.on("line", (line) => {
       channel: "local_cli",
       trust_mode: "auto_approve"
     }));
-    expect(processed.pairing).toMatchObject({
+    expect(blockedAfterPairing.pairing).toMatchObject({
       status: "approved",
       source_identity: "owner-terminal",
       metadata: expect.objectContaining({
         gateway_pairing_policy_auto_approved: true
       })
     });
-    expect(processed.inbound).toMatchObject({
-      status: "processed",
-      trusted: true
+    expect(blockedAfterPairing.inbound).toMatchObject({
+      status: "blocked",
+      trusted: true,
+      error: "gateway_participant_authentication_required"
     });
+    expect(blockedAfterPairing.session).toBeUndefined();
+    expect(blockedAfterPairing.chat).toBeUndefined();
   });
 
   it("blocks inbound before pairing when the saved channel policy is blocked", async () => {

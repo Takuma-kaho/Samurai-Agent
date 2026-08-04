@@ -98,7 +98,7 @@ export const cHandlerExpectations = {
   "evaluation.run": {
     requiredBranches: [],
     cases: [{
-      id: "source-run", input: { source_run_id: "run_fixture" }, branches: [], calls: [{ method: "runAppliedEvaluation", args: [{ sourceRunId: "run_fixture" }] }]
+      id: "source-run", input: { source_run_id: "run_fixture" }, branches: [], calls: [{ method: "runAppliedEvaluation", args: [{ sourceRunId: "run_fixture", sessionId: "session_fixture" }] }]
     }]
   },
   "memory.archive": {
@@ -248,7 +248,7 @@ export const cHandlerExpectations = {
     cases: [
       {
         id: "memory", input: { suggestion_id: "suggestion_memory" }, branches: ["suggestion:memory"], calls: [
-          { method: "listReflectionSuggestions", args: [] },
+          { method: "getReflectionSuggestion", args: ["session_fixture", "suggestion_memory"] },
           { method: "ensureReflectionMutationSession", args: [] },
           { method: "createReflectionMutationEnvelope", args: ["Apply reflection suggestion: Fixture suggestion"] },
           { method: "runReflectionSuggestionMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "reflection.suggestion.apply", proposedEffects: ["Apply memory reflection suggestion."], targetResourceRefs: [resourceRef], execute: "$function" }] },
@@ -260,7 +260,7 @@ export const cHandlerExpectations = {
       },
       {
         id: "wiki", input: { suggestion_id: "suggestion_wiki" }, branches: ["suggestion:knowledge_wiki"], calls: [
-          { method: "listReflectionSuggestions", args: [] },
+          { method: "getReflectionSuggestion", args: ["session_fixture", "suggestion_wiki"] },
           { method: "ensureReflectionMutationSession", args: [] },
           { method: "createReflectionMutationEnvelope", args: ["Apply reflection suggestion: Fixture suggestion"] },
           { method: "runReflectionSuggestionMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "reflection.suggestion.apply", proposedEffects: ["Apply knowledge_wiki reflection suggestion."], targetResourceRefs: [resourceRef], execute: "$function" }] },
@@ -271,7 +271,7 @@ export const cHandlerExpectations = {
       },
       {
         id: "skill", input: { suggestion_id: "suggestion_skill" }, branches: ["suggestion:skill"], calls: [
-          { method: "listReflectionSuggestions", args: [] },
+          { method: "getReflectionSuggestion", args: ["session_fixture", "suggestion_skill"] },
           { method: "ensureReflectionMutationSession", args: [] },
           { method: "createReflectionMutationEnvelope", args: ["Apply reflection suggestion: Fixture suggestion"] },
           { method: "runReflectionSuggestionMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "reflection.suggestion.apply", proposedEffects: ["Apply skill reflection suggestion."], targetResourceRefs: [resourceRef], execute: "$function" }] },
@@ -292,21 +292,21 @@ export const cHandlerExpectations = {
         calls: [
           { method: "loadArtifactTranslationSource", args: ["artifact_fixture"] },
           { method: "hashTranslationContent", args: ["Source body for artifact"] },
-          { method: "saveTranslationAutomationJob", args: [{ title: "Translate artifact", kind: "resource_translation", schedule: "daily", target_instruction: "Translate artifact/artifact_fixture from ja to ja.", delivery_target: { channel: "resource_translation", source_ref: resourceRef, source_locale: "ja", target_locale: "ja", original_hash: "hash_translation_fixture", source_label: "Fixture artifact" }, enabled: true, next_run_at: now, max_attempts: 4 }] }
+          { method: "saveTranslationAutomationJob", args: [{ title: "Translate artifact", kind: "resource_translation", schedule: "daily", target_instruction: "Translate artifact/artifact_fixture from ja to ja.", delivery_target: { channel: "resource_translation", source_ref: resourceRef, source_locale: "ja", target_locale: "ja", original_hash: "hash_translation_fixture", source_label: "Fixture artifact", room_id: "room_fixture" }, enabled: true, next_run_at: now, max_attempts: 4 }] }
         ]
       },
       {
         id: "memory", input: { source_ref: { kind: "memory", id: "memory_fixture", uri: "memory/fixture.md" }, target_locale: "en" }, branches: ["source:memory", "schedule:default"], calls: [
           { method: "loadMemoryTranslationSource", args: ["memory_fixture"] },
           { method: "hashTranslationContent", args: ["Source body for memory"] },
-          { method: "saveTranslationAutomationJob", args: [{ title: "Translate memory/memory_fixture to en", kind: "resource_translation", schedule: "once", target_instruction: "Translate memory/memory_fixture from ja to en.", delivery_target: { channel: "resource_translation", source_ref: { kind: "memory", id: "memory_fixture", uri: "memory/fixture.md" }, source_locale: "ja", target_locale: "en", original_hash: "hash_translation_fixture", source_label: "memory_fixture" }, enabled: undefined, next_run_at: undefined, max_attempts: undefined }] }
+          { method: "saveTranslationAutomationJob", args: [{ title: "Translate memory/memory_fixture to en", kind: "resource_translation", schedule: "once", target_instruction: "Translate memory/memory_fixture from ja to en.", delivery_target: { channel: "resource_translation", source_ref: { kind: "memory", id: "memory_fixture", uri: "memory/fixture.md" }, source_locale: "ja", target_locale: "en", original_hash: "hash_translation_fixture", source_label: "memory_fixture", room_id: "room_fixture" }, enabled: undefined, next_run_at: undefined, max_attempts: undefined }] }
         ]
       },
       {
         id: "wiki", input: { source_ref: { kind: "wiki", id: "wiki_fixture", uri: "wiki/fixture.md" }, target_locale: "en" }, branches: ["source:wiki"], calls: [
           { method: "loadWikiTranslationSource", args: ["wiki_fixture"] },
           { method: "hashTranslationContent", args: ["Source body for wiki"] },
-          { method: "saveTranslationAutomationJob", args: [{ title: "Translate wiki/wiki_fixture to en", kind: "resource_translation", schedule: "once", target_instruction: "Translate wiki/wiki_fixture from en to en.", delivery_target: { channel: "resource_translation", source_ref: { kind: "wiki", id: "wiki_fixture", uri: "wiki/fixture.md" }, source_locale: "en", target_locale: "en", original_hash: "hash_translation_fixture", source_label: "wiki_fixture" }, enabled: undefined, next_run_at: undefined, max_attempts: undefined }] }
+          { method: "saveTranslationAutomationJob", args: [{ title: "Translate wiki/wiki_fixture to en", kind: "resource_translation", schedule: "once", target_instruction: "Translate wiki/wiki_fixture from en to en.", delivery_target: { channel: "resource_translation", source_ref: { kind: "wiki", id: "wiki_fixture", uri: "wiki/fixture.md" }, source_locale: "en", target_locale: "en", original_hash: "hash_translation_fixture", source_label: "wiki_fixture", room_id: "room_fixture" }, enabled: undefined, next_run_at: undefined, max_attempts: undefined }] }
         ]
       },
       {
@@ -314,14 +314,14 @@ export const cHandlerExpectations = {
           { method: "loadSkillTranslationSource", args: ["skill_fixture"] },
           { method: "stripTranslationSkillFrontmatter", args: ["---\n{}\n---\nSkill body"] },
           { method: "hashTranslationContent", args: ["Skill body"] },
-          { method: "saveTranslationAutomationJob", args: [{ title: "Translate skill/skill_fixture to en", kind: "resource_translation", schedule: "once", target_instruction: "Translate skill/skill_fixture from en to en.", delivery_target: { channel: "resource_translation", source_ref: { kind: "skill", id: "skill_fixture", uri: "skills/fixture.md" }, source_locale: "en", target_locale: "en", original_hash: "hash_translation_fixture", source_label: "skill_fixture" }, enabled: undefined, next_run_at: undefined, max_attempts: undefined }] }
+          { method: "saveTranslationAutomationJob", args: [{ title: "Translate skill/skill_fixture to en", kind: "resource_translation", schedule: "once", target_instruction: "Translate skill/skill_fixture from en to en.", delivery_target: { channel: "resource_translation", source_ref: { kind: "skill", id: "skill_fixture", uri: "skills/fixture.md" }, source_locale: "en", target_locale: "en", original_hash: "hash_translation_fixture", source_label: "skill_fixture", room_id: "room_fixture" }, enabled: undefined, next_run_at: undefined, max_attempts: undefined }] }
         ]
       },
       {
         id: "collection-record", input: { source_ref: { kind: "collection_record", id: "collection:record", uri: "collections/fixture/records/record.json" }, target_locale: "en" }, branches: ["source:collection_record"], calls: [
           { method: "loadCollectionRecordTranslationSource", args: [{ kind: "collection_record", id: "collection:record", uri: "collections/fixture/records/record.json" }] },
           { method: "hashTranslationContent", args: ["Source body for collection_record"] },
-          { method: "saveTranslationAutomationJob", args: [{ title: "Translate collection_record/collection:record to en", kind: "resource_translation", schedule: "once", target_instruction: "Translate collection_record/collection:record from ja to en.", delivery_target: { channel: "resource_translation", source_ref: { kind: "collection_record", id: "collection:record", uri: "collections/fixture/records/record.json" }, source_locale: "ja", target_locale: "en", original_hash: "hash_translation_fixture", source_label: "collection:record" }, enabled: undefined, next_run_at: undefined, max_attempts: undefined }] }
+          { method: "saveTranslationAutomationJob", args: [{ title: "Translate collection_record/collection:record to en", kind: "resource_translation", schedule: "once", target_instruction: "Translate collection_record/collection:record from ja to en.", delivery_target: { channel: "resource_translation", source_ref: { kind: "collection_record", id: "collection:record", uri: "collections/fixture/records/record.json" }, source_locale: "ja", target_locale: "en", original_hash: "hash_translation_fixture", source_label: "collection:record", room_id: "room_fixture" }, enabled: undefined, next_run_at: undefined, max_attempts: undefined }] }
         ]
       }
     ]

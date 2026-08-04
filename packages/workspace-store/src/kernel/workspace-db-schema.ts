@@ -18,6 +18,7 @@ export type { AutomationJobsTable, AutomationRunsTable } from "../rows/automatio
 export type { ExternalSendsTable, GatewayPairingsTable, GatewayPairingPoliciesTable, GatewayRoutingPoliciesTable, GatewayInboundMessagesTable, GatewayDeliveriesTable, GatewayBoundaryPoliciesTable, GatewayMcpConfigsTable, GatewayConcurrencyLocksTable, GatewaySandboxInstancesTable, GatewaySandboxWorkspaceSyncsTable } from "../rows/gateway-rows";
 export type { SettingsTable, PluginStatesTable, ResourceTranslationsTable } from "../rows/workspace-metadata-rows";
 export type { RoomsTable, AgentsTable } from "../rows/room-agent-rows";
+export type { WorkspaceMembersTable, RoomMembersTable, RoomAgentsTable, AgentWorkspacePermissionsTable, ResourceAccessBoundariesTable, RoomResourceSharesTable } from "../rows/room-permission-rows";
 export type { ClientEventsTable } from "../rows/client-event-rows";
 export type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
 
@@ -35,12 +36,19 @@ import type { AutomationJobsTable, AutomationRunsTable } from "../rows/automatio
 import type { ExternalSendsTable, GatewayPairingsTable, GatewayPairingPoliciesTable, GatewayRoutingPoliciesTable, GatewayInboundMessagesTable, GatewayDeliveriesTable, GatewayBoundaryPoliciesTable, GatewayMcpConfigsTable, GatewayConcurrencyLocksTable, GatewaySandboxInstancesTable, GatewaySandboxWorkspaceSyncsTable } from "../rows/gateway-rows";
 import type { SettingsTable, PluginStatesTable, ResourceTranslationsTable } from "../rows/workspace-metadata-rows";
 import type { RoomsTable, AgentsTable } from "../rows/room-agent-rows";
+import type { WorkspaceMembersTable, RoomMembersTable, RoomAgentsTable, AgentWorkspacePermissionsTable, ResourceAccessBoundariesTable, RoomResourceSharesTable } from "../rows/room-permission-rows";
 import type { ClientEventsTable } from "../rows/client-event-rows";
 import type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
 
 export interface WorkspaceDb {
   rooms: RoomsTable;
   agents: AgentsTable;
+  workspace_members: WorkspaceMembersTable;
+  room_members: RoomMembersTable;
+  room_agents: RoomAgentsTable;
+  agent_workspace_permissions: AgentWorkspacePermissionsTable;
+  resource_access_boundaries: ResourceAccessBoundariesTable;
+  room_resource_shares: RoomResourceSharesTable;
   sessions: SessionsTable;
   messages: MessagesTable;
   message_presentations: MessagePresentationsTable;

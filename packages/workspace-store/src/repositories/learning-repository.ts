@@ -53,10 +53,10 @@ import { stringify, parse } from "./serialization";
 import { pathExists } from "./workspace-file-codecs";
 
 export interface LearningResourcesPort {
-  listMemory(options: { includeArchived?: boolean }): Promise<MemoryWithFilePath[]>;
-  listSkills(): Promise<SkillWithFilePath[]>;
-  listWiki(options: { activeOnly?: boolean }): Promise<WikiWithFilePath[]>;
-  listSkillUsage(): Promise<unknown[]>;
+  listMemory(options: { includeArchived?: boolean; resourceIds?: string[]; includeLegacy?: boolean }): Promise<MemoryWithFilePath[]>;
+  listSkills(options?: { resourceIds?: string[]; includeLegacy?: boolean }): Promise<SkillWithFilePath[]>;
+  listWiki(options: { activeOnly?: boolean; resourceIds?: string[]; includeLegacy?: boolean }): Promise<WikiWithFilePath[]>;
+  listSkillUsage(input?: { skillIds?: string[] }): Promise<unknown[]>;
   listSkillSupportFiles(skillId: string): Promise<SkillSupportFile[]>;
   synchronizeManagedResources(): Promise<{
     memory: { errors: Array<{ file_path: string; message: string }> };
@@ -67,6 +67,23 @@ export interface LearningResourcesPort {
 
 export interface LearningSessionChangePort {
   deleteWorkspaceChangesBySummaryLike(summaryPattern: string): Promise<void>;
+}
+
+type SnapshotResourceKind = "memory" | "skill" | "wiki";
+type LearningSnapshotScope = { kind: "legacy" } | { kind: "room"; roomId: string };
+
+interface ScopedLearningSnapshotManifest {
+  format: "core06-scoped-v1";
+  scope: LearningSnapshotScope;
+  resource_ids: Record<SnapshotResourceKind, string[]>;
+  files: string[];
+  resource_versions: LearningResourceVersionRecord[];
+}
+
+interface SnapshotResources {
+  memory: MemoryWithFilePath[];
+  skill: SkillWithFilePath[];
+  wiki: WikiWithFilePath[];
 }
 
 /** Learning history, snapshots, reflection, and isolated external assist state. */
@@ -110,13 +127,21 @@ async recordLearningResourceUse(record: LearningResourceUseRecord): Promise<Lear
 async listLearningResourceUses(input: {
   runId?: string;
   sessionId?: string;
+  resourceKind?: string;
   resourceId?: string;
+  resourceIds?: string[];
   activityContext?: ActivityContextRef;
 } = {}): Promise<LearningResourceUseRecord[]> {
   let query = this.db.selectFrom("learning_resource_uses").selectAll().orderBy("created_at", "desc");
   if (input.runId) query = query.where("run_id", "=", input.runId);
   if (input.sessionId) query = query.where("session_id", "=", input.sessionId);
+  if (input.resourceKind) query = query.where("resource_kind", "=", input.resourceKind);
   if (input.resourceId) query = query.where("resource_id", "=", input.resourceId);
+  if (input.resourceIds !== undefined) {
+    const resourceIds = [...new Set(input.resourceIds)];
+    if (resourceIds.length === 0) return [];
+    query = query.where("resource_id", "in", resourceIds);
+  }
   if (input.activityContext) {
     query = query
       .where("session_id", "=", input.activityContext.session_id)
@@ -194,10 +219,19 @@ async getCurrentLearningResourceVersion(input: { resourceKind: LearningResourceV
   return row ? learningResourceVersionFromRow(row) : undefined;
 }
 
-async listLearningResourceVersions(input: { resourceKind?: LearningResourceVersionRecord["resource_kind"]; resourceId?: string } = {}): Promise<LearningResourceVersionRecord[]> {
+async listLearningResourceVersions(input: {
+  resourceKind?: LearningResourceVersionRecord["resource_kind"];
+  resourceId?: string;
+  resourceIds?: string[];
+} = {}): Promise<LearningResourceVersionRecord[]> {
   let query = this.db.selectFrom("learning_resource_versions").selectAll().orderBy("created_at", "desc");
   if (input.resourceKind) query = query.where("resource_kind", "=", input.resourceKind);
   if (input.resourceId) query = query.where("resource_id", "=", input.resourceId);
+  if (input.resourceIds !== undefined) {
+    const resourceIds = [...new Set(input.resourceIds)];
+    if (resourceIds.length === 0) return [];
+    query = query.where("resource_id", "in", resourceIds);
+  }
   return (await query.execute()).map(learningResourceVersionFromRow);
 }
 
@@ -207,9 +241,26 @@ async readLearningResourceVersionContent(input: { resourceKind: LearningResource
   return readFile(path.join(this.rootDir, record.file_path), "utf8").catch(() => undefined);
 }
 
-async listLearningEvaluations(input: { resourceId?: string; taskClass?: string } = {}): Promise<LearningEvaluationRecord[]> {
+/** Activity context is indexed from the persisted evaluation payload at query time. */
+async listLearningEvaluations(input: {
+  resourceId?: string;
+  resourceIds?: string[];
+  taskClass?: string;
+  activityContext?: ActivityContextRef;
+} = {}): Promise<LearningEvaluationRecord[]> {
   let query = this.db.selectFrom("learning_evaluations").selectAll().orderBy("created_at", "desc");
   if (input.taskClass) query = query.where("task_class", "=", input.taskClass);
+  if (input.resourceIds !== undefined) {
+    const resourceIds = [...new Set(input.resourceIds)];
+    if (resourceIds.length === 0) return [];
+    query = query.where(sql<string>`json_extract(learning_resource_ref_json, '$.id')`, "in", resourceIds);
+  }
+  if (input.activityContext) {
+    query = query
+      .where(sql<string>`json_extract(evaluation_json, '$.activity_context.session_id')`, "=", input.activityContext.session_id)
+      .where(sql<string>`json_extract(evaluation_json, '$.activity_context.room_id')`, "=", input.activityContext.room_id)
+      .where(sql<string>`json_extract(evaluation_json, '$.activity_context.agent_id')`, "=", input.activityContext.agent_id);
+  }
   const records = (await query.execute()).map(learningEvaluationFromRow);
   return input.resourceId ? records.filter((record) => record.learning_resource_ref.id === input.resourceId) : records;
 }
@@ -227,29 +278,57 @@ async listLearningResourceEdges(): Promise<LearningResourceEdgeRecord[]> {
 async createLearningSnapshot(runId: string): Promise<LearningSnapshotRecord> {
   const id = createId("learning_snapshot");
   const relativePath = path.join("learning-snapshots", id);
-  const snapshotRoot = path.join(this.rootDir, relativePath);
+  const snapshotRoot = snapshotRootPath(this.rootDir, relativePath);
+  const scope = await this.snapshotScope(runId);
+  const sourceRoomResourceIds = await this.sourceRoomResourceIds(scope);
+  const resources = await this.loadSnapshotResources(sourceRoomResourceIds, true);
+  const resourceIds = snapshotResourceIds(resources);
+  const [supportFiles, memoryVersions, skillVersions, wikiVersions, skillUsage, evaluations, resourceUses] = await Promise.all([
+    Promise.all(resources.skill.map((skill) => this.resources.listSkillSupportFiles(skill.id))).then((files) => files.flat()),
+    this.listLearningResourceVersions({ resourceKind: "memory", resourceIds: resourceIds.memory }),
+    this.listLearningResourceVersions({ resourceKind: "skill", resourceIds: resourceIds.skill }),
+    this.listLearningResourceVersions({ resourceKind: "wiki", resourceIds: resourceIds.wiki }),
+    this.resources.listSkillUsage({ skillIds: resourceIds.skill }),
+    this.listLearningEvaluations({ resourceIds: allSnapshotResourceIds(resourceIds) }),
+    this.listLearningResourceUses({ resourceIds: allSnapshotResourceIds(resourceIds) })
+  ]);
+  const resourceVersions = [...memoryVersions, ...skillVersions, ...wikiVersions];
+  const files = uniqueManagedResourcePaths([
+    ...resources.memory.map((memory) => memory.file_path),
+    ...resources.skill.map((skill) => skill.file_path),
+    ...resources.wiki.map((page) => page.file_path),
+    ...supportFiles.map((file) => file.file_path),
+    ...resourceVersions.map((version) => version.file_path)
+  ]);
+  const manifest: ScopedLearningSnapshotManifest = {
+    format: "core06-scoped-v1",
+    scope,
+    resource_ids: resourceIds,
+    files,
+    resource_versions: resourceVersions
+  };
   await mkdir(snapshotRoot, { recursive: true });
-  for (const rootName of ["memory", "skills", "wiki", "learning-graph", "learning-history"]) {
-    const source = path.join(this.rootDir, rootName);
-    if (await pathExists(source)) await cp(source, path.join(snapshotRoot, rootName), { recursive: true, force: true });
+  const snapshotFilesRoot = path.join(snapshotRoot, "files");
+  for (const relativeFilePath of files) {
+    const source = managedWorkspacePath(this.rootDir, relativeFilePath);
+    if (!await pathExists(source)) throw new Error(`learning_snapshot_resource_file_missing:${relativeFilePath}`);
+    const target = containedPath(snapshotFilesRoot, relativeFilePath, "learning_snapshot_file_path_invalid");
+    await mkdir(path.dirname(target), { recursive: true });
+    await cp(source, target, { force: true });
   }
-  const resourceVersions = await this.listLearningResourceVersions();
   await writeFile(
     path.join(snapshotRoot, "learning-resource-versions.json"),
     `${JSON.stringify(resourceVersions, null, 2)}\n`
   );
-  const [memories, skills, wiki, skillUsage, evaluations, resourceUses] = await Promise.all([
-    this.resources.listMemory({ includeArchived: true }), this.resources.listSkills(), this.resources.listWiki({ activeOnly: false }), this.resources.listSkillUsage(), this.listLearningEvaluations(), this.listLearningResourceUses()
-  ]);
-  const supportFiles = (await Promise.all(skills.map((skill) => this.resources.listSkillSupportFiles(skill.id)))).flat();
   const record: LearningSnapshotRecord = {
     id,
     run_id: runId,
     path: relativePath,
-    resource_counts: { memory: memories.length, skills: skills.length, support_files: supportFiles.length, wiki: wiki.length },
+    resource_counts: { memory: resources.memory.length, skills: resources.skill.length, support_files: supportFiles.length, wiki: resources.wiki.length },
     created_at: nowIso()
   };
   await writeFile(path.join(snapshotRoot, "manifest.json"), `${JSON.stringify(record, null, 2)}\n`);
+  await writeFile(path.join(snapshotRoot, "core06-scope.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(path.join(snapshotRoot, "metadata.json"), `${JSON.stringify({ skill_usage: skillUsage, evaluations, resource_uses: resourceUses }, null, 2)}\n`);
   await this.db.insertInto("learning_snapshots").values({
     id: record.id,
@@ -264,49 +343,146 @@ async createLearningSnapshot(runId: string): Promise<LearningSnapshotRecord> {
 }
 
 async listLearningSnapshots(): Promise<LearningSnapshotRecord[]> {
-  return (await this.db.selectFrom("learning_snapshots").selectAll().orderBy("created_at", "desc").execute()).map(learningSnapshotFromRow);
+  // A public Curator snapshot is legacy Owner-only data. Room-scoped
+  // compensation snapshots stay linked to their Room run and are never a
+  // Workspace-wide listing result.
+  return (await this.db
+    .selectFrom("learning_snapshots")
+    .leftJoin("reflection_runs", "reflection_runs.id", "learning_snapshots.run_id")
+    .selectAll("learning_snapshots")
+    .where("reflection_runs.room_id", "is", null)
+    .orderBy("learning_snapshots.created_at", "desc")
+    .execute()).map(learningSnapshotFromRow);
 }
 
 async pruneLearningSnapshots(retain = 20): Promise<{ retained: number; removed: string[] }> {
   const keep = Math.max(1, Math.min(Math.floor(retain), 200));
-  const snapshots = await this.listLearningSnapshots();
+  const snapshots = await this.listAllLearningSnapshots();
   const removed: string[] = [];
   for (const snapshot of snapshots.slice(keep)) {
-    await rm(path.join(this.rootDir, snapshot.path), { recursive: true, force: true });
+    await rm(snapshotRootPath(this.rootDir, snapshot.path), { recursive: true, force: true });
     await this.db.deleteFrom("learning_snapshots").where("id", "=", snapshot.id).execute();
     removed.push(snapshot.id);
   }
   return { retained: Math.min(snapshots.length, keep), removed };
 }
 
-async restoreLearningSnapshot(id: string): Promise<LearningSnapshotRecord | undefined> {
+async restoreLearningSnapshot(id: string, options: { allowRoomScope?: boolean } = {}): Promise<LearningSnapshotRecord | undefined> {
   const row = await this.db.selectFrom("learning_snapshots").selectAll().where("id", "=", id).executeTakeFirst();
   if (!row) return undefined;
-  const snapshotRoot = path.join(this.rootDir, row.path);
-  const serializedVersions = await readFile(path.join(snapshotRoot, "learning-resource-versions.json"), "utf8").catch(() => undefined);
-  for (const rootName of ["memory", "skills", "wiki", "learning-graph", "learning-history"]) {
-    const snapshotSource = path.join(snapshotRoot, rootName);
-    await rm(path.join(this.rootDir, rootName), { recursive: true, force: true });
-    if (await pathExists(snapshotSource)) {
-      await cp(snapshotSource, path.join(this.rootDir, rootName), { recursive: true, force: true });
-    }
+  const snapshotRoot = snapshotRootPath(this.rootDir, row.path);
+  const manifest = await readScopedLearningSnapshotManifest(snapshotRoot);
+  if (manifest.scope.kind === "room") {
+    const run = await this.getReflectionRun(row.run_id);
+    if (run?.activity_context?.room_id !== manifest.scope.roomId) throw new Error("learning_snapshot_room_scope_mismatch");
+    if (!options.allowRoomScope) throw new Error("learning_snapshot_room_scope_restore_requires_compensation");
+  }
+  const currentResources = await this.loadSnapshotResources(manifest.resource_ids, false);
+  const createdResources = options.allowRoomScope
+    ? await this.backgroundReviewResourcesCreatedAfterSnapshot(row.run_id, manifest.resource_ids)
+    : emptySnapshotResourceIds();
+  const currentCreatedResources = await this.loadSnapshotResources(createdResources, false);
+  await this.removeSnapshotResources(currentResources);
+  await this.removeSnapshotResources(currentCreatedResources);
+  const snapshotFilesRoot = path.join(snapshotRoot, "files");
+  for (const relativeFilePath of manifest.files) {
+    const source = containedPath(snapshotFilesRoot, relativeFilePath, "learning_snapshot_file_path_invalid");
+    if (!await pathExists(source)) throw new Error(`learning_snapshot_file_missing:${relativeFilePath}`);
+    const target = managedWorkspacePath(this.rootDir, relativeFilePath);
+    await mkdir(path.dirname(target), { recursive: true });
+    await cp(source, target, { force: true });
   }
   const synchronization = await this.resources.synchronizeManagedResources();
   if (synchronization.memory.errors.length || synchronization.skills.errors.length || synchronization.wiki.errors.length) {
     throw new Error(`learning_snapshot_reindex_failed:${JSON.stringify({ memory: synchronization.memory.errors, skills: synchronization.skills.errors, wiki: synchronization.wiki.errors })}`);
   }
-  if (serializedVersions !== undefined) {
-    const versions = LearningResourceVersionRecordSchema.array().parse(JSON.parse(serializedVersions));
-    await this.db.transaction().execute(async (transaction) => {
-      await transaction.deleteFrom("learning_resource_versions").execute();
-      if (versions.length) {
-        await transaction.insertInto("learning_resource_versions").values(versions.map(learningResourceVersionToRow)).execute();
-      }
-    });
-  }
+  await this.restoreSnapshotResourceVersions(manifest.resource_ids, createdResources, manifest.resource_versions);
   const restoredAt = nowIso();
   await this.db.updateTable("learning_snapshots").set({ restored_at: restoredAt }).where("id", "=", id).execute();
   return learningSnapshotFromRow({ ...row, restored_at: restoredAt });
+}
+
+private async snapshotScope(runId: string): Promise<LearningSnapshotScope> {
+  const run = await this.getReflectionRun(runId);
+  return run?.activity_context?.room_id
+    ? { kind: "room", roomId: run.activity_context.room_id }
+    : { kind: "legacy" };
+}
+
+private async sourceRoomResourceIds(scope: LearningSnapshotScope): Promise<Record<SnapshotResourceKind, string[]>> {
+  if (scope.kind === "legacy") return emptySnapshotResourceIds();
+  const rows = await this.db.selectFrom("resource_access_boundaries")
+    .select(["resource_kind", "resource_id"])
+    .where("source_room_id", "=", scope.roomId)
+    .where("resource_kind", "in", ["memory", "skill", "wiki"])
+    .execute();
+  const ids = emptySnapshotResourceIds();
+  for (const row of rows) {
+    if (row.resource_kind === "memory" || row.resource_kind === "skill" || row.resource_kind === "wiki") {
+      ids[row.resource_kind].push(row.resource_id);
+    }
+  }
+  return normalizeSnapshotResourceIds(ids);
+}
+
+private async loadSnapshotResources(resourceIds: Record<SnapshotResourceKind, string[]>, includeLegacy: boolean): Promise<SnapshotResources> {
+  return {
+    memory: await this.resources.listMemory({ includeArchived: true, resourceIds: resourceIds.memory, includeLegacy }),
+    skill: await this.resources.listSkills({ resourceIds: resourceIds.skill, includeLegacy }),
+    wiki: await this.resources.listWiki({ activeOnly: false, resourceIds: resourceIds.wiki, includeLegacy })
+  };
+}
+
+private async listAllLearningSnapshots(): Promise<LearningSnapshotRecord[]> {
+  return (await this.db.selectFrom("learning_snapshots").selectAll().orderBy("created_at", "desc").execute()).map(learningSnapshotFromRow);
+}
+
+private async removeSnapshotResources(resources: SnapshotResources): Promise<void> {
+  const supportFiles = (await Promise.all(resources.skill.map((skill) => this.resources.listSkillSupportFiles(skill.id)))).flat();
+  const files = uniqueManagedResourcePaths([
+    ...resources.memory.map((memory) => memory.file_path),
+    ...resources.skill.map((skill) => skill.file_path),
+    ...resources.wiki.map((page) => page.file_path),
+    ...supportFiles.map((file) => file.file_path)
+  ]);
+  await Promise.all(files.map(async (relativeFilePath) => {
+    await rm(managedWorkspacePath(this.rootDir, relativeFilePath), { force: true });
+  }));
+}
+
+private async backgroundReviewResourcesCreatedAfterSnapshot(
+  reviewRunId: string,
+  snapshotIds: Record<SnapshotResourceKind, string[]>
+): Promise<Record<SnapshotResourceKind, string[]>> {
+  const changes = await this.listBackgroundReviewChanges({ reviewRunId });
+  const created = emptySnapshotResourceIds();
+  for (const change of changes) {
+    const kind = change.resource_ref.kind === "knowledge_wiki" ? "wiki" : change.resource_ref.kind;
+    if (!isSnapshotResourceKind(kind) || !isBackgroundReviewCreate(change.mutation_kind)) continue;
+    if (!snapshotIds[kind].includes(change.resource_ref.id)) created[kind].push(change.resource_ref.id);
+  }
+  return normalizeSnapshotResourceIds(created);
+}
+
+private async restoreSnapshotResourceVersions(
+  snapshotIds: Record<SnapshotResourceKind, string[]>,
+  createdIds: Record<SnapshotResourceKind, string[]>,
+  versions: LearningResourceVersionRecord[]
+): Promise<void> {
+  await this.db.transaction().execute(async (transaction) => {
+    for (const kind of snapshotResourceKinds) {
+      const ids = [...new Set([...snapshotIds[kind], ...createdIds[kind]])];
+      if (ids.length) {
+        await transaction.deleteFrom("learning_resource_versions")
+          .where("resource_kind", "=", kind)
+          .where("resource_id", "in", ids)
+          .execute();
+      }
+    }
+    if (versions.length) {
+      await transaction.insertInto("learning_resource_versions").values(versions.map(learningResourceVersionToRow)).execute();
+    }
+  });
 }
 
 async saveBackgroundReviewChange(record: BackgroundReviewChangeRecord): Promise<BackgroundReviewChangeRecord> {
@@ -349,7 +525,19 @@ async saveLearningJobReport(record: LearningJobReportRecord): Promise<LearningJo
   return record;
 }
 
-async listLearningJobReports(input: { jobKind?: LearningJobReportRecord["job_kind"]; limit?: number } = {}): Promise<LearningJobReportRecord[]> {
+/** Reports are read through their Reflection Run's Session when a Room scope is supplied. */
+async listLearningJobReports(input: { sessionId?: string; jobKind?: LearningJobReportRecord["job_kind"]; limit?: number } = {}): Promise<LearningJobReportRecord[]> {
+  if (input.sessionId) {
+    let scoped = this.db
+      .selectFrom("learning_job_reports as report")
+      .innerJoin("reflection_runs as reflection", "reflection.id", "report.run_id")
+      .selectAll("report")
+      .where("reflection.session_id", "=", input.sessionId)
+      .orderBy("report.created_at", "desc");
+    if (input.jobKind) scoped = scoped.where("report.job_kind", "=", input.jobKind);
+    if (input.limit) scoped = scoped.limit(input.limit);
+    return (await scoped.execute()).map((row) => parse(row.report_json));
+  }
   let query = this.db.selectFrom("learning_job_reports").selectAll().orderBy("created_at", "desc");
   if (input.jobKind) query = query.where("job_kind", "=", input.jobKind);
   if (input.limit) query = query.limit(input.limit);
@@ -561,6 +749,136 @@ async getExternalAssistDiagnostics(input: {
   };
 }
 
+}
+
+const snapshotResourceKinds = ["memory", "skill", "wiki"] as const;
+
+function emptySnapshotResourceIds(): Record<SnapshotResourceKind, string[]> {
+  return { memory: [], skill: [], wiki: [] };
+}
+
+function isSnapshotResourceKind(value: string): value is SnapshotResourceKind {
+  return (snapshotResourceKinds as readonly string[]).includes(value);
+}
+
+function normalizeSnapshotResourceIds(input: Record<SnapshotResourceKind, string[]>): Record<SnapshotResourceKind, string[]> {
+  return {
+    memory: normalizeSnapshotIds(input.memory),
+    skill: normalizeSnapshotIds(input.skill),
+    wiki: normalizeSnapshotIds(input.wiki)
+  };
+}
+
+function normalizeSnapshotIds(ids: string[]): string[] {
+  return [...new Set(ids.map((id) => {
+    if (!id.trim() || id.includes("/") || id.includes("\\")) throw new Error("learning_snapshot_resource_id_invalid");
+    return id;
+  }))].sort();
+}
+
+function snapshotResourceIds(resources: SnapshotResources): Record<SnapshotResourceKind, string[]> {
+  return normalizeSnapshotResourceIds({
+    memory: resources.memory.map((resource) => resource.id),
+    skill: resources.skill.map((resource) => resource.id),
+    wiki: resources.wiki.map((resource) => resource.id)
+  });
+}
+
+function allSnapshotResourceIds(resourceIds: Record<SnapshotResourceKind, string[]>): string[] {
+  return [...new Set([...resourceIds.memory, ...resourceIds.skill, ...resourceIds.wiki])];
+}
+
+function uniqueManagedResourcePaths(paths: string[]): string[] {
+  return [...new Set(paths.map((value) => assertManagedRelativePath(value)))].sort();
+}
+
+function assertManagedRelativePath(value: string): string {
+  const normalized = normalizeRelativePath(value, "learning_snapshot_file_path_invalid");
+  const firstSegment = normalized.split(path.sep)[0];
+  if (!firstSegment || !["memory", "skills", "wiki", "learning-history"].includes(firstSegment)) {
+    throw new Error("learning_snapshot_file_path_invalid");
+  }
+  return normalized;
+}
+
+function normalizeRelativePath(value: string, errorCode: string): string {
+  if (!value || path.isAbsolute(value)) throw new Error(errorCode);
+  const normalized = path.normalize(value);
+  if (normalized === "." || normalized === ".." || normalized.startsWith(`..${path.sep}`)) throw new Error(errorCode);
+  return normalized;
+}
+
+function containedPath(root: string, relativePath: string, errorCode: string): string {
+  const normalized = normalizeRelativePath(relativePath, errorCode);
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, normalized);
+  if (!resolved.startsWith(`${resolvedRoot}${path.sep}`)) throw new Error(errorCode);
+  return resolved;
+}
+
+function managedWorkspacePath(rootDir: string, relativePath: string): string {
+  return containedPath(rootDir, assertManagedRelativePath(relativePath), "learning_snapshot_file_path_invalid");
+}
+
+function snapshotRootPath(rootDir: string, relativePath: string): string {
+  const normalized = normalizeRelativePath(relativePath, "learning_snapshot_path_invalid");
+  if (!normalized.startsWith(`learning-snapshots${path.sep}`)) throw new Error("learning_snapshot_path_invalid");
+  return containedPath(rootDir, normalized, "learning_snapshot_path_invalid");
+}
+
+async function readScopedLearningSnapshotManifest(snapshotRoot: string): Promise<ScopedLearningSnapshotManifest> {
+  const raw = await readFile(path.join(snapshotRoot, "core06-scope.json"), "utf8").catch(() => undefined);
+  if (!raw) throw new Error("learning_snapshot_scope_unknown");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("learning_snapshot_manifest_invalid");
+  }
+  if (!isRecord(parsed) || parsed.format !== "core06-scoped-v1" || !isRecord(parsed.resource_ids) || !Array.isArray(parsed.files) || !Array.isArray(parsed.resource_versions)) {
+    throw new Error("learning_snapshot_manifest_invalid");
+  }
+  const scope = parseLearningSnapshotScope(parsed.scope);
+  const resourceIds = emptySnapshotResourceIds();
+  for (const kind of snapshotResourceKinds) {
+    const ids = parsed.resource_ids[kind];
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) throw new Error("learning_snapshot_manifest_invalid");
+    resourceIds[kind] = ids;
+  }
+  const normalizedResourceIds = normalizeSnapshotResourceIds(resourceIds);
+  const files = uniqueManagedResourcePaths(parsed.files.map((file) => {
+    if (typeof file !== "string") throw new Error("learning_snapshot_manifest_invalid");
+    return file;
+  }));
+  const versions = LearningResourceVersionRecordSchema.array().parse(parsed.resource_versions);
+  for (const version of versions) {
+    if (!isSnapshotResourceKind(version.resource_kind) || !normalizedResourceIds[version.resource_kind].includes(version.resource_id)) {
+      throw new Error("learning_snapshot_manifest_invalid");
+    }
+    assertManagedRelativePath(version.file_path);
+  }
+  return {
+    format: "core06-scoped-v1",
+    scope,
+    resource_ids: normalizedResourceIds,
+    files,
+    resource_versions: versions
+  };
+}
+
+function parseLearningSnapshotScope(value: unknown): LearningSnapshotScope {
+  if (!isRecord(value) || typeof value.kind !== "string") throw new Error("learning_snapshot_manifest_invalid");
+  if (value.kind === "legacy") return { kind: "legacy" };
+  if (value.kind === "room" && typeof value.roomId === "string" && value.roomId.trim()) return { kind: "room", roomId: value.roomId };
+  throw new Error("learning_snapshot_manifest_invalid");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isBackgroundReviewCreate(kind: BackgroundReviewChangeRecord["mutation_kind"]): boolean {
+  return kind === "memory_add" || kind === "skill_create" || kind === "wiki_create";
 }
 
 function learningHistoryPath(kind: LearningResourceVersionRecord["resource_kind"], resourceId: string, version: string): string {

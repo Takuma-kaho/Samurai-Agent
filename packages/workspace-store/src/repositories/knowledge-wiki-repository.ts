@@ -40,10 +40,32 @@ async saveWikiPage(frontmatter: WikiFrontmatter, content: string): Promise<WikiW
   }
 }
 
-async listWiki(options: { activeOnly?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<WikiWithFilePath[]> {
+async listWiki(options: {
+  activeOnly?: boolean;
+  activityContext?: UsageScopeQueryContext;
+  resourceIds?: string[];
+  includeLegacy?: boolean;
+} = {}): Promise<WikiWithFilePath[]> {
   let query = this.db.selectFrom("wiki_index").selectAll();
   if (options.activeOnly) {
     query = query.where("state", "=", "active");
+  }
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      query = query.where("id", "in", resourceIds);
+    } else {
+      query = query.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "wiki")
+            .whereRef("boundary.resource_id", "=", "wiki_index.id")
+        ))
+      ]));
+    }
   }
   if (options.activityContext) {
     query = query.where((eb) => eb.or([
@@ -57,10 +79,36 @@ async listWiki(options: { activeOnly?: boolean; activityContext?: UsageScopeQuer
   return rows.map(wikiFromRow);
 }
 
-async searchWiki(query: string, limit = 5, options: { activeOnly?: boolean; activityContext?: UsageScopeQueryContext } = { activeOnly: true }): Promise<WikiWithFilePath[]> {
+async searchWiki(query: string, limit = 5, options: {
+  activeOnly?: boolean;
+  activityContext?: UsageScopeQueryContext;
+  /** Explicit Room-bound resources, resolved before this UsageScope narrowing. */
+  resourceIds?: string[];
+  /** Only the current Workspace Owner can include pre-Core 06 unbounded data. */
+  includeLegacy?: boolean;
+} = { activeOnly: true }): Promise<WikiWithFilePath[]> {
   let dbQuery = this.db.selectFrom("wiki_index").selectAll();
   if (options.activeOnly ?? true) {
     dbQuery = dbQuery.where("state", "=", "active");
+  }
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      dbQuery = dbQuery.where("id", "in", resourceIds);
+    } else {
+      // Room boundary permits the candidate; UsageScope below can only narrow
+      // it. A formal boundary in another Room is never treated as legacy.
+      dbQuery = dbQuery.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "wiki")
+            .whereRef("boundary.resource_id", "=", "wiki_index.id")
+        ))
+      ]));
+    }
   }
   if (options.activityContext) {
     dbQuery = dbQuery.where((eb) => eb.or([

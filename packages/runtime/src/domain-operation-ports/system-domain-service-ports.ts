@@ -31,7 +31,7 @@ export function createSystemDomainServicePorts(services: Pick<RuntimeDomainServi
       executeReflectionWorkflow: (input: ReflectionWorkflowInput) => services.systemDomainService.executeReflectionWorkflow(input)
     },
     "reflection.suggestion.apply": {
-      listReflectionSuggestions: () => services.systemDomainService.listReflectionSuggestions(),
+      getReflectionSuggestion: (sessionId, suggestionId) => services.systemDomainService.getReflectionSuggestion(sessionId, suggestionId),
       reflectionSuggestionError: (code, message) => services.systemDomainService.reflectionSuggestionError(code, message),
       ensureReflectionMutationSession: () => services.systemDomainService.ensureReflectionMutationSession(),
       createReflectionMutationEnvelope: (content) => services.systemDomainService.createReflectionMutationEnvelope(content),

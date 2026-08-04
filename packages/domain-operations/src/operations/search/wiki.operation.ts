@@ -11,7 +11,7 @@ const SearchResult = z.object({
 const Output = z.array(SearchResult).max(8);
 
 export interface WikiSearchPorts extends DomainQueryPorts {
-  searchWiki: ReadCapability<(runId: string, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
+  searchWiki: ReadCapability<(context: TrustedDomainContext, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
 }
 
 const wikiSearch = defineQuery<WikiSearchPorts>()({
@@ -34,7 +34,7 @@ const wikiSearch = defineQuery<WikiSearchPorts>()({
     return {
       execute: async function handleWikiSearch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         if (!context.runId) throw new TrustedDomainContextError("wiki.search", "runId");
-        return { ok: true, value: Output.parse(await ports.searchWiki(context.runId, input.query, input.limit)) };
+        return { ok: true, value: Output.parse(await ports.searchWiki(context, input.query, input.limit)) };
       }
     };
   }

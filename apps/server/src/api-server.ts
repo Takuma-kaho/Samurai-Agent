@@ -136,6 +136,7 @@ import {
 import { assertTrustedRuntimePayload, resolveTrustedRuntimeApiInput, type TrustedRuntimeApiContext } from "./domain-ingress";
 import { parseSurfaceOperation, type RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import { WorkspaceStore, type SessionTranscriptExport } from "@samurai-agent/workspace-store";
+import { collectionRecordResourceId } from "@samurai-agent/room-permissions";
 import { registerBackendEventRoutes } from "./routes/backend-events";
 import { startAutomationScheduler, type AutomationScheduler } from "./workers/automation-scheduler";
 
@@ -708,6 +709,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       const sourceRef = resourceRefFromQuery(req.query);
       const targetLocale = asSupportedLocale(req.query.target_locale);
       const status = asTranslationStatus(req.query.status);
+      const sourceResource = sourceRef ? roomAccessResourceForRef(sourceRef) : undefined;
+      if (!sourceRef || !sourceResource) {
+        res.status(400).json({ error: "source_ref_required" });
+        return;
+      }
+      await runtime.assertLocalOwnerRoomAccess({
+        ...apiRoomAccessContext(req),
+        resource: sourceResource
+      });
       res.json(await store.listResourceTranslations({ sourceRef, targetLocale, status }));
     } catch (error) {
       next(error);
@@ -770,10 +780,22 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     try {
       const sourceRef = resourceRef(req.body?.source_ref);
       const targetLocale = asSupportedLocale(req.body?.target_locale);
-      if (!sourceRef || !targetLocale) {
+      const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+      const roomId = typeof req.body?.room_id === "string" ? req.body.room_id.trim() : "";
+      if (!sourceRef || !targetLocale || (!sessionId && !roomId)) {
         res.status(400).json({ error: "invalid_resource_translation_resolution" });
         return;
       }
+      const sourceResource = roomAccessResourceForRef(sourceRef);
+      if (!sourceResource) {
+        res.status(400).json({ error: "invalid_resource_translation_source" });
+        return;
+      }
+      await runtime.assertLocalOwnerRoomAccess({
+        ...(sessionId ? { sessionId } : {}),
+        ...(roomId ? { roomId } : {}),
+        resource: sourceResource
+      });
       res.json(await store.resolveResourceTranslation({
         sourceRef,
         targetLocale,
@@ -785,9 +807,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     }
   });
 
-  app.get("/api/agent-backends", async (_req, res, next) => {
+  app.get("/api/agent-backends", async (req, res, next) => {
     try {
-      res.json(await runtime.listAgentBackends());
+      const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+      if (!sessionId) {
+        res.status(400).json({ error: "session_id_required" });
+        return;
+      }
+      await runtime.assertLocalOwnerRoomAccess({ sessionId });
+      res.json(await runtime.listAgentBackends(sessionId));
     } catch (error) {
       next(error);
     }
@@ -798,7 +826,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       const session = await runRuntimeApiCommand(runtime, req, "session.create", {
         ...(typeof req.body?.title === "string" ? { title: req.body.title } : {}),
         ...(asSupportedLocale(req.body?.ui_locale) ? { ui_locale: req.body.ui_locale } : {}),
-        ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {})
+        ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
+        ...(typeof req.body?.room_id === "string" ? { room_id: req.body.room_id } : {})
       });
       res.status(201).json(session);
     } catch (error) {
@@ -806,13 +835,21 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     }
   });
 
-  app.get("/api/chat/sessions", async (_req, res, next) => {
+  app.get("/api/chat/sessions", async (req, res, next) => {
     try {
-      const sessions = await store.listSessions();
+      const sessions = await runtime.listLocalOwnerRoomSessions(apiRoomAccessContext(req));
       const activeSessions = await Promise.all(
         sessions.map(async (session) => ({
           session,
-          messageCount: (await store.listMessages(session.id)).length
+          messageCount: await (async () => {
+            try {
+              await runtime.assertLocalOwnerRoomAccess({ sessionId: session.id });
+              return (await store.listMessages(session.id)).length;
+            } catch (error) {
+              if (error instanceof RuntimeRequestError && error.code === "forbidden") return 0;
+              throw error;
+            }
+          })()
         }))
       );
       res.json(activeSessions.filter((item) => item.messageCount > 0).map((item) => item.session));
@@ -1072,11 +1109,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/generated-surfaces/:surfaceId", async (req, res, next) => {
       try {
-        const surface = await store.getGeneratedSurface(req.params.surfaceId);
-        if (!surface) {
-          res.status(404).json({ error: "generated_surface_not_found" });
-          return;
-        }
+        const surface = await requireGeneratedSurfaceRoomAccess(runtime, store, req.params.surfaceId);
         res.json({ surface, revisions: await store.listGeneratedSurfaceRevisions(surface.id), interactions: await store.listSurfaceInteractions(surface.id) });
       } catch (error) {
         next(error);
@@ -1085,6 +1118,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/generated-surfaces/:surfaceId/revisions/:revisionId/bundle", async (req, res, next) => {
       try {
+        await requireGeneratedSurfaceRoomAccess(runtime, store, req.params.surfaceId);
         const revision = await store.getGeneratedSurfaceRevision(req.params.revisionId);
         if (!revision || revision.surface_id !== req.params.surfaceId) {
           res.status(404).json({ error: "generated_surface_revision_not_found" });
@@ -1098,6 +1132,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/generated-surfaces/:surfaceId/revisions/:revisionId/assets/{*assetPath}", async (req, res, next) => {
       try {
+        await requireGeneratedSurfaceRoomAccess(runtime, store, req.params.surfaceId);
         const revision = await store.getGeneratedSurfaceRevision(req.params.revisionId);
         if (!revision || revision.surface_id !== req.params.surfaceId) {
           res.status(404).type("text").send("Generated Surface asset not found.");
@@ -1119,7 +1154,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/generated-surfaces/:surfaceId/revisions/:revisionId/preview", async (req, res, next) => {
       try {
-        const surface = await store.getGeneratedSurface(req.params.surfaceId);
+        const surface = await requireGeneratedSurfaceRoomAccess(runtime, store, req.params.surfaceId);
         const revision = await store.getGeneratedSurfaceRevision(req.params.revisionId);
         const bundle = revision && revision.surface_id === req.params.surfaceId ? await store.readGeneratedSurfaceBundle(revision.id) : undefined;
         if (!surface || !revision || !bundle) {
@@ -1137,11 +1172,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/generated-surfaces/:surfaceId/export", async (req, res, next) => {
       try {
-        const surface = await store.getGeneratedSurface(req.params.surfaceId);
-        if (!surface) {
-          res.status(404).json({ error: "generated_surface_not_found" });
-          return;
-        }
+        const surface = await requireGeneratedSurfaceRoomAccess(runtime, store, req.params.surfaceId);
         const requestedRevision = typeof req.query.revision_id === "string" ? req.query.revision_id : surface.current_revision_id;
         const revision = await store.getGeneratedSurfaceRevision(requestedRevision);
         const bundle = revision && revision.surface_id === surface.id ? await store.readGeneratedSurfaceBundle(revision.id) : undefined;
@@ -1174,7 +1205,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.get("/api/skill-optimizations", async (req, res, next) => {
       try {
         const skillId = typeof req.query.skill_id === "string" ? req.query.skill_id : undefined;
-        res.json(await store.listSkillOptimizationRuns({ skillId }));
+        const runs = await listApiVisibleSkillOptimizationRuns(runtime, store, req);
+        res.json(skillId ? runs.filter((run) => run.target_skill_id === skillId) : runs);
       } catch (error) {
         next(error);
       }
@@ -1182,7 +1214,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/skill-optimizations/:runId", async (req, res, next) => {
       try {
-        const run = await store.getSkillOptimizationRun(req.params.runId);
+        const run = (await listApiVisibleSkillOptimizationRuns(runtime, store, req))
+          .find((candidate) => candidate.id === req.params.runId);
         if (!run) {
           res.status(404).json({ error: "skill_optimization_run_not_found" });
           return;
@@ -1279,7 +1312,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     try {
       const operationId = typeof req.query.operation_id === "string" ? req.query.operation_id : undefined;
       const capabilityId = typeof req.query.capability_id === "string" ? req.query.capability_id : undefined;
-      const decisions = await store.listPolicyDecisions();
+      const scope = await apiRoomOperationScope(runtime, store, req);
+      const decisions = await store.listPolicyDecisionsForOperationIds([...scope.operationIds]);
       res.json(decisions.filter((decision) =>
         (!operationId || decision.operation_id === operationId) &&
         (!capabilityId || decision.capability_id === capabilityId)
@@ -1317,26 +1351,67 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
   app.get("/api/chat/sessions/:sessionId", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: req.params.sessionId });
         const session = await store.getSession(req.params.sessionId);
         if (!session) {
           res.status(404).json({ error: "session_not_found" });
           return;
         }
-        const [messages, messagePresentations, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
+        if (!session.room_id) {
+          res.status(409).json({ error: "session_room_missing" });
+          return;
+        }
+        const roomId = session.room_id;
+        const [operations, memoryCandidates] = await Promise.all([
+          store.listOperations(session.id),
+          runtime.localOwnerResourceCandidates({ sessionId: session.id }, "memory")
+        ]);
+        const sessionOperationIds = new Set(operations.map((operation) => operation.id));
+        const [messages, messagePresentations, artifacts, auditRecords, rawMemory, approvals, decisions, rollbacks, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
           store.listMessages(session.id),
           store.listMessagePresentations({ sessionId: session.id }),
-          store.listOperations(session.id),
           store.listArtifactsForSession(session.id),
-          store.listAuditRecords(),
-          store.listMemoryForSession(session.id),
-          store.readActivityInputs().then((inputs) => import("@samurai-agent/audit").then(({ buildActivityInboxItems }) => buildActivityInboxItems(inputs))),
+          store.listAuditRecordsForRoom(roomId),
+          store.listMemoryForSession(session.id, memoryCandidates),
+          store.listApprovalRequestsForOperationIds([...sessionOperationIds]),
+          store.listPolicyDecisionsForOperationIds([...sessionOperationIds]),
+          store.listRollbackPointsForOperationIds([...sessionOperationIds]),
           store.listBackendRuns(session.id),
           store.listBackendEvents({ sessionId: session.id }),
           store.listWorkspaceChanges(session.id),
           store.listToolRuns({ sessionId: session.id }),
           store.listReflectionRuns(session.id)
         ]);
-        res.json({ session, messages, messagePresentations, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns });
+        const memory = await recheckRoomResources(
+          runtime,
+          { sessionId: session.id },
+          "memory",
+          rawMemory,
+          (item) => item.id
+        );
+        const { buildActivityInboxItems } = await import("@samurai-agent/audit");
+        const activity = buildActivityInboxItems({
+          operations,
+          approvals,
+          decisions,
+          audits: auditRecords.filter((item) => sessionOperationIds.has(item.operation_id)),
+          rollbacks
+        });
+        res.json({
+          session,
+          messages,
+          messagePresentations,
+          operations,
+          artifacts,
+          auditRecords: auditRecords.filter((record) => record.room_id === roomId),
+          memory,
+          activity: activity.filter((item) => item.operation_id !== undefined && sessionOperationIds.has(item.operation_id)),
+          backendRuns,
+          backendEvents,
+          workspaceChanges,
+          toolRuns,
+          reflectionRuns
+        });
       } catch (error) {
         next(error);
       }
@@ -1344,6 +1419,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/chat/sessions/:sessionId/transcript", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: req.params.sessionId });
         const transcript = await store.exportSessionTranscript(req.params.sessionId);
         if (!transcript) {
           res.status(404).json({ error: "session_not_found" });
@@ -1357,6 +1433,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/chat/sessions/:sessionId/resume-state", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: req.params.sessionId });
         const transcript = await store.exportSessionTranscript(req.params.sessionId);
         if (!transcript) {
           res.status(404).json({ error: "session_not_found" });
@@ -1395,6 +1472,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "content_required" });
           return;
         }
+        // Starting a chat is a two-step server operation: first create the
+        // Session in its authorized Room, then run the turn with that trusted
+        // Session reference. A turn never chooses a fallback Room itself.
+        const session = await runRuntimeApiCommand(runtime, req, "session.create", {
+          ...(asSupportedLocale(req.body?.ui_locale) ? { ui_locale: req.body.ui_locale } : {}),
+          ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
+          ...(typeof req.body?.room_id === "string" ? { room_id: req.body.room_id } : {})
+        });
         const result = await runRuntimeApiCommand(runtime, req, "chat.turn.run", {
           content,
           ...(typeof req.body?.backend_id === "string" ? { backend_id: req.body.backend_id } : {}),
@@ -1402,7 +1487,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...(asSupportedLocale(req.body?.input_locale) ? { input_locale: req.body.input_locale } : {}),
           ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
           metadata: jsonRecord(req.body?.metadata)
-        }, {}, { requireIdempotencyKey: true });
+        }, { sessionId: session.id }, { requireIdempotencyKey: true });
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -1445,7 +1530,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.get("/api/search", async (req, res, next) => {
       try {
         const query = typeof req.query.q === "string" ? req.query.q : "";
-        res.json(await store.search(query));
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiQuery(runtime, req, "session.search", { query, limit: 8 }, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1453,7 +1543,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/search/reindex", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiCommand(runtime, req, "session.search.reindex", {}));
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiCommand(runtime, req, "session.search.reindex", {}, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1466,6 +1561,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "session_id_required" });
           return;
         }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         res.json(await runtime.previewContext({
           sessionId,
           query: typeof req.query.q === "string" ? req.query.q : ""
@@ -1482,6 +1578,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "session_id_required" });
           return;
         }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         res.json(await runtime.freezeContext({
           sessionId,
           query: typeof req.body?.query === "string"
@@ -1497,6 +1594,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/external-assist", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const phaseRaw = typeof req.query.phase === "string" ? req.query.phase : undefined;
         const phase = phaseRaw ? ExternalAssistPhaseSchema.safeParse(phaseRaw) : undefined;
         if (phaseRaw && !phase?.success) {
@@ -1505,7 +1608,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         }
         const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : undefined;
         res.json(await store.listExternalAssistRecords({
-          ...(typeof req.query.session_id === "string" ? { sessionId: req.query.session_id } : {}),
+          sessionId,
           ...(phase?.success ? { phase: phase.data } : {}),
           ...(Number.isFinite(limitRaw) && limitRaw !== undefined ? { limit: Math.max(1, Math.min(100, limitRaw)) } : {})
         }));
@@ -1516,6 +1619,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/external-assist/diagnostics", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const phaseRaw = typeof req.query.phase === "string" ? req.query.phase : undefined;
         const phase = phaseRaw ? ExternalAssistPhaseSchema.safeParse(phaseRaw) : undefined;
         if (phaseRaw && !phase?.success) {
@@ -1530,7 +1639,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         }
         const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : undefined;
         res.json(await store.getExternalAssistDiagnostics({
-          ...(typeof req.query.session_id === "string" ? { sessionId: req.query.session_id } : {}),
+          sessionId,
           ...(phase?.success ? { phase: phase.data } : {}),
           ...(status?.success ? { status: status.data } : {}),
           ...(typeof req.query.provider_id === "string" ? { providerId: req.query.provider_id } : {}),
@@ -1558,14 +1667,25 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/reflection/diagnostics", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const staleAfterHours = typeof req.query.stale_after_hours === "string"
           ? Number.parseInt(req.query.stale_after_hours, 10)
           : undefined;
+        const [memories, skills, wikiPages] = await Promise.all([
+          filterApiRoomResources(runtime, req, "memory", (candidates) => store.listMemory(candidates), (memory) => memory.id),
+          filterApiRoomResources(runtime, req, "skill", (candidates) => store.listSkills(candidates), (skill) => skill.id),
+          filterApiRoomResources(runtime, req, "wiki", (candidates) => store.listWiki({ activeOnly: false, ...candidates }), (wiki) => wiki.id)
+        ]);
         res.json(await reflectionDiagnosticsPayload(store, {
-          sessionId: typeof req.query.session_id === "string" ? req.query.session_id : undefined,
+          sessionId,
           staleAfterHours: typeof staleAfterHours === "number" && Number.isFinite(staleAfterHours) && staleAfterHours > 0 ? staleAfterHours : undefined,
           limit: numberQuery(req.query.limit)
-        }));
+        }, { memories, skills, wikiPages }));
       } catch (error) {
         next(error);
       }
@@ -1579,9 +1699,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
-    app.get("/api/curator/snapshots", async (_req, res, next) => {
+    app.get("/api/curator/snapshots", async (req, res, next) => {
       try {
-        res.json(await store.listLearningSnapshots());
+        res.json(await runRuntimeApiQuery(runtime, req, "curator.snapshot.list", {}));
       } catch (error) {
         next(error);
       }
@@ -1598,13 +1718,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/curator/snapshots/:id/restore", async (req, res, next) => {
       try {
-        const restored = await runtime.runDomainCommand({
-          command_id: "curator.restore",
-          input_source: "runtime_api",
-          idempotency_key: domainCommandIdempotencyKey(req),
-          payload: { snapshot_id: req.params.id }
-        });
-        res.json(restored.result);
+        res.json(await runRuntimeApiCommand(runtime, req, "curator.restore", { snapshot_id: req.params.id }));
       } catch (error) {
         next(error);
       }
@@ -1630,6 +1744,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/curator/skill-actions/apply", async (req, res, next) => {
       try {
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const skillId = typeof req.body?.skill_id === "string" ? req.body.skill_id : "";
         const parsedAction = CuratorLifecycleActionSchema.safeParse(req.body?.action);
         const action = parsedAction.success ? parsedAction.data : undefined;
@@ -1640,7 +1759,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         res.json(await runRuntimeApiWriteCommand(runtime, req, "skill.lifecycle.apply", {
           skill_id: skillId,
           action
-        }));
+        }, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1648,7 +1767,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/evaluation/run", async (req, res, next) => {
       try {
-        res.status(201).json(await runRuntimeApiCommand(runtime, req, "evaluation.run", {}));
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.status(201).json(await runRuntimeApiCommand(runtime, req, "evaluation.run", {
+          ...(typeof req.body?.source_run_id === "string" ? { source_run_id: req.body.source_run_id } : {})
+        }, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1656,10 +1782,40 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/evaluation/learning", async (req, res, next) => {
       try {
-        res.json(await store.listLearningEvaluations({
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        const { roomId } = await runtime.assertLocalOwnerRoomAccess({ sessionId });
+        const activityContexts = (await store.listLearningResourceUses({ sessionId }))
+          .flatMap((use) => use.activity_context ? [use.activity_context] : []);
+        const uniqueContexts = [...new Map(activityContexts.map((context) => [
+          `${context.room_id}:${context.session_id}:${context.agent_id}`,
+          context
+        ])).values()];
+        const evaluations = (await Promise.all(uniqueContexts.map((activityContext) => store.listLearningEvaluations({
+          activityContext,
           resourceId: typeof req.query.resource_id === "string" ? req.query.resource_id : undefined,
           taskClass: typeof req.query.task_class === "string" ? req.query.task_class : undefined
+        })))).flat();
+        const visible = await Promise.all(evaluations.map(async (evaluation) => {
+          const kind = evaluation.learning_resource_ref.kind === "knowledge_wiki"
+            ? "wiki"
+            : evaluation.learning_resource_ref.kind;
+          if (!(["memory", "wiki", "skill"] as const).includes(kind as "memory" | "wiki" | "skill")) return undefined;
+          try {
+            await runtime.assertLocalOwnerRoomAccess({
+              roomId,
+              resource: { kind, id: evaluation.learning_resource_ref.id }
+            });
+            return evaluation;
+          } catch (error) {
+            if (error instanceof RuntimeRequestError && error.code === "forbidden") return undefined;
+            throw error;
+          }
         }));
+        res.json(visible.filter((evaluation): evaluation is NonNullable<typeof evaluation> => Boolean(evaluation)));
       } catch (error) {
         next(error);
       }
@@ -1667,10 +1823,16 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/learning/reports", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const jobKind = typeof req.query.job_kind === "string" && ["background_review", "evaluation", "curator"].includes(req.query.job_kind)
           ? req.query.job_kind as "background_review" | "evaluation" | "curator"
           : undefined;
-        res.json(await store.listLearningJobReports({ jobKind, limit: numberQuery(req.query.limit) }));
+        res.json(await store.listLearningJobReports({ sessionId, jobKind, limit: numberQuery(req.query.limit) }));
       } catch (error) {
         next(error);
       }
@@ -1678,11 +1840,17 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/evaluation/diagnostics", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const staleAfterHours = typeof req.query.stale_after_hours === "string"
           ? Number.parseInt(req.query.stale_after_hours, 10)
           : undefined;
         res.json(await evaluationDiagnosticsPayload(store, {
-          sessionId: typeof req.query.session_id === "string" ? req.query.session_id : undefined,
+          sessionId,
           staleAfterHours: typeof staleAfterHours === "number" && Number.isFinite(staleAfterHours) && staleAfterHours > 0 ? staleAfterHours : undefined,
           limit: numberQuery(req.query.limit)
         }));
@@ -1693,7 +1861,13 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/reflection-runs/:id", async (req, res, next) => {
       try {
-        const reflectionRun = await store.getReflectionRun(req.params.id);
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
+        const reflectionRun = (await store.listReflectionRuns(sessionId)).find((item) => item.id === req.params.id);
         if (!reflectionRun) {
           res.status(404).json({ error: "reflection_run_not_found" });
           return;
@@ -1709,7 +1883,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/reflection-suggestions/:id/apply", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "reflection.suggestion.apply", { suggestion_id: req.params.id }));
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "reflection.suggestion.apply", {
+          suggestion_id: req.params.id
+        }, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1717,6 +1898,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/tools/file", async (req, res, next) => {
       try {
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const operation = typeof req.body?.operation === "string" ? req.body.operation : "";
         if (!["file.read", "file.inspect", "file.list", "file.write", "file.patch"].includes(operation)) {
           res.status(400).json({ error: "invalid_file_operation" });
@@ -1735,11 +1921,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         };
         if (getDomainQueryEntry(operation)) {
           res.setHeader("Warning", '299 - "Query operation sent to legacy command URL"');
-          const result = await runDynamicRuntimeApiQuery(runtime, req, operation, payload);
+          const result = await runDynamicRuntimeApiQuery(runtime, req, operation, payload, { sessionId });
           res.json(isRecord(result) ? result : { resource: result });
           return;
         }
-        res.json(await runDynamicRuntimeApiWriteCommand(runtime, req, operation, payload));
+        res.json(await runDynamicRuntimeApiWriteCommand(runtime, req, operation, payload, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1747,6 +1933,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/tools/browser", async (req, res, next) => {
       try {
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const operation = typeof req.body?.operation === "string" ? req.body.operation : "";
         if (!["browser.navigate", "browser.extract", "browser.interact", "browser.screenshot", "browser.download_to_workspace"].includes(operation)) {
           res.status(400).json({ error: "invalid_browser_operation" });
@@ -1766,11 +1957,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         };
         if (getDomainQueryEntry(operation)) {
           res.setHeader("Warning", '299 - "Query operation sent to legacy command URL"');
-          const result = await runDynamicRuntimeApiQuery(runtime, req, operation, payload);
+          const result = await runDynamicRuntimeApiQuery(runtime, req, operation, payload, { sessionId });
           res.json(isRecord(result) ? result : { resource: result });
           return;
         }
-        res.json(await runDynamicRuntimeApiWriteCommand(runtime, req, operation, payload));
+        res.json(await runDynamicRuntimeApiWriteCommand(runtime, req, operation, payload, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1778,8 +1969,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/tools/file-browser/diagnostics", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         res.json(await fileBrowserActionDiagnosticsPayload(store, {
-          sessionId: typeof req.query.session_id === "string" ? req.query.session_id : undefined,
+          sessionId,
           limit: numberQuery(req.query.limit)
         }));
       } catch (error) {
@@ -1787,9 +1984,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
-    app.get("/api/external-sends", async (_req, res, next) => {
+    app.get("/api/external-sends", async (req, res, next) => {
       try {
-        res.json(await store.listExternalSends());
+        res.json(await listApiRoomExternalSends(runtime, store, req));
       } catch (error) {
         next(error);
       }
@@ -1800,7 +1997,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const staleAfterHours = typeof req.query.stale_after_hours === "string"
           ? Number.parseInt(req.query.stale_after_hours, 10)
           : undefined;
-        res.json(await externalSendDiagnosticsPayload(store, {
+        res.json(await externalSendDiagnosticsPayload(await listApiRoomExternalSends(runtime, store, req), {
           staleAfterHours: typeof staleAfterHours === "number" && Number.isFinite(staleAfterHours) && staleAfterHours > 0 ? staleAfterHours : undefined
         }));
       } catch (error) {
@@ -1810,6 +2007,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/external-sends", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
         const body = typeof req.body?.body === "string" ? req.body.body : "";
         const channel = typeof req.body?.channel === "string" ? req.body.channel : "webhook";
@@ -1822,7 +2024,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           target: jsonRecord(req.body?.target),
           title,
           body
-        }));
+        }, context));
       } catch (error) {
         next(error);
       }
@@ -1830,7 +2032,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/external-sends/:id/dispatch", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "external.send.dispatch", { send_id: req.params.id, dry_run: req.body?.dry_run !== false }));
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "external.send.dispatch", { send_id: req.params.id, dry_run: req.body?.dry_run !== false }, context));
       } catch (error) {
         next(error);
       }
@@ -2692,23 +2899,45 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/artifacts/:id", async (req, res, next) => {
       try {
+        const access = await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "artifact", id: req.params.id }
+        });
         const artifact = await store.getArtifact(req.params.id);
         if (!artifact) {
           res.status(404).json({ error: "artifact_not_found" });
           return;
         }
-        const [content, operation, auditRecords] = await Promise.all([
+        const [content, boundary] = await Promise.all([
           store.readArtifactContent(req.params.id),
-          store.getOperation(artifact.source_operation_id),
-          store.listAuditRecordsForOperation(artifact.source_operation_id)
+          store.getResourceAccessBoundary("artifact", artifact.id)
         ]);
+        const includeSourceOperationHistory = !boundary || boundary.source_room_id === access.roomId;
+        const [operation, auditRecords] = includeSourceOperationHistory
+          ? await Promise.all([
+              store.getOperation(artifact.source_operation_id),
+              store.listAuditRecordsForOperation(artifact.source_operation_id)
+            ])
+          : [undefined, []];
         const translation = await resolveDetailTranslation(
           req.query as Record<string, unknown>,
           artifact.file_ref,
           artifact.locale,
           content ?? ""
         );
-        res.json({ artifact, content, operation, auditRecords, ...translation });
+        res.json({
+          artifact,
+          content,
+          operation,
+          auditRecords,
+          ...(boundary ? { provenance: {
+            source_room_id: boundary.source_room_id,
+            owner_participant_id: boundary.owner_participant_id,
+            ...(boundary.creator_participant_id ? { creator_participant_id: boundary.creator_participant_id } : {}),
+            ...(boundary.resource_created_at ? { resource_created_at: boundary.resource_created_at } : {})
+          } } : {}),
+          ...translation
+        });
       } catch (error) {
         next(error);
       }
@@ -2716,6 +2945,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/artifacts/:id/content", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "artifact", id: req.params.id }
+        });
         const artifact = await store.getArtifact(req.params.id);
         if (!artifact) {
           res.status(404).json({ error: "artifact_not_found" });
@@ -2740,20 +2973,24 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/audit", async (req, res, next) => {
       try {
+        const access = await runtime.assertLocalOwnerRoomAccess(apiRoomAccessContext(req));
         const operationId = typeof req.query.operation_id === "string" ? req.query.operation_id : undefined;
-        const [auditRecords, operations, policyDecisions, approvalRequests, rollbackPoints] = await Promise.all([
-          store.listAuditRecords(),
-          store.listOperations(),
-          store.listPolicyDecisions(),
-          store.listApprovalRequests(),
-          store.listRollbackPoints()
+        const operations = await store.listOperationsForRoom(access.roomId);
+        const roomOperationIds = operations.map((operation) => operation.id);
+        const [auditRecords, policyDecisions, approvalRequests, rollbackPoints] = await Promise.all([
+          store.listAuditRecordsForRoom(access.roomId),
+          store.listPolicyDecisionsForOperationIds(roomOperationIds),
+          store.listApprovalRequestsForOperationIds(roomOperationIds),
+          store.listRollbackPointsForOperationIds(roomOperationIds)
         ]);
+        const roomOperations = operations;
+        const roomOperationIdSet = new Set(roomOperationIds);
         res.json({
-          auditRecords: auditRecords.filter((record) => !operationId || record.operation_id === operationId),
-          operations: operations.filter((operation) => !operationId || operation.id === operationId),
-          policyDecisions: policyDecisions.filter((decision) => !operationId || decision.operation_id === operationId),
-          approvalRequests: approvalRequests.filter((approval) => !operationId || approval.operation_id === operationId),
-          rollbackPoints: rollbackPoints.filter((point) => !operationId || point.operation_id === operationId)
+          auditRecords: auditRecords.filter((record) => record.room_id === access.roomId && (!operationId || record.operation_id === operationId)),
+          operations: roomOperations.filter((operation) => !operationId || operation.id === operationId),
+          policyDecisions: policyDecisions.filter((decision) => roomOperationIdSet.has(decision.operation_id) && (!operationId || decision.operation_id === operationId)),
+          approvalRequests: approvalRequests.filter((approval) => roomOperationIdSet.has(approval.operation_id) && (!operationId || approval.operation_id === operationId)),
+          rollbackPoints: rollbackPoints.filter((point) => roomOperationIdSet.has(point.operation_id) && (!operationId || point.operation_id === operationId))
         });
       } catch (error) {
         next(error);
@@ -2798,7 +3035,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.get("/api/rollback-points", async (req, res, next) => {
       try {
         const operationId = typeof req.query.operation_id === "string" ? req.query.operation_id : undefined;
-        const points = await store.listRollbackPoints();
+        const scope = await apiRoomOperationScope(runtime, store, req);
+        const points = await store.listRollbackPointsForOperationIds([...scope.operationIds]);
         res.json(points.filter((point) => !operationId || point.operation_id === operationId));
       } catch (error) {
         next(error);
@@ -2807,7 +3045,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/rollback-points/:id", async (req, res, next) => {
       try {
-        const point = await store.getRollbackPoint(req.params.id);
+        const scope = await apiRoomOperationScope(runtime, store, req);
+        const point = await store.getRollbackPointForOperationIds(req.params.id, [...scope.operationIds]);
         if (!point) {
           res.status(404).json({ error: "rollback_point_not_found" });
           return;
@@ -2820,16 +3059,41 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/rollback/:id/restore", async (req, res, next) => {
       try {
-        res.status(201).json(await runRuntimeApiCommand(runtime, req, "rollback.restore", { rollback_point_id: req.params.id }));
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        const access = await runtime.assertLocalOwnerRoomAccess(context);
+        const operations = await store.listOperationsForRoom(access.roomId);
+        const point = await store.getRollbackPointForOperationIds(req.params.id, operations.map((operation) => operation.id));
+        if (!point) {
+          res.status(404).json({ error: "rollback_point_not_found" });
+          return;
+        }
+        res.status(201).json(await runRuntimeApiCommand(runtime, req, "rollback.restore", { rollback_point_id: req.params.id }, context));
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/activity", async (_req, res, next) => {
+    app.get("/api/activity", async (req, res, next) => {
       try {
         const { buildActivityInboxItems } = await import("@samurai-agent/audit");
-        res.json(buildActivityInboxItems(await store.readActivityInputs()));
+        const scope = await apiRoomOperationScope(runtime, store, req);
+        const [approvals, decisions, audits, rollbacks] = await Promise.all([
+          store.listApprovalRequestsForOperationIds([...scope.operationIds]),
+          store.listPolicyDecisionsForOperationIds([...scope.operationIds]),
+          store.listAuditRecordsForRoom(scope.roomId),
+          store.listRollbackPointsForOperationIds([...scope.operationIds])
+        ]);
+        res.json(buildActivityInboxItems({
+          operations: scope.operations,
+          approvals,
+          decisions,
+          audits: audits.filter((item) => scope.operationIds.has(item.operation_id)),
+          rollbacks
+        }));
       } catch (error) {
         next(error);
       }
@@ -2837,7 +3101,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/backend-runs", async (req, res, next) => {
       try {
-        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : undefined;
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         res.json(await store.listBackendRuns(sessionId));
       } catch (error) {
         next(error);
@@ -2851,6 +3120,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id });
         res.json(run);
       } catch (error) {
         next(error);
@@ -2932,6 +3202,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/backend-runs/:runId/cancel", async (req, res, next) => {
       try {
+        const run = await store.getBackendRun(req.params.runId);
+        if (!run) {
+          res.status(404).json({ error: "backend_run_not_found" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id, action: "execute" });
         res.json(await runtime.cancelBackendRun(req.params.runId));
       } catch (error) {
         next(error);
@@ -2940,6 +3216,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/backend-runs/:runId/resume", async (req, res, next) => {
       try {
+        const run = await store.getBackendRun(req.params.runId);
+        if (!run) {
+          res.status(404).json({ error: "backend_run_not_found" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id, action: "execute" });
         res.json(await runtime.resumeBackendRun(req.params.runId, jsonRecord(req.body)));
       } catch (error) {
         next(error);
@@ -2948,6 +3230,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/backend-runs/:runId/stream-sync", async (req, res, next) => {
       try {
+        const run = await store.getBackendRun(req.params.runId);
+        if (!run) {
+          res.status(404).json({ error: "backend_run_not_found" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id, action: "execute" });
         const maxEvents = typeof req.body?.max_events === "number" ? req.body.max_events : undefined;
         const timeoutMs = typeof req.body?.timeout_ms === "number" ? req.body.timeout_ms : undefined;
         res.json(await runtime.syncBackendStream(req.params.runId, { maxEvents, timeoutMs }));
@@ -2956,7 +3244,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
-    registerBackendEventRoutes(app, store);
+    registerBackendEventRoutes(app, store, runtime);
 
     app.get("/api/backend-runs/:runId/tool-runs", async (req, res, next) => {
       try {
@@ -2965,6 +3253,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id });
         res.json(await store.listToolRuns({ runId: req.params.runId }));
       } catch (error) {
         next(error);
@@ -2978,6 +3267,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id });
         const status = asToolRunStatus(req.query.status);
         if (req.query.status !== undefined && !status) {
           res.status(400).json({ error: "invalid_tool_run_status" });
@@ -2995,6 +3285,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/tool-runs/diagnostics", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const status = asToolRunStatus(req.query.status);
         if (req.query.status !== undefined && !status) {
           res.status(400).json({ error: "invalid_tool_run_status" });
@@ -3002,7 +3298,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         }
         res.json(toolRunDiagnosticsPayload(await store.getToolRunDiagnostics({
           runId: typeof req.query.run_id === "string" ? req.query.run_id : undefined,
-          sessionId: typeof req.query.session_id === "string" ? req.query.session_id : undefined,
+          sessionId,
           status,
           limit: numberQuery(req.query.limit)
         })));
@@ -3014,15 +3310,20 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.get("/api/workspace-changes", async (req, res, next) => {
       try {
         const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : undefined;
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         res.json(await store.listWorkspaceChanges(sessionId));
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/memory", async (_req, res, next) => {
+    app.get("/api/memory", async (req, res, next) => {
       try {
-        res.json(await store.listMemory());
+        res.json(await filterApiRoomResources(runtime, req, "memory", (candidates) => store.listMemory(candidates), (memory) => memory.id));
       } catch (error) {
         next(error);
       }
@@ -3030,8 +3331,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/memory/active-retrieval", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         res.json(await runtime.previewActiveMemory({
-          query: typeof req.query.q === "string" ? req.query.q : ""
+          query: typeof req.query.q === "string" ? req.query.q : "",
+          sessionId: context.sessionId
         }));
       } catch (error) {
         next(error);
@@ -3040,6 +3347,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/memory/:id", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "memory", id: req.params.id }
+        });
         const memory = await store.getMemory(req.params.id);
         if (!memory) {
           res.status(404).json({ error: "memory_not_found" });
@@ -3063,17 +3374,22 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
-    app.get("/api/skills", async (_req, res, next) => {
+    app.get("/api/skills", async (req, res, next) => {
       try {
-        res.json(await store.listSkills());
+        res.json(await filterApiRoomResources(runtime, req, "skill", (candidates) => store.listSkills(candidates), (skill) => skill.id));
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/skills/diagnostics", async (_req, res, next) => {
+    app.get("/api/skills/diagnostics", async (req, res, next) => {
       try {
-        res.json(await skillDiagnosticsPayload(store));
+        const context = apiRoomAccessContext(req);
+        const [skills, sessions] = await Promise.all([
+          filterApiRoomResources(runtime, req, "skill", (candidates) => store.listSkills(candidates), (skill) => skill.id),
+          runtime.listLocalOwnerRoomSessions(context)
+        ]);
+        res.json(await skillDiagnosticsPayload(store, skills, sessions.map((session) => session.id)));
       } catch (error) {
         next(error);
       }
@@ -3081,6 +3397,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/skills/:id", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "skill", id: req.params.id }
+        });
         const skill = await store.getSkill(req.params.id);
         if (!skill) {
           res.status(404).json({ error: "skill_not_found" });
@@ -3108,6 +3428,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/skills/:id/support", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "skill", id: req.params.id }
+        });
         const skill = await store.getSkill(req.params.id);
         if (!skill) {
           res.status(404).json({ error: "skill_not_found" });
@@ -3121,13 +3445,18 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.patch("/api/skills/:id", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         res.json(await runRuntimeApiWriteCommand(runtime, req, "skill.patch", {
           skill_id: req.params.id,
           ...(typeof req.body?.title === "string" ? { title: req.body.title } : {}),
           ...(typeof req.body?.description === "string" ? { description: req.body.description } : {}),
           ...(typeof req.body?.content === "string" ? { content: req.body.content } : {}),
           ...(Array.isArray(req.body?.tags) ? { tags: stringArray(req.body.tags) } : {})
-        }));
+        }, context));
       } catch (error) {
         next(error);
       }
@@ -3135,6 +3464,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/skills/:id/state", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const state = req.body?.state;
         if (state !== "active" && state !== "disabled") {
           res.status(400).json({ error: "invalid_skill_state" });
@@ -3143,7 +3477,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         res.json(await runRuntimeApiWriteCommand(runtime, req, "skill.lifecycle.apply", {
           skill_id: req.params.id,
           action: state === "active" ? "reactivate" : "archive"
-        }));
+        }, context));
       } catch (error) {
         next(error);
       }
@@ -3151,6 +3485,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/skills/candidates", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
         const description = typeof req.body?.description === "string" ? req.body.description.trim() : "";
         if (!title || !description) {
@@ -3163,7 +3502,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           content: typeof req.body?.content === "string" && req.body.content.trim() ? req.body.content : description,
           tags: stringArray(req.body?.tags),
           required_capabilities: stringArray(req.body?.required_capabilities)
-        });
+        }, context);
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -3172,12 +3511,17 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/skills/projects", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const candidateId = typeof req.body?.candidate_id === "string" ? req.body.candidate_id : "";
         if (!candidateId) {
           res.status(400).json({ error: "candidate_id_required" });
           return;
         }
-        const result = await runRuntimeApiWriteCommand(runtime, req, "skill.project.save", { candidate_id: candidateId });
+        const result = await runRuntimeApiWriteCommand(runtime, req, "skill.project.save", { candidate_id: candidateId }, context);
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -3186,6 +3530,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/skills/:id/support", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const supportPath = typeof req.body?.path === "string" ? req.body.path.trim() : "";
         if (!supportPath) {
           res.status(400).json({ error: "support_path_required" });
@@ -3196,16 +3545,16 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           skill_id: req.params.id,
           path: supportPath,
           content
-        });
+        }, context);
         res.status(201).json(result);
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/wiki", async (_req, res, next) => {
+    app.get("/api/wiki", async (req, res, next) => {
       try {
-        res.json(await store.listWiki());
+        res.json(await filterApiRoomResources(runtime, req, "wiki", (candidates) => store.listWiki(candidates), (wiki) => wiki.id));
       } catch (error) {
         next(error);
       }
@@ -3213,8 +3562,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/wiki/active-retrieval", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         res.json(await runtime.previewKnowledgeWiki({
-          query: typeof req.query.q === "string" ? req.query.q : ""
+          query: typeof req.query.q === "string" ? req.query.q : "",
+          sessionId: context.sessionId
         }));
       } catch (error) {
         next(error);
@@ -3223,25 +3578,37 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/wiki/graph", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         res.json(await runtime.previewKnowledgeWikiGraph({
-          activeOnly: req.query.active_only === "false" ? false : true
+          activeOnly: req.query.active_only === "false" ? false : true,
+          sessionId: context.sessionId
         }));
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/wiki/diagnostics", async (_req, res, next) => {
+    app.get("/api/wiki/diagnostics", async (req, res, next) => {
       try {
-        res.json(await knowledgeWikiDiagnosticsPayload(store));
+        const pages = await filterApiRoomResources(runtime, req, "wiki", (candidates) => store.listWiki(candidates), (wiki) => wiki.id);
+        res.json(await knowledgeWikiDiagnosticsPayload(store, pages));
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/wiki/lint", async (_req, res, next) => {
+    app.get("/api/wiki/lint", async (req, res, next) => {
       try {
-        res.json(await runtime.inspectKnowledgeWikiQuality());
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runtime.inspectKnowledgeWikiQuality(context));
       } catch (error) {
         next(error);
       }
@@ -3249,7 +3616,13 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/wiki/:id/backlinks", async (req, res, next) => {
       try {
-        const report = await runtime.inspectKnowledgeWikiQuality();
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ ...context, resource: { kind: "wiki", id: req.params.id } });
+        const report = await runtime.inspectKnowledgeWikiQuality(context);
         res.json(report.backlinks[req.params.id] ?? []);
       } catch (error) {
         next(error);
@@ -3258,6 +3631,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/wiki/:id", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "wiki", id: req.params.id }
+        });
         const wiki = await store.getWiki(req.params.id);
         if (!wiki) {
           res.status(404).json({ error: "wiki_not_found" });
@@ -3283,6 +3660,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/wiki/proposals", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
         const content = typeof req.body?.content === "string" ? req.body.content.trim() : "";
         if (!title || !content) {
@@ -3298,7 +3680,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...(asSupportedLocale(req.body?.content_locale) ? { content_locale: req.body.content_locale } : {}),
           source_refs: resourceRefs(req.body?.source_refs),
           ...(proposalProvenance ? { provenance: proposalProvenance } : {})
-        });
+        }, context);
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -3307,7 +3689,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/wiki/:id/accept", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.accept", { wiki_id: req.params.id }));
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.accept", { wiki_id: req.params.id }, context));
       } catch (error) {
         next(error);
       }
@@ -3315,7 +3702,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/wiki/:id/reject", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.reject", { wiki_id: req.params.id }));
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.reject", { wiki_id: req.params.id }, context));
       } catch (error) {
         next(error);
       }
@@ -3323,6 +3715,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.patch("/api/wiki/:id", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const patchProvenance = provenance(req.body?.provenance);
         const result = await runRuntimeApiWriteCommand(runtime, req, "wiki.patch", {
           wiki_id: req.params.id,
@@ -3332,7 +3729,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...(asSupportedLocale(req.body?.content_locale) ? { content_locale: req.body.content_locale } : {}),
           ...(Array.isArray(req.body?.source_refs) ? { source_refs: resourceRefs(req.body.source_refs) } : {}),
           ...(patchProvenance ? { provenance: patchProvenance } : {})
-        });
+        }, context);
         res.json(result);
       } catch (error) {
         next(error);
@@ -3341,7 +3738,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/wiki/:id/archive", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.archive", { wiki_id: req.params.id }));
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.archive", { wiki_id: req.params.id }, context));
       } catch (error) {
         next(error);
       }
@@ -3349,15 +3751,20 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/wiki/reindex", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.reindex", {}));
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "wiki.reindex", {}, context));
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/collections/schemas", async (_req, res, next) => {
+    app.get("/api/collections/schemas", async (req, res, next) => {
       try {
-        res.json(await store.listCollectionSchemas());
+        res.json(await filterApiRoomResources(runtime, req, "collection_schema", (candidates) => store.listCollectionSchemas(candidates), (schema) => schema.id));
       } catch (error) {
         next(error);
       }
@@ -3365,12 +3772,17 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/collections/schemas", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const parsed = CollectionSchemaSchema.safeParse(req.body);
         if (!parsed.success) {
           res.status(400).json({ error: "invalid_collection_schema", details: parsed.error.flatten() });
           return;
         }
-        const result = await runRuntimeApiWriteCommand(runtime, req, "collection.schema.save", parsed.data);
+        const result = await runRuntimeApiWriteCommand(runtime, req, "collection.schema.save", parsed.data, context);
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -3379,23 +3791,30 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/collections/reindex", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "collection.reindex", {}));
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "collection.reindex", {}, context));
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/collections/triggers", async (_req, res, next) => {
+    app.get("/api/collections/triggers", async (req, res, next) => {
       try {
-        res.json(await store.listCollectionTriggerStates());
+        const schemas = await filterApiRoomResources(runtime, req, "collection_schema", (candidates) => store.listCollectionSchemas(candidates), (schema) => schema.id);
+        res.json((await Promise.all(schemas.map((schema) => store.listCollectionTriggerStates(schema.id)))).flat());
       } catch (error) {
         next(error);
       }
     });
 
-    app.get("/api/collections/actions", async (_req, res, next) => {
+    app.get("/api/collections/actions", async (req, res, next) => {
       try {
-        res.json(await runtime.listCollectionActions());
+        const schemas = await filterApiRoomResources(runtime, req, "collection_schema", (candidates) => store.listCollectionSchemas(candidates), (schema) => schema.id);
+        res.json((await Promise.all(schemas.map((schema) => runtime.listCollectionActions(schema.id)))).flat());
       } catch (error) {
         next(error);
       }
@@ -3403,6 +3822,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/schema", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_schema", id: req.params.collectionId }
+        });
         const schema = await store.getCollectionSchema(req.params.collectionId);
         if (!schema) {
           res.status(404).json({ error: "collection_schema_not_found" });
@@ -3416,6 +3839,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/actions", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_schema", id: req.params.collectionId }
+        });
         res.json(await runtime.listCollectionActions(req.params.collectionId));
       } catch (error) {
         next(error);
@@ -3424,6 +3851,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/triggers", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_schema", id: req.params.collectionId }
+        });
         res.json(await store.listCollectionTriggerStates(req.params.collectionId));
       } catch (error) {
         next(error);
@@ -3432,7 +3863,17 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/records", async (req, res, next) => {
       try {
-        res.json(await store.listCollectionRecords(req.params.collectionId));
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_schema", id: req.params.collectionId }
+        });
+        res.json(await filterApiRoomResources(
+          runtime,
+          req,
+          "collection_record",
+          (candidates) => store.listCollectionRecords(req.params.collectionId, candidates),
+          (record) => collectionRecordResourceId(record.collection_id, record.id)
+        ));
       } catch (error) {
         next(error);
       }
@@ -3440,13 +3881,18 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/view-data", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const ids = queryStringList(req.query.ids);
         const fields = queryStringList(req.query.fields);
         res.json(await runRuntimeApiQuery(runtime, req, "collection.records.list", {
           collection_id: req.params.collectionId,
           ...(ids.length > 0 ? { ids } : {}),
           ...(fields.length > 0 ? { fields } : {})
-        }));
+        }, context));
       } catch (error) {
         next(error);
       }
@@ -3454,12 +3900,17 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.put("/api/collections/:collectionId/view-data", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const result = await runtime.runCollectionManageCompatibility({
           action: "putItems",
           collection_id: req.params.collectionId,
           items: Array.isArray(req.body?.items) ? req.body.items.map(jsonSafe) : [],
           mode: typeof req.body?.mode === "string" ? req.body.mode : "merge"
-        }, "runtime_api", domainCommandIdempotencyKey(req));
+        }, "runtime_api", domainCommandIdempotencyKey(req), context);
         res.json(result);
       } catch (error) {
         next(error);
@@ -3468,7 +3919,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/patches", async (req, res, next) => {
       try {
-        res.json(await store.listCollectionPatches({ collectionId: req.params.collectionId }));
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_schema", id: req.params.collectionId }
+        });
+        res.json(await filterApiCollectionRecordPatches(runtime, store, req, req.params.collectionId));
       } catch (error) {
         next(error);
       }
@@ -3476,6 +3931,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/records/:recordId", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_record", id: collectionRecordResourceId(req.params.collectionId, req.params.recordId) }
+        });
         const record = await store.getCollectionRecord(req.params.collectionId, req.params.recordId);
         if (!record) {
           res.status(404).json({ error: "collection_record_not_found" });
@@ -3502,11 +3961,16 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.delete("/api/collections/:collectionId/records/:recordId", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const result = await runRuntimeApiWriteCommand(runtime, req, "collection.record.delete", {
           collection_id: req.params.collectionId,
           record_id: req.params.recordId,
           ...(typeof req.query.view_id === "string" ? { view_id: req.query.view_id } : {})
-        });
+        }, context);
         res.json(result);
       } catch (error) {
         next(error);
@@ -3515,7 +3979,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/records/:recordId/refs", async (req, res, next) => {
       try {
-        res.json(await store.resolveCollectionRecordRefs(req.params.collectionId, req.params.recordId));
+        res.json(await runtime.resolveLocalOwnerCollectionRecordRefs({
+          collectionId: req.params.collectionId,
+          recordId: req.params.recordId,
+          ...apiRoomAccessContext(req)
+        }));
       } catch (error) {
         next(error);
       }
@@ -3523,6 +3991,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/records/:recordId/patches", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_record", id: collectionRecordResourceId(req.params.collectionId, req.params.recordId) }
+        });
         res.json(await store.listCollectionPatches({
           collectionId: req.params.collectionId,
           recordId: req.params.recordId
@@ -3534,6 +4006,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/records/:recordId/patches/:patchId", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_record", id: collectionRecordResourceId(req.params.collectionId, req.params.recordId) }
+        });
         const patch = await store.getCollectionPatch(req.params.collectionId, req.params.recordId, req.params.patchId);
         if (!patch) {
           res.status(404).json({ error: "collection_patch_not_found" });
@@ -3547,6 +4023,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/collections/:collectionId/records", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const now = nowIso();
         const record = {
           id: typeof req.body?.id === "string" ? req.body.id : createId("record"),
@@ -3561,7 +4042,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           collection_id: record.collection_id,
           data: jsonRecord(record.data),
           resource_refs: resourceRefs(record.resource_refs)
-        });
+        }, context);
         res.status(201).json(result);
       } catch (error) {
         next(error);
@@ -3570,6 +4051,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/collections/:collectionId/records/:recordId/patches", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const expectedVersion = positiveIntegerOrUndefined(req.body?.expected_version, undefined);
         if (!expectedVersion) {
           res.status(400).json({ error: "expected_version_required" });
@@ -3587,7 +4073,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           patch_id: patch.id,
           expected_version: expectedVersion,
           changes: jsonRecord(patch.changes)
-        });
+        }, context);
         res.json(result);
       } catch (error) {
         next(error);
@@ -3596,13 +4082,18 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/collections/:collectionId/actions/:actionId/run", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const result = await runRuntimeApiWriteCommand(runtime, req, "collection.action.run", {
           collection_id: req.params.collectionId,
           action_id: req.params.actionId,
           ...(typeof req.body?.backend_id === "string" ? { backend_id: req.body.backend_id } : {}),
           ...(typeof req.body?.record_id === "string" ? { record_id: req.body.record_id } : {}),
           payload: jsonRecord(req.body?.payload)
-        });
+        }, context);
         res.json(result);
       } catch (error) {
         next(error);
@@ -3611,6 +4102,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/notes", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_schema", id: req.params.collectionId }
+        });
         res.json(await store.listCollectionNotes(req.params.collectionId));
       } catch (error) {
         next(error);
@@ -4085,10 +4580,11 @@ async function runRuntimeApiWriteCommand<Id extends DomainWriteCommandId>(
   runtime: AgentRuntime,
   req: Request,
   commandId: Id,
-  payload: DomainOperationInput<Id>
+  payload: DomainOperationInput<Id>,
+  context: TrustedRuntimeApiContext = {}
 ) {
   return runtimeWritePayload(requireRuntimeWriteValue(
-    await runRuntimeApiCommand(runtime, req, commandId, payload),
+    await runRuntimeApiCommand(runtime, req, commandId, payload, context),
     commandId
   ));
 }
@@ -4098,7 +4594,8 @@ async function runDynamicRuntimeApiWriteCommand(
   runtime: AgentRuntime,
   req: Request,
   commandId: string,
-  payload: unknown
+  payload: unknown,
+  context: TrustedRuntimeApiContext = {}
 ) {
   if (!isDomainCommandId(commandId)) {
     throw new RuntimeRequestError("not_found", `domain_command_not_found:${commandId}`);
@@ -4109,7 +4606,7 @@ async function runDynamicRuntimeApiWriteCommand(
     input_source: "runtime_api",
     idempotency_key: domainCommandIdempotencyKey(req),
     payload: input
-  }, runtimeRequestContext(req));
+  }, runtimeRequestContext(req, context));
   return runtimeWritePayload(requireRuntimeWriteValue(result.result, commandId));
 }
 
@@ -4118,7 +4615,8 @@ async function runDynamicRuntimeApiQuery(
   runtime: AgentRuntime,
   req: Request,
   queryId: string,
-  payload: unknown
+  payload: unknown,
+  context: TrustedRuntimeApiContext = {}
 ): Promise<unknown> {
   if (!isDomainQueryId(queryId)) {
     throw new RuntimeRequestError("not_found", `domain_query_not_found:${queryId}`);
@@ -4128,7 +4626,7 @@ async function runDynamicRuntimeApiQuery(
     query_id: queryId,
     input_source: "runtime_api",
     payload: input
-  }, runtimeRequestContext(req))).result;
+  }, runtimeRequestContext(req, context))).result;
 }
 
 function runtimeRequestContext(req: Request, context: TrustedRuntimeApiContext = {}): TrustedRuntimeApiContext {
@@ -4137,6 +4635,122 @@ function runtimeRequestContext(req: Request, context: TrustedRuntimeApiContext =
     ...context,
     ...(signal ? { signal } : {})
   };
+}
+
+/** Room/session references select a target only; the Runtime selects the actor. */
+function apiRoomAccessContext(req: Request): { roomId?: string; sessionId?: string } {
+  const roomId = typeof req.query.room_id === "string" ? req.query.room_id.trim() : "";
+  const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+  return {
+    ...(roomId ? { roomId } : {}),
+    ...(sessionId ? { sessionId } : {})
+  };
+}
+
+/** Content operations require a persisted Session so the Runtime can derive its Room. */
+function apiSessionContext(req: Request): { sessionId: string } | undefined {
+  const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+  return sessionId ? { sessionId } : undefined;
+}
+
+async function filterApiRoomResources<T>(
+  runtime: AgentRuntime,
+  req: Request,
+  resourceKind: string,
+  load: (candidates: { resourceIds: string[]; includeLegacy: boolean }) => Promise<T[]>,
+  resourceId: (value: T) => string
+): Promise<T[]> {
+  const context = apiRoomAccessContext(req);
+  // This rejects missing Room context instead of falling back to a Workspace-wide list,
+  // then constrains SQLite before any resource rows are loaded.
+  const candidates = await runtime.localOwnerResourceCandidates(context, resourceKind);
+  const values = await load(candidates);
+  return recheckRoomResources(runtime, context, resourceKind, values, resourceId);
+}
+
+/** Optimization history belongs to both its Skill and the Session that produced it. */
+async function listApiVisibleSkillOptimizationRuns(
+  runtime: AgentRuntime,
+  store: WorkspaceStore,
+  req: Request
+) {
+  const context = apiRoomAccessContext(req);
+  const [skills, sessions] = await Promise.all([
+    filterApiRoomResources(runtime, req, "skill", (candidates) => store.listSkills(candidates), (skill) => skill.id),
+    runtime.listLocalOwnerRoomSessions(context)
+  ]);
+  const skillIds = skills.map((skill) => skill.id);
+  const sessionIds = sessions.map((session) => session.id);
+  if (skillIds.length === 0 || sessionIds.length === 0) return [];
+  return store.listSkillOptimizationRuns({ skillIds, sessionIds });
+}
+
+/** Collection patch bodies follow the individual record boundary, not just the schema. */
+async function filterApiCollectionRecordPatches(
+  runtime: AgentRuntime,
+  store: WorkspaceStore,
+  req: Request,
+  collectionId: string
+) {
+  const context = apiRoomAccessContext(req);
+  const candidates = await runtime.localOwnerResourceCandidates(context, "collection_record");
+  const patches = await store.listCollectionPatches({ collectionId, ...candidates });
+  return recheckRoomResources(
+    runtime,
+    context,
+    "collection_record",
+    patches,
+    (patch) => collectionRecordResourceId(collectionId, patch.record_id)
+  );
+}
+
+/** The second mandatory check, immediately before Room-bound resources leave the server. */
+async function recheckRoomResources<T>(
+  runtime: AgentRuntime,
+  context: { roomId?: string; sessionId?: string },
+  resourceKind: string,
+  values: T[],
+  resourceId: (value: T) => string
+): Promise<T[]> {
+  const allowed: T[] = [];
+  for (const value of values) {
+    try {
+      await runtime.assertLocalOwnerRoomAccess({
+        ...context,
+        resource: { kind: resourceKind, id: resourceId(value) }
+      });
+      allowed.push(value);
+    } catch (error) {
+      if (error instanceof RuntimeRequestError && error.code === "forbidden") continue;
+      throw error;
+    }
+  }
+  return allowed;
+}
+
+/** Generated Surfaces inherit the Room boundary of the Session that created them. */
+async function requireGeneratedSurfaceRoomAccess(
+  runtime: AgentRuntime,
+  store: WorkspaceStore,
+  surfaceId: string
+) {
+  await runtime.assertLocalOwnerRoomAccess({ resource: { kind: "generated_surface", id: surfaceId } });
+  const surface = await store.getGeneratedSurface(surfaceId);
+  if (!surface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
+  return surface;
+}
+
+/** Operation-linked history is visible only from its persisted Room. */
+async function apiRoomOperationScope(runtime: AgentRuntime, store: WorkspaceStore, req: Request) {
+  const access = await runtime.assertLocalOwnerRoomAccess(apiRoomAccessContext(req));
+  const operations = await store.listOperationsForRoom(access.roomId);
+  return { roomId: access.roomId, operations, operationIds: new Set(operations.map((operation) => operation.id)) };
+}
+
+/** External sends are read through the Room operation that created or last updated them. */
+async function listApiRoomExternalSends(runtime: AgentRuntime, store: WorkspaceStore, req: Request) {
+  const scope = await apiRoomOperationScope(runtime, store, req);
+  return store.listExternalSends({ operationIds: [...scope.operationIds] });
 }
 
 function asToolRunStatus(value: unknown): ToolRunStatus | undefined {
@@ -5815,6 +6429,18 @@ function resourceRef(value: unknown) {
   return parsed.success ? parsed.data : undefined;
 }
 
+/** Converts a translation source reference into the persisted Room boundary key. */
+function roomAccessResourceForRef(ref: ResourceRef): { kind: string; id: string } | undefined {
+  if (ref.kind === "artifact" || ref.kind === "memory" || ref.kind === "wiki" || ref.kind === "skill") {
+    return { kind: ref.kind, id: ref.id };
+  }
+  if (ref.kind !== "collection_record") return undefined;
+  const uriMatch = ref.uri.match(/^collections\/([^/]+)\/records\/[^/]+\.json$/);
+  const labelMatch = ref.label?.match(/^([^/]+)\/[^/]+$/);
+  const collectionId = uriMatch?.[1] ?? labelMatch?.[1];
+  return collectionId ? { kind: "collection_record", id: collectionRecordResourceId(collectionId, ref.id) } : undefined;
+}
+
 function resourceRefFromQuery(query: Record<string, unknown>) {
   if (typeof query.source_kind !== "string" || typeof query.source_id !== "string" || typeof query.source_uri !== "string") {
     return undefined;
@@ -6030,21 +6656,24 @@ function pluginDiagnosticsRecommendation(issues: PluginDiagnosticsReport["issues
 
 async function reflectionDiagnosticsPayload(
   store: WorkspaceStore,
-  input: { sessionId?: string; staleAfterHours?: number; limit?: number } = {}
+  input: { sessionId: string; staleAfterHours?: number; limit?: number },
+  resources: {
+    memories: Awaited<ReturnType<WorkspaceStore["listMemory"]>>;
+    skills: Awaited<ReturnType<WorkspaceStore["listSkills"]>>;
+    wikiPages: Awaited<ReturnType<WorkspaceStore["listWiki"]>>;
+  }
 ): Promise<ReflectionDiagnosticsReport> {
   const generatedAt = nowIso();
   const staleAfterHours = input.staleAfterHours ?? 72;
   const staleBeforeMs = Date.parse(generatedAt) - staleAfterHours * 60 * 60 * 1000;
   const limit = normalizeDiagnosticsLimit(input.limit);
-  const [curatorState, runs, allSuggestions, backendRuns, memories, skills, wikiPages] = await Promise.all([
+  const [curatorState, runs, backendRuns] = await Promise.all([
     store.getCuratorState(),
     store.listReflectionRuns(input.sessionId),
-    store.listReflectionSuggestions(),
-    store.listBackendRuns(input.sessionId),
-    store.listMemory(),
-    store.listSkills(),
-    store.listWiki({ activeOnly: false })
+    store.listBackendRuns(input.sessionId)
   ]);
+  const allSuggestions = (await Promise.all(runs.map((run) => store.listReflectionSuggestions(run.id)))).flat();
+  const { memories, skills, wikiPages } = resources;
   const reflectionRuns = runs.filter((run) => run.kind !== "curator" && run.kind !== "evaluation");
   const curatorRuns = runs.filter((run) => run.kind === "curator");
   const latestReflectionRun = reflectionRuns[0];
@@ -6220,19 +6849,19 @@ function reflectionDiagnosticsRecommendation(issues: ReflectionDiagnosticsReport
 
 async function evaluationDiagnosticsPayload(
   store: WorkspaceStore,
-  input: { sessionId?: string; staleAfterHours?: number; limit?: number } = {}
+  input: { sessionId: string; staleAfterHours?: number; limit?: number }
 ): Promise<EvaluationDiagnosticsReport> {
   const generatedAt = nowIso();
   const staleAfterHours = input.staleAfterHours ?? 72;
   const staleBeforeMs = Date.parse(generatedAt) - staleAfterHours * 60 * 60 * 1000;
   const limit = normalizeDiagnosticsLimit(input.limit);
-  const [reflectionRuns, allSuggestions, backendRuns, toolRuns, workspaceChanges] = await Promise.all([
+  const [reflectionRuns, backendRuns, toolRuns, workspaceChanges] = await Promise.all([
     store.listReflectionRuns(input.sessionId),
-    store.listReflectionSuggestions(),
     store.listBackendRuns(input.sessionId),
     store.listToolRuns(input.sessionId ? { sessionId: input.sessionId } : {}),
     store.listWorkspaceChanges(input.sessionId)
   ]);
+  const allSuggestions = (await Promise.all(reflectionRuns.map((run) => store.listReflectionSuggestions(run.id)))).flat();
   const evaluationRuns = reflectionRuns.filter((run) => run.kind === "evaluation");
   const latestEvaluationRun = evaluationRuns[0];
   const evaluationRunIds = new Set(evaluationRuns.map((run) => run.id));
@@ -6553,13 +7182,12 @@ function fileBrowserActionDiagnosticsRecommendation(issues: FileBrowserActionDia
 }
 
 async function externalSendDiagnosticsPayload(
-  store: WorkspaceStore,
+  sends: ExternalSendRecord[],
   input: { staleAfterHours?: number } = {}
 ): Promise<ExternalSendDiagnosticsReport> {
   const generatedAt = nowIso();
   const staleAfterHours = input.staleAfterHours ?? 24;
   const staleBeforeMs = Date.parse(generatedAt) - staleAfterHours * 60 * 60 * 1000;
-  const sends = await store.listExternalSends();
   const dispatchEnabled = process.env.SAMURAI_EXTERNAL_SEND_DISPATCH === "true";
   const transportReadiness = externalSendTransportReadiness(dispatchEnabled);
   const issues: ExternalSendDiagnosticsReport["issues"] = [];
@@ -6993,8 +7621,10 @@ async function gatewayDiagnosticsPayload(store: WorkspaceStore): Promise<Gateway
   });
 }
 
-async function knowledgeWikiDiagnosticsPayload(store: WorkspaceStore): Promise<KnowledgeWikiDiagnosticsReport> {
-  const pages = await store.listWiki();
+async function knowledgeWikiDiagnosticsPayload(
+  store: WorkspaceStore,
+  pages: Awaited<ReturnType<WorkspaceStore["listWiki"]>>
+): Promise<KnowledgeWikiDiagnosticsReport> {
   const activePages = pages.filter((page) => page.state === "active");
   const issues: KnowledgeWikiDiagnosticsReport["issues"] = [];
   let activeWithProvenance = 0;
@@ -7062,21 +7692,6 @@ async function knowledgeWikiDiagnosticsPayload(store: WorkspaceStore): Promise<K
     }
   }
 
-  const retrievalProbe = await store.searchWiki("", Math.max(pages.length, 1), { activeOnly: true });
-  for (const page of retrievalProbe) {
-    if (page.state !== "active") {
-      issues.push({
-        code: "active_wiki_retrieval_includes_non_active",
-        severity: "critical",
-        wiki_id: page.id,
-        slug: page.slug,
-        title: page.title,
-        state: page.state,
-        message: "Active Knowledge Wiki retrieval returned a non-active page."
-      });
-    }
-  }
-
   const hasCriticalIssue = issues.some((issue) => issue.severity === "critical");
   const recommendation = hasCriticalIssue
     ? "Fix critical Knowledge Wiki issues before treating active pages as backend evidence."
@@ -7098,14 +7713,21 @@ async function knowledgeWikiDiagnosticsPayload(store: WorkspaceStore): Promise<K
   });
 }
 
-async function skillDiagnosticsPayload(store: WorkspaceStore): Promise<SkillDiagnosticsReport> {
-  const skills = await store.listSkills();
+async function skillDiagnosticsPayload(
+  store: WorkspaceStore,
+  skills: Awaited<ReturnType<WorkspaceStore["listSkills"]>>,
+  sessionIds: string[]
+): Promise<SkillDiagnosticsReport> {
   const selectableSkills = skills.filter((skill) => isSelectableSkillState(skill.state));
-  const [skillUsage, learningUses] = await Promise.all([
-    store.listSkillUsage(),
-    store.listLearningResourceUses()
-  ]);
-  const usageBySkillId = new Map(skillUsage.map((usage) => [usage.skill_id, usage]));
+  const visibleSkillIds = new Set(skills.map((skill) => skill.id));
+  const skillIds = [...visibleSkillIds];
+  const allLearningUses = (await Promise.all(sessionIds.map((sessionId) => store.listLearningResourceUses({
+    sessionId,
+    resourceKind: "skill",
+    resourceIds: skillIds
+  })))).flat();
+  const learningUses = allLearningUses.filter((use) => visibleSkillIds.has(use.resource_id));
+  const usedSkillIds = new Set(learningUses.map((use) => use.resource_id));
   const supportedScopes = supportedSkillScopeSet();
   const issues: SkillDiagnosticsReport["issues"] = [];
   let selectableWithVerifiedProvenance = 0;
@@ -7122,7 +7744,6 @@ async function skillDiagnosticsPayload(store: WorkspaceStore): Promise<SkillDiag
     const sourceRefs = skill.frontmatter.source_refs ?? [];
     const allowedScopes = skill.allowed_scopes ?? skill.frontmatter.allowed_scopes;
     const unsupportedScopes = allowedScopes.filter((scope) => !supportedScopes.has(scope));
-    const usage = usageBySkillId.get(skill.id);
 
     if (!markdownBody.trim()) {
       issues.push({
@@ -7208,7 +7829,7 @@ async function skillDiagnosticsPayload(store: WorkspaceStore): Promise<SkillDiag
       }
     }
 
-    if (usage?.use_count && usage.use_count > 0) {
+    if (usedSkillIds.has(skill.id)) {
       selectableWithUsage += 1;
     } else if (skill.state === "active" || skill.state === "pinned") {
       issues.push({

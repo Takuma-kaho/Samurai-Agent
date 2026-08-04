@@ -14,21 +14,36 @@ export interface HandlerExpectation {
   calls: HandlerCallExpectation[];
 }
 
+const trustedContext = {
+  inputSource: "runtime_api",
+  workspaceId: "handler-matrix-workspace",
+  actorId: "handler-matrix-actor",
+  participant: { kind: "human", participantId: "human:owner" },
+  roomId: "room_fixture",
+  correlationId: "handler-matrix",
+  sessionId: "session_fixture",
+  runId: "run_fixture"
+} as const;
+
 export const handlerExpectations = {
   "agent.backend.bind": {
     input: { id: "agent_fixture", backend_id: "backend_next" },
-    calls: [{ method: "bindAgentBackend", args: [{ id: "agent_fixture", backendId: "backend_next" }] }]
+    calls: [{ method: "bindAgentBackend", args: [trustedContext, { id: "agent_fixture", backendId: "backend_next" }] }]
   },
   "agent.create": {
     input: { name: "Fixture Agent", role: "Fixture", instructions: "Handle fixture work.", backend_id: "backend_fixture", enabled: false },
-    calls: [{ method: "createAgent", args: [{ name: "Fixture Agent", role: "Fixture", instructions: "Handle fixture work.", backendId: "backend_fixture", enabled: false }] }]
+    calls: [{ method: "createAgent", args: [trustedContext, { name: "Fixture Agent", role: "Fixture", instructions: "Handle fixture work.", backendId: "backend_fixture", enabled: false }] }]
   },
-  "agent.list": { input: {}, calls: [{ method: "listAgents", args: [] }] },
+  "agent.list": { input: {}, calls: [{ method: "listAgents", args: [trustedContext] }] },
   "agent.patch": {
     input: { id: "agent_fixture", role: "Updated fixture" },
-    calls: [{ method: "patchAgent", args: [{ id: "agent_fixture", role: "Updated fixture" }] }]
+    calls: [{ method: "patchAgent", args: [trustedContext, { id: "agent_fixture", role: "Updated fixture" }] }]
   },
-  "agent.view": { input: { id: "agent_fixture" }, calls: [{ method: "viewAgent", args: ["agent_fixture"] }] },
+  "agent.view": { input: { id: "agent_fixture" }, calls: [{ method: "viewAgent", args: [trustedContext, "agent_fixture"] }] },
+  "agent.workspace_permission.set": {
+    input: { agent_id: "agent_fixture", allowed: true },
+    calls: [{ method: "setAgentRoomCreatePermission", args: [trustedContext, { agentId: "agent_fixture", allowed: true }] }]
+  },
   "file.read": {
     input: { path: "workspace/notes.txt" },
     calls: [{ method: "readWorkspaceFile", args: [{ path: "workspace/notes.txt" }] }]
@@ -108,31 +123,99 @@ export const handlerExpectations = {
   },
   "room.create": {
     input: { name: "Fixture Room" },
-    calls: [{ method: "createRoom", args: [{ name: "Fixture Room" }] }]
+    calls: [{ method: "createRoom", args: [trustedContext, { name: "Fixture Room" }] }]
   },
-  "room.list": { input: {}, calls: [{ method: "listRooms", args: [] }] },
+  "room.list": { input: {}, calls: [{ method: "listRooms", args: [trustedContext] }] },
   "room.patch": {
     input: { id: "room_fixture", name: "Updated Room" },
-    calls: [{ method: "patchRoom", args: [{ id: "room_fixture", name: "Updated Room" }] }]
+    calls: [{ method: "patchRoom", args: [trustedContext, { id: "room_fixture", name: "Updated Room" }] }]
   },
-  "room.view": { input: { id: "room_fixture" }, calls: [{ method: "viewRoom", args: ["room_fixture"] }] },
+  "room.view": { input: { id: "room_fixture" }, calls: [{ method: "viewRoom", args: [trustedContext, "room_fixture"] }] },
+  "room.agent.permission.set": {
+    input: { room_id: "room_fixture", agent_id: "agent_fixture", can_view: true, can_edit: true, can_execute: true },
+    calls: [{ method: "setRoomAgentPermissions", args: [trustedContext, { roomId: "room_fixture", agentId: "agent_fixture", canView: true, canEdit: true, canExecute: true }] }]
+  },
+  "room.agent.remove": {
+    input: { room_id: "room_fixture", agent_id: "agent_fixture" },
+    calls: [{ method: "removeRoomAgent", args: [trustedContext, { roomId: "room_fixture", agentId: "agent_fixture" }] }]
+  },
+  "room.member.add": {
+    input: { room_id: "room_fixture", target_participant_id: "human:member", role: "member" },
+    calls: [{ method: "addRoomMember", args: [trustedContext, { roomId: "room_fixture", participantId: "human:member", role: "member" }] }]
+  },
+  "room.member.list": {
+    input: { room_id: "room_fixture" },
+    calls: [{ method: "listRoomParticipants", args: [trustedContext, "room_fixture"] }]
+  },
+  "room.member.remove": {
+    input: { room_id: "room_fixture", target_participant_id: "human:member" },
+    calls: [{ method: "removeRoomMember", args: [trustedContext, { roomId: "room_fixture", participantId: "human:member" }] }]
+  },
+  "room.member.role.change": {
+    input: { room_id: "room_fixture", target_participant_id: "human:member", role: "admin" },
+    calls: [{ method: "changeRoomMemberRole", args: [trustedContext, { roomId: "room_fixture", participantId: "human:member", role: "admin" }] }]
+  },
+  "room.owner.recover": {
+    input: { room_id: "room_fixture", owner_participant_id: "human:owner" },
+    calls: [{ method: "recoverOwnerlessRoom", args: [trustedContext, { roomId: "room_fixture", ownerParticipantId: "human:owner" }] }]
+  },
+  "room.owner.transfer": {
+    input: { room_id: "room_fixture", to_participant_id: "human:new-owner" },
+    calls: [{ method: "transferRoomOwnership", args: [trustedContext, { roomId: "room_fixture", toParticipantId: "human:new-owner" }] }]
+  },
+  "room.ownerless.list": {
+    input: {},
+    calls: [{ method: "listOwnerlessRooms", args: [trustedContext] }]
+  },
+  "room.resource.share": {
+    input: { source_room_id: "room_fixture", target_room_id: "room_target_fixture", resource: { kind: "artifact", id: "artifact_fixture" } },
+    calls: [{ method: "shareResource", args: [trustedContext, { sourceRoomId: "room_fixture", targetRoomId: "room_target_fixture", resource: { kind: "artifact", id: "artifact_fixture" } }] }]
+  },
+  "room.resource.share.list": {
+    input: { source_room_id: "room_fixture", resource: { kind: "artifact", id: "artifact_fixture" } },
+    calls: [{ method: "listResourceShares", args: [trustedContext, { sourceRoomId: "room_fixture", resource: { kind: "artifact", id: "artifact_fixture" } }] }]
+  },
+  "room.resource.share.revoke": {
+    input: { source_room_id: "room_fixture", target_room_id: "room_target_fixture", resource: { kind: "artifact", id: "artifact_fixture" } },
+    calls: [{ method: "revokeResourceShare", args: [trustedContext, { sourceRoomId: "room_fixture", targetRoomId: "room_target_fixture", resource: { kind: "artifact", id: "artifact_fixture" } }] }]
+  },
+  "workspace.member.add": {
+    input: { target_participant_id: "human:member", role: "member" },
+    calls: [{ method: "addWorkspaceMember", args: [trustedContext, { participantId: "human:member", role: "member" }] }]
+  },
+  "workspace.member.list": {
+    input: {},
+    calls: [{ method: "listWorkspaceMembers", args: [trustedContext] }]
+  },
+  "workspace.member.remove": {
+    input: { target_participant_id: "human:member" },
+    calls: [{ method: "removeWorkspaceMember", args: [trustedContext, "human:member"] }]
+  },
+  "workspace.member.role.change": {
+    input: { target_participant_id: "human:member", role: "admin" },
+    calls: [{ method: "changeWorkspaceMemberRole", args: [trustedContext, { participantId: "human:member", role: "admin" }] }]
+  },
+  "workspace.owner.transfer": {
+    input: { to_participant_id: "human:new-owner" },
+    calls: [{ method: "transferWorkspaceOwnership", args: [trustedContext, "human:new-owner"] }]
+  },
   "session.create": {
     input: { title: "Fixture session", room_id: "room_fixture", ui_locale: "en", output_locale: "ja" },
-    calls: [{ method: "createSession", args: [{ title: "Fixture session", roomId: "room_fixture", uiLocale: "en", outputLocale: "ja" }] }]
+    calls: [{ method: "createSession", args: [trustedContext, { title: "Fixture session", roomId: "room_fixture", uiLocale: "en", outputLocale: "ja" }] }]
   },
   "session.search.reindex": { input: {}, calls: [{ method: "reindexSessionSearch", args: [] }] },
-  "session.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSessions", args: ["fixture", 5] }] },
-  "memory.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchMemory", args: ["run_fixture", "fixture", 5] }] },
-  "wiki.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchWiki", args: ["run_fixture", "fixture", 5] }] },
-  "skill.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSkills", args: ["run_fixture", "fixture", 5] }] },
-  "collection.search": { input: { collection_id: "collection_fixture", query: "fixture", limit: 5 }, calls: [{ method: "searchCollections", args: ["collection_fixture", "fixture", 5] }] },
+  "session.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSessions", args: [trustedContext, "fixture", 5] }] },
+  "memory.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchMemory", args: [trustedContext, "fixture", 5] }] },
+  "wiki.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchWiki", args: [trustedContext, "fixture", 5] }] },
+  "skill.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSkills", args: [trustedContext, "fixture", 5] }] },
+  "collection.search": { input: { collection_id: "collection_fixture", query: "fixture", limit: 5 }, calls: [{ method: "searchCollections", args: [trustedContext, "collection_fixture", "fixture", 5] }] },
   "learning.snapshot.prune": {
     input: { retain: 5 },
     calls: [{ method: "pruneLearningSnapshots", args: [{ retain: 5 }] }]
   },
   "learning.background_review.apply": {
     input: { reflection_run_id: "reflection_fixture", mutations: [] },
-    calls: [{ method: "applyBackgroundReviewMutations", args: [{ reflectionRunId: "reflection_fixture", sessionId: "session_fixture", mutations: [] }] }]
+    calls: [{ method: "applyBackgroundReviewMutations", args: [{ reflectionRunId: "reflection_fixture", sessionId: "session_fixture", roomId: "room_fixture", ownerParticipantId: "human:owner", creatorParticipantId: "human:owner", mutations: [] }] }]
   },
   "learning.resource.usage.record": {
     input: { resource_kind: "skill", resource_id: "resource_fixture", resource_version: "1", content_hash: "hash_fixture", decision_summary: "Use the resource for this decision.", matched_conditions: ["fixture condition"] },

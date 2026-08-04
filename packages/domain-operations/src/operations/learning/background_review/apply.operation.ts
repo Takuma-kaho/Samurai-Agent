@@ -1,5 +1,6 @@
 // Domain operation module. Keep the validated Background Review write boundary explicit.
 import { LearningBackgroundReviewMutationSchema, ReflectionSuggestionRecordSchema } from "@samurai-agent/core-schemas";
+import { agentParticipantId } from "@samurai-agent/room-permissions";
 import { z } from "zod";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 
@@ -16,6 +17,9 @@ export interface LearningBackgroundReviewApplyPorts {
   applyBackgroundReviewMutations(input: {
     reflectionRunId: string;
     sessionId: string;
+    roomId: string;
+    ownerParticipantId: string;
+    creatorParticipantId: string;
     mutations: LearningBackgroundReviewApplyInput["mutations"];
   }): Promise<LearningBackgroundReviewApplyOutput>;
 }
@@ -53,12 +57,22 @@ const learningBackgroundReviewApply = defineCommand<LearningBackgroundReviewAppl
         context: TrustedDomainContext,
         input: LearningBackgroundReviewApplyInput
       ): Promise<DomainResult<LearningBackgroundReviewApplyOutput>> {
-        if (!context.sessionId) throw new Error("trusted_context_session_required");
+        if (!context.sessionId || !context.roomId || !context.participant || context.participant.kind === "system") {
+          throw new Error("trusted_context_room_participant_required");
+        }
+        const ownerParticipantId = context.participant.kind === "agent"
+          ? context.participant.requestedByParticipantId
+          : context.participant.participantId;
         return {
           ok: true,
           value: Output.parse(await ports.applyBackgroundReviewMutations({
             reflectionRunId: input.reflection_run_id,
             sessionId: context.sessionId,
+            roomId: context.roomId,
+            ownerParticipantId,
+            creatorParticipantId: context.participant.kind === "agent"
+              ? agentParticipantId(context.participant.agentId)
+              : context.participant.participantId,
             mutations: input.mutations
           }))
         };

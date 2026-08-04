@@ -6,8 +6,10 @@ settings:
 
 overrides:
   brace-expansion@^5.0.0: 5.0.8
-  fast-uri: 3.1.4
+  fast-uri: 3.1.5
   postcss: 8.5.18
+  socket.io-parser: 4.2.7
+  undici: 7.29.0
 
 importers:
 
@@ -110,6 +112,9 @@ importers:
       '@samurai-agent/policy-engine':
         specifier: workspace:*
         version: link:../../packages/policy-engine
+      '@samurai-agent/room-permissions':
+        specifier: workspace:*
+        version: link:../../packages/room-permissions
       '@samurai-agent/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
@@ -226,6 +231,9 @@ importers:
       '@samurai-agent/gateway':
         specifier: workspace:*
         version: link:../gateway
+      '@samurai-agent/room-permissions':
+        specifier: workspace:*
+        version: link:../room-permissions
       '@samurai-agent/skills':
         specifier: workspace:*
         version: link:../skills
@@ -266,6 +274,8 @@ importers:
         specifier: workspace:*
         version: link:../core-schemas
 
+  packages/room-permissions: {}
+
   packages/runtime:
     dependencies:
       '@samurai-agent/action-catalog':
@@ -304,6 +314,9 @@ importers:
       '@samurai-agent/policy-engine':
         specifier: workspace:*
         version: link:../policy-engine
+      '@samurai-agent/room-permissions':
+        specifier: workspace:*
+        version: link:../room-permissions
       '@samurai-agent/skill-optimization':
         specifier: workspace:*
         version: link:../skill-optimization
@@ -343,6 +356,9 @@ importers:
       '@samurai-agent/core-schemas':
         specifier: workspace:*
         version: link:../core-schemas
+      '@samurai-agent/room-permissions':
+        specifier: workspace:*
+        version: link:../room-permissions
       better-sqlite3:
         specifier: ^11.10.0
         version: 11.10.0
@@ -1184,8 +1200,8 @@ packages:
   fast-deep-equal@3.1.3:
     resolution: {integrity: sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==}
 
-  fast-uri@3.1.4:
-    resolution: {integrity: sha512-8JnbkQ4juDyvYs4mgFGQqg4yCYtFDtUtmp2QIQq11ZZe5CFQ5wcqm1rqDgAh/QdMySuBnPzMUiJUNZG5N/AiQw==}
+  fast-uri@3.1.5:
+    resolution: {integrity: sha512-gHwA1O9LDIcKunMKhObS/HimwtehO1nPUECKAu5TpKgaO19fcWEl4bliWe1jWxVFvIXztJjjQ4L8XQ1EU9f7Jw==}
 
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
@@ -1531,8 +1547,8 @@ packages:
     resolution: {integrity: sha512-uP0bpjWrjQmUt5DTHq9RuoCBdFJF10cdX9X+a368j/Ft0wmaVgxlrjvK3kjvgCODOMMOz9lcaRzxmso0bTWZ/g==}
     engines: {node: '>=10.0.0'}
 
-  socket.io-parser@4.2.6:
-    resolution: {integrity: sha512-asJqbVBDsBCJx0pTqw3WfesSY0iRX+2xzWEWzrpcH7L6fLzrhyF8WPI8UaeM4YCuDfpwA/cgsdugMsmtz8EJeg==}
+  socket.io-parser@4.2.7:
+    resolution: {integrity: sha512-IH/iSeO9T6gz1KkFleGDWkG9N3dl4jXVYUtMhIqH10Md0ttMer8nUNWiP1DKuNrybD2xBrixLJdCC9J6ECoYkg==}
     engines: {node: '>=10.0.0'}
 
   socket.io@4.8.3:
@@ -1617,8 +1633,8 @@ packages:
   undici-types@7.18.2:
     resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
 
-  undici@7.28.0:
-    resolution: {integrity: sha512-cRZYrTDwWznlnRiPjggAGxZXanty6M8RV1ff8Wm4LWXBp7/IG8v5DnOm74DtUBp9OONpK75YlPnIjQqX0dBDtA==}
+  undici@7.29.0:
+    resolution: {integrity: sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==}
     engines: {node: '>=20.18.1'}
 
   unpipe@1.0.0:
@@ -1790,7 +1806,7 @@ snapshots:
       semver: 7.8.4
       sumchecker: 3.0.1
     optionalDependencies:
-      undici: 7.28.0
+      undici: 7.29.0
     transitivePeerDependencies:
       - supports-color
 
@@ -2258,7 +2274,7 @@ snapshots:
   ajv@8.17.1:
     dependencies:
       fast-deep-equal: 3.1.3
-      fast-uri: 3.1.4
+      fast-uri: 3.1.5
       json-schema-traverse: 1.0.0
       require-from-string: 2.0.2
 
@@ -2537,7 +2553,7 @@ snapshots:
 
   fast-deep-equal@3.1.3: {}
 
-  fast-uri@3.1.4: {}
+  fast-uri@3.1.5: {}
 
   fdir@6.5.0(picomatch@4.0.4):
     optionalDependencies:
@@ -2915,13 +2931,13 @@ snapshots:
       '@socket.io/component-emitter': 3.1.2
       debug: 4.4.3
       engine.io-client: 6.6.6
-      socket.io-parser: 4.2.6
+      socket.io-parser: 4.2.7
     transitivePeerDependencies:
       - bufferutil
       - supports-color
       - utf-8-validate
 
-  socket.io-parser@4.2.6:
+  socket.io-parser@4.2.7:
     dependencies:
       '@socket.io/component-emitter': 3.1.2
       debug: 4.4.3
@@ -2936,7 +2952,7 @@ snapshots:
       debug: 4.4.3
       engine.io: 6.6.9
       socket.io-adapter: 2.5.8
-      socket.io-parser: 4.2.6
+      socket.io-parser: 4.2.7
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -3016,7 +3032,7 @@ snapshots:
 
   undici-types@7.18.2: {}
 
-  undici@7.28.0:
+  undici@7.29.0:
     optional: true
 
   unpipe@1.0.0: {}

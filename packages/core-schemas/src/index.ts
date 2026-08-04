@@ -515,6 +515,8 @@ export const BackendRunRecordSchema = z.object({
   id: z.string().min(1),
   session_id: z.string().min(1),
   agent_id: z.string().min(1).optional(),
+  /** Human participant that requested this execution; never inferred from Backend state. */
+  requested_by_participant_id: z.string().min(1).optional(),
   input_message_id: z.string().min(1),
   output_message_id: z.string().optional(),
   backend_id: z.string().min(1),
@@ -3056,6 +3058,11 @@ export const OperationRecordSchema = z.object({
   capability_id: z.string().min(1),
   operation: z.string().min(1),
   actor_identity: ActorIdentitySchema,
+  /** Core 06 participant identity, separate from the transport ActorIdentity. */
+  participant_id: z.string().min(1).optional(),
+  participant_kind: z.enum(["human", "agent", "system"]).optional(),
+  requested_by_participant_id: z.string().min(1).optional(),
+  room_id: z.string().min(1).optional(),
   instruction_source: InstructionSourceSchema,
   instruction_authority: z.string().min(1),
   channel: z.string().min(1),
@@ -3388,12 +3395,21 @@ export type PolicyDecisionRecord = z.infer<typeof PolicyDecisionRecordSchema>;
 export const AuditRecordSchema = z.object({
   id: z.string().min(1),
   actor_identity: ActorIdentitySchema,
+  participant_id: z.string().min(1).optional(),
+  participant_kind: z.enum(["human", "agent", "system"]).optional(),
+  requested_by_participant_id: z.string().min(1).optional(),
+  room_id: z.string().min(1).optional(),
   operation_id: z.string().min(1),
   capability_id: z.string().min(1),
   instruction_source: InstructionSourceSchema,
   inputs_summary: z.string(),
   outputs_summary: z.string(),
-  policy_decision_id: z.string().min(1),
+  /** Core 06 Room authorization is independent from legacy PolicyDecision / Grant records. */
+  policy_decision_id: z.string().min(1).optional(),
+  room_access_scope: z.enum(["workspace", "room", "resource"]).optional(),
+  room_access_action: z.string().min(1).optional(),
+  room_access_allowed: z.boolean().optional(),
+  room_access_reason: z.string().min(1).optional(),
   affected_resources: z.array(ResourceRefSchema),
   rollback_point_id: z.string().optional(),
   created_at: z.string().datetime()

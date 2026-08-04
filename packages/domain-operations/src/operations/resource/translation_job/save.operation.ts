@@ -70,6 +70,7 @@ const resourceTranslationJobSave = defineCommand<ResourceTranslationJobSavePorts
   createHandler(ports) {
     return {
       execute: async function handleResourceTranslationJobSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        if (!context.roomId) throw new Error("room_context_required");
         const loaded = input.source_ref.kind === "artifact" ? await ports.loadArtifactTranslationSource(input.source_ref.id)
           : input.source_ref.kind === "memory" ? await ports.loadMemoryTranslationSource(input.source_ref.id)
           : input.source_ref.kind === "wiki" ? await ports.loadWikiTranslationSource(input.source_ref.id)
@@ -97,7 +98,11 @@ const resourceTranslationJobSave = defineCommand<ResourceTranslationJobSavePorts
             source_locale: source.source_locale,
             target_locale: input.target_locale,
             original_hash: source.original_hash,
-            source_label: source.ref.label ?? source.ref.id
+            source_label: source.ref.label ?? source.ref.id,
+            // This value is derived from the trusted execution path, never
+            // requested from the API body. Scheduled execution reuses it
+            // instead of falling back to the Workspace default Room.
+            room_id: context.roomId
           },
           enabled: input.enabled,
           next_run_at: input.next_run_at,

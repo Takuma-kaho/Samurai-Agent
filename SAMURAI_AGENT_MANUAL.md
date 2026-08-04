@@ -386,6 +386,26 @@ Sessionはメンバー管理の単位ではない。
 
 Sessionの閲覧・利用権限は、基本的に所属するRoomから引き継ぐ。
 
+## 5.4 Core 06: Room参加者・権限・共有境界
+
+人とAgentは同じ役割表に混ぜない。人はWorkspaceとRoomで別々に役割を持ち、AgentはRoomごとの個別許可だけを持つ。
+
+```text
+人の役割: Owner > Admin > Member > Guest
+Agent: 閲覧 / 編集 / 実行を個別に許可
+```
+
+- Workspace Ownerは1人。Workspaceの役割だけで、未参加Roomの内容は読めない。
+- Room Ownerは1人。AdminはOwnerや他のAdminを変更・解除できない。
+- Agentの編集・実行には、必ず閲覧許可も必要である。AgentはRoom Ownerになれない。
+- Session独自の役割は作らず、所属Roomの現在の参加状態を使う。
+- 参加解除は削除ではなく履歴として残す。ただし解除直後から、新しい閲覧・検索・実行・編集は拒否する。
+- Room間共有は、両Roomに参加する人の明示操作だけで成立する。元データは複製せず、出所を保った閲覧・利用資格だけを追加する。
+- `Grant`と`UsageScope`は参加権限ではない。`UsageScope`は、Room境界で許可された候補をさらに狭める用途だけに使う。
+- 参加解除後は、候補検索・履歴・ファイル出所・Agent用Contextにも内容を返さない。過去の会話・実行・変更履歴そのものは削除しない。
+- 共有先では共有対象だけを読み取り・利用でき、元Roomの会話や操作履歴は自動では見えない。共有解除後の新しい閲覧・利用は拒否する。
+- Gatewayは外部入力を受信・pairing・履歴保存できるが、検証済みの外部本人確認が安定した参加者IDに結び付くまでは、Roomへの参加、Session、Chat、Agent実行、Tool実行を始めない。受信metadataや`system`扱いはRoom権限にならない。署名方式の導入はCore 06の後に別途行う。
+
 ---
 
 # 6. RoomとSession
@@ -427,7 +447,7 @@ Roomごとに、次のものを分離できる。
 - `settings.patch`で既定Room／既定Agentを選び、SessionにはRoom、Backend RunにはAgentを保存する。
 - `room.create / patch / list / view` と `agent.create / patch / backend.bind / list / view` で操作する。
 
-Room参加者、招待、削除、画面、閲覧権限は、この基盤には含めない。
+Core 06では、Room参加者・Agent権限・明示共有をSQLiteへ保存する。招待メール、外部認証・署名方式、Room管理画面、Room削除・アーカイブは含めない。
 
 この基盤は新しいWorkspace形式から使い始める。旧Session／RunへのRoom・Agent出所のbackfillや、旧Bundleの復元互換は行わない。
 

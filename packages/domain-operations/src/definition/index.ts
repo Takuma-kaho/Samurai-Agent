@@ -1,5 +1,7 @@
 import { toStrictJsonSchema, type JsonValue } from "@samurai-agent/core-schemas";
+import type { ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { z } from "zod";
+import { domainOperationAccess, type DomainAccessClassification } from "./access-classification.js";
 
 export const domainInputSources = [
   "surface_operation",
@@ -37,6 +39,10 @@ export interface TrustedDomainContext {
   inputSource: DomainInputSource;
   workspaceId: string;
   actorId: string;
+  /** Core 06 actor, selected only by a trusted ingress or a persisted Run. */
+  participant?: ParticipantPrincipal;
+  /** Server-resolved Room target. Public payloads never supply this field. */
+  roomId?: string;
   sessionId?: string;
   runId?: string;
   /** Server-selected input envelope; never populated from a command payload. */
@@ -118,6 +124,8 @@ interface BaseDefinition<I extends z.ZodTypeAny, O extends z.ZodTypeAny, P> {
   proposedEffects: readonly string[];
   outputResourceKind: string;
   uiDisplayCategory: string;
+  /** Explicit Core 06 ownership boundary; assigned from the closed registry. */
+  access: DomainAccessClassification;
   providerToolNames?: readonly string[];
   surfaceOperationKinds?: readonly string[];
   provenance: readonly DomainProvenance[];
@@ -164,13 +172,13 @@ export type QueryPortContract<P extends DomainQueryPorts> = {
 };
 
 export function defineCommand<P>() {
-  return <I extends z.ZodTypeAny, O extends z.ZodTypeAny>(definition: Omit<CommandDefinition<I, O, P>, "kind">): CommandDefinition<I, O, P> =>
-    Object.freeze({ ...definition, kind: "command" as const });
+  return <I extends z.ZodTypeAny, O extends z.ZodTypeAny>(definition: Omit<CommandDefinition<I, O, P>, "kind" | "access">): CommandDefinition<I, O, P> =>
+    Object.freeze({ ...definition, access: domainOperationAccess(definition.id), kind: "command" as const });
 }
 
 export function defineQuery<P extends DomainQueryPorts>() {
-  return <I extends z.ZodTypeAny, O extends z.ZodTypeAny>(definition: Omit<QueryDefinition<I, O, QueryPortContract<P>>, "kind" | "effect" | "idempotency" | "concurrency">): QueryDefinition<I, O, QueryPortContract<P>> =>
-    Object.freeze({ ...definition, kind: "query" as const, effect: "read_only" as const, idempotency: "none" as const, concurrency: "none" as const });
+  return <I extends z.ZodTypeAny, O extends z.ZodTypeAny>(definition: Omit<QueryDefinition<I, O, QueryPortContract<P>>, "kind" | "effect" | "idempotency" | "concurrency" | "access">): QueryDefinition<I, O, QueryPortContract<P>> =>
+    Object.freeze({ ...definition, access: domainOperationAccess(definition.id), kind: "query" as const, effect: "read_only" as const, idempotency: "none" as const, concurrency: "none" as const });
 }
 
 /**

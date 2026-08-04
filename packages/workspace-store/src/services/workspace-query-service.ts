@@ -26,7 +26,7 @@ import type { SearchResult, SessionTranscriptExport, WorkspaceHealthReport } fro
 
 export interface SessionQueryPort {
   getSession(sessionId: string): Promise<SessionRecord | undefined>;
-  listSessions(): Promise<SessionRecord[]>;
+  listSessions(input?: { ids?: string[]; roomIds?: string[] }): Promise<SessionRecord[]>;
   listMessages(sessionId: string): Promise<MessageRecord[]>;
   listMessagePresentations(input: { sessionId: string; messageId?: string }): Promise<MessagePresentationRecord[]>;
   listOperations(sessionId?: string): Promise<OperationRecord[]>;
@@ -200,9 +200,15 @@ export class WorkspaceQueryService {
     };
   }
 
-  async search(query: string): Promise<SearchResult[]> {
+  async search(query: string, input: { sessionIds?: string[] } = {}): Promise<SearchResult[]> {
     const trimmed = query.trim();
     if (!trimmed) return [];
+    // Room-scoped callers supply already-authorized Session IDs.  Bypass the
+    // global FTS index here because it cannot constrain rows by Room; this
+    // slower path reads only those Sessions and their descendants.
+    if (input.sessionIds) {
+      return this.searchScopedSessions(trimmed, input.sessionIds);
+    }
     if (this.sessionSearch.getMode() !== "like") {
       const indexed = await this.sessionSearch.search(trimmed);
       if (this.sessionSearch.getMode() !== "like") {
@@ -247,6 +253,48 @@ export class WorkspaceQueryService {
       })),
       ...artifactResults,
       ...(await this.matchAuditRecords(trimmed, auditRecords))
+    ];
+  }
+
+  private async searchScopedSessions(query: string, sessionIds: string[]): Promise<SearchResult[]> {
+    if (sessionIds.length === 0) return [];
+    const sessions = await this.sessions.listSessions({ ids: sessionIds });
+    if (sessions.length === 0) return [];
+    const [messages, artifacts] = await Promise.all([
+      Promise.all(sessions.map((session) => this.sessions.listMessages(session.id))).then((items) => items.flat()),
+      Promise.all(sessions.map((session) => this.artifacts.listArtifactsForSession(session.id))).then((items) => items.flat())
+    ]);
+    const artifactResults: SearchResult[] = [];
+    for (const artifact of artifacts) {
+      const content = (await this.artifacts.readArtifactContent(artifact.id).catch(() => "")) ?? "";
+      if (!artifact.title.includes(query) && !content.includes(query)) continue;
+      const operation = await this.sessions.getOperation(artifact.source_operation_id);
+      if (!operation?.session_id || !sessionIds.includes(operation.session_id)) continue;
+      artifactResults.push({
+        kind: "artifact",
+        id: artifact.id,
+        title: artifact.title,
+        summary: content.slice(0, 120),
+        session_id: operation.session_id,
+        operation_id: artifact.source_operation_id
+      });
+      if (artifactResults.length >= 10) break;
+    }
+    return [
+      ...sessions.filter((session) => session.title.includes(query)).slice(0, 10).map((session) => ({
+        kind: "session" as const,
+        id: session.id,
+        title: session.title,
+        summary: session.session_key
+      })),
+      ...messages.filter((message) => message.content.includes(query)).slice(0, 10).map((message) => ({
+        kind: "message" as const,
+        id: message.id,
+        title: message.role,
+        summary: message.content.slice(0, 120),
+        session_id: message.session_id
+      })),
+      ...artifactResults
     ];
   }
 
