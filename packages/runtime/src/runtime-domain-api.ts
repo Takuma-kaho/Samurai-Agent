@@ -142,6 +142,8 @@ export class RuntimeDomainApi {
   async applyCore05BackgroundReview(input: {
     reflectionRunId: string;
     sessionId: string;
+    /** The original Agent Run stays the actor for every later Review read/write. */
+    sourceRunId: string;
     mutations: LearningBackgroundReviewMutation[];
   }): Promise<unknown> {
     const payload = {
@@ -152,7 +154,7 @@ export class RuntimeDomainApi {
       command_id: "learning.background_review.apply",
       idempotency_key: `learning_background_review_apply:${stableHash(payload)}`,
       payload
-    }, { sessionId: input.sessionId });
+    }, { sessionId: input.sessionId, runId: input.sourceRunId });
     return result.result;
   }
 

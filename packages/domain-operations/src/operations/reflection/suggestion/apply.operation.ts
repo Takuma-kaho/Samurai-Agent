@@ -11,7 +11,7 @@ const Output = reflectionSuggestionApplyValueSchema;
 type ReflectionTarget = z.infer<typeof Output>["resource"];
 
 export interface ReflectionSuggestionApplyPorts {
-  listReflectionSuggestions(): Promise<ReflectionSuggestionRecord[]>;
+  getReflectionSuggestion(sessionId: string, suggestionId: string): Promise<ReflectionSuggestionRecord | undefined>;
   reflectionSuggestionError(code: "not_found" | "conflict", message: string): Error;
   ensureReflectionMutationSession(): Promise<SessionRecord>;
   createReflectionMutationEnvelope(content: string): MessageEnvelope;
@@ -73,7 +73,8 @@ const reflectionSuggestionApply = defineCommand<ReflectionSuggestionApplyPorts>(
   createHandler(ports) {
     return {
       execute: async function handleReflectionSuggestionApply(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const suggestion = (await ports.listReflectionSuggestions()).find((item) => item.id === input.suggestion_id);
+        if (!context.sessionId) throw new Error("trusted_context_session_required");
+        const suggestion = await ports.getReflectionSuggestion(context.sessionId, input.suggestion_id);
         if (!suggestion) throw ports.reflectionSuggestionError("not_found", `Reflection suggestion not found: ${input.suggestion_id}`);
         if (suggestion.status !== "proposed") throw ports.reflectionSuggestionError("conflict", "reflection_suggestion_already_settled");
         const session = await ports.ensureReflectionMutationSession();

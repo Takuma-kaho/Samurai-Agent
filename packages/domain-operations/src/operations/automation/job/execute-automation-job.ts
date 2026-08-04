@@ -9,7 +9,7 @@ export interface AutomationJobExecutionPorts {
   automationExecutionError(code: "not_found" | "conflict", message: string): Error;
   createAutomationRun(input: { id: string; kind: string; source: string; status: "started"; started_at: string }): Promise<AutomationRunRecord>;
   updateAutomationRun(record: AutomationRunRecord): Promise<AutomationRunRecord>;
-  ensureScheduledAutomationSession(context: ScheduledContext, title: string): Promise<SessionRecord>;
+  ensureScheduledAutomationSession(context: ScheduledContext, title: string, roomId?: string): Promise<SessionRecord>;
   createScheduledAutomationEnvelope(context: ScheduledContext, content: string): MessageEnvelope;
   runScheduledAutomationMutation(input: { session: SessionRecord; envelope: MessageEnvelope; context: ScheduledContext; operationName: string; inputRef?: ResourceRef; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: AutomationRunRecord; ref: ResourceRef; summary: string; rollbackPoint?: RollbackPoint }> }): Promise<{ resource: AutomationRunRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
   automationJobRef(job: AutomationJobRecord): ResourceRef;
@@ -28,7 +28,13 @@ export interface AutomationJobExecutionPorts {
 export async function executeAutomationJob(ports: AutomationJobExecutionPorts, job: AutomationJobRecord, runStartedAt: string) {
   let automationRun = await ports.createAutomationRun({ id: createId("automationrun"), kind: job.kind, source: "automation_job", status: "started", started_at: runStartedAt });
   const context: ScheduledContext = { source: "cron", actor_identity: "owner_scheduled", instruction_source: "scheduled_context", channel: "cron", session_key: `cron:automation:${job.id}` };
-  const session = await ports.ensureScheduledAutomationSession(context, job.title);
+  // Only translations read a persisted Room-bound source when they run later.
+  // Existing non-translation automation retains its established execution path.
+  const roomId = job.kind === "resource_translation" ? automationJobRoomId(job) : undefined;
+  if (job.kind === "resource_translation" && !roomId) {
+    throw ports.automationExecutionError("conflict", "automation_job_room_context_required");
+  }
+  const session = await ports.ensureScheduledAutomationSession(context, job.title, roomId);
   automationRun = await ports.updateAutomationRun({ ...automationRun, session_id: session.id });
   const envelope = ports.createScheduledAutomationEnvelope(context, job.target_instruction);
   try {
@@ -63,3 +69,8 @@ async function executeKind(ports: AutomationJobExecutionPorts, job: AutomationJo
 
 function isOneShot(schedule: string) { return ["once", "one-shot", "oneshot"].includes(schedule.trim().toLowerCase()); }
 function nextRun(schedule: string, fromMs = Date.now()) { const value = schedule.trim().toLowerCase(); if (value.includes("weekly")) return new Date(fromMs + 7 * 86400000).toISOString(); if (value.includes("hourly")) return new Date(fromMs + 3600000).toISOString(); const match = value.match(/every\s+(\d+(?:\.\d+)?)\s+hours?/); return new Date(fromMs + (match ? Number(match[1]) * 3600000 : 86400000)).toISOString(); }
+
+function automationJobRoomId(job: AutomationJobRecord): string | undefined {
+  const roomId = job.delivery_target.room_id;
+  return typeof roomId === "string" && roomId.trim() ? roomId : undefined;
+}

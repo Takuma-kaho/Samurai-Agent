@@ -8,7 +8,7 @@ type Ports = Pick<DomainOperationPorts,
   | "workspace.member.add" | "workspace.member.list" | "workspace.member.role.change" | "workspace.member.remove" | "workspace.owner.transfer"
   | "agent.workspace_permission.set"
   | "room.member.add" | "room.member.list" | "room.member.role.change" | "room.member.remove"
-  | "room.agent.permission.set" | "room.agent.remove" | "room.owner.transfer" | "room.owner.recover"
+  | "room.agent.permission.set" | "room.agent.remove" | "room.owner.transfer" | "room.owner.recover" | "room.ownerless.list"
   | "room.resource.share" | "room.resource.share.revoke" | "room.resource.share.list"
 >;
 
@@ -37,6 +37,7 @@ export function createRoomAgentDomainServicePorts(services: Pick<RuntimeDomainSe
     "room.agent.remove": { removeRoomAgent: (context, input) => services.roomAgentDomainService.removeRoomAgent(context, input) },
     "room.owner.transfer": { transferRoomOwnership: (context, input) => services.roomAgentDomainService.transferRoomOwnership(context, input) },
     "room.owner.recover": { recoverOwnerlessRoom: (context, input) => services.roomAgentDomainService.recoverOwnerlessRoom(context, input) },
+    "room.ownerless.list": readOnlyQueryPort<DomainOperationPorts["room.ownerless.list"]>({ listOwnerlessRooms: (context) => services.roomAgentDomainService.listOwnerlessRooms(context) }),
     "room.resource.share": { shareResource: (context, input) => services.roomAgentDomainService.shareResource(context, input) },
     "room.resource.share.revoke": { revokeResourceShare: (context, input) => services.roomAgentDomainService.revokeResourceShare(context, input) },
     "room.resource.share.list": readOnlyQueryPort<DomainOperationPorts["room.resource.share.list"]>({ listResourceShares: (context, input) => services.roomAgentDomainService.listResourceShares(context, input) })

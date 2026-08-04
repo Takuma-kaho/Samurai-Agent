@@ -101,12 +101,13 @@
 #### 実装済み
 
 - [x] 純粋な`@samurai-agent/room-permissions`に、参加者ID、人の役割、Agent許可、操作種別、許可理由を定義した。
-- [x] SQLite migration `009`で`workspace_members`、`room_members`、`room_agents`、`agent_workspace_permissions`、`resource_access_boundaries`、`room_resource_shares`を追加した。
+- [x] SQLite migration `009`で`workspace_members`、`room_members`、`room_agents`、`agent_workspace_permissions`、`resource_access_boundaries`、`room_resource_shares`を追加し、`010`で外部キー・現在状態の部分一意制約・古い境界IDの検査を追加した。
 - [x] Room作成とOwner登録、Owner移譲、参加解除・再参加、Agent許可、明示共有・共有解除をRepository transactionへ置いた。
 - [x] Domain Context、Operation、Audit、Backend Runへ参加者種別・参加者ID・依頼者・Roomを通した。
 - [x] Room/Workspace参加操作と共有操作をDomain Operationとして追加した。
 - [x] Chat、Agent Run、Backend Tool、検索、Context assembly、Memory/Wiki/Skill/Collection/File、履歴読取の本番入口へ共通判定を接続した。
-- [x] 検索とAgent Contextは、Room境界の候補絞り込みと返却直前の再確認を行う。
+- [x] 検索、Agent Context、履歴、診断、ファイル出所は、Room境界の候補絞り込みと返却・読み込み直前の再確認を行う。
+- [x] 共有先には共有対象の読み取り・利用資格だけを追加し、元Roomの履歴・編集・再共有権限を自動で渡さない。
 
 #### 完了判定
 
@@ -146,7 +147,7 @@
 | 2026-07-22 | Core-02 | focused Runnerのgroup・bundle rootを明示し、cache再利用後の実行を再確認した | `core:host-runtime:check`成功（required 18 / parsed 41 / untracked Core-02 34）。Workspace 14件は2.79秒、Runtime 55件は2.76秒で各exit code 0。Core Schema / Workspace Store / Runtime typecheckとGit差分検査は未達のため、Phase 0〜2は完了扱いにしない | 型検査・Git差分検査を成功終了させ、最新SourceでVerifier全体を再判定する |
 | 2026-07-29 | Core-04 | Phase 1〜3を完了。Bundle作成・検証・Import/Export、journal付きRestore・中断回復、Facade委譲を完成 | operation catalog確認、canonical ledger再生成（102 Command / 17 Query / 5 Deprecated）、対象3 packageのtypecheck、`pnpm core:workspace-persistence:verify`、`git diff --check`が成功。独立レビューで見つけたjournal書込み失敗時の再起動漏れも修正・再検証済み。根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)。ベースHEADは`ec35ea0e30e98d27f6fc160e3b43639529d29f7b`、ユーザー指定により変更は未コミット | 次に着手するCoreを別途決める |
 | 2026-08-03 | 新Core-06 | Room参加者・役割・Agent個別許可・情報境界・明示共有の実装へ着手。旧Artifact・Collection分類は採用しない | migration `009`、共通権限判定、Domain Operation、検索/Context/Host接続を追加。最終の集中検証と構造確認は継続中 | 検証結果とセルフチェックを記録し、完了条件を再判定する |
-| 2026-08-03 | 新Core-06 | Room参加、役割、Agent個別許可、情報境界、明示共有を完了。Room管理UI・外部認証・Gateway接続・学習判断・旧Bundle互換は追加していない | focused Vitest 3 files / 14 tests、関連5 packageのtypecheck、Domain Operation生成整合（149 bindings）、本番経路の構造確認、`git diff --check`が成功 | 次のCoreは別途決定する |
+| 2026-08-04 | 新Core-06 | 前回実装後の深い本番経路を調整。全操作分類を明示し、候補先行・直前再確認、共有先の読み取り境界、ファイル・履歴・診断・予約処理のRoom境界、SQLite migration 010の整合性を追加 | focused Vitest 3 files / 15 tests、関連4 packageのtypecheck、`node scripts/generate-domain-operation-index.mjs --check`（150 bindings）、`git diff --check`が成功。総合Domain ingress確認はCore 06対象外のGateway fixtureで停止したため、成功扱いにしていない | 次のCoreは別途決定する |
 
 追記用テンプレート:
 

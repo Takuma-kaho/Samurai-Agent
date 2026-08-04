@@ -75,10 +75,32 @@ async patchMemoryLearningMetadata(input: {
   return { ...next, file_path: filePath };
 }
 
-async listMemory(options: { includeArchived?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<MemoryWithFilePath[]> {
+async listMemory(options: {
+  includeArchived?: boolean;
+  activityContext?: UsageScopeQueryContext;
+  resourceIds?: string[];
+  includeLegacy?: boolean;
+} = {}): Promise<MemoryWithFilePath[]> {
   let query = this.db.selectFrom("memory_index").selectAll();
   if (!options.includeArchived) {
     query = query.where("state", "!=", "archived");
+  }
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      query = query.where("id", "in", resourceIds);
+    } else {
+      query = query.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "memory")
+            .whereRef("boundary.resource_id", "=", "memory_index.id")
+        ))
+      ]));
+    }
   }
   if (options.activityContext) {
     query = query.where((eb) => eb.or([
@@ -92,7 +114,12 @@ async listMemory(options: { includeArchived?: boolean; activityContext?: UsageSc
   return rows.map((row) => ({ ...withUsageScope(parse<MemoryFrontmatter>(row.frontmatter_json)), file_path: row.file_path }));
 }
 
-async listMemoryForSession(sessionId: string, options: { includeArchived?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<MemoryWithFilePath[]> {
+async listMemoryForSession(sessionId: string, options: {
+  includeArchived?: boolean;
+  activityContext?: UsageScopeQueryContext;
+  resourceIds?: string[];
+  includeLegacy?: boolean;
+} = {}): Promise<MemoryWithFilePath[]> {
   const messages = await this.sessions.listMessages(sessionId);
   const envelopeIds = new Set<string>();
   for (const message of messages) {
@@ -108,6 +135,23 @@ async listMemoryForSession(sessionId: string, options: { includeArchived?: boole
   let query = this.db.selectFrom("memory_index").selectAll();
   if (!options.includeArchived) {
     query = query.where("state", "!=", "archived");
+  }
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      query = query.where("id", "in", resourceIds);
+    } else {
+      query = query.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "memory")
+            .whereRef("boundary.resource_id", "=", "memory_index.id")
+        ))
+      ]));
+    }
   }
   if (options.activityContext) {
     query = query.where((eb) => eb.or([
@@ -140,20 +184,22 @@ async searchMemory(query: string, limit = 5, options: {
     if (!options.includeLegacy) {
       if (resourceIds.length === 0) return [];
       dbQuery = dbQuery.where("id", "in", resourceIds);
-    } else if (options.activityContext) {
-      dbQuery = dbQuery.where((eb) => eb.or([
-        eb("usage_scope_kind", "=", "workspace"),
-        eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
-        eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
-        eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)]),
-        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : [])
-      ]));
-    } else if (resourceIds.length > 0) {
-      dbQuery = dbQuery.where("id", "in", resourceIds);
     } else {
-      return [];
+      // A Workspace Owner may read only a genuinely unbounded legacy Memory,
+      // never a formally Room-bound Memory from another Room. Room boundary
+      // and UsageScope are separate AND-ed constraints.
+      dbQuery = dbQuery.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "memory")
+            .whereRef("boundary.resource_id", "=", "memory_index.id")
+        ))
+      ]));
     }
-  } else if (options.activityContext) {
+  }
+  if (options.activityContext) {
     dbQuery = dbQuery.where((eb) => eb.or([
       eb("usage_scope_kind", "=", "workspace"),
       eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),

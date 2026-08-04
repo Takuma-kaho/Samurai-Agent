@@ -4,6 +4,7 @@ import {
   evaluateRoomPermission,
   evaluateWorkspacePermission,
   type ParticipantPrincipal,
+  type PermissionDecision,
   type RoomAction,
   type RoomHumanRole,
   type WorkspaceAction,
@@ -36,7 +37,7 @@ type RoomAuthorizationStore = Pick<WorkspaceStore,
   | "listRoomIdsForHuman"
   | "listRoomIdsForAgent"
   | "listResourceIdsAvailableInRoom"
-  | "isResourceAvailableInRoom"
+  | "getResourceAccessMode"
 >;
 
 export interface RoomResourceCandidateAccess {
@@ -74,6 +75,12 @@ export class RoomAuthorizationService {
   }
 
   async roomDecision(principal: ParticipantPrincipal, roomId: string, action: RoomAction) {
+    // Workspace membership is a prerequisite, never a grant for Room content.
+    // This closes the stale Room-membership path after Workspace removal.
+    if (principal.kind === "human") {
+      const workspace = await this.store.getWorkspaceMember(principal.participantId);
+      if (!workspace) return deniedRoomDecision(action, "workspace_membership_missing");
+    }
     const membership = principal.kind === "human"
       ? await this.store.getRoomMember(roomId, principal.participantId)
       : undefined;
@@ -90,7 +97,11 @@ export class RoomAuthorizationService {
 
     // An Agent acts only within a currently permitted human request. This is
     // re-evaluated for each read, write, and tool execution after admission.
-    const requester = await this.store.getRoomMember(roomId, principal.requestedByParticipantId);
+    const [workspaceRequester, requester] = await Promise.all([
+      this.store.getWorkspaceMember(principal.requestedByParticipantId),
+      this.store.getRoomMember(roomId, principal.requestedByParticipantId)
+    ]);
+    if (!workspaceRequester) return deniedRoomDecision(action, "workspace_membership_missing");
     const requesterDecision = evaluateRoomPermission({
       principal: { kind: "human", participantId: principal.requestedByParticipantId },
       action,
@@ -103,7 +114,6 @@ export class RoomAuthorizationService {
     await this.assertRoom({ kind: "human", participantId: input.requesterParticipantId }, input.roomId, "execute");
     await this.assertRoom({
       kind: "agent",
-      participantId: `agent:${input.agentId}`,
       agentId: input.agentId,
       requestedByParticipantId: input.requesterParticipantId
     }, input.roomId, "execute");
@@ -147,13 +157,15 @@ export class RoomAuthorizationService {
     resourceId: string;
   }): Promise<void> {
     await this.assertRoom(principal, input.roomId, input.action);
-    const available = await this.store.isResourceAvailableInRoom({
+    const mode = await this.store.getResourceAccessMode({
       resourceKind: input.resourceKind,
       resourceId: input.resourceId,
       roomId: input.roomId,
       participantId: principal.kind === "agent" ? principal.requestedByParticipantId : principal.participantId
     });
-    if (!available) throw new RoomAuthorizationError("resource", input.action, "resource_access_boundary_denied");
+    if (mode === "denied" || (mode === "shared" && input.action === "edit")) {
+      throw new RoomAuthorizationError("resource", input.action, "resource_access_boundary_denied");
+    }
   }
 
   /**
@@ -179,9 +191,20 @@ export class RoomAuthorizationService {
 
   async visibleRoomIds(principal: ParticipantPrincipal): Promise<Set<string>> {
     if (principal.kind === "human") return new Set(await this.store.listRoomIdsForHuman(principal.participantId));
-    if (principal.kind === "agent") return new Set(await this.store.listRoomIdsForAgent(principal.agentId));
+    if (principal.kind === "agent") {
+      const [agentRooms, requesterRooms] = await Promise.all([
+        this.store.listRoomIdsForAgent(principal.agentId),
+        this.store.listRoomIdsForHuman(principal.requestedByParticipantId)
+      ]);
+      const requesterSet = new Set(requesterRooms);
+      return new Set(agentRooms.filter((roomId) => requesterSet.has(roomId)));
+    }
     return new Set();
   }
+}
+
+function deniedRoomDecision(action: RoomAction, reason: "workspace_membership_missing"): PermissionDecision {
+  return { allowed: false, action, reason };
 }
 
 function workspaceMembership(record: WorkspaceMemberRecord) {

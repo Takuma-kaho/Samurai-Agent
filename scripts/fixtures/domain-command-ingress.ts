@@ -7,6 +7,7 @@ import { getDomainCommandEntry } from "../../packages/action-catalog/src/index";
 import { AgentBackendRegistry, type AgentBackend } from "../../packages/agent-backends/src/index";
 import type { ArtifactRecord, JsonValue, OperationRecord } from "../../packages/core-schemas/src/index";
 import { DomainOperationRegistry } from "../../packages/domain-operations/src/registry/operation-registry";
+import { localOwnerParticipantId } from "../../packages/room-permissions/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { closeApiServer, createApiServer } from "../../apps/server/src/api-server";
 
@@ -216,6 +217,14 @@ try {
     enabled: true,
     created_at: setupNow,
     updated_at: setupNow
+  });
+  await server.store.setRoomAgentPermissions({
+    roomId: "ingress-room",
+    agentId: "ingress-agent",
+    canView: true,
+    canEdit: true,
+    canExecute: true,
+    actorId: localOwnerParticipantId
   });
   await server.store.patchSettings({
     default_room_id: "ingress-room",

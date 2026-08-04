@@ -26,7 +26,7 @@ export interface WorkspaceContextPreviewStorePort extends MemoryRetrievalPort, W
   }): Promise<SkillContextSkill[]>;
   listSkillUsage: ContextPreviewPorts["skills"]["listUsage"];
   listSkillSupportFileRefs: ContextPreviewPorts["skills"]["listSupportFileRefs"];
-  listCollectionSchemas: ContextPreviewPorts["collections"]["listSchemas"];
+  listCollectionSchemas(options?: { resourceIds?: string[]; includeLegacy?: boolean }): ReturnType<ContextPreviewPorts["collections"]["listSchemas"]>;
   listCollectionNotes(collectionId: string): Promise<Array<{ collection_id: string; file_path: string; content: string; role: "context_only" }>>;
   search(query: string, input?: { sessionIds?: string[] }): ReturnType<ContextPreviewPorts["sessionSearch"]["search"]>;
 }
@@ -44,22 +44,18 @@ export interface WorkspaceContextPreviewAccess {
 
 /** Concrete Workspace Store adapter; the context preview core only sees ContextPreviewPorts. */
 export class WorkspaceContextPreviewAdapter {
-  readonly ports: ContextPreviewPorts;
-
   constructor(
     private readonly store: WorkspaceContextPreviewStorePort,
     private readonly options: WorkspaceContextPreviewAdapterOptions,
-    private readonly authorization?: RoomAuthorizationService
-  ) {
-    this.ports = this.createPorts();
-  }
+    private readonly authorization: RoomAuthorizationService
+  ) {}
 
   /** A Run-specific view prevents Memory, Skill, Wiki, Collection and search leakage. */
   portsForAccess(access: WorkspaceContextPreviewAccess): ContextPreviewPorts {
     return this.createPorts(access);
   }
 
-  private createPorts(access?: WorkspaceContextPreviewAccess): ContextPreviewPorts {
+  private createPorts(access: WorkspaceContextPreviewAccess): ContextPreviewPorts {
     const environment: SkillContextEnvironment = {
       runtime: "local_workspace",
       platform: process.platform,
@@ -74,35 +70,51 @@ export class WorkspaceContextPreviewAdapter {
     };
     return {
       session: {
-        getSession: (sessionId) => this.store.getSession(sessionId),
+        getSession: async (sessionId) => {
+          const session = await this.store.getSession(sessionId);
+          if (!session || !await this.sessionAllowed(access, sessionId)) return undefined;
+          return session;
+        },
         getSettings: () => this.store.getSettings()
       },
       summary: {
-        listMessages: (sessionId) => this.store.listMessages(sessionId),
-        listOperations: (sessionId) => this.store.listOperations(sessionId),
-        listBackendRuns: (sessionId) => this.store.listBackendRuns(sessionId),
-        listToolRuns: (sessionId) => this.store.listToolRuns({ sessionId }),
-        listWorkspaceChanges: (sessionId) => this.store.listWorkspaceChanges(sessionId)
+        listMessages: async (sessionId) => {
+          await this.assertSessionAccess(access, sessionId);
+          return this.store.listMessages(sessionId);
+        },
+        listOperations: async (sessionId) => {
+          await this.assertSessionAccess(access, sessionId);
+          return this.store.listOperations(sessionId);
+        },
+        listBackendRuns: async (sessionId) => {
+          await this.assertSessionAccess(access, sessionId);
+          return this.store.listBackendRuns(sessionId);
+        },
+        listToolRuns: async (sessionId) => {
+          await this.assertSessionAccess(access, sessionId);
+          return this.store.listToolRuns({ sessionId });
+        },
+        listWorkspaceChanges: async (sessionId) => {
+          await this.assertSessionAccess(access, sessionId);
+          return this.store.listWorkspaceChanges(sessionId);
+        }
       },
       memory: {
         retrieve: async (query, activityContext) => {
-          const retrievalStore: MemoryRetrievalPort = access
-            ? {
-                searchMemory: async (searchQuery, limit, options) => {
-                  const candidates = await this.store.searchMemory(searchQuery, limit, {
-                    ...options,
-                    ...await this.resourceCandidateOptions(access, "memory")
-                  });
-                  return this.filterResources(access, candidates, "memory", (candidate) => candidate.id);
-                },
-                readMemoryContent: async (memoryId) => {
-                  if (!await this.resourceAllowed(access, "memory", memoryId)) return undefined;
-                  return this.store.readMemoryContent(memoryId);
-                }
-              }
-            : this.store;
+          const retrievalStore: MemoryRetrievalPort = {
+            searchMemory: async (searchQuery, limit, options) => {
+              const candidates = await this.store.searchMemory(searchQuery, limit, {
+                ...options,
+                ...await this.resourceCandidateOptions(access, "memory")
+              });
+              return this.filterResources(access, candidates, "memory", (candidate) => candidate.id);
+            },
+            readMemoryContent: async (memoryId) => {
+              if (!await this.resourceAllowed(access, "memory", memoryId)) return undefined;
+              return this.store.readMemoryContent(memoryId);
+            }
+          };
           const result = await retrieveActiveMemoryWithReport(retrievalStore, query, activityContext);
-          if (!access) return result;
           const candidates = await this.filterResources(access, result.candidates, "memory", (candidate) => candidate.frontmatter.id);
           return {
             candidates,
@@ -115,19 +127,29 @@ export class WorkspaceContextPreviewAdapter {
             }
           };
         },
-        loadFreezeSnapshot: (input) => loadFreezeSnapshot(this.store, input)
+        loadFreezeSnapshot: async (input) => {
+          const refs = [
+            ...input.memoryRefs.map((ref) => ({ kind: "memory", id: ref.id })),
+            ...input.skillRefs.map((ref) => ({ kind: "skill", id: ref.id })),
+            ...input.wikiRefs.map((ref) => ({ kind: "wiki", id: ref.id }))
+          ];
+          for (const ref of refs) {
+            if (!await this.resourceAllowed(access, ref.kind, ref.id)) return undefined;
+          }
+          return loadFreezeSnapshot(this.store, input);
+        }
       },
       wiki: {
         build: async (query, activityContext) => buildKnowledgeWikiContext({
           searchWiki: async (searchQuery, limit, searchOptions) => {
             const candidates = await this.store.searchWiki(searchQuery, limit, {
               ...searchOptions,
-              ...(access ? await this.resourceCandidateOptions(access, "wiki") : {})
-            });
-            return access ? this.filterResources(access, candidates, "wiki", (candidate) => candidate.id) : candidates;
+            ...await this.resourceCandidateOptions(access, "wiki")
+          });
+            return this.filterResources(access, candidates, "wiki", (candidate) => candidate.id);
           },
           readWikiContent: async (id) => {
-            if (access && !await this.resourceAllowed(access, "wiki", id)) return undefined;
+            if (!await this.resourceAllowed(access, "wiki", id)) return undefined;
             return this.store.readWikiContent(id);
           }
         }, query, activityContext)
@@ -137,13 +159,12 @@ export class WorkspaceContextPreviewAdapter {
           const candidates = (await this.store.searchSkills(query, limit, {
             states: ["active", "pinned", "project"],
             ...(activityContext ? { activityContext } : {}),
-            ...(access ? await this.resourceCandidateOptions(access, "skill") : {})
+            ...await this.resourceCandidateOptions(access, "skill")
           })).filter((skill) => skill.frontmatter.evidence_state !== "conflict" && skill.frontmatter.usage_state !== "dormant");
-          return access ? this.filterResources(access, candidates, "skill", (skill) => skill.id) : candidates;
+          return this.filterResources(access, candidates, "skill", (skill) => skill.id);
         },
         listUsage: async () => {
           const usage = await this.store.listSkillUsage();
-          if (!access) return usage;
           const filtered = await Promise.all(usage.map(async (entry) => ({
             entry,
             allowed: await this.resourceAllowed(access, "skill", entry.skill_id)
@@ -151,18 +172,20 @@ export class WorkspaceContextPreviewAdapter {
           return filtered.filter((entry) => entry.allowed).map((entry) => entry.entry);
         },
         listSupportFileRefs: async (skillId) => {
-          if (access && !await this.resourceAllowed(access, "skill", skillId)) return [];
+          if (!await this.resourceAllowed(access, "skill", skillId)) return [];
           return this.store.listSkillSupportFileRefs(skillId);
         },
         environment
       },
       collections: {
         listSchemas: async () => {
-          const schemas = await this.store.listCollectionSchemas();
-          return access ? this.filterResources(access, schemas, "collection_schema", (schema) => schema.id) : schemas;
+          const schemas = await this.store.listCollectionSchemas(
+            await this.resourceCandidateOptions(access, "collection_schema")
+          );
+          return this.filterResources(access, schemas, "collection_schema", (schema) => schema.id);
         },
         listNotes: async (collectionId) => {
-          if (access && !await this.resourceAllowed(access, "collection_schema", collectionId)) return [];
+          if (!await this.resourceAllowed(access, "collection_schema", collectionId)) return [];
           return (await this.store.listCollectionNotes(collectionId)).map((note) => ({
             collection_id: note.collection_id,
             file_path: note.file_path,
@@ -173,25 +196,28 @@ export class WorkspaceContextPreviewAdapter {
       },
       sessionSearch: {
         search: async (query) => {
-          const results = await this.store.search(query, access
-            ? { sessionIds: await this.authorizedSessionIds(access) }
-            : undefined);
-          return access ? this.filterSessionSearch(access, results) : results;
+          const results = await this.store.search(query, { sessionIds: await this.authorizedSessionIds(access) });
+          return this.filterSessionSearch(access, results);
         }
       },
       externalAssist: {
-        build: (input) => buildExternalAssistContext({
-          store: {
-            listExternalAssistRecords: (recordInput) => this.store.listExternalAssistRecords(recordInput),
-            saveExternalAssistRecord: (record: ExternalAssistRecord) => this.store.saveExternalAssistRecord(record)
-          },
-          providers: this.options.externalAssistProviders ?? [],
-          sessionId: input.sessionId,
-          query: input.query,
-          role: input.role,
-          recentMessages: input.recentMessages,
-          sessionSearch: input.sessionSearch
-        })
+        build: async (input) => {
+          // Re-check at the external boundary, after context was assembled but
+          // immediately before its contents could leave the Workspace.
+          await this.assertSessionAccess(access, input.sessionId);
+          return buildExternalAssistContext({
+            store: {
+              listExternalAssistRecords: (recordInput) => this.store.listExternalAssistRecords(recordInput),
+              saveExternalAssistRecord: (record: ExternalAssistRecord) => this.store.saveExternalAssistRecord(record)
+            },
+            providers: this.options.externalAssistProviders ?? [],
+            sessionId: input.sessionId,
+            query: input.query,
+            role: input.role,
+            recentMessages: input.recentMessages,
+            sessionSearch: input.sessionSearch
+          });
+        }
       },
       tools: { listAvailable: () => proposalCapabilityManifest.agent_tools },
       errors: { sessionNotFound: this.options.sessionNotFound },
@@ -216,7 +242,6 @@ export class WorkspaceContextPreviewAdapter {
   }
 
   private async authorizedSessionIds(access: WorkspaceContextPreviewAccess): Promise<string[]> {
-    if (!this.authorization) return [];
     const candidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.roomId, "session");
     const ids = new Set(candidateAccess.resourceIds);
     if (candidateAccess.includeLegacy) {
@@ -231,7 +256,6 @@ export class WorkspaceContextPreviewAdapter {
   }
 
   private async resourceAllowed(access: WorkspaceContextPreviewAccess, resourceKind: string, resourceId: string): Promise<boolean> {
-    if (!this.authorization) return true;
     try {
       // Final check happens immediately before the candidate reaches Host context.
       await this.authorization.assertResource(access.principal, { roomId: access.roomId, action: "read", resourceKind, resourceId });
@@ -246,7 +270,27 @@ export class WorkspaceContextPreviewAdapter {
     access: WorkspaceContextPreviewAccess,
     resourceKind: string
   ): Promise<{ resourceIds: string[]; includeLegacy: boolean }> {
-    if (!this.authorization) return { resourceIds: [], includeLegacy: true };
     return this.authorization.resourceCandidateAccess(access.principal, access.roomId, resourceKind);
+  }
+
+  private async sessionAllowed(access: WorkspaceContextPreviewAccess, sessionId: string): Promise<boolean> {
+    try {
+      await this.assertSessionAccess(access, sessionId);
+      return true;
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) return false;
+      throw error;
+    }
+  }
+
+  private async assertSessionAccess(access: WorkspaceContextPreviewAccess, sessionId: string): Promise<void> {
+    const session = await this.store.getSession(sessionId);
+    if (!session?.room_id) throw this.options.sessionNotFound(sessionId);
+    await this.authorization.assertResource(access.principal, {
+      roomId: access.roomId,
+      action: "read",
+      resourceKind: "session",
+      resourceId: session.id
+    });
   }
 }

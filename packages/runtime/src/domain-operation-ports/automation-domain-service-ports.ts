@@ -19,7 +19,7 @@ export function createAutomationDomainServicePorts(services: Pick<RuntimeDomainS
       automationExecutionError: (code, message) => services.automationDomainService.jobError(code, message),
       createAutomationRun: (input) => services.automationDomainService.createExecutionRun(input),
       updateAutomationRun: (record) => services.automationDomainService.updateExecutionRun(record),
-      ensureScheduledAutomationSession: (context, title) => services.automationDomainService.ensureExecutionSession(context, title),
+      ensureScheduledAutomationSession: (context, title, roomId) => services.automationDomainService.ensureExecutionSession(context, title, roomId),
       createScheduledAutomationEnvelope: (context, content) => services.automationDomainService.createExecutionEnvelope(context, content),
       runScheduledAutomationMutation: (input) => services.automationDomainService.runExecutionMutation(input),
       automationJobRef: (job) => services.automationDomainService.jobRef(job),

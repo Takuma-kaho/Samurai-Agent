@@ -45,7 +45,11 @@ export function auditRecordFromRow(row: AuditRecordsTable): AuditRecord {
     instruction_source: row.instruction_source as AuditRecord["instruction_source"],
     inputs_summary: row.inputs_summary,
     outputs_summary: row.outputs_summary,
-    policy_decision_id: row.policy_decision_id,
+    ...(row.policy_decision_id ? { policy_decision_id: row.policy_decision_id } : {}),
+    ...(row.room_access_scope ? { room_access_scope: row.room_access_scope as AuditRecord["room_access_scope"] } : {}),
+    ...(row.room_access_action ? { room_access_action: row.room_access_action } : {}),
+    ...(row.room_access_allowed === null ? {} : { room_access_allowed: row.room_access_allowed === 1 }),
+    ...(row.room_access_reason ? { room_access_reason: row.room_access_reason } : {}),
     affected_resources: parse(row.affected_resources_json),
     rollback_point_id: row.rollback_point_id ?? undefined,
     created_at: row.created_at

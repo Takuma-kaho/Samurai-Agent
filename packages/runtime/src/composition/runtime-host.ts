@@ -59,7 +59,6 @@ export interface RuntimeHostCompositionDependencies {
     store: WorkspaceStore;
     backendRegistry: AgentBackendRegistry;
     emit: RuntimeEventSink;
-    contextPreviewPorts: ContextPreviewPorts;
   };
   /** Request and context preparation belongs outside the Host lifecycle. */
   preparation: {

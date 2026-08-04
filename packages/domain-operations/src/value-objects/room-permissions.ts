@@ -52,6 +52,20 @@ export const agentWorkspacePermissionValueSchema = z.object({
   updated_at: z.string()
 }).strict();
 
+/** A share target is typed before it reaches any Room authorization code. */
+export const roomShareableResourceReferenceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("session"), id: z.string().trim().min(1) }).strict(),
+  z.object({ kind: z.literal("artifact"), id: z.string().trim().min(1) }).strict(),
+  z.object({ kind: z.literal("memory"), id: z.string().trim().min(1) }).strict(),
+  z.object({ kind: z.literal("wiki"), id: z.string().trim().min(1) }).strict(),
+  z.object({ kind: z.literal("skill"), id: z.string().trim().min(1) }).strict(),
+  z.object({ kind: z.literal("collection_schema"), id: z.string().trim().min(1) }).strict(),
+  z.object({ kind: z.literal("collection_record"), collection_id: z.string().trim().min(1), record_id: z.string().trim().min(1) }).strict(),
+  z.object({ kind: z.literal("file"), path: z.string().trim().min(1) }).strict(),
+  z.object({ kind: z.literal("generated_surface"), id: z.string().trim().min(1) }).strict()
+]);
+export type RoomShareableResourceReferenceValue = z.infer<typeof roomShareableResourceReferenceSchema>;
+
 export const roomResourceShareValueSchema = z.object({
   id: z.string(),
   resource_access_boundary_id: z.string(),

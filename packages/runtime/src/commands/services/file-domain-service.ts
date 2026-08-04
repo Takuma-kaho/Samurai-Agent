@@ -12,14 +12,20 @@ export interface FileReadPort {
   readText(path: string): Promise<string>;
   readBytes(path: string): Promise<Uint8Array>;
   stat(path: string): Promise<FileInfo>;
-  list(path: WorkspacePath): Promise<DirectoryEntry[]>;
-  listArtifacts(): Promise<ArtifactRecord[]>;
-  listChanges(): Promise<WorkspaceChangeRecord[]>;
+  /** Rechecks the target immediately before a direct file read. */
+  assertReadablePath(path: string): Promise<void>;
+  /** Already Room-scoped and rechecked file paths; never a raw filesystem scan. */
+  listAccessibleFilePaths(path: WorkspacePath): Promise<string[]>;
+  /** Provenance is scoped to the current Room before it reaches this service. */
+  listArtifactsForPath(path: string): Promise<ArtifactRecord[]>;
+  listChangesForPath(path: string): Promise<WorkspaceChangeRecord[]>;
 }
 export interface FileWritePort {
   readTextIfExists(path: string): Promise<string | undefined>;
   writeText(path: string, content: string): Promise<void>;
   ensureParent(path: string): Promise<void>;
+  /** Rechecks the target immediately before a direct filesystem mutation. */
+  assertWritablePath(path: string): Promise<void>;
   reindexCollections(): Promise<void>;
   isManagedCollectionPath(path: string): boolean;
 }
@@ -38,9 +44,18 @@ export class FileDomainService {
   ensureFileSession() { return this.host.ensureSession(); }
   createFileEnvelope(session: SessionRecord, content: string) { return this.host.createEnvelope(session, content); }
   runFileMutation(input: Parameters<FileMutationHost["runMutation"]>[0]) { return this.host.runMutation(input); }
-  readFileTextIfExists(path: string) { return this.write.readTextIfExists(path); }
-  ensureFileParent(path: string) { return this.write.ensureParent(path); }
-  writeFileText(path: string, content: string) { return this.write.writeText(path, content); }
+  async readFileTextIfExists(path: string) {
+    await this.write.assertWritablePath(path);
+    return this.write.readTextIfExists(path);
+  }
+  async ensureFileParent(path: string) {
+    await this.write.assertWritablePath(path);
+    return this.write.ensureParent(path);
+  }
+  async writeFileText(path: string, content: string) {
+    await this.write.assertWritablePath(path);
+    return this.write.writeText(path, content);
+  }
   isManagedCollectionPath(path: string) { return this.write.isManagedCollectionPath(path); }
   reindexManagedCollections(): Promise<void> { return this.write.reindexCollections(); }
   createFileRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.host.createRollback(operation, refs, before, after); }
@@ -49,18 +64,37 @@ export class FileDomainService {
 
   async readFile(input: { path: string }): Promise<{ resource: FileResource }> {
     const workspacePath = this.read.resolve(input.path);
+    await this.read.assertReadablePath(workspacePath.absolutePath);
     return { resource: { path: workspacePath.relativePath, content: await this.read.readText(workspacePath.absolutePath) } };
   }
 
   async listFiles(input: { path: string }): Promise<{ resource: FileResource }> {
     const workspacePath = this.read.resolve(input.path);
-    return { resource: { path: workspacePath.relativePath, entries: await this.read.list(workspacePath) } };
+    const filePaths = await this.read.listAccessibleFilePaths(workspacePath);
+    const entries = (await Promise.all(filePaths.map(async (relativePath): Promise<DirectoryEntry | undefined> => {
+      try {
+        const resolved = this.read.resolve(relativePath);
+        const info = await this.read.stat(resolved.absolutePath);
+        return { path: resolved.relativePath, kind: "file" as const, size: info.size };
+      } catch {
+        // A permitted file may be removed between the final access check and
+        // metadata lookup. It must not turn a list response into a stale read.
+        return undefined;
+      }
+    }))).filter((entry): entry is DirectoryEntry => entry !== undefined);
+    return { resource: { path: workspacePath.relativePath, entries } };
   }
 
   async inspectFile(input: { path: string }): Promise<{ resource: FileResource }> {
     const workspacePath = this.read.resolve(input.path);
-    const [bytes, info, artifacts, changes] = await Promise.all([this.read.readBytes(workspacePath.absolutePath), this.read.stat(workspacePath.absolutePath), this.read.listArtifacts(), this.read.listChanges()]);
-    return { resource: { path: workspacePath.relativePath, metadata: { size: info.size, modified_at: info.modifiedAt, content_hash: createHash("sha256").update(bytes).digest("hex") }, provenance: { artifact_ids: artifacts.filter((artifact) => artifact.file_ref.uri === workspacePath.relativePath).map((artifact) => artifact.id), workspace_change_ids: changes.filter((change) => change.resource_ref.uri === workspacePath.relativePath).map((change) => change.id) } } };
+    await this.read.assertReadablePath(workspacePath.absolutePath);
+    const [bytes, info, artifacts, changes] = await Promise.all([
+      this.read.readBytes(workspacePath.absolutePath),
+      this.read.stat(workspacePath.absolutePath),
+      this.read.listArtifactsForPath(workspacePath.relativePath),
+      this.read.listChangesForPath(workspacePath.relativePath)
+    ]);
+    return { resource: { path: workspacePath.relativePath, metadata: { size: info.size, modified_at: info.modifiedAt, content_hash: createHash("sha256").update(bytes).digest("hex") }, provenance: { artifact_ids: artifacts.map((artifact) => artifact.id), workspace_change_ids: changes.map((change) => change.id) } } };
   }
 
 }

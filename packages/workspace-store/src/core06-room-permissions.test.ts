@@ -27,8 +27,9 @@ describe("Core 06 Room participation persistence", () => {
     expect(owner).toMatchObject({ room_id: room.id, participant_id: localOwnerParticipantId, role: "owner" });
 
     const nextOwner = humanParticipantId("next-owner");
+    await store.addWorkspaceMember({ participantId: nextOwner, role: "member", actorId: localOwnerParticipantId });
     await store.addRoomMember({ roomId: room.id, participantId: nextOwner, role: "admin", actorId: localOwnerParticipantId });
-    await store.transferRoomOwnership({ roomId: room.id, fromParticipantId: localOwnerParticipantId, toParticipantId: nextOwner });
+    await store.transferRoomOwnership({ roomId: room.id, fromParticipantId: localOwnerParticipantId, toParticipantId: nextOwner, actorId: localOwnerParticipantId });
 
     expect((await store.listRoomMembers(room.id)).filter((member) => member.role === "owner")).toEqual([
       expect.objectContaining({ participant_id: nextOwner })
@@ -43,6 +44,7 @@ describe("Core 06 Room participation persistence", () => {
     const source = await createRoom(store, "room-core06-source", now);
     const target = await createRoom(store, "room-core06-target", now);
     const member = humanParticipantId("member");
+    await store.addWorkspaceMember({ participantId: member, role: "member", actorId: localOwnerParticipantId });
     await store.addRoomMember({ roomId: source.id, participantId: member, role: "member", actorId: localOwnerParticipantId });
     await store.addRoomMember({ roomId: target.id, participantId: member, role: "member", actorId: localOwnerParticipantId });
     const boundary = await store.ensureResourceAccessBoundary({
@@ -59,7 +61,7 @@ describe("Core 06 Room participation persistence", () => {
     await store.shareResource({ resourceAccessBoundaryId: boundary.id, sourceRoomId: source.id, targetRoomId: target.id, actorId: localOwnerParticipantId });
     expect(await store.isResourceAvailableInRoom({ resourceKind: "memory", resourceId: "memory-core06", roomId: target.id, participantId: member })).toBe(true);
 
-    await store.revokeRoomResourceShare({ resourceAccessBoundaryId: boundary.id, targetRoomId: target.id, actorId: localOwnerParticipantId });
+    await store.revokeRoomResourceShare({ resourceAccessBoundaryId: boundary.id, sourceRoomId: source.id, targetRoomId: target.id, actorId: localOwnerParticipantId });
     expect(await store.isResourceAvailableInRoom({ resourceKind: "memory", resourceId: "memory-core06", roomId: target.id, participantId: member })).toBe(false);
 
     const removed = await store.removeRoomMember({ roomId: source.id, participantId: member, actorId: localOwnerParticipantId });

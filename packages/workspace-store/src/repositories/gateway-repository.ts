@@ -62,13 +62,21 @@ async saveExternalSend(send: ExternalSendRecord): Promise<ExternalSendRecord> {
   return send;
 }
 
-async getExternalSend(id: string): Promise<ExternalSendRecord | undefined> {
-  const row = await this.db.selectFrom("external_sends").selectAll().where("id", "=", id).executeTakeFirst();
+async getExternalSend(id: string, input: { operationIds?: string[] } = {}): Promise<ExternalSendRecord | undefined> {
+  const operationIds = input.operationIds === undefined ? undefined : [...new Set(input.operationIds)];
+  if (operationIds?.length === 0) return undefined;
+  let query = this.db.selectFrom("external_sends").selectAll().where("id", "=", id);
+  if (operationIds) query = query.where("operation_id", "in", operationIds);
+  const row = await query.executeTakeFirst();
   return row ? externalSendFromRow(row) : undefined;
 }
 
-async listExternalSends(): Promise<ExternalSendRecord[]> {
-  const rows = await this.db.selectFrom("external_sends").selectAll().orderBy("created_at", "desc").execute();
+async listExternalSends(input: { operationIds?: string[] } = {}): Promise<ExternalSendRecord[]> {
+  const operationIds = input.operationIds === undefined ? undefined : [...new Set(input.operationIds)];
+  if (operationIds?.length === 0) return [];
+  let query = this.db.selectFrom("external_sends").selectAll().orderBy("created_at", "desc");
+  if (operationIds) query = query.where("operation_id", "in", operationIds);
+  const rows = await query.execute();
   return rows.map(externalSendFromRow);
 }
 

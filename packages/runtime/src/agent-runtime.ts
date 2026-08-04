@@ -82,10 +82,11 @@ import {
   type DomainOperationInput,
   type DomainOperationOutput,
   type DomainRuntimeCapability,
+  type DomainResourceTarget,
   type DomainQueryId,
   type TrustedDomainContext
 } from "@samurai-agent/domain-operations";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { connect as netConnect, type Socket } from "node:net";
 import path from "node:path";
@@ -247,7 +248,7 @@ import {
   type SandboxWorkspaceSyncExecutionResult
 } from "@samurai-agent/gateway";
 import { isSupportedLocale } from "@samurai-agent/localization";
-import { agentParticipantId, localOwnerParticipantId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
+import { agentParticipantId, collectionRecordResourceId, isRoomShareableResourceKind, localOwnerParticipantId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { buildMemoryFrontmatter, createSessionMemory, createTopicMemory, retrieveActiveMemoryWithReport } from "@samurai-agent/memory";
 import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type MessageSubmitOperation, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
@@ -316,6 +317,7 @@ import { BrowserDomainService } from "./commands/services/browser-domain-service
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
 import { RoomAgentDomainService } from "./commands/services/room-agent-domain-service";
 import { RoomAuthorizationError, RoomAuthorizationService } from "./commands/services/room-authorization-service";
+import { RoomResourceCatalog } from "./commands/services/room-resource-catalog";
 import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
 import { BackendToolBridgeService, type BackendToolBridgeCallResult } from "./host/backend-tool-bridge-service";
 import { LearningEvidenceAssembler } from "./learning/learning-evidence-assembler";
@@ -972,6 +974,8 @@ export class AgentRuntime {
   private readonly roomAgentDomainService: RoomAgentDomainService;
   private readonly roomAuthorizationService: RoomAuthorizationService;
   private readonly learningEvidenceAssembler: LearningEvidenceAssembler;
+  /** Identity cache only for an already live-checked pre-Core 06 Run. */
+  private readonly legacyRunRequesterIds = new Map<string, string>();
   private agentHost: AgentHost | undefined;
 
   constructor(
@@ -1062,9 +1066,21 @@ export class AgentRuntime {
       (code, message) => new RuntimeRequestError(code, message)
     );
     this.roomAuthorizationService = new RoomAuthorizationService(this.store);
+    const roomResourceCatalog = new RoomResourceCatalog(
+      this.store,
+      (input) => this.resolveWorkspacePath(input).relativePath,
+      async (relativePath) => {
+        try {
+          return (await stat(this.resolveWorkspacePath(relativePath).absolutePath)).isFile();
+        } catch {
+          return false;
+        }
+      }
+    );
     this.roomAgentDomainService = new RoomAgentDomainService(
       this.store,
       this.roomAuthorizationService,
+      roomResourceCatalog,
       (backendId) => Boolean(this.backendRegistry.get(backendId)),
       (code, message) => new RuntimeRequestError(code, message)
     );
@@ -1291,8 +1307,26 @@ export class AgentRuntime {
     this.appliedLearningEvaluationDomainService = new AppliedLearningEvaluationDomainService({
       isLearningEnabled: async () => (await this.store.getSettings()).learning_enabled,
       listUses: (input) => this.store.listLearningResourceUses(input),
-      listEvaluations: () => this.store.listLearningEvaluations(),
+      listEvaluations: (input) => this.store.listLearningEvaluations(input),
       getRun: (id) => this.store.getBackendRun(id),
+      assertRunAccess: (run) => this.assertRunAgentExecution(run),
+      assertResourceAccess: async ({ run, resourceKind, resourceId, activityContext, action }) => {
+        const access = await this.roomReadAccessForRun(run);
+        if (access.roomId !== activityContext.room_id || run.session_id !== activityContext.session_id || run.agent_id !== activityContext.agent_id) {
+          throw new RuntimeRequestError("forbidden", "learning_evaluation_activity_context_invalid");
+        }
+        try {
+          await this.roomAuthorizationService.assertResource(access.principal, {
+            roomId: access.roomId,
+            action,
+            resourceKind,
+            resourceId
+          });
+        } catch (error) {
+          if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+          throw error;
+        }
+      },
       listToolRuns: (input) => this.store.listToolRuns(input),
       listMessages: (sessionId) => this.store.listMessages(sessionId),
       getResource: async ({ resourceKind, resourceId }) => {
@@ -1317,7 +1351,25 @@ export class AgentRuntime {
           current_version: resource.frontmatter.version
         } : undefined;
       },
-      markRefuted: (input) => this.core05BackgroundReviewMutationDomainService.markRefuted(input),
+      markRefuted: async ({ run, ...input }) => {
+        const access = await this.roomReadAccessForRun(run);
+        if (access.roomId !== input.activityContext.room_id || run.session_id !== input.activityContext.session_id || run.agent_id !== input.activityContext.agent_id) {
+          throw new RuntimeRequestError("forbidden", "learning_evaluation_activity_context_invalid");
+        }
+        const ownerParticipantId = access.principal.kind === "agent"
+          ? access.principal.requestedByParticipantId
+          : access.principal.participantId;
+        return this.core05BackgroundReviewMutationDomainService.markRefuted({
+          ...input,
+          ownership: {
+            roomId: access.roomId,
+            ownerParticipantId,
+            creatorParticipantId: access.principal.kind === "agent"
+              ? agentParticipantId(access.principal.agentId)
+              : access.principal.participantId
+          }
+        });
+      },
       createReflectionRun: (record) => this.store.createReflectionRun(record),
       updateReflectionRun: (record) => this.store.updateReflectionRun(record),
       saveEvaluation: (record) => this.store.saveLearningEvaluation(record),
@@ -1347,14 +1399,34 @@ export class AgentRuntime {
       },
       curator: {
         ensureSession: () => this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled curator"),
-        getState: () => this.store.getCuratorState(), listMemory: () => this.store.listMemory(), listSkills: () => this.store.listSkills(),
-        listSkillUsage: () => this.store.listSkillUsage(), listWiki: () => this.store.listWiki({ activeOnly: false }),
+        // Curator has no Room requester. It may examine only pre-Core 06
+        // unbounded data, which remains explicitly Owner-only, never current
+        // Room-bound resources belonging to another participant.
+        getState: () => this.store.getCuratorState(),
+        listMemory: () => this.store.listMemory({ resourceIds: [], includeLegacy: true }),
+        listSkills: () => this.store.listSkills({ resourceIds: [], includeLegacy: true }),
+        listSkillUsage: ({ skillIds }) => this.store.listSkillUsage({ skillIds }),
+        listWiki: () => this.store.listWiki({ activeOnly: false, resourceIds: [], includeLegacy: true }),
         listBackendRuns: () => this.store.listBackendRuns(), listEvaluations: () => this.store.listLearningEvaluations(),
         listReflectionRuns: () => this.store.listReflectionRuns(), createReflectionRun: (run) => this.store.createReflectionRun(run),
         updateReflectionRun: (run) => this.store.updateReflectionRun(run), createSnapshot: (runId) => this.store.createLearningSnapshot(runId),
         restoreSnapshot: async (id) => { await this.store.restoreLearningSnapshot(id); }, saveState: (input) => this.store.saveCuratorState(input),
         saveSuggestion: async (value) => { await this.store.saveReflectionSuggestion(value); }, saveJobReport: async (value) => { await this.store.saveLearningJobReport(value); },
-        archiveResourceVersion: async (input) => { await this.learningResourceVersionDomainService.archive(input); },
+        archiveResourceVersion: async ({ roomId, ...input }) => {
+          if (!roomId) throw new RuntimeRequestError("conflict", "curator_room_context_required");
+          // A legacy resource becomes formally Room-bound before this write.
+          // `ensureResourceAccessBoundary` repeats the Owner's current Room
+          // membership inside its SQLite transaction.
+          await this.store.ensureResourceAccessBoundary({
+            resourceKind: input.resourceKind,
+            resourceId: input.resourceId,
+            sourceRoomId: roomId,
+            ownerParticipantId: localOwnerParticipantId,
+            creatorParticipantId: localOwnerParticipantId,
+            actorId: localOwnerParticipantId
+          });
+          await this.learningResourceVersionDomainService.archive(input);
+        },
         readMemory: (id) => this.store.readMemoryContent(id), replaceMemory: async (id, content) => { await this.store.replaceMemoryContent(id, content); },
         archiveMemory: async (id) => { await this.store.archiveMemory(id); }, archiveWiki: async (id) => { await this.store.setWikiState(id, "archived"); }, readWiki: (id) => this.store.readWikiContent(id),
         readSkill: (id) => this.store.readSkillMarkdown(id), listSkillSupport: (id) => this.store.listSkillSupportFiles(id),
@@ -1375,14 +1447,20 @@ export class AgentRuntime {
         getSession: (id) => this.store.getSession(id),
         getBackendRun: (id) => this.store.getBackendRun(id),
         listMessages: (sessionId) => this.store.listMessages(sessionId),
-        listSessions: () => this.store.listSessions(),
-        listBackendRuns: () => this.store.listBackendRuns(),
+        listBackendRuns: (sessionId) => this.store.listBackendRuns(sessionId),
         listToolRuns: (runId) => this.store.listToolRuns(runId ? { runId } : {}),
         listWorkspaceChanges: (sessionId) => this.store.listWorkspaceChanges(sessionId),
         listBackendEvents: (input) => this.store.listBackendEvents(input),
         loadArtifacts: (input) => this.loadReflectionArtifacts(input as Parameters<AgentRuntime["loadReflectionArtifacts"]>[0]),
         executeReflection: (input) => this.runReflectionForCompletedTurn(input as Parameters<AgentRuntime["runReflectionForCompletedTurn"]>[0]),
-        listReflectionSuggestions: () => this.store.listReflectionSuggestions(),
+        getReflectionSuggestion: async (sessionId, suggestionId) => {
+          const runs = await this.store.listReflectionRuns(sessionId);
+          for (const run of runs) {
+            const suggestion = (await this.store.listReflectionSuggestions(run.id)).find((item) => item.id === suggestionId);
+            if (suggestion) return suggestion;
+          }
+          return undefined;
+        },
         updateReflectionSuggestion: (suggestion) => this.store.updateReflectionSuggestion(suggestion),
         ensureReflectionSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
         createReflectionEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
@@ -1526,7 +1604,7 @@ export class AgentRuntime {
       execution: {
         createRun: (input) => this.store.createAutomationRun(input),
         updateRun: (record) => this.store.updateAutomationRun(record),
-        ensureSession: (context, title) => this.ensureSessionForContext(context, title),
+        ensureSession: (context, title, roomId) => this.ensureSessionForContext(context, title, roomId ? { roomId } : {}),
         createEnvelope: (context, content) => createGatewayEnvelope(context, content),
         runMutation: <T>(input: RecordedMutationInput<T>) => this.runRecordedMutation<T>(input),
         reindexWiki: () => this.store.reindexWiki(),
@@ -1655,13 +1733,15 @@ export class AgentRuntime {
       readText: (absolutePath) => readFile(absolutePath, "utf8"),
       readBytes: (absolutePath) => readFile(absolutePath),
       stat: async (absolutePath) => { const info = await stat(absolutePath); return { size: info.size, modifiedAt: info.mtime.toISOString() }; },
-      list: (workspacePath) => listWorkspaceDirectory(workspacePath.absolutePath, workspacePath.relativePath),
-      listArtifacts: () => this.store.listArtifacts(),
-      listChanges: () => this.store.listWorkspaceChanges()
+      assertReadablePath: (workspacePath) => this.assertActiveFilePathAccess(workspacePath, "read"),
+      listAccessibleFilePaths: (workspacePath) => this.listActiveRoomFilePaths(workspacePath.relativePath),
+      listArtifactsForPath: (relativePath) => this.listActiveRoomArtifactsForPath(relativePath),
+      listChangesForPath: (relativePath) => this.listActiveRoomChangesForPath(relativePath)
     }, {
       readTextIfExists: (absolutePath) => readFile(absolutePath, "utf8").catch(() => undefined),
       writeText: (absolutePath, content) => writeFile(absolutePath, content),
       ensureParent: (absolutePath) => mkdir(path.dirname(absolutePath), { recursive: true }).then(() => undefined),
+      assertWritablePath: (workspacePath) => this.assertActiveFilePathAccess(workspacePath, "edit"),
       reindexCollections: async () => { await this.store.reindexCollections(); },
       isManagedCollectionPath: (relativePath) => isManagedCollectionWorkspacePath(relativePath)
     }, {
@@ -1705,6 +1785,8 @@ export class AgentRuntime {
     }, {
       ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
       createEnvelope: (_session, content) => createGatewayEnvelope(webGatewayContext, content),
+      getForCurrentRoom: (id) => this.getExternalSendForActiveRoom(id),
+      assertCurrentRoomExecution: async () => { await this.assertActiveDomainRoomAction("execute"); },
       runMutation: (input) => this.runRecordedMutation({ ...input, context: webGatewayContext }),
       createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
       createId: () => createId("send"), now: () => nowIso(),
@@ -1873,8 +1955,7 @@ export class AgentRuntime {
       core: {
         store: this.store,
         backendRegistry: this.backendRegistry,
-        emit: this.emit,
-        contextPreviewPorts: this.contextPreviewAdapter.ports
+        emit: this.emit
       },
       preparation: {
         prepareRequest: (request) => this.prepareHostRequest(request),
@@ -2018,13 +2099,15 @@ export class AgentRuntime {
   private contextPreviewPortsForTurn(turn: AdmittedTurn) {
     const roomId = turn.session.room_id;
     const agentId = turn.run.agent_id ?? turn.request.agentId;
-    const requestedByParticipantId = turn.run.requested_by_participant_id ?? turn.request.requestedByParticipantId ?? localOwnerParticipantId;
+    const requestedByParticipantId = turn.run.requested_by_participant_id
+      ?? turn.request.requestedByParticipantId
+      ?? this.legacyRunRequesterIds.get(turn.run.id);
     if (!roomId || !agentId) throw new RuntimeRequestError("conflict", `run_room_agent_missing:${turn.run.id}`);
+    if (!requestedByParticipantId) throw new RuntimeRequestError("forbidden", `run_requester_missing:${turn.run.id}`);
     return this.contextPreviewAdapter.portsForAccess({
       roomId,
       principal: {
         kind: "agent",
-        participantId: agentParticipantId(agentId),
         agentId,
         requestedByParticipantId
       }
@@ -2035,13 +2118,12 @@ export class AgentRuntime {
     const session = await this.store.getSession(run.session_id);
     const roomId = session?.room_id;
     const agentId = run.agent_id ?? requestedAgentId;
-    const requesterParticipantId = run.requested_by_participant_id ?? requestedByParticipantId ?? localOwnerParticipantId;
+    const requesterParticipantId = await this.requesterParticipantIdForRun(run, requestedByParticipantId);
     if (!roomId || !agentId) throw new RuntimeRequestError("conflict", `run_room_agent_missing:${run.id}`);
     try {
       await this.roomAuthorizationService.assertAgentExecution({ requesterParticipantId, roomId, agentId });
       await this.roomAuthorizationService.assertResource({
         kind: "agent",
-        participantId: agentParticipantId(agentId),
         agentId,
         requestedByParticipantId: requesterParticipantId
       }, { roomId, action: "execute", resourceKind: "session", resourceId: session.id });
@@ -2049,6 +2131,30 @@ export class AgentRuntime {
       if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
       throw error;
     }
+  }
+
+  /** Re-resolves a Run's current Room principal before post-run reads. */
+  private async roomReadAccessForRun(run: BackendRunRecord): Promise<{ principal: ParticipantPrincipal; roomId: string }> {
+    const session = await this.store.getSession(run.session_id);
+    const roomId = session?.room_id;
+    const agentId = run.agent_id;
+    if (!roomId || !agentId) throw new RuntimeRequestError("conflict", `run_room_agent_missing:${run.id}`);
+    const requestedByParticipantId = await this.requesterParticipantIdForRun(run);
+    await this.assertRunAgentExecution(run, agentId, requestedByParticipantId);
+    return {
+      principal: { kind: "agent", agentId, requestedByParticipantId },
+      roomId
+    };
+  }
+
+  private async requesterParticipantIdForRun(run: BackendRunRecord, suppliedRequesterId?: string): Promise<string> {
+    const requester = run.requested_by_participant_id
+      ?? suppliedRequesterId
+      ?? this.legacyRunRequesterIds.get(run.id);
+    if (requester) return requester;
+    const legacyRequester = await this.legacyRequesterParticipantIdForRun(run);
+    this.legacyRunRequesterIds.set(run.id, legacyRequester);
+    return legacyRequester;
   }
 
   private async recordLearningResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void> {
@@ -2198,12 +2304,42 @@ export class AgentRuntime {
     return this.stdioMcpProcessPool.stats();
   }
 
-  async listAgentBackends(): Promise<AgentBackendStatus[]> {
+  async listAgentBackends(sessionId?: string): Promise<AgentBackendStatus[]> {
     const [statuses, runs] = await Promise.all([
       Promise.resolve(this.backendRegistry.statuses()),
-      this.store.listBackendRuns()
+      sessionId ? this.store.listBackendRuns(sessionId) : Promise.resolve([])
     ]);
     return statuses.map((status) => backendStatusWithRunHistory(status, runs));
+  }
+
+  /** External-send records are owned by the Room of their persisted Operation. */
+  private async getExternalSendForActiveRoom(id: string): Promise<ExternalSendRecord | undefined> {
+    const context = await this.assertActiveDomainRoomAction("execute");
+    const operationIds = (await this.store.listOperationsForRoom(context.roomId!)).map((operation) => operation.id);
+    return this.store.getExternalSend(id, { operationIds });
+  }
+
+  /** Rechecks the live principal immediately before an external side effect. */
+  private async assertActiveDomainRoomAction(action: "read" | "edit" | "execute"): Promise<TrustedDomainContext> {
+    const context = this.activeDomainContext.getStore();
+    if (!context?.participant || !context.roomId) {
+      throw new RuntimeRequestError("forbidden", "room_participant_required");
+    }
+    try {
+      await this.roomAuthorizationService.assertRoom(context.participant, context.roomId, action);
+      if (context.sessionId) {
+        await this.roomAuthorizationService.assertResource(context.participant, {
+          roomId: context.roomId,
+          action,
+          resourceKind: "session",
+          resourceId: context.sessionId
+        });
+      }
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+    return context;
   }
 
   private backendWorkingDirectoryMode(): "workspace" | "repo" {
@@ -2272,7 +2408,7 @@ export class AgentRuntime {
     const settings = await this.store.getSettings();
     const result = await this.contextPreviewAdapter.portsForAccess(access).memory.retrieve(input.query ?? "", {
       room_id: access.roomId,
-      session_id: input.sessionId ?? (await this.store.listSessions()).find((session) => session.room_id === access.roomId)?.id ?? "preview",
+      session_id: input.sessionId ?? (await this.store.listSessions({ roomIds: [access.roomId] }))[0]?.id ?? "preview",
       agent_id: settings.default_agent_id ?? "preview"
     });
     const output = {
@@ -2291,7 +2427,7 @@ export class AgentRuntime {
     const settings = await this.store.getSettings();
     const context = await this.contextPreviewAdapter.portsForAccess(access).wiki.build(input.query ?? "", {
       room_id: access.roomId,
-      session_id: input.sessionId ?? (await this.store.listSessions()).find((session) => session.room_id === access.roomId)?.id ?? "preview",
+      session_id: input.sessionId ?? (await this.store.listSessions({ roomIds: [access.roomId] }))[0]?.id ?? "preview",
       agent_id: settings.default_agent_id ?? "preview"
     });
     return {
@@ -2303,7 +2439,9 @@ export class AgentRuntime {
 
   async previewKnowledgeWikiGraph(input: { activeOnly?: boolean; sessionId?: string } = {}): Promise<KnowledgeWikiGraph> {
     const access = await this.localOwnerContextAccess(input.sessionId);
-    const pages = await this.filterCurrentRoomResources(access, "wiki", await this.store.listWiki({ activeOnly: input.activeOnly ?? true }));
+    const pages = await this.listCurrentRoomResources(access, "wiki", (candidates) =>
+      this.store.listWiki({ activeOnly: input.activeOnly ?? true, ...candidates })
+    );
     return knowledgeWikiGraph(pages, input.activeOnly ?? true);
   }
 
@@ -2340,9 +2478,20 @@ export class AgentRuntime {
     return allowed;
   }
 
+  private async listCurrentRoomResources<T extends { id: string }>(
+    access: { principal: ParticipantPrincipal; roomId: string },
+    resourceKind: string,
+    load: (candidates: { resourceIds: string[]; includeLegacy: boolean }) => Promise<T[]>
+  ): Promise<T[]> {
+    const candidates = await this.roomAuthorizationService.resourceCandidateAccess(access.principal, access.roomId, resourceKind);
+    return this.filterCurrentRoomResources(access, resourceKind, await load(candidates));
+  }
+
   async inspectKnowledgeWikiQuality(input: { sessionId?: string } = {}): Promise<KnowledgeWikiLintReport> {
     const access = await this.localOwnerContextAccess(input.sessionId);
-    const pages = await this.filterCurrentRoomResources(access, "wiki", await this.store.listWiki({ activeOnly: true }));
+    const pages = await this.listCurrentRoomResources(access, "wiki", (candidates) =>
+      this.store.listWiki({ activeOnly: true, ...candidates })
+    );
     const aliases = new Map<string, string>();
     const duplicateIndex = new Map<string, string[]>();
     for (const page of pages) {
@@ -2543,6 +2692,39 @@ export class AgentRuntime {
     return this.roomAuthorizationService.visibleRoomIds({ kind: "human", participantId: localOwnerParticipantId });
   }
 
+  /** First-stage candidate boundary for legacy HTTP reads. */
+  async localOwnerResourceCandidates(input: { roomId?: string; sessionId?: string }, resourceKind: string): Promise<{
+    roomId: string;
+    resourceIds: string[];
+    includeLegacy: boolean;
+  }> {
+    const access = await this.assertLocalOwnerRoomAccess(input);
+    const candidates = await this.roomAuthorizationService.resourceCandidateAccess(
+      { kind: "human", participantId: localOwnerParticipantId },
+      access.roomId,
+      resourceKind
+    );
+    return { roomId: access.roomId, ...candidates };
+  }
+
+  /** Candidate-first Session listing for the remaining local HTTP read route. */
+  async listLocalOwnerRoomSessions(input: { roomId?: string; sessionId?: string }): Promise<SessionRecord[]> {
+    const candidates = await this.localOwnerResourceCandidates(input, "session");
+    const sessions = candidates.includeLegacy
+      ? await this.store.listSessions({ roomIds: [candidates.roomId] })
+      : await this.store.listSessions({ ids: candidates.resourceIds });
+    const allowed = await Promise.all(sessions.map(async (session) => {
+      try {
+        await this.assertLocalOwnerRoomAccess({ roomId: candidates.roomId, resource: { kind: "session", id: session.id } });
+        return session;
+      } catch (error) {
+        if (error instanceof RuntimeRequestError && error.code === "forbidden") return undefined;
+        throw error;
+      }
+    }));
+    return allowed.filter((session): session is SessionRecord => Boolean(session));
+  }
+
   async runBackendToolBridgeCall(input: {
     runId: string;
     token: string;
@@ -2582,7 +2764,8 @@ export class AgentRuntime {
     const viewId = typeof input.view_id === "string" ? input.view_id.trim() : "";
     const recordId = typeof input.record_id === "string" ? input.record_id.trim() : "";
     const sessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
-    const schemas = await this.store.listCollectionSchemas();
+    const access = await this.collectionReadAccess();
+    const schemas = await this.listCurrentRoomResources(access, "collection_schema", (candidates) => this.store.listCollectionSchemas(candidates));
     const recentPresentation = sessionId ? await this.latestCollectionPresentation(sessionId) : undefined;
     const recentSchema = recentPresentation
       ? schemas.find((schema) => schema.id === recentPresentation.collection_id)
@@ -2607,7 +2790,7 @@ export class AgentRuntime {
       };
     }
     const schema = matches[0]!;
-    const records = await this.store.listCollectionRecords(schema.id);
+    const records = await this.listAccessibleCollectionRecords(access, schema.id);
     const recentState = recentPresentation?.collection_id === schema.id ? recentPresentation.view_state : undefined;
     const requestedViewId = viewId
       || (recentPresentation?.collection_id === schema.id ? recentPresentation.view_id : "");
@@ -2821,6 +3004,17 @@ export class AgentRuntime {
   private async projectChatTurn(run: BackendRunRecord): Promise<RunChatTurnResult> {
     const session = await this.store.getSession(run.session_id);
     if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${run.session_id}`);
+    if (!session.room_id || !run.agent_id) throw new RuntimeRequestError("conflict", `run_room_agent_missing:${run.id}`);
+    const requesterParticipantId = await this.requesterParticipantIdForRun(run);
+    const access = {
+      principal: {
+        kind: "agent" as const,
+        agentId: run.agent_id,
+        requestedByParticipantId: requesterParticipantId
+      },
+      roomId: session.room_id
+    };
+    const memoryCandidates = await this.roomAuthorizationService.resourceCandidateAccess(access.principal, access.roomId, "memory");
     const [messages, backendEvents, workspaceChanges, toolRuns, operations, artifacts, presentations, reflections, storedMemories] = await Promise.all([
       this.store.listMessages(session.id),
       this.store.listBackendEvents({ runId: run.id }),
@@ -2830,18 +3024,20 @@ export class AgentRuntime {
       this.store.listArtifactsForSession(session.id),
       run.output_message_id ? this.store.listMessagePresentations({ sessionId: session.id, messageId: run.output_message_id }) : Promise.resolve([]),
       this.store.listReflectionRuns(session.id),
-      this.store.listMemoryForSession(session.id, { includeArchived: true })
+      this.store.listMemoryForSession(session.id, { includeArchived: true, ...memoryCandidates })
     ]);
     // `file_path` is a Workspace Store read-model detail. Keep it out of the
     // Chat/Domain result, whose public contract is MemoryFrontmatter only.
-    const memories = storedMemories.map(({ file_path: _filePath, ...memory }) => memory);
+    const memories = (await this.filterCurrentRoomResources(access, "memory", storedMemories))
+      .map(({ file_path: _filePath, ...memory }) => memory);
     const operationIds = new Set(workspaceChanges.map((change) => change.legacy_operation_id).filter((id): id is string => Boolean(id)));
     const scopedOperations = operations.filter((operation) => operationIds.has(operation.id));
     const artifactIds = new Set(workspaceChanges.filter((change) => change.change_type === "artifact_created").map((change) => change.resource_ref.id));
     const scopedArtifacts = artifacts.filter((artifact) => artifactIds.has(artifact.id) || artifactIds.has(artifact.file_ref.id));
     const reflectionRuns = reflections.filter((reflection) => reflection.source_run_id === run.id);
-    const reflectionRunIds = new Set(reflectionRuns.map((reflection) => reflection.id));
-    const reflectionSuggestions = (await this.store.listReflectionSuggestions()).filter((suggestion) => reflectionRunIds.has(suggestion.reflection_run_id));
+    const reflectionSuggestions = (await Promise.all(
+      reflectionRuns.map((reflection) => this.store.listReflectionSuggestions(reflection.id))
+    )).flat();
     const userMessage = messages.find((message) => message.id === run.input_message_id);
     const outputMessage = run.output_message_id ? messages.find((message) => message.id === run.output_message_id) : undefined;
     return {
@@ -2980,12 +3176,39 @@ export class AgentRuntime {
     return output.result as TResult;
   }
 
-  private async executeSurfaceOperation(input: SurfaceOperation): Promise<SurfaceOperationRuntimeResult> {
+  /** Keeps post-command rendering inside the same live Room boundary. */
+  private async withSurfaceReadContext<T>(input: SurfaceOperation, work: () => Promise<T>): Promise<T> {
+    const commandId = commandIdForSurfaceOperation(input.kind);
+    const context = await this.trustedDomainContext("surface_operation", {}, surfaceOperationTrustedContext(input), commandId);
+    if (!context.participant || !context.roomId) {
+      throw new RuntimeRequestError("forbidden", "room_context_required");
+    }
+    try {
+      await this.roomAuthorizationService.assertRoom(context.participant, context.roomId, "read");
+      if (context.sessionId) {
+        await this.roomAuthorizationService.assertResource(context.participant, {
+          roomId: context.roomId,
+          action: "read",
+          resourceKind: "session",
+          resourceId: context.sessionId
+        });
+      }
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+    return this.activeDomainContext.run(context, work);
+  }
+
+  private async executeSurfaceOperation(input: SurfaceOperation, surfaceAccessEstablished = false): Promise<SurfaceOperationRuntimeResult> {
+    if (input.kind === "message.submit" && !surfaceAccessEstablished) {
+      return this.withSurfaceReadContext(input, () => this.executeSurfaceOperation(input, true));
+    }
     if (input.kind === "message.submit") {
       if (!input.session_id) {
         throw new RuntimeRequestError("conflict", "surface_operation_session_required");
       }
-      const collectionSchemasBefore = await this.store.listCollectionSchemas();
+      const collectionSchemasBefore = await this.listActiveCollectionSchemas();
       const result = await this.runSurfaceDomainCommand<RunChatTurnResult>(commandIdForSurfaceOperation(input.kind), input, {
         content: input.content,
         backend_id: input.backend_id,
@@ -3010,7 +3233,7 @@ export class AgentRuntime {
         if (renderSpecs.some((spec) => isCollectionRenderSpecForId(spec, collectionId))) {
           continue;
         }
-        const schema = await this.store.getCollectionSchema(collectionId);
+        const schema = await this.getAccessibleCollectionSchema(collectionId);
         if (!schema) {
           continue;
         }
@@ -3074,7 +3297,7 @@ export class AgentRuntime {
         data: input.data,
         resource_refs: []
       });
-      const resolution = await this.store.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
+      const resolution = await this.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
       const renderSpec = negotiatedRenderSpec(input, collectionRecordRenderSpec(result.resource, "Collection record", resolution));
       return {
         operation: input,
@@ -3131,7 +3354,7 @@ export class AgentRuntime {
         changes: input.changes,
         expected_version: input.expected_version
       });
-      const resolution = await this.store.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
+      const resolution = await this.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
       const renderSpec = negotiatedRenderSpec(input, collectionRecordRenderSpec(result.resource, "Collection patch applied", resolution));
       return {
         operation: input,
@@ -3464,8 +3687,10 @@ export class AgentRuntime {
       return [];
     }
     const beforeById = new Map(schemasBefore.map((schema) => [schema.id, collectionSchemaSignature(schema)]));
-    await this.store.reindexCollections();
-    const schemasAfter = await this.store.listCollectionSchemas();
+    // Domain writes update their own Collection index. A chat response must
+    // not trigger a Workspace-wide filesystem reindex merely to discover
+    // renderable changes from another Room.
+    const schemasAfter = await this.listActiveCollectionSchemas();
     const changedCollectionIds = new Set<string>();
     const runtimeSavedCollectionIds = new Set<string>();
     for (const operation of result.operations) {
@@ -3662,7 +3887,15 @@ export class AgentRuntime {
       ...trusted,
       ...(input.idempotency_key ? { idempotencyKey: input.idempotency_key } : {})
     }, command.id);
-    await this.assertDomainOperationAuthorized(command, payload, trustedContext);
+    try {
+      await this.assertDomainOperationAuthorized(command, payload, trustedContext);
+    } catch (error) {
+      await this.recordDomainAccessAuditSafely(command, payload, { error: safeRuntimeErrorMessage(error, "room_authorization_denied") }, trustedContext, {
+        allowed: false,
+        reason: safeRuntimeErrorMessage(error, "room_authorization_denied")
+      });
+      throw error;
+    }
     if (!this.domainOperationAvailable(command)) {
       throw new RuntimeRequestError("unavailable", `domain_operation_unavailable:${command.id}`);
     }
@@ -3680,6 +3913,10 @@ export class AgentRuntime {
         executionClass: command.idempotency_policy === "external" ? "external" : "internal"
       }, () => this.executeDomainCommand(command, payload, trustedContext));
     } catch (error) {
+      await this.recordDomainAccessAuditSafely(command, payload, { error: safeRuntimeErrorMessage(error, "domain_command_failed") }, trustedContext, {
+        allowed: true,
+        reason: "execution_failed"
+      });
       if (error instanceof DomainCommandIdempotencyKeyRequiredError) {
         throw new RuntimeRequestError("bad_request", error.code);
       }
@@ -3706,7 +3943,7 @@ export class AgentRuntime {
     await this.recordResourceAccessBoundaries(result, command, trustedContext);
     await this.recordBackendDomainOperationTelemetry(result, trustedContext);
     await this.attachDomainCorrelation(result, trustedContext);
-    await this.recordDomainAccessAudit(command, payload, result, trustedContext);
+    await this.recordDomainAccessAudit(command, payload, result, trustedContext, { allowed: true, reason: "allowed" });
     const renderSpecs = assertDomainCommandRenderSpecs(command, await this.domainCommandRenderSpecs(command, result));
     const output: DomainCommandRuntimeResult = {
       command,
@@ -3771,7 +4008,15 @@ export class AgentRuntime {
       throw new RuntimeRequestError("validation", `domain_query_input_invalid:${query.id}:${inputIssue.path}:${inputIssue.message}`);
     }
     const trustedContext = await this.trustedDomainContext(inputSource, payload, trusted, query.id);
-    await this.assertDomainOperationAuthorized(query, payload, trustedContext);
+    try {
+      await this.assertDomainOperationAuthorized(query, payload, trustedContext);
+    } catch (error) {
+      await this.recordDomainAccessAuditSafely(query, payload, { error: safeRuntimeErrorMessage(error, "room_authorization_denied") }, trustedContext, {
+        allowed: false,
+        reason: safeRuntimeErrorMessage(error, "room_authorization_denied")
+      });
+      throw error;
+    }
     let result: unknown;
     try {
       result = await this.activeDomainContext.run(
@@ -3779,13 +4024,17 @@ export class AgentRuntime {
         async () => (await this.domainOperationRegistry.execute(trustedContext, query.id, payload)).value
       );
     } catch (error) {
+      await this.recordDomainAccessAuditSafely(query, payload, { error: safeRuntimeErrorMessage(error, "domain_query_failed") }, trustedContext, {
+        allowed: true,
+        reason: "execution_failed"
+      });
       if (error instanceof DomainOperationError) {
         if (error.handlerCause instanceof RuntimeRequestError) throw error.handlerCause;
         throw runtimeRequestErrorFromDomainOperationError(error);
       }
       throw error;
     }
-    await this.recordDomainAccessAudit(query, payload, result, trustedContext);
+    await this.recordDomainAccessAudit(query, payload, result, trustedContext, { allowed: true, reason: "allowed" });
     const renderSpecs = assertDomainQueryRenderSpecs(query, await this.domainQueryRenderSpecs(query, result));
     const output: DomainQueryRuntimeResult = {
       query,
@@ -3847,7 +4096,7 @@ export class AgentRuntime {
     }
     if (isCollectionRecordRuntimeResult(result)) {
       if (isResourceDeletionResult(result)) return [];
-      const resolution = await this.store.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
+      const resolution = await this.resolveCollectionRecordRefs(result.resource.collection_id, result.resource.id);
       return [collectionRecordRenderSpec(result.resource, command.title, resolution)];
     }
     const resourceSpec = resourceRenderSpec(command, result);
@@ -3876,105 +4125,139 @@ export class AgentRuntime {
   ): Promise<void> {
     const principal = context.participant;
     if (!principal) throw new RuntimeRequestError("forbidden", "room_participant_required");
-    // Collaboration operations own their more specific target checks in the
-    // Room service. Chat is admitted by the Host after it resolves its Room.
-    if (isRoomCollaborationOperation(entry.id)) return;
-    // A new Session has no trusted Session reference yet. Its declared Room is
-    // the target resource, not caller-controlled identity, and must be checked
-    // before the handler can create anything there.
-    if (entry.id === "session.create") {
-      const roomId = context.roomId;
-      if (!roomId) throw new RuntimeRequestError("forbidden", "room_context_required");
-      try {
-        await this.roomAuthorizationService.assertRoom(principal, roomId, "execute");
-      } catch (error) {
-        if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
-        throw error;
-      }
-      return;
-    }
-    if (entry.id === "chat.turn.run") {
-      if (!context.roomId) throw new RuntimeRequestError("forbidden", "room_context_required");
-      return;
-    }
+    // Collaboration has explicit target checks in RoomAgentDomainService. It
+    // is deliberately not inferred from a command name here.
+    if (entry.access.scope === "room_collaboration") return;
     try {
-      if (context.roomId) {
-        const action = entry.effect_kind === "read_only"
-          ? "read"
-          : entry.effect_kind === "external_effect" || entry.effect_kind === "runtime_control"
-            ? "execute"
-            : "edit";
-        await this.roomAuthorizationService.assertRoom(principal, context.roomId, action);
-        // A Session is a resource too. This keeps old unbounded Sessions
-        // Owner-only and blocks a removed participant before any handler can
-        // load its messages, runs, or related Workspace state.
-        if (context.sessionId) {
-          await this.roomAuthorizationService.assertResource(principal, {
-            roomId: context.roomId,
-            action,
-            resourceKind: "session",
-            resourceId: context.sessionId
-          });
-        }
-        // Rollback points do not own separate content files. Their immutable
-        // access boundary is the Room of the original operation, so a Session
-        // from another Room cannot restore or inspect their changes.
-        if (entry.id === "rollback.restore") {
-          const rollbackPointId = stringPayload(payload.rollback_point_id);
-          const rollbackPoint = rollbackPointId ? await this.store.getRollbackPoint(rollbackPointId) : undefined;
-          const operation = rollbackPoint ? await this.store.getOperation(rollbackPoint.operation_id) : undefined;
-          if (!operation || operation.room_id !== context.roomId) {
-            throw new RuntimeRequestError("forbidden", "room_rollback_access_denied");
-          }
-        }
-        const target = await this.existingDomainResourceTarget(entry.id, payload);
-        if (target) {
-          await this.roomAuthorizationService.assertResource(principal, {
-            roomId: context.roomId,
-            action,
-            resourceKind: target.kind,
-            resourceId: target.id
-          });
-        }
+      if (entry.access.scope === "workspace_control" || entry.access.scope === "legacy_owner") {
+        await this.roomAuthorizationService.assertWorkspace(
+          principal,
+          entry.access.scope === "legacy_owner" ? "use_legacy_resources" : "manage_settings"
+        );
         return;
       }
-      // A content operation without a Room must never fall back to a default
-      // Room or Workspace-wide data. Workspace controls are the only explicit
-      // exception, and are checked separately below.
-      if (requiresRoomContext(entry)) {
-        throw new RuntimeRequestError("forbidden", "room_context_required");
+      const roomId = context.roomId;
+      if (!roomId) throw new RuntimeRequestError("forbidden", "room_context_required");
+      const action = entry.access.action;
+      await this.roomAuthorizationService.assertRoom(principal, roomId, action);
+      // A Session is a resource too. This keeps old unbounded Sessions
+      // Owner-only and blocks a removed participant before any handler can
+      // load its messages, runs, or related Workspace state.
+      if (context.sessionId) {
+        await this.roomAuthorizationService.assertResource(principal, {
+          roomId,
+          action,
+          resourceKind: "session",
+          resourceId: context.sessionId
+        });
       }
-      // Only a Workspace administrator may use the remaining global controls.
-      await this.roomAuthorizationService.assertWorkspace(principal, "manage_settings");
+      // Rollback points do not own separate content files. Their immutable
+      // access boundary is the Room of the original operation, so a Session
+      // from another Room cannot restore or inspect their changes.
+      if (entry.id === "rollback.restore") {
+        const rollbackPointId = stringPayload(payload.rollback_point_id);
+        const rollbackPoint = rollbackPointId ? await this.store.getRollbackPoint(rollbackPointId) : undefined;
+        const operation = rollbackPoint ? await this.store.getOperation(rollbackPoint.operation_id) : undefined;
+        if (!operation || operation.room_id !== roomId) {
+          throw new RuntimeRequestError("forbidden", "room_rollback_access_denied");
+        }
+      }
+      const targets = await this.existingDomainResourceTargets(entry.access.target, payload);
+      for (const target of targets) {
+        await this.roomAuthorizationService.assertResource(principal, {
+          roomId,
+          action,
+          resourceKind: target.kind,
+          resourceId: target.id
+        });
+      }
+      if (entry.id === "learning.background_review.apply") {
+        await this.assertBackgroundReviewMutationAuthorization(payload, context);
+      }
+      return;
     } catch (error) {
       if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
       throw error;
     }
   }
 
-  private async existingDomainResourceTarget(
-    operationId: string,
+  private async existingDomainResourceTargets(
+    target: DomainResourceTarget | readonly DomainResourceTarget[] | undefined,
     payload: Record<string, JsonValue>
-  ): Promise<{ kind: string; id: string } | undefined> {
-    const target = resourceTargetFromDomainOperation(operationId, payload);
-    if (target) return target;
-    // Save operations may be either create or update. Only an existing record
-    // is a target of this request; a new record receives its boundary after
-    // the successful write below.
-    if (operationId === "collection.schema.save") {
-      const collectionId = stringPayload(payload.id);
-      if (collectionId && await this.store.getCollectionSchema(collectionId)) {
-        return { kind: "collection_schema", id: collectionId };
+  ): Promise<Array<{ kind: string; id: string }>> {
+    if (!target) return [];
+    const targets = Array.isArray(target) ? target : [target];
+    const resolved = await Promise.all(targets.map(async (item) => {
+      if ("resourceRefField" in item) {
+        const ref = unknownRecord(payload[item.resourceRefField]);
+        const kind = typeof ref.kind === "string" ? ref.kind.trim() : "";
+        const id = typeof ref.id === "string" ? ref.id.trim() : "";
+        if (!kind || !id || !item.allowedKinds.includes(kind as "artifact" | "memory" | "wiki" | "skill" | "collection_record")) return undefined;
+        if (kind !== "collection_record") return { kind, id };
+        const uri = typeof ref.uri === "string" ? ref.uri : "";
+        const collectionTarget = collectionRecordTargetFromRef({ kind, id, uri });
+        return collectionTarget ? {
+          kind,
+          id: collectionRecordResourceId(collectionTarget.collectionId, collectionTarget.recordId)
+        } : undefined;
       }
-    }
-    if (operationId === "collection.record.create") {
-      const collectionId = stringPayload(payload.collection_id);
-      const recordId = stringPayload(payload.record_id);
-      if (collectionId && recordId && await this.store.getCollectionRecord(collectionId, recordId)) {
-        return { kind: "collection_record", id: collectionRecordBoundaryId(collectionId, recordId) };
+      if ("kindField" in item) {
+        const kind = stringPayload(payload[item.kindField]);
+        const id = stringPayload(payload[item.idField]);
+        return kind && id && item.allowedKinds.includes(kind as "memory" | "wiki" | "skill") ? { kind, id } : undefined;
       }
+      if (item.kind === "collection_record") {
+        const collectionId = stringPayload(payload[item.collectionIdField]);
+        const recordId = stringPayload(payload[item.recordIdField]);
+        if (!collectionId || !recordId) return undefined;
+        if (item.onlyIfExisting && !await this.store.getCollectionRecord(collectionId, recordId)) return undefined;
+        return { kind: item.kind, id: collectionRecordResourceId(collectionId, recordId) };
+      }
+      const id = stringPayload(payload[item.idField]);
+      if (!id) return undefined;
+      if (item.onlyIfExisting && item.kind === "collection_schema" && !await this.store.getCollectionSchema(id)) return undefined;
+      return { kind: item.kind, id };
+    }));
+    return resolved.filter((item): item is { kind: string; id: string } => Boolean(item));
+  }
+
+  /**
+   * The Background Review plan contains its affected resources inside a typed
+   * mutation list, rather than one top-level resource ID.  Check those
+   * targets here before the mutation service can load or change a document.
+   */
+  private async assertBackgroundReviewMutationAuthorization(
+    payload: Record<string, JsonValue>,
+    context: TrustedDomainContext
+  ): Promise<void> {
+    if (!context.participant || !context.roomId || !context.sessionId || !context.runId) {
+      throw new RuntimeRequestError("forbidden", "background_review_room_run_required");
     }
-    return undefined;
+    const reflectionRunId = stringPayload(payload.reflection_run_id);
+    const reflectionRun = reflectionRunId ? await this.store.getReflectionRun(reflectionRunId) : undefined;
+    const sourceRun = await this.store.getBackendRun(context.runId);
+    if (!reflectionRun || !sourceRun || reflectionRun.source_run_id !== sourceRun.id
+      || reflectionRun.session_id !== context.sessionId || reflectionRun.activity_context?.room_id !== context.roomId) {
+      throw new RuntimeRequestError("forbidden", "background_review_source_context_invalid");
+    }
+    await this.assertRunAgentExecution(sourceRun);
+    // A plan can create new Resources, so execute permission alone is not
+    // enough. This is deliberately evaluated again at application time.
+    await this.roomAuthorizationService.assertRoom(context.participant, context.roomId, "edit");
+    const mutations = Array.isArray(payload.mutations) ? payload.mutations : [];
+    for (const rawMutation of mutations) {
+      const mutation = unknownRecord(rawMutation);
+      const kind = typeof mutation.kind === "string" ? mutation.kind : "";
+      const resourceKind = typeof mutation.resource_kind === "string" ? mutation.resource_kind : undefined;
+      const resourceId = typeof mutation.resource_id === "string" ? mutation.resource_id : undefined;
+      if (!resourceKind || !resourceId || !["memory", "wiki", "skill"].includes(resourceKind)) continue;
+      await this.roomAuthorizationService.assertResource(context.participant, {
+        roomId: context.roomId,
+        action: kind === "resource_evidence_append" ? "edit" : "read",
+        resourceKind,
+        resourceId
+      });
+    }
   }
 
   private async attachDomainCorrelation(result: unknown, context: TrustedDomainContext): Promise<void> {
@@ -3986,20 +4269,20 @@ export class AgentRuntime {
       const updatedOperation = {
         ...operation,
         correlation_id: context.correlationId,
-        ...(participant ? { participant_id: participant.participantId, participant_kind: participant.kind } : {}),
-        ...(participant ? { requested_by_participant_id: participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId } : {}),
+        ...(participant ? { participant_id: principalParticipantId(participant), participant_kind: participant.kind } : {}),
+        ...(participant ? { requested_by_participant_id: requesterParticipantId(participant) } : {}),
         ...(context.roomId ? { room_id: context.roomId } : {})
       };
       if (JSON.stringify(updatedOperation) !== JSON.stringify(operation)) await this.store.updateOperation(updatedOperation);
       for (const audit of await this.store.listAuditRecordsForOperation(operation.id)) {
         await this.store.updateAuditRecord({
           ...audit,
-          ...(participant ? { participant_id: participant.participantId, participant_kind: participant.kind } : {}),
-          ...(participant ? { requested_by_participant_id: participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId } : {}),
+          ...(participant ? { participant_id: principalParticipantId(participant), participant_kind: participant.kind } : {}),
+          ...(participant ? { requested_by_participant_id: requesterParticipantId(participant) } : {}),
           ...(context.roomId ? { room_id: context.roomId } : {})
         });
       }
-      const changes = await this.store.listWorkspaceChanges();
+      const changes = await this.store.listWorkspaceChangesForOperation(operation.id);
       for (const change of changes) {
         if (change.legacy_operation_id === operation.id && change.correlation_id !== context.correlationId) {
           await this.store.setWorkspaceChangeCorrelation(change.id, context.correlationId);
@@ -4045,7 +4328,7 @@ export class AgentRuntime {
     const resourceRecord = unknownRecord(resource);
     if (typeof resourceRecord.id === "string") {
       const resourceId = command.output_resource_kind === "collection_record" && typeof resourceRecord.collection_id === "string"
-        ? `${resourceRecord.collection_id}/${resourceRecord.id}`
+        ? collectionRecordResourceId(resourceRecord.collection_id, resourceRecord.id)
         : resourceRecord.id;
       refs.push({ kind: command.output_resource_kind, id: resourceId, uri: `domain/${command.output_resource_kind}/${resourceId}` });
     }
@@ -4056,25 +4339,28 @@ export class AgentRuntime {
     const directResource = command.output_resource_kind === "generated_surface"
       ? unknownRecord(output.definition)
       : output;
-    if (isRoomScopedResourceKind(command.output_resource_kind) && typeof directResource.id === "string") {
+    if (canonicalRoomResourceKind(command.output_resource_kind) && typeof directResource.id === "string") {
       const resourceId = command.output_resource_kind === "collection_record" && typeof directResource.collection_id === "string"
-        ? `${directResource.collection_id}/${directResource.id}`
+        ? collectionRecordResourceId(directResource.collection_id, directResource.id)
         : directResource.id;
       refs.push({ kind: command.output_resource_kind, id: resourceId, uri: `domain/${command.output_resource_kind}/${resourceId}` });
     }
     if (session) refs.push({ kind: "session", id: session.id, uri: `sessions/${session.id}` });
     for (const ref of refs) {
-      if (!ref.id || isRoomPermissionMetadataKind(ref.kind)) continue;
+      const resourceKind = canonicalRoomResourceKind(ref.kind);
+      if (!ref.id || !resourceKind || isRoomPermissionMetadataKind(ref.kind)) continue;
       const resourceId = ref.kind === "collection_record"
         && typeof resourceRecord.collection_id === "string"
         && ref.id === resourceRecord.id
-        ? collectionRecordBoundaryId(resourceRecord.collection_id, ref.id)
+        ? collectionRecordResourceId(resourceRecord.collection_id, ref.id)
         : ref.id;
       await this.store.ensureResourceAccessBoundary({
-        resourceKind: ref.kind,
+        resourceKind,
         resourceId,
         sourceRoomId: roomId,
         ownerParticipantId,
+        creatorParticipantId: principalParticipantId(context.participant),
+        ...(typeof resourceRecord.created_at === "string" ? { resourceCreatedAt: resourceRecord.created_at } : {}),
         actorId: ownerParticipantId
       });
     }
@@ -4084,7 +4370,8 @@ export class AgentRuntime {
     entry: DomainCommandEntry | DomainQueryEntry,
     payload: Record<string, JsonValue>,
     result: unknown,
-    context: TrustedDomainContext
+    context: TrustedDomainContext,
+    decision: { allowed: boolean; reason: string }
   ): Promise<void> {
     const participant = context.participant;
     const write = operationAuditRuntimeResult(result);
@@ -4093,21 +4380,56 @@ export class AgentRuntime {
     const sourceRoomId = typeof payload.source_room_id === "string" ? payload.source_room_id : undefined;
     const createdRoomId = entry.id === "room.create" && typeof output.id === "string" ? output.id : undefined;
     const roomId = context.roomId ?? payloadRoomId ?? sourceRoomId ?? createdRoomId;
+    const affectedResources = uniqueResourceRefs([
+      ...(write?.resourceRefs ?? []),
+      ...(context.sessionId ? [{ kind: "session", id: context.sessionId, uri: `sessions/${context.sessionId}` } satisfies ResourceRef] : [])
+    ]);
+    const accessScope = entry.access.scope === "workspace_control" || entry.access.scope === "legacy_owner"
+      ? "workspace"
+      : entry.access.scope === "room_content" && (entry.access.target || context.sessionId)
+        ? "resource"
+        : roomId ? "room" : "workspace";
+    const accessAction = entry.access.scope === "room_content"
+      ? entry.access.action
+      : entry.access.scope === "workspace_control"
+        ? "manage_settings"
+        : entry.access.scope === "legacy_owner"
+          ? "use_legacy_resources"
+        : entry.id;
     await this.store.saveAuditRecord({
       id: createId("audit"),
       actor_identity: context.actorId as ActorIdentity,
-      ...(participant ? { participant_id: participant.participantId, participant_kind: participant.kind } : {}),
-      ...(participant ? { requested_by_participant_id: participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId } : {}),
+      ...(participant ? { participant_id: principalParticipantId(participant), participant_kind: participant.kind } : {}),
+      ...(participant ? { requested_by_participant_id: requesterParticipantId(participant) } : {}),
       ...(roomId ? { room_id: roomId } : {}),
       operation_id: write?.operation.id ?? `domain:${entry.id}:${context.correlationId}`,
       capability_id: proposalCapabilityManifest.id,
       instruction_source: instructionSourceForDomainInput(context.inputSource),
       inputs_summary: summarize(`${entry.id} ${JSON.stringify(jsonSafe(payload))}`, 500),
       outputs_summary: summarize(`${entry.id} ${JSON.stringify(jsonSafe(output))}`, 500),
-      policy_decision_id: `room-permission:${context.correlationId}`,
-      affected_resources: write?.resourceRefs ?? [],
+      room_access_scope: accessScope,
+      room_access_action: accessAction,
+      room_access_allowed: decision.allowed,
+      room_access_reason: decision.reason,
+      affected_resources: affectedResources,
       created_at: nowIso()
     });
+  }
+
+  /** An audit write must not mask the access decision that it records. */
+  private async recordDomainAccessAuditSafely(
+    entry: DomainCommandEntry | DomainQueryEntry,
+    payload: Record<string, JsonValue>,
+    result: unknown,
+    context: TrustedDomainContext,
+    decision: { allowed: boolean; reason: string }
+  ): Promise<void> {
+    try {
+      await this.recordDomainAccessAudit(entry, payload, result, context, decision);
+    } catch {
+      // The original access or execution outcome remains authoritative. Audit
+      // persistence failure is visible through normal Workspace diagnostics.
+    }
   }
 
   private async backendWorkspaceChangesForOperation(runId: string, sessionId: string, operationId: string): Promise<WorkspaceChangeRecord[]> {
@@ -4144,7 +4466,7 @@ export class AgentRuntime {
     }
     const session = sessionId ? await this.store.getSession(sessionId) : undefined;
     if (sessionId && !session) throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
-    const participant = this.resolveTrustedParticipant({ inputSource, actorIdentity, trusted, run });
+    const participant = await this.resolveTrustedParticipant({ inputSource, actorIdentity, trusted, run });
     // A Session-create command is the single legitimate operation without a
     // pre-existing Session. Its Room may be selected by the public DTO, or by
     // the server-owned default Room when the local UI starts a new chat.
@@ -4152,8 +4474,29 @@ export class AgentRuntime {
     if (session?.room_id && requestedRoomId && session.room_id !== requestedRoomId) {
       throw new RuntimeRequestError("conflict", `domain_session_room_mismatch:${session.id}`);
     }
+    const targetRoomIds = new Set<string>();
+    if (!session?.room_id && !requestedRoomId && operationId) {
+      const entry = getDomainCommandEntry(operationId) ?? getDomainQueryEntry(operationId);
+      if (entry?.access.scope === "room_content") {
+        for (const target of await this.existingDomainResourceTargets(entry.access.target, payload)) {
+          const boundary = await this.store.getResourceAccessBoundary(target.kind, target.id);
+          if (boundary) targetRoomIds.add(boundary.source_room_id);
+        }
+      }
+    }
+    if (targetRoomIds.size > 1) {
+      throw new RuntimeRequestError("conflict", `domain_resource_rooms_conflict:${operationId ?? "unknown"}`);
+    }
+    // Runtime and Surface ingress are trusted local-Owner adapters. A missing
+    // context may use only the persisted default Room, never the Workspace as
+    // a substitute. Provider and gateway ingress never receive this fallback.
+    const localDefaultRoomId = (inputSource === "runtime_api" || inputSource === "surface_operation") && actorIdentity === "owner"
+      ? (await this.store.getSettings()).default_room_id
+      : undefined;
     const roomId = session?.room_id ?? requestedRoomId
-      ?? (operationId === "session.create" ? (await this.store.getSettings()).default_room_id : undefined);
+      ?? [...targetRoomIds][0]
+      ?? (operationId === "session.create" ? (await this.store.getSettings()).default_room_id : undefined)
+      ?? localDefaultRoomId;
     return {
       inputSource,
       workspaceId: stableHash(this.store.rootDir),
@@ -4175,26 +4518,26 @@ export class AgentRuntime {
         surface_operation_id: surfaceOperation?.id ?? null,
         surface_operation_kind: surfaceOperation?.kind ?? null,
         actor_id: actorIdentity,
-        participant_id: participant.participantId,
+        participant_id: principalParticipantId(participant),
         room_id: roomId ?? null,
         payload
       })
     };
   }
 
-  private resolveTrustedParticipant(input: {
+  private async resolveTrustedParticipant(input: {
     inputSource: DomainCommandInputSource;
     actorIdentity: TrustedActorIdentity;
     trusted: TrustedDomainRuntimeContext;
     run?: BackendRunRecord;
-  }): ParticipantPrincipal {
+  }): Promise<ParticipantPrincipal> {
     if (input.run) {
       if (!input.run.agent_id) throw new RuntimeRequestError("conflict", `run_agent_missing:${input.run.id}`);
       const resolved: ParticipantPrincipal = {
         kind: "agent",
-        participantId: agentParticipantId(input.run.agent_id),
         agentId: input.run.agent_id,
-        requestedByParticipantId: input.run.requested_by_participant_id ?? localOwnerParticipantId
+        requestedByParticipantId: input.run.requested_by_participant_id
+          ?? await this.legacyRequesterParticipantIdForRun(input.run)
       };
       if (input.trusted.participant && !sameParticipant(input.trusted.participant, resolved)) {
         throw new RuntimeRequestError("forbidden", `domain_participant_run_mismatch:${input.run.id}`);
@@ -4208,6 +4551,24 @@ export class AgentRuntime {
     // A paired external contact has no Core 06 participant binding yet. It
     // must not inherit the local Owner's access through a transport label.
     return { kind: "system", participantId: "system:unbound-gateway" };
+  }
+
+  /**
+   * Pre-Core 06 Runs never had a requester field. They may be resumed only
+   * for the local participant while that participant is still the Room Owner;
+   * no transport or Agent field is reinterpreted as a human identity.
+   */
+  private async legacyRequesterParticipantIdForRun(run: BackendRunRecord): Promise<string> {
+    const session = await this.store.getSession(run.session_id);
+    if (!session?.room_id) throw new RuntimeRequestError("forbidden", `legacy_run_room_missing:${run.id}`);
+    const [workspaceMember, roomMember] = await Promise.all([
+      this.store.getWorkspaceMember(localOwnerParticipantId),
+      this.store.getRoomMember(session.room_id, localOwnerParticipantId)
+    ]);
+    if (workspaceMember?.role !== "owner" || roomMember?.role !== "owner") {
+      throw new RuntimeRequestError("forbidden", `legacy_run_requester_unavailable:${run.id}`);
+    }
+    return localOwnerParticipantId;
   }
 
   listSurfaceRenderers(): SurfaceRendererRegistryEntry[] {
@@ -4806,12 +5167,12 @@ export class AgentRuntime {
   private async collectionManageGetItems(schema: CollectionSchemaWithFilePath, options: { ids?: string[]; fields?: string[] } = {}): Promise<{
     collection_id: string; count: number; items: Record<string, JsonValue>[]; linked_data: JsonValue; schema_fields: JsonValue;
   }> {
-    const access = this.activeCollectionRoomAccess();
-    if (access) await this.assertCollectionResource(access, "collection_schema", schema.id);
+    const access = await this.collectionReadAccess(schema.id);
+    await this.assertCollectionResource(access, "collection_schema", schema.id);
     const candidates = options.ids && options.ids.length > 0
-      ? (await Promise.all(options.ids.map((id) => this.store.getCollectionRecord(schema.id, id)))).filter((record): record is CollectionRecordWithFilePath => Boolean(record))
-      : await this.store.listCollectionRecords(schema.id);
-    const loaded = access ? await this.filterCollectionRecordsForRoom(access, candidates) : candidates;
+      ? (await Promise.all(options.ids.map((id) => this.getAccessibleCollectionRecord(access, schema.id, id)))).filter((record): record is CollectionRecordWithFilePath => Boolean(record))
+      : await this.listAccessibleCollectionRecords(access, schema.id);
+    const loaded = await this.filterCollectionRecordsForRoom(access, candidates);
     const linkedData = await this.genericCollectionLinkedData(schema, loaded, access);
     const records = loaded.map((record) => genericCollectionRecordRenderData(record, schema, loaded, linkedData));
     const projected = options.fields && options.fields.length > 0
@@ -4834,14 +5195,12 @@ export class AgentRuntime {
   }
 
   async presentCollectionView(input: { collectionId: string; viewId?: string }): Promise<CollectionViewRuntimeResult & { render_spec: SurfaceRenderSpec }> {
-    const schema = await this.store.getCollectionSchema(input.collectionId);
+    const access = await this.collectionReadAccess(input.collectionId);
+    const schema = await this.getAccessibleCollectionSchema(input.collectionId, access);
     if (!schema) {
       throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
     }
-    const access = this.activeCollectionRoomAccess();
-    if (access) await this.assertCollectionResource(access, "collection_schema", schema.id);
-    const candidates = await this.store.listCollectionRecords(input.collectionId);
-    const records = access ? await this.filterCollectionRecordsForRoom(access, candidates) : candidates;
+    const records = await this.listAccessibleCollectionRecords(access, input.collectionId);
     const linkedData = await this.genericCollectionLinkedData(schema, records, access);
     const renderSpec = genericCollectionRenderSpec(schema, records, input.viewId, linkedData);
     return {
@@ -4859,6 +5218,21 @@ export class AgentRuntime {
     idempotencyKey?: string,
     trusted: TrustedDomainRuntimeContext = {}
   ): Promise<JsonValue> {
+    if (!this.activeCollectionRoomAccess()) {
+      const context = await this.trustedDomainContext(inputSource, {}, trusted);
+      if (!context.participant || !context.roomId) {
+        throw new RuntimeRequestError("forbidden", "room_context_required");
+      }
+      try {
+        await this.roomAuthorizationService.assertRoom(context.participant, context.roomId, "read");
+      } catch (error) {
+        if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+        throw error;
+      }
+      return this.activeDomainContext.run(context, () =>
+        this.runCollectionManageCompatibility(input, inputSource, idempotencyKey, trusted)
+      );
+    }
     const action = stringPayload(input.action);
     const collectionId = stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.id);
     if (action === "schemaDocs") {
@@ -4948,6 +5322,7 @@ export class AgentRuntime {
     idempotencyKey?: string,
     trusted: TrustedDomainRuntimeContext = {}
   ): Promise<Record<string, JsonValue>> {
+    const access = await this.collectionWriteAccess(schema.id);
     const written: string[] = [];
     const rejected: Array<Record<string, JsonValue>> = [];
     for (const item of items) {
@@ -4962,7 +5337,23 @@ export class AgentRuntime {
         continue;
       }
       try {
-        const existing = await this.store.getCollectionRecord(schema.id, recordId);
+        const boundaryId = collectionRecordBoundaryId(schema.id, recordId);
+        const boundary = await this.store.getResourceAccessBoundary("collection_record", boundaryId);
+        let existing: CollectionRecordWithFilePath | undefined;
+        if (boundary) {
+          await this.assertCollectionResourceForAction(access, "edit", "collection_record", boundaryId);
+          existing = await this.store.getCollectionRecord(schema.id, recordId);
+        } else {
+          try {
+            // Only the current Workspace Owner may inspect an unbounded
+            // legacy record. A Room editor may still create a fresh record
+            // beneath a Collection schema they can edit.
+            await this.assertCollectionResourceForAction(access, "edit", "collection_record", boundaryId);
+            existing = await this.store.getCollectionRecord(schema.id, recordId);
+          } catch (error) {
+            if (mode === "merge") throw error;
+          }
+        }
         if (mode === "create" && existing) {
           rejected.push({ id: recordId, problem: "record_already_exists" });
           continue;
@@ -5015,6 +5406,49 @@ export class AgentRuntime {
       : undefined;
   }
 
+  /**
+   * Collection calls outside a Domain operation are legacy local-Owner
+   * adapters. They resolve a concrete source/default Room first; they never
+   * fall back to a Workspace-wide Collection scan.
+   */
+  private async collectionReadAccess(collectionId?: string): Promise<{ principal: ParticipantPrincipal; roomId: string }> {
+    const active = this.activeCollectionRoomAccess();
+    if (active) return active;
+    if (collectionId) {
+      const boundary = await this.store.getResourceAccessBoundary("collection_schema", collectionId);
+      if (boundary) {
+        const access = { principal: { kind: "human" as const, participantId: localOwnerParticipantId }, roomId: boundary.source_room_id };
+        try {
+          await this.roomAuthorizationService.assertResource(access.principal, {
+            roomId: access.roomId,
+            action: "read",
+            resourceKind: "collection_schema",
+            resourceId: collectionId
+          });
+        } catch (error) {
+          if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+          throw error;
+        }
+        return access;
+      }
+    }
+    return this.localOwnerContextAccess();
+  }
+
+  private async listActiveCollectionSchemas(): Promise<CollectionSchemaWithFilePath[]> {
+    const access = await this.collectionReadAccess();
+    return this.listCurrentRoomResources(access, "collection_schema", (candidates) => this.store.listCollectionSchemas(candidates));
+  }
+
+  private async getAccessibleCollectionSchema(
+    collectionId: string,
+    access?: { principal: ParticipantPrincipal; roomId: string }
+  ): Promise<CollectionSchemaWithFilePath | undefined> {
+    const resolvedAccess = access ?? await this.collectionReadAccess(collectionId);
+    await this.assertCollectionResource(resolvedAccess, "collection_schema", collectionId);
+    return this.store.getCollectionSchema(collectionId);
+  }
+
   private async assertCollectionResource(
     access: { principal: ParticipantPrincipal; roomId: string },
     resourceKind: "collection_schema" | "collection_record",
@@ -5031,6 +5465,31 @@ export class AgentRuntime {
       if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
       throw error;
     }
+  }
+
+  private async assertCollectionResourceForAction(
+    access: { principal: ParticipantPrincipal; roomId: string },
+    action: "read" | "edit" | "execute",
+    resourceKind: "collection_schema" | "collection_record",
+    resourceId: string
+  ): Promise<void> {
+    try {
+      await this.roomAuthorizationService.assertResource(access.principal, {
+        roomId: access.roomId,
+        action,
+        resourceKind,
+        resourceId
+      });
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+  }
+
+  private async collectionWriteAccess(collectionId: string): Promise<{ principal: ParticipantPrincipal; roomId: string }> {
+    const access = await this.collectionReadAccess(collectionId);
+    await this.assertCollectionResourceForAction(access, "edit", "collection_schema", collectionId);
+    return access;
   }
 
   private async collectionResourceAllowed(
@@ -5051,15 +5510,9 @@ export class AgentRuntime {
     access: { principal: ParticipantPrincipal; roomId: string },
     records: CollectionRecordWithFilePath[]
   ): Promise<CollectionRecordWithFilePath[]> {
-    const candidateAccess = await this.roomAuthorizationService.resourceCandidateAccess(
-      access.principal,
-      access.roomId,
-      "collection_record"
-    );
-    const firstStage = candidateAccess.includeLegacy
-      ? records
-      : records.filter((record) => candidateAccess.resourceIds.includes(collectionRecordBoundaryId(record.collection_id, record.id)));
-    const allowed = await Promise.all(firstStage.map(async (record) =>
+    // The caller has already queried only Room-bound candidates. This is the
+    // mandatory second check immediately before a record reaches a renderer.
+    const allowed = await Promise.all(records.map(async (record) =>
       await this.collectionResourceAllowed(access, "collection_record", collectionRecordBoundaryId(record.collection_id, record.id))
         ? record
         : undefined
@@ -5067,10 +5520,70 @@ export class AgentRuntime {
     return allowed.filter((record): record is CollectionRecordWithFilePath => Boolean(record));
   }
 
+  private async listAccessibleCollectionRecords(
+    access: { principal: ParticipantPrincipal; roomId: string },
+    collectionId: string
+  ): Promise<CollectionRecordWithFilePath[]> {
+    const candidates = await this.roomAuthorizationService.resourceCandidateAccess(
+      access.principal,
+      access.roomId,
+      "collection_record"
+    );
+    return this.filterCollectionRecordsForRoom(
+      access,
+      await this.store.listCollectionRecords(collectionId, candidates)
+    );
+  }
+
+  private async getAccessibleCollectionRecord(
+    access: { principal: ParticipantPrincipal; roomId: string },
+    collectionId: string,
+    recordId: string
+  ): Promise<CollectionRecordWithFilePath | undefined> {
+    const boundaryId = collectionRecordBoundaryId(collectionId, recordId);
+    if (!await this.collectionResourceAllowed(access, "collection_record", boundaryId)) return undefined;
+    return this.store.getCollectionRecord(collectionId, recordId);
+  }
+
+  private async resolveCollectionRecordRefs(
+    collectionId: string,
+    recordId: string,
+    access?: { principal: ParticipantPrincipal; roomId: string }
+  ): Promise<CollectionRecordResolution> {
+    const resolvedAccess = access ?? await this.collectionReadAccess(collectionId);
+    await this.assertCollectionResource(resolvedAccess, "collection_schema", collectionId);
+    await this.assertCollectionResource(resolvedAccess, "collection_record", collectionRecordBoundaryId(collectionId, recordId));
+    const candidates = await this.roomAuthorizationService.resourceCandidateAccess(resolvedAccess.principal, resolvedAccess.roomId, "collection_record");
+    const resolution = await this.store.resolveCollectionRecordRefs(collectionId, recordId, candidates);
+    const resolvedRefs = (await Promise.all(resolution.resolved_refs.map(async (ref) =>
+      await this.collectionResourceAllowed(resolvedAccess, "collection_record", collectionRecordBoundaryId(ref.target_collection_id, ref.target_record_id))
+        ? ref
+        : undefined
+    ))).filter((ref): ref is CollectionRecordResolution["resolved_refs"][number] => Boolean(ref));
+    return { ...resolution, resolved_refs: resolvedRefs };
+  }
+
+  /** Legacy HTTP adapter with an explicit Room/session selector and final recheck. */
+  async resolveLocalOwnerCollectionRecordRefs(input: {
+    collectionId: string;
+    recordId: string;
+    roomId?: string;
+    sessionId?: string;
+  }): Promise<CollectionRecordResolution> {
+    const resourceId = collectionRecordBoundaryId(input.collectionId, input.recordId);
+    const { roomId } = await this.assertLocalOwnerRoomAccess({
+      ...(input.roomId ? { roomId: input.roomId } : {}),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      resource: { kind: "collection_record", id: resourceId }
+    });
+    const access = { principal: { kind: "human" as const, participantId: localOwnerParticipantId }, roomId };
+    return this.resolveCollectionRecordRefs(input.collectionId, input.recordId, access);
+  }
+
   private async genericCollectionLinkedData(
     schema: CollectionSchema,
     records: CollectionRecordWithFilePath[] = [],
-    access?: { principal: ParticipantPrincipal; roomId: string }
+    access: { principal: ParticipantPrincipal; roomId: string }
   ): Promise<GenericCollectionLinkedData> {
     const refOptions: Record<string, Array<Record<string, JsonValue>>> = {};
     const refRecords: Record<string, Record<string, Record<string, JsonValue>>> = {};
@@ -5085,12 +5598,11 @@ export class AgentRuntime {
       const targetCollectionId = collectionDefinitionStringRuntime(ref, "collection_id")
         ?? collectionDefinitionStringRuntime(ref, "target_collection_id")
         ?? schema.id;
-      const [targetSchema, targetRecords] = await Promise.all([
-        this.store.getCollectionSchema(targetCollectionId),
-        this.store.listCollectionRecords(targetCollectionId)
+      if (!await this.collectionResourceAllowed(access, "collection_schema", targetCollectionId)) continue;
+      const [targetSchema, permittedRecords] = await Promise.all([
+        this.getAccessibleCollectionSchema(targetCollectionId, access),
+        this.listAccessibleCollectionRecords(access, targetCollectionId)
       ]);
-      if (access && !await this.collectionResourceAllowed(access, "collection_schema", targetCollectionId)) continue;
-      const permittedRecords = access ? await this.filterCollectionRecordsForRoom(access, targetRecords) : targetRecords;
       targetCollections.add(targetCollectionId);
       const targetRecordIds = new Set(permittedRecords.map((record) => record.id));
       refOptions[field] = permittedRecords.map((record) => genericCollectionRefOption(record));
@@ -5129,14 +5641,11 @@ export class AgentRuntime {
       if (!targetCollectionId || !targetRecordId) {
         continue;
       }
-      const [targetSchema, target] = await Promise.all([
-        this.store.getCollectionSchema(targetCollectionId),
-        this.store.getCollectionRecord(targetCollectionId, targetRecordId)
+      if (!await this.collectionResourceAllowed(access, "collection_schema", targetCollectionId)) continue;
+      const [targetSchema, permittedTarget] = await Promise.all([
+        this.getAccessibleCollectionSchema(targetCollectionId, access),
+        this.getAccessibleCollectionRecord(access, targetCollectionId, targetRecordId)
       ]);
-      if (access && !await this.collectionResourceAllowed(access, "collection_schema", targetCollectionId)) continue;
-      const permittedTarget = target && access
-        ? await this.collectionResourceAllowed(access, "collection_record", collectionRecordBoundaryId(target.collection_id, target.id)) ? target : undefined
-        : target;
       targetCollections.add(targetCollectionId);
       embedRecords[field] = permittedTarget ? genericCollectionRecordRenderData(permittedTarget, targetSchema ?? schema, [permittedTarget]) : null;
       if (!permittedTarget) {
@@ -5160,6 +5669,8 @@ export class AgentRuntime {
   }
 
   async applyCollectionPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<CollectionPatchRuntimeResult> {
+    const access = await this.collectionWriteAccess(input.collectionId);
+    await this.assertCollectionResourceForAction(access, "edit", "collection_record", collectionRecordBoundaryId(input.collectionId, input.recordId));
     const expectedVersion = input.patch.expected_version
       ?? (await this.store.getCollectionRecord(input.collectionId, input.recordId))?.version;
     if (expectedVersion === undefined) {
@@ -5176,8 +5687,8 @@ export class AgentRuntime {
   }
 
   async listCollectionActions(collectionId?: string): Promise<CollectionActionDescriptor[]> {
-    const schema = collectionId ? await this.store.getCollectionSchema(collectionId) : undefined;
-    const schemas = collectionId ? (schema ? [schema] : []) : await this.store.listCollectionSchemas();
+    const schema = collectionId ? await this.getAccessibleCollectionSchema(collectionId) : undefined;
+    const schemas = collectionId ? (schema ? [schema] : []) : await this.listActiveCollectionSchemas();
     return schemas.flatMap((item) =>
       item.actions.map((action) => collectionActionDescriptor(item.id, action, this.pluginRegistry))
     );
@@ -5212,7 +5723,33 @@ export class AgentRuntime {
     session: SessionRecord,
     context: ScheduledAutomationContext
   ): Promise<ResourceTranslationJobRuntimeDetails> {
+    await this.assertScheduledTranslationSourceAccess(job, session);
     return this.translationDomainService.executeJob(job, session, context);
+  }
+
+  /** The scheduled translator rechecks the persisted source immediately before it reads it. */
+  private async assertScheduledTranslationSourceAccess(job: AutomationJobRecord, session: SessionRecord): Promise<void> {
+    if (!session.room_id) throw new RuntimeRequestError("conflict", `automation_session_room_missing:${session.id}`);
+    const sourceRef = translationSourceRefFromAutomationJob(job);
+    if (!sourceRef) throw new RuntimeRequestError("conflict", "automation_translation_source_missing");
+    const kind = canonicalRoomResourceKind(sourceRef.kind);
+    if (!kind) throw new RuntimeRequestError("conflict", "automation_translation_source_kind_invalid");
+    const resourceId = kind === "collection_record"
+      ? (() => {
+          const target = collectionRecordTargetFromRef(sourceRef);
+          return target ? collectionRecordResourceId(target.collectionId, target.recordId) : undefined;
+        })()
+      : sourceRef.id;
+    if (!resourceId) throw new RuntimeRequestError("conflict", "automation_translation_source_ref_invalid");
+    try {
+      await this.roomAuthorizationService.assertResource(
+        { kind: "human", participantId: localOwnerParticipantId },
+        { roomId: session.room_id, action: "read", resourceKind: kind, resourceId }
+      );
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
   }
 
   private async runAutomationInstructionJob(
@@ -5926,13 +6463,14 @@ export class AgentRuntime {
     const resourceRefs = [executionRef, ...outputRefs, ...(sandboxInstanceRef ? [sandboxInstanceRef] : [])];
     const now = nowIso();
     const session = await this.store.getSession(run.session_id);
+    const requesterParticipantId = run.agent_id ? await this.requesterParticipantIdForRun(run) : undefined;
     const operation: OperationRecord = {
       id: createId("operation"),
       session_id: run.session_id,
       capability_id: proposalCapabilityManifest.id,
       operation: runtimeOperationIds.sandboxExec,
       actor_identity: "system",
-      ...(run.agent_id ? { participant_id: agentParticipantId(run.agent_id), participant_kind: "agent" as const, requested_by_participant_id: run.requested_by_participant_id ?? localOwnerParticipantId } : {}),
+      ...(run.agent_id && requesterParticipantId ? { participant_id: agentParticipantId(run.agent_id), participant_kind: "agent" as const, requested_by_participant_id: requesterParticipantId } : {}),
       ...(session?.room_id ? { room_id: session.room_id } : {}),
       instruction_source: "tool_output",
       instruction_authority: "backend_runtime",
@@ -6072,13 +6610,14 @@ export class AgentRuntime {
     const resourceRefs = [configRef, ...outputRefs];
     const now = nowIso();
     const session = await this.store.getSession(run.session_id);
+    const requesterParticipantId = run.agent_id ? await this.requesterParticipantIdForRun(run) : undefined;
     const operation: OperationRecord = {
       id: createId("operation"),
       session_id: run.session_id,
       capability_id: proposalCapabilityManifest.id,
       operation: runtimeOperationIds.mcpCall,
       actor_identity: "system",
-      ...(run.agent_id ? { participant_id: agentParticipantId(run.agent_id), participant_kind: "agent" as const, requested_by_participant_id: run.requested_by_participant_id ?? localOwnerParticipantId } : {}),
+      ...(run.agent_id && requesterParticipantId ? { participant_id: agentParticipantId(run.agent_id), participant_kind: "agent" as const, requested_by_participant_id: requesterParticipantId } : {}),
       ...(session?.room_id ? { room_id: session.room_id } : {}),
       instruction_source: "tool_output",
       instruction_authority: "backend_runtime",
@@ -6149,6 +6688,98 @@ export class AgentRuntime {
       absolutePath,
       relativePath: path.relative(root, absolutePath) || "."
     };
+  }
+
+  /**
+   * File-listing is candidate-first: the filesystem is never enumerated to
+   * discover another Room's paths. The final Room check runs before stat/read.
+   */
+  private async listActiveRoomFilePaths(directoryPath: string): Promise<string[]> {
+    const context = this.activeDomainContext.getStore();
+    if (!context?.participant || !context.roomId) {
+      throw new RuntimeRequestError("forbidden", "room_context_required");
+    }
+    const candidates = await this.roomAuthorizationService.resourceCandidateAccess(
+      context.participant,
+      context.roomId,
+      "file"
+    );
+    const root = directoryPath === "." ? "" : `${directoryPath.replaceAll("\\", "/").replace(/^\/+|\/+$/g, "")}/`;
+    const allowed: string[] = [];
+    for (const candidate of candidates.resourceIds) {
+      const normalized = this.resolveWorkspacePath(candidate).relativePath;
+      if (root && !normalized.startsWith(root)) continue;
+      try {
+        await this.roomAuthorizationService.assertResource(context.participant, {
+          roomId: context.roomId,
+          action: "read",
+          resourceKind: "file",
+          resourceId: normalized
+        });
+        allowed.push(normalized);
+      } catch (error) {
+        if (error instanceof RoomAuthorizationError) continue;
+        throw error;
+      }
+    }
+    return allowed.sort();
+  }
+
+  /** Converts an internal absolute path back to the only stable file Resource ID. */
+  private workspaceRelativePath(pathInput: string): string {
+    const root = path.resolve(this.store.rootDir);
+    const absolutePath = path.resolve(pathInput);
+    if (absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`)) {
+      return path.relative(root, absolutePath) || ".";
+    }
+    return this.resolveWorkspacePath(pathInput).relativePath;
+  }
+
+  /** Direct filesystem calls repeat the common Room decision at the last responsible moment. */
+  private async assertActiveFilePathAccess(pathInput: string, action: "read" | "edit"): Promise<void> {
+    const context = await this.assertActiveDomainRoomAction(action);
+    try {
+      await this.roomAuthorizationService.assertResource(context.participant!, {
+        roomId: context.roomId!,
+        action,
+        resourceKind: "file",
+        resourceId: this.workspaceRelativePath(pathInput)
+      });
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+  }
+
+  /** File provenance is a Room read too: never scan artifacts from another Room. */
+  private async listActiveRoomArtifactsForPath(relativePath: string): Promise<ArtifactRecord[]> {
+    const context = await this.assertActiveDomainRoomAction("read");
+    const access = { principal: context.participant!, roomId: context.roomId! };
+    await this.roomAuthorizationService.assertResource(access.principal, {
+      roomId: access.roomId,
+      action: "read",
+      resourceKind: "file",
+      resourceId: relativePath
+    });
+    const artifacts = await this.listCurrentRoomResources(access, "artifact", (candidates) =>
+      this.store.listArtifacts({ artifactIds: candidates.resourceIds })
+    );
+    return artifacts.filter((artifact) => artifact.file_ref.uri === relativePath);
+  }
+
+  /** Changes belong to Sessions, so read only the current Room's Sessions first. */
+  private async listActiveRoomChangesForPath(relativePath: string): Promise<WorkspaceChangeRecord[]> {
+    const context = await this.assertActiveDomainRoomAction("read");
+    const access = { principal: context.participant!, roomId: context.roomId! };
+    await this.roomAuthorizationService.assertResource(access.principal, {
+      roomId: access.roomId,
+      action: "read",
+      resourceKind: "file",
+      resourceId: relativePath
+    });
+    const sessions = await this.store.listSessions({ roomIds: [access.roomId] });
+    const changes = (await Promise.all(sessions.map((session) => this.store.listWorkspaceChanges(session.id)))).flat();
+    return changes.filter((change) => change.resource_ref.uri === relativePath);
   }
 
   private async runExternalAssistSync(input: ExternalAssistSyncInput & { role: "assistive" | "disabled" }): Promise<ExternalAssistRecord[]> {
@@ -6261,6 +6892,18 @@ export class AgentRuntime {
       return { reflectionRun: failed, suggestions: [] };
     }
     if (candidate.status === "completed" || candidate.status === "started") return { reflectionRun: candidate, suggestions: [] };
+    try {
+      await this.assertRunAgentExecution(sourceRun);
+    } catch (error) {
+      const deferred = await this.store.updateReflectionRun({
+        ...candidate,
+        status: "deferred",
+        deferred_reason: "background_review_room_access_revoked",
+        output_summary: "Background Review is deferred because its original Room access is no longer active.",
+        completed_at: undefined
+      });
+      return { reflectionRun: deferred, suggestions: [] };
+    }
     const settings = await this.store.getSettings();
     if (!settings.learning_enabled) {
       const deferred = await this.store.updateReflectionRun({
@@ -6282,9 +6925,16 @@ export class AgentRuntime {
       });
       return { reflectionRun: deferred, suggestions: [] };
     }
-    const allReflectionRuns = await this.store.listReflectionRuns();
+    // Budget accounting is Room-local. A review must not inspect another
+    // Room's run summaries simply to decide whether it may start here.
+    const roomSessions = await this.store.listSessions({ roomIds: [candidate.activity_context.room_id] });
+    const [allReflectionRunLists, roomBackendRunLists] = await Promise.all([
+      Promise.all(roomSessions.map((roomSession) => this.store.listReflectionRuns(roomSession.id))),
+      Promise.all(roomSessions.map((roomSession) => this.store.listBackendRuns(roomSession.id)))
+    ]);
+    const allReflectionRuns = allReflectionRunLists.flat();
     const budget = learningBudgetDecision({
-      normal_runs: await this.store.listBackendRuns(),
+      normal_runs: roomBackendRunLists.flat(),
       source_run: sourceRun,
       ratio: settings.learning_budget_ratio,
       window_days: settings.learning_budget_window_days,
@@ -6343,6 +6993,7 @@ export class AgentRuntime {
       const applied = await this.runtimeDomainApi.applyCore05BackgroundReview({
         reflectionRunId: reflectionRun.id,
         sessionId: evidence.session.id,
+        sourceRunId: sourceRun.id,
         mutations: result.mutations
       }) as { suggestions: ReflectionSuggestionRecord[] };
       const suggestions = applied.suggestions;
@@ -6392,7 +7043,13 @@ export class AgentRuntime {
 
   /** Existing Automation calls this only when a candidate Room has no active Backend Run. */
   private async runCore05PendingRoomReview(): Promise<ReflectionRuntimeResult> {
-    const candidates = (await this.store.listReflectionRuns())
+    // Scheduled work uses the local owner's current Room memberships as its
+    // candidate boundary. It never scans queued review records from a Room
+    // that the scheduler's human principal cannot currently enter.
+    const visibleRoomIds = await this.listLocalOwnerVisibleRoomIds();
+    const visibleSessions = await this.store.listSessions({ roomIds: [...visibleRoomIds] });
+    const candidates = (await Promise.all(visibleSessions.map((session) => this.store.listReflectionRuns(session.id))))
+      .flat()
       .filter((candidate) => candidate.kind === "background_review" && (candidate.status === "queued" || candidate.status === "deferred") && Boolean(candidate.source_run_id) && Boolean(candidate.activity_context))
       .sort((left, right) => Date.parse(left.started_at) - Date.parse(right.started_at));
     const candidate = candidates[0];
@@ -6414,11 +7071,9 @@ export class AgentRuntime {
     };
     if (!candidate?.source_run_id || !candidate.activity_context || !candidate.session_id) return skipped("Skipped Background Review: no queued Learning candidate exists.");
     const roomCandidates = candidates.filter((queued) => queued.activity_context?.room_id === candidate.activity_context?.room_id);
-    const [sourceRun, session, sessions, backendRuns] = await Promise.all([
+    const [sourceRun, session] = await Promise.all([
       this.store.getBackendRun(candidate.source_run_id),
-      this.store.getSession(candidate.session_id),
-      this.store.listSessions(),
-      this.store.listBackendRuns()
+      this.store.getSession(candidate.session_id)
     ]);
     if (!sourceRun || !session || session.id !== sourceRun.session_id || session.room_id !== candidate.activity_context.room_id) {
       const failed = await this.store.updateReflectionRun({
@@ -6429,8 +7084,21 @@ export class AgentRuntime {
       });
       return { reflectionRun: failed, suggestions: [] };
     }
-    const roomSessionIds = new Set(sessions.filter((item) => item.room_id === session.room_id).map((item) => item.id));
-    const roomHasActiveRun = backendRuns.some((run) => roomSessionIds.has(run.session_id) && ["queued", "running", "waiting_for_backend_input"].includes(run.status));
+    try {
+      await this.assertRunAgentExecution(sourceRun);
+    } catch {
+      const deferred = await this.store.updateReflectionRun({
+        ...candidate,
+        status: "deferred",
+        deferred_reason: "background_review_room_access_revoked",
+        output_summary: "Background Review is deferred because its original Room access is no longer active.",
+        completed_at: undefined
+      });
+      return { reflectionRun: deferred, suggestions: [] };
+    }
+    const roomSessions = await this.store.listSessions({ roomIds: [session.room_id] });
+    const roomBackendRuns = (await Promise.all(roomSessions.map((roomSession) => this.store.listBackendRuns(roomSession.id)))).flat();
+    const roomHasActiveRun = roomBackendRuns.some((run) => ["queued", "running", "waiting_for_backend_input"].includes(run.status));
     if (roomHasActiveRun) {
       const deferred = await this.store.updateReflectionRun({
         ...candidate,
@@ -6466,10 +7134,20 @@ export class AgentRuntime {
     evidence: Awaited<ReturnType<LearningEvidenceAssembler["assemble"]>> extends infer T ? Exclude<T, undefined> : never,
     pendingRoomEvidence: Array<Awaited<ReturnType<LearningEvidenceAssembler["assemble"]>> extends infer T ? Exclude<T, undefined> : never> = []
   ): Promise<Core05ReviewSnapshot> {
+    const access = await this.roomReadAccessForRun(evidence.backend_run);
+    if (access.roomId !== evidence.activity_context.room_id) {
+      throw new RuntimeRequestError("forbidden", "background_review_activity_room_mismatch");
+    }
     const [memory, wiki, skills] = await Promise.all([
-      this.store.listMemory({ activityContext: evidence.activity_context }),
-      this.store.listWiki({ activeOnly: false, activityContext: evidence.activity_context }),
-      this.store.listSkills({ activityContext: evidence.activity_context })
+      this.listCurrentRoomResources(access, "memory", (candidates) =>
+        this.store.listMemory({ activityContext: evidence.activity_context, ...candidates })
+      ),
+      this.listCurrentRoomResources(access, "wiki", (candidates) =>
+        this.store.listWiki({ activeOnly: false, activityContext: evidence.activity_context, ...candidates })
+      ),
+      this.listCurrentRoomResources(access, "skill", (candidates) =>
+        this.store.listSkills({ activityContext: evidence.activity_context, ...candidates })
+      )
     ]);
     return {
       evidence,
@@ -6556,6 +7234,7 @@ export class AgentRuntime {
     const applied = await this.runtimeDomainApi.applyCore05BackgroundReview({
       reflectionRunId: reflectionRun.id,
       sessionId: session.id,
+      sourceRunId: reflectionRun.source_run_id ?? reflectionRun.id,
       mutations: result.mutations
     }) as { suggestions: ReflectionSuggestionRecord[] };
     const legacyDirectMutationPath: boolean = false;
@@ -7074,7 +7753,9 @@ export class AgentRuntime {
       try {
         suggestions = await this.applyBackgroundReviewMutations(reflectionRun, input.session, result.mutations);
       } catch (error) {
-        await this.store.restoreLearningSnapshot(learningSnapshot.id);
+        // This is an internal compensation for the same Room-bound review.
+        // Public Curator restore deliberately cannot apply a Room snapshot.
+        await this.store.restoreLearningSnapshot(learningSnapshot.id, { allowRoomScope: true });
         await this.store.rollbackBackgroundReviewMetadata(reflectionRun.id);
         throw error;
       }
@@ -7661,7 +8342,7 @@ export class AgentRuntime {
     const now = nowIso();
     const context = options.context ?? webGatewayContext;
     const domainParticipant = this.activeDomainContext.getStore()?.participant;
-    const participantId = domainParticipant?.participantId ?? requesterParticipantIdForGatewayContext(context);
+    const participantId = domainParticipant ? principalParticipantId(domainParticipant) : requesterParticipantIdForGatewayContext(context);
     const requestedByParticipantId = domainParticipant?.kind === "agent"
       ? domainParticipant.requestedByParticipantId
       : participantId;
@@ -7703,11 +8384,18 @@ export class AgentRuntime {
     return operation;
   }
 
-  private async ensureSessionForContext(context: GatewayContext, title: string): Promise<SessionRecord> {
+  private async ensureSessionForContext(
+    context: GatewayContext,
+    title: string,
+    options: { roomId?: string } = {}
+  ): Promise<SessionRecord> {
     const domainContext = this.activeDomainContext.getStore();
     if (domainContext?.sessionId) {
       const session = await this.store.getSession(domainContext.sessionId);
       if (!session?.room_id) throw new RuntimeRequestError("conflict", `session_room_missing:${domainContext.sessionId}`);
+      if (options.roomId && session.room_id !== options.roomId) {
+        throw new RuntimeRequestError("conflict", `scheduled_session_room_mismatch:${session.id}`);
+      }
       if (domainContext.roomId && session.room_id !== domainContext.roomId) {
         throw new RuntimeRequestError("conflict", `domain_session_room_mismatch:${domainContext.sessionId}`);
       }
@@ -7725,19 +8413,46 @@ export class AgentRuntime {
       }
       return session;
     }
-    const existing = (await this.store.listSessions()).find((session) => session.session_key === context.session_key);
+    const participantId = requesterParticipantIdForGatewayContext(context);
+    // Every reuse is a fresh authorization decision. A transport label or an
+    // Agent Backend's in-memory session is never enough to keep using a Room.
+    if (!participantId) throw new RuntimeRequestError("forbidden", "room_participant_authentication_required");
+    const principal: ParticipantPrincipal = { kind: "human", participantId };
+    const requestedRoomId = options.roomId;
+    if (requestedRoomId) {
+      try {
+        await this.roomAuthorizationService.assertRoom(principal, requestedRoomId, "edit");
+      } catch (error) {
+        if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+        throw error;
+      }
+    }
+    const visibleRoomIds = requestedRoomId
+      ? new Set([requestedRoomId])
+      : await this.roomAuthorizationService.visibleRoomIds(principal);
+    const existing = (await this.store.listSessions({ roomIds: [...visibleRoomIds] })).find((session) => session.session_key === context.session_key);
     if (existing) {
+      if (!existing.room_id) throw new RuntimeRequestError("conflict", `session_room_missing:${existing.id}`);
+      try {
+        await this.roomAuthorizationService.assertResource(principal, {
+          roomId: existing.room_id,
+          action: "edit",
+          resourceKind: "session",
+          resourceId: existing.id
+        });
+      } catch (error) {
+        if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+        throw error;
+      }
       return existing;
     }
     const settings = await this.store.getSettings();
-    const roomId = settings.default_room_id;
+    const roomId = requestedRoomId ?? settings.default_room_id;
     if (!roomId || !await this.store.getRoom(roomId)) {
       throw new RuntimeRequestError("conflict", `room_not_found:${roomId ?? "default"}`);
     }
-    const participantId = requesterParticipantIdForGatewayContext(context);
-    if (!participantId) throw new RuntimeRequestError("forbidden", "room_participant_authentication_required");
     try {
-      await this.roomAuthorizationService.assertRoom({ kind: "human", participantId }, roomId, "edit");
+      await this.roomAuthorizationService.assertRoom(principal, roomId, "edit");
     } catch (error) {
       if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
       throw error;
@@ -12272,6 +12987,21 @@ function automationJobRef(job: AutomationJobRecord) {
   };
 }
 
+function translationSourceRefFromAutomationJob(job: AutomationJobRecord): ResourceRef | undefined {
+  const source = unknownRecord(job.delivery_target.source_ref);
+  const kind = typeof source.kind === "string" ? source.kind.trim() : "";
+  const id = typeof source.id === "string" ? source.id.trim() : "";
+  const uri = typeof source.uri === "string" ? source.uri : "";
+  if (!kind || !id || !uri) return undefined;
+  return {
+    kind,
+    id,
+    uri,
+    ...(typeof source.version === "string" ? { version: source.version } : {}),
+    ...(typeof source.label === "string" ? { label: source.label } : {})
+  };
+}
+
 function htmlToText(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -12336,22 +13066,6 @@ async function readBrowserPageWithPlaywright(url: string): Promise<{ url: string
   } finally {
     await browser.close();
   }
-}
-
-async function listWorkspaceDirectory(absolutePath: string, relativePath: string) {
-  const entries = await readdir(absolutePath, { withFileTypes: true });
-  return Promise.all(
-    entries.map(async (entry) => {
-      const childRelativePath = path.posix.join(relativePath.replaceAll(path.sep, "/"), entry.name).replace(/^\/+/, "");
-      const childAbsolutePath = path.join(absolutePath, entry.name);
-      const info = await stat(childAbsolutePath);
-      return {
-        path: childRelativePath,
-        kind: entry.isDirectory() ? "directory" as const : "file" as const,
-        ...(entry.isFile() ? { size: info.size } : {})
-      };
-    })
-  );
 }
 
 function nextRunFromSchedule(schedule: string, fromMs = Date.now()): string {
@@ -13034,9 +13748,23 @@ function trustedActorIdentityForSource(inputSource: DomainCommandInputSource): T
 }
 
 function sameParticipant(left: ParticipantPrincipal, right: ParticipantPrincipal): boolean {
-  if (left.kind !== right.kind || left.participantId !== right.participantId) return false;
+  if (left.kind !== right.kind || principalParticipantId(left) !== principalParticipantId(right)) return false;
   if (left.kind !== "agent" || right.kind !== "agent") return true;
   return left.agentId === right.agentId && left.requestedByParticipantId === right.requestedByParticipantId;
+}
+
+/** Agent participant IDs are derived from their Agent record and never trusted twice. */
+function principalParticipantId(participant: ParticipantPrincipal): string {
+  return participant.kind === "agent" ? agentParticipantId(participant.agentId) : participant.participantId;
+}
+
+function requesterParticipantId(participant: ParticipantPrincipal): string {
+  return participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId;
+}
+
+function canonicalRoomResourceKind(kind: string) {
+  const canonical = kind === "knowledge_wiki" ? "wiki" : kind;
+  return isRoomShareableResourceKind(canonical) ? canonical : undefined;
 }
 
 function requesterParticipantIdForGatewayContext(context: GatewayContext): string | undefined {
@@ -13052,103 +13780,10 @@ function trustedRequesterParticipantId(context: TrustedDomainContext): string | 
   return participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId;
 }
 
-function isRoomCollaborationOperation(operationId: string): boolean {
-  return operationId.startsWith("room.")
-    || operationId.startsWith("workspace.member.")
-    || operationId === "workspace.owner.transfer"
-    || operationId.startsWith("agent.");
-}
-
-/**
- * These operations read or mutate Room-scoped Workspace content. A Session
- * reference must be resolved by trusted ingress before they can run; using a
- * default Room here would leak data to a Workspace-level actor.
- */
-function requiresRoomContext(entry: DomainCommandEntry | DomainQueryEntry): boolean {
-  if (/^(chat|session|search|memory|wiki|skill|artifact|file|collection|image|graph|rollback|message|presentation)\./.test(entry.id)) {
-    return true;
-  }
-  return entry.resource_kinds.some((kind) => roomScopedResourceKinds.has(kind));
-}
-
-const roomScopedResourceKinds = new Set([
-  "artifact",
-  "collection_note",
-  "collection_record",
-  "collection_records",
-  "collection_schema",
-  "file",
-  "generated_surface",
-  "knowledge_wiki",
-  "memory",
-  "message",
-  "presentation",
-  "session",
-  "session_search",
-  "skill",
-  "skill_support_file",
-  "tool_run",
-  "workspace_change"
-]);
-
-/** Maps an existing Domain target to its Room access boundary. */
-function resourceTargetFromDomainOperation(
-  operationId: string,
-  payload: Record<string, JsonValue>
-): { kind: string; id: string } | undefined {
-  const surfaceId = stringPayload(payload.surface_id);
-  if (surfaceId && operationId.startsWith("generated_surface.")) {
-    return { kind: "generated_surface", id: surfaceId };
-  }
-
-  const artifactId = stringPayload(payload.artifact_id);
-  if (artifactId && (
-    operationId.startsWith("artifact.")
-    || operationId === "image.edit"
-    || operationId === "graph.patch"
-  )) return { kind: "artifact", id: artifactId };
-
-  const memoryId = stringPayload(payload.memory_id);
-  if (memoryId && operationId.startsWith("memory.")) return { kind: "memory", id: memoryId };
-
-  const wikiId = stringPayload(payload.wiki_id);
-  if (wikiId && operationId.startsWith("wiki.")) return { kind: "wiki", id: wikiId };
-
-  const skillId = stringPayload(payload.skill_id);
-  if (skillId && operationId.startsWith("skill.")) return { kind: "skill", id: skillId };
-
-  const filePath = stringPayload(payload.path);
-  if (filePath && (
-    operationId.startsWith("file.")
-    || operationId === "rollback.restore"
-  )) return { kind: "file", id: filePath };
-
-  const collectionId = stringPayload(payload.collection_id);
-  const recordId = stringPayload(payload.record_id);
-  if (collectionId && recordId && (
-    operationId === "collection.record.delete"
-    || operationId === "collection.patch.apply"
-    || operationId === "collection.action.run"
-  )) return { kind: "collection_record", id: collectionRecordBoundaryId(collectionId, recordId) };
-
-  if (collectionId && (
-    operationId === "collection.schema.get"
-    || operationId === "collection.records.list"
-    || operationId === "collection.view.present"
-    || operationId === "collection.action.run"
-  )) return { kind: "collection_schema", id: collectionId };
-
-  return undefined;
-}
-
 function isRoomPermissionMetadataKind(kind: string): boolean {
   return kind === "room" || kind === "agent" || kind === "workspace_member" || kind === "room_member"
     || kind === "room_agent" || kind === "agent_workspace_permission" || kind === "room_resource_share"
     || kind === "resource_access_boundary";
-}
-
-function isRoomScopedResourceKind(kind: string): boolean {
-  return roomScopedResourceKinds.has(kind);
 }
 
 function instructionSourceForDomainInput(inputSource: DomainCommandInputSource): InstructionSource {

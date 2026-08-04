@@ -52,14 +52,13 @@ export interface SystemOperationPort {
   getSession(id: string): Promise<SessionRecord | undefined>;
   getBackendRun(id: string): Promise<BackendRunRecord | undefined>;
   listMessages(sessionId: string): Promise<MessageRecord[]>;
-  listSessions(): Promise<SessionRecord[]>;
-  listBackendRuns(): Promise<BackendRunRecord[]>;
+  listBackendRuns(sessionId?: string): Promise<BackendRunRecord[]>;
   listToolRuns(runId?: string): Promise<ToolRunRecord[]>;
   listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]>;
   listBackendEvents(input: { runId?: string; sessionId?: string }): Promise<BackendEventRecord[]>;
   loadArtifacts(input: { sessionId: string; sourceRunId?: string; workspaceChanges: WorkspaceChangeRecord[] }): Promise<ReflectionArtifactSnapshot[]>;
   executeReflection(input: ReflectionWorkflowInput): Promise<ReflectionExecutionResult>;
-  listReflectionSuggestions(): Promise<ReflectionSuggestionRecord[]>;
+  getReflectionSuggestion(sessionId: string, suggestionId: string): Promise<ReflectionSuggestionRecord | undefined>;
   updateReflectionSuggestion(suggestion: ReflectionSuggestionRecord): Promise<ReflectionSuggestionRecord>;
   ensureReflectionSession(): Promise<SessionRecord>;
   createReflectionEnvelope(content: string): MessageEnvelope;
@@ -123,7 +122,7 @@ export class SystemDomainService {
   listReflectionBackendEvents(input: { runId?: string; sessionId?: string }) { return this.dependencies.operations.listBackendEvents(input); }
   loadReflectionArtifacts(input: { sessionId: string; sourceRunId?: string; workspaceChanges: WorkspaceChangeRecord[] }) { return this.dependencies.operations.loadArtifacts(input); }
   executeReflectionWorkflow(input: ReflectionWorkflowInput) { return this.dependencies.operations.executeReflection(input); }
-  listReflectionSuggestions() { return this.dependencies.operations.listReflectionSuggestions(); }
+  getReflectionSuggestion(sessionId: string, suggestionId: string) { return this.dependencies.operations.getReflectionSuggestion(sessionId, suggestionId); }
   reflectionSuggestionError(code: "not_found" | "conflict", message: string) { return this.dependencies.rollback.requestError(code, message); }
   ensureReflectionMutationSession() { return this.dependencies.operations.ensureReflectionSession(); }
   createReflectionMutationEnvelope(content: string) { return this.dependencies.operations.createReflectionEnvelope(content); }
@@ -136,17 +135,11 @@ export class SystemDomainService {
   reflectionNow() { return this.dependencies.operations.now(); }
 
   async runScheduledReflection(session: SessionRecord): Promise<ReflectionExecutionResult> {
-    const [sessions, backendRuns] = await Promise.all([
-      this.dependencies.operations.listSessions(), this.dependencies.operations.listBackendRuns()
-    ]);
-    const sessionsById = new Map(sessions.map((item) => [item.id, item]));
-    const scopedSource = backendRuns
-      .map((run) => ({ run, session: sessionsById.get(run.session_id) }))
-      .find((candidate): candidate is { run: BackendRunRecord; session: SessionRecord } => (
-        candidate.run.status === "completed" && Boolean(candidate.run.agent_id) && Boolean(candidate.session?.room_id)
-      ));
-    const sourceRun = scopedSource?.run;
-    const sourceSession = scopedSource?.session ?? session;
+    // Scheduled work is still Room work.  It may inspect only the supplied
+    // Session, never select an unrelated completed Run from another Room.
+    const backendRuns = await this.dependencies.operations.listBackendRuns(session.id);
+    const sourceRun = backendRuns.find((run) => run.status === "completed" && Boolean(run.agent_id));
+    const sourceSession = session;
     const recentRuns = sourceRun
       ? backendRuns.filter((run) => run.session_id === sourceSession.id).slice(0, 8)
       : [];

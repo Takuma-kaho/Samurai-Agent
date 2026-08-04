@@ -110,6 +110,7 @@ export const domainOperationClient = Object.freeze({
   roomMemberRoleChange: (): typeof domainOperationIds.roomMemberRoleChange => domainOperationIds.roomMemberRoleChange,
   roomOwnerRecover: (): typeof domainOperationIds.roomOwnerRecover => domainOperationIds.roomOwnerRecover,
   roomOwnerTransfer: (): typeof domainOperationIds.roomOwnerTransfer => domainOperationIds.roomOwnerTransfer,
+  roomOwnerlessList: (): typeof domainOperationIds.roomOwnerlessList => domainOperationIds.roomOwnerlessList,
   roomPatch: (): typeof domainOperationIds.roomPatch => domainOperationIds.roomPatch,
   roomResourceShare: (): typeof domainOperationIds.roomResourceShare => domainOperationIds.roomResourceShare,
   roomResourceShareList: (): typeof domainOperationIds.roomResourceShareList => domainOperationIds.roomResourceShareList,

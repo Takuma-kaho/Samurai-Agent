@@ -1,4 +1,5 @@
 import { jsonSchemaFor, type DomainAvailability, type DomainConcurrency, type DomainEffect, type DomainIdempotency, type DomainInputSource, type DomainProvenance, type DomainRenderKind, type DomainRuntimeCapability } from "./definition/index.js";
+import type { DomainAccessClassification } from "./definition/access-classification.js";
 import { operationDefinitions } from "./generated/operation-index.generated.js";
 import type { z } from "zod";
 import type { JsonValue } from "@samurai-agent/core-schemas";
@@ -15,6 +16,7 @@ export interface DomainCommandCatalogEntry {
   description: string;
   implementation_target: "domain_operation";
   ui_display_category: string;
+  access: DomainAccessClassification;
   input_sources: DomainInputSource[];
   allowed_sources: DomainInputSource[];
   provider_tool_names?: string[];
@@ -82,6 +84,7 @@ interface CatalogDefinition {
   proposedEffects: readonly string[];
   outputResourceKind: string;
   uiDisplayCategory: string;
+  access: DomainAccessClassification;
   providerToolNames?: readonly string[];
   surfaceOperationKinds?: readonly string[];
   provenance: readonly DomainProvenance[];
@@ -103,6 +106,7 @@ function projectCommand(definition: CatalogDefinition): DomainCommandCatalogEntr
     description: definition.description,
     implementation_target: "domain_operation",
     ui_display_category: definition.uiDisplayCategory,
+    access: definition.access,
     input_sources: [...definition.sources],
     allowed_sources: [...definition.sources],
     ...(definition.providerToolNames ? { provider_tool_names: [...definition.providerToolNames] } : {}),
@@ -143,6 +147,7 @@ export function fingerprintDefinition(
     proposedEffects: definition.proposedEffects,
     outputResourceKind: definition.outputResourceKind,
     uiDisplayCategory: definition.uiDisplayCategory,
+    access: definition.access,
     providerToolNames: definition.providerToolNames,
     surfaceOperationKinds: definition.surfaceOperationKinds,
     provenance: definition.provenance,

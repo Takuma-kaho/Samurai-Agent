@@ -16,8 +16,9 @@ import type {
   WorkspaceMemberRecord,
   WorkspaceStore
 } from "@samurai-agent/workspace-store";
-import type { RoomHumanRole, WorkspaceRole } from "@samurai-agent/room-permissions";
+import { type RoomHumanRole, type RoomShareableResourceReference, type WorkspaceRole } from "@samurai-agent/room-permissions";
 import { RoomAuthorizationService } from "./room-authorization-service.js";
+import { RoomResourceCatalog } from "./room-resource-catalog.js";
 
 export type RoomAgentStorePort = Pick<WorkspaceStore,
   | "createRoomWithOwner"
@@ -42,6 +43,7 @@ export type RoomAgentStorePort = Pick<WorkspaceStore,
   | "removeRoomMember"
   | "transferRoomOwnership"
   | "recoverOwnerlessRoom"
+  | "listOwnerlessRoomIds"
   | "listRoomAgents"
   | "setRoomAgentPermissions"
   | "removeRoomAgent"
@@ -69,6 +71,7 @@ export class RoomAgentDomainService {
   constructor(
     private readonly store: RoomAgentStorePort,
     private readonly authorization: RoomAuthorizationService,
+    private readonly resourceCatalog: RoomResourceCatalog,
     private readonly backendRegistered: (backendId: string) => boolean,
     private readonly requestError: (code: "not_found" | "conflict" | "forbidden", message: string) => Error
   ) {}
@@ -113,13 +116,13 @@ export class RoomAgentDomainService {
   }
 
   async addWorkspaceMember(context: TrustedDomainContext, input: { participantId: string; role: Exclude<WorkspaceRole, "owner"> }): Promise<WorkspaceMemberRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertWorkspaceMemberManagement({ principal, targetRole: input.role });
     return this.store.addWorkspaceMember({ ...input, actorId: principal.participantId });
   }
 
   async changeWorkspaceMemberRole(context: TrustedDomainContext, input: { participantId: string; role: Exclude<WorkspaceRole, "owner"> }): Promise<WorkspaceMemberRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     const target = await this.store.getWorkspaceMember(input.participantId);
     if (!target) throw this.requestError("not_found", `workspace_member_not_found:${input.participantId}`);
     await this.authorization.assertWorkspaceMemberManagement({ principal, targetRole: target.role });
@@ -130,7 +133,7 @@ export class RoomAgentDomainService {
   }
 
   async removeWorkspaceMember(context: TrustedDomainContext, participantId: string): Promise<WorkspaceMemberRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     const target = await this.store.getWorkspaceMember(participantId);
     if (!target) throw this.requestError("not_found", `workspace_member_not_found:${participantId}`);
     await this.authorization.assertWorkspaceMemberManagement({ principal, targetRole: target.role });
@@ -140,8 +143,7 @@ export class RoomAgentDomainService {
   }
 
   async transferWorkspaceOwnership(context: TrustedDomainContext, toParticipantId: string): Promise<{ previousOwner: WorkspaceMemberRecord; owner: WorkspaceMemberRecord }> {
-    const principal = this.principal(context);
-    if (principal.kind !== "human") throw this.requestError("forbidden", "workspace_owner_transfer_human_required");
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertWorkspace(principal, "transfer_ownership");
     return this.store.transferWorkspaceOwnership({
       fromParticipantId: principal.participantId,
@@ -151,7 +153,7 @@ export class RoomAgentDomainService {
   }
 
   async setAgentRoomCreatePermission(context: TrustedDomainContext, input: { agentId: string; allowed: boolean }): Promise<AgentWorkspacePermissionRecord | undefined> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertWorkspace(principal, "manage_agent_room_create");
     if (!await this.store.getAgent(input.agentId)) throw this.requestError("not_found", `agent_not_found:${input.agentId}`);
     return this.store.setAgentWorkspacePermission({
@@ -169,24 +171,24 @@ export class RoomAgentDomainService {
   }
 
   async addRoomMember(context: TrustedDomainContext, input: { roomId: string; participantId: string; role: Exclude<RoomHumanRole, "owner"> }): Promise<RoomMemberRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertRoomMemberManagement({ principal, roomId: input.roomId, targetKind: "human", targetRole: input.role });
     return this.store.addRoomMember({ ...input, actorId: principal.participantId });
   }
 
   async changeRoomMemberRole(context: TrustedDomainContext, input: { roomId: string; participantId: string; role: Exclude<RoomHumanRole, "owner"> }): Promise<RoomMemberRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     const target = await this.store.getRoomMember(input.roomId, input.participantId);
     if (!target) throw this.requestError("not_found", `room_member_not_found:${input.roomId}:${input.participantId}`);
     await this.authorization.assertRoomMemberManagement({ principal, roomId: input.roomId, targetKind: "human", targetRole: target.role });
     await this.authorization.assertRoomMemberManagement({ principal, roomId: input.roomId, targetKind: "human", targetRole: input.role });
-    const changed = await this.store.changeRoomMemberRole(input);
+    const changed = await this.store.changeRoomMemberRole({ ...input, actorId: principal.participantId });
     if (!changed) throw this.requestError("not_found", `room_member_not_found:${input.roomId}:${input.participantId}`);
     return changed;
   }
 
   async removeRoomMember(context: TrustedDomainContext, input: { roomId: string; participantId: string }): Promise<RoomMemberRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     const target = await this.store.getRoomMember(input.roomId, input.participantId);
     if (!target) throw this.requestError("not_found", `room_member_not_found:${input.roomId}:${input.participantId}`);
     await this.authorization.assertRoomMemberManagement({ principal, roomId: input.roomId, targetKind: "human", targetRole: target.role });
@@ -196,14 +198,14 @@ export class RoomAgentDomainService {
   }
 
   async setRoomAgentPermissions(context: TrustedDomainContext, input: { roomId: string; agentId: string; canView: boolean; canEdit: boolean; canExecute: boolean }): Promise<RoomAgentPermissionRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertRoomMemberManagement({ principal, roomId: input.roomId, targetKind: "agent" });
     if (!await this.store.getAgent(input.agentId)) throw this.requestError("not_found", `agent_not_found:${input.agentId}`);
     return this.store.setRoomAgentPermissions({ ...input, actorId: principal.participantId });
   }
 
   async removeRoomAgent(context: TrustedDomainContext, input: { roomId: string; agentId: string }): Promise<RoomAgentPermissionRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertRoomMemberManagement({ principal, roomId: input.roomId, targetKind: "agent" });
     const removed = await this.store.removeRoomAgent({ ...input, actorId: principal.participantId });
     if (!removed) throw this.requestError("not_found", `room_agent_not_found:${input.roomId}:${input.agentId}`);
@@ -211,33 +213,49 @@ export class RoomAgentDomainService {
   }
 
   async transferRoomOwnership(context: TrustedDomainContext, input: { roomId: string; toParticipantId: string }): Promise<{ previousOwner: RoomMemberRecord; owner: RoomMemberRecord }> {
-    const principal = this.principal(context);
-    if (principal.kind !== "human") throw this.requestError("forbidden", "room_owner_transfer_human_required");
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertRoom(principal, input.roomId, "transfer_ownership");
-    return this.store.transferRoomOwnership({ roomId: input.roomId, fromParticipantId: principal.participantId, toParticipantId: input.toParticipantId });
+    return this.store.transferRoomOwnership({ roomId: input.roomId, fromParticipantId: principal.participantId, toParticipantId: input.toParticipantId, actorId: principal.participantId });
   }
 
   async recoverOwnerlessRoom(context: TrustedDomainContext, input: { roomId: string; ownerParticipantId: string }): Promise<RoomMemberRecord> {
-    const principal = this.principal(context);
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertWorkspace(principal, "recover_ownerless_room");
-    return this.store.recoverOwnerlessRoom(input);
+    return this.store.recoverOwnerlessRoom({ ...input, actorId: principal.participantId });
   }
 
-  async shareResource(context: TrustedDomainContext, input: { sourceRoomId: string; targetRoomId: string; resourceKind: string; resourceId: string }): Promise<RoomResourceShareRecord> {
-    const principal = this.principal(context);
-    if (principal.kind !== "human") throw this.requestError("forbidden", "room_share_human_required");
+  async listOwnerlessRooms(context: TrustedDomainContext): Promise<RoomRecord[]> {
+    const principal = this.humanPrincipal(context);
+    await this.authorization.assertWorkspace(principal, "recover_ownerless_room");
+    const ids = await this.store.listOwnerlessRoomIds();
+    const rooms = await Promise.all(ids.map((id) => this.store.getRoom(id)));
+    return rooms.filter((room): room is RoomRecord => Boolean(room));
+  }
+
+  async shareResource(context: TrustedDomainContext, input: { sourceRoomId: string; targetRoomId: string; resource: RoomShareableResourceReference }): Promise<RoomResourceShareRecord> {
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertShare(principal, input.sourceRoomId, input.targetRoomId);
+    const resource = await this.resourceCatalog.resolve(input.resource);
+    if (!resource) throw this.requestError("not_found", "room_resource_not_found");
+    if (resource.sourceRoomId && resource.sourceRoomId !== input.sourceRoomId) {
+      throw this.requestError("conflict", "room_resource_source_room_mismatch");
+    }
     await this.authorization.assertResource(principal, {
       roomId: input.sourceRoomId,
       action: "read",
-      resourceKind: input.resourceKind,
-      resourceId: input.resourceId
+      resourceKind: resource.kind,
+      resourceId: resource.resourceId
     });
+    const existing = await this.store.getResourceAccessBoundary(resource.kind, resource.resourceId);
+    if (existing && existing.source_room_id !== input.sourceRoomId) {
+      throw this.requestError("conflict", "room_resource_source_room_mismatch");
+    }
     const boundary = await this.store.ensureResourceAccessBoundary({
-      resourceKind: input.resourceKind,
-      resourceId: input.resourceId,
+      resourceKind: resource.kind,
+      resourceId: resource.resourceId,
       sourceRoomId: input.sourceRoomId,
       ownerParticipantId: principal.participantId,
+      ...(resource.resourceCreatedAt ? { resourceCreatedAt: resource.resourceCreatedAt } : {}),
       actorId: principal.participantId
     });
     return this.store.shareResource({
@@ -248,14 +266,15 @@ export class RoomAgentDomainService {
     });
   }
 
-  async revokeResourceShare(context: TrustedDomainContext, input: { sourceRoomId: string; targetRoomId: string; resourceKind: string; resourceId: string }): Promise<RoomResourceShareRecord> {
-    const principal = this.principal(context);
-    if (principal.kind !== "human") throw this.requestError("forbidden", "room_share_human_required");
+  async revokeResourceShare(context: TrustedDomainContext, input: { sourceRoomId: string; targetRoomId: string; resource: RoomShareableResourceReference }): Promise<RoomResourceShareRecord> {
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertShare(principal, input.sourceRoomId, input.targetRoomId);
-    const boundary = await this.requireBoundary(input.resourceKind, input.resourceId);
+    const resource = this.resourceCatalog.canonicalize(input.resource);
+    const boundary = await this.requireBoundary(resource.kind, resource.resourceId);
     if (boundary.source_room_id !== input.sourceRoomId) throw this.requestError("conflict", "room_resource_share_source_invalid");
     const revoked = await this.store.revokeRoomResourceShare({
       resourceAccessBoundaryId: boundary.id,
+      sourceRoomId: input.sourceRoomId,
       targetRoomId: input.targetRoomId,
       actorId: principal.participantId
     });
@@ -263,11 +282,11 @@ export class RoomAgentDomainService {
     return revoked;
   }
 
-  async listResourceShares(context: TrustedDomainContext, input: { sourceRoomId: string; resourceKind: string; resourceId: string }): Promise<RoomResourceShareRecord[]> {
-    const principal = this.principal(context);
-    if (principal.kind !== "human") throw this.requestError("forbidden", "room_share_human_required");
+  async listResourceShares(context: TrustedDomainContext, input: { sourceRoomId: string; resource: RoomShareableResourceReference }): Promise<RoomResourceShareRecord[]> {
+    const principal = this.humanPrincipal(context);
     await this.authorization.assertRoom(principal, input.sourceRoomId, "share");
-    const boundary = await this.requireBoundary(input.resourceKind, input.resourceId);
+    const resource = this.resourceCatalog.canonicalize(input.resource);
+    const boundary = await this.requireBoundary(resource.kind, resource.resourceId);
     if (boundary.source_room_id !== input.sourceRoomId) throw this.requestError("not_found", "room_resource_boundary_not_found");
     return this.store.listRoomResourceShares(boundary.id);
   }
@@ -312,6 +331,12 @@ export class RoomAgentDomainService {
   private principal(context: TrustedDomainContext) {
     if (!context.participant) throw this.requestError("forbidden", "room_participant_required");
     return context.participant;
+  }
+
+  private humanPrincipal(context: TrustedDomainContext) {
+    const principal = this.principal(context);
+    if (principal.kind !== "human") throw this.requestError("forbidden", "room_human_participant_required");
+    return principal;
   }
 
   private async requireBoundary(resourceKind: string, resourceId: string): Promise<ResourceAccessBoundaryRecord> {

@@ -50,10 +50,11 @@ export interface ResourceAccessBoundariesTable {
   id: string;
   resource_kind: string;
   resource_id: string;
-  source_room_id: string | null;
+  source_room_id: string;
   owner_participant_id: string;
-  created_by_participant_id: string;
-  created_at: string;
+  creator_participant_id: string | null;
+  resource_created_at: string | null;
+  boundary_registered_at: string;
   updated_at: string;
 }
 

@@ -24,13 +24,23 @@ interface EvaluableResource {
 
 export interface AppliedLearningEvaluationDomainServiceDependencies {
   isLearningEnabled(): Promise<boolean>;
-  listUses(input?: { runId?: string }): Promise<LearningResourceUseRecord[]>;
-  listEvaluations(): Promise<LearningEvaluationRecord[]>;
+  listUses(input?: { runId?: string; sessionId?: string }): Promise<LearningResourceUseRecord[]>;
+  listEvaluations(input?: { activityContext?: ActivityContextRef }): Promise<LearningEvaluationRecord[]>;
   getRun(id: string): Promise<BackendRunRecord | undefined>;
+  /** Re-checks the Agent and requester before any post-run evidence is read. */
+  assertRunAccess(run: BackendRunRecord): Promise<void>;
+  assertResourceAccess(input: {
+    run: BackendRunRecord;
+    resourceKind: LearningResourceKind;
+    resourceId: string;
+    activityContext: ActivityContextRef;
+    action: "read" | "edit";
+  }): Promise<void>;
   listToolRuns(input: { runId: string }): Promise<ToolRunRecord[]>;
   listMessages(sessionId: string): Promise<Array<{ id: string; role: "user" | "agent" | "system"; content: string; created_at: string }>>;
   getResource(input: { resourceKind: LearningResourceKind; resourceId: string }): Promise<EvaluableResource | undefined>;
   markRefuted(input: {
+    run: BackendRunRecord;
     resourceKind: LearningResourceKind;
     resourceId: string;
     expectedVersion: string;
@@ -61,6 +71,26 @@ export class AppliedLearningEvaluationDomainService {
     learningEvaluations: LearningEvaluationRecord[];
   }> {
     const now = nowIso();
+    // A scheduled Workspace-wide evaluation has no Room principal. It must
+    // not turn into a hidden scan of every Room; per-Run evaluation still
+    // arrives here with its concrete source Run or Session.
+    if (!input.sourceRunId && !input.sessionId) {
+      const reflectionRun: ReflectionRunRecord = {
+        id: createId("reflection"),
+        kind: "evaluation",
+        status: "completed",
+        input_summary: "Skipped Evaluation: no Room-scoped Run or Session was supplied.",
+        output_summary: "No Evaluation ran because a Room context is required.",
+        started_at: now,
+        completed_at: now
+      };
+      return {
+        reflectionRun,
+        suggestions: [],
+        evaluationReport: appliedEvaluationReport(now, [], [], 0),
+        learningEvaluations: []
+      };
+    }
     if (!await this.dependencies.isLearningEnabled()) {
       const reflectionRun: ReflectionRunRecord = {
         id: createId("reflection"),
@@ -90,13 +120,24 @@ export class AppliedLearningEvaluationDomainService {
       } => use.stage === "applied"
         && (use.resource_kind === "memory" || use.resource_kind === "wiki" || use.resource_kind === "skill")
         && Boolean(use.resource_version && use.content_hash && use.activity_context && use.decision_summary && use.matched_conditions?.length));
-    const existing = await this.dependencies.listEvaluations();
-    const pending = applied.filter((use) => !existing.some((evaluation) =>
-      evaluation.evaluation_kind === "applied"
-      && evaluation.applied_run_id === use.run_id
-      && evaluation.learning_resource_ref.id === use.resource_id
-      && evaluation.learning_resource_version === use.resource_version
-    ));
+    const existingByActivity = new Map<string, LearningEvaluationRecord[]>();
+    const existingFor = async (activityContext: ActivityContextRef) => {
+      const key = `${activityContext.room_id}:${activityContext.session_id}:${activityContext.agent_id}`;
+      const cached = existingByActivity.get(key);
+      if (cached) return cached;
+      const records = await this.dependencies.listEvaluations({ activityContext });
+      existingByActivity.set(key, records);
+      return records;
+    };
+    const pending = (await Promise.all(applied.map(async (use) => {
+      const existing = await existingFor(use.activity_context);
+      return existing.some((evaluation) =>
+        evaluation.evaluation_kind === "applied"
+        && evaluation.applied_run_id === use.run_id
+        && evaluation.learning_resource_ref.id === use.resource_id
+        && evaluation.learning_resource_version === use.resource_version
+      ) ? undefined : use;
+    }))).filter((use): use is typeof applied[number] => Boolean(use));
     if (pending.length === 0) {
       const reflectionRun: ReflectionRunRecord = {
         id: createId("reflection"),
@@ -129,6 +170,15 @@ export class AppliedLearningEvaluationDomainService {
     for (const use of pending) {
       const run = await this.dependencies.getRun(use.run_id);
       if (!run) continue;
+      if (run.session_id !== use.activity_context.session_id) continue;
+      await this.dependencies.assertRunAccess(run);
+      await this.dependencies.assertResourceAccess({
+        run,
+        resourceKind: use.resource_kind,
+        resourceId: use.resource_id,
+        activityContext: use.activity_context,
+        action: "read"
+      });
       const [resource, toolRuns, messages] = await Promise.all([
         this.dependencies.getResource({ resourceKind: use.resource_kind, resourceId: use.resource_id }),
         this.dependencies.listToolRuns({ runId: run.id }),
@@ -172,7 +222,15 @@ export class AppliedLearningEvaluationDomainService {
       await this.dependencies.saveEvaluation(evaluation);
       learningEvaluations.push(evaluation);
       if (outcome.verdict === "refuted") {
+        await this.dependencies.assertResourceAccess({
+          run,
+          resourceKind: use.resource_kind,
+          resourceId: use.resource_id,
+          activityContext: use.activity_context,
+          action: "edit"
+        });
         const limitedRef = await this.dependencies.markRefuted({
+          run,
           resourceKind: use.resource_kind,
           resourceId: use.resource_id,
           expectedVersion: use.resource_version,

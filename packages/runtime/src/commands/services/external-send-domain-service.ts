@@ -8,6 +8,8 @@ export interface ExternalSendPort {
 }
 export interface ExternalSendMutationHost {
   ensureSession(): Promise<SessionRecord>; createEnvelope(session: SessionRecord, content: string): MessageEnvelope;
+  getForCurrentRoom(id: string): Promise<ExternalSendRecord | undefined>;
+  assertCurrentRoomExecution(): Promise<void>;
   runMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: "external.send" | "external.send.prepare" | "external.send.dispatch"; proposedEffects: string[]; inputRef?: ResourceRef; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ExternalSendRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<ExternalSendWriteResult>;
   createRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   createId(): string; now(): string; defaultDryRun(): boolean; notFound(message: string): Error;
@@ -17,8 +19,12 @@ export class ExternalSendDomainService {
   constructor(private readonly sends: ExternalSendPort, private readonly host: ExternalSendMutationHost) {}
 
   getExternalSend(id: string) { return this.sends.get(id); }
+  getExternalSendForCurrentRoom(id: string) { return this.host.getForCurrentRoom(id); }
   saveExternalSend(record: ExternalSendRecord) { return this.sends.save(record); }
-  dispatchExternalSend(record: ExternalSendRecord, dryRun: boolean) { return this.sends.dispatch(record, dryRun); }
+  async dispatchExternalSend(record: ExternalSendRecord, dryRun: boolean) {
+    await this.host.assertCurrentRoomExecution();
+    return this.sends.dispatch(record, dryRun);
+  }
   ensureExternalSendSession() { return this.host.ensureSession(); }
   createExternalSendEnvelope(session: SessionRecord, content: string) { return this.host.createEnvelope(session, content); }
   runExternalSendMutation(input: Parameters<ExternalSendMutationHost["runMutation"]>[0]) { return this.host.runMutation(input); }

@@ -136,6 +136,7 @@ import {
 import { assertTrustedRuntimePayload, resolveTrustedRuntimeApiInput, type TrustedRuntimeApiContext } from "./domain-ingress";
 import { parseSurfaceOperation, type RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import { WorkspaceStore, type SessionTranscriptExport } from "@samurai-agent/workspace-store";
+import { collectionRecordResourceId } from "@samurai-agent/room-permissions";
 import { registerBackendEventRoutes } from "./routes/backend-events";
 import { startAutomationScheduler, type AutomationScheduler } from "./workers/automation-scheduler";
 
@@ -708,6 +709,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       const sourceRef = resourceRefFromQuery(req.query);
       const targetLocale = asSupportedLocale(req.query.target_locale);
       const status = asTranslationStatus(req.query.status);
+      const sourceResource = sourceRef ? roomAccessResourceForRef(sourceRef) : undefined;
+      if (!sourceRef || !sourceResource) {
+        res.status(400).json({ error: "source_ref_required" });
+        return;
+      }
+      await runtime.assertLocalOwnerRoomAccess({
+        ...apiRoomAccessContext(req),
+        resource: sourceResource
+      });
       res.json(await store.listResourceTranslations({ sourceRef, targetLocale, status }));
     } catch (error) {
       next(error);
@@ -770,10 +780,22 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     try {
       const sourceRef = resourceRef(req.body?.source_ref);
       const targetLocale = asSupportedLocale(req.body?.target_locale);
-      if (!sourceRef || !targetLocale) {
+      const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+      const roomId = typeof req.body?.room_id === "string" ? req.body.room_id.trim() : "";
+      if (!sourceRef || !targetLocale || (!sessionId && !roomId)) {
         res.status(400).json({ error: "invalid_resource_translation_resolution" });
         return;
       }
+      const sourceResource = roomAccessResourceForRef(sourceRef);
+      if (!sourceResource) {
+        res.status(400).json({ error: "invalid_resource_translation_source" });
+        return;
+      }
+      await runtime.assertLocalOwnerRoomAccess({
+        ...(sessionId ? { sessionId } : {}),
+        ...(roomId ? { roomId } : {}),
+        resource: sourceResource
+      });
       res.json(await store.resolveResourceTranslation({
         sourceRef,
         targetLocale,
@@ -785,9 +807,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     }
   });
 
-  app.get("/api/agent-backends", async (_req, res, next) => {
+  app.get("/api/agent-backends", async (req, res, next) => {
     try {
-      res.json(await runtime.listAgentBackends());
+      const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+      if (!sessionId) {
+        res.status(400).json({ error: "session_id_required" });
+        return;
+      }
+      await runtime.assertLocalOwnerRoomAccess({ sessionId });
+      res.json(await runtime.listAgentBackends(sessionId));
     } catch (error) {
       next(error);
     }
@@ -807,9 +835,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     }
   });
 
-  app.get("/api/chat/sessions", async (_req, res, next) => {
+  app.get("/api/chat/sessions", async (req, res, next) => {
     try {
-      const sessions = await store.listSessions();
+      const sessions = await runtime.listLocalOwnerRoomSessions(apiRoomAccessContext(req));
       const activeSessions = await Promise.all(
         sessions.map(async (session) => ({
           session,
@@ -1090,12 +1118,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/generated-surfaces/:surfaceId/revisions/:revisionId/bundle", async (req, res, next) => {
       try {
+        await requireGeneratedSurfaceRoomAccess(runtime, store, req.params.surfaceId);
         const revision = await store.getGeneratedSurfaceRevision(req.params.revisionId);
         if (!revision || revision.surface_id !== req.params.surfaceId) {
           res.status(404).json({ error: "generated_surface_revision_not_found" });
           return;
         }
-        await requireGeneratedSurfaceRoomAccess(runtime, store, revision.surface_id);
         res.json({ revision, bundle: await store.readGeneratedSurfaceBundle(revision.id), csp: generatedSurfaceCsp });
       } catch (error) {
         next(error);
@@ -1104,12 +1132,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/generated-surfaces/:surfaceId/revisions/:revisionId/assets/{*assetPath}", async (req, res, next) => {
       try {
+        await requireGeneratedSurfaceRoomAccess(runtime, store, req.params.surfaceId);
         const revision = await store.getGeneratedSurfaceRevision(req.params.revisionId);
         if (!revision || revision.surface_id !== req.params.surfaceId) {
           res.status(404).type("text").send("Generated Surface asset not found.");
           return;
         }
-        await requireGeneratedSurfaceRoomAccess(runtime, store, revision.surface_id);
         const requestedPath = String(req.params.assetPath ?? "").replace(/^\/+/, "");
         const asset = (await store.readGeneratedSurfaceAssets(revision.id)).find((candidate) => candidate.path === requestedPath);
         if (!asset) {
@@ -1177,7 +1205,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     app.get("/api/skill-optimizations", async (req, res, next) => {
       try {
         const skillId = typeof req.query.skill_id === "string" ? req.query.skill_id : undefined;
-        res.json(await store.listSkillOptimizationRuns({ skillId }));
+        const runs = await listApiVisibleSkillOptimizationRuns(runtime, store, req);
+        res.json(skillId ? runs.filter((run) => run.target_skill_id === skillId) : runs);
       } catch (error) {
         next(error);
       }
@@ -1185,7 +1214,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/skill-optimizations/:runId", async (req, res, next) => {
       try {
-        const run = await store.getSkillOptimizationRun(req.params.runId);
+        const run = (await listApiVisibleSkillOptimizationRuns(runtime, store, req))
+          .find((candidate) => candidate.id === req.params.runId);
         if (!run) {
           res.status(404).json({ error: "skill_optimization_run_not_found" });
           return;
@@ -1282,7 +1312,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     try {
       const operationId = typeof req.query.operation_id === "string" ? req.query.operation_id : undefined;
       const capabilityId = typeof req.query.capability_id === "string" ? req.query.capability_id : undefined;
-      const decisions = await store.listPolicyDecisions();
+      const scope = await apiRoomOperationScope(runtime, store, req);
+      const decisions = await store.listPolicyDecisionsForOperationIds([...scope.operationIds]);
       res.json(decisions.filter((decision) =>
         (!operationId || decision.operation_id === operationId) &&
         (!capabilityId || decision.capability_id === capabilityId)
@@ -1326,28 +1357,53 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "session_not_found" });
           return;
         }
-        const [messages, messagePresentations, operations, artifacts, auditRecords, memory, activity, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
+        if (!session.room_id) {
+          res.status(409).json({ error: "session_room_missing" });
+          return;
+        }
+        const roomId = session.room_id;
+        const [operations, memoryCandidates] = await Promise.all([
+          store.listOperations(session.id),
+          runtime.localOwnerResourceCandidates({ sessionId: session.id }, "memory")
+        ]);
+        const sessionOperationIds = new Set(operations.map((operation) => operation.id));
+        const [messages, messagePresentations, artifacts, auditRecords, rawMemory, approvals, decisions, rollbacks, backendRuns, backendEvents, workspaceChanges, toolRuns, reflectionRuns] = await Promise.all([
           store.listMessages(session.id),
           store.listMessagePresentations({ sessionId: session.id }),
-          store.listOperations(session.id),
           store.listArtifactsForSession(session.id),
-          store.listAuditRecords(),
-          store.listMemoryForSession(session.id),
-          store.readActivityInputs().then((inputs) => import("@samurai-agent/audit").then(({ buildActivityInboxItems }) => buildActivityInboxItems(inputs))),
+          store.listAuditRecordsForRoom(roomId),
+          store.listMemoryForSession(session.id, memoryCandidates),
+          store.listApprovalRequestsForOperationIds([...sessionOperationIds]),
+          store.listPolicyDecisionsForOperationIds([...sessionOperationIds]),
+          store.listRollbackPointsForOperationIds([...sessionOperationIds]),
           store.listBackendRuns(session.id),
           store.listBackendEvents({ sessionId: session.id }),
           store.listWorkspaceChanges(session.id),
           store.listToolRuns({ sessionId: session.id }),
           store.listReflectionRuns(session.id)
         ]);
-        const sessionOperationIds = new Set(operations.map((operation) => operation.id));
+        const memory = await recheckRoomResources(
+          runtime,
+          { sessionId: session.id },
+          "memory",
+          rawMemory,
+          (item) => item.id
+        );
+        const { buildActivityInboxItems } = await import("@samurai-agent/audit");
+        const activity = buildActivityInboxItems({
+          operations,
+          approvals,
+          decisions,
+          audits: auditRecords.filter((item) => sessionOperationIds.has(item.operation_id)),
+          rollbacks
+        });
         res.json({
           session,
           messages,
           messagePresentations,
           operations,
           artifacts,
-          auditRecords: auditRecords.filter((record) => record.room_id === session.room_id),
+          auditRecords: auditRecords.filter((record) => record.room_id === roomId),
           memory,
           activity: activity.filter((item) => item.operation_id !== undefined && sessionOperationIds.has(item.operation_id)),
           backendRuns,
@@ -1538,6 +1594,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/external-assist", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const phaseRaw = typeof req.query.phase === "string" ? req.query.phase : undefined;
         const phase = phaseRaw ? ExternalAssistPhaseSchema.safeParse(phaseRaw) : undefined;
         if (phaseRaw && !phase?.success) {
@@ -1546,7 +1608,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         }
         const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : undefined;
         res.json(await store.listExternalAssistRecords({
-          ...(typeof req.query.session_id === "string" ? { sessionId: req.query.session_id } : {}),
+          sessionId,
           ...(phase?.success ? { phase: phase.data } : {}),
           ...(Number.isFinite(limitRaw) && limitRaw !== undefined ? { limit: Math.max(1, Math.min(100, limitRaw)) } : {})
         }));
@@ -1557,6 +1619,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/external-assist/diagnostics", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const phaseRaw = typeof req.query.phase === "string" ? req.query.phase : undefined;
         const phase = phaseRaw ? ExternalAssistPhaseSchema.safeParse(phaseRaw) : undefined;
         if (phaseRaw && !phase?.success) {
@@ -1571,7 +1639,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         }
         const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : undefined;
         res.json(await store.getExternalAssistDiagnostics({
-          ...(typeof req.query.session_id === "string" ? { sessionId: req.query.session_id } : {}),
+          sessionId,
           ...(phase?.success ? { phase: phase.data } : {}),
           ...(status?.success ? { status: status.data } : {}),
           ...(typeof req.query.provider_id === "string" ? { providerId: req.query.provider_id } : {}),
@@ -1599,14 +1667,25 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/reflection/diagnostics", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const staleAfterHours = typeof req.query.stale_after_hours === "string"
           ? Number.parseInt(req.query.stale_after_hours, 10)
           : undefined;
+        const [memories, skills, wikiPages] = await Promise.all([
+          filterApiRoomResources(runtime, req, "memory", (candidates) => store.listMemory(candidates), (memory) => memory.id),
+          filterApiRoomResources(runtime, req, "skill", (candidates) => store.listSkills(candidates), (skill) => skill.id),
+          filterApiRoomResources(runtime, req, "wiki", (candidates) => store.listWiki({ activeOnly: false, ...candidates }), (wiki) => wiki.id)
+        ]);
         res.json(await reflectionDiagnosticsPayload(store, {
-          sessionId: typeof req.query.session_id === "string" ? req.query.session_id : undefined,
+          sessionId,
           staleAfterHours: typeof staleAfterHours === "number" && Number.isFinite(staleAfterHours) && staleAfterHours > 0 ? staleAfterHours : undefined,
           limit: numberQuery(req.query.limit)
-        }));
+        }, { memories, skills, wikiPages }));
       } catch (error) {
         next(error);
       }
@@ -1620,9 +1699,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
-    app.get("/api/curator/snapshots", async (_req, res, next) => {
+    app.get("/api/curator/snapshots", async (req, res, next) => {
       try {
-        res.json(await store.listLearningSnapshots());
+        res.json(await runRuntimeApiQuery(runtime, req, "curator.snapshot.list", {}));
       } catch (error) {
         next(error);
       }
@@ -1639,13 +1718,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/curator/snapshots/:id/restore", async (req, res, next) => {
       try {
-        const restored = await runtime.runDomainCommand({
-          command_id: "curator.restore",
-          input_source: "runtime_api",
-          idempotency_key: domainCommandIdempotencyKey(req),
-          payload: { snapshot_id: req.params.id }
-        });
-        res.json(restored.result);
+        res.json(await runRuntimeApiCommand(runtime, req, "curator.restore", { snapshot_id: req.params.id }));
       } catch (error) {
         next(error);
       }
@@ -1694,7 +1767,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/evaluation/run", async (req, res, next) => {
       try {
-        res.status(201).json(await runRuntimeApiCommand(runtime, req, "evaluation.run", {}));
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.status(201).json(await runRuntimeApiCommand(runtime, req, "evaluation.run", {
+          ...(typeof req.body?.source_run_id === "string" ? { source_run_id: req.body.source_run_id } : {})
+        }, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1702,10 +1782,40 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/evaluation/learning", async (req, res, next) => {
       try {
-        res.json(await store.listLearningEvaluations({
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        const { roomId } = await runtime.assertLocalOwnerRoomAccess({ sessionId });
+        const activityContexts = (await store.listLearningResourceUses({ sessionId }))
+          .flatMap((use) => use.activity_context ? [use.activity_context] : []);
+        const uniqueContexts = [...new Map(activityContexts.map((context) => [
+          `${context.room_id}:${context.session_id}:${context.agent_id}`,
+          context
+        ])).values()];
+        const evaluations = (await Promise.all(uniqueContexts.map((activityContext) => store.listLearningEvaluations({
+          activityContext,
           resourceId: typeof req.query.resource_id === "string" ? req.query.resource_id : undefined,
           taskClass: typeof req.query.task_class === "string" ? req.query.task_class : undefined
+        })))).flat();
+        const visible = await Promise.all(evaluations.map(async (evaluation) => {
+          const kind = evaluation.learning_resource_ref.kind === "knowledge_wiki"
+            ? "wiki"
+            : evaluation.learning_resource_ref.kind;
+          if (!(["memory", "wiki", "skill"] as const).includes(kind as "memory" | "wiki" | "skill")) return undefined;
+          try {
+            await runtime.assertLocalOwnerRoomAccess({
+              roomId,
+              resource: { kind, id: evaluation.learning_resource_ref.id }
+            });
+            return evaluation;
+          } catch (error) {
+            if (error instanceof RuntimeRequestError && error.code === "forbidden") return undefined;
+            throw error;
+          }
         }));
+        res.json(visible.filter((evaluation): evaluation is NonNullable<typeof evaluation> => Boolean(evaluation)));
       } catch (error) {
         next(error);
       }
@@ -1713,10 +1823,16 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/learning/reports", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const jobKind = typeof req.query.job_kind === "string" && ["background_review", "evaluation", "curator"].includes(req.query.job_kind)
           ? req.query.job_kind as "background_review" | "evaluation" | "curator"
           : undefined;
-        res.json(await store.listLearningJobReports({ jobKind, limit: numberQuery(req.query.limit) }));
+        res.json(await store.listLearningJobReports({ sessionId, jobKind, limit: numberQuery(req.query.limit) }));
       } catch (error) {
         next(error);
       }
@@ -1724,11 +1840,17 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/evaluation/diagnostics", async (req, res, next) => {
       try {
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
         const staleAfterHours = typeof req.query.stale_after_hours === "string"
           ? Number.parseInt(req.query.stale_after_hours, 10)
           : undefined;
         res.json(await evaluationDiagnosticsPayload(store, {
-          sessionId: typeof req.query.session_id === "string" ? req.query.session_id : undefined,
+          sessionId,
           staleAfterHours: typeof staleAfterHours === "number" && Number.isFinite(staleAfterHours) && staleAfterHours > 0 ? staleAfterHours : undefined,
           limit: numberQuery(req.query.limit)
         }));
@@ -1739,7 +1861,13 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/reflection-runs/:id", async (req, res, next) => {
       try {
-        const reflectionRun = await store.getReflectionRun(req.params.id);
+        const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        await runtime.assertLocalOwnerRoomAccess({ sessionId });
+        const reflectionRun = (await store.listReflectionRuns(sessionId)).find((item) => item.id === req.params.id);
         if (!reflectionRun) {
           res.status(404).json({ error: "reflection_run_not_found" });
           return;
@@ -1755,7 +1883,14 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/reflection-suggestions/:id/apply", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "reflection.suggestion.apply", { suggestion_id: req.params.id }));
+        const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id.trim() : "";
+        if (!sessionId) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "reflection.suggestion.apply", {
+          suggestion_id: req.params.id
+        }, { sessionId }));
       } catch (error) {
         next(error);
       }
@@ -1849,9 +1984,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     });
 
-    app.get("/api/external-sends", async (_req, res, next) => {
+    app.get("/api/external-sends", async (req, res, next) => {
       try {
-        res.json(await store.listExternalSends());
+        res.json(await listApiRoomExternalSends(runtime, store, req));
       } catch (error) {
         next(error);
       }
@@ -1862,7 +1997,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         const staleAfterHours = typeof req.query.stale_after_hours === "string"
           ? Number.parseInt(req.query.stale_after_hours, 10)
           : undefined;
-        res.json(await externalSendDiagnosticsPayload(store, {
+        res.json(await externalSendDiagnosticsPayload(await listApiRoomExternalSends(runtime, store, req), {
           staleAfterHours: typeof staleAfterHours === "number" && Number.isFinite(staleAfterHours) && staleAfterHours > 0 ? staleAfterHours : undefined
         }));
       } catch (error) {
@@ -1872,6 +2007,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/external-sends", async (req, res, next) => {
       try {
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
         const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
         const body = typeof req.body?.body === "string" ? req.body.body : "";
         const channel = typeof req.body?.channel === "string" ? req.body.channel : "webhook";
@@ -1884,7 +2024,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           target: jsonRecord(req.body?.target),
           title,
           body
-        }));
+        }, context));
       } catch (error) {
         next(error);
       }
@@ -1892,7 +2032,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.post("/api/external-sends/:id/dispatch", async (req, res, next) => {
       try {
-        res.json(await runRuntimeApiWriteCommand(runtime, req, "external.send.dispatch", { send_id: req.params.id, dry_run: req.body?.dry_run !== false }));
+        const context = apiSessionContext(req);
+        if (!context) {
+          res.status(400).json({ error: "session_id_required" });
+          return;
+        }
+        res.json(await runRuntimeApiWriteCommand(runtime, req, "external.send.dispatch", { send_id: req.params.id, dry_run: req.body?.dry_run !== false }, context));
       } catch (error) {
         next(error);
       }
@@ -2754,27 +2899,45 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/artifacts/:id", async (req, res, next) => {
       try {
+        const access = await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "artifact", id: req.params.id }
+        });
         const artifact = await store.getArtifact(req.params.id);
         if (!artifact) {
           res.status(404).json({ error: "artifact_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "artifact", id: artifact.id }
-        });
-        const [content, operation, auditRecords] = await Promise.all([
+        const [content, boundary] = await Promise.all([
           store.readArtifactContent(req.params.id),
-          store.getOperation(artifact.source_operation_id),
-          store.listAuditRecordsForOperation(artifact.source_operation_id)
+          store.getResourceAccessBoundary("artifact", artifact.id)
         ]);
+        const includeSourceOperationHistory = !boundary || boundary.source_room_id === access.roomId;
+        const [operation, auditRecords] = includeSourceOperationHistory
+          ? await Promise.all([
+              store.getOperation(artifact.source_operation_id),
+              store.listAuditRecordsForOperation(artifact.source_operation_id)
+            ])
+          : [undefined, []];
         const translation = await resolveDetailTranslation(
           req.query as Record<string, unknown>,
           artifact.file_ref,
           artifact.locale,
           content ?? ""
         );
-        res.json({ artifact, content, operation, auditRecords, ...translation });
+        res.json({
+          artifact,
+          content,
+          operation,
+          auditRecords,
+          ...(boundary ? { provenance: {
+            source_room_id: boundary.source_room_id,
+            owner_participant_id: boundary.owner_participant_id,
+            ...(boundary.creator_participant_id ? { creator_participant_id: boundary.creator_participant_id } : {}),
+            ...(boundary.resource_created_at ? { resource_created_at: boundary.resource_created_at } : {})
+          } } : {}),
+          ...translation
+        });
       } catch (error) {
         next(error);
       }
@@ -2782,15 +2945,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/artifacts/:id/content", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "artifact", id: req.params.id }
+        });
         const artifact = await store.getArtifact(req.params.id);
         if (!artifact) {
           res.status(404).json({ error: "artifact_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "artifact", id: artifact.id }
-        });
         const contentType = typeof artifact.metadata.content_type === "string" ? artifact.metadata.content_type : "text/markdown";
         const textContent = await store.readArtifactContent(req.params.id);
         if (textContent !== undefined) {
@@ -2812,21 +2975,22 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const access = await runtime.assertLocalOwnerRoomAccess(apiRoomAccessContext(req));
         const operationId = typeof req.query.operation_id === "string" ? req.query.operation_id : undefined;
-        const [auditRecords, operations, policyDecisions, approvalRequests, rollbackPoints] = await Promise.all([
-          store.listAuditRecords(),
-          store.listOperations(),
-          store.listPolicyDecisions(),
-          store.listApprovalRequests(),
-          store.listRollbackPoints()
+        const operations = await store.listOperationsForRoom(access.roomId);
+        const roomOperationIds = operations.map((operation) => operation.id);
+        const [auditRecords, policyDecisions, approvalRequests, rollbackPoints] = await Promise.all([
+          store.listAuditRecordsForRoom(access.roomId),
+          store.listPolicyDecisionsForOperationIds(roomOperationIds),
+          store.listApprovalRequestsForOperationIds(roomOperationIds),
+          store.listRollbackPointsForOperationIds(roomOperationIds)
         ]);
-        const roomOperations = operations.filter((operation) => operation.room_id === access.roomId);
-        const roomOperationIds = new Set(roomOperations.map((operation) => operation.id));
+        const roomOperations = operations;
+        const roomOperationIdSet = new Set(roomOperationIds);
         res.json({
           auditRecords: auditRecords.filter((record) => record.room_id === access.roomId && (!operationId || record.operation_id === operationId)),
           operations: roomOperations.filter((operation) => !operationId || operation.id === operationId),
-          policyDecisions: policyDecisions.filter((decision) => roomOperationIds.has(decision.operation_id) && (!operationId || decision.operation_id === operationId)),
-          approvalRequests: approvalRequests.filter((approval) => roomOperationIds.has(approval.operation_id) && (!operationId || approval.operation_id === operationId)),
-          rollbackPoints: rollbackPoints.filter((point) => roomOperationIds.has(point.operation_id) && (!operationId || point.operation_id === operationId))
+          policyDecisions: policyDecisions.filter((decision) => roomOperationIdSet.has(decision.operation_id) && (!operationId || decision.operation_id === operationId)),
+          approvalRequests: approvalRequests.filter((approval) => roomOperationIdSet.has(approval.operation_id) && (!operationId || approval.operation_id === operationId)),
+          rollbackPoints: rollbackPoints.filter((point) => roomOperationIdSet.has(point.operation_id) && (!operationId || point.operation_id === operationId))
         });
       } catch (error) {
         next(error);
@@ -2872,8 +3036,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const operationId = typeof req.query.operation_id === "string" ? req.query.operation_id : undefined;
         const scope = await apiRoomOperationScope(runtime, store, req);
-        const points = await store.listRollbackPoints();
-        res.json(points.filter((point) => scope.operationIds.has(point.operation_id) && (!operationId || point.operation_id === operationId)));
+        const points = await store.listRollbackPointsForOperationIds([...scope.operationIds]);
+        res.json(points.filter((point) => !operationId || point.operation_id === operationId));
       } catch (error) {
         next(error);
       }
@@ -2881,14 +3045,10 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/rollback-points/:id", async (req, res, next) => {
       try {
-        const point = await store.getRollbackPoint(req.params.id);
+        const scope = await apiRoomOperationScope(runtime, store, req);
+        const point = await store.getRollbackPointForOperationIds(req.params.id, [...scope.operationIds]);
         if (!point) {
           res.status(404).json({ error: "rollback_point_not_found" });
-          return;
-        }
-        const scope = await apiRoomOperationScope(runtime, store, req);
-        if (!scope.operationIds.has(point.operation_id)) {
-          res.status(403).json({ error: "room_resource_access_denied" });
           return;
         }
         res.json(point);
@@ -2904,15 +3064,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "session_id_required" });
           return;
         }
-        const point = await store.getRollbackPoint(req.params.id);
+        const access = await runtime.assertLocalOwnerRoomAccess(context);
+        const operations = await store.listOperationsForRoom(access.roomId);
+        const point = await store.getRollbackPointForOperationIds(req.params.id, operations.map((operation) => operation.id));
         if (!point) {
           res.status(404).json({ error: "rollback_point_not_found" });
-          return;
-        }
-        const access = await runtime.assertLocalOwnerRoomAccess(context);
-        const operation = await store.getOperation(point.operation_id);
-        if (!operation || operation.room_id !== access.roomId) {
-          res.status(403).json({ error: "room_resource_access_denied" });
           return;
         }
         res.status(201).json(await runRuntimeApiCommand(runtime, req, "rollback.restore", { rollback_point_id: req.params.id }, context));
@@ -2925,13 +3081,18 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const { buildActivityInboxItems } = await import("@samurai-agent/audit");
         const scope = await apiRoomOperationScope(runtime, store, req);
-        const inputs = await store.readActivityInputs();
+        const [approvals, decisions, audits, rollbacks] = await Promise.all([
+          store.listApprovalRequestsForOperationIds([...scope.operationIds]),
+          store.listPolicyDecisionsForOperationIds([...scope.operationIds]),
+          store.listAuditRecordsForRoom(scope.roomId),
+          store.listRollbackPointsForOperationIds([...scope.operationIds])
+        ]);
         res.json(buildActivityInboxItems({
           operations: scope.operations,
-          approvals: inputs.approvals.filter((item) => scope.operationIds.has(item.operation_id)),
-          decisions: inputs.decisions.filter((item) => scope.operationIds.has(item.operation_id)),
-          audits: inputs.audits.filter((item) => scope.operationIds.has(item.operation_id) && item.room_id === scope.roomId),
-          rollbacks: inputs.rollbacks.filter((item) => scope.operationIds.has(item.operation_id))
+          approvals,
+          decisions,
+          audits: audits.filter((item) => scope.operationIds.has(item.operation_id)),
+          rollbacks
         }));
       } catch (error) {
         next(error);
@@ -3162,7 +3323,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/memory", async (req, res, next) => {
       try {
-        res.json(await filterApiRoomResources(runtime, req, "memory", await store.listMemory(), (memory) => memory.id));
+        res.json(await filterApiRoomResources(runtime, req, "memory", (candidates) => store.listMemory(candidates), (memory) => memory.id));
       } catch (error) {
         next(error);
       }
@@ -3186,15 +3347,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/memory/:id", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "memory", id: req.params.id }
+        });
         const memory = await store.getMemory(req.params.id);
         if (!memory) {
           res.status(404).json({ error: "memory_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "memory", id: memory.id }
-        });
         const content = await store.readMemoryContent(req.params.id);
         const translation = await resolveDetailTranslation(
           req.query as Record<string, unknown>,
@@ -3215,7 +3376,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/skills", async (req, res, next) => {
       try {
-        res.json(await filterApiRoomResources(runtime, req, "skill", await store.listSkills(), (skill) => skill.id));
+        res.json(await filterApiRoomResources(runtime, req, "skill", (candidates) => store.listSkills(candidates), (skill) => skill.id));
       } catch (error) {
         next(error);
       }
@@ -3223,8 +3384,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/skills/diagnostics", async (req, res, next) => {
       try {
-        const skills = await filterApiRoomResources(runtime, req, "skill", await store.listSkills(), (skill) => skill.id);
-        res.json(await skillDiagnosticsPayload(store, skills));
+        const context = apiRoomAccessContext(req);
+        const [skills, sessions] = await Promise.all([
+          filterApiRoomResources(runtime, req, "skill", (candidates) => store.listSkills(candidates), (skill) => skill.id),
+          runtime.listLocalOwnerRoomSessions(context)
+        ]);
+        res.json(await skillDiagnosticsPayload(store, skills, sessions.map((session) => session.id)));
       } catch (error) {
         next(error);
       }
@@ -3232,15 +3397,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/skills/:id", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "skill", id: req.params.id }
+        });
         const skill = await store.getSkill(req.params.id);
         if (!skill) {
           res.status(404).json({ error: "skill_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "skill", id: skill.id }
-        });
         const markdown = await store.readSkillMarkdown(req.params.id);
         const supportFiles = await store.listSkillSupportFiles(req.params.id);
         const sourceLocale = asSupportedLocale(req.query.source_locale) ?? "ja";
@@ -3263,15 +3428,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/skills/:id/support", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "skill", id: req.params.id }
+        });
         const skill = await store.getSkill(req.params.id);
         if (!skill) {
           res.status(404).json({ error: "skill_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "skill", id: skill.id }
-        });
         res.json(await store.listSkillSupportFiles(req.params.id));
       } catch (error) {
         next(error);
@@ -3389,7 +3554,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/wiki", async (req, res, next) => {
       try {
-        res.json(await filterApiRoomResources(runtime, req, "wiki", await store.listWiki(), (wiki) => wiki.id));
+        res.json(await filterApiRoomResources(runtime, req, "wiki", (candidates) => store.listWiki(candidates), (wiki) => wiki.id));
       } catch (error) {
         next(error);
       }
@@ -3429,7 +3594,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/wiki/diagnostics", async (req, res, next) => {
       try {
-        const pages = await filterApiRoomResources(runtime, req, "wiki", await store.listWiki(), (wiki) => wiki.id);
+        const pages = await filterApiRoomResources(runtime, req, "wiki", (candidates) => store.listWiki(candidates), (wiki) => wiki.id);
         res.json(await knowledgeWikiDiagnosticsPayload(store, pages));
       } catch (error) {
         next(error);
@@ -3466,15 +3631,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/wiki/:id", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "wiki", id: req.params.id }
+        });
         const wiki = await store.getWiki(req.params.id);
         if (!wiki) {
           res.status(404).json({ error: "wiki_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "wiki", id: wiki.id }
-        });
         const content = await store.readWikiContent(req.params.id);
         const translation = await resolveDetailTranslation(
           req.query as Record<string, unknown>,
@@ -3599,7 +3764,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/schemas", async (req, res, next) => {
       try {
-        res.json(await filterApiRoomResources(runtime, req, "collection_schema", await store.listCollectionSchemas(), (schema) => schema.id));
+        res.json(await filterApiRoomResources(runtime, req, "collection_schema", (candidates) => store.listCollectionSchemas(candidates), (schema) => schema.id));
       } catch (error) {
         next(error);
       }
@@ -3639,7 +3804,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/triggers", async (req, res, next) => {
       try {
-        const schemas = await filterApiRoomResources(runtime, req, "collection_schema", await store.listCollectionSchemas(), (schema) => schema.id);
+        const schemas = await filterApiRoomResources(runtime, req, "collection_schema", (candidates) => store.listCollectionSchemas(candidates), (schema) => schema.id);
         res.json((await Promise.all(schemas.map((schema) => store.listCollectionTriggerStates(schema.id)))).flat());
       } catch (error) {
         next(error);
@@ -3648,7 +3813,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/actions", async (req, res, next) => {
       try {
-        const schemas = await filterApiRoomResources(runtime, req, "collection_schema", await store.listCollectionSchemas(), (schema) => schema.id);
+        const schemas = await filterApiRoomResources(runtime, req, "collection_schema", (candidates) => store.listCollectionSchemas(candidates), (schema) => schema.id);
         res.json((await Promise.all(schemas.map((schema) => runtime.listCollectionActions(schema.id)))).flat());
       } catch (error) {
         next(error);
@@ -3657,15 +3822,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/schema", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_schema", id: req.params.collectionId }
+        });
         const schema = await store.getCollectionSchema(req.params.collectionId);
         if (!schema) {
           res.status(404).json({ error: "collection_schema_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "collection_schema", id: schema.id }
-        });
         res.json(schema);
       } catch (error) {
         next(error);
@@ -3706,8 +3871,8 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           runtime,
           req,
           "collection_record",
-          await store.listCollectionRecords(req.params.collectionId),
-          (record) => `${record.collection_id}/${record.id}`
+          (candidates) => store.listCollectionRecords(req.params.collectionId, candidates),
+          (record) => collectionRecordResourceId(record.collection_id, record.id)
         ));
       } catch (error) {
         next(error);
@@ -3758,7 +3923,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           ...apiRoomAccessContext(req),
           resource: { kind: "collection_schema", id: req.params.collectionId }
         });
-        res.json(await store.listCollectionPatches({ collectionId: req.params.collectionId }));
+        res.json(await filterApiCollectionRecordPatches(runtime, store, req, req.params.collectionId));
       } catch (error) {
         next(error);
       }
@@ -3766,15 +3931,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/records/:recordId", async (req, res, next) => {
       try {
+        await runtime.assertLocalOwnerRoomAccess({
+          ...apiRoomAccessContext(req),
+          resource: { kind: "collection_record", id: collectionRecordResourceId(req.params.collectionId, req.params.recordId) }
+        });
         const record = await store.getCollectionRecord(req.params.collectionId, req.params.recordId);
         if (!record) {
           res.status(404).json({ error: "collection_record_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "collection_record", id: `${record.collection_id}/${record.id}` }
-        });
         const content = JSON.stringify(record.data, null, 2);
         const sourceLocale = asSupportedLocale(record.data.content_locale) ?? asSupportedLocale(req.query.source_locale) ?? "ja";
         const translation = await resolveDetailTranslation(
@@ -3814,11 +3979,11 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
     app.get("/api/collections/:collectionId/records/:recordId/refs", async (req, res, next) => {
       try {
-        await runtime.assertLocalOwnerRoomAccess({
-          ...apiRoomAccessContext(req),
-          resource: { kind: "collection_record", id: `${req.params.collectionId}/${req.params.recordId}` }
-        });
-        res.json(await store.resolveCollectionRecordRefs(req.params.collectionId, req.params.recordId));
+        res.json(await runtime.resolveLocalOwnerCollectionRecordRefs({
+          collectionId: req.params.collectionId,
+          recordId: req.params.recordId,
+          ...apiRoomAccessContext(req)
+        }));
       } catch (error) {
         next(error);
       }
@@ -3828,7 +3993,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         await runtime.assertLocalOwnerRoomAccess({
           ...apiRoomAccessContext(req),
-          resource: { kind: "collection_record", id: `${req.params.collectionId}/${req.params.recordId}` }
+          resource: { kind: "collection_record", id: collectionRecordResourceId(req.params.collectionId, req.params.recordId) }
         });
         res.json(await store.listCollectionPatches({
           collectionId: req.params.collectionId,
@@ -3843,7 +4008,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         await runtime.assertLocalOwnerRoomAccess({
           ...apiRoomAccessContext(req),
-          resource: { kind: "collection_record", id: `${req.params.collectionId}/${req.params.recordId}` }
+          resource: { kind: "collection_record", id: collectionRecordResourceId(req.params.collectionId, req.params.recordId) }
         });
         const patch = await store.getCollectionPatch(req.params.collectionId, req.params.recordId, req.params.patchId);
         if (!patch) {
@@ -4492,12 +4657,61 @@ async function filterApiRoomResources<T>(
   runtime: AgentRuntime,
   req: Request,
   resourceKind: string,
-  values: T[],
+  load: (candidates: { resourceIds: string[]; includeLegacy: boolean }) => Promise<T[]>,
   resourceId: (value: T) => string
 ): Promise<T[]> {
   const context = apiRoomAccessContext(req);
-  // This rejects missing Room context instead of falling back to a Workspace-wide list.
-  await runtime.assertLocalOwnerRoomAccess(context);
+  // This rejects missing Room context instead of falling back to a Workspace-wide list,
+  // then constrains SQLite before any resource rows are loaded.
+  const candidates = await runtime.localOwnerResourceCandidates(context, resourceKind);
+  const values = await load(candidates);
+  return recheckRoomResources(runtime, context, resourceKind, values, resourceId);
+}
+
+/** Optimization history belongs to both its Skill and the Session that produced it. */
+async function listApiVisibleSkillOptimizationRuns(
+  runtime: AgentRuntime,
+  store: WorkspaceStore,
+  req: Request
+) {
+  const context = apiRoomAccessContext(req);
+  const [skills, sessions] = await Promise.all([
+    filterApiRoomResources(runtime, req, "skill", (candidates) => store.listSkills(candidates), (skill) => skill.id),
+    runtime.listLocalOwnerRoomSessions(context)
+  ]);
+  const skillIds = skills.map((skill) => skill.id);
+  const sessionIds = sessions.map((session) => session.id);
+  if (skillIds.length === 0 || sessionIds.length === 0) return [];
+  return store.listSkillOptimizationRuns({ skillIds, sessionIds });
+}
+
+/** Collection patch bodies follow the individual record boundary, not just the schema. */
+async function filterApiCollectionRecordPatches(
+  runtime: AgentRuntime,
+  store: WorkspaceStore,
+  req: Request,
+  collectionId: string
+) {
+  const context = apiRoomAccessContext(req);
+  const candidates = await runtime.localOwnerResourceCandidates(context, "collection_record");
+  const patches = await store.listCollectionPatches({ collectionId, ...candidates });
+  return recheckRoomResources(
+    runtime,
+    context,
+    "collection_record",
+    patches,
+    (patch) => collectionRecordResourceId(collectionId, patch.record_id)
+  );
+}
+
+/** The second mandatory check, immediately before Room-bound resources leave the server. */
+async function recheckRoomResources<T>(
+  runtime: AgentRuntime,
+  context: { roomId?: string; sessionId?: string },
+  resourceKind: string,
+  values: T[],
+  resourceId: (value: T) => string
+): Promise<T[]> {
   const allowed: T[] = [];
   for (const value of values) {
     try {
@@ -4520,20 +4734,23 @@ async function requireGeneratedSurfaceRoomAccess(
   store: WorkspaceStore,
   surfaceId: string
 ) {
+  await runtime.assertLocalOwnerRoomAccess({ resource: { kind: "generated_surface", id: surfaceId } });
   const surface = await store.getGeneratedSurface(surfaceId);
   if (!surface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
-  await runtime.assertLocalOwnerRoomAccess({
-    sessionId: surface.session_id,
-    resource: { kind: "generated_surface", id: surface.id }
-  });
   return surface;
 }
 
 /** Operation-linked history is visible only from its persisted Room. */
 async function apiRoomOperationScope(runtime: AgentRuntime, store: WorkspaceStore, req: Request) {
   const access = await runtime.assertLocalOwnerRoomAccess(apiRoomAccessContext(req));
-  const operations = (await store.listOperations()).filter((operation) => operation.room_id === access.roomId);
+  const operations = await store.listOperationsForRoom(access.roomId);
   return { roomId: access.roomId, operations, operationIds: new Set(operations.map((operation) => operation.id)) };
+}
+
+/** External sends are read through the Room operation that created or last updated them. */
+async function listApiRoomExternalSends(runtime: AgentRuntime, store: WorkspaceStore, req: Request) {
+  const scope = await apiRoomOperationScope(runtime, store, req);
+  return store.listExternalSends({ operationIds: [...scope.operationIds] });
 }
 
 function asToolRunStatus(value: unknown): ToolRunStatus | undefined {
@@ -6212,6 +6429,18 @@ function resourceRef(value: unknown) {
   return parsed.success ? parsed.data : undefined;
 }
 
+/** Converts a translation source reference into the persisted Room boundary key. */
+function roomAccessResourceForRef(ref: ResourceRef): { kind: string; id: string } | undefined {
+  if (ref.kind === "artifact" || ref.kind === "memory" || ref.kind === "wiki" || ref.kind === "skill") {
+    return { kind: ref.kind, id: ref.id };
+  }
+  if (ref.kind !== "collection_record") return undefined;
+  const uriMatch = ref.uri.match(/^collections\/([^/]+)\/records\/[^/]+\.json$/);
+  const labelMatch = ref.label?.match(/^([^/]+)\/[^/]+$/);
+  const collectionId = uriMatch?.[1] ?? labelMatch?.[1];
+  return collectionId ? { kind: "collection_record", id: collectionRecordResourceId(collectionId, ref.id) } : undefined;
+}
+
 function resourceRefFromQuery(query: Record<string, unknown>) {
   if (typeof query.source_kind !== "string" || typeof query.source_id !== "string" || typeof query.source_uri !== "string") {
     return undefined;
@@ -6427,21 +6656,24 @@ function pluginDiagnosticsRecommendation(issues: PluginDiagnosticsReport["issues
 
 async function reflectionDiagnosticsPayload(
   store: WorkspaceStore,
-  input: { sessionId?: string; staleAfterHours?: number; limit?: number } = {}
+  input: { sessionId: string; staleAfterHours?: number; limit?: number },
+  resources: {
+    memories: Awaited<ReturnType<WorkspaceStore["listMemory"]>>;
+    skills: Awaited<ReturnType<WorkspaceStore["listSkills"]>>;
+    wikiPages: Awaited<ReturnType<WorkspaceStore["listWiki"]>>;
+  }
 ): Promise<ReflectionDiagnosticsReport> {
   const generatedAt = nowIso();
   const staleAfterHours = input.staleAfterHours ?? 72;
   const staleBeforeMs = Date.parse(generatedAt) - staleAfterHours * 60 * 60 * 1000;
   const limit = normalizeDiagnosticsLimit(input.limit);
-  const [curatorState, runs, allSuggestions, backendRuns, memories, skills, wikiPages] = await Promise.all([
+  const [curatorState, runs, backendRuns] = await Promise.all([
     store.getCuratorState(),
     store.listReflectionRuns(input.sessionId),
-    store.listReflectionSuggestions(),
-    store.listBackendRuns(input.sessionId),
-    store.listMemory(),
-    store.listSkills(),
-    store.listWiki({ activeOnly: false })
+    store.listBackendRuns(input.sessionId)
   ]);
+  const allSuggestions = (await Promise.all(runs.map((run) => store.listReflectionSuggestions(run.id)))).flat();
+  const { memories, skills, wikiPages } = resources;
   const reflectionRuns = runs.filter((run) => run.kind !== "curator" && run.kind !== "evaluation");
   const curatorRuns = runs.filter((run) => run.kind === "curator");
   const latestReflectionRun = reflectionRuns[0];
@@ -6617,19 +6849,19 @@ function reflectionDiagnosticsRecommendation(issues: ReflectionDiagnosticsReport
 
 async function evaluationDiagnosticsPayload(
   store: WorkspaceStore,
-  input: { sessionId?: string; staleAfterHours?: number; limit?: number } = {}
+  input: { sessionId: string; staleAfterHours?: number; limit?: number }
 ): Promise<EvaluationDiagnosticsReport> {
   const generatedAt = nowIso();
   const staleAfterHours = input.staleAfterHours ?? 72;
   const staleBeforeMs = Date.parse(generatedAt) - staleAfterHours * 60 * 60 * 1000;
   const limit = normalizeDiagnosticsLimit(input.limit);
-  const [reflectionRuns, allSuggestions, backendRuns, toolRuns, workspaceChanges] = await Promise.all([
+  const [reflectionRuns, backendRuns, toolRuns, workspaceChanges] = await Promise.all([
     store.listReflectionRuns(input.sessionId),
-    store.listReflectionSuggestions(),
     store.listBackendRuns(input.sessionId),
     store.listToolRuns(input.sessionId ? { sessionId: input.sessionId } : {}),
     store.listWorkspaceChanges(input.sessionId)
   ]);
+  const allSuggestions = (await Promise.all(reflectionRuns.map((run) => store.listReflectionSuggestions(run.id)))).flat();
   const evaluationRuns = reflectionRuns.filter((run) => run.kind === "evaluation");
   const latestEvaluationRun = evaluationRuns[0];
   const evaluationRunIds = new Set(evaluationRuns.map((run) => run.id));
@@ -6950,13 +7182,12 @@ function fileBrowserActionDiagnosticsRecommendation(issues: FileBrowserActionDia
 }
 
 async function externalSendDiagnosticsPayload(
-  store: WorkspaceStore,
+  sends: ExternalSendRecord[],
   input: { staleAfterHours?: number } = {}
 ): Promise<ExternalSendDiagnosticsReport> {
   const generatedAt = nowIso();
   const staleAfterHours = input.staleAfterHours ?? 24;
   const staleBeforeMs = Date.parse(generatedAt) - staleAfterHours * 60 * 60 * 1000;
-  const sends = await store.listExternalSends();
   const dispatchEnabled = process.env.SAMURAI_EXTERNAL_SEND_DISPATCH === "true";
   const transportReadiness = externalSendTransportReadiness(dispatchEnabled);
   const issues: ExternalSendDiagnosticsReport["issues"] = [];
@@ -7484,17 +7715,19 @@ async function knowledgeWikiDiagnosticsPayload(
 
 async function skillDiagnosticsPayload(
   store: WorkspaceStore,
-  skills: Awaited<ReturnType<WorkspaceStore["listSkills"]>>
+  skills: Awaited<ReturnType<WorkspaceStore["listSkills"]>>,
+  sessionIds: string[]
 ): Promise<SkillDiagnosticsReport> {
   const selectableSkills = skills.filter((skill) => isSelectableSkillState(skill.state));
   const visibleSkillIds = new Set(skills.map((skill) => skill.id));
-  const [allSkillUsage, allLearningUses] = await Promise.all([
-    store.listSkillUsage(),
-    store.listLearningResourceUses()
-  ]);
-  const skillUsage = allSkillUsage.filter((usage) => visibleSkillIds.has(usage.skill_id));
-  const learningUses = allLearningUses.filter((use) => use.resource_kind !== "skill" || visibleSkillIds.has(use.resource_id));
-  const usageBySkillId = new Map(skillUsage.map((usage) => [usage.skill_id, usage]));
+  const skillIds = [...visibleSkillIds];
+  const allLearningUses = (await Promise.all(sessionIds.map((sessionId) => store.listLearningResourceUses({
+    sessionId,
+    resourceKind: "skill",
+    resourceIds: skillIds
+  })))).flat();
+  const learningUses = allLearningUses.filter((use) => visibleSkillIds.has(use.resource_id));
+  const usedSkillIds = new Set(learningUses.map((use) => use.resource_id));
   const supportedScopes = supportedSkillScopeSet();
   const issues: SkillDiagnosticsReport["issues"] = [];
   let selectableWithVerifiedProvenance = 0;
@@ -7511,7 +7744,6 @@ async function skillDiagnosticsPayload(
     const sourceRefs = skill.frontmatter.source_refs ?? [];
     const allowedScopes = skill.allowed_scopes ?? skill.frontmatter.allowed_scopes;
     const unsupportedScopes = allowedScopes.filter((scope) => !supportedScopes.has(scope));
-    const usage = usageBySkillId.get(skill.id);
 
     if (!markdownBody.trim()) {
       issues.push({
@@ -7597,7 +7829,7 @@ async function skillDiagnosticsPayload(
       }
     }
 
-    if (usage?.use_count && usage.use_count > 0) {
+    if (usedSkillIds.has(skill.id)) {
       selectableWithUsage += 1;
     } else if (skill.state === "active" || skill.state === "pinned") {
       issues.push({

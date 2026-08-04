@@ -56,8 +56,12 @@ export class ArtifactRepository {
     return row ? artifactFromRow(row) : undefined;
   }
 
-  async listArtifacts(): Promise<ArtifactRecord[]> {
-    return (await this.db.selectFrom("artifacts").selectAll().orderBy("updated_at", "desc").execute()).map(artifactFromRow);
+  async listArtifacts(input: { artifactIds?: readonly string[] } = {}): Promise<ArtifactRecord[]> {
+    const artifactIds = input.artifactIds ? [...new Set(input.artifactIds)] : undefined;
+    if (artifactIds?.length === 0) return [];
+    let query = this.db.selectFrom("artifacts").selectAll();
+    if (artifactIds) query = query.where("id", "in", artifactIds);
+    return (await query.orderBy("updated_at", "desc").execute()).map(artifactFromRow);
   }
 
   async listArtifactsForSession(sessionId: string): Promise<ArtifactRecord[]> {

@@ -10,7 +10,7 @@ import type {
   WikiFrontmatter
 } from "@samurai-agent/core-schemas";
 import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
-import { agentParticipantId, localOwnerParticipantId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
+import { collectionRecordResourceId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { RoomAuthorizationError, RoomAuthorizationService } from "./room-authorization-service.js";
 
 interface SearchResult {
@@ -49,8 +49,8 @@ export interface SearchReadStore {
   searchWiki(query: string, limit?: number, options?: { activeOnly?: boolean; activityContext?: ActivityContextRef; resourceIds?: string[]; includeLegacy?: boolean }): Promise<WikiWithFilePath[]>;
   searchSkills(query: string, limit?: number, options?: { states?: SkillWithFilePath["state"][]; activityContext?: ActivityContextRef; resourceIds?: string[]; includeLegacy?: boolean }): Promise<SkillWithFilePath[]>;
   getCollectionSchema(collectionId: string): Promise<CollectionSchemaWithFilePath | undefined>;
-  listCollectionSchemas(): Promise<CollectionSchemaWithFilePath[]>;
-  listCollectionRecords(collectionId?: string): Promise<CollectionRecordWithFilePath[]>;
+  listCollectionSchemas(options?: { resourceIds?: string[]; includeLegacy?: boolean }): Promise<CollectionSchemaWithFilePath[]>;
+  listCollectionRecords(collectionId?: string, options?: { resourceIds?: string[]; includeLegacy?: boolean }): Promise<CollectionRecordWithFilePath[]>;
 }
 
 export interface SessionSearchResult { kind: "session" | "message" | "artifact" | "audit"; id: string; title: string; summary: string; session_id?: string }
@@ -73,8 +73,8 @@ export function createSearchReadStore(store: SearchReadStore): SearchReadStore {
     searchWiki: (query, limit, options) => store.searchWiki(query, limit, options),
     searchSkills: (query, limit, options) => store.searchSkills(query, limit, options),
     getCollectionSchema: (collectionId) => store.getCollectionSchema(collectionId),
-    listCollectionSchemas: () => store.listCollectionSchemas(),
-    listCollectionRecords: (collectionId) => store.listCollectionRecords(collectionId)
+    listCollectionSchemas: (options) => store.listCollectionSchemas(options),
+    listCollectionRecords: (collectionId, options) => store.listCollectionRecords(collectionId, options)
   });
 }
 
@@ -145,12 +145,9 @@ export class SearchDomainService {
   async searchCollections(context: TrustedDomainContext, collectionId: string | undefined, query: string, limit: number): Promise<CollectionSearchResult[]> {
     const access = await this.resolveAccess(context);
     const schemaCandidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.activityContext.room_id, "collection_schema");
-    const allSchemas = collectionId
-      ? [await this.store.getCollectionSchema(collectionId)].filter((item): item is NonNullable<typeof item> => Boolean(item))
-      : await this.store.listCollectionSchemas();
-    const schemas = schemaCandidateAccess.includeLegacy
-      ? allSchemas
-      : allSchemas.filter((schema) => schemaCandidateAccess.resourceIds.includes(schema.id));
+    const schemas = collectionId
+      ? await this.directSchemaCandidate(access, collectionId, schemaCandidateAccess)
+      : await this.store.listCollectionSchemas(schemaCandidateAccess);
     const recordCandidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.activityContext.room_id, "collection_record");
     const normalized = query.trim().toLowerCase();
     const results: CollectionSearchResult[] = [];
@@ -164,10 +161,9 @@ export class SearchDomainService {
         if (results.length >= limit) break;
         continue;
       }
-      const records = await this.store.listCollectionRecords(schema.id);
+      const records = await this.store.listCollectionRecords(schema.id, recordCandidateAccess);
       for (const record of records) {
         const recordBoundaryId = collectionRecordBoundaryId(record.collection_id, record.id);
-        if (!recordCandidateAccess.includeLegacy && !recordCandidateAccess.resourceIds.includes(recordBoundaryId)) continue;
         if (!await this.resourceAllowed(access, "collection_record", recordBoundaryId)) continue;
         if (normalized && !JSON.stringify(record.data).toLowerCase().includes(normalized)) continue;
         results.push({ kind: "collection_record", collection_id: record.collection_id, id: record.id, file_path: record.file_path, summary: JSON.stringify(record.data).slice(0, 180), data: record.data });
@@ -187,12 +183,9 @@ export class SearchDomainService {
       run = await this.store.getBackendRun(context.runId);
       if (!run?.agent_id) throw new Error(`search_activity_context_required:${context.runId}`);
       sessionId = run.session_id;
-      principal = {
-        kind: "agent",
-        participantId: agentParticipantId(run.agent_id),
-        agentId: run.agent_id,
-        requestedByParticipantId: run.requested_by_participant_id ?? localOwnerParticipantId
-      };
+      if (principal.kind !== "agent" || principal.agentId !== run.agent_id) {
+        throw new Error(`search_activity_context_participant_mismatch:${context.runId}`);
+      }
     }
     if (!sessionId) throw new Error("search_activity_context_required:session");
     const session = await this.store.getSession(sessionId);
@@ -219,6 +212,20 @@ export class SearchDomainService {
     // same-Room legacy Session, so removal and Owner-only legacy rules take
     // effect immediately before a title or message summary is returned.
     return this.resourceAllowed(access, "session", session.id);
+  }
+
+  private async directSchemaCandidate(
+    access: SearchAccess,
+    collectionId: string,
+    candidates: { resourceIds: string[]; includeLegacy: boolean }
+  ): Promise<CollectionSchemaWithFilePath[]> {
+    // Check a known identifier before loading its schema body or metadata. For
+    // an Owner, `resourceAllowed` distinguishes a genuinely legacy schema
+    // from one formally owned by another Room.
+    if (!candidates.includeLegacy && !candidates.resourceIds.includes(collectionId)) return [];
+    if (!await this.resourceAllowed(access, "collection_schema", collectionId)) return [];
+    const schema = await this.store.getCollectionSchema(collectionId);
+    return schema ? [schema] : [];
   }
 
   private async authorizedSessionIds(access: SearchAccess): Promise<string[]> {
@@ -274,5 +281,5 @@ export class SearchDomainService {
 }
 
 export function collectionRecordBoundaryId(collectionId: string, recordId: string): string {
-  return `${collectionId}/${recordId}`;
+  return collectionRecordResourceId(collectionId, recordId);
 }

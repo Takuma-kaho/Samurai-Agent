@@ -1,4 +1,5 @@
 export * from "./definition/index.js";
+export * from "./definition/access-classification.js";
 export {
   operationDefinitions,
   domainCommandIds,

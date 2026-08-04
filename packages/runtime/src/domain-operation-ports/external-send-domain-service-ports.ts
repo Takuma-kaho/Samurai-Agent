@@ -15,7 +15,7 @@ export function createExternalSendDomainServicePorts(services: Pick<RuntimeDomai
       runExternalSendMutation: (input) => services.externalSendDomainService.runExternalSendMutation(input)
     },
     "external.send.dispatch": {
-      getExternalSend: (id) => services.externalSendDomainService.getExternalSend(id),
+      getExternalSend: (id) => services.externalSendDomainService.getExternalSendForCurrentRoom(id),
       saveExternalSend: (record) => services.externalSendDomainService.saveExternalSend(record),
       dispatchExternalSend: (record, dryRun) => services.externalSendDomainService.dispatchExternalSend(record, dryRun),
       ensureExternalSendSession: () => services.externalSendDomainService.ensureExternalSendSession(),

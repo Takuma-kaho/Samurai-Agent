@@ -40,10 +40,32 @@ async saveWikiPage(frontmatter: WikiFrontmatter, content: string): Promise<WikiW
   }
 }
 
-async listWiki(options: { activeOnly?: boolean; activityContext?: UsageScopeQueryContext } = {}): Promise<WikiWithFilePath[]> {
+async listWiki(options: {
+  activeOnly?: boolean;
+  activityContext?: UsageScopeQueryContext;
+  resourceIds?: string[];
+  includeLegacy?: boolean;
+} = {}): Promise<WikiWithFilePath[]> {
   let query = this.db.selectFrom("wiki_index").selectAll();
   if (options.activeOnly) {
     query = query.where("state", "=", "active");
+  }
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      query = query.where("id", "in", resourceIds);
+    } else {
+      query = query.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "wiki")
+            .whereRef("boundary.resource_id", "=", "wiki_index.id")
+        ))
+      ]));
+    }
   }
   if (options.activityContext) {
     query = query.where((eb) => eb.or([
@@ -74,20 +96,21 @@ async searchWiki(query: string, limit = 5, options: {
     if (!options.includeLegacy) {
       if (resourceIds.length === 0) return [];
       dbQuery = dbQuery.where("id", "in", resourceIds);
-    } else if (options.activityContext) {
-      dbQuery = dbQuery.where((eb) => eb.or([
-        eb("usage_scope_kind", "=", "workspace"),
-        eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
-        eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
-        eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)]),
-        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : [])
-      ]));
-    } else if (resourceIds.length > 0) {
-      dbQuery = dbQuery.where("id", "in", resourceIds);
     } else {
-      return [];
+      // Room boundary permits the candidate; UsageScope below can only narrow
+      // it. A formal boundary in another Room is never treated as legacy.
+      dbQuery = dbQuery.where((eb) => eb.or([
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : []),
+        eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary")
+            .select("boundary.id")
+            .where("boundary.resource_kind", "=", "wiki")
+            .whereRef("boundary.resource_id", "=", "wiki_index.id")
+        ))
+      ]));
     }
-  } else if (options.activityContext) {
+  }
+  if (options.activityContext) {
     dbQuery = dbQuery.where((eb) => eb.or([
       eb("usage_scope_kind", "=", "workspace"),
       eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),

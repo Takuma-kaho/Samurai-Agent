@@ -121,14 +121,19 @@ export class WorkspaceStore {
   private async ensureDefaultRoomAccess(): Promise<void> {
     await this.composition.metadata.ensureDefaultSettings(defaultSettings());
     const settings = await this.composition.metadata.getSettings();
-    await this.composition.roomPermissions.ensureInitialAccess({});
-    const { room, agent } = await this.composition.roomAgent.ensureDefaults(settings, {
+    const { room, agent, createdRoom, createdAgent } = await this.composition.roomAgent.ensureDefaults(settings, {
       createRoomWithOwner: (room) => this.composition.roomPermissions.createRoomWithOwner(room, localOwnerParticipantId)
     });
-    await this.composition.roomPermissions.ensureInitialAccess({
-      defaultRoomId: room.id,
-      defaultAgentId: agent.id
-    });
+    // Migration 009 seeds existing Workspaces once.  On later opens we do not
+    // scan or repair Room ownership; only a newly-created default pair gets
+    // its explicit initial Agent permission here.
+    if (createdRoom || createdAgent) {
+      await this.composition.roomPermissions.grantInitialDefaultAgentAccess({
+        roomId: room.id,
+        agentId: agent.id,
+        ownerParticipantId: localOwnerParticipantId
+      });
+    }
   }
 
   async synchronizeManagedResources(): ReturnType<ManagedResourceSynchronizer["synchronizeAll"]> {
@@ -208,9 +213,9 @@ export class WorkspaceStore {
       this.rootDir,
       {
         listMemory: (options) => memory.listMemory(options),
-        listSkills: () => skills.listSkills(),
+        listSkills: (options) => skills.listSkills(options),
         listWiki: (options) => wiki.listWiki(options),
-        listSkillUsage: () => skills.listSkillUsage(),
+        listSkillUsage: (input) => skills.listSkillUsage(input),
         listSkillSupportFiles: (skillId) => skills.listSkillSupportFiles(skillId),
         synchronizeManagedResources: () => managedResources.synchronizeAll()
       },
@@ -327,6 +332,7 @@ export class WorkspaceStore {
     facade.removeRoomMember = roomPermissions.removeRoomMember.bind(roomPermissions);
     facade.transferRoomOwnership = roomPermissions.transferRoomOwnership.bind(roomPermissions);
     facade.recoverOwnerlessRoom = roomPermissions.recoverOwnerlessRoom.bind(roomPermissions);
+    facade.listOwnerlessRoomIds = roomPermissions.listOwnerlessRoomIds.bind(roomPermissions);
     facade.getRoomAgent = roomPermissions.getRoomAgent.bind(roomPermissions);
     facade.listRoomAgents = roomPermissions.listRoomAgents.bind(roomPermissions);
     facade.setRoomAgentPermissions = roomPermissions.setRoomAgentPermissions.bind(roomPermissions);
@@ -338,6 +344,7 @@ export class WorkspaceStore {
     facade.listRoomResourceShares = roomPermissions.listRoomResourceShares.bind(roomPermissions);
     facade.shareResource = roomPermissions.shareResource.bind(roomPermissions);
     facade.revokeRoomResourceShare = roomPermissions.revokeRoomResourceShare.bind(roomPermissions);
+    facade.getResourceAccessMode = roomPermissions.getResourceAccessMode.bind(roomPermissions);
     facade.isResourceAvailableInRoom = roomPermissions.isResourceAvailableInRoom.bind(roomPermissions);
     facade.listResourceIdsAvailableInRoom = roomPermissions.listResourceIdsAvailableInRoom.bind(roomPermissions);
     facade.listRoomIdsForHuman = roomPermissions.listRoomIdsForHuman.bind(roomPermissions);
@@ -361,6 +368,7 @@ export class WorkspaceStore {
     facade.updateOperation = session.updateOperation.bind(session);
     facade.getOperation = session.getOperation.bind(session);
     facade.listOperations = session.listOperations.bind(session);
+    facade.listOperationsForRoom = session.listOperationsForRoom.bind(session);
     facade.saveBackendRun = session.saveBackendRun.bind(session);
     facade.admitTurn = session.admitTurn.bind(session);
     facade.releaseReservation = session.releaseReservation.bind(session);
@@ -380,6 +388,7 @@ export class WorkspaceStore {
     facade.saveWorkspaceChange = session.saveWorkspaceChange.bind(session);
     facade.setWorkspaceChangeCorrelation = session.setWorkspaceChangeCorrelation.bind(session);
     facade.listWorkspaceChanges = session.listWorkspaceChanges.bind(session);
+    facade.listWorkspaceChangesForOperation = session.listWorkspaceChangesForOperation.bind(session);
     facade.listChangeHistoryEntries = session.listChangeHistoryEntries.bind(session);
     facade.saveToolRun = session.saveToolRun.bind(session);
     facade.listToolRuns = session.listToolRuns.bind(session);
@@ -618,18 +627,23 @@ export class WorkspaceStore {
 
     facade.savePolicyDecision = accessHistory.savePolicyDecision.bind(accessHistory);
     facade.listPolicyDecisions = accessHistory.listPolicyDecisions.bind(accessHistory);
+    facade.listPolicyDecisionsForOperationIds = accessHistory.listPolicyDecisionsForOperationIds.bind(accessHistory);
     facade.getPolicyDecision = accessHistory.getPolicyDecision.bind(accessHistory);
     facade.saveApprovalRequest = accessHistory.saveApprovalRequest.bind(accessHistory);
     facade.updateApprovalRequest = accessHistory.updateApprovalRequest.bind(accessHistory);
     facade.getApprovalRequest = accessHistory.getApprovalRequest.bind(accessHistory);
     facade.listApprovalRequests = accessHistory.listApprovalRequests.bind(accessHistory);
+    facade.listApprovalRequestsForOperationIds = accessHistory.listApprovalRequestsForOperationIds.bind(accessHistory);
     facade.saveAuditRecord = accessHistory.saveAuditRecord.bind(accessHistory);
     facade.updateAuditRecord = accessHistory.updateAuditRecord.bind(accessHistory);
     facade.listAuditRecords = accessHistory.listAuditRecords.bind(accessHistory);
+    facade.listAuditRecordsForRoom = accessHistory.listAuditRecordsForRoom.bind(accessHistory);
     facade.listAuditRecordsForOperation = accessHistory.listAuditRecordsForOperation.bind(accessHistory);
     facade.saveRollbackPoint = accessHistory.saveRollbackPoint.bind(accessHistory);
     facade.listRollbackPoints = accessHistory.listRollbackPoints.bind(accessHistory);
+    facade.listRollbackPointsForOperationIds = accessHistory.listRollbackPointsForOperationIds.bind(accessHistory);
     facade.getRollbackPoint = accessHistory.getRollbackPoint.bind(accessHistory);
+    facade.getRollbackPointForOperationIds = accessHistory.getRollbackPointForOperationIds.bind(accessHistory);
     facade.listGrants = accessHistory.listGrants.bind(accessHistory);
     facade.getGrant = accessHistory.getGrant.bind(accessHistory);
     facade.saveGrant = accessHistory.saveGrant.bind(accessHistory);
@@ -688,6 +702,7 @@ export interface WorkspaceStore {
   removeRoomMember: RoomPermissionRepository["removeRoomMember"];
   transferRoomOwnership: RoomPermissionRepository["transferRoomOwnership"];
   recoverOwnerlessRoom: RoomPermissionRepository["recoverOwnerlessRoom"];
+  listOwnerlessRoomIds: RoomPermissionRepository["listOwnerlessRoomIds"];
   getRoomAgent: RoomPermissionRepository["getRoomAgent"];
   listRoomAgents: RoomPermissionRepository["listRoomAgents"];
   setRoomAgentPermissions: RoomPermissionRepository["setRoomAgentPermissions"];
@@ -699,6 +714,7 @@ export interface WorkspaceStore {
   listRoomResourceShares: RoomPermissionRepository["listRoomResourceShares"];
   shareResource: RoomPermissionRepository["shareResource"];
   revokeRoomResourceShare: RoomPermissionRepository["revokeRoomResourceShare"];
+  getResourceAccessMode: RoomPermissionRepository["getResourceAccessMode"];
   isResourceAvailableInRoom: RoomPermissionRepository["isResourceAvailableInRoom"];
   listResourceIdsAvailableInRoom: RoomPermissionRepository["listResourceIdsAvailableInRoom"];
   listRoomIdsForHuman: RoomPermissionRepository["listRoomIdsForHuman"];
@@ -722,6 +738,7 @@ export interface WorkspaceStore {
   updateOperation: SessionExecutionRepository["updateOperation"];
   getOperation: SessionExecutionRepository["getOperation"];
   listOperations: SessionExecutionRepository["listOperations"];
+  listOperationsForRoom: SessionExecutionRepository["listOperationsForRoom"];
   saveBackendRun: SessionExecutionRepository["saveBackendRun"];
   admitTurn: SessionExecutionRepository["admitTurn"];
   releaseReservation: SessionExecutionRepository["releaseReservation"];
@@ -741,6 +758,7 @@ export interface WorkspaceStore {
   saveWorkspaceChange: SessionExecutionRepository["saveWorkspaceChange"];
   setWorkspaceChangeCorrelation: SessionExecutionRepository["setWorkspaceChangeCorrelation"];
   listWorkspaceChanges: SessionExecutionRepository["listWorkspaceChanges"];
+  listWorkspaceChangesForOperation: SessionExecutionRepository["listWorkspaceChangesForOperation"];
   listChangeHistoryEntries: SessionExecutionRepository["listChangeHistoryEntries"];
   saveToolRun: SessionExecutionRepository["saveToolRun"];
   listToolRuns: SessionExecutionRepository["listToolRuns"];
@@ -979,18 +997,23 @@ export interface WorkspaceStore {
 
   savePolicyDecision: AccessHistoryRepository["savePolicyDecision"];
   listPolicyDecisions: AccessHistoryRepository["listPolicyDecisions"];
+  listPolicyDecisionsForOperationIds: AccessHistoryRepository["listPolicyDecisionsForOperationIds"];
   getPolicyDecision: AccessHistoryRepository["getPolicyDecision"];
   saveApprovalRequest: AccessHistoryRepository["saveApprovalRequest"];
   updateApprovalRequest: AccessHistoryRepository["updateApprovalRequest"];
   getApprovalRequest: AccessHistoryRepository["getApprovalRequest"];
   listApprovalRequests: AccessHistoryRepository["listApprovalRequests"];
+  listApprovalRequestsForOperationIds: AccessHistoryRepository["listApprovalRequestsForOperationIds"];
   saveAuditRecord: AccessHistoryRepository["saveAuditRecord"];
   updateAuditRecord: AccessHistoryRepository["updateAuditRecord"];
   listAuditRecords: AccessHistoryRepository["listAuditRecords"];
+  listAuditRecordsForRoom: AccessHistoryRepository["listAuditRecordsForRoom"];
   listAuditRecordsForOperation: AccessHistoryRepository["listAuditRecordsForOperation"];
   saveRollbackPoint: AccessHistoryRepository["saveRollbackPoint"];
   listRollbackPoints: AccessHistoryRepository["listRollbackPoints"];
+  listRollbackPointsForOperationIds: AccessHistoryRepository["listRollbackPointsForOperationIds"];
   getRollbackPoint: AccessHistoryRepository["getRollbackPoint"];
+  getRollbackPointForOperationIds: AccessHistoryRepository["getRollbackPointForOperationIds"];
   listGrants: AccessHistoryRepository["listGrants"];
   getGrant: AccessHistoryRepository["getGrant"];
   saveGrant: AccessHistoryRepository["saveGrant"];

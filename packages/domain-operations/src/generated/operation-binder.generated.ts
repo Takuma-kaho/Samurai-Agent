@@ -108,47 +108,48 @@ import operation104, { type RoomMemberRemovePorts } from "../operations/room/mem
 import operation105, { type RoomMemberRoleChangePorts } from "../operations/room/member-role-change.operation.js";
 import operation106, { type RoomOwnerRecoverPorts } from "../operations/room/owner-recover.operation.js";
 import operation107, { type RoomOwnerTransferPorts } from "../operations/room/owner-transfer.operation.js";
-import operation108, { type RoomPatchPorts } from "../operations/room/patch.operation.js";
-import operation109, { type RoomResourceSharePorts } from "../operations/room/resource-share.operation.js";
-import operation110, { type RoomResourceShareListPorts } from "../operations/room/resource-share-list.operation.js";
-import operation111, { type RoomResourceShareRevokePorts } from "../operations/room/resource-share-revoke.operation.js";
-import operation112, { type RoomViewPorts } from "../operations/room/view.operation.js";
-import operation113, { type SandboxExecPorts } from "../operations/sandbox/exec.operation.js";
-import operation114, { type SessionCreatePorts } from "../operations/session/create.operation.js";
-import operation115, { type SessionSearchPorts } from "../operations/search/session.operation.js";
-import operation116, { type SessionSearchReindexPorts } from "../operations/session/search/reindex.operation.js";
-import operation117, { type SettingsPatchPorts } from "../operations/settings/patch.operation.js";
-import operation118, { type SkillCandidateCreatePorts } from "../operations/skill/candidate/create.operation.js";
-import operation119, { type SkillLifecycleApplyPorts } from "../operations/skill/lifecycle/apply.operation.js";
-import operation120, { type SkillOptimizationCancelPorts } from "../operations/skill/optimization/cancel.operation.js";
-import operation121, { type SkillOptimizationPromotePorts } from "../operations/skill/optimization/promote.operation.js";
-import operation122, { type SkillOptimizationRejectPorts } from "../operations/skill/optimization/reject.operation.js";
-import operation123, { type SkillOptimizationRollbackPorts } from "../operations/skill/optimization/rollback.operation.js";
-import operation124, { type SkillOptimizationStartPorts } from "../operations/skill/optimization/start.operation.js";
-import operation125, { type SkillPatchPorts } from "../operations/skill/patch.operation.js";
-import operation126, { type SkillProjectSavePorts } from "../operations/skill/project/save.operation.js";
-import operation127, { type SkillSearchPorts } from "../operations/search/skill.operation.js";
-import operation128, { type SkillSupportFileSavePorts } from "../operations/skill/support_file/save.operation.js";
-import operation129, { type SkillUsageRecordPorts } from "../operations/skill/usage/record.operation.js";
-import operation130, { type SkillViewPorts } from "../operations/skill/view.operation.js";
-import operation131, { type WikiAcceptPorts } from "../operations/wiki/accept.operation.js";
-import operation132, { type WikiArchivePorts } from "../operations/wiki/archive.operation.js";
-import operation133, { type WikiPatchPorts } from "../operations/wiki/patch.operation.js";
-import operation134, { type WikiProposalCreatePorts } from "../operations/wiki/proposal/create.operation.js";
-import operation135, { type WikiReindexPorts } from "../operations/wiki/reindex.operation.js";
-import operation136, { type WikiRejectPorts } from "../operations/wiki/reject.operation.js";
-import operation137, { type WikiSearchPorts } from "../operations/search/wiki.operation.js";
-import operation138, { type WorkItemCreatePorts } from "../operations/work_item/create.operation.js";
-import operation139, { type WorkItemFollowUpPorts } from "../operations/work_item/follow_up.operation.js";
-import operation140, { type WorkItemSteerPorts } from "../operations/work_item/steer.operation.js";
-import operation141, { type WorkspaceBackupCreatePorts } from "../operations/workspace/backup/create.operation.js";
-import operation142, { type WorkspaceBackupRestorePorts } from "../operations/workspace/backup/restore.operation.js";
-import operation143, { type WorkspaceMemberAddPorts } from "../operations/workspace/member-add.operation.js";
-import operation144, { type WorkspaceMemberListPorts } from "../operations/workspace/member-list.operation.js";
-import operation145, { type WorkspaceMemberRemovePorts } from "../operations/workspace/member-remove.operation.js";
-import operation146, { type WorkspaceMemberRoleChangePorts } from "../operations/workspace/member-role-change.operation.js";
-import operation147, { type WorkspaceOwnerTransferPorts } from "../operations/workspace/owner-transfer.operation.js";
-import operation148, { type WorkspaceRepairPorts } from "../operations/workspace/repair.operation.js";
+import operation108, { type RoomOwnerlessListPorts } from "../operations/room/ownerless-list.operation.js";
+import operation109, { type RoomPatchPorts } from "../operations/room/patch.operation.js";
+import operation110, { type RoomResourceSharePorts } from "../operations/room/resource-share.operation.js";
+import operation111, { type RoomResourceShareListPorts } from "../operations/room/resource-share-list.operation.js";
+import operation112, { type RoomResourceShareRevokePorts } from "../operations/room/resource-share-revoke.operation.js";
+import operation113, { type RoomViewPorts } from "../operations/room/view.operation.js";
+import operation114, { type SandboxExecPorts } from "../operations/sandbox/exec.operation.js";
+import operation115, { type SessionCreatePorts } from "../operations/session/create.operation.js";
+import operation116, { type SessionSearchPorts } from "../operations/search/session.operation.js";
+import operation117, { type SessionSearchReindexPorts } from "../operations/session/search/reindex.operation.js";
+import operation118, { type SettingsPatchPorts } from "../operations/settings/patch.operation.js";
+import operation119, { type SkillCandidateCreatePorts } from "../operations/skill/candidate/create.operation.js";
+import operation120, { type SkillLifecycleApplyPorts } from "../operations/skill/lifecycle/apply.operation.js";
+import operation121, { type SkillOptimizationCancelPorts } from "../operations/skill/optimization/cancel.operation.js";
+import operation122, { type SkillOptimizationPromotePorts } from "../operations/skill/optimization/promote.operation.js";
+import operation123, { type SkillOptimizationRejectPorts } from "../operations/skill/optimization/reject.operation.js";
+import operation124, { type SkillOptimizationRollbackPorts } from "../operations/skill/optimization/rollback.operation.js";
+import operation125, { type SkillOptimizationStartPorts } from "../operations/skill/optimization/start.operation.js";
+import operation126, { type SkillPatchPorts } from "../operations/skill/patch.operation.js";
+import operation127, { type SkillProjectSavePorts } from "../operations/skill/project/save.operation.js";
+import operation128, { type SkillSearchPorts } from "../operations/search/skill.operation.js";
+import operation129, { type SkillSupportFileSavePorts } from "../operations/skill/support_file/save.operation.js";
+import operation130, { type SkillUsageRecordPorts } from "../operations/skill/usage/record.operation.js";
+import operation131, { type SkillViewPorts } from "../operations/skill/view.operation.js";
+import operation132, { type WikiAcceptPorts } from "../operations/wiki/accept.operation.js";
+import operation133, { type WikiArchivePorts } from "../operations/wiki/archive.operation.js";
+import operation134, { type WikiPatchPorts } from "../operations/wiki/patch.operation.js";
+import operation135, { type WikiProposalCreatePorts } from "../operations/wiki/proposal/create.operation.js";
+import operation136, { type WikiReindexPorts } from "../operations/wiki/reindex.operation.js";
+import operation137, { type WikiRejectPorts } from "../operations/wiki/reject.operation.js";
+import operation138, { type WikiSearchPorts } from "../operations/search/wiki.operation.js";
+import operation139, { type WorkItemCreatePorts } from "../operations/work_item/create.operation.js";
+import operation140, { type WorkItemFollowUpPorts } from "../operations/work_item/follow_up.operation.js";
+import operation141, { type WorkItemSteerPorts } from "../operations/work_item/steer.operation.js";
+import operation142, { type WorkspaceBackupCreatePorts } from "../operations/workspace/backup/create.operation.js";
+import operation143, { type WorkspaceBackupRestorePorts } from "../operations/workspace/backup/restore.operation.js";
+import operation144, { type WorkspaceMemberAddPorts } from "../operations/workspace/member-add.operation.js";
+import operation145, { type WorkspaceMemberListPorts } from "../operations/workspace/member-list.operation.js";
+import operation146, { type WorkspaceMemberRemovePorts } from "../operations/workspace/member-remove.operation.js";
+import operation147, { type WorkspaceMemberRoleChangePorts } from "../operations/workspace/member-role-change.operation.js";
+import operation148, { type WorkspaceOwnerTransferPorts } from "../operations/workspace/owner-transfer.operation.js";
+import operation149, { type WorkspaceRepairPorts } from "../operations/workspace/repair.operation.js";
 
 export interface DomainOperationPorts {
   "agent.backend.bind": AgentBackendBindPorts;
@@ -259,6 +260,7 @@ export interface DomainOperationPorts {
   "room.member.role.change": RoomMemberRoleChangePorts;
   "room.owner.recover": RoomOwnerRecoverPorts;
   "room.owner.transfer": RoomOwnerTransferPorts;
+  "room.ownerless.list": RoomOwnerlessListPorts;
   "room.patch": RoomPatchPorts;
   "room.resource.share": RoomResourceSharePorts;
   "room.resource.share.list": RoomResourceShareListPorts;
@@ -412,46 +414,47 @@ export function bindOperationDefinitions(ports: DomainOperationPorts): readonly 
     bindOperationDefinition(operation105, operation105.createHandler(ports["room.member.role.change"])),
     bindOperationDefinition(operation106, operation106.createHandler(ports["room.owner.recover"])),
     bindOperationDefinition(operation107, operation107.createHandler(ports["room.owner.transfer"])),
-    bindOperationDefinition(operation108, operation108.createHandler(ports["room.patch"])),
-    bindOperationDefinition(operation109, operation109.createHandler(ports["room.resource.share"])),
-    bindOperationDefinition(operation110, operation110.createHandler(ports["room.resource.share.list"])),
-    bindOperationDefinition(operation111, operation111.createHandler(ports["room.resource.share.revoke"])),
-    bindOperationDefinition(operation112, operation112.createHandler(ports["room.view"])),
-    bindOperationDefinition(operation113, operation113.createHandler(ports["sandbox.exec"])),
-    bindOperationDefinition(operation114, operation114.createHandler(ports["session.create"])),
-    bindOperationDefinition(operation115, operation115.createHandler(ports["session.search"])),
-    bindOperationDefinition(operation116, operation116.createHandler(ports["session.search.reindex"])),
-    bindOperationDefinition(operation117, operation117.createHandler(ports["settings.patch"])),
-    bindOperationDefinition(operation118, operation118.createHandler(ports["skill.candidate.create"])),
-    bindOperationDefinition(operation119, operation119.createHandler(ports["skill.lifecycle.apply"])),
-    bindOperationDefinition(operation120, operation120.createHandler(ports["skill.optimization.cancel"])),
-    bindOperationDefinition(operation121, operation121.createHandler(ports["skill.optimization.promote"])),
-    bindOperationDefinition(operation122, operation122.createHandler(ports["skill.optimization.reject"])),
-    bindOperationDefinition(operation123, operation123.createHandler(ports["skill.optimization.rollback"])),
-    bindOperationDefinition(operation124, operation124.createHandler(ports["skill.optimization.start"])),
-    bindOperationDefinition(operation125, operation125.createHandler(ports["skill.patch"])),
-    bindOperationDefinition(operation126, operation126.createHandler(ports["skill.project.save"])),
-    bindOperationDefinition(operation127, operation127.createHandler(ports["skill.search"])),
-    bindOperationDefinition(operation128, operation128.createHandler(ports["skill.support_file.save"])),
-    bindOperationDefinition(operation129, operation129.createHandler(ports["skill.usage.record"])),
-    bindOperationDefinition(operation130, operation130.createHandler(ports["skill.view"])),
-    bindOperationDefinition(operation131, operation131.createHandler(ports["wiki.accept"])),
-    bindOperationDefinition(operation132, operation132.createHandler(ports["wiki.archive"])),
-    bindOperationDefinition(operation133, operation133.createHandler(ports["wiki.patch"])),
-    bindOperationDefinition(operation134, operation134.createHandler(ports["wiki.proposal.create"])),
-    bindOperationDefinition(operation135, operation135.createHandler(ports["wiki.reindex"])),
-    bindOperationDefinition(operation136, operation136.createHandler(ports["wiki.reject"])),
-    bindOperationDefinition(operation137, operation137.createHandler(ports["wiki.search"])),
-    bindOperationDefinition(operation138, operation138.createHandler(ports["work_item.create"])),
-    bindOperationDefinition(operation139, operation139.createHandler(ports["work_item.follow_up"])),
-    bindOperationDefinition(operation140, operation140.createHandler(ports["work_item.steer"])),
-    bindOperationDefinition(operation141, operation141.createHandler(ports["workspace.backup.create"])),
-    bindOperationDefinition(operation142, operation142.createHandler(ports["workspace.backup.restore"])),
-    bindOperationDefinition(operation143, operation143.createHandler(ports["workspace.member.add"])),
-    bindOperationDefinition(operation144, operation144.createHandler(ports["workspace.member.list"])),
-    bindOperationDefinition(operation145, operation145.createHandler(ports["workspace.member.remove"])),
-    bindOperationDefinition(operation146, operation146.createHandler(ports["workspace.member.role.change"])),
-    bindOperationDefinition(operation147, operation147.createHandler(ports["workspace.owner.transfer"])),
-    bindOperationDefinition(operation148, operation148.createHandler(ports["workspace.repair"])),
+    bindOperationDefinition(operation108, operation108.createHandler(ports["room.ownerless.list"])),
+    bindOperationDefinition(operation109, operation109.createHandler(ports["room.patch"])),
+    bindOperationDefinition(operation110, operation110.createHandler(ports["room.resource.share"])),
+    bindOperationDefinition(operation111, operation111.createHandler(ports["room.resource.share.list"])),
+    bindOperationDefinition(operation112, operation112.createHandler(ports["room.resource.share.revoke"])),
+    bindOperationDefinition(operation113, operation113.createHandler(ports["room.view"])),
+    bindOperationDefinition(operation114, operation114.createHandler(ports["sandbox.exec"])),
+    bindOperationDefinition(operation115, operation115.createHandler(ports["session.create"])),
+    bindOperationDefinition(operation116, operation116.createHandler(ports["session.search"])),
+    bindOperationDefinition(operation117, operation117.createHandler(ports["session.search.reindex"])),
+    bindOperationDefinition(operation118, operation118.createHandler(ports["settings.patch"])),
+    bindOperationDefinition(operation119, operation119.createHandler(ports["skill.candidate.create"])),
+    bindOperationDefinition(operation120, operation120.createHandler(ports["skill.lifecycle.apply"])),
+    bindOperationDefinition(operation121, operation121.createHandler(ports["skill.optimization.cancel"])),
+    bindOperationDefinition(operation122, operation122.createHandler(ports["skill.optimization.promote"])),
+    bindOperationDefinition(operation123, operation123.createHandler(ports["skill.optimization.reject"])),
+    bindOperationDefinition(operation124, operation124.createHandler(ports["skill.optimization.rollback"])),
+    bindOperationDefinition(operation125, operation125.createHandler(ports["skill.optimization.start"])),
+    bindOperationDefinition(operation126, operation126.createHandler(ports["skill.patch"])),
+    bindOperationDefinition(operation127, operation127.createHandler(ports["skill.project.save"])),
+    bindOperationDefinition(operation128, operation128.createHandler(ports["skill.search"])),
+    bindOperationDefinition(operation129, operation129.createHandler(ports["skill.support_file.save"])),
+    bindOperationDefinition(operation130, operation130.createHandler(ports["skill.usage.record"])),
+    bindOperationDefinition(operation131, operation131.createHandler(ports["skill.view"])),
+    bindOperationDefinition(operation132, operation132.createHandler(ports["wiki.accept"])),
+    bindOperationDefinition(operation133, operation133.createHandler(ports["wiki.archive"])),
+    bindOperationDefinition(operation134, operation134.createHandler(ports["wiki.patch"])),
+    bindOperationDefinition(operation135, operation135.createHandler(ports["wiki.proposal.create"])),
+    bindOperationDefinition(operation136, operation136.createHandler(ports["wiki.reindex"])),
+    bindOperationDefinition(operation137, operation137.createHandler(ports["wiki.reject"])),
+    bindOperationDefinition(operation138, operation138.createHandler(ports["wiki.search"])),
+    bindOperationDefinition(operation139, operation139.createHandler(ports["work_item.create"])),
+    bindOperationDefinition(operation140, operation140.createHandler(ports["work_item.follow_up"])),
+    bindOperationDefinition(operation141, operation141.createHandler(ports["work_item.steer"])),
+    bindOperationDefinition(operation142, operation142.createHandler(ports["workspace.backup.create"])),
+    bindOperationDefinition(operation143, operation143.createHandler(ports["workspace.backup.restore"])),
+    bindOperationDefinition(operation144, operation144.createHandler(ports["workspace.member.add"])),
+    bindOperationDefinition(operation145, operation145.createHandler(ports["workspace.member.list"])),
+    bindOperationDefinition(operation146, operation146.createHandler(ports["workspace.member.remove"])),
+    bindOperationDefinition(operation147, operation147.createHandler(ports["workspace.member.role.change"])),
+    bindOperationDefinition(operation148, operation148.createHandler(ports["workspace.owner.transfer"])),
+    bindOperationDefinition(operation149, operation149.createHandler(ports["workspace.repair"])),
   ]);
 }

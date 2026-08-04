@@ -247,6 +247,15 @@ async listOperations(sessionId?: string): Promise<OperationRecord[]> {
   return rows.map(operationFromRow);
 }
 
+/** Room-scoped history query for authorization façades; never scan then filter. */
+async listOperationsForRoom(roomId: string): Promise<OperationRecord[]> {
+  const rows = await this.db.selectFrom("operations").selectAll()
+    .where("room_id", "=", roomId)
+    .orderBy("created_at", "desc")
+    .execute();
+  return rows.map(operationFromRow);
+}
+
 async saveBackendRun(run: BackendRunRecord): Promise<BackendRunRecord> {
   await this.db.insertInto("backend_runs").values(backendRunToRow(run)).execute();
   return run;
@@ -665,6 +674,16 @@ async listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]>
     query = query.where("session_id", "=", sessionId);
   }
   const rows = await query.orderBy("created_at", "desc").execute();
+  return rows.map(workspaceChangeFromRow);
+}
+
+/** Narrow internal lookup used while attaching a correlation to one Operation. */
+async listWorkspaceChangesForOperation(operationId: string): Promise<WorkspaceChangeRecord[]> {
+  const rows = await this.db.selectFrom("workspace_changes")
+    .selectAll()
+    .where("legacy_operation_id", "=", operationId)
+    .orderBy("created_at", "desc")
+    .execute();
   return rows.map(workspaceChangeFromRow);
 }
 

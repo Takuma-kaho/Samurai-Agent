@@ -110,6 +110,9 @@ importers:
       '@samurai-agent/policy-engine':
         specifier: workspace:*
         version: link:../../packages/policy-engine
+      '@samurai-agent/room-permissions':
+        specifier: workspace:*
+        version: link:../../packages/room-permissions
       '@samurai-agent/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime

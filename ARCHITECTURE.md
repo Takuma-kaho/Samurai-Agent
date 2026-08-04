@@ -269,12 +269,13 @@ Room membership      ── Room内容の閲覧・編集・実行・共有の権
 Resource boundary    ── 元Roomと明示共有先の利用範囲
 ```
 
-- `workspace_members`、`room_members`、`room_agents`、`agent_workspace_permissions`を現在の参加状態の正本として保存する。解除済み行は履歴として残し、判定には使わない。
+- `workspace_members`、`room_members`、`room_agents`、`agent_workspace_permissions`を現在の参加状態の正本として保存する。解除済み行は履歴として残し、判定には使わない。009で保存構造を追加し、010で外部キー、現在状態の部分一意制約、古い境界IDの検査を追加する。
 - `resource_access_boundaries`と`room_resource_shares`は元Room、作成者、共有・共有解除の履歴を保存する。共有はデータ複製や`UsageScope`変更を行わない。
 - Room作成とOwner登録、Owner移譲はSQLite transactionで保存する。active Ownerの部分一意制約により、外部からOwner 0人・2人の状態は観測できない。
 - `ActorIdentity`は経路情報のまま残す。Domain Contextには安定した参加者ID、種別、Agent実行を依頼した人、Sessionから導出したRoomを持たせ、公開payloadで偽装できないようにする。
-- Chat、Backend Run、Tool、検索、Context assembly、Resource read/write、Room操作は共通`RoomAuthorizationService`を通す。検索とContextはRoom境界で候補を絞り、返却・読み込み直前にもう一度確認する。
+- Chat、Backend Run、Tool、検索、Context assembly、Resource read/write、Room操作は共通`RoomAuthorizationService`を通す。検索とContextはRoom境界で候補を先に絞り、返却・読み込み直前にもう一度確認する。履歴、診断、ファイルの出所情報も同じRoom候補から取得する。
 - 参加解除後の過去履歴は残すが、新しい読み込み、検索、Tool、書き込み、Backend継続処理は拒否する。
+- Room間共有はデータを複製せず、共有先に読み取り・利用資格だけを追加する。共有先へ元Roomの操作履歴、編集権限、再共有権限は自動で渡さない。共有解除後の新しい利用も拒否する。
 
 Core 06はRoom管理UI、外部招待・認証、Gateway変更、学習判断、Room削除・アーカイブ、旧Bundle互換を追加しない。
 
