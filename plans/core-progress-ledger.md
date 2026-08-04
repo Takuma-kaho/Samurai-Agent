@@ -108,6 +108,7 @@
 - [x] Chat、Agent Run、Backend Tool、検索、Context assembly、Memory/Wiki/Skill/Collection/File、履歴読取の本番入口へ共通判定を接続した。
 - [x] 検索、Agent Context、履歴、診断、ファイル出所は、Room境界の候補絞り込みと返却・読み込み直前の再確認を行う。
 - [x] 共有先には共有対象の読み取り・利用資格だけを追加し、元Roomの履歴・編集・再共有権限を自動で渡さない。
+- [x] Gatewayは受信・pairing・履歴保存までに留め、検証済み外部本人確認を参加者IDへ結び付けるまではRoom境界、Session、Chat、Agent Run、Toolを開始しない。署名方式自体は後続Coreの対象とする。
 
 #### 完了判定
 

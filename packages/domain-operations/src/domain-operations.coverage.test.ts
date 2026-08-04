@@ -6,7 +6,7 @@ import gatewayMcpConfigSave from "./operations/gateway/mcp_config/save.operation
 import gatewayInboundRoute from "./operations/gateway/inbound/route.operation.js";
 
 describe("Domain Operation strict gate coverage", () => {
-  it("loads and executes the complete 132-operation strict gate", () => {
+  it("loads and executes the complete 150-operation strict gate", () => {
     expect(true).toBe(true);
   });
 
@@ -100,13 +100,22 @@ describe("Domain Operation strict gate coverage", () => {
           if (/Error$|NotFound$|Conflict$/.test(name)) return new Error(name);
           if ([
             "createRoom", "patchRoom", "listRooms", "viewRoom",
-            "createAgent", "patchAgent", "bindAgentBackend", "listAgents", "viewAgent"
+            "createAgent", "patchAgent", "bindAgentBackend", "listAgents", "viewAgent",
+            "addWorkspaceMember", "changeWorkspaceMemberRole", "removeWorkspaceMember",
+            "setAgentRoomCreatePermission", "setRoomAgentPermissions", "removeRoomAgent", "addRoomMember",
+            "listRoomParticipants", "changeRoomMemberRole", "removeRoomMember",
+            "recoverOwnerlessRoom", "shareResource", "revokeResourceShare"
           ].includes(name)) return outputs.get(id);
           if (name === "getReflectionSession") return fixtureSession(String(args[0]));
           if (name === "getReflectionBackendRun") return fixtureBackendRun(String(args[0]), reflectionSessionId);
           if (name === "listCollectionRecords") return { collection_id: "sample", count: 0, items: [], linked_data: {}, schema_fields: {} };
           if (name === "listMemoryForSession") return [{ ...fixtureRecord(id), id: "sample" }];
           if (name === "listReflectionSuggestions") return [{ id: "sample", reflection_run_id: "sample", suggestion_type: reflectionSuggestionType, status: "proposed", title: "fixture", content: "fixture", source_refs: [], confidence: 0.5, created_at: "2026-07-16T00:00:00.000Z", updated_at: "2026-07-16T00:00:00.000Z" }];
+          if (name === "getReflectionSuggestion") return { id: "sample", reflection_run_id: "sample", suggestion_type: reflectionSuggestionType, status: "proposed", title: "fixture", content: "fixture", source_refs: [], confidence: 0.5, created_at: "2026-07-16T00:00:00.000Z", updated_at: "2026-07-16T00:00:00.000Z" };
+          if (name === "transferRoomOwnership" || name === "transferWorkspaceOwnership") {
+            const output = outputs.get(id) as { previous_owner?: unknown; owner?: unknown };
+            return { previousOwner: output.previous_owner, owner: output.owner };
+          }
           if (name === "listEvaluationBackendRuns") return [
             { id: "run-before", session_id: "sample", input_message_id: "input-before", backend_id: "fixture", backend_kind: "samurai_native", status: "completed", started_at: "2026-07-14T00:00:00.000Z", completed_at: "2026-07-14T00:01:00.000Z", input_summary: "before", metadata: {} },
             { id: "run-used", session_id: "sample", input_message_id: "input-used", backend_id: "fixture", backend_kind: "samurai_native", status: "completed", started_at: "2026-07-15T00:00:00.000Z", completed_at: "2026-07-15T00:01:00.000Z", input_summary: "used", metadata: {} }
@@ -124,7 +133,15 @@ describe("Domain Operation strict gate coverage", () => {
           if (name === "currentTimeMillis") return 1_752_624_000_000;
           if (name.startsWith("create") && name.endsWith("Id")) return `${id}-fixture`;
           if (name.endsWith("Contract")) return { id, proposed_effects: [] };
-          if (name === "getAutomationJob" || name === "acquireAutomationJobLock") return { ...fixtureRecord(id), kind: automationJobKind, title: "fixture", target_instruction: "fixture", schedule: automationJobSchedule, status: "enabled" };
+          if (name === "getAutomationJob" || name === "acquireAutomationJobLock") return {
+            ...fixtureRecord(id),
+            kind: automationJobKind,
+            title: "fixture",
+            target_instruction: "fixture",
+            schedule: automationJobSchedule,
+            status: "enabled",
+            delivery_target: { room_id: "coverage-room" }
+          };
           if (name === "getArtifact" && id.startsWith("graph.")) return { ...fixtureRecord(id), kind: "graph", locale: "en", source_locales: ["en"] };
           if (name === "getArtifact" && id === "image.edit") return { ...fixtureRecord(id), kind: "image", locale: "en", source_locales: ["en"] };
           if (name === "getRollbackPoint") {
@@ -284,12 +301,16 @@ describe("Domain Operation strict gate coverage", () => {
         inputSource: definition.sources[0]!,
         workspaceId: "workspace",
         actorId: "actor",
+        roomId: "coverage-room",
+        participant: { kind: "human" as const, participantId: "human:owner" },
         correlationId: `coverage-${definition.id}`,
         ...(definition.id === "chat.turn.run" ? { idempotencyKey: "coverage-chat-turn" } : {}),
         ...(definition.id === "generated_surface.create" || definition.id === "generated_surface.revise"
           ? { sessionId: "surface-session", runId: "surface-run" }
           : definition.id === "learning.background_review.apply"
-            ? { sessionId: "reflection-session" }
+            ? { sessionId: "reflection-session", roomId: "reflection-room", participant: { kind: "human" as const, participantId: "human:owner" } }
+            : definition.id === "evaluation.run" || definition.id === "reflection.suggestion.apply"
+              ? { sessionId: "reflection-session" }
             : definition.id === "learning.resource.usage.record"
               ? { runId: "learning-resource-run" }
           : definition.id === "memory.archive"
@@ -325,8 +346,8 @@ describe("Domain Operation strict gate coverage", () => {
       if (count === 0 && definition.id !== "presentation.plan") throw new Error(`${definition.id} did not call its Port`);
     }
 
-    expect(bindings).toHaveLength(132);
-    expect(portCalls.size).toBe(131);
+    expect(bindings).toHaveLength(150);
+    expect(portCalls.size).toBe(149);
 
     for (const operationId of ["artifact.create", "chat.turn.run"] as const) {
       const binding = bindings.find((candidate) => candidate.definition.id === operationId)!;

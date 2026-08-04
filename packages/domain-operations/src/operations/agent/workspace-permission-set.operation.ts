@@ -2,7 +2,10 @@ import { z } from "zod";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { agentWorkspacePermissionValueSchema } from "../../value-objects/room-permissions.js";
 
-const Input = z.object({ agent_id: z.string().trim().min(1), permission: z.literal("room.create"), allowed: z.boolean() }).strict();
+// The operation itself names the only supported permission. Keeping a
+// redundant literal in the public input would imply a generic permission
+// system that Core 06 deliberately does not create.
+const Input = z.object({ agent_id: z.string().trim().min(1), allowed: z.boolean() }).strict();
 const Output = agentWorkspacePermissionValueSchema.nullable();
 export interface AgentWorkspacePermissionSetPorts { setAgentRoomCreatePermission(context: TrustedDomainContext, input: { agentId: string; allowed: boolean }): Promise<z.infer<typeof Output>>; }
 const agentWorkspacePermissionSet = defineCommand<AgentWorkspacePermissionSetPorts>()({

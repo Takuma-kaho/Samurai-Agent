@@ -45,6 +45,14 @@ export const fn = { $handler_matrix: "function" } as const;
 export const call = (method: string, ...args: unknown[]): BHandlerCallExpectation => ({ method, args });
 
 const now = "2026-07-17T00:00:00.000Z";
+const handlerContext = {
+  inputSource: "runtime_api",
+  workspaceId: "handler-matrix-workspace",
+  actorId: "handler-matrix-actor",
+  correlationId: "handler-matrix",
+  sessionId: "session_fixture",
+  runId: "run_fixture"
+};
 const locales = ["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"] as const;
 const gatewayChannels = ["telegram", "slack", "line", "email", "mobile", "webhook", "local_cli", "cron"] as const;
 const externalChannels = ["webhook", "email", "slack", "telegram", "line"] as const;
@@ -488,6 +496,10 @@ export const bHandlerExpectations = {
         context: { sessionId: "session_fixture", idempotencyKey: "handler-matrix-chat-turn", surfaceOperation: { id: "surface_operation_fixture", kind: "message.submit" } },
         branches: ["session:existing", "surface:present"],
         calls: [call("runChatTurn", {
+          ...handlerContext,
+          idempotencyKey: "handler-matrix-chat-turn",
+          surfaceOperation: { id: "surface_operation_fixture", kind: "message.submit" }
+        }, {
           sessionId: "session_fixture",
           content: "Fixture chat",
           idempotencyKey: "handler-matrix-chat-turn",
@@ -506,8 +518,8 @@ export const bHandlerExpectations = {
         context: { sessionId: undefined, idempotencyKey: "handler-matrix-chat-turn" },
         branches: ["session:create", "surface:absent"],
         calls: [
-          call("createChatSession", { output_locale: undefined }),
-          call("runChatTurn", { sessionId: "session_fixture", content: "Create fixture chat", idempotencyKey: "handler-matrix-chat-turn", agent_id: undefined, backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} })
+          call("createChatSession", { ...handlerContext, sessionId: undefined, idempotencyKey: "handler-matrix-chat-turn" }, { output_locale: undefined }),
+          call("runChatTurn", { ...handlerContext, sessionId: undefined, idempotencyKey: "handler-matrix-chat-turn" }, { sessionId: "session_fixture", content: "Create fixture chat", idempotencyKey: "handler-matrix-chat-turn", agent_id: undefined, backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} })
         ]
       }
     ]

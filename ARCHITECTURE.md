@@ -276,8 +276,9 @@ Resource boundary    ── 元Roomと明示共有先の利用範囲
 - Chat、Backend Run、Tool、検索、Context assembly、Resource read/write、Room操作は共通`RoomAuthorizationService`を通す。検索とContextはRoom境界で候補を先に絞り、返却・読み込み直前にもう一度確認する。履歴、診断、ファイルの出所情報も同じRoom候補から取得する。
 - 参加解除後の過去履歴は残すが、新しい読み込み、検索、Tool、書き込み、Backend継続処理は拒否する。
 - Room間共有はデータを複製せず、共有先に読み取り・利用資格だけを追加する。共有先へ元Roomの操作履歴、編集権限、再共有権限は自動で渡さない。共有解除後の新しい利用も拒否する。
+- Gatewayは入力の受信・pairing・履歴保存までは行えるが、検証済みの外部本人確認を安定した参加者IDへ結び付けるまでは、Room境界、Session、Chat、Agent Run、Tool実行を作らない。`system`や受信metadataだけでRoom権限を迂回しない。署名方式そのものはCore 06の対象外である。
 
-Core 06はRoom管理UI、外部招待・認証、Gateway変更、学習判断、Room削除・アーカイブ、旧Bundle互換を追加しない。
+Core 06はRoom管理UI、外部招待・認証、Gatewayの外部接続・署名方式、学習判断、Room削除・アーカイブ、旧Bundle互換を追加しない。
 
 ### 5.4 Agent Backend Cassette
 

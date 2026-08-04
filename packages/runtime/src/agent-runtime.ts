@@ -4124,6 +4124,19 @@ export class AgentRuntime {
     context: TrustedDomainContext
   ): Promise<void> {
     const principal = context.participant;
+    // An unbound Gateway contact may only create or update its transport
+    // admission record. It is deliberately not a general system bypass:
+    // Room content remains unavailable until a future verified participant is
+    // resolved by the trusted execution path.
+    if (entry.access.scope === "gateway_admission") {
+      if (context.inputSource !== "gateway_inbound") {
+        throw new RuntimeRequestError("forbidden", "gateway_admission_source_required");
+      }
+      if (!principal || (principal.kind === "system" && principal.participantId !== "system:unbound-gateway")) {
+        throw new RuntimeRequestError("forbidden", "gateway_admission_principal_required");
+      }
+      return;
+    }
     if (!principal) throw new RuntimeRequestError("forbidden", "room_participant_required");
     // Collaboration has explicit target checks in RoomAgentDomainService. It
     // is deliberately not inferred from a command name here.
@@ -4154,7 +4167,7 @@ export class AgentRuntime {
       // Rollback points do not own separate content files. Their immutable
       // access boundary is the Room of the original operation, so a Session
       // from another Room cannot restore or inspect their changes.
-      if (entry.id === "rollback.restore") {
+      if (entry.id === runtimeOperationIds.rollbackRestore) {
         const rollbackPointId = stringPayload(payload.rollback_point_id);
         const rollbackPoint = rollbackPointId ? await this.store.getRollbackPoint(rollbackPointId) : undefined;
         const operation = rollbackPoint ? await this.store.getOperation(rollbackPoint.operation_id) : undefined;
@@ -4171,7 +4184,7 @@ export class AgentRuntime {
           resourceId: target.id
         });
       }
-      if (entry.id === "learning.background_review.apply") {
+      if (entry.id === runtimeOperationIds.learningBackgroundReviewApply) {
         await this.assertBackgroundReviewMutationAuthorization(payload, context);
       }
       return;
@@ -4378,7 +4391,7 @@ export class AgentRuntime {
     const output = unknownRecord(result);
     const payloadRoomId = typeof payload.room_id === "string" ? payload.room_id : undefined;
     const sourceRoomId = typeof payload.source_room_id === "string" ? payload.source_room_id : undefined;
-    const createdRoomId = entry.id === "room.create" && typeof output.id === "string" ? output.id : undefined;
+    const createdRoomId = entry.id === runtimeOperationIds.roomCreate && typeof output.id === "string" ? output.id : undefined;
     const roomId = context.roomId ?? payloadRoomId ?? sourceRoomId ?? createdRoomId;
     const affectedResources = uniqueResourceRefs([
       ...(write?.resourceRefs ?? []),
@@ -4470,7 +4483,7 @@ export class AgentRuntime {
     // A Session-create command is the single legitimate operation without a
     // pre-existing Session. Its Room may be selected by the public DTO, or by
     // the server-owned default Room when the local UI starts a new chat.
-    const requestedRoomId = operationId === "session.create" ? optionalStringPayload(payload.room_id) : undefined;
+    const requestedRoomId = operationId === runtimeOperationIds.sessionCreate ? optionalStringPayload(payload.room_id) : undefined;
     if (session?.room_id && requestedRoomId && session.room_id !== requestedRoomId) {
       throw new RuntimeRequestError("conflict", `domain_session_room_mismatch:${session.id}`);
     }
@@ -4495,7 +4508,7 @@ export class AgentRuntime {
       : undefined;
     const roomId = session?.room_id ?? requestedRoomId
       ?? [...targetRoomIds][0]
-      ?? (operationId === "session.create" ? (await this.store.getSettings()).default_room_id : undefined)
+      ?? (operationId === runtimeOperationIds.sessionCreate ? (await this.store.getSettings()).default_room_id : undefined)
       ?? localDefaultRoomId;
     return {
       inputSource,

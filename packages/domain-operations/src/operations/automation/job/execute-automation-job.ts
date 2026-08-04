@@ -34,7 +34,9 @@ export async function executeAutomationJob(ports: AutomationJobExecutionPorts, j
   if (job.kind === "resource_translation" && !roomId) {
     throw ports.automationExecutionError("conflict", "automation_job_room_context_required");
   }
-  const session = await ports.ensureScheduledAutomationSession(context, job.title, roomId);
+  const session = roomId
+    ? await ports.ensureScheduledAutomationSession(context, job.title, roomId)
+    : await ports.ensureScheduledAutomationSession(context, job.title);
   automationRun = await ports.updateAutomationRun({ ...automationRun, session_id: session.id });
   const envelope = ports.createScheduledAutomationEnvelope(context, job.target_instruction);
   try {

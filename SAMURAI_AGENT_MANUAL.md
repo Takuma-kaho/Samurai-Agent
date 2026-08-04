@@ -404,6 +404,7 @@ Agent: 閲覧 / 編集 / 実行を個別に許可
 - `Grant`と`UsageScope`は参加権限ではない。`UsageScope`は、Room境界で許可された候補をさらに狭める用途だけに使う。
 - 参加解除後は、候補検索・履歴・ファイル出所・Agent用Contextにも内容を返さない。過去の会話・実行・変更履歴そのものは削除しない。
 - 共有先では共有対象だけを読み取り・利用でき、元Roomの会話や操作履歴は自動では見えない。共有解除後の新しい閲覧・利用は拒否する。
+- Gatewayは外部入力を受信・pairing・履歴保存できるが、検証済みの外部本人確認が安定した参加者IDに結び付くまでは、Roomへの参加、Session、Chat、Agent実行、Tool実行を始めない。受信metadataや`system`扱いはRoom権限にならない。署名方式の導入はCore 06の後に別途行う。
 
 ---
 
@@ -446,7 +447,7 @@ Roomごとに、次のものを分離できる。
 - `settings.patch`で既定Room／既定Agentを選び、SessionにはRoom、Backend RunにはAgentを保存する。
 - `room.create / patch / list / view` と `agent.create / patch / backend.bind / list / view` で操作する。
 
-Core 06では、Room参加者・Agent権限・明示共有をSQLiteへ保存する。招待メール、外部認証、Room管理画面、Room削除・アーカイブは含めない。
+Core 06では、Room参加者・Agent権限・明示共有をSQLiteへ保存する。招待メール、外部認証・署名方式、Room管理画面、Room削除・アーカイブは含めない。
 
 この基盤は新しいWorkspace形式から使い始める。旧Session／RunへのRoom・Agent出所のbackfillや、旧Bundleの復元互換は行わない。
 

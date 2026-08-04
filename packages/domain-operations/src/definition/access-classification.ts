@@ -16,6 +16,10 @@ export type DomainResourceTarget =
 
 export type DomainAccessClassification =
   | { scope: "room_collaboration" }
+  // Gateway admission is intentionally narrower than Workspace control. It
+  // permits the unbound Gateway transport to record and pair inbound contact,
+  // but never grants Room, Chat, Agent, Tool, or Workspace content access.
+  | { scope: "gateway_admission" }
   | { scope: "workspace_control" }
   | { scope: "legacy_owner" }
   | { scope: "room_content"; action: RoomContentAction; target?: DomainResourceTarget | readonly DomainResourceTarget[] };
@@ -39,12 +43,17 @@ register({ scope: "room_collaboration" },
   "workspace.member.add", "workspace.member.list", "workspace.member.remove", "workspace.member.role.change", "workspace.owner.transfer"
 );
 
+// Pairing records are transport admission state, not Workspace management.
+// Keep this one ingress operation separate so an unbound external contact
+// cannot inherit any wider authority from the Gateway transport.
+register({ scope: "gateway_admission" }, "gateway.inbound.route");
+
 // These controls intentionally concern Workspace-wide operational state, not
 // Room content. They remain an explicit Workspace-admin path.
 register({ scope: "workspace_control" },
   "automation.job.release_lock", "automation.job.requeue", "automation.job.run", "automation.job.save", "automation.job.set_status",
   "client.event.ack", "client.event.deliver", "client.event.expire", "client.event.fail", "client.event.save",
-  "gateway.concurrency_lock.expire", "gateway.inbound.route", "gateway.mcp_config.save", "gateway.pairing_policy.save",
+  "gateway.concurrency_lock.expire", "gateway.mcp_config.save", "gateway.pairing_policy.save",
   "gateway.pairing.approve", "gateway.pairing.expire", "gateway.pairing.reject", "gateway.pairing.revoke", "gateway.pairing.rotate",
   "gateway.routing_policy.save", "gateway.sandbox.delete", "gateway.sandbox.recreate", "gateway.sandbox.sync", "gateway.state.repair",
   "collection.reindex", "plugin.status.set", "session.search.reindex", "settings.patch", "wiki.reindex", "workspace.backup.create", "workspace.backup.restore", "workspace.repair"
