@@ -1,6 +1,7 @@
 import { appendFile } from "node:fs/promises";
 import { nowIso } from "../../packages/core-schemas/src/index";
 import { WorkspaceStore, type CollectionSchema, type CollectionRecord } from "../../packages/workspace-store/src/index";
+import { localOwnerParticipantId } from "../../packages/room-permissions/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { DurableDomainCommandBus, type DomainCommandCheckpoint } from "../../packages/runtime/src/commands/domain-command-bus";
 
@@ -27,6 +28,34 @@ if (mode === "during_internal_transaction") {
     id: "partial", collection_id: schema.id, version: 1, data: { value: "before" }, resource_refs: [], created_at: now, updated_at: now
   };
   if (!await store.getCollectionRecord(record.collection_id, record.id)) await store.saveCollectionRecord(record);
+  const settings = await store.getSettings();
+  if (!settings.default_room_id) throw new Error("fixture_room_required");
+  const sessionId = "crash-domain-command-session";
+  if (!await store.getSession(sessionId)) {
+    await store.createSession({
+      id: sessionId,
+      session_key: sessionId,
+      room_id: settings.default_room_id,
+      title: "Crash command fixture",
+      ui_locale: "en",
+      output_locale: "en",
+      created_at: now,
+      updated_at: now
+    });
+  }
+  for (const [resourceKind, resourceId] of [
+    ["session", sessionId],
+    ["collection_schema", schema.id],
+    ["collection_record", `${record.collection_id}/${record.id}`]
+  ] as const) {
+    await store.ensureResourceAccessBoundary({
+      resourceKind,
+      resourceId,
+      sourceRoomId: settings.default_room_id,
+      ownerParticipantId: localOwnerParticipantId,
+      actorId: localOwnerParticipantId
+    });
+  }
   const runtime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, undefined, { domainCommandRunningTimeoutMs: 100 });
   await runtime.runRuntimeApiDomainCommand({
     command_id: "collection.patch.apply",
@@ -38,7 +67,7 @@ if (mode === "during_internal_transaction") {
       patch_id: "crash-patch",
       changes: { value: "after" }
     }
-  });
+  }, { sessionId });
   await runtime.shutdownMcpProcessPool();
   await store.close();
   process.exit(0);

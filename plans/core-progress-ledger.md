@@ -1,8 +1,8 @@
 # Core 実装進捗台帳
 
-最終更新: 2026-07-29
+最終更新: 2026-08-03
 
-現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-04は「完了」**、**Core-03とCore-05〜Core-08は「基盤あり・個別完了作業は未着手」**である。
+現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-04と新Core-06は「完了」**、**Core-03・Core-05・Core-07・Core-08は「基盤あり・個別完了作業は未着手」**である。
 
 ## 0. この文書の目的
 
@@ -31,7 +31,7 @@
 | 3 | Backend実行・Event正規化 | 概ね実装済み。Codex、Claude Code、Nativeを差し替え可能 |
 | 4 | Workspace・永続化 | 完了。Phase 1〜3で責務分離、原子的更新、検索・同期、Bundle/Restoreを確認 |
 | 5 | Memory・Wiki・Skill・学習ループ | 基盤実装済み。Background Review、Evaluation、Curatorが存在 |
-| 6 | Artifact・Collection | 概ね実装済み。成果物、履歴、構造化データ操作を保持 |
+| 6 | Room参加者・権限・共有境界 | 完了。Workspace役割とRoom参加を分離し、Agent個別許可・情報境界・明示共有を実装・検証した |
 | 7 | Presentation・Generated Surface | 概ね実装済み。表示形式の選択、Surface契約、生成Surfaceがある |
 | 8 | Gateway・Automation・外部境界 | 概ね実装済み。routing、pairing、sandbox、定期実行がある |
 
@@ -46,7 +46,7 @@
 | Core-03 | 基盤あり・個別完了作業は未着手 | Backend差し替えとEvent正規化 | 未作成。着手時に作成する |
 | Core-04 | **完了** | Phase 1〜3でfilesystem/SQLiteの正本境界、原子的更新、検索・同期、移植可能なBundle/Restoreを実装・検証 | [core-04-phase-3-implementation-review.md](./core-04-phase-3-implementation-review.md) |
 | Core-05 | 基盤あり・個別完了作業は未着手 | Memory、Wiki、Skill、Review、Evaluation、Curator | 未作成。着手時に作成する |
-| Core-06 | 基盤あり・個別完了作業は未着手 | Artifact、履歴、Collection操作 | 未作成。着手時に作成する |
+| Core-06 | **完了** | 人とAgentのRoom参加、役割・個別許可、共有境界、解除即時反映 | 本節のCore-06チェックリスト |
 | Core-07 | 基盤あり・個別完了作業は未着手 | Presentation選択、Surface契約、Generated Surface | 未作成。着手時に作成する |
 | Core-08 | 基盤あり・個別完了作業は未着手 | routing、pairing、sandbox、Automation | 未作成。着手時に作成する |
 
@@ -92,11 +92,33 @@
 - [ ] 保守性監査で、全面的なコード手戻りを必要とする構造問題がない。小さな問題が見つかった場合は、対象箇所だけ修正済みである。
 - [ ] 実行日、Commit SHA、検証Command、結果をこの台帳の更新履歴へ残している。
 
+### 新Core-06: Room参加者・権限・共有境界
+
+状態: **完了**
+
+対象は、Room参加者・Workspace/Room役割・Agent個別許可・情報境界・Room間の明示共有だけである。Room管理UI、外部招待・認証、Gateway、学習判断、Room削除、旧Bundle互換、旧分類のArtifact・Collection実装は対象外とする。
+
+#### 実装済み
+
+- [x] 純粋な`@samurai-agent/room-permissions`に、参加者ID、人の役割、Agent許可、操作種別、許可理由を定義した。
+- [x] SQLite migration `009`で`workspace_members`、`room_members`、`room_agents`、`agent_workspace_permissions`、`resource_access_boundaries`、`room_resource_shares`を追加した。
+- [x] Room作成とOwner登録、Owner移譲、参加解除・再参加、Agent許可、明示共有・共有解除をRepository transactionへ置いた。
+- [x] Domain Context、Operation、Audit、Backend Runへ参加者種別・参加者ID・依頼者・Roomを通した。
+- [x] Room/Workspace参加操作と共有操作をDomain Operationとして追加した。
+- [x] Chat、Agent Run、Backend Tool、検索、Context assembly、Memory/Wiki/Skill/Collection/File、履歴読取の本番入口へ共通判定を接続した。
+- [x] 検索とAgent Contextは、Room境界の候補絞り込みと返却直前の再確認を行う。
+
+#### 完了判定
+
+- [x] 関連package typecheck、集中テスト、Domain Operation整合、経路の構造確認、`git diff --check`を最新差分で完走した。
+- [x] Workspace Ownerでも未参加Roomを読めないこと、解除後に新しいChat・検索・Tool・保存が拒否されること、Room間共有の出所維持を確認した。
+- [x] 結果を更新履歴へ残し、全項目を説明できることを確認した。
+
 ## 5. Core-02〜Core-08の扱い
 
 - Core-02は、専用台帳でPhase 0〜2と`C02-FINAL-01`だけを管理する。
 - Core-02のPhase 3〜7、本番切替、旧Runtime削除、全体Hard Gateは`unverified`のまま残す。
-- Core-04の完了根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)に残す。Core-03とCore-05〜Core-08の詳細チェックリストと完了条件は、引き続き作成しない。
+- Core-04の完了根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)に残す。新Core-06だけは本台帳の専用チェックリストで管理し、Core-03・Core-05・Core-07・Core-08の詳細チェックリストと完了条件は、引き続き作成しない。
 
 ## 6. 更新ルール
 
@@ -123,6 +145,8 @@
 | 2026-07-22 | Core-02 | fixtureの実行前状態を修正し、SQLite settlement競合テストを実Run状態から開始するよう整理 | 現在Sourceの独立focused VitestはWorkspace 3ファイル / 14件、Runtime 7ファイル / 55件の計69件が成功（Vitest内部計測 98.50秒 / 52.08秒）。ただし外側の起動遅延がVerifierの120秒制限を超えるため、Verifier全体は未完走。TypeScriptとGit差分検査も未達 | 起動遅延・typecheck・Git差分検査を解消し、Phase 0〜2の終了条件を再判定する |
 | 2026-07-22 | Core-02 | focused Runnerのgroup・bundle rootを明示し、cache再利用後の実行を再確認した | `core:host-runtime:check`成功（required 18 / parsed 41 / untracked Core-02 34）。Workspace 14件は2.79秒、Runtime 55件は2.76秒で各exit code 0。Core Schema / Workspace Store / Runtime typecheckとGit差分検査は未達のため、Phase 0〜2は完了扱いにしない | 型検査・Git差分検査を成功終了させ、最新SourceでVerifier全体を再判定する |
 | 2026-07-29 | Core-04 | Phase 1〜3を完了。Bundle作成・検証・Import/Export、journal付きRestore・中断回復、Facade委譲を完成 | operation catalog確認、canonical ledger再生成（102 Command / 17 Query / 5 Deprecated）、対象3 packageのtypecheck、`pnpm core:workspace-persistence:verify`、`git diff --check`が成功。独立レビューで見つけたjournal書込み失敗時の再起動漏れも修正・再検証済み。根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)。ベースHEADは`ec35ea0e30e98d27f6fc160e3b43639529d29f7b`、ユーザー指定により変更は未コミット | 次に着手するCoreを別途決める |
+| 2026-08-03 | 新Core-06 | Room参加者・役割・Agent個別許可・情報境界・明示共有の実装へ着手。旧Artifact・Collection分類は採用しない | migration `009`、共通権限判定、Domain Operation、検索/Context/Host接続を追加。最終の集中検証と構造確認は継続中 | 検証結果とセルフチェックを記録し、完了条件を再判定する |
+| 2026-08-03 | 新Core-06 | Room参加、役割、Agent個別許可、情報境界、明示共有を完了。Room管理UI・外部認証・Gateway接続・学習判断・旧Bundle互換は追加していない | focused Vitest 3 files / 14 tests、関連5 packageのtypecheck、Domain Operation生成整合（149 bindings）、本番経路の構造確認、`git diff --check`が成功 | 次のCoreは別途決定する |
 
 追記用テンプレート:
 

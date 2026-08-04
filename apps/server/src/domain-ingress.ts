@@ -43,7 +43,7 @@ export async function resolveTrustedRuntimeApiInput(
   transport: RuntimeApiTransportReferences,
   requestError: (code: "bad_request" | "not_found", message: string) => Error
 ): Promise<TrustedRuntimeApiInput> {
-  for (const key of ["workspace_id", "actor_id", "actor_identity", "correlation_id", "source", "input_source", "session_id", "envelope_id", "run_id", "backend_run_id"]) {
+  for (const key of ["workspace_id", "actor_id", "actor_identity", "participant_id", "participant_kind", "requested_by_participant_id", "trusted_participant_context", "trusted_requester_participant_id", "correlation_id", "source", "input_source", "session_id", "envelope_id", "run_id", "backend_run_id"]) {
     if (payload[key] !== undefined) throw requestError("bad_request", `untrusted_domain_context:${key}`);
   }
   if (transport.sessionId !== undefined && (typeof transport.sessionId !== "string" || !transport.sessionId.trim())) {

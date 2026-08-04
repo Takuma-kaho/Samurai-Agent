@@ -57,12 +57,37 @@ async listWiki(options: { activeOnly?: boolean; activityContext?: UsageScopeQuer
   return rows.map(wikiFromRow);
 }
 
-async searchWiki(query: string, limit = 5, options: { activeOnly?: boolean; activityContext?: UsageScopeQueryContext } = { activeOnly: true }): Promise<WikiWithFilePath[]> {
+async searchWiki(query: string, limit = 5, options: {
+  activeOnly?: boolean;
+  activityContext?: UsageScopeQueryContext;
+  /** Explicit Room-bound resources, resolved before this UsageScope narrowing. */
+  resourceIds?: string[];
+  /** Only the current Workspace Owner can include pre-Core 06 unbounded data. */
+  includeLegacy?: boolean;
+} = { activeOnly: true }): Promise<WikiWithFilePath[]> {
   let dbQuery = this.db.selectFrom("wiki_index").selectAll();
   if (options.activeOnly ?? true) {
     dbQuery = dbQuery.where("state", "=", "active");
   }
-  if (options.activityContext) {
+  if (options.resourceIds !== undefined) {
+    const resourceIds = [...new Set(options.resourceIds)];
+    if (!options.includeLegacy) {
+      if (resourceIds.length === 0) return [];
+      dbQuery = dbQuery.where("id", "in", resourceIds);
+    } else if (options.activityContext) {
+      dbQuery = dbQuery.where((eb) => eb.or([
+        eb("usage_scope_kind", "=", "workspace"),
+        eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),
+        eb.and([eb("usage_scope_kind", "=", "agent"), eb("usage_scope_ref_id", "=", options.activityContext!.agent_id)]),
+        eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)]),
+        ...(resourceIds.length > 0 ? [eb("id", "in", resourceIds)] : [])
+      ]));
+    } else if (resourceIds.length > 0) {
+      dbQuery = dbQuery.where("id", "in", resourceIds);
+    } else {
+      return [];
+    }
+  } else if (options.activityContext) {
     dbQuery = dbQuery.where((eb) => eb.or([
       eb("usage_scope_kind", "=", "workspace"),
       eb.and([eb("usage_scope_kind", "=", "room"), eb("usage_scope_ref_id", "=", options.activityContext!.room_id)]),

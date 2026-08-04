@@ -20,6 +20,7 @@ export class TurnAdmission {
     const requestHash = stableHash({
       session_id: request.sessionId,
       room_id: request.roomId ?? null,
+      requested_by_participant_id: request.requestedByParticipantId ?? null,
       agent: request.agent
         ? { id: request.agent.id, role: request.agent.role, backend_id: request.agent.backend_id }
         : { id: request.agentId ?? null },
@@ -32,7 +33,7 @@ export class TurnAdmission {
         actor_identity: request.envelope.actor_identity,
         user_intent: request.envelope.user_intent,
         session_key: request.envelope.session_key,
-        metadata: { ...request.envelope.metadata, ...(request.metadata ?? {}) }
+      metadata: { ...request.envelope.metadata, ...(request.metadata ?? {}), ...(request.requestedByParticipantId ? { requested_by_participant_id: request.requestedByParticipantId } : {}) }
       }
     });
     const bound: BackendBoundTurn = { request, session, binding, requestHash };

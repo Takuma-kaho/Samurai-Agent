@@ -1,4 +1,5 @@
 import { toStrictJsonSchema, type JsonValue } from "@samurai-agent/core-schemas";
+import type { ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { z } from "zod";
 
 export const domainInputSources = [
@@ -37,6 +38,10 @@ export interface TrustedDomainContext {
   inputSource: DomainInputSource;
   workspaceId: string;
   actorId: string;
+  /** Core 06 actor, selected only by a trusted ingress or a persisted Run. */
+  participant?: ParticipantPrincipal;
+  /** Server-resolved Room target. Public payloads never supply this field. */
+  roomId?: string;
   sessionId?: string;
   runId?: string;
   /** Server-selected input envelope; never populated from a command payload. */

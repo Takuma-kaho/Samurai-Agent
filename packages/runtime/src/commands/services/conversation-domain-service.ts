@@ -5,6 +5,7 @@ import {
   type ReflectionRunRecord, type ReflectionSuggestionRecord, type ResourceRef, type RollbackPoint,
   type SessionRecord, type SupportedLocale, type ToolRunRecord, type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 
 interface SessionCreateHostInput { title?: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale; room_id?: string }
 export interface CreateSessionInput { title?: string; uiLocale?: SupportedLocale; outputLocale?: SupportedLocale; roomId?: string }
@@ -24,8 +25,8 @@ export interface ChatTurnResult {
 }
 
 export interface ConversationHostPort {
-  createSession(input: SessionCreateHostInput): Promise<SessionRecord>;
-  runChatTurn(input: ChatTurnInput): Promise<ChatTurnResult>;
+  createSession(context: TrustedDomainContext, input: SessionCreateHostInput): Promise<SessionRecord>;
+  runChatTurn(context: TrustedDomainContext, input: ChatTurnInput): Promise<ChatTurnResult>;
   reindexSessionSearch(): Promise<{ mode: "fts5_trigram" | "fts5" | "like"; indexed: number }>;
   conflict(message: string): Error;
 }
@@ -33,11 +34,11 @@ export interface ConversationHostPort {
 export class ConversationDomainService {
   constructor(private readonly host: ConversationHostPort) {}
 
-  createChatSession(input: SessionCreateHostInput) { return this.host.createSession(input); }
-  executeChatTurn(input: ChatTurnInput) { return this.host.runChatTurn(input); }
+  createChatSession(context: TrustedDomainContext, input: SessionCreateHostInput) { return this.host.createSession(context, input); }
+  executeChatTurn(context: TrustedDomainContext, input: ChatTurnInput) { return this.host.runChatTurn(context, input); }
 
-  createSession(input: CreateSessionInput) {
-    return this.host.createSession({
+  createSession(context: TrustedDomainContext, input: CreateSessionInput) {
+    return this.host.createSession(context, {
       ...(input.title === undefined ? {} : { title: input.title }),
       ...(input.uiLocale === undefined ? {} : { ui_locale: input.uiLocale }),
       ...(input.outputLocale === undefined ? {} : { output_locale: input.outputLocale }),

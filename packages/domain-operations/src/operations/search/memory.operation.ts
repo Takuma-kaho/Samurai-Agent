@@ -11,7 +11,7 @@ const SearchResult = z.object({
 const Output = z.array(SearchResult).max(8);
 
 export interface MemorySearchPorts extends DomainQueryPorts {
-  searchMemory: ReadCapability<(runId: string, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
+  searchMemory: ReadCapability<(context: TrustedDomainContext, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
 }
 
 const memorySearch = defineQuery<MemorySearchPorts>()({
@@ -34,7 +34,7 @@ const memorySearch = defineQuery<MemorySearchPorts>()({
     return {
       execute: async function handleMemorySearch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         if (!context.runId) throw new TrustedDomainContextError("memory.search", "runId");
-        return { ok: true, value: Output.parse(await ports.searchMemory(context.runId, input.query, input.limit)) };
+        return { ok: true, value: Output.parse(await ports.searchMemory(context, input.query, input.limit)) };
       }
     };
   }

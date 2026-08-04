@@ -64,6 +64,11 @@ export interface RuntimeHostCompositionDependencies {
   /** Request and context preparation belongs outside the Host lifecycle. */
   preparation: {
     prepareRequest(request: TurnRequest): Promise<TurnRequest>;
+    /** Re-check live Room membership before context or Backend handoff. */
+    assertCurrentRunAccess(turn: AdmittedTurn): Promise<void>;
+    /** Re-check live Room membership immediately before a Host-owned Tool. */
+    assertRunAccess(run: BackendRunRecord): Promise<void>;
+    contextPreviewPortsForTurn(turn: AdmittedTurn): ContextPreviewPorts;
     prepareResumeInput(input: { run: BackendRunRecord; resumeInput: Record<string, JsonValue> }): Promise<{ backendInput: BackendRunInput; gatewayBoundaryPolicy?: GatewayBoundaryPolicy }>;
     recordLearningResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void>;
     workingDirectory(): string;
@@ -115,13 +120,14 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
   };
   const context: HostContextPort = {
     getCandidates: async ({ turn, signal }) => {
+      await deps.preparation.assertCurrentRunAccess(turn);
       const contextIntent = classifyBackendContextIntent(turn.request.content);
       const thinExternalContext = shouldThinExternalBackendContext(turn.binding.kind, contextIntent);
       return buildContextPreview({
         sessionId: turn.session.id,
         agentId: turn.request.agentId ?? turn.run.agent_id,
         query: turn.request.content,
-        ports: deps.core.contextPreviewPorts,
+        ports: deps.preparation.contextPreviewPortsForTurn(turn),
         skipHeavyContext: thinExternalContext,
         onProgress: async (displayKind, text, activityKind) => {
           await context.reportProgress({ turn, displayKind, text, ...(activityKind ? { activityKind } : {}) });
@@ -140,6 +146,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
       };
     },
     handoff: async ({ turn, candidates, assembly }) => {
+      await deps.preparation.assertCurrentRunAccess(turn);
       const contextIntent = classifyBackendContextIntent(turn.request.content);
       const expectedOutputs = expectedBackendOutputs(turn.request.content);
       const handoff = buildContextHandoffForBackend({
@@ -184,6 +191,9 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
           : {})
       };
       await deps.preparation.recordLearningResourceUses(turn, candidates);
+      // A participant may have been removed while the context was assembled.
+      // Do not let an already-created Backend input become a new execution.
+      await deps.preparation.assertCurrentRunAccess(turn);
       const backendInput: BackendRunInput = {
         run_id: turn.run.id,
         session_id: turn.session.id,
@@ -263,6 +273,9 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
     toolExecution: {
       execute: async ({ run, backendInput, event, gatewayBoundaryPolicy, recordEvent }) => {
         if (event.event_type !== "tool_call_started") return;
+        // This is deliberately inside the Tool path, rather than relying on
+        // admission-time state or the Backend's own cached Session state.
+        await deps.preparation.assertRunAccess(run);
         await deps.execution.handleBackendToolStartedEvent({
           run,
           runInput: backendInput,

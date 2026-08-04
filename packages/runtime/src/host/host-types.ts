@@ -21,6 +21,8 @@ export interface TurnRequest {
   sessionId: string;
   roomId?: string;
   agentId?: string;
+  /** Server-selected human requester. It is persisted with the resulting Run. */
+  requestedByParticipantId?: string;
   agent?: AgentRecord;
   content: string;
   envelope: MessageEnvelope;

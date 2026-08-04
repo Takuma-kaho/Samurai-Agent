@@ -12,7 +12,7 @@ const SearchResult = z.object({
 const Output = z.array(SearchResult).max(8);
 
 export interface SkillSearchPorts extends DomainQueryPorts {
-  searchSkills: ReadCapability<(runId: string, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
+  searchSkills: ReadCapability<(context: TrustedDomainContext, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
 }
 
 const skillSearch = defineQuery<SkillSearchPorts>()({
@@ -35,7 +35,7 @@ const skillSearch = defineQuery<SkillSearchPorts>()({
     return {
       execute: async function handleSkillSearch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         if (!context.runId) throw new TrustedDomainContextError("skill.search", "runId");
-        return { ok: true, value: Output.parse(await ports.searchSkills(context.runId, input.query, input.limit)) };
+        return { ok: true, value: Output.parse(await ports.searchSkills(context, input.query, input.limit)) };
       }
     };
   }

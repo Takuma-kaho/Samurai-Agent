@@ -1,0 +1,201 @@
+import {
+  canManageRoomTarget,
+  canManageWorkspaceTarget,
+  evaluateRoomPermission,
+  evaluateWorkspacePermission,
+  type ParticipantPrincipal,
+  type RoomAction,
+  type RoomHumanRole,
+  type WorkspaceAction,
+  type WorkspaceRole
+} from "@samurai-agent/room-permissions";
+import type {
+  AgentWorkspacePermissionRecord,
+  RoomAgentPermissionRecord,
+  RoomMemberRecord,
+  WorkspaceMemberRecord,
+  WorkspaceStore
+} from "@samurai-agent/workspace-store";
+
+export class RoomAuthorizationError extends Error {
+  constructor(
+    readonly scope: "workspace" | "room" | "resource",
+    readonly action: string,
+    readonly reason: string
+  ) {
+    super(`room_authorization_denied:${scope}:${action}:${reason}`);
+    this.name = "RoomAuthorizationError";
+  }
+}
+
+type RoomAuthorizationStore = Pick<WorkspaceStore,
+  | "getWorkspaceMember"
+  | "getRoomMember"
+  | "getRoomAgent"
+  | "getAgentWorkspacePermission"
+  | "listRoomIdsForHuman"
+  | "listRoomIdsForAgent"
+  | "listResourceIdsAvailableInRoom"
+  | "isResourceAvailableInRoom"
+>;
+
+export interface RoomResourceCandidateAccess {
+  /** Resource IDs whose source Room or active share permits this Room. */
+  resourceIds: string[];
+  /** Pre-Core 06 resources deliberately remain available only to the active Workspace Owner. */
+  includeLegacy: boolean;
+}
+
+/** Runtime adapter that obtains current membership facts and delegates every decision to the pure module. */
+export class RoomAuthorizationService {
+  constructor(private readonly store: RoomAuthorizationStore) {}
+
+  async assertWorkspace(principal: ParticipantPrincipal, action: WorkspaceAction): Promise<void> {
+    const decision = await this.workspaceDecision(principal, action);
+    if (!decision.allowed) throw new RoomAuthorizationError("workspace", action, decision.reason);
+  }
+
+  async workspaceDecision(principal: ParticipantPrincipal, action: WorkspaceAction) {
+    const [membership, agentPermission] = await Promise.all([
+      principal.kind === "human" ? this.store.getWorkspaceMember(principal.participantId) : Promise.resolve(undefined),
+      principal.kind === "agent" ? this.store.getAgentWorkspacePermission(principal.agentId) : Promise.resolve(undefined)
+    ]);
+    return evaluateWorkspacePermission({
+      principal,
+      action,
+      ...(membership ? { membership: workspaceMembership(membership) } : {}),
+      ...(agentPermission ? { agentPermission: workspaceAgentPermission(agentPermission) } : {})
+    });
+  }
+
+  async assertRoom(principal: ParticipantPrincipal, roomId: string, action: RoomAction): Promise<void> {
+    const decision = await this.roomDecision(principal, roomId, action);
+    if (!decision.allowed) throw new RoomAuthorizationError("room", action, decision.reason);
+  }
+
+  async roomDecision(principal: ParticipantPrincipal, roomId: string, action: RoomAction) {
+    const membership = principal.kind === "human"
+      ? await this.store.getRoomMember(roomId, principal.participantId)
+      : undefined;
+    const agentMembership = principal.kind === "agent"
+      ? await this.store.getRoomAgent(roomId, principal.agentId)
+      : undefined;
+    const decision = evaluateRoomPermission({
+      principal,
+      action,
+      ...(membership ? { humanMembership: roomMembership(membership) } : {}),
+      ...(agentMembership ? { agentMembership: roomAgentMembership(agentMembership) } : {})
+    });
+    if (!decision.allowed || principal.kind !== "agent") return decision;
+
+    // An Agent acts only within a currently permitted human request. This is
+    // re-evaluated for each read, write, and tool execution after admission.
+    const requester = await this.store.getRoomMember(roomId, principal.requestedByParticipantId);
+    const requesterDecision = evaluateRoomPermission({
+      principal: { kind: "human", participantId: principal.requestedByParticipantId },
+      action,
+      ...(requester ? { humanMembership: roomMembership(requester) } : {})
+    });
+    return requesterDecision.allowed ? decision : requesterDecision;
+  }
+
+  async assertAgentExecution(input: { requesterParticipantId: string; roomId: string; agentId: string }): Promise<void> {
+    await this.assertRoom({ kind: "human", participantId: input.requesterParticipantId }, input.roomId, "execute");
+    await this.assertRoom({
+      kind: "agent",
+      participantId: `agent:${input.agentId}`,
+      agentId: input.agentId,
+      requestedByParticipantId: input.requesterParticipantId
+    }, input.roomId, "execute");
+  }
+
+  async assertRoomMemberManagement(input: {
+    principal: ParticipantPrincipal;
+    roomId: string;
+    targetKind: "human" | "agent";
+    targetRole?: RoomHumanRole;
+  }): Promise<void> {
+    if (input.principal.kind !== "human") throw new RoomAuthorizationError("room", "manage_members", "principal_kind_not_supported");
+    await this.assertRoom(input.principal, input.roomId, "manage_members");
+    const actor = await this.store.getRoomMember(input.roomId, input.principal.participantId);
+    if (!actor) throw new RoomAuthorizationError("room", "manage_members", "room_membership_missing");
+    const target = canManageRoomTarget({ actorRole: actor.role, targetKind: input.targetKind, ...(input.targetRole ? { targetRole: input.targetRole } : {}) });
+    if (!target.allowed) throw new RoomAuthorizationError("room", "manage_members", target.reason);
+  }
+
+  async assertWorkspaceMemberManagement(input: {
+    principal: ParticipantPrincipal;
+    targetRole: WorkspaceRole;
+  }): Promise<void> {
+    if (input.principal.kind !== "human") throw new RoomAuthorizationError("workspace", "manage_members", "principal_kind_not_supported");
+    await this.assertWorkspace(input.principal, "manage_members");
+    const actor = await this.store.getWorkspaceMember(input.principal.participantId);
+    if (!actor) throw new RoomAuthorizationError("workspace", "manage_members", "workspace_membership_missing");
+    const target = canManageWorkspaceTarget({ actorRole: actor.role, targetRole: input.targetRole });
+    if (!target.allowed) throw new RoomAuthorizationError("workspace", "manage_members", target.reason);
+  }
+
+  async assertShare(principal: ParticipantPrincipal, sourceRoomId: string, targetRoomId: string): Promise<void> {
+    await this.assertRoom(principal, sourceRoomId, "share");
+    await this.assertRoom(principal, targetRoomId, "share");
+  }
+
+  async assertResource(principal: ParticipantPrincipal, input: {
+    roomId: string;
+    action: Extract<RoomAction, "read" | "edit" | "execute">;
+    resourceKind: string;
+    resourceId: string;
+  }): Promise<void> {
+    await this.assertRoom(principal, input.roomId, input.action);
+    const available = await this.store.isResourceAvailableInRoom({
+      resourceKind: input.resourceKind,
+      resourceId: input.resourceId,
+      roomId: input.roomId,
+      participantId: principal.kind === "agent" ? principal.requestedByParticipantId : principal.participantId
+    });
+    if (!available) throw new RoomAuthorizationError("resource", input.action, "resource_access_boundary_denied");
+  }
+
+  /**
+   * Returns the first-stage search boundary.  This does not grant access by
+   * itself: every returned candidate still goes through `assertResource` just
+   * before it is returned or loaded into Agent context.
+   */
+  async resourceCandidateAccess(
+    principal: ParticipantPrincipal,
+    roomId: string,
+    resourceKind: string
+  ): Promise<RoomResourceCandidateAccess> {
+    await this.assertRoom(principal, roomId, "read");
+    const participantId = principal.kind === "agent"
+      ? principal.requestedByParticipantId
+      : principal.participantId;
+    const [membership, resourceIds] = await Promise.all([
+      this.store.getWorkspaceMember(participantId),
+      this.store.listResourceIdsAvailableInRoom({ roomId, resourceKind })
+    ]);
+    return { resourceIds, includeLegacy: membership?.role === "owner" };
+  }
+
+  async visibleRoomIds(principal: ParticipantPrincipal): Promise<Set<string>> {
+    if (principal.kind === "human") return new Set(await this.store.listRoomIdsForHuman(principal.participantId));
+    if (principal.kind === "agent") return new Set(await this.store.listRoomIdsForAgent(principal.agentId));
+    return new Set();
+  }
+}
+
+function workspaceMembership(record: WorkspaceMemberRecord) {
+  return { participantId: record.participant_id, role: record.role, ...(record.removed_at ? { removedAt: record.removed_at } : {}) };
+}
+
+function roomMembership(record: RoomMemberRecord) {
+  return { participantId: record.participant_id, role: record.role, ...(record.removed_at ? { removedAt: record.removed_at } : {}) };
+}
+
+function roomAgentMembership(record: RoomAgentPermissionRecord) {
+  return { agentId: record.agent_id, canView: record.can_view, canEdit: record.can_edit, canExecute: record.can_execute, ...(record.removed_at ? { removedAt: record.removed_at } : {}) };
+}
+
+function workspaceAgentPermission(record: AgentWorkspacePermissionRecord) {
+  return { agentId: record.agent_id, permission: record.permission, ...(record.revoked_at ? { revokedAt: record.revoked_at } : {}) };
+}

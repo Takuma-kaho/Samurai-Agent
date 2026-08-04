@@ -73,8 +73,13 @@ async createSession(session: SessionRecord): Promise<SessionRecord> {
   return session;
 }
 
-async listSessions(): Promise<SessionRecord[]> {
-  const rows = await this.db.selectFrom("sessions").selectAll().orderBy("updated_at", "desc").execute();
+async listSessions(input: { ids?: string[]; roomIds?: string[] } = {}): Promise<SessionRecord[]> {
+  if (input.ids && input.ids.length === 0) return [];
+  if (input.roomIds && input.roomIds.length === 0) return [];
+  let query = this.db.selectFrom("sessions").selectAll();
+  if (input.ids) query = query.where("id", "in", input.ids);
+  if (input.roomIds) query = query.where("room_id", "in", input.roomIds);
+  const rows = await query.orderBy("updated_at", "desc").execute();
   return rows.map(sessionFromRow);
 }
 
@@ -272,14 +277,14 @@ private async executeCore02Transaction<T>(operation: (transaction: Transaction<W
 async admitTurn(input: {
   session: SessionRecord;
   binding: { id: string; kind: BackendRunRecord["backend_kind"] };
-  request: { sessionId: string; content: string; envelope: MessageRecord["envelope"]; idempotencyKey: string; agentId?: string; metadata?: JsonValue };
+  request: { sessionId: string; content: string; envelope: MessageRecord["envelope"]; idempotencyKey: string; agentId?: string; requestedByParticipantId?: string; metadata?: JsonValue };
   requestHash: string;
   runId: string;
   now: string;
 }): Promise<{ reservation: { sessionId: string; runId: string; version: number; status: "held" | "released" }; userMessage: MessageRecord; run: BackendRunRecord; replay: boolean }> {
   if (!input.request.envelope) throw new Error("message_envelope_required");
   const message: MessageRecord = { id: createId("message"), session_id: input.session.id, role: "user", content: input.request.content, input_locale: input.request.envelope.input_locale, output_locale: input.request.envelope.output_locale, envelope: input.request.envelope, created_at: input.now };
-  const run: BackendRunRecord = { id: input.runId, session_id: input.session.id, ...(input.request.agentId ? { agent_id: input.request.agentId } : {}), input_message_id: message.id, backend_id: input.binding.id, backend_kind: input.binding.kind, status: "queued", phase: "admitted", current_attempt: 1, request_idempotency_key: input.request.idempotencyKey, request_hash: input.requestHash, started_at: input.now, input_summary: input.request.content.slice(0, 240), metadata: typeof input.request.metadata === "object" && input.request.metadata && !Array.isArray(input.request.metadata) ? input.request.metadata as Record<string, JsonValue> : {} };
+  const run: BackendRunRecord = { id: input.runId, session_id: input.session.id, ...(input.request.agentId ? { agent_id: input.request.agentId } : {}), ...(input.request.requestedByParticipantId ? { requested_by_participant_id: input.request.requestedByParticipantId } : {}), input_message_id: message.id, backend_id: input.binding.id, backend_kind: input.binding.kind, status: "queued", phase: "admitted", current_attempt: 1, request_idempotency_key: input.request.idempotencyKey, request_hash: input.requestHash, started_at: input.now, input_summary: input.request.content.slice(0, 240), metadata: typeof input.request.metadata === "object" && input.request.metadata && !Array.isArray(input.request.metadata) ? input.request.metadata as Record<string, JsonValue> : {} };
   let reservationVersion = 1;
   try {
     await this.executeCore02Transaction(async (transaction) => {

@@ -36,6 +36,10 @@ export function auditRecordFromRow(row: AuditRecordsTable): AuditRecord {
   return {
     id: row.id,
     actor_identity: row.actor_identity as AuditRecord["actor_identity"],
+    participant_id: row.participant_id ?? undefined,
+    participant_kind: row.participant_kind as AuditRecord["participant_kind"] | undefined,
+    requested_by_participant_id: row.requested_by_participant_id ?? undefined,
+    room_id: row.room_id ?? undefined,
     operation_id: row.operation_id,
     capability_id: row.capability_id,
     instruction_source: row.instruction_source as AuditRecord["instruction_source"],

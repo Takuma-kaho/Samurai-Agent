@@ -1,26 +1,34 @@
 import { proposalCapabilityManifest } from "@samurai-agent/capability-registry";
 import { loadFreezeSnapshot, retrieveActiveMemoryWithReport, type MemoryRetrievalPort, type WorkspaceRootPort } from "@samurai-agent/memory";
 import { nowIso, type ExternalAssistRecord, type SkillFrontmatter } from "@samurai-agent/core-schemas";
+import type { ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { type ExternalAssistProviderPort, buildExternalAssistContext } from "./external-assist-context.js";
 import { buildKnowledgeWikiContext, type WorkspaceContextCandidatesStore } from "./workspace-context-candidates.js";
-import { type ContextPreviewPorts } from "./context-preview.js";
+import { type ContextPreviewPorts, type ContextPreviewSearchResult } from "./context-preview.js";
 import type { SkillContextEnvironment, SkillContextSkill } from "./skill-context.js";
 import type { ExternalAssistContextStore } from "./external-assist-context.js";
+import { RoomAuthorizationError, RoomAuthorizationService } from "../commands/services/room-authorization-service.js";
 
 export interface WorkspaceContextPreviewStorePort extends MemoryRetrievalPort, WorkspaceRootPort, WorkspaceContextCandidatesStore, ExternalAssistContextStore {
   getSession: ContextPreviewPorts["session"]["getSession"];
+  listSessions(input?: { ids?: string[]; roomIds?: string[] }): Promise<Array<{ id: string; room_id?: string }>>;
   getSettings: ContextPreviewPorts["session"]["getSettings"];
   listMessages: ContextPreviewPorts["summary"]["listMessages"];
   listOperations: ContextPreviewPorts["summary"]["listOperations"];
   listBackendRuns: ContextPreviewPorts["summary"]["listBackendRuns"];
   listToolRuns(input: { sessionId: string }): ReturnType<ContextPreviewPorts["summary"]["listToolRuns"]>;
   listWorkspaceChanges: ContextPreviewPorts["summary"]["listWorkspaceChanges"];
-  searchSkills(query: string, limit?: number, options?: { states?: SkillFrontmatter["state"][]; activityContext?: { room_id: string; session_id: string; agent_id: string } }): Promise<SkillContextSkill[]>;
+  searchSkills(query: string, limit?: number, options?: {
+    states?: SkillFrontmatter["state"][];
+    activityContext?: { room_id: string; session_id: string; agent_id: string };
+    resourceIds?: string[];
+    includeLegacy?: boolean;
+  }): Promise<SkillContextSkill[]>;
   listSkillUsage: ContextPreviewPorts["skills"]["listUsage"];
   listSkillSupportFileRefs: ContextPreviewPorts["skills"]["listSupportFileRefs"];
   listCollectionSchemas: ContextPreviewPorts["collections"]["listSchemas"];
   listCollectionNotes(collectionId: string): Promise<Array<{ collection_id: string; file_path: string; content: string; role: "context_only" }>>;
-  search: ContextPreviewPorts["sessionSearch"]["search"];
+  search(query: string, input?: { sessionIds?: string[] }): ReturnType<ContextPreviewPorts["sessionSearch"]["search"]>;
 }
 
 export interface WorkspaceContextPreviewAdapterOptions {
@@ -28,11 +36,30 @@ export interface WorkspaceContextPreviewAdapterOptions {
   sessionNotFound(sessionId: string): Error;
 }
 
+/** The current principal and Room are server-resolved from the admitted Run. */
+export interface WorkspaceContextPreviewAccess {
+  principal: ParticipantPrincipal;
+  roomId: string;
+}
+
 /** Concrete Workspace Store adapter; the context preview core only sees ContextPreviewPorts. */
 export class WorkspaceContextPreviewAdapter {
   readonly ports: ContextPreviewPorts;
 
-  constructor(private readonly store: WorkspaceContextPreviewStorePort, options: WorkspaceContextPreviewAdapterOptions) {
+  constructor(
+    private readonly store: WorkspaceContextPreviewStorePort,
+    private readonly options: WorkspaceContextPreviewAdapterOptions,
+    private readonly authorization?: RoomAuthorizationService
+  ) {
+    this.ports = this.createPorts();
+  }
+
+  /** A Run-specific view prevents Memory, Skill, Wiki, Collection and search leakage. */
+  portsForAccess(access: WorkspaceContextPreviewAccess): ContextPreviewPorts {
+    return this.createPorts(access);
+  }
+
+  private createPorts(access?: WorkspaceContextPreviewAccess): ContextPreviewPorts {
     const environment: SkillContextEnvironment = {
       runtime: "local_workspace",
       platform: process.platform,
@@ -42,15 +69,10 @@ export class WorkspaceContextPreviewAdapter {
       ])].sort(),
       supportedScopes: new Set([
         ...proposalCapabilityManifest.operations.map((operation) => operation.scope),
-        "artifact",
-        "collection",
-        "memory",
-        "session",
-        "skill",
-        "workspace"
+        "artifact", "collection", "memory", "session", "skill", "workspace"
       ])
     };
-    this.ports = {
+    return {
       session: {
         getSession: (sessionId) => this.store.getSession(sessionId),
         getSettings: () => this.store.getSettings()
@@ -63,32 +85,99 @@ export class WorkspaceContextPreviewAdapter {
         listWorkspaceChanges: (sessionId) => this.store.listWorkspaceChanges(sessionId)
       },
       memory: {
-        retrieve: (query, activityContext) => retrieveActiveMemoryWithReport(this.store, query, activityContext),
+        retrieve: async (query, activityContext) => {
+          const retrievalStore: MemoryRetrievalPort = access
+            ? {
+                searchMemory: async (searchQuery, limit, options) => {
+                  const candidates = await this.store.searchMemory(searchQuery, limit, {
+                    ...options,
+                    ...await this.resourceCandidateOptions(access, "memory")
+                  });
+                  return this.filterResources(access, candidates, "memory", (candidate) => candidate.id);
+                },
+                readMemoryContent: async (memoryId) => {
+                  if (!await this.resourceAllowed(access, "memory", memoryId)) return undefined;
+                  return this.store.readMemoryContent(memoryId);
+                }
+              }
+            : this.store;
+          const result = await retrieveActiveMemoryWithReport(retrievalStore, query, activityContext);
+          if (!access) return result;
+          const candidates = await this.filterResources(access, result.candidates, "memory", (candidate) => candidate.frontmatter.id);
+          return {
+            candidates,
+            report: {
+              ...result.report,
+              candidate_count: candidates.length,
+              included_count: candidates.length,
+              included_memory_ids: candidates.map((candidate) => candidate.frontmatter.id),
+              excluded: []
+            }
+          };
+        },
         loadFreezeSnapshot: (input) => loadFreezeSnapshot(this.store, input)
       },
       wiki: {
-        build: (query, activityContext) => buildKnowledgeWikiContext(this.store, query, activityContext)
+        build: async (query, activityContext) => buildKnowledgeWikiContext({
+          searchWiki: async (searchQuery, limit, searchOptions) => {
+            const candidates = await this.store.searchWiki(searchQuery, limit, {
+              ...searchOptions,
+              ...(access ? await this.resourceCandidateOptions(access, "wiki") : {})
+            });
+            return access ? this.filterResources(access, candidates, "wiki", (candidate) => candidate.id) : candidates;
+          },
+          readWikiContent: async (id) => {
+            if (access && !await this.resourceAllowed(access, "wiki", id)) return undefined;
+            return this.store.readWikiContent(id);
+          }
+        }, query, activityContext)
       },
       skills: {
-        search: async (query, limit, activityContext) => (await this.store.searchSkills(query, limit, {
-          states: ["active", "pinned", "project"],
-          ...(activityContext ? { activityContext } : {})
-        })).filter((skill) => skill.frontmatter.evidence_state !== "conflict" && skill.frontmatter.usage_state !== "dormant"),
-        listUsage: () => this.store.listSkillUsage(),
-        listSupportFileRefs: (skillId) => this.store.listSkillSupportFileRefs(skillId),
+        search: async (query, limit, activityContext) => {
+          const candidates = (await this.store.searchSkills(query, limit, {
+            states: ["active", "pinned", "project"],
+            ...(activityContext ? { activityContext } : {}),
+            ...(access ? await this.resourceCandidateOptions(access, "skill") : {})
+          })).filter((skill) => skill.frontmatter.evidence_state !== "conflict" && skill.frontmatter.usage_state !== "dormant");
+          return access ? this.filterResources(access, candidates, "skill", (skill) => skill.id) : candidates;
+        },
+        listUsage: async () => {
+          const usage = await this.store.listSkillUsage();
+          if (!access) return usage;
+          const filtered = await Promise.all(usage.map(async (entry) => ({
+            entry,
+            allowed: await this.resourceAllowed(access, "skill", entry.skill_id)
+          })));
+          return filtered.filter((entry) => entry.allowed).map((entry) => entry.entry);
+        },
+        listSupportFileRefs: async (skillId) => {
+          if (access && !await this.resourceAllowed(access, "skill", skillId)) return [];
+          return this.store.listSkillSupportFileRefs(skillId);
+        },
         environment
       },
       collections: {
-        listSchemas: async () => this.store.listCollectionSchemas(),
-        listNotes: async (collectionId) => (await this.store.listCollectionNotes(collectionId)).map((note) => ({
-          collection_id: note.collection_id,
-          file_path: note.file_path,
-          content: note.content.trim(),
-          role: "context_only" as const
-        }))
+        listSchemas: async () => {
+          const schemas = await this.store.listCollectionSchemas();
+          return access ? this.filterResources(access, schemas, "collection_schema", (schema) => schema.id) : schemas;
+        },
+        listNotes: async (collectionId) => {
+          if (access && !await this.resourceAllowed(access, "collection_schema", collectionId)) return [];
+          return (await this.store.listCollectionNotes(collectionId)).map((note) => ({
+            collection_id: note.collection_id,
+            file_path: note.file_path,
+            content: note.content.trim(),
+            role: "context_only" as const
+          }));
+        }
       },
       sessionSearch: {
-        search: (query) => this.store.search(query)
+        search: async (query) => {
+          const results = await this.store.search(query, access
+            ? { sessionIds: await this.authorizedSessionIds(access) }
+            : undefined);
+          return access ? this.filterSessionSearch(access, results) : results;
+        }
       },
       externalAssist: {
         build: (input) => buildExternalAssistContext({
@@ -96,7 +185,7 @@ export class WorkspaceContextPreviewAdapter {
             listExternalAssistRecords: (recordInput) => this.store.listExternalAssistRecords(recordInput),
             saveExternalAssistRecord: (record: ExternalAssistRecord) => this.store.saveExternalAssistRecord(record)
           },
-          providers: options.externalAssistProviders ?? [],
+          providers: this.options.externalAssistProviders ?? [],
           sessionId: input.sessionId,
           query: input.query,
           role: input.role,
@@ -104,15 +193,60 @@ export class WorkspaceContextPreviewAdapter {
           sessionSearch: input.sessionSearch
         })
       },
-      tools: {
-        listAvailable: () => proposalCapabilityManifest.agent_tools
-      },
-      errors: {
-        sessionNotFound: options.sessionNotFound
-      },
-      clock: {
-        now: () => nowIso()
-      }
+      tools: { listAvailable: () => proposalCapabilityManifest.agent_tools },
+      errors: { sessionNotFound: this.options.sessionNotFound },
+      clock: { now: () => nowIso() }
     };
+  }
+
+  private async filterSessionSearch(access: WorkspaceContextPreviewAccess, results: ContextPreviewSearchResult[]): Promise<ContextPreviewSearchResult[]> {
+    const filtered = await Promise.all(results.map(async (result) => {
+      const sessionId = "session_id" in result && typeof result.session_id === "string"
+        ? result.session_id
+        : result.kind === "session" ? result.id : undefined;
+      if (!sessionId) return undefined;
+      const session = await this.store.getSession(sessionId);
+      if (!session?.room_id) return undefined;
+      // Candidate selection already constrains Session IDs. Re-check even the
+      // current Room here so an unbounded legacy Session cannot reach Agent
+      // context for anyone other than the Workspace Owner.
+      return await this.resourceAllowed(access, "session", session.id) ? result : undefined;
+    }));
+    return filtered.filter((result): result is ContextPreviewSearchResult => Boolean(result));
+  }
+
+  private async authorizedSessionIds(access: WorkspaceContextPreviewAccess): Promise<string[]> {
+    if (!this.authorization) return [];
+    const candidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.roomId, "session");
+    const ids = new Set(candidateAccess.resourceIds);
+    if (candidateAccess.includeLegacy) {
+      for (const session of await this.store.listSessions({ roomIds: [access.roomId] })) ids.add(session.id);
+    }
+    return [...ids];
+  }
+
+  private async filterResources<T>(access: WorkspaceContextPreviewAccess, values: T[], resourceKind: string, resourceId: (value: T) => string): Promise<T[]> {
+    const filtered = await Promise.all(values.map(async (value) => ({ value, allowed: await this.resourceAllowed(access, resourceKind, resourceId(value)) })));
+    return filtered.filter((entry) => entry.allowed).map((entry) => entry.value);
+  }
+
+  private async resourceAllowed(access: WorkspaceContextPreviewAccess, resourceKind: string, resourceId: string): Promise<boolean> {
+    if (!this.authorization) return true;
+    try {
+      // Final check happens immediately before the candidate reaches Host context.
+      await this.authorization.assertResource(access.principal, { roomId: access.roomId, action: "read", resourceKind, resourceId });
+      return true;
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) return false;
+      throw error;
+    }
+  }
+
+  private async resourceCandidateOptions(
+    access: WorkspaceContextPreviewAccess,
+    resourceKind: string
+  ): Promise<{ resourceIds: string[]; includeLegacy: boolean }> {
+    if (!this.authorization) return { resourceIds: [], includeLegacy: true };
+    return this.authorization.resourceCandidateAccess(access.principal, access.roomId, resourceKind);
   }
 }

@@ -6,11 +6,11 @@ type Ports = Pick<DomainOperationPorts, "chat.turn.run" | "session.create" | "se
 export function createConversationDomainServicePorts(services: Pick<RuntimeDomainServices, "conversationDomainService">): Ports {
   return {
     "chat.turn.run": {
-      createChatSession: (input) => services.conversationDomainService.createChatSession(input),
-      runChatTurn: (input) => services.conversationDomainService.executeChatTurn(input)
+      createChatSession: (context, input) => services.conversationDomainService.createChatSession(context, input),
+      runChatTurn: (context, input) => services.conversationDomainService.executeChatTurn(context, input)
     },
     "session.create": {
-      createSession: (input) => services.conversationDomainService.createSession(input)
+      createSession: (context, input) => services.conversationDomainService.createSession(context, input)
     },
     "session.search.reindex": {
       reindexSessionSearch: () => services.conversationDomainService.reindexSearch()

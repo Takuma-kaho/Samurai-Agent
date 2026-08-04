@@ -1,7 +1,8 @@
 import type { Express } from "express";
+import type { AgentRuntime } from "@samurai-agent/runtime";
 import type { WorkspaceStore } from "@samurai-agent/workspace-store";
 
-export function registerBackendEventRoutes(app: Express, store: WorkspaceStore): void {
+export function registerBackendEventRoutes(app: Express, store: WorkspaceStore, runtime: AgentRuntime): void {
   app.get("/api/backend-runs/:runId/events", async (req, res, next) => {
     try {
       const run = await store.getBackendRun(req.params.runId);
@@ -9,6 +10,7 @@ export function registerBackendEventRoutes(app: Express, store: WorkspaceStore):
         res.status(404).json({ error: "backend_run_not_found" });
         return;
       }
+      await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id });
       const afterSequence = typeof req.query.after_sequence === "string" && Number.isInteger(Number(req.query.after_sequence))
         ? Math.max(0, Number(req.query.after_sequence))
         : undefined;

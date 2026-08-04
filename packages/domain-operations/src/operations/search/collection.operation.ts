@@ -16,7 +16,7 @@ const SearchResult = z.discriminatedUnion("kind", [
 const Output = z.array(SearchResult).max(8);
 
 export interface CollectionSearchPorts extends DomainQueryPorts {
-  searchCollections: ReadCapability<(collectionId: string | undefined, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
+  searchCollections: ReadCapability<(context: TrustedDomainContext, collectionId: string | undefined, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
 }
 
 const collectionSearch = defineQuery<CollectionSearchPorts>()({
@@ -37,8 +37,8 @@ const collectionSearch = defineQuery<CollectionSearchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionSearch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await ports.searchCollections(input.collection_id, input.query, input.limit)) };
+      execute: async function handleCollectionSearch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        return { ok: true, value: Output.parse(await ports.searchCollections(context, input.collection_id, input.query, input.limit)) };
       }
     };
   }

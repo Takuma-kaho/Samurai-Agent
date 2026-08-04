@@ -226,6 +226,9 @@ importers:
       '@samurai-agent/gateway':
         specifier: workspace:*
         version: link:../gateway
+      '@samurai-agent/room-permissions':
+        specifier: workspace:*
+        version: link:../room-permissions
       '@samurai-agent/skills':
         specifier: workspace:*
         version: link:../skills
@@ -266,6 +269,8 @@ importers:
         specifier: workspace:*
         version: link:../core-schemas
 
+  packages/room-permissions: {}
+
   packages/runtime:
     dependencies:
       '@samurai-agent/action-catalog':
@@ -304,6 +309,9 @@ importers:
       '@samurai-agent/policy-engine':
         specifier: workspace:*
         version: link:../policy-engine
+      '@samurai-agent/room-permissions':
+        specifier: workspace:*
+        version: link:../room-permissions
       '@samurai-agent/skill-optimization':
         specifier: workspace:*
         version: link:../skill-optimization
@@ -343,6 +351,9 @@ importers:
       '@samurai-agent/core-schemas':
         specifier: workspace:*
         version: link:../core-schemas
+      '@samurai-agent/room-permissions':
+        specifier: workspace:*
+        version: link:../room-permissions
       better-sqlite3:
         specifier: ^11.10.0
         version: 11.10.0

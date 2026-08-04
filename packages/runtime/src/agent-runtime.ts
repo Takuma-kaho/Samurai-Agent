@@ -86,6 +86,7 @@ import {
   type TrustedDomainContext
 } from "@samurai-agent/domain-operations";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { connect as netConnect, type Socket } from "node:net";
 import path from "node:path";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
@@ -246,6 +247,7 @@ import {
   type SandboxWorkspaceSyncExecutionResult
 } from "@samurai-agent/gateway";
 import { isSupportedLocale } from "@samurai-agent/localization";
+import { agentParticipantId, localOwnerParticipantId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { buildMemoryFrontmatter, createSessionMemory, createTopicMemory, retrieveActiveMemoryWithReport } from "@samurai-agent/memory";
 import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type MessageSubmitOperation, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
@@ -313,6 +315,7 @@ import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
 import { RoomAgentDomainService } from "./commands/services/room-agent-domain-service";
+import { RoomAuthorizationError, RoomAuthorizationService } from "./commands/services/room-authorization-service";
 import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
 import { BackendToolBridgeService, type BackendToolBridgeCallResult } from "./host/backend-tool-bridge-service";
 import { LearningEvidenceAssembler } from "./learning/learning-evidence-assembler";
@@ -324,7 +327,7 @@ import type {
 import type { AgentHost } from "./host/agent-host";
 import { MemoryDomainService } from "./commands/services/memory-domain-service";
 import { ArtifactDomainService, type ArtifactMutationInput } from "./commands/services/artifact-domain-service";
-import { createSearchReadStore, SearchDomainService } from "./commands/services/search-domain-service";
+import { collectionRecordBoundaryId, createSearchReadStore, SearchDomainService } from "./commands/services/search-domain-service";
 export {
   HttpExternalAssistProvider,
   LocalFileExternalAssistProvider,
@@ -370,6 +373,9 @@ export interface RunChatTurnInput {
   metadata?: Record<string, unknown>;
   gateway_context?: GatewayContext;
   gateway_boundary_policy?: GatewayBoundaryPolicy;
+  /** Internal trusted context only. HTTP payloads cannot set these values. */
+  trusted_participant_context?: true;
+  trusted_requester_participant_id?: string;
   /** Stable key supplied by the ingress; transport retries must reuse it. */
   idempotency_key?: string;
 }
@@ -637,6 +643,11 @@ export interface TrustedDomainRuntimeContext {
    * an arbitrary actor id into a Domain handler.
    */
   actorIdentity?: TrustedActorIdentity;
+  /**
+   * Server-only participant selected after authentication or persisted Run
+   * lookup. It is never accepted from an operation payload or HTTP body.
+   */
+  participant?: import("@samurai-agent/room-permissions").ParticipantPrincipal;
   /** Server-created correlation root shared by a multi-command ingress chain. */
   correlationId?: string;
   sessionId?: string;
@@ -929,6 +940,8 @@ export class AgentRuntime {
   private readonly domainCommandBus: DurableDomainCommandBus;
   private readonly domainOperationTelemetry: DomainOperationTelemetryService;
   private readonly domainOperationRegistry: DomainOperationRegistry;
+  /** Per-request Room context; avoids mutable global authorization state. */
+  private readonly activeDomainContext = new AsyncLocalStorage<TrustedDomainContext>();
   private readonly runtimeDomainApi: RuntimeDomainApi;
   private readonly durableWorkCoordinator: DurableWorkCoordinator;
   private readonly executionDomainService: ExecutionDomainService;
@@ -957,6 +970,7 @@ export class AgentRuntime {
   private readonly browserDomainService: BrowserDomainService;
   private readonly externalSendDomainService: ExternalSendDomainService;
   private readonly roomAgentDomainService: RoomAgentDomainService;
+  private readonly roomAuthorizationService: RoomAuthorizationService;
   private readonly learningEvidenceAssembler: LearningEvidenceAssembler;
   private agentHost: AgentHost | undefined;
 
@@ -1047,18 +1061,10 @@ export class AgentRuntime {
       { getRoom: (id) => this.store.getRoom(id), getAgent: (id) => this.store.getAgent(id) },
       (code, message) => new RuntimeRequestError(code, message)
     );
+    this.roomAuthorizationService = new RoomAuthorizationService(this.store);
     this.roomAgentDomainService = new RoomAgentDomainService(
-      {
-        createRoom: (record) => this.store.createRoom(record),
-        getRoom: (id) => this.store.getRoom(id),
-        listRooms: () => this.store.listRooms(),
-        patchRoom: (input) => this.store.patchRoom(input),
-        createAgent: (record) => this.store.createAgent(record),
-        getAgent: (id) => this.store.getAgent(id),
-        listAgents: () => this.store.listAgents(),
-        patchAgent: (input) => this.store.patchAgent(input),
-        bindAgentBackend: (input) => this.store.bindAgentBackend(input)
-      },
+      this.store,
+      this.roomAuthorizationService,
       (backendId) => Boolean(this.backendRegistry.get(backendId)),
       (code, message) => new RuntimeRequestError(code, message)
     );
@@ -1624,8 +1630,23 @@ export class AgentRuntime {
       conflictError: (message) => new RuntimeRequestError("conflict", message)
     });
     this.conversationDomainService = new ConversationDomainService({
-      createSession: (input) => this.createSession(input),
-      runChatTurn: (input) => this.runChatTurn({ ...input, idempotency_key: input.idempotencyKey }),
+      createSession: (context, input) => {
+        const requesterParticipantId = trustedRequesterParticipantId(context);
+        return this.createSession({
+          ...input,
+          trusted_participant_context: true,
+          ...(requesterParticipantId ? { trusted_requester_participant_id: requesterParticipantId } : {})
+        });
+      },
+      runChatTurn: (context, input) => {
+        const requesterParticipantId = trustedRequesterParticipantId(context);
+        return this.runChatTurn({
+          ...input,
+          idempotency_key: input.idempotencyKey,
+          trusted_participant_context: true,
+          ...(requesterParticipantId ? { trusted_requester_participant_id: requesterParticipantId } : {})
+        });
+      },
       reindexSessionSearch: () => this.store.reindexSessionSearch(),
       conflict: (message) => new RuntimeRequestError("conflict", message)
     });
@@ -1799,7 +1820,7 @@ export class AgentRuntime {
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
-    const searchDomainService = new SearchDomainService(createSearchReadStore(this.store));
+    const searchDomainService = new SearchDomainService(createSearchReadStore(this.store), this.roomAuthorizationService);
     this.domainOperationRegistry = new DomainOperationRegistry(createDomainOperationPorts({
       artifactDomainService: this.artifactDomainService,
       automationDomainService: this.automationDomainService,
@@ -1833,7 +1854,7 @@ export class AgentRuntime {
     this.contextPreviewAdapter = new WorkspaceContextPreviewAdapter(this.store, {
       externalAssistProviders: this.externalAssistProviders,
       sessionNotFound: (sessionId) => new RuntimeRequestError("not_found", `Session not found: ${sessionId}`)
-    });
+    }, this.roomAuthorizationService);
     this.stdioMcpProcessPool = createPooledStdioMcpToolAdapter({
       resolveConfig: async (input) => {
         const config = await this.store.getGatewayMcpConfigByServerName(input.server_name);
@@ -1857,7 +1878,11 @@ export class AgentRuntime {
       },
       preparation: {
         prepareRequest: (request) => this.prepareHostRequest(request),
+        assertCurrentRunAccess: (turn) => this.assertCurrentRunAccess(turn),
+        assertRunAccess: (run) => this.assertRunAgentExecution(run),
+        contextPreviewPortsForTurn: (turn) => this.contextPreviewPortsForTurn(turn),
         prepareResumeInput: async ({ run, resumeInput }) => {
+          await this.assertRunAgentExecution(run);
           const gatewayBoundaryPolicy = await this.gatewayBoundaryPolicyForRun(run);
           return {
             backendInput: await this.buildResumeToolRunInput(run, resumeInput, gatewayBoundaryPolicy),
@@ -1924,6 +1949,25 @@ export class AgentRuntime {
     const agent = await this.store.getAgent(agentId);
     if (!agent) throw new RuntimeRequestError("conflict", `agent_not_found:${agentId}`);
     if (!agent.enabled) throw new RuntimeRequestError("conflict", `agent_disabled:${agent.id}`);
+    if (!request.requestedByParticipantId) {
+      throw new RuntimeRequestError("forbidden", "room_participant_authentication_required");
+    }
+    try {
+      await this.roomAuthorizationService.assertAgentExecution({
+        requesterParticipantId: request.requestedByParticipantId,
+        roomId: room.id,
+        agentId: agent.id
+      });
+      await this.roomAuthorizationService.assertResource(
+        { kind: "human", participantId: request.requestedByParticipantId },
+        { roomId: room.id, action: "execute", resourceKind: "session", resourceId: session.id }
+      );
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) {
+        throw new RuntimeRequestError("forbidden", error.message);
+      }
+      throw error;
+    }
     const requestedBackendId = request.backendId?.trim();
     // Workspaces created before Agent routing selected the first runnable
     // Backend when neither a Backend nor an Agent was supplied. Preserve that
@@ -1943,6 +1987,7 @@ export class AgentRuntime {
       ...request,
       roomId: room.id,
       agentId: agent.id,
+      requestedByParticipantId: request.requestedByParticipantId,
       agent,
       // backend_id is a one-turn compatibility override. It never writes the
       // Agent record; agent.backend_id remains the durable binding.
@@ -1951,6 +1996,7 @@ export class AgentRuntime {
       metadata: {
         ...jsonRecord(request.metadata ?? {}),
         room_id: room.id,
+        requested_by_participant_id: request.requestedByParticipantId,
         agent_id: agent.id,
         agent_name: agent.name,
         agent_role: agent.role,
@@ -1963,6 +2009,46 @@ export class AgentRuntime {
             : "agent_binding"
       }
     };
+  }
+
+  private async assertCurrentRunAccess(turn: AdmittedTurn): Promise<void> {
+    await this.assertRunAgentExecution(turn.run, turn.request.agentId, turn.request.requestedByParticipantId);
+  }
+
+  private contextPreviewPortsForTurn(turn: AdmittedTurn) {
+    const roomId = turn.session.room_id;
+    const agentId = turn.run.agent_id ?? turn.request.agentId;
+    const requestedByParticipantId = turn.run.requested_by_participant_id ?? turn.request.requestedByParticipantId ?? localOwnerParticipantId;
+    if (!roomId || !agentId) throw new RuntimeRequestError("conflict", `run_room_agent_missing:${turn.run.id}`);
+    return this.contextPreviewAdapter.portsForAccess({
+      roomId,
+      principal: {
+        kind: "agent",
+        participantId: agentParticipantId(agentId),
+        agentId,
+        requestedByParticipantId
+      }
+    });
+  }
+
+  private async assertRunAgentExecution(run: BackendRunRecord, requestedAgentId?: string, requestedByParticipantId?: string): Promise<void> {
+    const session = await this.store.getSession(run.session_id);
+    const roomId = session?.room_id;
+    const agentId = run.agent_id ?? requestedAgentId;
+    const requesterParticipantId = run.requested_by_participant_id ?? requestedByParticipantId ?? localOwnerParticipantId;
+    if (!roomId || !agentId) throw new RuntimeRequestError("conflict", `run_room_agent_missing:${run.id}`);
+    try {
+      await this.roomAuthorizationService.assertAgentExecution({ requesterParticipantId, roomId, agentId });
+      await this.roomAuthorizationService.assertResource({
+        kind: "agent",
+        participantId: agentParticipantId(agentId),
+        agentId,
+        requestedByParticipantId: requesterParticipantId
+      }, { roomId, action: "execute", resourceKind: "session", resourceId: session.id });
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
   }
 
   private async recordLearningResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void> {
@@ -2146,10 +2232,11 @@ export class AgentRuntime {
   }
 
   async previewContext(input: { sessionId: string; query?: string }): Promise<ContextPreview> {
+    const access = await this.localOwnerContextAccess(input.sessionId);
     return buildContextPreviewWithPorts({
       sessionId: input.sessionId,
       query: input.query ?? "",
-      ports: this.contextPreviewAdapter.ports
+      ports: this.contextPreviewAdapter.portsForAccess(access)
     });
   }
 
@@ -2177,11 +2264,17 @@ export class AgentRuntime {
     });
   }
 
-  async previewActiveMemory(input: { query?: string }): Promise<{
+  async previewActiveMemory(input: { query?: string; sessionId?: string }): Promise<{
     active_memory: ContextPreview["active_memory"];
     report: ContextPreview["active_memory_report"];
   }> {
-    const result = await retrieveActiveMemoryWithReport(this.store, input.query ?? "");
+    const access = await this.localOwnerContextAccess(input.sessionId);
+    const settings = await this.store.getSettings();
+    const result = await this.contextPreviewAdapter.portsForAccess(access).memory.retrieve(input.query ?? "", {
+      room_id: access.roomId,
+      session_id: input.sessionId ?? (await this.store.listSessions()).find((session) => session.room_id === access.roomId)?.id ?? "preview",
+      agent_id: settings.default_agent_id ?? "preview"
+    });
     const output = {
       active_memory: result.candidates.map(activeMemoryPreviewEntry),
       report: result.report
@@ -2189,12 +2282,18 @@ export class AgentRuntime {
     return output;
   }
 
-  async previewKnowledgeWiki(input: { query?: string }): Promise<{
+  async previewKnowledgeWiki(input: { query?: string; sessionId?: string }): Promise<{
     knowledge_wiki: ContextPreview["knowledge_wiki"];
     report: ContextPreview["knowledge_wiki_report"];
     graph: KnowledgeWikiGraph;
   }> {
-    const context = await buildKnowledgeWikiContextPort(this.store, input.query ?? "");
+    const access = await this.localOwnerContextAccess(input.sessionId);
+    const settings = await this.store.getSettings();
+    const context = await this.contextPreviewAdapter.portsForAccess(access).wiki.build(input.query ?? "", {
+      room_id: access.roomId,
+      session_id: input.sessionId ?? (await this.store.listSessions()).find((session) => session.room_id === access.roomId)?.id ?? "preview",
+      agent_id: settings.default_agent_id ?? "preview"
+    });
     return {
       knowledge_wiki: context.entries,
       report: context.report,
@@ -2202,13 +2301,48 @@ export class AgentRuntime {
     };
   }
 
-  async previewKnowledgeWikiGraph(input: { activeOnly?: boolean } = {}): Promise<KnowledgeWikiGraph> {
-    const pages = await this.store.listWiki({ activeOnly: input.activeOnly ?? true });
+  async previewKnowledgeWikiGraph(input: { activeOnly?: boolean; sessionId?: string } = {}): Promise<KnowledgeWikiGraph> {
+    const access = await this.localOwnerContextAccess(input.sessionId);
+    const pages = await this.filterCurrentRoomResources(access, "wiki", await this.store.listWiki({ activeOnly: input.activeOnly ?? true }));
     return knowledgeWikiGraph(pages, input.activeOnly ?? true);
   }
 
-  async inspectKnowledgeWikiQuality(): Promise<KnowledgeWikiLintReport> {
-    const pages = await this.store.listWiki({ activeOnly: true });
+  private async localOwnerContextAccess(sessionId?: string): Promise<{ principal: ParticipantPrincipal; roomId: string }> {
+    const settings = await this.store.getSettings();
+    const session = sessionId ? await this.store.getSession(sessionId) : undefined;
+    const roomId = session?.room_id ?? settings.default_room_id;
+    if (!roomId) throw new RuntimeRequestError("conflict", "room_context_required");
+    try {
+      await this.roomAuthorizationService.assertRoom({ kind: "human", participantId: localOwnerParticipantId }, roomId, "read");
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+    return { principal: { kind: "human", participantId: localOwnerParticipantId }, roomId };
+  }
+
+  private async filterCurrentRoomResources<T extends { id: string }>(
+    access: { principal: ParticipantPrincipal; roomId: string },
+    resourceKind: string,
+    values: T[]
+  ): Promise<T[]> {
+    const results = await Promise.all(values.map(async (value): Promise<T | undefined> => {
+      try {
+        await this.roomAuthorizationService.assertResource(access.principal, { roomId: access.roomId, action: "read", resourceKind, resourceId: value.id });
+        return value;
+      } catch (error) {
+        if (error instanceof RoomAuthorizationError) return undefined;
+        throw error;
+      }
+    }));
+    const allowed: T[] = [];
+    for (const value of results) if (value !== undefined) allowed.push(value);
+    return allowed;
+  }
+
+  async inspectKnowledgeWikiQuality(input: { sessionId?: string } = {}): Promise<KnowledgeWikiLintReport> {
+    const access = await this.localOwnerContextAccess(input.sessionId);
+    const pages = await this.filterCurrentRoomResources(access, "wiki", await this.store.listWiki({ activeOnly: true }));
     const aliases = new Map<string, string>();
     const duplicateIndex = new Map<string, string[]>();
     for (const page of pages) {
@@ -2309,11 +2443,26 @@ export class AgentRuntime {
     ui_locale?: SupportedLocale;
     output_locale?: SupportedLocale;
     room_id?: string;
+    /** Internal trusted context only. HTTP payloads cannot set these values. */
+    trusted_participant_context?: true;
+    trusted_requester_participant_id?: string;
   } = {}): Promise<SessionRecord> {
     const settings = await this.store.getSettings();
     const roomId = input.room_id ?? settings.default_room_id;
     if (!roomId || !(await this.store.getRoom(roomId))) {
       throw new RuntimeRequestError("conflict", `room_not_found:${roomId ?? "default"}`);
+    }
+    const requesterParticipantId = input.trusted_participant_context
+      ? input.trusted_requester_participant_id
+      : localOwnerParticipantId;
+    if (!requesterParticipantId) {
+      throw new RuntimeRequestError("forbidden", "room_participant_authentication_required");
+    }
+    try {
+      await this.roomAuthorizationService.assertRoom({ kind: "human", participantId: requesterParticipantId }, roomId, "execute");
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
     }
     const now = nowIso();
     const session: SessionRecord = {
@@ -2328,8 +2477,70 @@ export class AgentRuntime {
     };
 
     await this.store.createSession(session);
+    await this.store.ensureResourceAccessBoundary({
+      resourceKind: "session", resourceId: session.id, sourceRoomId: roomId,
+      ownerParticipantId: requesterParticipantId, actorId: requesterParticipantId
+    });
     await this.emit("session.created", session);
     return session;
+  }
+
+  /**
+   * Server HTTP adapters use this for legacy read routes that have not yet
+   * become Domain queries. The actor is deliberately fixed to the trusted
+   * local Owner ingress; a request body never selects a participant.
+   */
+  async assertLocalOwnerRoomAccess(input: {
+    roomId?: string;
+    sessionId?: string;
+    resource?: { kind: string; id: string };
+    action?: "read" | "edit" | "execute";
+  }): Promise<{ roomId: string }> {
+    let roomId = input.roomId;
+    let session: SessionRecord | undefined;
+    if (input.sessionId) {
+      session = await this.store.getSession(input.sessionId);
+      if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
+      if (!session.room_id) throw new RuntimeRequestError("conflict", `session_room_missing:${session.id}`);
+      if (roomId && roomId !== session.room_id) {
+        // A Session itself can be explicitly shared for read-only history
+        // access. It never changes the Session's own Room and cannot be used
+        // as a write or execution context in another Room.
+        if (input.action && input.action !== "read" || !input.resource) {
+          throw new RuntimeRequestError("conflict", `room_session_mismatch:${roomId}:${session.id}`);
+        }
+      } else {
+        roomId = session.room_id;
+      }
+    }
+    if (!roomId && input.resource) {
+      // A persisted source Room is safe to resolve server-side. We never
+      // substitute a Workspace-wide default when the resource is unbounded.
+      roomId = (await this.store.getResourceAccessBoundary(input.resource.kind, input.resource.id))?.source_room_id;
+    }
+    if (!roomId) throw new RuntimeRequestError("conflict", "room_access_context_required");
+    const principal: ParticipantPrincipal = { kind: "human", participantId: localOwnerParticipantId };
+    const action = input.action ?? "read";
+    try {
+      await this.roomAuthorizationService.assertRoom(principal, roomId, action);
+      const resource = input.resource ?? (session ? { kind: "session", id: session.id } : undefined);
+      if (resource) {
+        await this.roomAuthorizationService.assertResource(principal, {
+          roomId,
+          action,
+          resourceKind: resource.kind,
+          resourceId: resource.id
+        });
+      }
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+    return { roomId };
+  }
+
+  async listLocalOwnerVisibleRoomIds(): Promise<Set<string>> {
+    return this.roomAuthorizationService.visibleRoomIds({ kind: "human", participantId: localOwnerParticipantId });
   }
 
   async runBackendToolBridgeCall(input: {
@@ -2339,6 +2550,8 @@ export class AgentRuntime {
     toolCallId: string;
     toolInput: Record<string, JsonValue>;
   }): Promise<BackendToolBridgeCallResult> {
+    const run = await this.store.getBackendRun(input.runId);
+    if (run) await this.assertRunAgentExecution(run);
     return this.backendToolBridgeService.run(input);
   }
 
@@ -2358,7 +2571,7 @@ export class AgentRuntime {
       return jsonSafe(queryResult.result);
     }
     if (toolName === "samurai.collection.manage") {
-      return this.runCollectionManageCompatibility(input, "provider_tool_call");
+      return this.runCollectionManageCompatibility(input, "provider_tool_call", undefined, { runId: trusted.runId });
     }
     throw new RuntimeRequestError("conflict", "tool_bridge_tool_not_allowed");
   }
@@ -2522,8 +2735,37 @@ export class AgentRuntime {
     const session = await this.store.getSession(input.sessionId);
     if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${input.sessionId}`);
     const settings = await this.store.getSettings();
+    const gatewayContext = input.gateway_context ?? webGatewayContext;
+    const requesterParticipantId = input.trusted_participant_context
+      ? input.trusted_requester_participant_id
+      : requesterParticipantIdForGatewayContext(gatewayContext);
+    if (!requesterParticipantId) {
+      throw new RuntimeRequestError("forbidden", "room_participant_authentication_required");
+    }
+    if (session.room_id) {
+      // A legacy Session receives its formal boundary when it is first edited,
+      // but never before confirming the requester is still a participant of
+      // that Room. Otherwise a Workspace Owner who is not in the Room could
+      // turn a denied attempt into a boundary visible to Room members.
+      try {
+        await this.roomAuthorizationService.assertResource(
+          { kind: "human", participantId: requesterParticipantId },
+          { roomId: session.room_id, action: "execute", resourceKind: "session", resourceId: session.id }
+        );
+      } catch (error) {
+        if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+        throw error;
+      }
+      await this.store.ensureResourceAccessBoundary({
+        resourceKind: "session",
+        resourceId: session.id,
+        sourceRoomId: session.room_id,
+        ownerParticipantId: requesterParticipantId,
+        actorId: requesterParticipantId
+      });
+    }
     const envelope = createGatewayEnvelope(
-      input.gateway_context ?? webGatewayContext,
+      gatewayContext,
       input.content,
       input.input_locale ?? session.ui_locale ?? settings.ui_locale,
       input.output_locale ?? session.output_locale ?? settings.output_locale,
@@ -2541,6 +2783,7 @@ export class AgentRuntime {
         agentId: input.agent_id,
         envelope,
         backendId: input.backend_id,
+        requestedByParticipantId: requesterParticipantId,
         idempotencyKey,
         metadata: jsonRecord(input.metadata ?? {}),
         temporaryContext: input.temporary_context,
@@ -2557,6 +2800,7 @@ export class AgentRuntime {
     // durable Run before projecting the legacy facade result so diagnostics
     // and recovery corrections are never based on an in-memory snapshot.
     const committedRun = await this.store.getBackendRun(outcome.run.id) ?? outcome.run;
+    await this.assertRunAgentExecution(committedRun);
     const result = await this.projectChatTurn(committedRun);
     if (outcome.kind === "failed") {
       throw new RuntimeRequestError(
@@ -2624,6 +2868,7 @@ export class AgentRuntime {
   async cancelBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.store.getBackendRun(runId);
     if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
+    await this.assertRunAgentExecution(run);
     const cancelled = await this.requireAgentHost().cancelRun(runId);
     const lockKey = typeof cancelled.metadata.gateway_boundary_concurrency_lock_key === "string"
       ? cancelled.metadata.gateway_boundary_concurrency_lock_key.trim()
@@ -2645,6 +2890,9 @@ export class AgentRuntime {
 
   async resumeBackendRun(runId: string, input: Record<string, JsonValue> = {}): Promise<BackendRunRecord> {
     try {
+      const run = await this.store.getBackendRun(runId);
+      if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
+      await this.assertRunAgentExecution(run);
       return await this.requireAgentHost().resumeRun(runId, input);
     } catch (error) {
       if (String(error).includes("run_not_found")) throw new RuntimeRequestError("not_found", "backend_run_not_found");
@@ -2654,6 +2902,9 @@ export class AgentRuntime {
 
   async syncBackendStream(runId: string, input: { maxEvents?: number; timeoutMs?: number } = {}): Promise<BackendStreamSyncResult> {
     const before = await this.store.listBackendEvents({ runId });
+    const existingRun = await this.store.getBackendRun(runId);
+    if (!existingRun) throw new RuntimeRequestError("not_found", "backend_run_not_found");
+    await this.assertRunAgentExecution(existingRun);
     const run = await this.requireAgentHost().syncRun(runId);
     const syncEventId = `control:sync:${run.id}:${run.current_attempt ?? 1}`;
     const syncEvent = await this.store.appendCore02Event({
@@ -3268,8 +3519,17 @@ export class AgentRuntime {
     messageId?: string;
     actionPayload?: Record<string, JsonValue>;
   }, trusted: TrustedDomainRuntimeContext = {}): Promise<{ surface: GeneratedSurfaceDefinition; action: GeneratedSurfaceActionDeclaration; command: unknown; interaction: unknown }> {
+    // A generated surface is bound to one persisted Session. Resolve that
+    // binding before dispatch so an omitted Session can never use a default
+    // Room as an authorization fallback.
+    const persistedSurface = await this.store.getGeneratedSurface(input.surfaceId);
+    if (!persistedSurface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
+    if (trusted.sessionId && trusted.sessionId !== persistedSurface.session_id) {
+      throw new RuntimeRequestError("conflict", `generated_surface_session_mismatch:${input.surfaceId}`);
+    }
     const ingressTrusted: TrustedDomainRuntimeContext = {
       ...trusted,
+      sessionId: persistedSurface.session_id,
       correlationId: trusted.correlationId ?? stableHash({
         ingress: "generated_surface_action",
         surface_id: input.surfaceId,
@@ -3401,7 +3661,8 @@ export class AgentRuntime {
     const trustedContext = await this.trustedDomainContext(inputSource, payload, {
       ...trusted,
       ...(input.idempotency_key ? { idempotencyKey: input.idempotency_key } : {})
-    });
+    }, command.id);
+    await this.assertDomainOperationAuthorized(command, payload, trustedContext);
     if (!this.domainOperationAvailable(command)) {
       throw new RuntimeRequestError("unavailable", `domain_operation_unavailable:${command.id}`);
     }
@@ -3442,8 +3703,10 @@ export class AgentRuntime {
       }
       throw error;
     }
+    await this.recordResourceAccessBoundaries(result, command, trustedContext);
     await this.recordBackendDomainOperationTelemetry(result, trustedContext);
-    await this.attachDomainCorrelation(result, trustedContext.correlationId);
+    await this.attachDomainCorrelation(result, trustedContext);
+    await this.recordDomainAccessAudit(command, payload, result, trustedContext);
     const renderSpecs = assertDomainCommandRenderSpecs(command, await this.domainCommandRenderSpecs(command, result));
     const output: DomainCommandRuntimeResult = {
       command,
@@ -3507,13 +3770,14 @@ export class AgentRuntime {
     if (inputIssue) {
       throw new RuntimeRequestError("validation", `domain_query_input_invalid:${query.id}:${inputIssue.path}:${inputIssue.message}`);
     }
+    const trustedContext = await this.trustedDomainContext(inputSource, payload, trusted, query.id);
+    await this.assertDomainOperationAuthorized(query, payload, trustedContext);
     let result: unknown;
     try {
-      result = (await this.domainOperationRegistry.execute(
-        await this.trustedDomainContext(inputSource, payload, trusted),
-        query.id,
-        payload
-      )).value;
+      result = await this.activeDomainContext.run(
+        trustedContext,
+        async () => (await this.domainOperationRegistry.execute(trustedContext, query.id, payload)).value
+      );
     } catch (error) {
       if (error instanceof DomainOperationError) {
         if (error.handlerCause instanceof RuntimeRequestError) throw error.handlerCause;
@@ -3521,6 +3785,7 @@ export class AgentRuntime {
       }
       throw error;
     }
+    await this.recordDomainAccessAudit(query, payload, result, trustedContext);
     const renderSpecs = assertDomainQueryRenderSpecs(query, await this.domainQueryRenderSpecs(query, result));
     const output: DomainQueryRuntimeResult = {
       query,
@@ -3598,19 +3863,146 @@ export class AgentRuntime {
     payload: Record<string, JsonValue>,
     context: TrustedDomainContext
   ): Promise<unknown> {
-    return (await this.domainOperationRegistry.execute(context, entry.id, payload)).value;
+    return this.activeDomainContext.run(
+      context,
+      async () => (await this.domainOperationRegistry.execute(context, entry.id, payload)).value
+    );
   }
 
-  private async attachDomainCorrelation(result: unknown, correlationId: string): Promise<void> {
+  private async assertDomainOperationAuthorized(
+    entry: DomainCommandEntry | DomainQueryEntry,
+    payload: Record<string, JsonValue>,
+    context: TrustedDomainContext
+  ): Promise<void> {
+    const principal = context.participant;
+    if (!principal) throw new RuntimeRequestError("forbidden", "room_participant_required");
+    // Collaboration operations own their more specific target checks in the
+    // Room service. Chat is admitted by the Host after it resolves its Room.
+    if (isRoomCollaborationOperation(entry.id)) return;
+    // A new Session has no trusted Session reference yet. Its declared Room is
+    // the target resource, not caller-controlled identity, and must be checked
+    // before the handler can create anything there.
+    if (entry.id === "session.create") {
+      const roomId = context.roomId;
+      if (!roomId) throw new RuntimeRequestError("forbidden", "room_context_required");
+      try {
+        await this.roomAuthorizationService.assertRoom(principal, roomId, "execute");
+      } catch (error) {
+        if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+        throw error;
+      }
+      return;
+    }
+    if (entry.id === "chat.turn.run") {
+      if (!context.roomId) throw new RuntimeRequestError("forbidden", "room_context_required");
+      return;
+    }
+    try {
+      if (context.roomId) {
+        const action = entry.effect_kind === "read_only"
+          ? "read"
+          : entry.effect_kind === "external_effect" || entry.effect_kind === "runtime_control"
+            ? "execute"
+            : "edit";
+        await this.roomAuthorizationService.assertRoom(principal, context.roomId, action);
+        // A Session is a resource too. This keeps old unbounded Sessions
+        // Owner-only and blocks a removed participant before any handler can
+        // load its messages, runs, or related Workspace state.
+        if (context.sessionId) {
+          await this.roomAuthorizationService.assertResource(principal, {
+            roomId: context.roomId,
+            action,
+            resourceKind: "session",
+            resourceId: context.sessionId
+          });
+        }
+        // Rollback points do not own separate content files. Their immutable
+        // access boundary is the Room of the original operation, so a Session
+        // from another Room cannot restore or inspect their changes.
+        if (entry.id === "rollback.restore") {
+          const rollbackPointId = stringPayload(payload.rollback_point_id);
+          const rollbackPoint = rollbackPointId ? await this.store.getRollbackPoint(rollbackPointId) : undefined;
+          const operation = rollbackPoint ? await this.store.getOperation(rollbackPoint.operation_id) : undefined;
+          if (!operation || operation.room_id !== context.roomId) {
+            throw new RuntimeRequestError("forbidden", "room_rollback_access_denied");
+          }
+        }
+        const target = await this.existingDomainResourceTarget(entry.id, payload);
+        if (target) {
+          await this.roomAuthorizationService.assertResource(principal, {
+            roomId: context.roomId,
+            action,
+            resourceKind: target.kind,
+            resourceId: target.id
+          });
+        }
+        return;
+      }
+      // A content operation without a Room must never fall back to a default
+      // Room or Workspace-wide data. Workspace controls are the only explicit
+      // exception, and are checked separately below.
+      if (requiresRoomContext(entry)) {
+        throw new RuntimeRequestError("forbidden", "room_context_required");
+      }
+      // Only a Workspace administrator may use the remaining global controls.
+      await this.roomAuthorizationService.assertWorkspace(principal, "manage_settings");
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+  }
+
+  private async existingDomainResourceTarget(
+    operationId: string,
+    payload: Record<string, JsonValue>
+  ): Promise<{ kind: string; id: string } | undefined> {
+    const target = resourceTargetFromDomainOperation(operationId, payload);
+    if (target) return target;
+    // Save operations may be either create or update. Only an existing record
+    // is a target of this request; a new record receives its boundary after
+    // the successful write below.
+    if (operationId === "collection.schema.save") {
+      const collectionId = stringPayload(payload.id);
+      if (collectionId && await this.store.getCollectionSchema(collectionId)) {
+        return { kind: "collection_schema", id: collectionId };
+      }
+    }
+    if (operationId === "collection.record.create") {
+      const collectionId = stringPayload(payload.collection_id);
+      const recordId = stringPayload(payload.record_id);
+      if (collectionId && recordId && await this.store.getCollectionRecord(collectionId, recordId)) {
+        return { kind: "collection_record", id: collectionRecordBoundaryId(collectionId, recordId) };
+      }
+    }
+    return undefined;
+  }
+
+  private async attachDomainCorrelation(result: unknown, context: TrustedDomainContext): Promise<void> {
     const operationCandidates = domainResultOperations(result);
     for (const candidate of operationCandidates) {
       const operation = await this.store.getOperation(candidate.id);
       if (!operation) continue;
-      if (operation.correlation_id !== correlationId) await this.store.updateOperation({ ...operation, correlation_id: correlationId });
+      const participant = context.participant;
+      const updatedOperation = {
+        ...operation,
+        correlation_id: context.correlationId,
+        ...(participant ? { participant_id: participant.participantId, participant_kind: participant.kind } : {}),
+        ...(participant ? { requested_by_participant_id: participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId } : {}),
+        ...(context.roomId ? { room_id: context.roomId } : {})
+      };
+      if (JSON.stringify(updatedOperation) !== JSON.stringify(operation)) await this.store.updateOperation(updatedOperation);
+      for (const audit of await this.store.listAuditRecordsForOperation(operation.id)) {
+        await this.store.updateAuditRecord({
+          ...audit,
+          ...(participant ? { participant_id: participant.participantId, participant_kind: participant.kind } : {}),
+          ...(participant ? { requested_by_participant_id: participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId } : {}),
+          ...(context.roomId ? { room_id: context.roomId } : {})
+        });
+      }
       const changes = await this.store.listWorkspaceChanges();
       for (const change of changes) {
-        if (change.legacy_operation_id === operation.id && change.correlation_id !== correlationId) {
-          await this.store.setWorkspaceChangeCorrelation(change.id, correlationId);
+        if (change.legacy_operation_id === operation.id && change.correlation_id !== context.correlationId) {
+          await this.store.setWorkspaceChangeCorrelation(change.id, context.correlationId);
         }
       }
     }
@@ -3630,6 +4022,94 @@ export class AgentRuntime {
     });
   }
 
+  private async recordResourceAccessBoundaries(
+    result: unknown,
+    command: DomainCommandEntry,
+    context: TrustedDomainContext
+  ): Promise<void> {
+    if (!context.participant || context.participant.kind === "system") return;
+    const operation = operationAuditRuntimeResult(result)?.operation;
+    const output = unknownRecord(result);
+    const outputSession = unknownRecord(output.session);
+    const sessionId = context.sessionId ?? operation?.session_id
+      ?? (typeof outputSession.id === "string" ? outputSession.id : undefined)
+      ?? (command.output_resource_kind === "session" && typeof output.id === "string" ? output.id : undefined);
+    const session = sessionId ? await this.store.getSession(sessionId) : undefined;
+    const roomId = context.roomId ?? session?.room_id;
+    if (!roomId) return;
+    const ownerParticipantId = context.participant.kind === "agent"
+      ? context.participant.requestedByParticipantId
+      : context.participant.participantId;
+    const refs = [...(operationAuditRuntimeResult(result)?.resourceRefs ?? [])];
+    const resource = runtimeWriteResource(result);
+    const resourceRecord = unknownRecord(resource);
+    if (typeof resourceRecord.id === "string") {
+      const resourceId = command.output_resource_kind === "collection_record" && typeof resourceRecord.collection_id === "string"
+        ? `${resourceRecord.collection_id}/${resourceRecord.id}`
+        : resourceRecord.id;
+      refs.push({ kind: command.output_resource_kind, id: resourceId, uri: `domain/${command.output_resource_kind}/${resourceId}` });
+    }
+    // Some commands intentionally return their resource directly rather than
+    // through the legacy RuntimeWrite envelope. In particular, Session create
+    // and Generated Surface create/revise must still establish their Room
+    // boundary before a later read, revision, or export can occur.
+    const directResource = command.output_resource_kind === "generated_surface"
+      ? unknownRecord(output.definition)
+      : output;
+    if (isRoomScopedResourceKind(command.output_resource_kind) && typeof directResource.id === "string") {
+      const resourceId = command.output_resource_kind === "collection_record" && typeof directResource.collection_id === "string"
+        ? `${directResource.collection_id}/${directResource.id}`
+        : directResource.id;
+      refs.push({ kind: command.output_resource_kind, id: resourceId, uri: `domain/${command.output_resource_kind}/${resourceId}` });
+    }
+    if (session) refs.push({ kind: "session", id: session.id, uri: `sessions/${session.id}` });
+    for (const ref of refs) {
+      if (!ref.id || isRoomPermissionMetadataKind(ref.kind)) continue;
+      const resourceId = ref.kind === "collection_record"
+        && typeof resourceRecord.collection_id === "string"
+        && ref.id === resourceRecord.id
+        ? collectionRecordBoundaryId(resourceRecord.collection_id, ref.id)
+        : ref.id;
+      await this.store.ensureResourceAccessBoundary({
+        resourceKind: ref.kind,
+        resourceId,
+        sourceRoomId: roomId,
+        ownerParticipantId,
+        actorId: ownerParticipantId
+      });
+    }
+  }
+
+  private async recordDomainAccessAudit(
+    entry: DomainCommandEntry | DomainQueryEntry,
+    payload: Record<string, JsonValue>,
+    result: unknown,
+    context: TrustedDomainContext
+  ): Promise<void> {
+    const participant = context.participant;
+    const write = operationAuditRuntimeResult(result);
+    const output = unknownRecord(result);
+    const payloadRoomId = typeof payload.room_id === "string" ? payload.room_id : undefined;
+    const sourceRoomId = typeof payload.source_room_id === "string" ? payload.source_room_id : undefined;
+    const createdRoomId = entry.id === "room.create" && typeof output.id === "string" ? output.id : undefined;
+    const roomId = context.roomId ?? payloadRoomId ?? sourceRoomId ?? createdRoomId;
+    await this.store.saveAuditRecord({
+      id: createId("audit"),
+      actor_identity: context.actorId as ActorIdentity,
+      ...(participant ? { participant_id: participant.participantId, participant_kind: participant.kind } : {}),
+      ...(participant ? { requested_by_participant_id: participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId } : {}),
+      ...(roomId ? { room_id: roomId } : {}),
+      operation_id: write?.operation.id ?? `domain:${entry.id}:${context.correlationId}`,
+      capability_id: proposalCapabilityManifest.id,
+      instruction_source: instructionSourceForDomainInput(context.inputSource),
+      inputs_summary: summarize(`${entry.id} ${JSON.stringify(jsonSafe(payload))}`, 500),
+      outputs_summary: summarize(`${entry.id} ${JSON.stringify(jsonSafe(output))}`, 500),
+      policy_decision_id: `room-permission:${context.correlationId}`,
+      affected_resources: write?.resourceRefs ?? [],
+      created_at: nowIso()
+    });
+  }
+
   private async backendWorkspaceChangesForOperation(runId: string, sessionId: string, operationId: string): Promise<WorkspaceChangeRecord[]> {
     return (await this.store.listWorkspaceChanges(sessionId)).filter((change) =>
       change.run_id === runId && change.legacy_operation_id === operationId
@@ -3639,7 +4119,8 @@ export class AgentRuntime {
   private async trustedDomainContext(
     inputSource: DomainCommandInputSource,
     payload: Record<string, JsonValue>,
-    trusted: TrustedDomainRuntimeContext = {}
+    trusted: TrustedDomainRuntimeContext = {},
+    operationId?: string
   ): Promise<TrustedDomainContext> {
     assertNoTrustedContextPayloadFields(payload);
     const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey } = trusted;
@@ -3649,21 +4130,36 @@ export class AgentRuntime {
       throw new RuntimeRequestError("forbidden", `domain_actor_source_mismatch:${inputSource}`);
     }
     let sessionId = trusted.sessionId;
+    let run: BackendRunRecord | undefined;
     if (runId) {
-      const run = await this.store.getBackendRun(runId);
+      run = await this.store.getBackendRun(runId);
       if (!run) throw new RuntimeRequestError("not_found", `Backend run not found: ${runId}`);
       if (sessionId && run.session_id !== sessionId) {
         throw new RuntimeRequestError("conflict", `domain_run_session_mismatch:${runId}`);
       }
       sessionId = run.session_id;
     }
-    if (sessionId && !await this.store.getSession(sessionId)) {
-      throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
+    if (inputSource === "provider_tool_call" && !run) {
+      throw new RuntimeRequestError("forbidden", "provider_room_run_required");
     }
+    const session = sessionId ? await this.store.getSession(sessionId) : undefined;
+    if (sessionId && !session) throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
+    const participant = this.resolveTrustedParticipant({ inputSource, actorIdentity, trusted, run });
+    // A Session-create command is the single legitimate operation without a
+    // pre-existing Session. Its Room may be selected by the public DTO, or by
+    // the server-owned default Room when the local UI starts a new chat.
+    const requestedRoomId = operationId === "session.create" ? optionalStringPayload(payload.room_id) : undefined;
+    if (session?.room_id && requestedRoomId && session.room_id !== requestedRoomId) {
+      throw new RuntimeRequestError("conflict", `domain_session_room_mismatch:${session.id}`);
+    }
+    const roomId = session?.room_id ?? requestedRoomId
+      ?? (operationId === "session.create" ? (await this.store.getSettings()).default_room_id : undefined);
     return {
       inputSource,
       workspaceId: stableHash(this.store.rootDir),
       actorId: actorIdentity,
+      participant,
+      ...(roomId ? { roomId } : {}),
       ...(sessionId ? { sessionId } : {}),
       ...(runId ? { runId } : {}),
       ...(envelopeId ? { envelopeId } : {}),
@@ -3679,9 +4175,39 @@ export class AgentRuntime {
         surface_operation_id: surfaceOperation?.id ?? null,
         surface_operation_kind: surfaceOperation?.kind ?? null,
         actor_id: actorIdentity,
+        participant_id: participant.participantId,
+        room_id: roomId ?? null,
         payload
       })
     };
+  }
+
+  private resolveTrustedParticipant(input: {
+    inputSource: DomainCommandInputSource;
+    actorIdentity: TrustedActorIdentity;
+    trusted: TrustedDomainRuntimeContext;
+    run?: BackendRunRecord;
+  }): ParticipantPrincipal {
+    if (input.run) {
+      if (!input.run.agent_id) throw new RuntimeRequestError("conflict", `run_agent_missing:${input.run.id}`);
+      const resolved: ParticipantPrincipal = {
+        kind: "agent",
+        participantId: agentParticipantId(input.run.agent_id),
+        agentId: input.run.agent_id,
+        requestedByParticipantId: input.run.requested_by_participant_id ?? localOwnerParticipantId
+      };
+      if (input.trusted.participant && !sameParticipant(input.trusted.participant, resolved)) {
+        throw new RuntimeRequestError("forbidden", `domain_participant_run_mismatch:${input.run.id}`);
+      }
+      return resolved;
+    }
+    if (input.trusted.participant) return input.trusted.participant;
+    if (input.actorIdentity === "owner" || input.actorIdentity === "owner_scheduled") {
+      return { kind: "human", participantId: localOwnerParticipantId };
+    }
+    // A paired external contact has no Core 06 participant binding yet. It
+    // must not inherit the local Owner's access through a transport label.
+    return { kind: "system", participantId: "system:unbound-gateway" };
   }
 
   listSurfaceRenderers(): SurfaceRendererRegistryEntry[] {
@@ -4280,10 +4806,13 @@ export class AgentRuntime {
   private async collectionManageGetItems(schema: CollectionSchemaWithFilePath, options: { ids?: string[]; fields?: string[] } = {}): Promise<{
     collection_id: string; count: number; items: Record<string, JsonValue>[]; linked_data: JsonValue; schema_fields: JsonValue;
   }> {
-    const loaded = options.ids && options.ids.length > 0
+    const access = this.activeCollectionRoomAccess();
+    if (access) await this.assertCollectionResource(access, "collection_schema", schema.id);
+    const candidates = options.ids && options.ids.length > 0
       ? (await Promise.all(options.ids.map((id) => this.store.getCollectionRecord(schema.id, id)))).filter((record): record is CollectionRecordWithFilePath => Boolean(record))
       : await this.store.listCollectionRecords(schema.id);
-    const linkedData = await this.genericCollectionLinkedData(schema, loaded);
+    const loaded = access ? await this.filterCollectionRecordsForRoom(access, candidates) : candidates;
+    const linkedData = await this.genericCollectionLinkedData(schema, loaded, access);
     const records = loaded.map((record) => genericCollectionRecordRenderData(record, schema, loaded, linkedData));
     const projected = options.fields && options.fields.length > 0
       ? records.map((record) => projectCollectionManageFields(record, options.fields ?? []))
@@ -4309,8 +4838,11 @@ export class AgentRuntime {
     if (!schema) {
       throw new RuntimeRequestError("not_found", `Collection schema not found: ${input.collectionId}`);
     }
-    const records = await this.store.listCollectionRecords(input.collectionId);
-    const linkedData = await this.genericCollectionLinkedData(schema, records);
+    const access = this.activeCollectionRoomAccess();
+    if (access) await this.assertCollectionResource(access, "collection_schema", schema.id);
+    const candidates = await this.store.listCollectionRecords(input.collectionId);
+    const records = access ? await this.filterCollectionRecordsForRoom(access, candidates) : candidates;
+    const linkedData = await this.genericCollectionLinkedData(schema, records, access);
     const renderSpec = genericCollectionRenderSpec(schema, records, input.viewId, linkedData);
     return {
       collection_id: input.collectionId,
@@ -4324,7 +4856,8 @@ export class AgentRuntime {
   async runCollectionManageCompatibility(
     input: Record<string, JsonValue>,
     inputSource: DomainCommandInputSource,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    trusted: TrustedDomainRuntimeContext = {}
   ): Promise<JsonValue> {
     const action = stringPayload(input.action);
     const collectionId = stringPayload(input.collection_id) || stringPayload(input.slug) || stringPayload(input.id);
@@ -4333,7 +4866,7 @@ export class AgentRuntime {
         query_id: collectionSchemaDocsQueryId(),
         input_source: inputSource,
         payload: {}
-      });
+      }, trusted);
       return jsonSafe({ action, ...(unknownRecord(result.result)) });
     }
     if (action === "getSchema") {
@@ -4341,7 +4874,7 @@ export class AgentRuntime {
         query_id: collectionSchemaQueryId(),
         input_source: inputSource,
         payload: { collection_id: collectionId }
-      });
+      }, trusted);
       return jsonSafe({ action, ...(unknownRecord(result.result)) });
     }
     if (action === "getItems") {
@@ -4355,7 +4888,7 @@ export class AgentRuntime {
           ...(ids ? { ids } : {}),
           ...(fields ? { fields } : {})
         }
-      });
+      }, trusted);
       return jsonSafe({ action, ...(unknownRecord(result.result)) });
     }
     if (action === "putSchema") {
@@ -4368,7 +4901,7 @@ export class AgentRuntime {
         input_source: inputSource,
         idempotency_key: idempotencyKey,
         payload: schema as unknown as Record<string, unknown>
-      });
+      }, trusted);
       const resource = unknownRecord(unknownRecord(result.result).resource);
       return jsonSafe({ action, collection_id: schema.id, schema: Object.keys(resource).length > 0 ? resource : result.result, status: "written" });
     }
@@ -4379,7 +4912,7 @@ export class AgentRuntime {
       query_id: collectionSchemaQueryId(),
       input_source: inputSource,
       payload: { collection_id: collectionId }
-    });
+    }, trusted);
     const schemaRecord = unknownRecord(unknownRecord(schemaResult.result).schema);
     const schema = CollectionSchemaSchema.parse(schemaRecord);
     if (action === "patchSchema") {
@@ -4393,7 +4926,7 @@ export class AgentRuntime {
         input_source: inputSource,
         idempotency_key: idempotencyKey,
         payload: nextSchema as unknown as Record<string, unknown>
-      });
+      }, trusted);
       const resource = unknownRecord(unknownRecord(result.result).resource);
       return jsonSafe({ action, collection_id: schema.id, status: "patched", schema: Object.keys(resource).length > 0 ? resource : result.result });
     }
@@ -4402,7 +4935,7 @@ export class AgentRuntime {
         ? input.items.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item) && isJsonValue(item))
         : [];
       if (items.length === 0) throw new RuntimeRequestError("conflict", "collection_manage_items_required");
-      return jsonSafe({ action, ...(await this.collectionManagePutItemsViaCommands(schema, items, collectionManagePutMode(input.mode), inputSource, idempotencyKey)) });
+      return jsonSafe({ action, ...(await this.collectionManagePutItemsViaCommands(schema, items, collectionManagePutMode(input.mode), inputSource, idempotencyKey, trusted)) });
     }
     throw new RuntimeRequestError("conflict", `collection_manage_action_unsupported:${action || "missing"}`);
   }
@@ -4412,7 +4945,8 @@ export class AgentRuntime {
     items: Array<Record<string, JsonValue>>,
     mode: "create" | "upsert" | "merge",
     inputSource: DomainCommandInputSource,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    trusted: TrustedDomainRuntimeContext = {}
   ): Promise<Record<string, JsonValue>> {
     const written: string[] = [];
     const rejected: Array<Record<string, JsonValue>> = [];
@@ -4452,7 +4986,7 @@ export class AgentRuntime {
               expected_version: existing.version,
               changes: data
             }
-          });
+          }, trusted);
         } else {
           await this.runDomainCommand({
             command_id: collectionRecordCreateCommandId(),
@@ -4464,7 +4998,7 @@ export class AgentRuntime {
               data,
               resource_refs: resourceRefsPayload(item.resource_refs)
             }
-          });
+          }, trusted);
         }
         written.push(recordId);
       } catch (error) {
@@ -4474,7 +5008,70 @@ export class AgentRuntime {
     return { collection_id: schema.id, mode, written, rejected };
   }
 
-  private async genericCollectionLinkedData(schema: CollectionSchema, records: CollectionRecordWithFilePath[] = []): Promise<GenericCollectionLinkedData> {
+  private activeCollectionRoomAccess(): { principal: ParticipantPrincipal; roomId: string } | undefined {
+    const context = this.activeDomainContext.getStore();
+    return context?.participant && context.roomId
+      ? { principal: context.participant, roomId: context.roomId }
+      : undefined;
+  }
+
+  private async assertCollectionResource(
+    access: { principal: ParticipantPrincipal; roomId: string },
+    resourceKind: "collection_schema" | "collection_record",
+    resourceId: string
+  ): Promise<void> {
+    try {
+      await this.roomAuthorizationService.assertResource(access.principal, {
+        roomId: access.roomId,
+        action: "read",
+        resourceKind,
+        resourceId
+      });
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+  }
+
+  private async collectionResourceAllowed(
+    access: { principal: ParticipantPrincipal; roomId: string },
+    resourceKind: "collection_schema" | "collection_record",
+    resourceId: string
+  ): Promise<boolean> {
+    try {
+      await this.assertCollectionResource(access, resourceKind, resourceId);
+      return true;
+    } catch (error) {
+      if (error instanceof RuntimeRequestError && error.code === "forbidden") return false;
+      throw error;
+    }
+  }
+
+  private async filterCollectionRecordsForRoom(
+    access: { principal: ParticipantPrincipal; roomId: string },
+    records: CollectionRecordWithFilePath[]
+  ): Promise<CollectionRecordWithFilePath[]> {
+    const candidateAccess = await this.roomAuthorizationService.resourceCandidateAccess(
+      access.principal,
+      access.roomId,
+      "collection_record"
+    );
+    const firstStage = candidateAccess.includeLegacy
+      ? records
+      : records.filter((record) => candidateAccess.resourceIds.includes(collectionRecordBoundaryId(record.collection_id, record.id)));
+    const allowed = await Promise.all(firstStage.map(async (record) =>
+      await this.collectionResourceAllowed(access, "collection_record", collectionRecordBoundaryId(record.collection_id, record.id))
+        ? record
+        : undefined
+    ));
+    return allowed.filter((record): record is CollectionRecordWithFilePath => Boolean(record));
+  }
+
+  private async genericCollectionLinkedData(
+    schema: CollectionSchema,
+    records: CollectionRecordWithFilePath[] = [],
+    access?: { principal: ParticipantPrincipal; roomId: string }
+  ): Promise<GenericCollectionLinkedData> {
     const refOptions: Record<string, Array<Record<string, JsonValue>>> = {};
     const refRecords: Record<string, Record<string, Record<string, JsonValue>>> = {};
     const embedRecords: Record<string, Record<string, JsonValue> | null> = {};
@@ -4488,16 +5085,18 @@ export class AgentRuntime {
       const targetCollectionId = collectionDefinitionStringRuntime(ref, "collection_id")
         ?? collectionDefinitionStringRuntime(ref, "target_collection_id")
         ?? schema.id;
-      targetCollections.add(targetCollectionId);
       const [targetSchema, targetRecords] = await Promise.all([
         this.store.getCollectionSchema(targetCollectionId),
         this.store.listCollectionRecords(targetCollectionId)
       ]);
-      const targetRecordIds = new Set(targetRecords.map((record) => record.id));
-      refOptions[field] = targetRecords.map((record) => genericCollectionRefOption(record));
-      refRecords[field] = Object.fromEntries(targetRecords.map((record) => [
+      if (access && !await this.collectionResourceAllowed(access, "collection_schema", targetCollectionId)) continue;
+      const permittedRecords = access ? await this.filterCollectionRecordsForRoom(access, targetRecords) : targetRecords;
+      targetCollections.add(targetCollectionId);
+      const targetRecordIds = new Set(permittedRecords.map((record) => record.id));
+      refOptions[field] = permittedRecords.map((record) => genericCollectionRefOption(record));
+      refRecords[field] = Object.fromEntries(permittedRecords.map((record) => [
         record.id,
-        genericCollectionRecordRenderData(record, targetSchema ?? schema, targetRecords)
+        genericCollectionRecordRenderData(record, targetSchema ?? schema, permittedRecords)
       ]));
       const refId = collectionDefinitionStringRuntime(ref, "id") ?? field;
       for (const record of records) {
@@ -4530,13 +5129,17 @@ export class AgentRuntime {
       if (!targetCollectionId || !targetRecordId) {
         continue;
       }
-      targetCollections.add(targetCollectionId);
       const [targetSchema, target] = await Promise.all([
         this.store.getCollectionSchema(targetCollectionId),
         this.store.getCollectionRecord(targetCollectionId, targetRecordId)
       ]);
-      embedRecords[field] = target ? genericCollectionRecordRenderData(target, targetSchema ?? schema, [target]) : null;
-      if (!target) {
+      if (access && !await this.collectionResourceAllowed(access, "collection_schema", targetCollectionId)) continue;
+      const permittedTarget = target && access
+        ? await this.collectionResourceAllowed(access, "collection_record", collectionRecordBoundaryId(target.collection_id, target.id)) ? target : undefined
+        : target;
+      targetCollections.add(targetCollectionId);
+      embedRecords[field] = permittedTarget ? genericCollectionRecordRenderData(permittedTarget, targetSchema ?? schema, [permittedTarget]) : null;
+      if (!permittedTarget) {
         missingRefs.push({
           collection_id: schema.id,
           field,
@@ -4747,6 +5350,24 @@ export class AgentRuntime {
       toolRuns: [],
       workspaceChanges: []
     };
+    try {
+      await this.assertRunAgentExecution(input.run);
+    } catch (error) {
+      const reason = error instanceof RuntimeRequestError ? error.message : safeRuntimeErrorMessage(error);
+      const toolRun = await this.store.saveToolRun({
+        id: createId("toolrun"), run_id: input.run.id, session_id: input.run.session_id, tool_call_id: toolCallId,
+        provider_tool_name: providerToolName || "unknown_tool", action_id: stringPayload(input.event.payload.action_id) || "unknown_tool",
+        status: "ignored", input_summary: summarize(JSON.stringify(input.event.payload.input ?? {}), 220),
+        output_summary: reason, error_code: "room_authorization_denied", resource_refs: [], created_at: nowIso()
+      });
+      result.toolRuns.push(toolRun);
+      await input.recordEvent({
+        event_type: "tool_call_output",
+        payload: { status: "ignored", reason, error_code: "room_authorization_denied" },
+        tool_call_id: toolCallId
+      });
+      return result;
+    }
     if (isSamuraiToolBridgeObservedProviderTool(providerToolName, input.event.payload)) {
       const actionId = samuraiToolBridgeActionId(normalizeSamuraiToolBridgeName(providerToolName));
       const toolRun = await this.store.saveToolRun({
@@ -5007,6 +5628,7 @@ export class AgentRuntime {
     boundary?: BackendToolBoundaryFeedback,
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy
   ): Promise<RuntimeToolCallResult | RuntimeToolQueryResult | undefined> {
+    await this.assertRunAgentExecution(run);
     const providerToolName = stringPayload(event.payload.provider_tool_name);
     const providerCommand = providerToolName ? getDomainCommandForProviderToolName(providerToolName) : undefined;
     const providerQuery = providerToolName ? getDomainQueryForProviderToolName(providerToolName) : undefined;
@@ -5019,7 +5641,12 @@ export class AgentRuntime {
     // Resolve the compatibility adapter from the provider name so both direct
     // bridge calls and provider-emitted bridge events use the same path.
     if (normalizeSamuraiToolBridgeName(providerToolName || toolName) === "samurai.collection.manage") {
-      const output = await this.runCollectionManageCompatibility(args, "provider_tool_call", providerToolIdempotencyKey(run.id, run.current_attempt ?? 1, toolCallId, "collection.manage"));
+      const output = await this.runCollectionManageCompatibility(
+        args,
+        "provider_tool_call",
+        providerToolIdempotencyKey(run.id, run.current_attempt ?? 1, toolCallId, "collection.manage"),
+        { runId: run.id }
+      );
       const session = await this.store.getSession(run.session_id);
       if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
       const operation = await this.createOperation(session, runInput.envelope, "collection.manage", ["Run the legacy Collection compatibility adapter."]);
@@ -5298,12 +5925,15 @@ export class AgentRuntime {
     const sandboxInstanceRef = sandboxInstance ? gatewaySandboxInstanceRef(sandboxInstance) : undefined;
     const resourceRefs = [executionRef, ...outputRefs, ...(sandboxInstanceRef ? [sandboxInstanceRef] : [])];
     const now = nowIso();
+    const session = await this.store.getSession(run.session_id);
     const operation: OperationRecord = {
       id: createId("operation"),
       session_id: run.session_id,
       capability_id: proposalCapabilityManifest.id,
       operation: runtimeOperationIds.sandboxExec,
       actor_identity: "system",
+      ...(run.agent_id ? { participant_id: agentParticipantId(run.agent_id), participant_kind: "agent" as const, requested_by_participant_id: run.requested_by_participant_id ?? localOwnerParticipantId } : {}),
+      ...(session?.room_id ? { room_id: session.room_id } : {}),
       instruction_source: "tool_output",
       instruction_authority: "backend_runtime",
       channel: "gateway",
@@ -5441,12 +6071,15 @@ export class AgentRuntime {
     const outputRefs = normalizeMcpExecutionResourceRefs(execution.resource_refs);
     const resourceRefs = [configRef, ...outputRefs];
     const now = nowIso();
+    const session = await this.store.getSession(run.session_id);
     const operation: OperationRecord = {
       id: createId("operation"),
       session_id: run.session_id,
       capability_id: proposalCapabilityManifest.id,
       operation: runtimeOperationIds.mcpCall,
       actor_identity: "system",
+      ...(run.agent_id ? { participant_id: agentParticipantId(run.agent_id), participant_kind: "agent" as const, requested_by_participant_id: run.requested_by_participant_id ?? localOwnerParticipantId } : {}),
+      ...(session?.room_id ? { room_id: session.room_id } : {}),
       instruction_source: "tool_output",
       instruction_authority: "backend_runtime",
       channel: "gateway",
@@ -7027,12 +7660,23 @@ export class AgentRuntime {
   ): Promise<OperationRecord> {
     const now = nowIso();
     const context = options.context ?? webGatewayContext;
+    const domainParticipant = this.activeDomainContext.getStore()?.participant;
+    const participantId = domainParticipant?.participantId ?? requesterParticipantIdForGatewayContext(context);
+    const requestedByParticipantId = domainParticipant?.kind === "agent"
+      ? domainParticipant.requestedByParticipantId
+      : participantId;
     const operation: OperationRecord = {
       id: createId("operation"),
       session_id: session.id,
       capability_id: proposalCapabilityManifest.id,
       operation: operationName,
       actor_identity: context.actor_identity,
+      ...(participantId ? {
+        participant_id: participantId,
+        participant_kind: domainParticipant?.kind ?? "human" as const,
+        ...(requestedByParticipantId ? { requested_by_participant_id: requestedByParticipantId } : {})
+      } : {}),
+      ...(session.room_id ? { room_id: session.room_id } : {}),
       instruction_source: context.instruction_source,
       instruction_authority: context.actor_identity,
       channel: context.channel,
@@ -7060,6 +7704,27 @@ export class AgentRuntime {
   }
 
   private async ensureSessionForContext(context: GatewayContext, title: string): Promise<SessionRecord> {
+    const domainContext = this.activeDomainContext.getStore();
+    if (domainContext?.sessionId) {
+      const session = await this.store.getSession(domainContext.sessionId);
+      if (!session?.room_id) throw new RuntimeRequestError("conflict", `session_room_missing:${domainContext.sessionId}`);
+      if (domainContext.roomId && session.room_id !== domainContext.roomId) {
+        throw new RuntimeRequestError("conflict", `domain_session_room_mismatch:${domainContext.sessionId}`);
+      }
+      if (!domainContext.participant) throw new RuntimeRequestError("forbidden", "room_participant_required");
+      try {
+        await this.roomAuthorizationService.assertResource(domainContext.participant, {
+          roomId: session.room_id,
+          action: "edit",
+          resourceKind: "session",
+          resourceId: session.id
+        });
+      } catch (error) {
+        if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+        throw error;
+      }
+      return session;
+    }
     const existing = (await this.store.listSessions()).find((session) => session.session_key === context.session_key);
     if (existing) {
       return existing;
@@ -7068,6 +7733,14 @@ export class AgentRuntime {
     const roomId = settings.default_room_id;
     if (!roomId || !await this.store.getRoom(roomId)) {
       throw new RuntimeRequestError("conflict", `room_not_found:${roomId ?? "default"}`);
+    }
+    const participantId = requesterParticipantIdForGatewayContext(context);
+    if (!participantId) throw new RuntimeRequestError("forbidden", "room_participant_authentication_required");
+    try {
+      await this.roomAuthorizationService.assertRoom({ kind: "human", participantId }, roomId, "edit");
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
     }
     const now = nowIso();
     const session: SessionRecord = {
@@ -7081,6 +7754,10 @@ export class AgentRuntime {
       updated_at: now
     };
     await this.store.createSession(session);
+    await this.store.ensureResourceAccessBoundary({
+      resourceKind: "session", resourceId: session.id, sourceRoomId: roomId,
+      ownerParticipantId: participantId, actorId: participantId
+    });
     await this.emit("session.created", session);
     return session;
   }
@@ -10739,6 +11416,11 @@ const providerServerOwnedContextFields = [
   "workspace_id",
   "actor_id",
   "actor_identity",
+  "participant_id",
+  "participant_kind",
+  "requested_by_participant_id",
+  "trusted_participant_context",
+  "trusted_requester_participant_id",
   "correlation_id",
   "source",
   "input_source",
@@ -12319,6 +13001,9 @@ const trustedContextPayloadFields = new Set([
   "workspace_id",
   "actor_id",
   "actor_identity",
+  "participant_id",
+  "participant_kind",
+  "requested_by_participant_id",
   "correlation_id",
   "source",
   "input_source",
@@ -12346,6 +13031,132 @@ function trustedActorIdentityForSource(inputSource: DomainCommandInputSource): T
     case "generated_surface":
       return "owner";
   }
+}
+
+function sameParticipant(left: ParticipantPrincipal, right: ParticipantPrincipal): boolean {
+  if (left.kind !== right.kind || left.participantId !== right.participantId) return false;
+  if (left.kind !== "agent" || right.kind !== "agent") return true;
+  return left.agentId === right.agentId && left.requestedByParticipantId === right.requestedByParticipantId;
+}
+
+function requesterParticipantIdForGatewayContext(context: GatewayContext): string | undefined {
+  return context.actor_identity === "owner" || context.actor_identity === "owner_scheduled"
+    ? localOwnerParticipantId
+    : undefined;
+}
+
+/** Domain Context is server-owned; an unbound system principal never becomes an Owner. */
+function trustedRequesterParticipantId(context: TrustedDomainContext): string | undefined {
+  const participant = context.participant;
+  if (!participant || participant.kind === "system") return undefined;
+  return participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId;
+}
+
+function isRoomCollaborationOperation(operationId: string): boolean {
+  return operationId.startsWith("room.")
+    || operationId.startsWith("workspace.member.")
+    || operationId === "workspace.owner.transfer"
+    || operationId.startsWith("agent.");
+}
+
+/**
+ * These operations read or mutate Room-scoped Workspace content. A Session
+ * reference must be resolved by trusted ingress before they can run; using a
+ * default Room here would leak data to a Workspace-level actor.
+ */
+function requiresRoomContext(entry: DomainCommandEntry | DomainQueryEntry): boolean {
+  if (/^(chat|session|search|memory|wiki|skill|artifact|file|collection|image|graph|rollback|message|presentation)\./.test(entry.id)) {
+    return true;
+  }
+  return entry.resource_kinds.some((kind) => roomScopedResourceKinds.has(kind));
+}
+
+const roomScopedResourceKinds = new Set([
+  "artifact",
+  "collection_note",
+  "collection_record",
+  "collection_records",
+  "collection_schema",
+  "file",
+  "generated_surface",
+  "knowledge_wiki",
+  "memory",
+  "message",
+  "presentation",
+  "session",
+  "session_search",
+  "skill",
+  "skill_support_file",
+  "tool_run",
+  "workspace_change"
+]);
+
+/** Maps an existing Domain target to its Room access boundary. */
+function resourceTargetFromDomainOperation(
+  operationId: string,
+  payload: Record<string, JsonValue>
+): { kind: string; id: string } | undefined {
+  const surfaceId = stringPayload(payload.surface_id);
+  if (surfaceId && operationId.startsWith("generated_surface.")) {
+    return { kind: "generated_surface", id: surfaceId };
+  }
+
+  const artifactId = stringPayload(payload.artifact_id);
+  if (artifactId && (
+    operationId.startsWith("artifact.")
+    || operationId === "image.edit"
+    || operationId === "graph.patch"
+  )) return { kind: "artifact", id: artifactId };
+
+  const memoryId = stringPayload(payload.memory_id);
+  if (memoryId && operationId.startsWith("memory.")) return { kind: "memory", id: memoryId };
+
+  const wikiId = stringPayload(payload.wiki_id);
+  if (wikiId && operationId.startsWith("wiki.")) return { kind: "wiki", id: wikiId };
+
+  const skillId = stringPayload(payload.skill_id);
+  if (skillId && operationId.startsWith("skill.")) return { kind: "skill", id: skillId };
+
+  const filePath = stringPayload(payload.path);
+  if (filePath && (
+    operationId.startsWith("file.")
+    || operationId === "rollback.restore"
+  )) return { kind: "file", id: filePath };
+
+  const collectionId = stringPayload(payload.collection_id);
+  const recordId = stringPayload(payload.record_id);
+  if (collectionId && recordId && (
+    operationId === "collection.record.delete"
+    || operationId === "collection.patch.apply"
+    || operationId === "collection.action.run"
+  )) return { kind: "collection_record", id: collectionRecordBoundaryId(collectionId, recordId) };
+
+  if (collectionId && (
+    operationId === "collection.schema.get"
+    || operationId === "collection.records.list"
+    || operationId === "collection.view.present"
+    || operationId === "collection.action.run"
+  )) return { kind: "collection_schema", id: collectionId };
+
+  return undefined;
+}
+
+function isRoomPermissionMetadataKind(kind: string): boolean {
+  return kind === "room" || kind === "agent" || kind === "workspace_member" || kind === "room_member"
+    || kind === "room_agent" || kind === "agent_workspace_permission" || kind === "room_resource_share"
+    || kind === "resource_access_boundary";
+}
+
+function isRoomScopedResourceKind(kind: string): boolean {
+  return roomScopedResourceKinds.has(kind);
+}
+
+function instructionSourceForDomainInput(inputSource: DomainCommandInputSource): InstructionSource {
+  if (inputSource === "provider_tool_call") return "agent_reasoning";
+  if (inputSource === "gateway_inbound") return "paired_identity_message";
+  if (inputSource === "automation" || inputSource === "scheduled_context") return "scheduled_context";
+  if (inputSource === "generated_surface") return "owner_approved_policy";
+  return "owner_instruction";
 }
 
 async function settleWithin(tasks: Iterable<Promise<unknown>>, timeoutMs: number): Promise<boolean> {

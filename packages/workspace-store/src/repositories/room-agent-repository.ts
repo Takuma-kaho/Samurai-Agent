@@ -9,14 +9,17 @@ export const DEFAULT_AGENT_ID = "agent_default";
 export class RoomAgentRepository {
   constructor(private readonly db: Kysely<WorkspaceDb>) {}
 
-  async ensureDefaults(settings: SettingsRecord): Promise<{ room: RoomRecord; agent: AgentRecord }> {
+  async ensureDefaults(
+    settings: SettingsRecord,
+    options: { createRoomWithOwner?: (room: RoomRecord) => Promise<RoomRecord> } = {}
+  ): Promise<{ room: RoomRecord; agent: AgentRecord }> {
     const roomId = settings.default_room_id ?? DEFAULT_ROOM_ID;
     const agentId = settings.default_agent_id ?? DEFAULT_AGENT_ID;
     const now = nowIso();
     let room = await this.getRoom(roomId);
     if (!room) {
       room = { id: roomId, name: "Default Room", created_at: now, updated_at: now };
-      await this.createRoom(room);
+      await (options.createRoomWithOwner ?? ((record) => this.createRoom(record)))(room);
     }
     let agent = await this.getAgent(agentId);
     if (!agent) {

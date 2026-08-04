@@ -7,6 +7,7 @@ import { gatewayPairingPolicyAllowedToolsMigration } from "./005-gateway-allowed
 import { preCore04SchemaNormalizationMigration } from "./006-pre-core04-schema-normalization";
 import { core05RoomAgentFoundationMigration } from "./007-core05-room-agent-foundation";
 import { core05LearningCompletionMigration } from "./008-core05-learning-completion";
+import { core06RoomParticipantsMigration } from "./009-core06-room-participants";
 
 export const workspaceMigrations: readonly WorkspaceMigration[] = [
   coreBaselineMigration,
@@ -16,7 +17,8 @@ export const workspaceMigrations: readonly WorkspaceMigration[] = [
   gatewayPairingPolicyAllowedToolsMigration,
   preCore04SchemaNormalizationMigration,
   core05RoomAgentFoundationMigration,
-  core05LearningCompletionMigration
+  core05LearningCompletionMigration,
+  core06RoomParticipantsMigration
 ];
 
-export { coreBaselineMigration, gatewayDeliveryMigration, skillOptimizationMigration, toolRunErrorCodeMigration, gatewayPairingPolicyAllowedToolsMigration, preCore04SchemaNormalizationMigration, core05RoomAgentFoundationMigration, core05LearningCompletionMigration };
+export { coreBaselineMigration, gatewayDeliveryMigration, skillOptimizationMigration, toolRunErrorCodeMigration, gatewayPairingPolicyAllowedToolsMigration, preCore04SchemaNormalizationMigration, core05RoomAgentFoundationMigration, core05LearningCompletionMigration, core06RoomParticipantsMigration };

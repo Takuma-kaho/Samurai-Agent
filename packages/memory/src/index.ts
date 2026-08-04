@@ -15,7 +15,12 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface MemoryRetrievalPort {
-  searchMemory(query: string, limit?: number, options?: { includeArchived?: boolean; activityContext?: { room_id: string; session_id: string; agent_id: string } }): Promise<Array<MemoryFrontmatter & { file_path: string }>>;
+  searchMemory(query: string, limit?: number, options?: {
+    includeArchived?: boolean;
+    activityContext?: { room_id: string; session_id: string; agent_id: string };
+    resourceIds?: string[];
+    includeLegacy?: boolean;
+  }): Promise<Array<MemoryFrontmatter & { file_path: string }>>;
   readMemoryContent(id: string): Promise<string | undefined>;
 }
 

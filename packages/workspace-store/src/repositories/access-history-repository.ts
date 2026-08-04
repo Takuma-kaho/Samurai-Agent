@@ -92,6 +92,10 @@ export class AccessHistoryRepository {
       .values({
         id: record.id,
         actor_identity: record.actor_identity,
+        participant_id: record.participant_id ?? null,
+        participant_kind: record.participant_kind ?? null,
+        requested_by_participant_id: record.requested_by_participant_id ?? null,
+        room_id: record.room_id ?? null,
         operation_id: record.operation_id,
         capability_id: record.capability_id,
         instruction_source: record.instruction_source,
@@ -102,6 +106,28 @@ export class AccessHistoryRepository {
         rollback_point_id: record.rollback_point_id ?? null,
         created_at: record.created_at
       })
+      .execute();
+    return record;
+  }
+
+  async updateAuditRecord(record: AuditRecord): Promise<AuditRecord> {
+    await this.db
+      .updateTable("audit_records")
+      .set({
+        actor_identity: record.actor_identity,
+        participant_id: record.participant_id ?? null,
+        participant_kind: record.participant_kind ?? null,
+        requested_by_participant_id: record.requested_by_participant_id ?? null,
+        room_id: record.room_id ?? null,
+        capability_id: record.capability_id,
+        instruction_source: record.instruction_source,
+        inputs_summary: record.inputs_summary,
+        outputs_summary: record.outputs_summary,
+        policy_decision_id: record.policy_decision_id,
+        affected_resources_json: stringify(record.affected_resources),
+        rollback_point_id: record.rollback_point_id ?? null
+      })
+      .where("id", "=", record.id)
       .execute();
     return record;
   }
