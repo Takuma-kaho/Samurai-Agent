@@ -1,183 +1,128 @@
-# Public Naming Rules
+# Samurai Agent Public Naming
 
-## 0. この文書の目的
+## 0. 目的
 
-この文書は、Samurai Agent を公開・OSS化する時に、参照元プロジェクトの固有名詞や借り物感の強い用語が外向きに出ないようにするための命名ルールである。
+この文書は、README、UI、API、route、package、DB、設定値など、公開面で使う名称を固定する正本である。
 
-重要なのは、参照元を隠すことではない。
-
-実装中は、参照元との対応関係を追えることが大事である。
-ただし、ユーザーや外部開発者が見る場所では、Samurai Agent 自身の名前と概念で説明する。
+参照元の固有名は設計資料では使えるが、公開面の中心には置かない。
 
 ---
 
-## 1. 基本方針
+## 1. 製品の定義
 
-- 内部設計文書では、参照元固有名を残してよい。
-- 公開面では、参照元固有名を使わない。
-- 一般的な技術語は、無理に日本語化しない。
-- 借り物感が強い用語は、公開面に出す前に Samurai Agent 側の正式名を決める。
+正式な説明は次を使う。
 
----
+> **Samurai Agentは、AI-native Knowledge Workspaceです。**
 
-## 2. 固有名を残してよい場所
+日本語では次のように説明する。
 
-以下は内部理解・設計履歴のため、参照元固有名を残してよい。
+> **人間の知識を一か所に集め、普段のアプリから届く経験をAIが整理・成長させるWorkspaceです。**
 
-- `ARCHITECTURE.md`
-- `PRINCIPLES.md`
-- `SAMURAI_AGENT_MANUAL.md`
-- `AGENTS.md`
-- `plans/`
-- 参照元調査メモ
-- 設計レビュー
-- 実装前の比較表
-- ライセンスや出典を説明する文脈
-- 参照元URLを固定する内部設計文脈
-
-理由。
-
-- どの判断がどの参照元に由来するか追えるようにするため。
-- 実装中に「これは何を参考にした設計か」が迷子にならないようにするため。
+Samuraiの中心を「単一Agent」「Chatアプリ」「AIチーム」と表現しない。
 
 ---
 
-## 3. 固有名を出さない場所
+## 2. 基本用語
 
-以下は公開面または公開面になりやすいので、参照元固有名を使わない。
+| 公開用語 | 意味 |
+| --- | --- |
+| Workspace | 人間のKnowledgeを保管する正本 |
+| Room | Knowledge、共有、閲覧権限を分ける境界 |
+| Native App | SamuraiのChat、Session、Surfaceを提供する外部アプリ |
+| External App | Codex、Claude Codeなど、Workspaceを利用する外部アプリ |
+| Session | アプリ側の会話・作業単位 |
+| Activity History | 指示、結果、変更、検証、出所をまとめた構造化証拠 |
+| Knowledge Host | Activityを整理し、Knowledgeを育てるバックエンド役 |
+| Agent | 継続する役割と権限を持つ参加者 |
+| Agent Backend | Agentが作業を実行する交換可能なBackend cassette |
+| Memory | 再利用する短い個人・Roomの理解 |
+| Skill | 再利用する作業手順 |
+| Artifact | 文書、コード、表、画像などの成果物 |
+| Collection | 顧客、案件、タスクなどの構造化データ |
+| Surface | 必要な時だけ表示する操作・閲覧面 |
+| Gateway | 外部アプリやAutomationの接続境界 |
+
+---
+
+## 3. 用語の責務
+
+### Workspace
+
+「作業画面」ではなく「知識の保管庫」と説明する。
+
+### Room
+
+「チャットルーム」「AIチームの活動場所」と説明しない。「Knowledgeとアクセス範囲を分ける場所」と説明する。
+
+### Session
+
+Workspaceの構成要素ではなく、Native AppやExternal Appが持つ会話・作業履歴として説明する。
+
+### Chat-first
+
+Samurai全体のCore原則ではない。Native AppのUI方針として使う。
+
+### Native App
+
+Workspaceの所有者や特別な内部Agentではない。「Workspaceと最も互換性の高い外部アプリ」と説明する。
+
+### AgentとAgent Backend
+
+Agentは「誰として、どのKnowledgeにアクセスするか」。Backendは「どの実行エンジンで処理するか」。
+
+### Workspace Job
+
+内部設計用語。公開面では、必要に応じて「AI処理」「Knowledge整理」「バックグラウンド処理」と言い換える。
+
+---
+
+## 4. 推奨表現と避ける表現
+
+| 推奨 | 避ける |
+| --- | --- |
+| AI-native Knowledge Workspace | Personal Agent Interfaceを製品全体の主定義にする |
+| WorkspaceにKnowledgeが残る | Chatに記憶が残る |
+| Roomで共有範囲を分ける | RoomでAIチームが常時活動する |
+| Activityを整理してKnowledgeにする | 全会話をそのまま学習する |
+| Native AppからWorkspaceを使う | Workspace内にNative Appを埋め込む |
+| Backendを交換できる | ClaudeやCodexがWorkspaceの正本になる |
+| 必要な時だけSurfaceを表示する | Workspaceが固定ダッシュボードになる |
+
+---
+
+## 5. 参照元固有名
+
+次の名前は、設計・比較・出典の文脈では使用してよい。
+
+- MulmoClaude
+- Hermes Agent
+- Buzz
+- Type.com
+- Claude Code
+- Codex
+- Nostr
+
+次の公開面では、参照元固有名を製品の機能名・API名・DB名・設定キーとして使わない。
 
 - README
-- 公式サイト
-- 本番UI文言
-- API名
-- route名
+- UI文言
+- APIとroute
 - package名
-- database table / column名
-- env var
-- config key
-- example code
-- generated artifact template
-- public docs
+- database table / column
+- env / config key
 
-理由。
-
-- Samurai Agent が参照元プロジェクトのクローンに見えるのを避けるため。
-- 外部のユーザーや開発者に、Samurai Agent 自身のプロダクトとして理解してもらうため。
+Nostr、Relay、署名Eventは、将来のGateway接続候補として説明する。Samuraiの正本や必須イベント形式として説明しない。
 
 ---
 
-## 4. 公開面で使わない語
+## 6. 命名チェック
 
-| 内部では使ってよい語 | 公開面での扱い | 備考 |
-| --- | --- | --- |
-| `MulmoClaude` | 使わない | 参照元としては内部文書に残す |
-| `Hermes Agent` | 使わない | 参照元としては内部文書に残す |
-| `OpenClaw` | 使わない | 参照元としては内部文書に残す |
-| `Buzz` | 使わない | 参照OSSとしては内部文書に残す |
-| `Type.com` | 使わない | 非OSSの参照プロダクトとしては内部文書に残す |
-| `MulmoScript` | 使わない | 固有機能名なので公開面に出さない |
-| `gui-chat-protocol` | 使わない | 参照元由来のプロトコル名として扱う |
-| `Claude Code SDK` | 使わない | 依存しない方針は内部設計で説明する |
+公開面を変更する前に確認する。
 
----
-
-## 5. 注意して使う語
-
-以下は一般語として使えるが、参照元文脈と強く結びつく場合は公開面での名前を別途決める。
-
-| 語 | 方針 |
-| --- | --- |
-| `DSL` | 公開面に出す前に、Samurai Agent 側の正式名を決める |
-| `Collection DSL` | 公開面では避ける。データ操作機能の正式名を別途決める |
-| `Workspace is the agent` | 公開面ではそのまま使わず、Samurai Agent の説明文に言い換える |
-| `Chat summons GUIs` | 公開面ではそのまま使わず、画面が会話から開く体験として説明する |
-| `Universal controller` | 公開面では使わない |
-| `Policy` | 中核語彙として使わない。外部文脈で必要な場合だけ補足付きで使う |
-| `Audit` | 中核語彙として使わない。履歴表示は `Run History` や `Change History` に言い換える |
-| `Rollback` | 中核語彙として使わない。復元機能は後続UXとして別途命名する |
-| `Approval` | 中核語彙として使わない。外部Backend固有の確認待ちはBackend eventとして説明する |
-
----
-
-## 6. そのまま使ってよい一般語
-
-以下は一般的なAI・ソフトウェア用語として使ってよい。
-
-- Memory
-- Wiki
-- Knowledge Wiki
-- Skill
-- Runtime
-- Gateway
-- Artifact
-- Session
-- Workspace
-- Provider
-- Sandbox
-- Capability
-
-ただし、公開面で使う場合は、Samurai Agent 内での意味が伝わるように説明を添える。
-
-`Knowledge Wiki` は、濃い知識を扱うWorkspaceリソースの正式名称として使う。
-External Providerは、UIでは `External memory assist` のように補助役であることが伝わる名前にする。
-API keyやsecretの保存導線はSettings UIに置かない。
-
-### 6.1 Chat-first / Workspace-backed / UI on demand
-
-以下はSamurai Agentの公開説明で使ってよい。
-
-| 表現 | Samurai Agentでの意味 |
-| --- | --- |
-| `Chat-first` | Chatを初回入力だけでなく、継続的な主要インターフェースとして扱うこと |
-| `Workspace-backed` | Workspaceをデータ、成果物、記憶、履歴の永続状態の正本として扱うこと |
-| `UI on demand` | 必要な時だけ、会話から表、フォーム、プレビューなどの操作面を出すこと |
-
-`Workspace`を、常設のアプリ一覧や固定ダッシュボードと誤解させる説明は避ける。
-日本語では「会話から必要な画面が開く」「裏側のWorkspaceに仕事の状態が残る」と説明する。
-
-`Chat summons GUIs`は参照元に近い表現として公開面では使わない。
-
-### 6.2 Knowledge Wiki
-
-MulmoClaudeでいう `LLM Wiki` は、Samurai Agentでは `Knowledge Wiki` と呼ぶ。
-
-- 公開面だけでなく、プロジェクト内の正式名称として `Knowledge Wiki` を使う。
-- `LLM Wiki` は参照元比較や履歴説明で必要な場合だけ使う。
-- 実装名、UI文言、API payload、database column、env/config key には `LLM Wiki` / `llm_wiki` を使わない。
-- 実装上の短いresource名として `wiki` は使ってよい。
-
----
-
-## 7. 実装時のチェック
-
-公開面に関わる変更をした時は、次を確認する。
-
-```sh
-rg -n "MulmoClaude|Hermes Agent|OpenClaw|Buzz|Type\\.com|MulmoScript|gui-chat-protocol|Claude Code SDK" .
-```
-
-許可される検出先。
-
-- `ARCHITECTURE.md`
-- `PRINCIPLES.md`
-- `SAMURAI_AGENT_MANUAL.md`
-- `AGENTS.md`
-- `plans/`
-- `PUBLIC_NAMING.md`
-- `Hermes_Agent_解説.md`
-- 参照元調査メモ
-- ライセンスや出典を説明する文脈
-
-修正すべき検出先。
-
-- README
-- UI
-- API
-- route
-- package
-- database
-- env / config
-- public docs
-
-`DSL` は禁止語ではない。
-ただし、公開面で使う場合は、Samurai Agent の正式な公開名を決めてから使う。
+- WorkspaceがKnowledgeの正本になっているか
+- Roomを会話場所として説明していないか
+- SessionをWorkspaceの必須要素として説明していないか
+- Chat-firstの範囲がNative Appに限定されているか
+- Native Appを特別なWorkspace領域として扱っていないか
+- AgentとBackendを混同していないか
+- 参照元固有名が公開面へ漏れていないか

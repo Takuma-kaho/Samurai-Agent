@@ -2,317 +2,182 @@
 
 ## 0. この文書の位置づけ
 
-この文書は、Samurai Agent の設計思想、判断基準、前提を固定するための文書である。
+この文書は、Samurai Agent（以下Samurai）の設計思想と判断基準を固定する正本である。
 
-目的は、ユーザーの頭の中の前提と、実装者やAIの前提がズレないようにすること。
+文書の優先順位は次のとおり。
 
-文書の優先順位は以下。
+1. PRINCIPLES.md：なぜ作るか、何を優先するか
+2. SAMURAI_AGENT_MANUAL.md：何を作り、概念がどう関係するか
+3. ARCHITECTURE.md：どう分解し、どう接続するか
+4. PUBLIC_NAMING.md：公開面で何と呼ぶか
+5. WEB_UI_DESIGN.md：Native AppのWeb UIをどう見せるか
+6. plans/：実装順と作業記録
 
-1. `PRINCIPLES.md`: なぜそう作るのか、何を優先するのか
-2. `SAMURAI_AGENT_MANUAL.md`: 何を作り、各概念がどう関係するのか
-3. `ARCHITECTURE.md`: どう分解し、どう実装するのか
-4. `PUBLIC_NAMING.md`: 公開面でどの名前を使うか、使わないか
-5. `WEB_UI_DESIGN.md`: 固定Web UIをどう見せるか
-6. `plans/`: レビュー、改訂方針、作業計画
-7. `Hermes_Agent_解説.md`: Hermes Agent を理解するための補助資料
-
----
-
-## 1. Samurai Agent が作るもの
-Samurai Agentは、
-> 会話を中心に、人間とAIが同じ仕事状態を育てる Workspace-first Personal Agent Interface。
-
-まずは個人が所有するWorkspaceを起点に「自分専用に育つAI秘書」という体験を載せ、必要な人とAgentへ選択的に共有できる構造へ広げる。
-
-重視すること。
-
-- 個人の記憶、好み、作業手順、成果物を長期的に扱う。
-- Agent の実行部は固定せず、外部Agentや自前Agentを差し替えられる。
-- 実行結果は Workspace、Artifact、Memory、Skill に戻ってくる。
-- 使うほど、Memory と Skill が育つ。
+本文は完成形を示す。現状実装との差分はManualとArchitectureの末尾に短く記録する。
 
 ---
 
-## 2. 作らないもの
+## 1. Samuraiが作るもの
 
-Samurai Agent は、以下を目指さない。
+> **Samuraiは、人間の知識を一か所に集め、外部アプリから届く経験をAIが整理・成長させるAI-native Knowledge Workspaceである。**
 
-- 単なるチャットボット。
-- CLI Agent の薄いGUIラッパー。
-- 従来アプリ固有の複雑なUIを、Workspace内へ再現して並べ直す仕組み。
-- 独自の安全制御を主役にしたAgent基盤。
-- すべての会話、文章生成、思考をDSL化する仕組み。
-- 最初から多チャネルGateway、音声秘書、plugin marketplaceを全部載せた大きなシステム。
+価値の中心は、Samuraiの中で会話することではない。Codex、Claude Code、Native Appなど、普段使うアプリを変えずに活動を続け、その経験が一つのWorkspaceに蓄積されることである。
 
-特に重要な前提。
+~~~text
+普段のアプリで作業する
+        ↓
+指示・結果・変更・検証がActivityとして届く
+        ↓
+Knowledge Hostが根拠を整理する
+        ↓
+Roomの知識・Memory・Skill・Artifactが育つ
+        ↓
+次のアプリ作業で再利用される
+~~~
 
-- 独自性は、安全制御ではなく、できることの拡張で出す。
-- 外部Agentが持つ確認や制限は尊重するが、Samurai Agent 側で独自の承認中核を作らない。
-- 記憶、スキル、成果物、Workspace体験を育てることを優先する。
-
----
-
-## 3. Chat-first / UI on demand
-
-Chatは、初回命令だけを送る入口ではない。ユーザーとAIが意図をすり合わせ、作業を継続する主要インターフェースである。
-
-Generative UIは独立アプリではなく、会話の文脈に応じて選ばれる返答・確認・操作の表現形式である。
-
-- 文章やMarkdownで十分なら、UIを増やさない。
-- 成果物を確認したい時はArtifactを見せる。
-- 比較、選択、直接修正が速い時だけ、表、フォーム、グラフ、プレビューなどのUIを出す。
-- 必要がなくなったUIは閉じてよい。仕事状態はWorkspaceに残る。
-
-実装判断。
-
-- 話した方が速ければ会話を使う。
-- 見た方が速ければUIを出す。
-- 触った方が速ければ操作可能にする。
-- 不要ならUIを出さない。
-- Artifact、Memory、Skill、Collection、Run History、Backend eventは、必要時に理解・確認できる導線を持つ。
-- UIをログやプロンプト内だけに閉じ込めないが、常設ダッシュボードの主役にも置かない。
+Samuraiは、特定のAIモデル、単一のAgent、または新しいチャットアプリに知識を閉じ込める製品ではない。
 
 ---
 
-## 4. Workspace-backed state
+## 2. 中心原則
 
-Workspace は、Samurai Agent の永続状態の正本である。表示上の主画面やアプリ一覧を意味しない。
+### 2.1 Workspaceが知識の正本
 
-AIも人間も同じWorkspace状態を読み書きする。
+- Workspaceは人間が所有する永続的な知識の箱である。
+- Knowledge、Memory、Skill、Artifact、Collection、Activity Historyを保管する。
+- 外部アプリ、Agent、Backendを交換しても知識はWorkspaceに残る。
+- Backup・Export・RestoreはWorkspace単位で考える。
 
-Workspaceに置くもの。
+### 2.2 Roomは知識と権限の境界
 
-- profile
-- prompt
-- memory
-- skills
-- collections
-- artifacts
-- sessions
-- backend runs
-- backend events
-- workspace changes
-- files
-- indexes
-- system
+- Roomは、知識を混ぜないための分類・共有・閲覧権限の境界である。
+- Roomは会話アプリや自律チームの作業場ではない。
+- 個人、プロジェクト、顧客、組織など、必要な範囲でRoomを分ける。
 
-基本方針。
+### 2.3 Sessionはアプリ側の会話単位
 
-- ユーザーが直接見たいものは filesystem に置く。
-- 整合性、検索、履歴、queue が必要なものは SQLite に置く。
-- Agent の価値は、Workspace に記憶、スキル、成果物、履歴が蓄積されることで育つ。
-- Collectionは、AIと人間が共有する構造化データであり、独立アプリではない。
-- Artifactは、会話やBackend実行から生まれる成果物であり、独立アプリではない。
+- SessionはNative Appや外部アプリが持つ会話・作業履歴である。
+- WorkspaceはSessionを必須の親にしない。
+- Workspaceが受け取るのは、必要なActivityとSessionの参照情報である。
+- App Sessionの保存・バックアップはアプリ側が責任を持つ。
 
----
+### 2.4 Chat-firstはNative Appの原則
 
-## 5. Agent Backend Cassette
+- Native Appでは、会話を中心に作業を始め、必要な時だけUIを出す。
+- CoreはChatに依存しない。
+- 外部アプリは、同じWorkspace Coreを利用する対等なクライアントである。
 
-Samurai Agent の中核は、実行部を固定しない Host 構造である。
+### 2.5 Knowledge Hostは整理役
 
-```text
-Samurai Agent Host
-  Chat / Surface / Workspace / Memory / Skill / Gateway
-  AgentBackend cassette
-    ClaudeCodeBackend
-    CodexBackend
-    SamuraiNativeBackend
-    future external backends
-```
+Knowledge Hostは、Workspaceに届いた情報を整理し、Memory・Knowledge・Skillの学習ループを動かす。
 
-考え方。
+- Activityを要約・分類し、根拠を残す。
+- 同じRoom内へ、根拠付きの暫定知識を自動保存できる。
+- Workspace全体への昇格、削除・統合、権限変更、機密情報の採用は自動で決めない。
+- 人間の明確な保存指示はDomain Operationとして直接処理する。
 
-- Host は、Workspace、Memory、Skill、Artifact、Gateway を束ねる。
-- Backend cassette は、実際に作業するAgent実行部である。
-- Claude Code、Codex、自前実装は、同じ差し替え口の候補として扱う。
-- `ProviderAdapter` は中核の差し替え口ではなく、`SamuraiNativeBackend` 内部のモデル差し替え口である。
+### 2.6 Backend cassetteは一種類の実行境界
 
-実装判断。
+Hostから見た実行部は、交換可能なBackend cassetteで統一する。
 
-- v1では、まず差し替え口とイベント正規化を作る。
-- 最初から全Backendを完成させない。
-- 外部Agentを使う場合、そのAgentが持つ確認、tool制限、sandboxをSamurai側の状態表示として扱う。
-- Samurai Host側に独自の承認中核を再導入しない。
+~~~text
+Workspace Core
+      ↓
+Knowledge Host
+      ↓
+Agent Backend cassette
+  ├─ Claude Code
+  ├─ Codex
+  └─ Samurai Native Backend
+~~~
 
----
+外部アプリから届く作業も、Host内部の学習処理も、必要な場合は同じBackend境界を通る。外部アプリ用とNative App用で別の実行方式を作らない。
 
-## 6. Memory / Skill Improvement Loop
+### 2.7 Activityは証拠、Knowledgeは再利用物
 
-Samurai Agent の独自性は、使うほど育つことにある。
+- Activity Historyは、指示、最終結果、変更、検証、失敗・修正、出所を構造化して保存する。
+- 会話全文や内部思考をWorkspace Coreの必須保存対象にしない。
+- KnowledgeはActivityから選別された再利用物であり、Activityと同一視しない。
+- すべてのKnowledge変更は、根拠と変更履歴を追えるようにする。
 
-育てるもの。
+### 2.8 Artifact・Collection・Surfaceを分ける
 
-- Memory: 毎回効かせる短い個人理解。好み、作業スタイル、重要ルール、短い教訓。
-- Knowledge Wiki: 濃い知識。記事、調査、設計、プロジェクト知識、技術、意思決定。
-- Skill: 記憶ではなく、よくやる作業を再利用可能にした手順。
-- Session Search: SQLiteで過去会話を探すための検索面。長期Memoryの正本ではない。
-- External Provider: 検索、関連付け、抽出の補助。正本ではない。
-- Reflection: 実行後に、何を覚えるべきか、何をSkill化すべきかを見つける処理。
-- Curator: 増えすぎたMemoryやSkillを整理する処理。
+- Artifactは文書、コード、表、画像、PDFなどの成果物である。
+- Collectionは、顧客、案件、タスクなどの構造化された知識である。
+- Surfaceは、Native Appが必要な時だけ表示する一時的な操作・閲覧面である。
+- SurfaceをWorkspaceの正本にしない。
 
-基本フロー。
+### 2.9 中立な共通基盤
 
-```text
-User asks
-Host builds context
-Backend cassette runs
-Backend events return
-Workspace / Artifact updates
-Background Review updates reusable Memory / Skill
-Evaluation measures whether the learning helped
-```
-
-実装判断。
-
-- MemoryやSkillは、外部Agentの中だけに閉じ込めない。
-- Workspace側に、後から見える形で残す。
-- Memory、Knowledge Wiki、Skillの正本はWorkspace内のMarkdownに置く。
-- SQLiteは検索、履歴、index、状態管理に限定する。
-- External Provider由来の内容は、参照元付きの提案として扱い、acceptedされるまで正本にしない。
-- 参照元不明のProvider情報は保存せず、診断上の未検証ヒントに留める。
-- Background ReviewによるMemory / Skill更新は自動保存を標準にし、source run、変更前後version、根拠を履歴へ残す。
-- 承認待ちqueueや確認画面はLearning Coreの依存条件にしない。将来の任意モードとして追加できる境界だけを残す。
-- Evaluationは正式Outcomeを作らず、既存のrun、tool、workspace change、実利用記録から効果量を再計算できるread modelとして扱う。
+- Native AppをWorkspace側で特別扱いしない。
+- Claude Code、Codex、他社アプリ、Native Appは、同じ権限とActivity入口を利用する。
+- App AgentはNative Appのチーム機能であり、Workspaceの常駐参加者や外部APIの主役ではない。
 
 ---
 
-## 7. Selective Structure
+## 3. 作らないもの
 
-すべてを構造化しない。
-
-構造化すべきもの。
-
-- Agent Backend へ渡す作業単位。
-- Workspace、Artifact、Memory、Skill、Collection に戻す結果。
-- Plugin や tool へ渡す入力。
-- 後から検索、再開、表示したいイベント。
-
-構造化しすぎないもの。
-
-- 通常の会話。
-- 自由な文章生成。
-- まだ構造が固まっていない思考や探索。
-
-実装判断。
-
-- 構造化は安全制御のためではなく、Workspaceに戻せる形にするために使う。
-- 何でも型に押し込んで、秘書体験を硬くしない。
+- Chatだけで知識が完結するアプリ
+- CodexやClaude Codeの薄いGUIラッパー
+- Workspace内でAIチームが自律活動することを主目的にした製品
+- SessionをWorkspaceの必須構成要素にする設計
+- すべての会話全文を強制的にWorkspaceへ保存する仕組み
+- Hostが通常知識を無制限に書き換える自動学習
+- Nostr、Relay、署名Eventを中核正本にする設計
+- Workspace Jobに保存・検索・会話・実行のすべてを背負わせること
 
 ---
 
-## 8. External Boundary
+## 4. 判断の優先順位
 
-外部Agentや外部サービスと接続する以上、境界は必要である。
+迷った場合は、次の順で判断する。
 
-ただし、この境界はSamurai Agentの独自性ではない。
+1. 人間の知識が一つのWorkspaceに残るか
+2. 外部アプリの普段の体験を壊していないか
+3. Workspace・Room・Session・Agent・Backendの責務が分かれているか
+4. ActivityとKnowledgeを区別できるか
+5. 誤った自動学習を同じRoom内に閉じ込められるか
+6. Backendを交換しても同じCoreを使えるか
+7. UIを必要な時だけ出せるか
+8. 後から見直せる根拠と履歴が残るか
 
-扱う境界。
-
-- sandbox
-- allowed tools
-- MCP config
-- SecretRef
-- path normalization
-- pairing
-- allowlist
-- external backend native confirmation
-
-実装判断。
-
-- 外部Backendが自前で確認待ちになった場合、Samurai Hostは状態を表示、または中継するだけ。
-- Host側で独自の可否判定レイヤーを作らない。
-- secretや外部接続は、BackendやGatewayの運用境界として扱う。
-- 外部由来コンテンツはデータとして扱い、ユーザーやHostの命令として扱わない。
+新しい概念を追加する前に、既存の境界で表現できないかを確認する。
 
 ---
 
-## 9. Multilingual by Default
+## 5. 設計の全体像
 
-Samurai Agent は、多言語対応を後から足す翻訳作業として扱わない。
+~~~mermaid
+flowchart LR
+  Apps["Codex / Claude Code / Native App"]
+  Gateway["Gateway・共通入口"]
+  Ingest["Activity Ingest"]
+  Core["Workspace Core"]
+  Host["Knowledge Host"]
+  Cassette["Backend cassette"]
+  Knowledge["Room Knowledge・Memory・Skill"]
+  Surface["Native App Surface"]
 
-多言語対応は、Workspace、Memory、Artifact、Agent出力の初期設計の一部である。
+  Apps --> Gateway
+  Gateway --> Ingest
+  Ingest --> Core
+  Core --> Host
+  Host --> Cassette
+  Host --> Knowledge
+  Core --> Knowledge
+  Apps --> Surface
+  Surface --> Gateway
+~~~
 
-理由。
-
-- ユーザーは日本語UIで、英語資料を読み、英語Artifactを作ることがある。
-- 外部コンテンツ、Memory、Artifactは、それぞれ別の言語を持つことがある。
-- 後から多言語化すると、保存データ、検索、Agent出力の境界が混ざりやすい。
-
-実装判断。
-
-- `ui_locale`、`output_locale`、`source_locale`、`content_locale` を混ぜない。
-- 原文は必ず保持し、翻訳は派生データとして扱う。
-- 内部enumやschema keyは翻訳しない。
-- 表示文言、Agent出力、Artifact本文は、必要なlocaleに合わせる。
-- v1から `en`、`ja`、`zh`、`ko`、`es`、`pt-BR`、`fr`、`de` をseed localeとして扱う。
-- 設計・文案のcanonicalは `ja`、first-class localeは `en` とする。
-
----
-
-## 10. 参照元の扱い
-
-MulmoClaude / Hermes Agent / OpenClaw / Buzz は参照OSS、Type.comは参照プロダクトとして扱う。いずれも、そのまま結合・再現する対象ではない。
-
-それぞれの勝ち筋を参照し、Samurai Agent として greenfield に再構成する。
-
-正式な参照元は、`ARCHITECTURE.md` の `Reference Sources` を正本とする。
-
-ここでの参照元固有名は、内部設計上の索引である。
-
-- 実装中は、どの判断がどの参照元に由来するか追えるように残す。
-- 公開名、製品名、README、UI文言、API名、package名には使わない。
-- 公開面の命名は `PUBLIC_NAMING.md` に従う。
-- Memory / Skill / Runtime / Gateway などの一般的な技術語は、無理に日本語化しない。
-
-役割分担。
-
-- MulmoClaude: Host、Workspace状態、Artifact、Collection、Renderer、Plugin composition の参照元。アプリ中心UXは完成形にしない。
-- Hermes Agent: Memory、Skill、Reflection、Self-improvement loop の参照元。
-- OpenClaw: Gateway、Session routing、Pairing、Sandbox、External boundary の参照元。
-- Buzz: Room、Human／Agentの共通活動面、署名Event、Relay、Identity境界の参照元。Event logをSamuraiのWorkspace正本として模倣しない。
-- Type.com: 共有Space、Knowledge・Skill・Integration、Codex／Claude Codeからの作業持ち込み体験の参照元。非OSSのため、公開情報から確認できる製品体験だけを参照する。
-- Claude Code / Codex: 差し替え可能な Agent Backend cassette の候補。
+この図の中心はChatではなく、Workspace Coreである。Native AppのChatやSurfaceは、Coreを利用する一つのクライアントである。
 
 ---
 
-## 11. 責務分離
+## 6. 実装時の注意
 
-Chat / Surface / Host / Agent Backend / Gateway / Memory / Skill / Workspace / Artifact / Collection の責務を混ぜない。
-
-基本の役割。
-
-- Chat: ユーザーとAIが意図をすり合わせ、作業を継続する主要インターフェース。
-- Surface: 必要時だけ現れ、状態を見せたり直接操作したりする表現面。
-- Host: Chat、Surface、Workspace、Memory、Skill、Gatewayを束ね、どのAgent Backendに流すかを決める場所。
-- Agent Backend: Hostから渡された作業を実行する、差し替え可能な実行部。
-- Gateway: Web UI以外の入口や外部チャネルを受ける境界。
-- Memory: 長期的に残す事実、好み、作業手順、文脈。
-- Skill: 繰り返し使える作業手順。
-- Workspace: Artifact、Collection、Memory、Skill、履歴が集まる作業机。
-- Artifact: 文書、表、グラフ、画像、PDFなどの成果物。
-- Collection: 顧客、案件、タスクなどの構造化された業務データ。
-
-実装判断。
-
-- GUIだけでBackend実行を抱え込まない。
-- Agent BackendだけにMemoryやSkillの正本を閉じ込めない。
-- GatewayにWorkspace更新の責務を持たせない。
-- Hostを太らせすぎず、WorkspaceとBackendの接続役にする。
-
----
-
-## 12. 判断に迷った時の優先順位
-
-迷ったら、以下の順に優先する。
-
-1. ユーザーが会話の流れで作業を理解・修正できる。
-2. Workspace、Memory、Skillに価値が戻る。
-3. UIは必要な時だけ現れ、状態そのものを正本にしない。
-4. Agent Backendを固定しない。
-5. MulmoClaude型HostとSurfaceの強みを活かす。
-6. Hermes的な改善ループを殺さない。
-7. 外部接続の境界は守るが、独自安全設計を主役にしない。
-8. 一気に広げず、縦切りで価値を通す。
-9. 仕様を増やす時は、後から読む人が迷わない粒度で残す。
-
-この優先順位に反する変更は、先に設計意図を確認する。
+- Domain Operationは明確な保存・変更命令を扱う。
+- Activity Ingestは外部の実行結果を正規化する。
+- Workspace JobはAI処理、学習、Curator、長時間処理に限定する。
+- Gatewayは入口と接続境界であり、Workspaceへ直接ファイルを書き込まない。
+- Agentは継続する参加者・権限主体、Backendは交換可能な実行エンジンとして扱う。
+- 設計資料を変更する時も、正本間の用語を先に確認する。
