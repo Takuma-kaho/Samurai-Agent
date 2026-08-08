@@ -147,6 +147,10 @@ type FunctionLike = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFun
 const manifest = staticManifestSource as StaticSchemaManifest;
 const definitions = [...operationDefinitions].sort((left, right) => left.id.localeCompare(right.id));
 const definitionById = new Map(definitions.map((definition) => [definition.id, definition]));
+// This compatibility Operation intentionally preserves its legacy DTO only
+// to return `session_scope_write_disabled`. Its public fields must not be
+// consumed or persisted after Core06 stopped new Session-scope writes.
+const terminalInputRejectionOperationIds = new Set(["memory.session.create"]);
 const staticAjv = createAjv();
 const projectionAjv = createAjv();
 const ts: typeof import("typescript") = createRequire(resolve(process.env.SAMURAI_REPO_ROOT ?? process.cwd(), "package.json"))("typescript");
@@ -264,7 +268,7 @@ function validateManifest(value: StaticSchemaManifest): void {
   assert.equal(value.review.required_endpoints, 300, "schema_manifest_required_endpoint_count_invalid");
   assert.equal(value.review.reviewed_endpoints, 300, "schema_manifest_reviewed_endpoint_count_invalid");
   assert.equal(value.review.unreviewed_endpoints, 0, "schema_manifest_unreviewed_endpoints");
-  assert.equal(value.review.required_schema_nodes, 860, "schema_catalog_required_node_count_invalid");
+  assert.equal(value.review.required_schema_nodes, 871, "schema_catalog_required_node_count_invalid");
   assert.equal(value.review.reviewed_schema_nodes, value.review.required_schema_nodes, "schema_catalog_reviewed_node_count_invalid");
   assert.equal(value.review.unreviewed_schema_nodes, 0, "schema_catalog_unreviewed_nodes");
   assert.equal(value.global_payload_limits.review, "reviewed", "schema_manifest_global_limit_unreviewed");
@@ -391,8 +395,9 @@ function assertInputFieldUsage(): InputFieldUsageSummary {
     if (!definition) throw new Error(`input_field_usage_definition_missing:${operationId}`);
     const fields = projectedInputFieldKeys(definition, file);
     const handler = operationHandler(ast, file);
-    const used = usedInputFields(ast, handler, fields);
     topLevelFields += fields.length;
+    if (terminalInputRejectionOperationIds.has(operationId)) continue;
+    const used = usedInputFields(ast, handler, fields);
     for (const field of fields) {
       if (!used.has(field)) findings.push({ operationId, field, file: relative(repositoryRoot, file) });
     }

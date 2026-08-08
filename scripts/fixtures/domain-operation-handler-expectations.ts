@@ -200,8 +200,8 @@ export const handlerExpectations = {
     calls: [{ method: "transferWorkspaceOwnership", args: [trustedContext, "human:new-owner"] }]
   },
   "session.create": {
-    input: { title: "Fixture session", room_id: "room_fixture", ui_locale: "en", output_locale: "ja" },
-    calls: [{ method: "createSession", args: [trustedContext, { title: "Fixture session", roomId: "room_fixture", uiLocale: "en", outputLocale: "ja" }] }]
+    input: { title: "Fixture session", ui_locale: "en", output_locale: "ja" },
+    calls: [{ method: "createSession", args: [trustedContext, { title: "Fixture session", uiLocale: "en", outputLocale: "ja" }] }]
   },
   "session.search.reindex": { input: {}, calls: [{ method: "reindexSessionSearch", args: [] }] },
   "session.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSessions", args: [trustedContext, "fixture", 5] }] },

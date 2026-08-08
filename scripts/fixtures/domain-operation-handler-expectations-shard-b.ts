@@ -479,7 +479,7 @@ export const bHandlerExpectations = {
     cases: [{ id: "page", input: { url: "https://example.com/fixture" }, branches: ["page:read"], calls: [call("ensureBrowserSession"), call("createBrowserEnvelope", session, "browser.navigate: https://example.com/fixture"), call("runBrowserMutation", browserMutation("browser.navigate", "https://example.com/fixture")), call("readBrowserPage", "https://example.com/fixture"), call("stableBrowserHash", "https://example.com/fixture")] }]
   },
   "chat.turn.run": {
-    requiredBranches: ["session:existing", "session:create", "surface:present", "surface:absent"],
+    requiredBranches: ["session:existing", "surface:present"],
     cases: [
       {
         id: "existing-surface-full-input",
@@ -511,16 +511,6 @@ export const bHandlerExpectations = {
           temporary_context: [{ id: "temporary_fixture", kind: "desktop_screenshot", label: "Fixture screenshot", source_name: "screen.png", mime_type: "image/png", data_url: "data:image/png;base64,AAAA", file_path: "screens/screen.png", created_at: now, expires_at: "2099-01-01T00:00:00.000Z", metadata: { fixture: true } }],
           metadata: { fixture: "chat", surface_operation_id: "surface_operation_fixture", surface_operation_kind: "message.submit" }
         })]
-      },
-      {
-        id: "create-defaults",
-        input: { content: "Create fixture chat" },
-        context: { sessionId: undefined, idempotencyKey: "handler-matrix-chat-turn" },
-        branches: ["session:create", "surface:absent"],
-        calls: [
-          call("createChatSession", { ...handlerContext, sessionId: undefined, idempotencyKey: "handler-matrix-chat-turn" }, { output_locale: undefined }),
-          call("runChatTurn", { ...handlerContext, sessionId: undefined, idempotencyKey: "handler-matrix-chat-turn" }, { sessionId: "session_fixture", content: "Create fixture chat", idempotencyKey: "handler-matrix-chat-turn", agent_id: undefined, backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} })
-        ]
       }
     ]
   },

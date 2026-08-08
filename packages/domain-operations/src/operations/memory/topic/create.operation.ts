@@ -1,13 +1,13 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
 import { SupportedLocaleSchema } from "@samurai-agent/core-schemas";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { memoryWriteValueSchema } from "../../../value-objects/memory.js";
 import { createRoomTopicMemory, type MemoryTopicCreatePorts as MemoryTopicCreateOperationPorts } from "../create-memory.js";
 
 const Input = z.object({
   "content": z.string().min(1),
-  "input_locale": SupportedLocaleSchema.optional(), "metadata": z.record(domainJsonValueSchema).default({}),
+  "input_locale": SupportedLocaleSchema.optional(),
   "output_locale": SupportedLocaleSchema.optional(),
   "topic_kind": z.string().trim().min(1).default("preference")
 }).strict();
@@ -19,7 +19,7 @@ const memoryTopicCreate = defineCommand<MemoryTopicCreatePorts>()({
   ...{
   "kind": "command",
   "id": "memory.topic.create",
-  "version": "4.0",
+  "version": "5.0",
   "availability": "active",
   "title": "Create topic memory",
   "description": "Create a visible topic memory candidate.",
