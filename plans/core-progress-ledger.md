@@ -1,8 +1,8 @@
 # Core 実装進捗台帳
 
-最終更新: 2026-08-03
+最終更新: 2026-08-08
 
-現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-04と新Core-06は「完了」**、**Core-03・Core-05・Core-07・Core-08は「基盤あり・個別完了作業は未着手」**である。
+現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-04は「完了」**、**新Core-06は「完了」**、**Core-03・Core-05・Core-07・Core-08は「基盤あり・個別完了作業は未着手」**である。
 
 ## 0. この文書の目的
 
@@ -31,7 +31,7 @@
 | 3 | Backend実行・Event正規化 | 概ね実装済み。Codex、Claude Code、Nativeを差し替え可能 |
 | 4 | Workspace・永続化 | 完了。Phase 1〜3で責務分離、原子的更新、検索・同期、Bundle/Restoreを確認 |
 | 5 | Memory・Wiki・Skill・学習ループ | 基盤実装済み。Background Review、Evaluation、Curatorが存在 |
-| 6 | Room参加者・権限・共有境界 | 完了。Workspace役割とRoom参加を分離し、Agent個別許可・情報境界・明示共有を実装・検証した |
+| 6 | Room・Principal・Permission・Session参照境界 | 完了。旧Room権限基盤に加え、Sessionを任意参照へ分離し、Room・Principal・Run中心の入口と実行を実装・検証した |
 | 7 | Presentation・Generated Surface | 概ね実装済み。表示形式の選択、Surface契約、生成Surfaceがある |
 | 8 | Gateway・Automation・外部境界 | 概ね実装済み。routing、pairing、sandbox、定期実行がある |
 
@@ -46,7 +46,7 @@
 | Core-03 | 基盤あり・個別完了作業は未着手 | Backend差し替えとEvent正規化 | 未作成。着手時に作成する |
 | Core-04 | **完了** | Phase 1〜3でfilesystem/SQLiteの正本境界、原子的更新、検索・同期、移植可能なBundle/Restoreを実装・検証 | [core-04-phase-3-implementation-review.md](./core-04-phase-3-implementation-review.md) |
 | Core-05 | 基盤あり・個別完了作業は未着手 | Memory、Wiki、Skill、Review、Evaluation、Curator | 未作成。着手時に作成する |
-| Core-06 | **完了** | 人とAgentのRoom参加、役割・個別許可、共有境界、解除即時反映 | 本節のCore-06チェックリスト |
+| Core-06 | **完了** | 人とAgentのRoom参加、役割・個別許可、共有境界、Session参照境界、解除即時反映 | 本節のCore-06チェックリスト |
 | Core-07 | 基盤あり・個別完了作業は未着手 | Presentation選択、Surface契約、Generated Surface | 未作成。着手時に作成する |
 | Core-08 | 基盤あり・個別完了作業は未着手 | routing、pairing、sandbox、Automation | 未作成。着手時に作成する |
 
@@ -116,6 +116,35 @@
 - [x] Workspace Ownerでも未参加Roomを読めないこと、解除後に新しいChat・検索・Tool・保存が拒否されること、Room間共有の出所維持を確認した。
 - [x] 結果を更新履歴へ残し、全項目を説明できることを確認した。
 
+### 新Core-06: Room・Principal・Permission・Session参照境界の再構成
+
+状態: **完了**
+
+旧Core-06の権限基盤完了とは分けて管理する。完成形の設計は変更せず、Session依存をRoom・Principal・Run中心へ整理する移行実装だけを対象とする。
+
+#### 実装済み
+
+- [x] PrincipalをHuman / Agent / External App / Systemへ分離し、External AppをRoom参加者にせず、`app_id`と委任元をRun・Domain監査へ残す。
+- [x] Human・Agent・External Appの委任関係と、Room参加・Agent許可・Resource権限の共通評価を追加した。
+- [x] 任意SessionRefとTrusted Workspace Contextを追加し、公開payloadからRoom・Principal・委任元を注入できない入口へ変更した。
+- [x] Room操作・有効Operation一覧・検索・Host実行をSessionなしで扱えるようにした。
+- [x] BackendRun、Backend Event、Tool Run、Workspace ChangeのSession参照を任意化し、Room・Principal・source・Runを正本にした。
+- [x] SQLite migration `011`、汎用Run lease、Session共有の新規拒否、legacy保持を追加した。
+- [x] Native Appの既存Session APIを一方向の互換境界として残し、SessionなしのCore06操作で偽Sessionを生成しないようにした。
+- [x] Session参照をA〜Eへ分類し、`ensureSession`を使うC〜EとNative App操作を閉じたSession互換一覧で管理した。
+- [x] 明示Workspace scopeのMemory・Wiki・Skillを参加済みRoomの読み取り候補にし、Room境界付きResourceをscope値だけで越境させないようにした。
+- [x] セルフレビューを[Core06セルフレビュー](./core06-self-review.md)へ記録した。
+
+#### 検証済みと未検証
+
+- [x] `pnpm core:06:verify`を最終差分で実行した（Focused Vitest 11 files / 88 tests、関連7 packageのtypecheck、生成Operation整合、architecture boundary、diff check）。
+- [x] Backup / Restore、migration再起動、SessionなしRunの再起動・取消・再開のFocused検証を通過した。
+- [x] `git diff --check`を最終差分で実行した。
+- [x] Sessionなしで有効なCore06 OperationがSessionを自動生成しないことを、Wiki・Skill・Topic Memory・File・Host実行と互換一覧の負例で確認した。
+- [x] 実Codex / Claude Code接続、OAuth、pairing、Gateway routingはCore09対象のため、このCore06判定には含めない。
+
+根拠: [Session参照分類](./core06-session-reference-classification.md)、[セルフレビュー](./core06-self-review.md)。
+
 ## 5. Core-02〜Core-08の扱い
 
 - Core-02は、専用台帳でPhase 0〜2と`C02-FINAL-01`だけを管理する。
@@ -149,6 +178,8 @@
 | 2026-07-29 | Core-04 | Phase 1〜3を完了。Bundle作成・検証・Import/Export、journal付きRestore・中断回復、Facade委譲を完成 | operation catalog確認、canonical ledger再生成（102 Command / 17 Query / 5 Deprecated）、対象3 packageのtypecheck、`pnpm core:workspace-persistence:verify`、`git diff --check`が成功。独立レビューで見つけたjournal書込み失敗時の再起動漏れも修正・再検証済み。根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)。ベースHEADは`ec35ea0e30e98d27f6fc160e3b43639529d29f7b`、ユーザー指定により変更は未コミット | 次に着手するCoreを別途決める |
 | 2026-08-03 | 新Core-06 | Room参加者・役割・Agent個別許可・情報境界・明示共有の実装へ着手。旧Artifact・Collection分類は採用しない | migration `009`、共通権限判定、Domain Operation、検索/Context/Host接続を追加。最終の集中検証と構造確認は継続中 | 検証結果とセルフチェックを記録し、完了条件を再判定する |
 | 2026-08-04 | 新Core-06 | 前回実装後の深い本番経路を調整。全操作分類を明示し、候補先行・直前再確認、共有先の読み取り境界、ファイル・履歴・診断・予約処理のRoom境界、SQLite migration 010の整合性を追加 | focused Vitest 3 files / 15 tests、関連4 packageのtypecheck、`node scripts/generate-domain-operation-index.mjs --check`（150 bindings）、`git diff --check`が成功。総合Domain ingress確認はCore 06対象外のGateway fixtureで停止したため、成功扱いにしていない | 次のCoreは別途決定する |
+| 2026-08-06 | 新Core-06 | 先行セルフレビューの3件（Memory偽Session、External App Context不一致、SessionなしHost別経路）と旧Chat APIの`room_id`互換漏れを修正。`010`→`011` migrationの既存行保持テストを追加 | `pnpm core:06:verify`はFocused Vitest 10 files / 72 tests、関連7 packageのtypecheck、生成Operation整合、architecture boundary、diff checkまで成功。だがSessionなし`wiki.proposal.create`でSession行が0件から1件へ増えることを実測。`apps/server/src/index.test.ts`はexit 130で未検証。変更は未コミット・未push | Wiki・Skill等の`ensureSession`経路をOperation単位でA〜Eへ分類し、Core06対象をRoom・Principal・Run中心化またはSessionなし入口で閉鎖してから再判定する |
+| 2026-08-08 | 新Core-06 | 全`ensureSession`経路をA〜Eと閉じた互換一覧へ照合し、Curator漏れを修正。SessionなしWiki/Skill/Memory/Fileを共通Room経路へ整理し、Session共有Schema、Workspace共通知識候補、Core05 fixtureをCore06契約へ補正 | `pnpm core:06:verify`成功（Focused Vitest 11 files / 88 tests、関連7 package typecheck、150 generated bindings、architecture boundary、diff check）。追加の集中検証は3 files / 30 testsとWorkspace Store/Runtime typecheckが成功。変更は未コミット・未push | Core07以降のActivity、Artifact/Collection/Surface完全分離、実Gateway接続は各Coreの着手時に扱う |
 
 追記用テンプレート:
 

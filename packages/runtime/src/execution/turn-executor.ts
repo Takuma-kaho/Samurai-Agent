@@ -1,6 +1,6 @@
 import type { BackendOutputEvent, BackendRuntimeFailure, BackendRunInput, RuntimeFailureCauseCategory } from "@samurai-agent/agent-backends";
 import { BackendTerminalEvidenceSchema, type BackendEventRecord, type BackendRunRecord, type GatewayBoundaryPolicy, type JsonValue } from "@samurai-agent/core-schemas";
-import type { CommittedEventPublisherPort, HostDiagnosticsPort, PreparedTurn, TurnCleanupPort, TurnToolExecutionPort } from "../host/host-types";
+import type { CommittedEventPublisherPort, HostDiagnosticsPort, PreparedBackendExecution, PreparedTurn, TurnCleanupPort, TurnToolExecutionPort } from "../host/host-types";
 import { normalizeBackendOutputEvent } from "../backend/event-bridge";
 import { BackendEventJournal } from "./backend-event-journal";
 import { RunLifecycle, type LifecycleRunStore, type PreparedTerminalSettlement } from "./run-lifecycle";
@@ -27,7 +27,7 @@ export interface TurnExecutorOptions {
 
 export interface TurnExecutorCleanupInput {
   readonly runId: string;
-  readonly sessionId: string;
+  readonly sessionId?: string;
 }
 
 export interface TurnResumeExecutionInput {
@@ -67,7 +67,7 @@ export class TurnExecutor {
     this.diagnostics = options.diagnostics;
   }
 
-  async execute(prepared: PreparedTurn, signal?: AbortSignal): Promise<TurnExecutionResult> {
+  async execute(prepared: PreparedBackendExecution, signal?: AbortSignal): Promise<TurnExecutionResult> {
     throwIfAborted(signal);
     let run = prepared.run;
     let currentPrepared = prepared;
@@ -88,12 +88,13 @@ export class TurnExecutor {
     if (!run.backend_session_id && backend.sessionPolicy.acquisition === "start_session") {
       throwIfAborted(signal);
       const sessionHandle = await backend.startSession!({
-        session_id: run.session_id,
-        session_key: currentPrepared.session.session_key,
-        ...(currentPrepared.session.room_id ? { room_id: currentPrepared.session.room_id } : {}),
+        run_id: run.id,
+        ...(run.session_id ? { session_id: run.session_id } : {}),
+        session_key: backendSessionKeyForExecution(currentPrepared),
+        ...(run.room_id ? { room_id: run.room_id } : {}),
         ...(currentPrepared.backendInput.agent_context ? { agent_id: currentPrepared.backendInput.agent_context.id } : {}),
         ...(currentPrepared.backendInput.backend_session_key ? { backend_session_key: currentPrepared.backendInput.backend_session_key } : {}),
-        output_locale: currentPrepared.session.output_locale,
+        output_locale: currentPrepared.backendInput.output_locale,
         metadata: currentPrepared.backendInput.metadata
       });
       throwIfAborted(signal);
@@ -108,8 +109,8 @@ export class TurnExecutor {
     currentPrepared = withRun(currentPrepared, run, {
       ...currentPrepared.backendInput,
       run_id: run.id,
-      session_id: run.session_id,
-      input_message_id: run.input_message_id,
+      ...(run.session_id ? { session_id: run.session_id } : {}),
+      ...(run.input_message_id ? { input_message_id: run.input_message_id } : {}),
       ...(run.backend_session_id ? { backend_session_id: run.backend_session_id } : {}),
       ...(signal ? { abort_signal: signal } : {})
     });
@@ -130,7 +131,7 @@ export class TurnExecutor {
             sourceEvent,
             run: committedRun,
             backendInput: currentPrepared.backendInput,
-            gatewayBoundaryPolicy: currentPrepared.request.gatewayBoundaryPolicy
+            gatewayBoundaryPolicy: gatewayBoundaryPolicyForExecution(currentPrepared)
           });
         }
       }
@@ -138,14 +139,17 @@ export class TurnExecutor {
     if (execution.cleanupError !== undefined) {
       await this.recordDiagnostic(execution.run, "host_cleanup_failed", "iterator_cleanup", execution.cleanupError);
     }
-    return { ...execution, prepared: withRun(currentPrepared, execution.run) };
+    return isPreparedTurn(currentPrepared)
+      ? { ...execution, prepared: withRun(currentPrepared, execution.run) }
+      : execution;
   }
 
   async resumeRun(input: TurnResumeExecutionInput): Promise<TurnExecutionResult> {
+    const sessionId = input.run.session_id;
     if (!input.backend.resumeRun) throw new Error("backend_resume_unsupported");
     const execution = await consumeBackendEvents({
       run: input.run,
-      sessionId: input.run.session_id,
+      sessionId,
       stream: input.backend.resumeRun(input.run.id, input.input),
       journal: this.journal,
       lifecycle: this.lifecycle,
@@ -172,9 +176,10 @@ export class TurnExecutor {
   /** Consume a durable backend stream without executing Host-owned Tools. */
   async syncRun(input: TurnSyncExecutionInput): Promise<TurnExecutionResult | undefined> {
     if (!input.backend.streamEvents) return undefined;
+    const sessionId = input.run.session_id;
     const execution = await consumeBackendEvents({
       run: input.run,
-      sessionId: input.run.session_id,
+      sessionId,
       stream: input.backend.streamEvents(input.run.id),
       journal: this.journal,
       lifecycle: this.lifecycle,
@@ -231,6 +236,7 @@ export class TurnExecutor {
     backendInput: BackendRunInput;
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
   }): Promise<void> {
+    const sessionId = input.run.session_id;
     const toolCallId = input.sourceEvent?.tool_call_id ?? (typeof input.event.payload.tool_call_id === "string" ? input.event.payload.tool_call_id : undefined);
     if (!toolCallId) throw new Error("tool_call_id_required");
     await this.toolExecution.execute({
@@ -246,7 +252,7 @@ export class TurnExecutor {
         const normalizedToolEvent = normalizeBackendOutputEvent(toolEvent);
         const recorded = await this.journal.appendCanonicalEvent({
           runId: input.run.id,
-          sessionId: input.run.session_id,
+          ...(sessionId ? { sessionId } : {}),
           ...(normalizedToolEvent.backend_session_id ? { backendSessionId: normalizedToolEvent.backend_session_id } : {}),
           attemptNo: input.run.current_attempt ?? 1,
           eventType: normalizedToolEvent.event_type,
@@ -269,6 +275,20 @@ export class TurnExecutor {
       await this.recordDiagnostic(run, "host_emit_failed", operationId, error);
     }
   }
+}
+
+function isPreparedTurn(prepared: PreparedBackendExecution): prepared is PreparedTurn {
+  return "session" in prepared;
+}
+
+function backendSessionKeyForExecution(prepared: PreparedBackendExecution): string {
+  return isPreparedTurn(prepared)
+    ? prepared.session.session_key
+    : prepared.backendInput.backend_session_key ?? `run:${prepared.run.id}`;
+}
+
+function gatewayBoundaryPolicyForExecution(prepared: PreparedBackendExecution): GatewayBoundaryPolicy | undefined {
+  return isPreparedTurn(prepared) ? prepared.request.gatewayBoundaryPolicy : prepared.gatewayBoundaryPolicy;
 }
 
 export function lifecycleEventForBackendEvent(event: BackendOutputEvent, requestedCancel = false) {
@@ -314,7 +334,7 @@ function failureCauseCategory(value: unknown, event: BackendOutputEvent): Runtim
   return "unknown";
 }
 
-export async function consumeBackendEvents(input: { run: BackendRunRecord; sessionId: string; stream: AsyncIterable<BackendOutputEvent>; journal: BackendEventJournal; store?: LifecycleRunStore; clock?: () => string; lifecycle?: RunLifecycle; emitCommitted?: (event: TurnExecutionResult["events"][number], run: BackendRunRecord, sourceEvent?: BackendOutputEvent) => Promise<void> }): Promise<TurnExecutionResult> {
+export async function consumeBackendEvents(input: { run: BackendRunRecord; sessionId?: string; stream: AsyncIterable<BackendOutputEvent>; journal: BackendEventJournal; store?: LifecycleRunStore; clock?: () => string; lifecycle?: RunLifecycle; emitCommitted?: (event: TurnExecutionResult["events"][number], run: BackendRunRecord, sourceEvent?: BackendOutputEvent) => Promise<void> }): Promise<TurnExecutionResult> {
   let run = input.run;
   const events: TurnExecutionResult["events"] = [];
   let terminal = false;
@@ -480,8 +500,8 @@ function mergeBackendSession(run: BackendRunRecord, backendSessionId: string, so
   };
 }
 
-function withRun(prepared: PreparedTurn, run: BackendRunRecord, backendInput: PreparedTurn["backendInput"] = prepared.backendInput): PreparedTurn {
-  return Object.freeze({ ...prepared, run, backendInput });
+function withRun<T extends PreparedBackendExecution>(prepared: T, run: BackendRunRecord, backendInput: BackendRunInput = prepared.backendInput): T {
+  return Object.freeze({ ...prepared, run, backendInput }) as unknown as T;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

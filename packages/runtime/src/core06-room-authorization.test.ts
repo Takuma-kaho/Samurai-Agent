@@ -1,8 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { nowIso, type AgentRecord, type RoomRecord, type SessionRecord } from "@samurai-agent/core-schemas";
+import { nowIso, type AgentRecord, type MemoryFrontmatter, type RoomRecord, type SessionRecord } from "@samurai-agent/core-schemas";
 import { agentParticipantId, humanParticipantId, localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime } from "./agent-runtime.js";
@@ -22,6 +22,24 @@ afterEach(async () => {
 });
 
 describe("Core 06 runtime authorization", () => {
+  it("does not expose Session as a new Room-share target", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "room.resource.share",
+      idempotency_key: "core06-session-share-schema",
+      payload: {
+        target_room_id: "room_default",
+        resource: { kind: "session", id: "legacy-session" }
+      }
+    }, {
+      roomId: "room_default",
+      participant: { kind: "human", participantId: localOwnerParticipantId }
+    })).rejects.toMatchObject({ code: "validation" });
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
   it("does not let a Workspace Owner read an unjoined Room and revokes Agent execution immediately", async () => {
     const store = await createStore();
     const now = nowIso();
@@ -47,6 +65,39 @@ describe("Core 06 runtime authorization", () => {
     await store.removeRoomAgent({ roomId: room.id, agentId, actorId: otherOwner });
     await expect(authorization.assertAgentExecution({ requesterParticipantId: requester, roomId: room.id, agentId })).rejects.toMatchObject<Partial<RoomAuthorizationError>>({ reason: "agent_not_in_room" });
     expect(agentParticipantId(agentId)).not.toBe(requester);
+    await store.close();
+  });
+
+  it("admits explicitly Workspace-scoped Knowledge for read, but never as a Room write", async () => {
+    const store = await createStore();
+    const now = nowIso();
+    const room = await store.createRoomWithOwner(roomRecord("room-core06-workspace-knowledge", now), localOwnerParticipantId);
+    const member = humanParticipantId("workspace-knowledge-member");
+    await store.addWorkspaceMember({ participantId: member, role: "member", actorId: localOwnerParticipantId });
+    await store.addRoomMember({ roomId: room.id, participantId: member, role: "member", actorId: localOwnerParticipantId });
+    const memory: MemoryFrontmatter = {
+      id: "memory-core06-workspace-common", state: "topic", topic: "Workspace common", source: "test",
+      source_locale: "ja", content_locale: "ja", source_kind: "owner_instruction", instruction_authority: "owner",
+      confidence: 1, created_by: "test", created_at: now, updated_at: now, related_memories: [], conflicts_with: [],
+      sensitive_level: "none", usage_scope: { kind: "workspace" }
+    };
+    await store.saveMemory(memory, "Workspace common knowledge");
+    const sourceRoom = await store.createRoomWithOwner(roomRecord("room-core06-workspace-knowledge-source", now), localOwnerParticipantId);
+    const roomBoundMemory: MemoryFrontmatter = { ...memory, id: "memory-core06-room-bound-workspace-scope", topic: "Room-bound default scope" };
+    await store.saveMemory(roomBoundMemory, "This must never become a cross-Room candidate");
+    await store.ensureResourceAccessBoundary({
+      resourceKind: "memory", resourceId: roomBoundMemory.id, sourceRoomId: sourceRoom.id,
+      ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId
+    });
+    const authorization = new RoomAuthorizationService(store);
+    const principal = { kind: "human" as const, participantId: member };
+
+    expect(await store.getResourceAccessMode({ resourceKind: "memory", resourceId: memory.id, roomId: room.id, participantId: member })).toBe("workspace");
+    expect(await store.listResourceIdsAvailableInRoom({ resourceKind: "memory", roomId: room.id })).toContain(memory.id);
+    expect(await store.listResourceIdsAvailableInRoom({ resourceKind: "memory", roomId: room.id })).not.toContain(roomBoundMemory.id);
+    await expect(authorization.assertResource(principal, { roomId: room.id, action: "read", resourceKind: "memory", resourceId: memory.id })).resolves.toBeUndefined();
+    await expect(authorization.assertResource(principal, { roomId: room.id, action: "edit", resourceKind: "memory", resourceId: memory.id }))
+      .rejects.toMatchObject<Partial<RoomAuthorizationError>>({ reason: "resource_access_boundary_denied" });
     await store.close();
   });
 
@@ -170,12 +221,12 @@ describe("Core 06 runtime authorization", () => {
     const context = { participant: { kind: "human" as const, participantId: member }, sessionId: targetSession.id };
     await expect(search.searchSessions(context, "secret", 8)).resolves.toEqual([]);
 
-    await store.shareResource({ resourceAccessBoundaryId: boundary.id, sourceRoomId: source.id, targetRoomId: target.id, actorId: sourceOwner });
-    await expect(search.searchSessions(context, "secret", 8)).resolves.toEqual([
-      expect.objectContaining({ kind: "session", id: sourceSession.id })
-    ]);
-
-    await store.revokeRoomResourceShare({ resourceAccessBoundaryId: boundary.id, sourceRoomId: source.id, targetRoomId: target.id, actorId: sourceOwner });
+    await expect(store.shareResource({
+      resourceAccessBoundaryId: boundary.id,
+      sourceRoomId: source.id,
+      targetRoomId: target.id,
+      actorId: sourceOwner
+    })).rejects.toThrow("core06_session_share_forbidden");
     await expect(search.searchSessions(context, "secret", 8)).resolves.toEqual([]);
     await store.close();
   });
@@ -218,6 +269,282 @@ describe("Core 06 runtime authorization", () => {
     await store.close();
   });
 
+  it("does not create a fake Session for a Session-compatible Artifact command", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const before = await store.listSessions();
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "artifact.create",
+      idempotency_key: "core06-artifact-without-session",
+      payload: { title: "No fake Session", content: "Room-scoped execution" }
+    }, { roomId: "room_default", participant: { kind: "human", participantId: localOwnerParticipantId } })).rejects.toMatchObject({ code: "unavailable" });
+
+    expect(await store.listSessions()).toEqual(before);
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("does not route a Room mutation to the default Room without a trusted Room selector", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const before = await store.listMemory({ includeArchived: true });
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "memory.topic.create",
+      idempotency_key: "core06-missing-room-selector",
+      payload: { topic_kind: "preference", content: "既定Roomへ流れてはいけない" }
+    })).rejects.toMatchObject({ code: "forbidden", message: "room_context_required" });
+
+    expect(await store.listMemory({ includeArchived: true })).toEqual(before);
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("does not create a fake Session for Session-scoped Memory", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const before = await store.listSessions();
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "memory.session.create",
+      idempotency_key: "core06-memory-without-session",
+      payload: { content: "Sessionなしでは保存しない" }
+    }, { roomId: "room_default", participant: { kind: "human", participantId: localOwnerParticipantId } })).rejects.toMatchObject({ code: "unavailable" });
+
+    expect(await store.listSessions()).toEqual(before);
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("does not create a fake Session for a Chat turn", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const before = await store.listSessions();
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "chat.turn.run",
+      idempotency_key: "core06-chat-without-session",
+      payload: { content: "SessionなしChatは開始しない" }
+    }, { roomId: "room_default", participant: { kind: "human", participantId: localOwnerParticipantId } })).rejects.toMatchObject({ code: "unavailable", message: "session_compatibility_required:chat.turn.run" });
+
+    expect(await store.listSessions()).toEqual(before);
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("does not create a fake Session for a Core07 Curator operation", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const before = await store.listSessions();
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "curator.run",
+      idempotency_key: "core06-curator-without-session",
+      payload: { reason: "user_request", resource_kind: "memory", resource_id: "memory_1" }
+    }, { participant: { kind: "human", participantId: localOwnerParticipantId } })).rejects.toMatchObject({
+      code: "unavailable",
+      message: "session_compatibility_required:curator.run"
+    });
+
+    expect(await store.listSessions()).toEqual(before);
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("hides the closed Session compatibility set from a Room-only inventory", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+
+    const inventory = await runtime.listEffectiveDomainOperationsForRoom({
+      roomId: "room_default",
+      source: "runtime_api",
+      principal: { kind: "human", participantId: localOwnerParticipantId }
+    });
+    const commandIds = new Set(inventory.commands.map((command) => command.id));
+
+    expect(commandIds.has("file.write")).toBe(true);
+    expect(commandIds.has("memory.topic.create")).toBe(true);
+    expect(commandIds.has("skill.candidate.create")).toBe(true);
+    expect(commandIds.has("wiki.proposal.create")).toBe(true);
+    expect(commandIds.has("artifact.create")).toBe(false);
+    expect(commandIds.has("chat.turn.run")).toBe(false);
+    expect(commandIds.has("memory.session.create")).toBe(false);
+    expect(commandIds.has("session.create")).toBe(false);
+    expect(commandIds.has("curator.run")).toBe(false);
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("allows a Room Member to create a new file but not overwrite an unbounded legacy file", async () => {
+    const store = await createStore();
+    const now = nowIso();
+    const member = humanParticipantId("sessionless-file-member");
+    const room = await store.createRoomWithOwner(roomRecord("room-core06-file-create", now), localOwnerParticipantId);
+    await store.addWorkspaceMember({ participantId: member, role: "member", actorId: localOwnerParticipantId });
+    await store.addRoomMember({ roomId: room.id, participantId: member, role: "member", actorId: localOwnerParticipantId });
+    const runtime = new AgentRuntime(store);
+    const trusted = { roomId: room.id, participant: { kind: "human" as const, participantId: member } };
+
+    await runtime.runRuntimeApiDomainCommand({
+      command_id: "file.write",
+      idempotency_key: "core06-member-new-file",
+      payload: { path: "member-created.txt", content: "Room-owned" }
+    }, trusted);
+    await writeFile(path.join(store.rootDir, "legacy-file.txt"), "legacy");
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "file.write",
+      idempotency_key: "core06-member-legacy-file",
+      payload: { path: "legacy-file.txt", content: "must not overwrite" }
+    }, trusted)).rejects.toMatchObject({ code: "forbidden" });
+
+    const source = await store.createRoomWithOwner(roomRecord("room-core06-file-source", now), localOwnerParticipantId);
+    await store.ensureResourceAccessBoundary({
+      resourceKind: "file",
+      resourceId: "deleted-source-file.txt",
+      sourceRoomId: source.id,
+      ownerParticipantId: localOwnerParticipantId,
+      actorId: localOwnerParticipantId
+    });
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "file.write",
+      idempotency_key: "core06-member-deleted-source-file",
+      payload: { path: "deleted-source-file.txt", content: "別Roomの削除済みFileを再作成しない" }
+    }, trusted)).rejects.toMatchObject({ code: "forbidden" });
+
+    expect(await readFile(path.join(store.rootDir, "member-created.txt"), "utf8")).toBe("Room-owned");
+    expect(await readFile(path.join(store.rootDir, "legacy-file.txt"), "utf8")).toBe("legacy");
+    await expect(store.getResourceAccessBoundary("file", "member-created.txt")).resolves.toMatchObject({ source_room_id: room.id });
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("rejects new Session-scoped knowledge even through a legacy Session adapter", async () => {
+    const store = await createStore();
+    const now = nowIso();
+    const session = sessionRecord("session-core06-no-new-session-knowledge", "room_default", now);
+    await store.createSession(session);
+    const runtime = new AgentRuntime(store);
+    const beforeMemory = await store.listMemory({ includeArchived: true });
+    const beforeSkills = await store.listSkills();
+    const trusted = {
+      roomId: "room_default",
+      sessionId: session.id,
+      participant: { kind: "human" as const, participantId: localOwnerParticipantId }
+    };
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "memory.session.create",
+      idempotency_key: "core06-legacy-session-memory",
+      payload: { content: "新規Session Memoryは禁止" }
+    }, trusted)).rejects.toMatchObject({ code: "conflict", message: "session_scope_write_disabled" });
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "skill.candidate.create",
+      idempotency_key: "core06-legacy-session-skill",
+      payload: {
+        title: "Session Skill",
+        content: "新規Session Skillは禁止",
+        usage_scope: { kind: "session", session_id: session.id }
+      }
+    }, trusted)).rejects.toMatchObject({ code: "conflict", message: "session_scope_write_disabled" });
+
+    expect(await store.listMemory({ includeArchived: true })).toEqual(beforeMemory);
+    expect(await store.listSkills()).toEqual(beforeSkills);
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("writes Wiki, Skill, and Topic Memory into the trusted Room without a Session", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const now = nowIso();
+    const room = await store.createRoom(roomRecord("room-core06-sessionless-write", now));
+    const beforeSessions = await store.listSessions();
+    const trusted = {
+      roomId: room.id,
+      participant: { kind: "human" as const, participantId: localOwnerParticipantId }
+    };
+
+    const wikiResult = await runtime.runRuntimeApiDomainCommand({
+      command_id: "wiki.proposal.create",
+      idempotency_key: "core06-sessionless-wiki",
+      payload: { title: "Room Wiki", content: "Room-only knowledge" }
+    }, { ...trusted, correlationId: "core06-sessionless-wiki" });
+    const skillResult = await runtime.runRuntimeApiDomainCommand({
+      command_id: "skill.candidate.create",
+      idempotency_key: "core06-sessionless-skill",
+      payload: { title: "Room Skill", content: "Room-only instructions" }
+    }, { ...trusted, correlationId: "core06-sessionless-skill" });
+    const memoryResult = await runtime.runRuntimeApiDomainCommand({
+      command_id: "memory.topic.create",
+      idempotency_key: "core06-sessionless-memory",
+      payload: { topic_kind: "preference", content: "Room-only preference" }
+    }, { ...trusted, correlationId: "core06-sessionless-memory" });
+
+    const wiki = (wikiResult.result as { resource: { id: string } }).resource;
+    const skill = (skillResult.result as { resource: { id: string } }).resource;
+    const memory = (memoryResult.result as { resource: { id: string } }).resource;
+    const operations = [wikiResult, skillResult, memoryResult].map((result) =>
+      (result.result as { operation: { id: string } }).operation.id
+    );
+
+    expect(await store.listSessions()).toEqual(beforeSessions);
+    for (const operationId of operations) {
+      const operation = await store.getOperation(operationId);
+      expect(operation).toMatchObject({
+        room_id: room.id,
+        status: "completed",
+        input_ref: expect.objectContaining({ kind: "workspace_context" })
+      });
+      expect(operation?.session_id).toBeUndefined();
+    }
+    await expect(store.getResourceAccessBoundary("wiki", wiki.id)).resolves.toMatchObject({ source_room_id: room.id });
+    await expect(store.getResourceAccessBoundary("skill", skill.id)).resolves.toMatchObject({ source_room_id: room.id });
+    await expect(store.getResourceAccessBoundary("memory", memory.id)).resolves.toMatchObject({ source_room_id: room.id });
+    await expect(store.getMemory(memory.id)).resolves.toMatchObject({ usage_scope: { kind: "room", room_id: room.id } });
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("does not let a Room member promote a Skill candidate from another Room", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const now = nowIso();
+    const source = await store.createRoomWithOwner(roomRecord("room-core06-skill-source", now), localOwnerParticipantId);
+    const target = await store.createRoomWithOwner(roomRecord("room-core06-skill-target", now), localOwnerParticipantId);
+    const member = humanParticipantId("skill-project-member");
+    await store.addWorkspaceMember({ participantId: member, role: "member", actorId: localOwnerParticipantId });
+    await store.addRoomMember({ roomId: target.id, participantId: member, role: "member", actorId: localOwnerParticipantId });
+
+    const candidate = await runtime.runRuntimeApiDomainCommand({
+      command_id: "skill.candidate.create",
+      idempotency_key: "core06-source-skill-candidate",
+      payload: { title: "Source candidate", content: "Room Aだけの候補" }
+    }, {
+      roomId: source.id,
+      participant: { kind: "human", participantId: localOwnerParticipantId }
+    });
+    const candidateId = (candidate.result as { resource: { id: string } }).resource.id;
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "skill.project.save",
+      idempotency_key: "core06-foreign-skill-project",
+      payload: { candidate_id: candidateId }
+    }, {
+      roomId: target.id,
+      participant: { kind: "human", participantId: member }
+    })).rejects.toMatchObject({ code: "forbidden" });
+    expect((await store.listSkills()).filter((skill) => skill.state === "project")).toEqual([]);
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
   it("keeps the trusted Room participant as the owner of a Session created through the Domain command", async () => {
     const store = await createStore();
     const now = nowIso();
@@ -230,13 +557,91 @@ describe("Core 06 runtime authorization", () => {
       command_id: "session.create",
       input_source: "runtime_api",
       idempotency_key: "core06-private-session-owner",
-      payload: { room_id: room.id, title: "Private" }
-    }, { participant: { kind: "human", participantId } });
+      payload: { title: "Private" }
+    }, { participant: { kind: "human", participantId }, roomId: room.id });
     const session = result.result as { id: string; room_id: string };
     expect(await store.getResourceAccessBoundary("session", session.id)).toMatchObject({
       source_room_id: room.id,
       owner_participant_id: participantId
     });
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("takes the Room operation target from Trusted Context, not the payload", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const room = await store.getRoom("room_default");
+    expect(room).toBeDefined();
+
+    await expect(runtime.runRuntimeApiDomainQuery({
+      query_id: "room.member.list",
+      payload: {}
+    }, { participant: { kind: "human", participantId: localOwnerParticipantId }, roomId: room!.id })).resolves.toMatchObject({ ok: true });
+    await expect(runtime.runRuntimeApiDomainQuery({
+      query_id: "room.member.list",
+      payload: { room_id: "room-forged" }
+    }, { participant: { kind: "human", participantId: localOwnerParticipantId }, roomId: room!.id })).rejects.toMatchObject({ code: "bad_request" });
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("keeps the External App id and delegation in the Domain audit record", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const room = await store.getRoom("room_default");
+    expect(room).toBeDefined();
+
+    await runtime.runRuntimeApiDomainQuery({
+      query_id: "room.member.list",
+      payload: {}
+    }, {
+      roomId: room!.id,
+      participant: {
+        kind: "external_app",
+        appId: "app:core06-test",
+        delegatedBy: { kind: "human", participantId: localOwnerParticipantId }
+      },
+      source: { kind: "external_app", app_id: "app:core06-test" },
+      sessionRef: { app_id: "app:core06-test", session_id: "external-session" },
+      correlationId: "core06-external-audit"
+    });
+
+    await expect(store.listAuditRecords()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        participant_kind: "external_app",
+        principal: expect.objectContaining({ kind: "external_app", app_id: "app:core06-test" }),
+        source: expect.objectContaining({ kind: "external_app", app_id: "app:core06-test" }),
+        session_ref: expect.objectContaining({ app_id: "app:core06-test" })
+      })
+    ]));
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("rejects a mismatched External App principal, source, and SessionRef", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const room = await store.getRoom("room_default");
+    expect(room).toBeDefined();
+
+    await expect(runtime.runRuntimeApiDomainQuery({
+      query_id: "room.member.list",
+      payload: {}
+    }, {
+      roomId: room!.id,
+      participant: {
+        kind: "external_app",
+        appId: "app:principal-a",
+        delegatedBy: { kind: "human", participantId: localOwnerParticipantId }
+      },
+      source: { kind: "external_app", app_id: "app:source-b" },
+      sessionRef: { app_id: "app:session-c", session_id: "external-session" },
+      correlationId: "core06-external-app-mismatch"
+    })).rejects.toMatchObject({ code: "forbidden", message: "external_app_context_mismatch" });
 
     await runtime.shutdownMcpProcessPool();
     await store.close();

@@ -485,6 +485,7 @@ export class RoomPermissionRepository {
       assertRoomAction(targetActor.room, input.actorId, "share");
       const boundary = await trx.selectFrom("resource_access_boundaries").selectAll().where("id", "=", input.resourceAccessBoundaryId).executeTakeFirst();
       if (!boundary || boundary.source_room_id !== input.sourceRoomId) throw new Error("room_resource_share_source_invalid");
+      if (boundary.resource_kind === "session") throw new Error("core06_session_share_forbidden");
       const current = await activeRoomResourceShare(trx, input.resourceAccessBoundaryId, input.targetRoomId);
       if (current) return roomResourceShareFromRow(current);
       const now = nowIso();
@@ -523,11 +524,20 @@ export class RoomPermissionRepository {
 
   async getResourceAccessMode(input: { resourceKind: string; resourceId: string; roomId: string; participantId: string }): Promise<ResourceAccessMode> {
     const boundary = await this.getResourceAccessBoundary(input.resourceKind, input.resourceId);
+    // Workspace scope is an explicit, durable classification for Knowledge.
+    // It is not an inferred Room assignment: only Memory, Wiki, and Skill
+    // rows that actually carry `usage_scope_kind = workspace` take this path.
+    // Older unclassified rows remain legacy Owner-only below.
+    if (!boundary && await isExplicitWorkspaceKnowledge(this.db, input.resourceKind, input.resourceId)) return "workspace";
     // Resources from before Core 06 are deliberately not given an inferred
     // Room. Only the current Workspace Owner can use them until a later edit
     // or explicit share records their real origin.
     if (!boundary) return (await activeWorkspaceOwner(this.db))?.participant_id === input.participantId ? "legacy_owner" : "denied";
     if (boundary.source_room_id === input.roomId) return "source";
+    // Legacy Session share rows remain inspectable, but are never a Core06
+    // Workspace-resource authorization grant. Session ownership stays with
+    // the originating app and its compatibility adapter.
+    if (boundary.resource_kind === "session") return "denied";
     const share = await activeRoomResourceShare(this.db, boundary.id, input.roomId);
     return share ? "shared" : "denied";
   }
@@ -537,10 +547,16 @@ export class RoomPermissionRepository {
     return (await this.getResourceAccessMode(input)) !== "denied";
   }
 
-  /** Candidate IDs come only from Room boundaries, never UsageScope. */
+  /**
+   * Candidate IDs are resolved before a body is loaded.  A Knowledge row
+   * explicitly scoped to the Workspace is a first-class candidate; an
+   * unclassified legacy row is not.  Every ID is checked again just before
+   * returning content by RoomAuthorizationService.assertResource().
+   */
   async listResourceIdsAvailableInRoom(input: { resourceKind: string; roomId: string }): Promise<string[]> {
     if (!isRoomShareableResourceKind(input.resourceKind)) return [];
-    const rows = await this.db
+    const [rows, workspaceKnowledgeIds] = await Promise.all([
+      this.db
       .selectFrom("resource_access_boundaries as boundary")
       .leftJoin("room_resource_shares as share", (join) => join
         .onRef("share.resource_access_boundary_id", "=", "boundary.id")
@@ -549,11 +565,16 @@ export class RoomPermissionRepository {
       .where("boundary.resource_kind", "=", input.resourceKind)
       .where((eb) => eb.or([
         eb("boundary.source_room_id", "=", input.roomId),
-        eb("share.target_room_id", "=", input.roomId)
+        eb.and([
+          eb("boundary.resource_kind", "!=", "session"),
+          eb("share.target_room_id", "=", input.roomId)
+        ])
       ]))
       .distinct()
-      .execute();
-    return rows.map((row) => row.resource_id);
+      .execute(),
+      listExplicitWorkspaceKnowledgeIds(this.db, input.resourceKind)
+    ]);
+    return [...new Set([...rows.map((row) => row.resource_id), ...workspaceKnowledgeIds])];
   }
 
   /** Workspace removal cannot leave an old Room membership visible here. */
@@ -570,6 +591,52 @@ export class RoomPermissionRepository {
   async listRoomIdsForAgent(agentId: string): Promise<string[]> {
     return (await this.db.selectFrom("room_agents").select("room_id")
       .where("agent_id", "=", agentId).where("removed_at", "is", null).where("can_view", "=", 1).execute()).map((row) => row.room_id);
+  }
+}
+
+/**
+ * The three Knowledge indices record an explicit Workspace scope.  This is
+ * intentionally kept in the persistence adapter rather than the pure
+ * permission package: the pure package must not know SQLite table names.
+ */
+async function isExplicitWorkspaceKnowledge(db: Kysely<WorkspaceDb>, resourceKind: string, resourceId: string): Promise<boolean> {
+  switch (resourceKind) {
+    case "memory":
+      return Boolean(await db.selectFrom("memory_index").select("id")
+        .where("id", "=", resourceId).where("usage_scope_kind", "=", "workspace").executeTakeFirst());
+    case "wiki":
+      return Boolean(await db.selectFrom("wiki_index").select("id")
+        .where("id", "=", resourceId).where("usage_scope_kind", "=", "workspace").executeTakeFirst());
+    case "skill":
+      return Boolean(await db.selectFrom("skill_index").select("id")
+        .where("id", "=", resourceId).where("usage_scope_kind", "=", "workspace").executeTakeFirst());
+    default:
+      return false;
+  }
+}
+
+async function listExplicitWorkspaceKnowledgeIds(db: Kysely<WorkspaceDb>, resourceKind: string): Promise<string[]> {
+  switch (resourceKind) {
+    case "memory":
+      return (await db.selectFrom("memory_index").select("id").where("usage_scope_kind", "=", "workspace")
+        .where((eb) => eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary").select("boundary.id")
+            .where("boundary.resource_kind", "=", "memory").whereRef("boundary.resource_id", "=", "memory_index.id")
+        ))).execute()).map((row) => row.id);
+    case "wiki":
+      return (await db.selectFrom("wiki_index").select("id").where("usage_scope_kind", "=", "workspace")
+        .where((eb) => eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary").select("boundary.id")
+            .where("boundary.resource_kind", "=", "wiki").whereRef("boundary.resource_id", "=", "wiki_index.id")
+        ))).execute()).map((row) => row.id);
+    case "skill":
+      return (await db.selectFrom("skill_index").select("id").where("usage_scope_kind", "=", "workspace")
+        .where((eb) => eb.not(eb.exists(
+          eb.selectFrom("resource_access_boundaries as boundary").select("boundary.id")
+            .where("boundary.resource_kind", "=", "skill").whereRef("boundary.resource_id", "=", "skill_index.id")
+        ))).execute()).map((row) => row.id);
+    default:
+      return [];
   }
 }
 

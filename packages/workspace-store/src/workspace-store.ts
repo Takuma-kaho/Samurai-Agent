@@ -370,6 +370,9 @@ export class WorkspaceStore {
     facade.listOperations = session.listOperations.bind(session);
     facade.listOperationsForRoom = session.listOperationsForRoom.bind(session);
     facade.saveBackendRun = session.saveBackendRun.bind(session);
+    facade.admitWorkspaceRun = session.admitWorkspaceRun.bind(session);
+    facade.releaseRunLease = session.releaseRunLease.bind(session);
+    facade.commitWorkspaceRunSettlement = session.commitWorkspaceRunSettlement.bind(session);
     facade.admitTurn = session.admitTurn.bind(session);
     facade.releaseReservation = session.releaseReservation.bind(session);
     facade.getSessionRunReservation = session.getSessionRunReservation.bind(session);
@@ -740,6 +743,9 @@ export interface WorkspaceStore {
   listOperations: SessionExecutionRepository["listOperations"];
   listOperationsForRoom: SessionExecutionRepository["listOperationsForRoom"];
   saveBackendRun: SessionExecutionRepository["saveBackendRun"];
+  admitWorkspaceRun: SessionExecutionRepository["admitWorkspaceRun"];
+  releaseRunLease: SessionExecutionRepository["releaseRunLease"];
+  commitWorkspaceRunSettlement: SessionExecutionRepository["commitWorkspaceRunSettlement"];
   admitTurn: SessionExecutionRepository["admitTurn"];
   releaseReservation: SessionExecutionRepository["releaseReservation"];
   getSessionRunReservation: SessionExecutionRepository["getSessionRunReservation"];

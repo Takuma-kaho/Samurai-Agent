@@ -1,14 +1,13 @@
 import {
   type ActivityInboxItem,
   type JsonValue,
-  type MessageEnvelope,
   type OperationRecord,
   type ResourceRef,
   type RollbackPoint,
-  type SessionRecord,
   type SupportedLocale,
   type WikiFrontmatter
 } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 
 type StoredWiki = WikiFrontmatter & { file_path: string };
 interface WikiReindexResult {
@@ -28,11 +27,12 @@ type WikiInput = {
 };
 export interface WikiWriteResult<T> { resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
 export interface WikiMutationInput<T> {
-  session: SessionRecord;
-  envelope: MessageEnvelope;
+  trustedContext: TrustedDomainContext;
   operationName: string;
   proposedEffects: string[];
+  inputSummary?: string;
   targetResourceRefs?: ResourceRef[];
+  boundaryResourceRefs?: ResourceRef[];
   execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }>;
 }
 
@@ -43,8 +43,7 @@ export interface WikiExecutionPort {
   update(input: WikiInput): Promise<StoredWiki | undefined>;
   setState(id: string, state: WikiFrontmatter["state"]): Promise<StoredWiki | undefined>;
   reindex(): Promise<WikiReindexResult>;
-  ensureSession(): Promise<SessionRecord>;
-  createEnvelope(content: string): MessageEnvelope;
+  defaultOutputLocale(): Promise<SupportedLocale>;
   runMutation<T>(input: WikiMutationInput<T>): Promise<WikiWriteResult<T>>;
   createRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   requestError(code: "not_found", message: string): Error;
@@ -53,8 +52,7 @@ export interface WikiExecutionPort {
 export class WikiDomainService {
   constructor(private readonly dependencies: { wiki: WikiExecutionPort }) {}
 
-  ensureWikiSession() { return this.dependencies.wiki.ensureSession(); }
-  createWikiEnvelope(content: string) { return this.dependencies.wiki.createEnvelope(content); }
+  defaultWikiOutputLocale() { return this.dependencies.wiki.defaultOutputLocale(); }
   reindexWikiPages() { return this.dependencies.wiki.reindex(); }
   runWikiMutation<T>(input: WikiMutationInput<T>): Promise<WikiWriteResult<T>> { return this.dependencies.wiki.runMutation(input); }
   getWikiPage(id: string) { return this.dependencies.wiki.get(id); }

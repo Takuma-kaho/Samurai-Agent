@@ -304,7 +304,7 @@ describe("Domain Operation strict gate coverage", () => {
         roomId: "coverage-room",
         participant: { kind: "human" as const, participantId: "human:owner" },
         correlationId: `coverage-${definition.id}`,
-        ...(definition.id === "chat.turn.run" ? { idempotencyKey: "coverage-chat-turn" } : {}),
+        ...(definition.id === "chat.turn.run" ? { idempotencyKey: "coverage-chat-turn", sessionId: "coverage-chat-session" } : {}),
         ...(definition.id === "generated_surface.create" || definition.id === "generated_surface.revise"
           ? { sessionId: "surface-session", runId: "surface-run" }
           : definition.id === "learning.background_review.apply"
@@ -313,15 +313,25 @@ describe("Domain Operation strict gate coverage", () => {
               ? { sessionId: "reflection-session" }
             : definition.id === "learning.resource.usage.record"
               ? { runId: "learning-resource-run" }
-          : definition.id === "memory.archive"
-            ? { sessionId: "memory-session" }
-            : definition.id === "reflection.run"
+            : definition.id === "memory.archive"
+              ? { sessionId: "memory-session" }
+            : definition.id === "memory.session.create"
+                ? { sessionId: "memory-session" }
+              : definition.id === "reflection.run"
               ? { sessionId: reflectionSessionId }
               : definition.id === "memory.search" || definition.id === "wiki.search" || definition.id === "skill.search" || definition.id === "skill.usage.record" || definition.id === "skill.view"
                 ? { runId: "skill-run" }
           : {})
       };
       executionCases.set(definition.id, { input, context });
+      if (definition.id === "memory.session.create") {
+        await expect(binding.execute(context, input)).rejects.toThrow("memorySessionScopeWriteDisabledError");
+        for (const inputSource of definition.sources.slice(1)) {
+          await expect(binding.execute({ ...context, inputSource, correlationId: `coverage-${definition.id}-${inputSource}` }, input))
+            .rejects.toThrow("memorySessionScopeWriteDisabledError");
+        }
+        continue;
+      }
       await binding.execute(context, input);
       for (const inputSource of definition.sources.slice(1)) {
         await binding.execute({ ...context, inputSource, correlationId: `coverage-${definition.id}-${inputSource}` }, input);

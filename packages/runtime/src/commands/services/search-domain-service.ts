@@ -40,7 +40,7 @@ type CollectionRecordWithFilePath = Omit<CollectionRecord, "version"> & { versio
 /** Narrow adapter exposed to Query services; no WorkspaceStore mutation API crosses this boundary. */
 export interface SearchReadStore {
   search(query: string, input?: { sessionIds?: string[] }): Promise<SearchResult[]>;
-  getBackendRun(id: string): Promise<{ id: string; session_id: string; agent_id?: string; requested_by_participant_id?: string } | undefined>;
+  getBackendRun(id: string): Promise<{ id: string; session_id?: string; room_id?: string; agent_id?: string; requested_by_participant_id?: string } | undefined>;
   getSession(id: string): Promise<{ id: string; room_id?: string } | undefined>;
   listSessions(input?: { ids?: string[]; roomIds?: string[] }): Promise<Array<{ id: string; room_id?: string }>>;
   getRoom(id: string): Promise<RoomRecord | undefined>;
@@ -79,7 +79,8 @@ export function createSearchReadStore(store: SearchReadStore): SearchReadStore {
 }
 
 interface SearchAccess {
-  activityContext: ActivityContextRef;
+  roomId: string;
+  activityContext?: ActivityContextRef;
   principal: ParticipantPrincipal;
 }
 
@@ -111,7 +112,7 @@ export class SearchDomainService {
     const access = await this.resolveAccess(context);
     const candidates = await this.store.searchMemory(query, limit, {
       includeArchived: false,
-      activityContext: access.activityContext,
+      ...(access.activityContext ? { activityContext: access.activityContext } : {}),
       ...await this.resourceCandidateOptions(access, "memory")
     });
     const allowed = await this.filterResources(access, candidates, "memory", (item) => item.id);
@@ -124,7 +125,7 @@ export class SearchDomainService {
     const access = await this.resolveAccess(context);
     const candidates = await this.store.searchWiki(query, limit, {
       activeOnly: true,
-      activityContext: access.activityContext,
+      ...(access.activityContext ? { activityContext: access.activityContext } : {}),
       ...await this.resourceCandidateOptions(access, "wiki")
     });
     const allowed = await this.filterResources(access, candidates, "wiki", (item) => item.id);
@@ -135,7 +136,7 @@ export class SearchDomainService {
     const access = await this.resolveAccess(context);
     const candidates = await this.store.searchSkills(query, limit, {
       states: ["active", "pinned", "project"],
-      activityContext: access.activityContext,
+      ...(access.activityContext ? { activityContext: access.activityContext } : {}),
       ...await this.resourceCandidateOptions(access, "skill")
     });
     const allowed = await this.filterResources(access, candidates, "skill", (item) => item.id);
@@ -144,11 +145,11 @@ export class SearchDomainService {
 
   async searchCollections(context: TrustedDomainContext, collectionId: string | undefined, query: string, limit: number): Promise<CollectionSearchResult[]> {
     const access = await this.resolveAccess(context);
-    const schemaCandidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.activityContext.room_id, "collection_schema");
+    const schemaCandidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.roomId, "collection_schema");
     const schemas = collectionId
       ? await this.directSchemaCandidate(access, collectionId, schemaCandidateAccess)
       : await this.store.listCollectionSchemas(schemaCandidateAccess);
-    const recordCandidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.activityContext.room_id, "collection_record");
+    const recordCandidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.roomId, "collection_record");
     const normalized = query.trim().toLowerCase();
     const results: CollectionSearchResult[] = [];
     for (const schema of schemas) {
@@ -177,31 +178,40 @@ export class SearchDomainService {
   private async resolveAccess(context: TrustedDomainContext): Promise<SearchAccess> {
     if (!context.participant) throw new Error("search_activity_context_required:participant");
     let sessionId = context.sessionId;
+    let roomId = context.roomId;
     let principal = context.participant;
     let run: Awaited<ReturnType<SearchReadStore["getBackendRun"]>>;
     if (context.runId) {
       run = await this.store.getBackendRun(context.runId);
-      if (!run?.agent_id) throw new Error(`search_activity_context_required:${context.runId}`);
+      if (!run) throw new Error(`search_activity_context_required:${context.runId}`);
       sessionId = run.session_id;
-      if (principal.kind !== "agent" || principal.agentId !== run.agent_id) {
+      roomId = run.room_id ?? roomId;
+      // Agent runs retain their Agent identity check. A Room-first Human or
+      // External-App Run has no Agent and must not be forced through a fake
+      // Session/Agent context just to read its own Room-scoped knowledge.
+      if (run.agent_id && (principal.kind !== "agent" || principal.agentId !== run.agent_id)) {
         throw new Error(`search_activity_context_participant_mismatch:${context.runId}`);
       }
     }
-    if (!sessionId) throw new Error("search_activity_context_required:session");
-    const session = await this.store.getSession(sessionId);
-    if (!session?.room_id) throw new Error(`search_activity_context_required:${sessionId}`);
+    const session = sessionId ? await this.store.getSession(sessionId) : undefined;
+    roomId = roomId ?? session?.room_id;
+    if (!roomId) throw new Error("search_activity_context_required:room");
     const [room, agent] = await Promise.all([
-      this.store.getRoom(session.room_id),
+      this.store.getRoom(roomId),
       context.runId && run?.agent_id ? this.store.getAgent(run.agent_id) : Promise.resolve(undefined)
     ]);
-    if (!room || (context.runId && !agent)) throw new Error(`search_activity_context_required:${sessionId}`);
+    if (!room || (run?.agent_id && !agent)) throw new Error(`search_activity_context_required:${roomId}`);
     try {
       await this.authorization.assertRoom(principal, room.id, "read");
     } catch (error) {
       if (error instanceof RoomAuthorizationError) throw new Error(`search_room_authorization_denied:${error.reason}`);
       throw error;
     }
-    return { activityContext: { room_id: room.id, session_id: session.id, agent_id: agent?.id ?? "human" }, principal };
+    return {
+      roomId: room.id,
+      principal,
+      ...(session && agent ? { activityContext: { room_id: room.id, session_id: session.id, agent_id: agent.id } } : {})
+    };
   }
 
   private async sessionResultAllowed(access: SearchAccess, sessionId: string): Promise<boolean> {
@@ -231,14 +241,14 @@ export class SearchDomainService {
   private async authorizedSessionIds(access: SearchAccess): Promise<string[]> {
     const candidateAccess = await this.authorization.resourceCandidateAccess(
       access.principal,
-      access.activityContext.room_id,
+      access.roomId,
       "session"
     );
     const ids = new Set(candidateAccess.resourceIds);
     // Legacy Sessions have no boundary. They remain available only to the
     // Workspace Owner, and only from their own Room; no other Room is scanned.
     if (candidateAccess.includeLegacy) {
-      for (const session of await this.store.listSessions({ roomIds: [access.activityContext.room_id] })) {
+      for (const session of await this.store.listSessions({ roomIds: [access.roomId] })) {
         ids.add(session.id);
       }
     }
@@ -258,7 +268,7 @@ export class SearchDomainService {
       // This executes after candidate retrieval, giving revoked participation
       // and shares an immediate final check before returning any content.
       await this.authorization.assertResource(access.principal, {
-        roomId: access.activityContext.room_id,
+        roomId: access.roomId,
         action: "read",
         resourceKind,
         resourceId
@@ -273,7 +283,7 @@ export class SearchDomainService {
   private async resourceCandidateOptions(access: SearchAccess, resourceKind: string): Promise<{ resourceIds: string[]; includeLegacy: boolean }> {
     const candidateAccess = await this.authorization.resourceCandidateAccess(
       access.principal,
-      access.activityContext.room_id,
+      access.roomId,
       resourceKind
     );
     return candidateAccess;

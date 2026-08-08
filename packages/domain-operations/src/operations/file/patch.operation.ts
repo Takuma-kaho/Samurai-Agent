@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { ActivityInboxItem, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import type { ActivityInboxItem, JsonValue, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { fileResourceSchema } from "../../value-objects/file.js";
 import { runtimeWriteValueSchema } from "../../value-objects/runtime-write.js";
@@ -14,8 +14,6 @@ const Output = runtimeWriteValueSchema(fileResourceSchema);
 
 export interface FilePatchPorts {
   resolveFilePath(path: string): { absolutePath: string; relativePath: string };
-  ensureFileSession(): Promise<SessionRecord>;
-  createFileEnvelope(session: SessionRecord, content: string): MessageEnvelope;
   readFileTextIfExists(path: string): Promise<string | undefined>;
   ensureFileParent(path: string): Promise<void>;
   writeFileText(path: string, content: string): Promise<void>;
@@ -24,7 +22,7 @@ export interface FilePatchPorts {
   fileNotFoundError(path: string): Error;
   filePatchConflictError(): Error;
   createFileRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runFileMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: z.infer<typeof fileResourceSchema>; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: z.infer<typeof fileResourceSchema>; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runFileMutation(input: { trustedContext: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary: string; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: z.infer<typeof fileResourceSchema>; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: z.infer<typeof fileResourceSchema>; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const filePatch = defineCommand<FilePatchPorts>()({
@@ -70,13 +68,11 @@ const filePatch = defineCommand<FilePatchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleFilePatch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleFilePatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const path = ports.resolveFilePath(input.path);
-        const session = await ports.ensureFileSession();
-        const envelope = ports.createFileEnvelope(session, `file.patch: ${path.relativePath}`);
         const ref: ResourceRef = { kind: "file", id: path.relativePath, uri: path.relativePath, label: path.relativePath };
         const value = await ports.runFileMutation({
-          session, envelope, operationName: "file.patch",
+          trustedContext: context, operationName: "file.patch", inputSummary: `file.patch: ${path.relativePath}`,
           proposedEffects: [`file.patch ${path.relativePath} inside the workspace.`], targetResourceRefs: [ref],
           execute: async (operation) => {
             const before = await ports.readFileTextIfExists(path.absolutePath);

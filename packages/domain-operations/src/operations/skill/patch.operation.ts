@@ -56,15 +56,13 @@ const skillPatch = defineCommand<SkillPatchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleSkillPatch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleSkillPatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const current = await ports.getSkillForMutation(input.skill_id);
         if (!current) throw ports.skillMutationNotFound("skill_not_found");
         const beforeMarkdown = await ports.readSkillMarkdown(input.skill_id);
         const contract = ports.skillMutationContract("skill.patch");
-        const session = await ports.ensureSkillMutationSession();
-        const envelope = ports.createSkillMutationEnvelope(`Edit Skill: ${current.title}`);
         const result = await ports.runSkillMutation({
-          session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
+          trustedContext: context, operationName: contract.id, inputSummary: `Edit Skill: ${current.title}`, proposedEffects: contract.proposed_effects,
           targetResourceRefs: [ports.skillResourceRef(current)],
           execute: async (operation) => {
             const saved = await ports.patchSkillRecord({ id: input.skill_id, title: input.title, description: input.description, tags: input.tags, content: input.content });

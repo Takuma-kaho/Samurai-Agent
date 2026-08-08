@@ -245,6 +245,38 @@ export async function createTopicMemory(
   return store.saveMemory(frontmatter, content);
 }
 
+/**
+ * Core06 Room-first Memory creation.  This deliberately has no Session or
+ * Message dependency: its source is a trusted operation/run correlation.
+ */
+export async function createRoomTopicMemory(
+  store: MemoryWritePort,
+  input: {
+    topic: string;
+    content: string;
+    source: string;
+    sourceLocale: SupportedLocale;
+    contentLocale: SupportedLocale;
+    sourceKind: MemoryFrontmatter["source_kind"];
+    instructionAuthority: string;
+    roomId: string;
+    id?: string;
+  }
+): Promise<MemoryFrontmatter> {
+  const frontmatter = buildMemoryFrontmatter({
+    state: "topic",
+    topic: input.topic,
+    source: input.source,
+    sourceLocale: input.sourceLocale,
+    contentLocale: input.contentLocale,
+    sourceKind: input.sourceKind,
+    instructionAuthority: input.instructionAuthority,
+    usageScope: { kind: "room", room_id: input.roomId },
+    id: input.id
+  });
+  return store.saveMemory(frontmatter, input.content);
+}
+
 export function buildMemoryFrontmatter(input: {
   state: MemoryFrontmatter["state"];
   topic: string;
@@ -254,10 +286,11 @@ export function buildMemoryFrontmatter(input: {
   sourceKind: MemoryFrontmatter["source_kind"];
   instructionAuthority: string;
   usageScope?: UsageScopeRef;
+  id?: string;
 }): MemoryFrontmatter {
   const now = nowIso();
   return {
-    id: createId("memory"),
+    id: input.id ?? createId("memory"),
     state: input.state,
     topic: input.topic,
     source: input.source,

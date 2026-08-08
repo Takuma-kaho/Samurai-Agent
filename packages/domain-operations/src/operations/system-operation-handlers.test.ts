@@ -19,6 +19,9 @@ describe("System operation handlers", () => {
       memory_capture_mode: "manual" as const,
       knowledge_wiki_capture_mode: "manual" as const,
       skill_capture_mode: "manual" as const,
+      learning_enabled: true,
+      learning_budget_ratio: 0.1,
+      learning_budget_window_days: 7,
       external_provider_role: "assistive" as const,
       updated_at: "2026-07-16T00:00:00.000Z"
     }));

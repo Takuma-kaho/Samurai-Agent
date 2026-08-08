@@ -20,18 +20,12 @@ export function createMemoryDomainServicePorts(services: Pick<RuntimeDomainServi
       rebuildMemoryActivity: () => services.memoryDomainService.rebuildMemoryActivity()
     },
     "memory.session.create": {
-      getMemorySession: (id) => services.memoryDomainService.getSession(id), createMemorySession: (input) => services.memoryDomainService.createMemorySession(input),
-      ensureMemorySession: () => services.memoryDomainService.ensureMemorySession(), memoryCreateError: (message) => services.memoryDomainService.memoryCreateError(message),
-      createMemoryEnvelope: (input) => services.memoryDomainService.createMemoryEnvelope(input), writeSessionMemory: (envelope, content) => services.memoryDomainService.writeSessionMemory(envelope, content),
-      writeTopicMemory: (envelope, topicKind, content) => services.memoryDomainService.writeTopicMemory(envelope, topicKind, content), memoryResourceRef: (memory) => services.memoryDomainService.memoryRef(memory),
-      createMemoryRollback: (operation, refs, after) => services.memoryDomainService.createMemoryRollback(operation, refs, after), emitMemoryCandidate: (memory) => services.memoryDomainService.emitMemoryCandidate(memory),
-      runMemoryMutation: (input) => services.memoryDomainService.runMemoryMutation(input)
+      memorySessionScopeWriteDisabledError: () => services.memoryDomainService.memorySessionScopeWriteDisabledError()
     },
     "memory.topic.create": {
-      getMemorySession: (id) => services.memoryDomainService.getSession(id), createMemorySession: (input) => services.memoryDomainService.createMemorySession(input),
-      ensureMemorySession: () => services.memoryDomainService.ensureMemorySession(), memoryCreateError: (message) => services.memoryDomainService.memoryCreateError(message),
-      createMemoryEnvelope: (input) => services.memoryDomainService.createMemoryEnvelope(input), writeSessionMemory: (envelope, content) => services.memoryDomainService.writeSessionMemory(envelope, content),
-      writeTopicMemory: (envelope, topicKind, content) => services.memoryDomainService.writeTopicMemory(envelope, topicKind, content), memoryResourceRef: (memory) => services.memoryDomainService.memoryRef(memory),
+      memoryCreateError: (message) => services.memoryDomainService.memoryCreateError(message),
+      writeRoomTopicMemory: (input) => services.memoryDomainService.writeRoomTopicMemory(input),
+      memoryResourceRef: (memory) => services.memoryDomainService.memoryRef(memory),
       createMemoryRollback: (operation, refs, after) => services.memoryDomainService.createMemoryRollback(operation, refs, after), emitMemoryCandidate: (memory) => services.memoryDomainService.emitMemoryCandidate(memory),
       runMemoryMutation: (input) => services.memoryDomainService.runMemoryMutation(input)
     }

@@ -10,7 +10,7 @@ export function registerBackendEventRoutes(app: Express, store: WorkspaceStore, 
         res.status(404).json({ error: "backend_run_not_found" });
         return;
       }
-      await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id });
+      await runtime.assertLocalOwnerBackendRunAccess(run);
       const afterSequence = typeof req.query.after_sequence === "string" && Number.isInteger(Number(req.query.after_sequence))
         ? Math.max(0, Number(req.query.after_sequence))
         : undefined;

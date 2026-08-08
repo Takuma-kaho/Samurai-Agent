@@ -34,7 +34,6 @@ export interface ConversationHostPort {
 export class ConversationDomainService {
   constructor(private readonly host: ConversationHostPort) {}
 
-  createChatSession(context: TrustedDomainContext, input: SessionCreateHostInput) { return this.host.createSession(context, input); }
   executeChatTurn(context: TrustedDomainContext, input: ChatTurnInput) { return this.host.runChatTurn(context, input); }
 
   createSession(context: TrustedDomainContext, input: CreateSessionInput) {

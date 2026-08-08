@@ -29,4 +29,19 @@ describe("room permissions", () => {
     expect(evaluateWorkspacePermission({ principal: agent, action: "create_room" }).allowed).toBe(false);
     expect(evaluateWorkspacePermission({ principal: agent, action: "create_room", agentPermission: { agentId: "builder", permission: "room.create" } }).allowed).toBe(true);
   });
+
+  it("evaluates an External App through its delegated Human without making it a member", () => {
+    const delegated = { kind: "human" as const, participantId: localOwnerParticipantId };
+    const app = { kind: "external_app" as const, appId: "codex", delegatedBy: delegated };
+    expect(evaluateRoomPermission({
+      principal: app,
+      action: "execute",
+      humanMembership: { participantId: delegated.participantId, role: "member" }
+    })).toMatchObject({ allowed: true, reason: "allowed" });
+    expect(evaluateRoomPermission({
+      principal: { ...app, delegatedBy: { kind: "human", participantId: "not-canonical" } },
+      action: "execute",
+      humanMembership: { participantId: localOwnerParticipantId, role: "owner" }
+    })).toMatchObject({ allowed: false, reason: "participant_id_invalid" });
+  });
 });

@@ -40,7 +40,8 @@ export function safeParse(value: string): unknown | undefined {
 export function operationToRow(operation: OperationRecord): OperationsTable {
   return {
     id: operation.id,
-    session_id: operation.session_id,
+    session_id: operation.session_id ?? null,
+    run_id: operation.run_id ?? null,
     capability_id: operation.capability_id,
     operation: operation.operation,
     actor_identity: operation.actor_identity,
@@ -48,6 +49,9 @@ export function operationToRow(operation: OperationRecord): OperationsTable {
     participant_kind: operation.participant_kind ?? null,
     requested_by_participant_id: operation.requested_by_participant_id ?? null,
     room_id: operation.room_id ?? null,
+    principal_json: operation.principal ? stringify(operation.principal) : null,
+    source_json: operation.source ? stringify(operation.source) : null,
+    session_ref_json: operation.session_ref ? stringify(operation.session_ref) : null,
     instruction_source: operation.instruction_source,
     instruction_authority: operation.instruction_authority,
     channel: operation.channel,
@@ -69,7 +73,8 @@ export function operationToRow(operation: OperationRecord): OperationsTable {
 export function operationFromRow(row: OperationsTable): OperationRecord {
   return {
     id: row.id,
-    session_id: row.session_id,
+    ...(row.session_id ? { session_id: row.session_id } : {}),
+    ...(row.run_id ? { run_id: row.run_id } : {}),
     capability_id: row.capability_id,
     operation: row.operation,
     actor_identity: row.actor_identity as OperationRecord["actor_identity"],
@@ -77,6 +82,9 @@ export function operationFromRow(row: OperationsTable): OperationRecord {
     participant_kind: row.participant_kind as OperationRecord["participant_kind"] | undefined,
     requested_by_participant_id: row.requested_by_participant_id ?? undefined,
     room_id: row.room_id ?? undefined,
+    ...(row.principal_json ? { principal: parse(row.principal_json) } : {}),
+    ...(row.source_json ? { source: parse(row.source_json) } : {}),
+    ...(row.session_ref_json ? { session_ref: parse(row.session_ref_json) } : {}),
     instruction_source: row.instruction_source as OperationRecord["instruction_source"],
     instruction_authority: row.instruction_authority,
     channel: row.channel,
@@ -98,10 +106,14 @@ export function operationFromRow(row: OperationsTable): OperationRecord {
 export function backendRunToRow(run: BackendRunRecord): BackendRunsTable {
   return {
     id: run.id,
-    session_id: run.session_id,
+    session_id: run.session_id ?? null,
+    room_id: run.room_id ?? null,
+    principal_json: run.principal ? stringify(run.principal) : null,
+    source_json: run.source ? stringify(run.source) : null,
+    session_ref_json: run.session_ref ? stringify(run.session_ref) : null,
     agent_id: run.agent_id ?? null,
     requested_by_participant_id: run.requested_by_participant_id ?? null,
-    input_message_id: run.input_message_id,
+    input_message_id: run.input_message_id ?? null,
     output_message_id: run.output_message_id ?? null,
     backend_id: run.backend_id,
     backend_kind: run.backend_kind,
@@ -123,10 +135,14 @@ export function backendRunToRow(run: BackendRunRecord): BackendRunsTable {
 export function backendRunFromRow(row: BackendRunsTable): BackendRunRecord {
   return {
     id: row.id,
-    session_id: row.session_id,
+    ...(row.session_id ? { session_id: row.session_id } : {}),
+    ...(row.room_id ? { room_id: row.room_id } : {}),
+    ...(row.principal_json ? { principal: parse(row.principal_json) } : {}),
+    ...(row.source_json ? { source: parse(row.source_json) } : {}),
+    ...(row.session_ref_json ? { session_ref: parse(row.session_ref_json) } : {}),
     agent_id: row.agent_id ?? undefined,
     requested_by_participant_id: row.requested_by_participant_id ?? undefined,
-    input_message_id: row.input_message_id,
+    ...(row.input_message_id ? { input_message_id: row.input_message_id } : {}),
     output_message_id: row.output_message_id ?? undefined,
     backend_id: row.backend_id,
     backend_kind: row.backend_kind as BackendRunRecord["backend_kind"],
@@ -149,7 +165,7 @@ export function workspaceChangeToRow(change: WorkspaceChangeRecord): WorkspaceCh
   return {
     id: change.id,
     run_id: change.run_id,
-    session_id: change.session_id,
+    session_id: change.session_id ?? null,
     resource_ref_json: stringify(change.resource_ref),
     change_type: change.change_type,
     summary: change.summary,
@@ -163,7 +179,7 @@ export function workspaceChangeFromRow(row: WorkspaceChangesTable): WorkspaceCha
   return {
     id: row.id,
     run_id: row.run_id,
-    session_id: row.session_id,
+    ...(row.session_id ? { session_id: row.session_id } : {}),
     resource_ref: parse(row.resource_ref_json),
     change_type: row.change_type as WorkspaceChangeRecord["change_type"],
     summary: row.summary,

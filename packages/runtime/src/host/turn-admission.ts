@@ -1,16 +1,19 @@
-import { createId, stableHash } from "@samurai-agent/core-schemas";
+import { createId, stableHash, type TrustedWorkspaceContext } from "@samurai-agent/core-schemas";
 import type { AgentBackendRegistry } from "@samurai-agent/agent-backends";
 import type { AdmittedTurn, BackendBoundTurn, BackendBinding, HostStorePort, TurnRequest } from "./host-types";
 
 export class TurnAdmission {
   constructor(private readonly registry: AgentBackendRegistry, private readonly store: HostStorePort, private readonly clock: () => string, private readonly resolveDefaultBackendId?: () => Promise<string> | string) {}
 
-  async admit(request: TurnRequest): Promise<AdmittedTurn> {
+  async admit(request: TurnRequest, context?: TrustedWorkspaceContext): Promise<AdmittedTurn> {
     if (!request.sessionId.trim()) throw new Error("session_id_required");
     if (!request.content.trim()) throw new Error("content_required");
     if (!request.idempotencyKey.trim()) throw new Error("idempotency_key_required");
     const session = await this.store.getSession(request.sessionId);
     if (!session) throw new Error(`session_not_found:${request.sessionId}`);
+    if (context?.room_id && context.room_id !== session.room_id) {
+      throw new Error(`session_adapter_room_mismatch:${session.id}`);
+    }
     const backendId = request.backendId?.trim() || await this.resolveDefaultBackendId?.() || "samurai-native";
     const backend = this.registry.get(backendId);
     if (!backend) throw new Error(`backend_not_registered:${backendId}`);
@@ -37,7 +40,7 @@ export class TurnAdmission {
       }
     });
     const bound: BackendBoundTurn = { request, session, binding, requestHash };
-    const admission = await this.store.admitTurn({ session, binding, request, requestHash, runId: createId("run"), now: this.clock() });
+    const admission = await this.store.admitTurn({ session, binding, request, ...(context ? { context } : {}), requestHash, runId: createId("run"), now: this.clock() });
     return { ...bound, ...admission };
   }
 }

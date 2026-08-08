@@ -49,7 +49,7 @@ const wikiReject = defineCommand<WikiRejectPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiReject(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: await executeWikiStateTransition(ports, { id: input.wiki_id, state: "rejected", operationName: "wiki.reject", proposedEffect: "Reject a wiki proposal without deleting its markdown.", summaryPrefix: "Rejected wiki page" }) };
+        return { ok: true, value: await executeWikiStateTransition(ports, { context, id: input.wiki_id, state: "rejected", operationName: "wiki.reject", proposedEffect: "Reject a wiki proposal without deleting its markdown.", summaryPrefix: "Rejected wiki page" }) };
       }
     };
   }

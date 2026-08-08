@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { getDomainQueryForProviderToolName } from "@samurai-agent/action-catalog";
+import { isSessionCompatibleOperation } from "@samurai-agent/domain-operations";
 import type { BackendOutputEvent, BackendRunInput, BackendToolCallStartedEvent } from "@samurai-agent/agent-backends";
 import {
   type ArtifactRecord,
@@ -105,6 +106,11 @@ export class BackendToolBridgeService {
 
     const attemptNo = run.current_attempt ?? 1;
     const actionId = samuraiToolBridgeActionId(providerToolName);
+    // Tool descriptors are advisory. A caller that guesses a hidden legacy
+    // tool name must not bypass the closed Session compatibility boundary.
+    if (!run.session_id && isSessionCompatibleOperation(actionId)) {
+      throw this.deps.createError("conflict", `session_compatibility_required:${actionId}`);
+    }
     const toolIdentity = `${run.id}:${attemptNo}:${toolCallId}`;
     const toolInputHash = stableHash({ action_id: actionId, input: input.toolInput });
     const existing = await this.findExistingResult(run.id, attemptNo, toolCallId, toolIdentity, toolInputHash);

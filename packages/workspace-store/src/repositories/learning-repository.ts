@@ -117,7 +117,7 @@ async recordLearningResourceUse(record: LearningResourceUseRecord): Promise<Lear
       id, run_id, session_id, room_id, agent_id, resource_kind, resource_id, resource_version,
       content_hash, usage_scope_json, stage, source_operation_id, decision_summary, matched_conditions_json, metadata_json, created_at
     ) VALUES (
-      ${record.id}, ${record.run_id}, ${record.session_id}, ${record.activity_context?.room_id ?? null}, ${record.activity_context?.agent_id ?? null}, ${record.resource_kind}, ${record.resource_id}, ${record.resource_version ?? null},
+      ${record.id}, ${record.run_id}, ${record.session_id ?? null}, ${record.activity_context?.room_id ?? null}, ${record.activity_context?.agent_id ?? null}, ${record.resource_kind}, ${record.resource_id}, ${record.resource_version ?? null},
       ${safeRecord.content_hash ?? null}, ${safeRecord.usage_scope ? stringify(safeRecord.usage_scope) : null}, ${safeRecord.stage}, ${safeRecord.source_operation_id ?? null}, ${safeRecord.decision_summary ?? null}, ${safeRecord.matched_conditions ? stringify(safeRecord.matched_conditions) : null}, ${stringify(safeRecord.metadata)}, ${safeRecord.created_at}
     )
   `.execute(this.db);

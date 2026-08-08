@@ -17,6 +17,7 @@
     "backend:external:verify": "node scripts/verify-external-backends.mjs",
     "backend:channels:verify": "node scripts/verify-external-channels.mjs",
     "backend:gateway:verify": "node --import tsx scripts/verify-gateway-recovery.mjs",
+    "core:06:verify": "node scripts/verify-core06.mjs",
     "core:verify": "node scripts/verify-core-completion.mjs",
     "core:host-runtime:check": "node scripts/check-core-host-runtime.mjs",
     "core:host-runtime:verify": "node scripts/verify-core-host-runtime.mjs",

@@ -14,6 +14,88 @@ export const domainInputSources = [
 ] as const;
 export type DomainInputSource = (typeof domainInputSources)[number];
 
+/**
+ * Closed compatibility boundary for operations that still belong to the
+ * Native App/legacy Session surface.  A Session-less ingress must not invent
+ * a Session just to make one of these operations appear available.
+ */
+export const sessionCompatibleOperationIds = new Set<string>([
+  "chat.turn.run",
+  "session.create",
+  "session.search",
+  "search.session",
+  "memory.archive",
+  "memory.session.create",
+  "learning.background_review.apply",
+  "learning.resource.usage.record",
+  "learning.resource.version.restore",
+  "learning.resource.version.update",
+  "learning.snapshot.prune",
+  "curator.pause",
+  "curator.restore",
+  "curator.resume",
+  "curator.run",
+  "curator.snapshot.create",
+  "curator.snapshot.list",
+  "reflection.run",
+  "reflection.suggestion.apply",
+  "evaluation.run",
+  "automation.job.release_lock",
+  "automation.job.requeue",
+  "automation.job.run",
+  "automation.job.save",
+  "automation.job.set_status",
+  "automation.memory_review.run",
+  "browser.download_to_workspace",
+  "browser.extract",
+  "browser.interact",
+  "browser.navigate",
+  "browser.screenshot",
+  "external.send",
+  "external.send.dispatch",
+  "external.send.prepare",
+  "image.edit",
+  "image.generate",
+  "mcp.call",
+  "sandbox.exec",
+  "skill.lifecycle.apply",
+  "skill.optimization.cancel",
+  "skill.optimization.promote",
+  "skill.optimization.reject",
+  "skill.optimization.rollback",
+  "skill.optimization.start",
+  "message.presentation.update",
+  "artifact.create",
+  "artifact.export_pdf",
+  "artifact.repair",
+  "artifact.restore_revision",
+  "artifact.revise",
+  "collection.action.run",
+  "collection.manage",
+  "collection.patch.apply",
+  "collection.record.create",
+  "collection.record.delete",
+  "collection.records.list",
+  "collection.reindex",
+  "collection.schema.docs",
+  "collection.schema.get",
+  "collection.schema.save",
+  "collection.search",
+  "collection.view.present",
+  "generated_surface.action.run",
+  "generated_surface.create",
+  "generated_surface.export",
+  "generated_surface.interaction.record",
+  "generated_surface.revise",
+  "generated_surface.state",
+  "graph.create",
+  "graph.patch"
+]);
+
+export function isSessionCompatibleOperation(operationId: string): boolean {
+  return sessionCompatibleOperationIds.has(operationId);
+}
+
 export const domainRenderKinds = [
   "chat", "status_timeline", "form", "table", "chart", "graph_view", "artifact",
   "collection", "collection_record", "memory", "skill", "knowledge_wiki", "gateway",
@@ -44,6 +126,9 @@ export interface TrustedDomainContext {
   /** Server-resolved Room target. Public payloads never supply this field. */
   roomId?: string;
   sessionId?: string;
+  /** Optional app-owned reference; never an authorization input. */
+  sessionRef?: import("@samurai-agent/core-schemas").SessionRef;
+  source?: import("@samurai-agent/core-schemas").TrustedWorkspaceSource;
   runId?: string;
   /** Server-selected input envelope; never populated from a command payload. */
   envelopeId?: string;
@@ -101,11 +186,18 @@ export class DomainContractError extends Error {
 export class TrustedDomainContextError extends Error {
   constructor(
     readonly operationId: string,
-    readonly field: "runId"
+    readonly field: "runId" | "roomId"
   ) {
     super(`domain_operation_trusted_context_missing:${operationId}:${field}`);
     this.name = "TrustedDomainContextError";
   }
+}
+
+/** Room operations receive the selected Room from the trusted transport. */
+export function requireRoomContext(context: TrustedDomainContext, operationId: string): string {
+  const roomId = context.roomId?.trim();
+  if (!roomId) throw new TrustedDomainContextError(operationId, "roomId");
+  return roomId;
 }
 
 interface BaseDefinition<I extends z.ZodTypeAny, O extends z.ZodTypeAny, P> {

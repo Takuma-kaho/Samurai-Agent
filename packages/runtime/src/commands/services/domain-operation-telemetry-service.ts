@@ -2,14 +2,14 @@ import { createId, nowIso, type BackendRunRecord, type OperationRecord, type Res
 
 export interface DomainOperationTelemetryPort {
   getBackendRun(id: string): Promise<BackendRunRecord | undefined>;
-  listWorkspaceChanges(sessionId: string): Promise<WorkspaceChangeRecord[]>;
+  listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]>;
   saveWorkspaceChange(change: WorkspaceChangeRecord): Promise<WorkspaceChangeRecord>;
   emitWorkspaceChange(change: WorkspaceChangeRecord): Promise<void>;
 }
 
 export interface DomainOperationTelemetryInput {
   runId: string;
-  sessionId: string;
+  sessionId?: string;
   correlationId: string;
   operation: OperationRecord;
   resourceRef: ResourceRef;
@@ -26,7 +26,7 @@ export class DomainOperationTelemetryService {
 
   async record(input: DomainOperationTelemetryInput): Promise<WorkspaceChangeRecord> {
     const run = await this.port.getBackendRun(input.runId);
-    if (!run || run.session_id !== input.sessionId) {
+    if (!run || (input.sessionId !== undefined && run.session_id !== input.sessionId)) {
       throw new Error(`domain_operation_telemetry_backend_run_invalid:${input.runId}`);
     }
     const existing = (await this.port.listWorkspaceChanges(input.sessionId)).find((change) =>
@@ -37,7 +37,7 @@ export class DomainOperationTelemetryService {
     const change: WorkspaceChangeRecord = {
       id: createId("change"),
       run_id: input.runId,
-      session_id: input.sessionId,
+      ...(input.sessionId ? { session_id: input.sessionId } : {}),
       resource_ref: input.resourceRef,
       change_type: changeTypeForResource(input.resourceRef),
       summary: `Changed ${input.resourceRef.label ?? input.resourceRef.kind}/${input.resourceRef.id}.`,

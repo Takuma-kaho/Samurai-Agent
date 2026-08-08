@@ -309,8 +309,8 @@ try {
   // IN07 is an actual effective-inventory check, not a label. The normal
   // Runtime has an available Backend and the built-in Plugin registry; this
   // isolated Runtime has neither. Source selection is checked separately.
-  const runtimeApiInventory = await runtime.listEffectiveDomainOperations(session.id, "runtime_api");
-  const providerInventory = await runtime.listEffectiveDomainOperations(session.id, "provider_tool_call");
+  const runtimeApiInventory = await runtime.listEffectiveDomainOperations(session.id, "runtime_api", { kind: "human", participantId: localOwnerParticipantId });
+  const providerInventory = await runtime.listEffectiveDomainOperations(session.id, "provider_tool_call", { kind: "human", participantId: localOwnerParticipantId });
   restrictedInventoryRuntime = new AgentRuntime(
     workspace,
     undefined,
@@ -318,7 +318,7 @@ try {
     new AgentBackendRegistry([]),
     new PluginRuntimeRegistry({ manifests: [], actions: [] })
   );
-  const restrictedInventory = await restrictedInventoryRuntime.listEffectiveDomainOperations(session.id, "runtime_api");
+  const restrictedInventory = await restrictedInventoryRuntime.listEffectiveDomainOperations(session.id, "runtime_api", { kind: "human", participantId: localOwnerParticipantId });
   const runtimeApiIds = effectiveInventoryIds(runtimeApiInventory);
   const providerIds = effectiveInventoryIds(providerInventory);
   const restrictedIds = effectiveInventoryIds(restrictedInventory);

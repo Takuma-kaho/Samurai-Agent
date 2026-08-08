@@ -6,15 +6,12 @@ import wikiReject from "./reject.operation.js";
 import type { WikiStateTransitionPorts } from "./state-transition.js";
 
 const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test" };
-const session = { id: "session_1" } as never;
-const envelope = { id: "envelope_1" } as never;
 const operation = { id: "operation_1" } as never;
 const page = { id: "wiki_1", slug: "page", title: "Page", state: "proposed" as const, content_locale: "ja" as const, tags: [], source_refs: [], provenance: { kind: "user_authored" as const, summary: "test", verified: true }, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z", file_path: "wiki/page.md" };
 
 function ports(setWikiPageState = vi.fn(async (_id: string, state: "active" | "archived" | "rejected") => ({ ...page, state }))) {
   return {
     getWikiPage: async () => page, setWikiPageState,
-    ensureWikiSession: async () => session, createWikiEnvelope: () => envelope,
     wikiPageNotFoundError: () => new Error("wiki_not_found"),
     createWikiRollback: async () => ({ id: "rollback_1" }) as never,
     runWikiMutation: async (input: Parameters<WikiStateTransitionPorts["runWikiMutation"]>[0]) => {

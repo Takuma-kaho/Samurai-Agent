@@ -42,6 +42,15 @@ export interface Core02SettlementInput {
   reservation: { sessionId: string; runId: string; version: number; status: "held" | "released" };
 }
 
+/** Session-free terminal settlement for Room-scoped Host Runs. */
+export interface WorkspaceRunSettlementInput {
+  expectedRun: BackendRunRecord;
+  nextRun: BackendRunRecord;
+  terminalEvent: BackendEventRecord;
+  outputSummary?: string;
+  diagnostic?: { code: string; message: string; metadata?: Record<string, JsonValue> };
+}
+
 export interface WorkspaceStoreOptions {
   rootDir: string;
   fileTransactionFailureInjector?: (phase: "planned" | "staged" | "db_transaction" | "db_committed" | "renamed") => void;

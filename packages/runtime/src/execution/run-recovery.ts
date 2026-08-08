@@ -73,6 +73,9 @@ export class RunRecovery {
     const candidates = await this.store.listCore02RecoveryCandidates();
     for (const run of candidates) {
       try {
+        // Room-scoped Runs are reconciled by AgentHost's shared Workspace
+        // execution path. This object owns Session-bound Chat recovery only.
+        if (!run.session_id) continue;
         if (!(run.status === "queued" || run.status === "running" || run.status === "waiting_for_backend_input" || run.status === "outcome_unknown")) continue;
         if (run.status === "queued") {
           await this.reenqueue(run);
@@ -156,6 +159,7 @@ export class RunRecovery {
     source: string,
     suppliedFailure?: BackendRuntimeFailure
   ): Promise<PreparedTerminalSettlement> {
+    requireSessionBoundRun(run);
     const evidence = event.terminal_evidence;
     if (!evidence) throw new Error(`recovery_terminal_evidence_missing:${run.id}`);
     const lifecycleEvent = lifecycleEventForTerminalEvidence(evidence, { failure: suppliedFailure });
@@ -194,6 +198,7 @@ export class RunRecovery {
   }
 
   private async createOutput(run: BackendRunRecord, content: string): Promise<MessageRecord | undefined> {
+    requireSessionBoundRun(run);
     const session = await this.store.getSession(run.session_id);
     if (!session) return undefined;
     return { id: `message:${run.id}:output`, session_id: session.id, role: "agent", content, input_locale: session.ui_locale, output_locale: session.output_locale, created_at: this.clock() };
@@ -247,6 +252,10 @@ export class RunRecovery {
       this.diagnostics.logPersistenceFailure({ ...diagnostic, error: diagnosticError });
     }
   }
+}
+
+function requireSessionBoundRun(run: BackendRunRecord): asserts run is BackendRunRecord & { session_id: string } {
+  if (!run.session_id) throw new Error(`session_bound_run_required:${run.id}`);
 }
 
 function hasSettledOutcome(run: BackendRunRecord): boolean {

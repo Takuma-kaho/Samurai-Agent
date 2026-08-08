@@ -22,6 +22,7 @@ import {
 } from "./context/skill-context.js";
 import { expectedBackendOutputs, gatewayBoundaryRuntimeSnapshot } from "./host/turn-preparation-policy.js";
 import { EnvironmentToolBridgeAdapter } from "./host/tool-bridge-adapter.js";
+import { workspaceBackendInput } from "./host/workspace-backend-input.js";
 import { runtimeOperationIds } from "./runtime-operation-composition.js";
 import { executeGeneratedSurfaceAction } from "./generated-surface-action-ingress.js";
 import {
@@ -77,6 +78,7 @@ import {
 import {
   DomainOperationError,
   DomainOperationRegistry,
+  isSessionCompatibleOperation,
   type DomainCommandId,
   type DomainOperationId,
   type DomainOperationInput,
@@ -186,6 +188,8 @@ import {
   type WorkspaceChangeRecord,
   type ToolRunRecord,
   type UsageScopeRef,
+  type Principal,
+  type WorkspaceExecutionRequest,
   GatewayRepairResultSchema,
   GatewaySandboxWorkspaceSyncResultSchema,
   gatewayChannels,
@@ -248,8 +252,8 @@ import {
   type SandboxWorkspaceSyncExecutionResult
 } from "@samurai-agent/gateway";
 import { isSupportedLocale } from "@samurai-agent/localization";
-import { agentParticipantId, collectionRecordResourceId, isRoomShareableResourceKind, localOwnerParticipantId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
-import { buildMemoryFrontmatter, createSessionMemory, createTopicMemory, retrieveActiveMemoryWithReport } from "@samurai-agent/memory";
+import { agentParticipantId, collectionRecordResourceId, delegatedParticipant, isRoomShareableResourceKind, localOwnerParticipantId, principalParticipantId as roomPrincipalParticipantId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
+import { buildMemoryFrontmatter, createRoomTopicMemory, createTopicMemory, retrieveActiveMemoryWithReport } from "@samurai-agent/memory";
 import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type MessageSubmitOperation, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   CollectionRecordVersionConflictError,
@@ -324,7 +328,8 @@ import { LearningEvidenceAssembler } from "./learning/learning-evidence-assemble
 import type {
   AdmittedTurn,
   BackendBoundTurn,
-  TurnRequest
+  TurnRequest,
+  WorkspaceExecutionOutcome
 } from "./host/host-types";
 import type { AgentHost } from "./host/agent-host";
 import { MemoryDomainService } from "./commands/services/memory-domain-service";
@@ -456,13 +461,23 @@ export interface RuntimeWriteResult<TResource> {
 }
 
 interface RecordedMutationInput<TResource, TExtra extends Record<string, unknown> = {}> {
-  session: SessionRecord;
-  envelope: MessageEnvelope;
+  /** Native App compatibility may supply these; Room-first mutations do not. */
+  session?: SessionRecord;
+  envelope?: MessageEnvelope;
   context?: GatewayContext;
+  /** The handler's server-resolved Context; never supplied by a public DTO. */
+  trustedContext?: TrustedDomainContext;
   operationName: string;
   proposedEffects: string[];
+  /** A human-readable server-side input summary when there is no Message. */
+  inputSummary?: string;
   inputRef?: OperationRecord["input_ref"];
   targetResourceRefs?: OperationRecord["target_resource_refs"];
+  /**
+   * Resource identities known before the write starts.  They are registered
+   * against the current Room before a filesystem or index mutation can run.
+   */
+  boundaryResourceRefs?: ResourceRef[];
   execute: (operation: OperationRecord) => Promise<{
     resource: TResource;
     ref: NonNullable<OperationRecord["result_ref"]>;
@@ -652,7 +667,11 @@ export interface TrustedDomainRuntimeContext {
   participant?: import("@samurai-agent/room-permissions").ParticipantPrincipal;
   /** Server-created correlation root shared by a multi-command ingress chain. */
   correlationId?: string;
+  /** Room selected by an authenticated transport, never by operation payload. */
+  roomId?: string;
   sessionId?: string;
+  sessionRef?: import("@samurai-agent/core-schemas").SessionRef;
+  source?: import("@samurai-agent/core-schemas").TrustedWorkspaceSource;
   runId?: string;
   envelopeId?: string;
   surfaceOperation?: {
@@ -797,6 +816,12 @@ export class RuntimeRequestError extends Error {
   ) {
     super(message);
     this.name = "RuntimeRequestError";
+  }
+}
+
+function requireSessionBoundRun(run: BackendRunRecord): asserts run is BackendRunRecord & { session_id: string } {
+  if (!run.session_id) {
+    throw new RuntimeRequestError("conflict", `session_bound_run_required:${run.id}`);
   }
 }
 
@@ -1131,7 +1156,7 @@ export class AgentRuntime {
     this.learningResourceUseDomainService = new LearningResourceUseDomainService({
       getRun: (id) => this.store.getBackendRun(id),
       resolveActivityContext: async (run) => {
-        if (!run.agent_id) return undefined;
+        if (!run.agent_id || !run.session_id) return undefined;
         const [session, agent] = await Promise.all([this.store.getSession(run.session_id), this.store.getAgent(run.agent_id)]);
         if (!session?.room_id || session.id !== run.session_id || !agent) return undefined;
         return { room_id: session.room_id, session_id: session.id, agent_id: agent.id };
@@ -1356,17 +1381,18 @@ export class AgentRuntime {
         if (access.roomId !== input.activityContext.room_id || run.session_id !== input.activityContext.session_id || run.agent_id !== input.activityContext.agent_id) {
           throw new RuntimeRequestError("forbidden", "learning_evaluation_activity_context_invalid");
         }
-        const ownerParticipantId = access.principal.kind === "agent"
-          ? access.principal.requestedByParticipantId
-          : access.principal.participantId;
+        const delegated = delegatedParticipant(access.principal);
+        const ownerParticipantId = delegated.kind === "agent"
+          ? delegated.requestedByParticipantId
+          : delegated.participantId;
         return this.core05BackgroundReviewMutationDomainService.markRefuted({
           ...input,
           ownership: {
             roomId: access.roomId,
             ownerParticipantId,
-            creatorParticipantId: access.principal.kind === "agent"
-              ? agentParticipantId(access.principal.agentId)
-              : access.principal.participantId
+            creatorParticipantId: delegated.kind === "agent"
+              ? agentParticipantId(delegated.agentId)
+              : delegated.participantId
           }
         });
       },
@@ -1494,8 +1520,6 @@ export class AgentRuntime {
         write: (value, content) => writeFile(value, content),
         remove: (value) => rm(value, { force: true }),
         ensureParent: (value) => mkdir(path.dirname(value), { recursive: true }).then(() => undefined),
-        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
-        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
         runMutation: (input) => runWebMutation(input),
         createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         fileRef: (value) => fileRef(value),
@@ -1578,8 +1602,7 @@ export class AgentRuntime {
         update: (input) => this.store.updateWikiPage(input),
         setState: (id, state) => this.store.setWikiState(id, state),
         reindex: () => this.store.reindexWiki(),
-        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
-        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
+        defaultOutputLocale: async () => (await this.store.getSettings()).output_locale,
         runMutation: (input) => runWebMutation(input),
         createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         requestError: (code, message) => new RuntimeRequestError(code, message)
@@ -1712,6 +1735,7 @@ export class AgentRuntime {
         const requesterParticipantId = trustedRequesterParticipantId(context);
         return this.createSession({
           ...input,
+          ...(context.roomId && input.room_id === undefined ? { room_id: context.roomId } : {}),
           trusted_participant_context: true,
           ...(requesterParticipantId ? { trusted_requester_participant_id: requesterParticipantId } : {})
         });
@@ -1745,8 +1769,6 @@ export class AgentRuntime {
       reindexCollections: async () => { await this.store.reindexCollections(); },
       isManagedCollectionPath: (relativePath) => isManagedCollectionWorkspacePath(relativePath)
     }, {
-      ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
-      createEnvelope: (_session, content) => createGatewayEnvelope(webGatewayContext, content),
       runMutation: (input) => this.runRecordedMutation({ ...input, context: webGatewayContext }),
       createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
       requestError: (code, message) => new RuntimeRequestError(code, message)
@@ -1839,22 +1861,25 @@ export class AgentRuntime {
     this.memoryDomainService = new MemoryDomainService({
       memories: {
         getSession: (id) => this.store.getSession(id),
-        createSession: (input) => this.createSession(input),
-        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
-        createEnvelope: (input) => {
-          const context = { ...webGatewayContext, session_key: input.session.session_key };
-          const envelope = createGatewayEnvelope(context, input.content, input.inputLocale, input.outputLocale, input.metadata);
-          return input.envelopeId ? { ...envelope, id: input.envelopeId } : envelope;
+        writeRoomTopicMemory: async (input) => {
+          if (!input.context.roomId) throw new RuntimeRequestError("conflict", "memory_room_context_required");
+          const settings = await this.store.getSettings();
+          return createRoomTopicMemory(this.store, {
+            id: input.memoryId,
+            topic: input.topicKind,
+            content: input.content,
+            source: input.context.runId ? `run:${input.context.runId}` : `context:${input.context.correlationId}`,
+            sourceLocale: input.inputLocale ?? settings.ui_locale,
+            contentLocale: input.outputLocale ?? settings.output_locale,
+            sourceKind: instructionSourceForDomainInput(input.context.inputSource),
+            instructionAuthority: input.context.actorId,
+            roomId: input.context.roomId
+          });
         },
-        writeSessionMemory: (envelope, content) => createSessionMemory(this.store, envelope, content),
-        writeTopicMemory: (envelope, topicKind, content) => createTopicMemory(this.store, envelope, topicKind, content),
         memoryRef: (memory) => memoryRef(memory),
         createRollback: (operation, refs, after) => this.createRollbackPoint(operation, refs, {}, after),
         emitCandidate: async (memory) => { await this.emit("memory.candidate.created", memory); },
-        runMutation: (input) => this.runRecordedMutation<MemoryFrontmatter>({
-          ...input,
-          context: { ...webGatewayContext, session_key: input.session.session_key }
-        })
+        runMutation: (input) => this.runRecordedMutation<MemoryFrontmatter>({ ...input, context: webGatewayContext })
       },
       archive: {
         getMemory: (id) => this.store.getMemory(id),
@@ -1960,10 +1985,13 @@ export class AgentRuntime {
       preparation: {
         prepareRequest: (request) => this.prepareHostRequest(request),
         assertCurrentRunAccess: (turn) => this.assertCurrentRunAccess(turn),
-        assertRunAccess: (run) => this.assertRunAgentExecution(run),
+        assertRunAccess: (run) => run.session_id
+          ? this.assertRunAgentExecution(run)
+          : this.assertWorkspaceRunAgentExecution(run),
         contextPreviewPortsForTurn: (turn) => this.contextPreviewPortsForTurn(turn),
         prepareResumeInput: async ({ run, resumeInput }) => {
-          await this.assertRunAgentExecution(run);
+          if (run.session_id) await this.assertRunAgentExecution(run);
+          else await this.assertWorkspaceRunAgentExecution(run);
           const gatewayBoundaryPolicy = await this.gatewayBoundaryPolicyForRun(run);
           return {
             backendInput: await this.buildResumeToolRunInput(run, resumeInput, gatewayBoundaryPolicy),
@@ -2115,6 +2143,7 @@ export class AgentRuntime {
   }
 
   private async assertRunAgentExecution(run: BackendRunRecord, requestedAgentId?: string, requestedByParticipantId?: string): Promise<void> {
+    requireSessionBoundRun(run);
     const session = await this.store.getSession(run.session_id);
     const roomId = session?.room_id;
     const agentId = run.agent_id ?? requestedAgentId;
@@ -2133,8 +2162,32 @@ export class AgentRuntime {
     }
   }
 
+  /** Re-checks a Room-scoped Run without consulting the app-owned Session. */
+  private async assertWorkspaceRunAgentExecution(run: BackendRunRecord): Promise<void> {
+    if (!run.room_id || !run.principal) throw new RuntimeRequestError("conflict", `run_room_principal_missing:${run.id}`);
+    const principal = principalFromTrustedWorkspace(run.principal);
+    if (principal.kind === "system") throw new RuntimeRequestError("forbidden", "system_principal_not_authorized");
+    try {
+      await this.roomAuthorizationService.assertRoom(principal, run.room_id, "execute");
+      const delegated = delegatedParticipant(principal);
+      const requesterParticipantId = delegated.kind === "agent" ? delegated.requestedByParticipantId : delegated.participantId;
+      const agentId = run.agent_id ?? (delegated.kind === "agent" ? delegated.agentId : undefined);
+      if (agentId) {
+        await this.roomAuthorizationService.assertAgentExecution({
+          requesterParticipantId,
+          roomId: run.room_id,
+          agentId
+        });
+      }
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+  }
+
   /** Re-resolves a Run's current Room principal before post-run reads. */
   private async roomReadAccessForRun(run: BackendRunRecord): Promise<{ principal: ParticipantPrincipal; roomId: string }> {
+    requireSessionBoundRun(run);
     const session = await this.store.getSession(run.session_id);
     const roomId = session?.room_id;
     const agentId = run.agent_id;
@@ -2688,6 +2741,20 @@ export class AgentRuntime {
     return { roomId };
   }
 
+  /**
+   * A Run is the canonical access anchor once it has no App Session. Legacy
+   * Runs resolve their Session first; Room-first Runs use the persisted Room
+   * and never fall back to a default Session or Room.
+   */
+  async assertLocalOwnerBackendRunAccess(
+    run: Pick<BackendRunRecord, "session_id" | "room_id">,
+    action: "read" | "edit" | "execute" = "read"
+  ): Promise<{ roomId: string }> {
+    if (run.session_id) return this.assertLocalOwnerRoomAccess({ sessionId: run.session_id, action });
+    if (!run.room_id) throw new RuntimeRequestError("conflict", "backend_run_room_missing");
+    return this.assertLocalOwnerRoomAccess({ roomId: run.room_id, action });
+  }
+
   async listLocalOwnerVisibleRoomIds(): Promise<Set<string>> {
     return this.roomAuthorizationService.visibleRoomIds({ kind: "human", participantId: localOwnerParticipantId });
   }
@@ -2733,7 +2800,10 @@ export class AgentRuntime {
     toolInput: Record<string, JsonValue>;
   }): Promise<BackendToolBridgeCallResult> {
     const run = await this.store.getBackendRun(input.runId);
-    if (run) await this.assertRunAgentExecution(run);
+    if (run) {
+      if (run.session_id) await this.assertRunAgentExecution(run);
+      else await this.assertWorkspaceRunAgentExecution(run);
+    }
     return this.backendToolBridgeService.run(input);
   }
 
@@ -3002,6 +3072,7 @@ export class AgentRuntime {
   }
 
   private async projectChatTurn(run: BackendRunRecord): Promise<RunChatTurnResult> {
+    requireSessionBoundRun(run);
     const session = await this.store.getSession(run.session_id);
     if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${run.session_id}`);
     if (!session.room_id || !run.agent_id) throw new RuntimeRequestError("conflict", `run_room_agent_missing:${run.id}`);
@@ -3061,10 +3132,41 @@ export class AgentRuntime {
     };
   }
 
+  async runWorkspaceExecution(input: WorkspaceExecutionRequest): Promise<WorkspaceExecutionOutcome> {
+    const principal = principalFromTrustedWorkspace(input.context.principal);
+    if (!input.context.room_id) throw new RuntimeRequestError("forbidden", "room_context_required");
+    assertTrustedExternalAppContext(principal, input.context.source, input.context.session_ref);
+    if (principal.kind === "system") throw new RuntimeRequestError("forbidden", "system_principal_not_authorized");
+    try {
+      await this.roomAuthorizationService.assertRoom(principal, input.context.room_id, "execute");
+      const delegated = delegatedParticipant(principal);
+      if (delegated.kind === "agent" && input.agent_id && input.agent_id !== delegated.agentId) {
+        throw new RuntimeRequestError("forbidden", "agent_principal_mismatch");
+      }
+      const requestedByParticipantId = delegated.kind === "agent" ? delegated.requestedByParticipantId : delegated.participantId;
+      const effectiveAgentId = input.agent_id ?? (delegated.kind === "agent" ? delegated.agentId : undefined);
+      if (effectiveAgentId) {
+        await this.roomAuthorizationService.assertAgentExecution({
+          requesterParticipantId: requestedByParticipantId,
+          roomId: input.context.room_id,
+          agentId: effectiveAgentId
+        });
+      }
+      return await this.requireAgentHost().runWorkspaceExecution({
+        ...input,
+        ...(effectiveAgentId ? { agent_id: effectiveAgentId } : {})
+      });
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
+      throw error;
+    }
+  }
+
   async cancelBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.store.getBackendRun(runId);
     if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
-    await this.assertRunAgentExecution(run);
+    if (run.session_id) await this.assertRunAgentExecution(run);
+    else await this.assertWorkspaceRunAgentExecution(run);
     const cancelled = await this.requireAgentHost().cancelRun(runId);
     const lockKey = typeof cancelled.metadata.gateway_boundary_concurrency_lock_key === "string"
       ? cancelled.metadata.gateway_boundary_concurrency_lock_key.trim()
@@ -3088,7 +3190,8 @@ export class AgentRuntime {
     try {
       const run = await this.store.getBackendRun(runId);
       if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
-      await this.assertRunAgentExecution(run);
+      if (run.session_id) await this.assertRunAgentExecution(run);
+      else await this.assertWorkspaceRunAgentExecution(run);
       return await this.requireAgentHost().resumeRun(runId, input);
     } catch (error) {
       if (String(error).includes("run_not_found")) throw new RuntimeRequestError("not_found", "backend_run_not_found");
@@ -3100,13 +3203,14 @@ export class AgentRuntime {
     const before = await this.store.listBackendEvents({ runId });
     const existingRun = await this.store.getBackendRun(runId);
     if (!existingRun) throw new RuntimeRequestError("not_found", "backend_run_not_found");
-    await this.assertRunAgentExecution(existingRun);
+    if (existingRun.session_id) await this.assertRunAgentExecution(existingRun);
+    else await this.assertWorkspaceRunAgentExecution(existingRun);
     const run = await this.requireAgentHost().syncRun(runId);
     const syncEventId = `control:sync:${run.id}:${run.current_attempt ?? 1}`;
     const syncEvent = await this.store.appendCore02Event({
       id: syncEventId,
       run_id: run.id,
-      session_id: run.session_id,
+      ...(run.session_id ? { session_id: run.session_id } : {}),
       event_type: "backend_stream_synced",
       sequence: 1,
       attempt_no: run.current_attempt ?? 1,
@@ -3896,6 +4000,9 @@ export class AgentRuntime {
       });
       throw error;
     }
+    if (!trustedContext.sessionId && isPersistedSessionCompatibilityOperation(command.id)) {
+      throw new RuntimeRequestError("unavailable", `session_compatibility_required:${command.id}`);
+    }
     if (!this.domainOperationAvailable(command)) {
       throw new RuntimeRequestError("unavailable", `domain_operation_unavailable:${command.id}`);
     }
@@ -3941,9 +4048,9 @@ export class AgentRuntime {
       throw error;
     }
     await this.recordResourceAccessBoundaries(result, command, trustedContext);
-    await this.recordBackendDomainOperationTelemetry(result, trustedContext);
-    await this.attachDomainCorrelation(result, trustedContext);
-    await this.recordDomainAccessAudit(command, payload, result, trustedContext, { allowed: true, reason: "allowed" });
+    await this.recordBackendDomainOperationTelemetrySafely(result, trustedContext);
+    await this.attachDomainCorrelationSafely(result, trustedContext);
+    await this.recordDomainAccessAuditSafely(command, payload, result, trustedContext, { allowed: true, reason: "allowed" });
     const renderSpecs = assertDomainCommandRenderSpecs(command, await this.domainCommandRenderSpecs(command, result));
     const output: DomainCommandRuntimeResult = {
       command,
@@ -4017,6 +4124,9 @@ export class AgentRuntime {
       });
       throw error;
     }
+    if (!trustedContext.sessionId && isSessionCompatibleOperation(query.id)) {
+      throw new RuntimeRequestError("unavailable", `session_compatibility_required:${query.id}`);
+    }
     let result: unknown;
     try {
       result = await this.activeDomainContext.run(
@@ -4034,7 +4144,7 @@ export class AgentRuntime {
       }
       throw error;
     }
-    await this.recordDomainAccessAudit(query, payload, result, trustedContext, { allowed: true, reason: "allowed" });
+    await this.recordDomainAccessAuditSafely(query, payload, result, trustedContext, { allowed: true, reason: "allowed" });
     const renderSpecs = assertDomainQueryRenderSpecs(query, await this.domainQueryRenderSpecs(query, result));
     const output: DomainQueryRuntimeResult = {
       query,
@@ -4052,12 +4162,41 @@ export class AgentRuntime {
     return output;
   }
 
-  async listEffectiveDomainOperations(sessionId: string, source: DomainCommandInputSource): Promise<{ commands: DomainCommandEntry[]; queries: DomainQueryEntry[] }> {
+  async listEffectiveDomainOperations(
+    sessionId: string,
+    source: DomainCommandInputSource,
+    principal: ParticipantPrincipal
+  ): Promise<{ commands: DomainCommandEntry[]; queries: DomainQueryEntry[] }> {
     const session = await this.store.getSession(sessionId);
     if (!session) throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
-    const commands = listDomainCommandEntries(source).filter((entry) => this.domainOperationAvailable(entry));
-    const queries = listDomainQueryEntries(source).filter((entry) => this.domainOperationAvailable(entry));
-    return { commands, queries };
+    if (!session.room_id) throw new RuntimeRequestError("conflict", `session_room_missing:${session.id}`);
+    return this.listEffectiveDomainOperationsForRoom({
+      roomId: session.room_id,
+      source,
+      principal,
+      sessionRef: { app_id: "samurai-native", session_id: session.id }
+    });
+  }
+
+  /**
+   * Room-first operation inventory.  A missing SessionRef only hides the
+   * closed legacy/Core08 compatibility set; it never creates a fake Session.
+   */
+  async listEffectiveDomainOperationsForRoom(input: {
+    roomId: string;
+    source: DomainCommandInputSource;
+    sessionRef?: import("@samurai-agent/core-schemas").SessionRef;
+    principal: ParticipantPrincipal;
+  }): Promise<{ commands: DomainCommandEntry[]; queries: DomainQueryEntry[] }> {
+    await this.roomAuthorizationService.assertRoom(input.principal, input.roomId, "read");
+    const includeSessionCompatible = input.sessionRef !== undefined;
+    const available = <T extends DomainCommandEntry | DomainQueryEntry>(entries: T[]): T[] => entries.filter((entry) =>
+      this.domainOperationAvailable(entry) && (includeSessionCompatible || !isSessionCompatibleOperation(entry.id))
+    );
+    return {
+      commands: available(listDomainCommandEntries(input.source)),
+      queries: available(listDomainQueryEntries(input.source))
+    };
   }
 
   private domainOperationAvailable(entry: DomainCommandEntry | DomainQueryEntry): boolean {
@@ -4132,7 +4271,7 @@ export class AgentRuntime {
       if (context.inputSource !== "gateway_inbound") {
         throw new RuntimeRequestError("forbidden", "gateway_admission_source_required");
       }
-      if (!principal || (principal.kind === "system" && principal.participantId !== "system:unbound-gateway")) {
+      if (!principal || (principal.kind === "system" && principalParticipantId(principal) !== "system:unbound-gateway")) {
         throw new RuntimeRequestError("forbidden", "gateway_admission_principal_required");
       }
       return;
@@ -4229,6 +4368,16 @@ export class AgentRuntime {
       const id = stringPayload(payload[item.idField]);
       if (!id) return undefined;
       if (item.onlyIfExisting && item.kind === "collection_schema" && !await this.store.getCollectionSchema(id)) return undefined;
+      if (item.onlyIfExisting && item.kind === "file") {
+        // A deleted file can still have a durable Room boundary. Treat that
+        // boundary as an existing resource too, otherwise another Room could
+        // recreate the same path before the post-write boundary check.
+        const [exists, boundary] = await Promise.all([
+          this.workspaceFileExists(id),
+          this.store.getResourceAccessBoundary("file", id)
+        ]);
+        if (!exists && !boundary) return undefined;
+      }
       return { kind: item.kind, id };
     }));
     return resolved.filter((item): item is { kind: string; id: string } => Boolean(item));
@@ -4305,17 +4454,68 @@ export class AgentRuntime {
   }
 
   private async recordBackendDomainOperationTelemetry(result: unknown, context: TrustedDomainContext): Promise<void> {
-    if (!context.runId || !context.sessionId) return;
+    if (!context.runId) return;
     const write = operationAuditRuntimeResult(result);
     const resourceRef = write?.resourceRefs[0] ?? write?.operation.result_ref;
     if (!write || !resourceRef) return;
     await this.domainOperationTelemetry.record({
       runId: context.runId,
-      sessionId: context.sessionId,
+      ...(context.sessionId ? { sessionId: context.sessionId } : {}),
       correlationId: context.correlationId,
       operation: write.operation,
       resourceRef
     });
+  }
+
+  /** Telemetry is a projection of a committed Operation, never its success condition. */
+  private async recordBackendDomainOperationTelemetrySafely(result: unknown, context: TrustedDomainContext): Promise<void> {
+    try {
+      await this.recordBackendDomainOperationTelemetry(result, context);
+    } catch {
+      // A later recovery pass can rebuild telemetry from the Run and Operation.
+    }
+  }
+
+  /** Correlation repair is useful for diagnostics but cannot invalidate a completed write. */
+  private async attachDomainCorrelationSafely(result: unknown, context: TrustedDomainContext): Promise<void> {
+    try {
+      await this.attachDomainCorrelation(result, context);
+    } catch {
+      // The Operation retains its immutable correlation_id even if a legacy
+      // WorkspaceChange projection could not be updated immediately.
+    }
+  }
+
+  /**
+   * Registers known Room-resource identities before a mutation starts, then
+   * repeats the check for the result before the Operation is settled.  This
+   * closes the former "write first, discover another Room later" path.
+   */
+  private async ensureRecordedMutationResourceAccessBoundaries(
+    refs: ResourceRef[],
+    context: TrustedDomainContext | undefined,
+    resource: unknown
+  ): Promise<void> {
+    if (!context?.participant || context.participant.kind === "system" || !context.roomId) return;
+    const delegated = delegatedParticipant(context.participant);
+    if (delegated.kind === "system") return;
+    const ownerParticipantId = delegated.kind === "agent"
+      ? delegated.requestedByParticipantId
+      : delegated.participantId;
+    const record = unknownRecord(resource);
+    for (const ref of uniqueResourceRefs(refs)) {
+      const resourceKind = canonicalRoomResourceKind(ref.kind);
+      if (!resourceKind || isRoomPermissionMetadataKind(ref.kind)) continue;
+      await this.store.ensureResourceAccessBoundary({
+        resourceKind,
+        resourceId: ref.id,
+        sourceRoomId: context.roomId,
+        ownerParticipantId,
+        creatorParticipantId: principalParticipantId(context.participant),
+        ...(typeof record.created_at === "string" ? { resourceCreatedAt: record.created_at } : {}),
+        actorId: ownerParticipantId
+      });
+    }
   }
 
   private async recordResourceAccessBoundaries(
@@ -4323,6 +4523,10 @@ export class AgentRuntime {
     command: DomainCommandEntry,
     context: TrustedDomainContext
   ): Promise<void> {
+    // RuntimeWriteResult is settled by runRecordedMutation, which establishes
+    // its boundary before marking the Operation complete.  Repeating it here
+    // used to turn a successful write into a late room-conflict response.
+    if (operationAuditRuntimeResult(result)?.operation) return;
     if (!context.participant || context.participant.kind === "system") return;
     const operation = operationAuditRuntimeResult(result)?.operation;
     const output = unknownRecord(result);
@@ -4333,9 +4537,10 @@ export class AgentRuntime {
     const session = sessionId ? await this.store.getSession(sessionId) : undefined;
     const roomId = context.roomId ?? session?.room_id;
     if (!roomId) return;
-    const ownerParticipantId = context.participant.kind === "agent"
-      ? context.participant.requestedByParticipantId
-      : context.participant.participantId;
+    const delegated = delegatedParticipant(context.participant);
+    const ownerParticipantId = delegated.kind === "agent"
+      ? delegated.requestedByParticipantId
+      : delegated.participantId;
     const refs = [...(operationAuditRuntimeResult(result)?.resourceRefs ?? [])];
     const resource = runtimeWriteResource(result);
     const resourceRecord = unknownRecord(resource);
@@ -4389,10 +4594,8 @@ export class AgentRuntime {
     const participant = context.participant;
     const write = operationAuditRuntimeResult(result);
     const output = unknownRecord(result);
-    const payloadRoomId = typeof payload.room_id === "string" ? payload.room_id : undefined;
-    const sourceRoomId = typeof payload.source_room_id === "string" ? payload.source_room_id : undefined;
     const createdRoomId = entry.id === runtimeOperationIds.roomCreate && typeof output.id === "string" ? output.id : undefined;
-    const roomId = context.roomId ?? payloadRoomId ?? sourceRoomId ?? createdRoomId;
+    const roomId = context.roomId ?? createdRoomId;
     const affectedResources = uniqueResourceRefs([
       ...(write?.resourceRefs ?? []),
       ...(context.sessionId ? [{ kind: "session", id: context.sessionId, uri: `sessions/${context.sessionId}` } satisfies ResourceRef] : [])
@@ -4415,6 +4618,9 @@ export class AgentRuntime {
       ...(participant ? { participant_id: principalParticipantId(participant), participant_kind: participant.kind } : {}),
       ...(participant ? { requested_by_participant_id: requesterParticipantId(participant) } : {}),
       ...(roomId ? { room_id: roomId } : {}),
+      ...(participant ? { principal: trustedPrincipalFromParticipant(participant) } : {}),
+      ...(context.source ? { source: context.source } : {}),
+      ...(context.sessionRef ? { session_ref: context.sessionRef } : {}),
       operation_id: write?.operation.id ?? `domain:${entry.id}:${context.correlationId}`,
       capability_id: proposalCapabilityManifest.id,
       instruction_source: instructionSourceForDomainInput(context.inputSource),
@@ -4445,7 +4651,7 @@ export class AgentRuntime {
     }
   }
 
-  private async backendWorkspaceChangesForOperation(runId: string, sessionId: string, operationId: string): Promise<WorkspaceChangeRecord[]> {
+  private async backendWorkspaceChangesForOperation(runId: string, sessionId: string | undefined, operationId: string): Promise<WorkspaceChangeRecord[]> {
     return (await this.store.listWorkspaceChanges(sessionId)).filter((change) =>
       change.run_id === runId && change.legacy_operation_id === operationId
     );
@@ -4458,7 +4664,7 @@ export class AgentRuntime {
     operationId?: string
   ): Promise<TrustedDomainContext> {
     assertNoTrustedContextPayloadFields(payload);
-    const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey } = trusted;
+    const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey, roomId: trustedRoomId, sessionRef, source } = trusted;
     assertTrustedRuntimeContextActive({ signal, deadlineAt });
     const actorIdentity = trustedActorIdentityForSource(inputSource);
     if (trusted.actorIdentity !== undefined && trusted.actorIdentity !== actorIdentity) {
@@ -4469,10 +4675,13 @@ export class AgentRuntime {
     if (runId) {
       run = await this.store.getBackendRun(runId);
       if (!run) throw new RuntimeRequestError("not_found", `Backend run not found: ${runId}`);
-      if (sessionId && run.session_id !== sessionId) {
+      if (sessionId && run.session_id && run.session_id !== sessionId) {
         throw new RuntimeRequestError("conflict", `domain_run_session_mismatch:${runId}`);
       }
-      sessionId = run.session_id;
+      sessionId = run.session_id ?? sessionId;
+      if (trustedRoomId && run.room_id && trustedRoomId !== run.room_id) {
+        throw new RuntimeRequestError("conflict", `domain_run_room_mismatch:${runId}`);
+      }
     }
     if (inputSource === "provider_tool_call" && !run) {
       throw new RuntimeRequestError("forbidden", "provider_room_run_required");
@@ -4480,10 +4689,11 @@ export class AgentRuntime {
     const session = sessionId ? await this.store.getSession(sessionId) : undefined;
     if (sessionId && !session) throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
     const participant = await this.resolveTrustedParticipant({ inputSource, actorIdentity, trusted, run });
+    assertTrustedExternalAppContext(participant, source, sessionRef);
     // A Session-create command is the single legitimate operation without a
     // pre-existing Session. Its Room may be selected by the public DTO, or by
     // the server-owned default Room when the local UI starts a new chat.
-    const requestedRoomId = operationId === runtimeOperationIds.sessionCreate ? optionalStringPayload(payload.room_id) : undefined;
+    const requestedRoomId = trustedRoomId;
     if (session?.room_id && requestedRoomId && session.room_id !== requestedRoomId) {
       throw new RuntimeRequestError("conflict", `domain_session_room_mismatch:${session.id}`);
     }
@@ -4500,16 +4710,12 @@ export class AgentRuntime {
     if (targetRoomIds.size > 1) {
       throw new RuntimeRequestError("conflict", `domain_resource_rooms_conflict:${operationId ?? "unknown"}`);
     }
-    // Runtime and Surface ingress are trusted local-Owner adapters. A missing
-    // context may use only the persisted default Room, never the Workspace as
-    // a substitute. Provider and gateway ingress never receive this fallback.
-    const localDefaultRoomId = (inputSource === "runtime_api" || inputSource === "surface_operation") && actorIdentity === "owner"
-      ? (await this.store.getSettings()).default_room_id
-      : undefined;
-    const roomId = session?.room_id ?? requestedRoomId
+    const roomId = trustedRoomId ?? run?.room_id ?? session?.room_id ?? requestedRoomId
       ?? [...targetRoomIds][0]
-      ?? (operationId === runtimeOperationIds.sessionCreate ? (await this.store.getSettings()).default_room_id : undefined)
-      ?? localDefaultRoomId;
+      // Creating a Native App Session is an explicit compatibility command.
+      // It may select the persisted local default; no Room Resource operation
+      // receives that fallback.
+      ?? (operationId === runtimeOperationIds.sessionCreate ? (await this.store.getSettings()).default_room_id : undefined);
     return {
       inputSource,
       workspaceId: stableHash(this.store.rootDir),
@@ -4517,6 +4723,8 @@ export class AgentRuntime {
       participant,
       ...(roomId ? { roomId } : {}),
       ...(sessionId ? { sessionId } : {}),
+      ...(sessionRef ? { sessionRef } : {}),
+      ...(source ? { source } : {}),
       ...(runId ? { runId } : {}),
       ...(envelopeId ? { envelopeId } : {}),
       ...(surfaceOperation ? { surfaceOperation } : {}),
@@ -4545,13 +4753,20 @@ export class AgentRuntime {
     run?: BackendRunRecord;
   }): Promise<ParticipantPrincipal> {
     if (input.run) {
-      if (!input.run.agent_id) throw new RuntimeRequestError("conflict", `run_agent_missing:${input.run.id}`);
-      const resolved: ParticipantPrincipal = {
-        kind: "agent",
-        agentId: input.run.agent_id,
-        requestedByParticipantId: input.run.requested_by_participant_id
-          ?? await this.legacyRequesterParticipantIdForRun(input.run)
-      };
+      const persistedPrincipal = input.run.principal ? principalFromTrustedWorkspace(input.run.principal) : undefined;
+      let resolved: ParticipantPrincipal;
+      if (input.run.agent_id) {
+        resolved = {
+          kind: "agent",
+          agentId: input.run.agent_id,
+          requestedByParticipantId: input.run.requested_by_participant_id
+            ?? (persistedPrincipal ? requesterParticipantId(persistedPrincipal) : await this.legacyRequesterParticipantIdForRun(input.run))
+        };
+      } else if (persistedPrincipal) {
+        resolved = persistedPrincipal;
+      } else {
+        throw new RuntimeRequestError("conflict", `run_principal_missing:${input.run.id}`);
+      }
       if (input.trusted.participant && !sameParticipant(input.trusted.participant, resolved)) {
         throw new RuntimeRequestError("forbidden", `domain_participant_run_mismatch:${input.run.id}`);
       }
@@ -4572,6 +4787,7 @@ export class AgentRuntime {
    * no transport or Agent field is reinterpreted as a human identity.
    */
   private async legacyRequesterParticipantIdForRun(run: BackendRunRecord): Promise<string> {
+    requireSessionBoundRun(run);
     const session = await this.store.getSession(run.session_id);
     if (!session?.room_id) throw new RuntimeRequestError("forbidden", `legacy_run_room_missing:${run.id}`);
     const [workspaceMember, roomMember] = await Promise.all([
@@ -5840,7 +6056,14 @@ export class AgentRuntime {
     resumeInput: Record<string, JsonValue>,
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy
   ): Promise<BackendRunInput> {
-    void resumeInput;
+    if (!run.session_id) {
+      const content = typeof resumeInput.content === "string" ? resumeInput.content : JSON.stringify(resumeInput);
+      return {
+        ...workspaceBackendInput(run, nowIso, content || run.input_summary, resumeInput),
+        ...(gatewayBoundaryPolicy ? { gateway_boundary: gatewayBoundaryRuntimeSnapshot(gatewayBoundaryPolicy, nowIso()) } : {})
+      };
+    }
+    requireSessionBoundRun(run);
     const [session, messages, settings, agent] = await Promise.all([
       this.store.getSession(run.session_id),
       this.store.listMessages(run.session_id),
@@ -5901,7 +6124,8 @@ export class AgentRuntime {
       workspaceChanges: []
     };
     try {
-      await this.assertRunAgentExecution(input.run);
+      if (input.run.session_id) await this.assertRunAgentExecution(input.run);
+      else await this.assertWorkspaceRunAgentExecution(input.run);
     } catch (error) {
       const reason = error instanceof RuntimeRequestError ? error.message : safeRuntimeErrorMessage(error);
       const toolRun = await this.store.saveToolRun({
@@ -6178,7 +6402,8 @@ export class AgentRuntime {
     boundary?: BackendToolBoundaryFeedback,
     gatewayBoundaryPolicy?: GatewayBoundaryPolicy
   ): Promise<RuntimeToolCallResult | RuntimeToolQueryResult | undefined> {
-    await this.assertRunAgentExecution(run);
+    if (run.session_id) await this.assertRunAgentExecution(run);
+    else await this.assertWorkspaceRunAgentExecution(run);
     const providerToolName = stringPayload(event.payload.provider_tool_name);
     const providerCommand = providerToolName ? getDomainCommandForProviderToolName(providerToolName) : undefined;
     const providerQuery = providerToolName ? getDomainQueryForProviderToolName(providerToolName) : undefined;
@@ -6191,6 +6416,7 @@ export class AgentRuntime {
     // Resolve the compatibility adapter from the provider name so both direct
     // bridge calls and provider-emitted bridge events use the same path.
     if (normalizeSamuraiToolBridgeName(providerToolName || toolName) === "samurai.collection.manage") {
+      if (!run.session_id) throw new RuntimeRequestError("unavailable", "session_compatibility_required:collection.manage");
       const output = await this.runCollectionManageCompatibility(
         args,
         "provider_tool_call",
@@ -6260,7 +6486,9 @@ export class AgentRuntime {
       if (directRuntimeTool) return directRuntimeTool;
       const generatedSurface = unknownRecord(unknownRecord(domainResult.result).definition);
       if (typeof generatedSurface.id === "string" && typeof generatedSurface.preview_url === "string") {
-        const session = await this.store.getSession(run.session_id);
+        const sessionId = run.session_id;
+        if (!sessionId) throw new RuntimeRequestError("unavailable", `session_compatibility_required:${effectiveCommandId}`);
+        const session = await this.store.getSession(sessionId);
         if (!session) throw new RuntimeRequestError("not_found", "session_not_found");
         const generatedRef: ResourceRef = {
           kind: "generated_surface",
@@ -6470,6 +6698,7 @@ export class AgentRuntime {
     boundary?: BackendToolBoundaryFeedback,
     sandboxInstance?: GatewaySandboxInstanceRecord
   ): Promise<RuntimeToolCallResult> {
+    requireSessionBoundRun(run);
     const executionRef = sandboxExecutionResourceRef(createId("sandbox_exec"), execution.command);
     const outputRefs = normalizeMcpExecutionResourceRefs(execution.resource_refs);
     const sandboxInstanceRef = sandboxInstance ? gatewaySandboxInstanceRef(sandboxInstance) : undefined;
@@ -6618,6 +6847,7 @@ export class AgentRuntime {
     boundary?: BackendToolBoundaryFeedback,
     configured?: Awaited<ReturnType<WorkspaceStore["getGatewayMcpConfigByServerName"]>>
   ): Promise<RuntimeToolCallResult> {
+    requireSessionBoundRun(run);
     const configRef = configured ? gatewayMcpConfigResourceRef(configured.id, configured.server_name) : gatewayMcpServerResourceRef(execution.server_name);
     const outputRefs = normalizeMcpExecutionResourceRefs(execution.resource_refs);
     const resourceRefs = [configRef, ...outputRefs];
@@ -6701,6 +6931,17 @@ export class AgentRuntime {
       absolutePath,
       relativePath: path.relative(root, absolutePath) || "."
     };
+  }
+
+  /** A new file is authorized by Room edit; an existing file keeps its Resource boundary. */
+  private async workspaceFileExists(inputPath: string): Promise<boolean> {
+    try {
+      return (await stat(this.resolveWorkspacePath(inputPath).absolutePath)).isFile();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return false;
+      throw error;
+    }
   }
 
   /**
@@ -8342,26 +8583,46 @@ export class AgentRuntime {
   }
 
   private async createOperation(
-    session: SessionRecord,
-    envelope: MessageEnvelope,
+    session: SessionRecord | undefined,
+    envelope: MessageEnvelope | undefined,
     operationName: string,
     proposedEffects: string[],
     options: {
       context?: GatewayContext;
+      trustedContext?: TrustedDomainContext;
+      inputSummary?: string;
       inputRef?: OperationRecord["input_ref"];
       targetResourceRefs?: OperationRecord["target_resource_refs"];
     } = {}
   ): Promise<OperationRecord> {
     const now = nowIso();
     const context = options.context ?? webGatewayContext;
-    const domainParticipant = this.activeDomainContext.getStore()?.participant;
+    const trustedContext = options.trustedContext ?? this.activeDomainContext.getStore();
+    const domainParticipant = trustedContext?.participant;
     const participantId = domainParticipant ? principalParticipantId(domainParticipant) : requesterParticipantIdForGatewayContext(context);
-    const requestedByParticipantId = domainParticipant?.kind === "agent"
-      ? domainParticipant.requestedByParticipantId
-      : participantId;
+    const requestedByParticipantId = domainParticipant ? requesterParticipantId(domainParticipant) : participantId;
+    const operationId = createId("operation");
+    const inputRef = options.inputRef
+      ?? (envelope ? {
+        kind: "message",
+        id: envelope.id,
+        uri: `messages/${envelope.id}`,
+        label: context.source === "cron" ? "Scheduled context" : "User message"
+      } : trustedContext?.runId ? {
+        kind: "backend_run",
+        id: trustedContext.runId,
+        uri: `backend-runs/${trustedContext.runId}`,
+        label: "Workspace execution"
+      } : {
+        kind: "workspace_context",
+        id: trustedContext?.correlationId ?? operationId,
+        uri: "workspace/context",
+        label: "Trusted Workspace context"
+      });
     const operation: OperationRecord = {
-      id: createId("operation"),
-      session_id: session.id,
+      id: operationId,
+      ...(session?.id ? { session_id: session.id } : trustedContext?.sessionId ? { session_id: trustedContext.sessionId } : {}),
+      ...(trustedContext?.runId ? { run_id: trustedContext.runId } : {}),
       capability_id: proposalCapabilityManifest.id,
       operation: operationName,
       actor_identity: context.actor_identity,
@@ -8370,24 +8631,25 @@ export class AgentRuntime {
         participant_kind: domainParticipant?.kind ?? "human" as const,
         ...(requestedByParticipantId ? { requested_by_participant_id: requestedByParticipantId } : {})
       } : {}),
-      ...(session.room_id ? { room_id: session.room_id } : {}),
+      ...(trustedContext?.roomId ? { room_id: trustedContext.roomId } : session?.room_id ? { room_id: session.room_id } : {}),
+      ...(domainParticipant ? { principal: trustedPrincipalFromParticipant(domainParticipant) } : {}),
+      ...(trustedContext?.source ? { source: trustedContext.source } : {}),
+      ...(trustedContext?.sessionRef ? { session_ref: trustedContext.sessionRef } : {}),
       instruction_source: context.instruction_source,
       instruction_authority: context.actor_identity,
       channel: context.channel,
       input_hash: stableHash({
-        envelope,
+        envelope: envelope ?? null,
+        input_summary: options.inputSummary ?? null,
+        correlation_id: trustedContext?.correlationId ?? null,
         operationName,
         proposedEffects
       }),
-      input_ref: options.inputRef ?? {
-        kind: "message",
-        id: envelope.id,
-        uri: `messages/${envelope.id}`,
-        label: context.source === "cron" ? "Scheduled context" : "User message"
-      },
+      input_ref: inputRef,
       target_resource_refs: options.targetResourceRefs ?? [],
       proposed_effects: proposedEffects,
       status: "created",
+      ...(trustedContext?.correlationId ? { correlation_id: trustedContext.correlationId } : {}),
       created_at: now,
       updated_at: now
     };
@@ -8527,19 +8789,37 @@ export class AgentRuntime {
   }
 
   private async runRecordedMutation<TResource, TExtra extends Record<string, unknown> = {}>(input: RecordedMutationInput<TResource, TExtra>): Promise<RuntimeWriteResult<TResource> & TExtra> {
+    const trustedContext = input.trustedContext ?? this.activeDomainContext.getStore();
     const operation = await this.createOperation(input.session, input.envelope, input.operationName, input.proposedEffects, {
       context: input.context,
+      trustedContext,
+      inputSummary: input.inputSummary,
       inputRef: input.inputRef,
       targetResourceRefs: input.targetResourceRefs
     });
 
     try {
+      await this.ensureRecordedMutationResourceAccessBoundaries([
+        ...(input.targetResourceRefs ?? []),
+        ...(input.boundaryResourceRefs ?? [])
+      ], trustedContext, undefined);
       const execution = await input.execute(operation);
+      await this.ensureRecordedMutationResourceAccessBoundaries([
+        ...(input.targetResourceRefs ?? []),
+        ...(input.boundaryResourceRefs ?? []),
+        execution.ref
+      ], trustedContext, execution.resource);
       operation.status = "completed";
       operation.result_ref = execution.ref;
       operation.updated_at = nowIso();
       await this.store.updateOperation(operation);
-      const activity = await this.rebuildActivity();
+      let activity: ActivityInboxItem[] = [];
+      try {
+        activity = await this.rebuildActivity();
+      } catch {
+        // Activity projection is downstream of the authoritative Operation.
+        // It must not convert a committed Workspace mutation into a failure.
+      }
       const { resource, ref: _ref, rollbackPoint, summary: _summary, ...extra } = execution;
       return {
         resource,
@@ -11839,7 +12119,7 @@ function gatewayBoundaryPolicyRef(policy: GatewayBoundaryPolicy): ResourceRef {
 }
 
 function withGatewayBoundaryRefs(refs: ResourceRef[], boundary: BackendToolBoundaryFeedback | undefined): ResourceRef[] {
-  return boundary ? [...refs, ...boundary.resourceRefs] : refs;
+  return uniqueResourceRefs(boundary ? [...refs, ...boundary.resourceRefs] : refs);
 }
 
 function gatewayMcpConfigResourceRef(id: string, serverName: string): ResourceRef {
@@ -13737,8 +14017,22 @@ const trustedContextPayloadFields = new Set([
   "session_id",
   "envelope_id",
   "run_id",
-  "backend_run_id"
+  "backend_run_id",
+  "room_id",
+  "source_room_id",
+  "principal",
+  "app_id",
+  "delegated_by",
+  "session_ref"
 ]);
+
+// `session.create` is an explicit compatibility operation. Chat itself must
+// receive an already-created App Session and may never create one implicitly.
+const sessionCreatingCompatibilityOperationIds = new Set(["session.create"]);
+
+function isPersistedSessionCompatibilityOperation(operationId: string): boolean {
+  return isSessionCompatibleOperation(operationId) && !sessionCreatingCompatibilityOperationIds.has(operationId);
+}
 
 function assertNoTrustedContextPayloadFields(payload: Record<string, JsonValue>): void {
   const field = Object.keys(payload).find((key) => trustedContextPayloadFields.has(key));
@@ -13762,17 +14056,101 @@ function trustedActorIdentityForSource(inputSource: DomainCommandInputSource): T
 
 function sameParticipant(left: ParticipantPrincipal, right: ParticipantPrincipal): boolean {
   if (left.kind !== right.kind || principalParticipantId(left) !== principalParticipantId(right)) return false;
+  if (left.kind === "external_app" && right.kind === "external_app") {
+    return left.appId === right.appId && sameParticipant(left.delegatedBy, right.delegatedBy);
+  }
   if (left.kind !== "agent" || right.kind !== "agent") return true;
   return left.agentId === right.agentId && left.requestedByParticipantId === right.requestedByParticipantId;
 }
 
 /** Agent participant IDs are derived from their Agent record and never trusted twice. */
 function principalParticipantId(participant: ParticipantPrincipal): string {
-  return participant.kind === "agent" ? agentParticipantId(participant.agentId) : participant.participantId;
+  return roomPrincipalParticipantId(participant);
+}
+
+function principalFromTrustedWorkspace(principal: Principal): ParticipantPrincipal {
+  switch (principal.kind) {
+    case "human":
+      return { kind: "human", participantId: principal.participant_id };
+    case "agent":
+      return {
+        kind: "agent",
+        agentId: principal.agent_id,
+        requestedByParticipantId: principal.requested_by_participant_id
+      };
+    case "external_app": {
+      const delegatedBy = principalFromTrustedWorkspace(principal.delegated_by);
+      if (delegatedBy.kind !== "human" && delegatedBy.kind !== "agent") {
+        throw new RuntimeRequestError("forbidden", "external_app_delegation_invalid");
+      }
+      return {
+        kind: "external_app",
+        appId: principal.app_id,
+        delegatedBy,
+        ...(principal.connector_id ? { connectorId: principal.connector_id } : {})
+      };
+    }
+    case "system":
+      return { kind: "system", participantId: `system:${principal.system_id}` };
+  }
+}
+
+/** A trusted transport may select a Principal only for its own app identity. */
+function assertTrustedExternalAppContext(
+  participant: ParticipantPrincipal,
+  source: TrustedDomainRuntimeContext["source"],
+  sessionRef: TrustedDomainRuntimeContext["sessionRef"]
+): void {
+  const externalSource = source?.kind === "external_app" ? source : undefined;
+  if (participant.kind === "external_app") {
+    if (!externalSource || !externalSource.app_id || externalSource.app_id !== participant.appId) {
+      throw new RuntimeRequestError("forbidden", "external_app_context_mismatch");
+    }
+  } else if (externalSource) {
+    throw new RuntimeRequestError("forbidden", "external_app_principal_required");
+  }
+  if (source?.app_id && sessionRef && source.app_id !== sessionRef.app_id) {
+    throw new RuntimeRequestError("forbidden", "session_ref_app_mismatch");
+  }
+}
+
+function trustedPrincipalFromParticipant(participant: ParticipantPrincipal): Principal {
+  switch (participant.kind) {
+    case "human":
+      return { kind: "human", participant_id: participant.participantId };
+    case "agent":
+      return {
+        kind: "agent",
+        agent_id: participant.agentId,
+        requested_by_participant_id: participant.requestedByParticipantId
+      };
+    case "external_app":
+      return {
+        kind: "external_app",
+        app_id: participant.appId,
+        delegated_by: trustedDelegatedPrincipalFromParticipant(participant.delegatedBy)
+      };
+    case "system":
+      return { kind: "system", system_id: participant.participantId };
+  }
+}
+
+function trustedDelegatedPrincipalFromParticipant(
+  participant: Extract<ParticipantPrincipal, { kind: "human" | "agent" }>
+): Extract<Principal, { kind: "human" | "agent" }> {
+  if (participant.kind === "human") {
+    return { kind: "human", participant_id: participant.participantId };
+  }
+  return {
+    kind: "agent",
+    agent_id: participant.agentId,
+    requested_by_participant_id: participant.requestedByParticipantId
+  };
 }
 
 function requesterParticipantId(participant: ParticipantPrincipal): string {
-  return participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId;
+  const delegated = delegatedParticipant(participant);
+  return delegated.kind === "agent" ? delegated.requestedByParticipantId : delegated.participantId;
 }
 
 function canonicalRoomResourceKind(kind: string) {
@@ -13790,7 +14168,7 @@ function requesterParticipantIdForGatewayContext(context: GatewayContext): strin
 function trustedRequesterParticipantId(context: TrustedDomainContext): string | undefined {
   const participant = context.participant;
   if (!participant || participant.kind === "system") return undefined;
-  return participant.kind === "agent" ? participant.requestedByParticipantId : participant.participantId;
+  return requesterParticipantId(participant);
 }
 
 function isRoomPermissionMetadataKind(kind: string): boolean {

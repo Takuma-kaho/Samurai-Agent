@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { ProvenanceSchema, ResourceRefSchema, SupportedLocaleSchema, createId, nowIso, type JsonValue, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord, type WikiFrontmatter } from "@samurai-agent/core-schemas";
+import { ProvenanceSchema, ResourceRefSchema, SupportedLocaleSchema, createId, nowIso, type JsonValue, type OperationRecord, type ResourceRef, type RollbackPoint, type WikiFrontmatter } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { wikiWriteValueSchema } from "../../../value-objects/wiki.js";
 
@@ -17,10 +17,10 @@ const Output = wikiWriteValueSchema;
 type OutputValue = z.infer<typeof Output>;
 
 export interface WikiProposalCreatePorts {
-  ensureWikiSession(): Promise<SessionRecord>; createWikiEnvelope(content: string): MessageEnvelope;
+  defaultWikiOutputLocale(): Promise<WikiFrontmatter["content_locale"]>;
   saveWikiPage(record: WikiFrontmatter, content: string): Promise<OutputValue["resource"]>;
   createWikiRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runWikiMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: "wiki.proposal.create"; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: OutputValue["resource"]; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<OutputValue>;
+  runWikiMutation(input: { trustedContext: TrustedDomainContext; operationName: "wiki.proposal.create"; proposedEffects: string[]; inputSummary: string; boundaryResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: OutputValue["resource"]; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<OutputValue>;
 }
 
 const wikiProposalCreate = defineCommand<WikiProposalCreatePorts>()({
@@ -64,16 +64,15 @@ const wikiProposalCreate = defineCommand<WikiProposalCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiProposalCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const session = await ports.ensureWikiSession();
-        const envelope = ports.createWikiEnvelope(`Create wiki proposal: ${input.title}`);
         const now = nowIso();
         const wiki: WikiFrontmatter = {
           id: createId("wiki"), slug: slugify(input.slug ?? input.title), title: input.title, state: "proposed",
-          content_locale: input.content_locale ?? session.output_locale, tags: input.tags, source_refs: input.source_refs,
+          content_locale: input.content_locale ?? await ports.defaultWikiOutputLocale(), tags: input.tags, source_refs: input.source_refs,
           provenance: input.provenance ?? { kind: "user_authored", summary: "Created from an explicit local request.", verified: true },
           created_at: now, updated_at: now
         };
-        const value = await ports.runWikiMutation({ session, envelope, operationName: "wiki.proposal.create", proposedEffects: ["Create a proposed wiki markdown page."], execute: async (operation) => {
+        const value = await ports.runWikiMutation({ trustedContext: context, operationName: "wiki.proposal.create", inputSummary: `Create wiki proposal: ${input.title}`,
+          proposedEffects: ["Create a proposed wiki markdown page."], boundaryResourceRefs: [{ kind: "wiki", id: wiki.id, uri: `wiki/${wiki.id}`, label: wiki.title }], execute: async (operation) => {
           const saved = await ports.saveWikiPage(wiki, input.content);
           const ref: ResourceRef = { kind: "wiki", id: saved.id, uri: saved.file_path, label: saved.title };
           const rollbackPoint = await ports.createWikiRollback(operation, [ref], {}, { wiki_id: saved.id });

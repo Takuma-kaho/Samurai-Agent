@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { ProvenanceSchema, ResourceRefSchema, SupportedLocaleSchema, type JsonValue, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord, type WikiFrontmatter } from "@samurai-agent/core-schemas";
+import { ProvenanceSchema, ResourceRefSchema, SupportedLocaleSchema, type JsonValue, type OperationRecord, type ResourceRef, type RollbackPoint, type WikiFrontmatter } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { wikiWriteValueSchema } from "../../value-objects/wiki.js";
 import { wikiJsonRecord } from "./state-transition.js";
@@ -22,9 +22,9 @@ export interface WikiPatchPorts {
   getWikiPage(id: string): Promise<OutputValue["resource"] | undefined>;
   readWikiContent(id: string): Promise<string | undefined>;
   updateWikiPage(input: { id: string; title?: string; content?: string; tags?: string[]; content_locale?: InputValue["content_locale"]; source_refs?: WikiFrontmatter["source_refs"]; provenance?: WikiFrontmatter["provenance"] }): Promise<OutputValue["resource"] | undefined>;
-  ensureWikiSession(): Promise<SessionRecord>; createWikiEnvelope(content: string): MessageEnvelope; wikiPageNotFoundError(id: string): Error;
+  wikiPageNotFoundError(id: string): Error;
   createWikiRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runWikiMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: "wiki.patch"; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: OutputValue["resource"]; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<OutputValue>;
+  runWikiMutation(input: { trustedContext: TrustedDomainContext; operationName: "wiki.patch"; proposedEffects: string[]; inputSummary: string; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: OutputValue["resource"]; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<OutputValue>;
 }
 
 const wikiPatch = defineCommand<WikiPatchPorts>()({
@@ -70,10 +70,10 @@ const wikiPatch = defineCommand<WikiPatchPorts>()({
         const current = await ports.getWikiPage(input.wiki_id);
         if (!current) throw ports.wikiPageNotFoundError(input.wiki_id);
         const beforeContent = await ports.readWikiContent(input.wiki_id);
-        const session = await ports.ensureWikiSession();
-        const envelope = ports.createWikiEnvelope(`Patch wiki page: ${current.title}`);
         const update = { id: input.wiki_id, title: input.title, content: input.content, tags: input.tags, content_locale: input.content_locale, source_refs: input.source_refs, provenance: input.provenance };
-        const value = await ports.runWikiMutation({ session, envelope, operationName: "wiki.patch", proposedEffects: ["Edit wiki page frontmatter or markdown content."], execute: async (operation) => {
+        const currentRef: ResourceRef = { kind: "wiki", id: current.id, uri: current.file_path, label: current.title };
+        const value = await ports.runWikiMutation({ trustedContext: context, operationName: "wiki.patch", inputSummary: `Patch wiki page: ${current.title}`,
+          proposedEffects: ["Edit wiki page frontmatter or markdown content."], targetResourceRefs: [currentRef], execute: async (operation) => {
           const saved = await ports.updateWikiPage(update);
           if (!saved) throw ports.wikiPageNotFoundError(input.wiki_id);
           const ref: ResourceRef = { kind: "wiki", id: saved.id, uri: saved.file_path, label: saved.title };

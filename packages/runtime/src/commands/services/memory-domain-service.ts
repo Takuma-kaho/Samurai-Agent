@@ -6,9 +6,9 @@ import {
   type OperationRecord,
   type ResourceRef,
   type RollbackPoint,
-  type SessionRecord,
-  type SupportedLocale
+  type SessionRecord
 } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 
 interface ArchivedMemorySnapshot {
   frontmatter: MemoryFrontmatter;
@@ -50,17 +50,13 @@ interface MemoryWriteResult {
 
 export interface MemoryCommandPort {
   getSession(id: string): Promise<SessionRecord | undefined>;
-  createSession(input: { title?: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale }): Promise<SessionRecord>;
-  ensureSession(): Promise<SessionRecord>;
-  createEnvelope(input: { session: SessionRecord; content: string; inputLocale?: SupportedLocale; outputLocale?: SupportedLocale; metadata: Record<string, JsonValue>; envelopeId?: string }): MessageEnvelope;
-  writeSessionMemory(envelope: MessageEnvelope, content: string): Promise<MemoryFrontmatter>;
-  writeTopicMemory(envelope: MessageEnvelope, topicKind: string, content: string): Promise<MemoryFrontmatter>;
+  writeRoomTopicMemory(input: { context: TrustedDomainContext; memoryId: string; topicKind: string; content: string; inputLocale?: import("@samurai-agent/core-schemas").SupportedLocale; outputLocale?: import("@samurai-agent/core-schemas").SupportedLocale }): Promise<MemoryFrontmatter>;
   memoryRef(memory: MemoryFrontmatter): ResourceRef;
   createRollback(operation: OperationRecord, refs: ResourceRef[], after: Record<string, JsonValue>): Promise<RollbackPoint>;
   emitCandidate(memory: MemoryFrontmatter): Promise<void>;
   runMutation(input: {
-    session: SessionRecord; envelope: MessageEnvelope; operationName: "memory.session.create" | "memory.topic.create";
-    proposedEffects: string[]; execute(operation: OperationRecord): Promise<MemoryMutationResult>;
+    trustedContext: TrustedDomainContext; operationName: "memory.topic.create"; inputSummary: string;
+    proposedEffects: string[]; boundaryResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<MemoryMutationResult>;
   }): Promise<MemoryWriteResult>;
 }
 
@@ -83,12 +79,9 @@ export class MemoryDomainService {
   emitMemoryArchiveOperation(operation: OperationRecord) { return this.dependencies.archive.emitOperation(operation); }
   createMemoryArchiveRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.archive.createRollback(operation, refs, before, after); }
   rebuildMemoryActivity() { return this.dependencies.archive.rebuildActivity(); }
-  createMemorySession(input: { title?: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale }) { return this.dependencies.memories.createSession(input); }
-  ensureMemorySession() { return this.dependencies.memories.ensureSession(); }
   memoryCreateError(message: string) { return this.dependencies.requestError("not_found", message); }
-  createMemoryEnvelope(input: Parameters<MemoryCommandPort["createEnvelope"]>[0]) { return this.dependencies.memories.createEnvelope(input); }
-  writeSessionMemory(envelope: MessageEnvelope, content: string) { return this.dependencies.memories.writeSessionMemory(envelope, content); }
-  writeTopicMemory(envelope: MessageEnvelope, topicKind: string, content: string) { return this.dependencies.memories.writeTopicMemory(envelope, topicKind, content); }
+  memorySessionScopeWriteDisabledError() { return this.dependencies.requestError("conflict", "session_scope_write_disabled"); }
+  writeRoomTopicMemory(input: Parameters<MemoryCommandPort["writeRoomTopicMemory"]>[0]) { return this.dependencies.memories.writeRoomTopicMemory(input); }
   createMemoryRollback(operation: OperationRecord, refs: ResourceRef[], after: Record<string, JsonValue>) { return this.dependencies.memories.createRollback(operation, refs, after); }
   emitMemoryCandidate(memory: MemoryFrontmatter) { return this.dependencies.memories.emitCandidate(memory); }
   runMemoryMutation(input: Parameters<MemoryCommandPort["runMutation"]>[0]) { return this.dependencies.memories.runMutation(input); }

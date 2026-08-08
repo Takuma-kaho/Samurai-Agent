@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentBackendRegistry, type AgentBackend } from "@samurai-agent/agent-backends";
 import { nowIso, type AgentRecord, type BackendRunRecord, type MemoryFrontmatter, type RoomRecord, type SessionRecord, type SkillFrontmatter, type WikiFrontmatter } from "@samurai-agent/core-schemas";
+import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime } from "./agent-runtime.js";
 
@@ -27,6 +28,16 @@ describe("Core 05 Phase 1 learning foundation", () => {
       store.saveSkillMarkdown({ state: "project", skillId: "skill-workspace", markdown: skill("skill-workspace", "shared search skill", { kind: "workspace" }, now, "workspace catalog") }),
       store.saveSkillMarkdown({ state: "project", skillId: "skill-room-b", markdown: skill("skill-room-b", "room b search skill", { kind: "room", room_id: roomB.id }, now, "Room B body must stay unread") })
     ]);
+    // Direct Store setup bypasses the Runtime mutation path, so register the
+    // explicit Room provenance that production writes establish before they
+    // become readable. Workspace-scoped fixtures intentionally remain
+    // boundary-free: their explicit scope is the shared Knowledge contract.
+    await Promise.all([
+      store.ensureResourceAccessBoundary({ resourceKind: "memory", resourceId: "memory-room-a", sourceRoomId: roomA.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId }),
+      store.ensureResourceAccessBoundary({ resourceKind: "memory", resourceId: "memory-room-b", sourceRoomId: roomB.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId }),
+      store.ensureResourceAccessBoundary({ resourceKind: "wiki", resourceId: "wiki-room-b", sourceRoomId: roomB.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId }),
+      store.ensureResourceAccessBoundary({ resourceKind: "skill", resourceId: "skill-room-b", sourceRoomId: roomB.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId })
+    ]);
     const readSkillMarkdown = vi.spyOn(store, "readSkillMarkdown");
 
     const [memoryA, wikiA, skillA, memoryB] = await Promise.all([
@@ -42,9 +53,12 @@ describe("Core 05 Phase 1 learning foundation", () => {
     expect(ids(memoryB.result as Array<{ id: string }>)).toEqual(new Set(["memory-workspace", "memory-room-b"]));
     expect(readSkillMarkdown).not.toHaveBeenCalled();
     await expect(runtime.runDomainQuery({ query_id: "skill.view", payload: { skill_id: "skill-room-b" } }, { runId: runA.id }))
-      .rejects.toThrow("skill_usage_scope_mismatch");
+      .rejects.toMatchObject({ code: "forbidden", message: "room_authorization_denied:resource:read:resource_access_boundary_denied" });
     expect(readSkillMarkdown).not.toHaveBeenCalled();
-    await expect(runtime.runDomainQuery({ query_id: "memory.search", payload: { query: "search" } })).rejects.toThrow("domain_operation_trusted_context_missing:memory.search:runId");
+    const workspaceSkill = await runtime.runDomainQuery({ query_id: "skill.view", payload: { skill_id: "skill-workspace" } }, { runId: runA.id });
+    expect((workspaceSkill.result as { content: string }).content).toContain("workspace catalog");
+    expect(readSkillMarkdown).toHaveBeenCalledWith("skill-workspace");
+    await expect(runtime.runDomainQuery({ query_id: "memory.search", payload: { query: "search" } })).rejects.toThrow("room_context_required");
 
     const unscopedRun: BackendRunRecord = { ...runA, id: "run-unscoped-search", agent_id: undefined };
     await store.saveBackendRun(unscopedRun);
@@ -62,8 +76,13 @@ describe("Core 05 Phase 1 learning foundation", () => {
     const room: RoomRecord = { id: "room-skill-use", name: "Skill use", created_at: now, updated_at: now };
     const agent: AgentRecord = { id: "agent-skill-use", name: "Skill agent", role: "Research", instructions: "Use scoped skill.", backend_id: "skill-bridge", enabled: true, created_at: now, updated_at: now };
     const session: SessionRecord = { id: "session-skill-use", session_key: "skill-use", room_id: room.id, title: "Skill use", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now };
-    await Promise.all([store.createRoom(room), store.createAgent(agent), store.createSession(session)]);
+    await Promise.all([store.createRoomWithOwner(room, localOwnerParticipantId), store.createAgent(agent), store.createSession(session)]);
+    await Promise.all([
+      store.setRoomAgentPermissions({ roomId: room.id, agentId: agent.id, canView: true, canEdit: true, canExecute: true, actorId: localOwnerParticipantId }),
+      store.ensureResourceAccessBoundary({ resourceKind: "session", resourceId: session.id, sourceRoomId: room.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId })
+    ]);
     await store.saveSkillMarkdown({ state: "project", skillId: "skill-use", markdown: skill("skill-use", "Scoped skill", { kind: "room", room_id: room.id }, now, "Skill body") });
+    await store.ensureResourceAccessBoundary({ resourceKind: "skill", resourceId: "skill-use", sourceRoomId: room.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId });
     await store.writeSkillSupportFile({ skillId: "skill-use", path: "references/check.md", content: "Support content" });
 
     let runtime: AgentRuntime;
@@ -109,7 +128,20 @@ async function scopedStore() {
   const agentB: AgentRecord = { id: "agent-b", name: "B", role: "Research", instructions: "Read scoped resources.", backend_id: "backend-b", enabled: true, created_at: now, updated_at: now };
   const sessionA: SessionRecord = { id: "session-a", session_key: "a", room_id: roomA.id, title: "A", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now };
   const sessionB: SessionRecord = { id: "session-b", session_key: "b", room_id: roomB.id, title: "B", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now };
-  await Promise.all([store.createRoom(roomA), store.createRoom(roomB), store.createAgent(agentA), store.createAgent(agentB), store.createSession(sessionA), store.createSession(sessionB)]);
+  await Promise.all([
+    store.createRoomWithOwner(roomA, localOwnerParticipantId),
+    store.createRoomWithOwner(roomB, localOwnerParticipantId),
+    store.createAgent(agentA),
+    store.createAgent(agentB),
+    store.createSession(sessionA),
+    store.createSession(sessionB)
+  ]);
+  await Promise.all([
+    store.setRoomAgentPermissions({ roomId: roomA.id, agentId: agentA.id, canView: true, canEdit: false, canExecute: true, actorId: localOwnerParticipantId }),
+    store.setRoomAgentPermissions({ roomId: roomB.id, agentId: agentB.id, canView: true, canEdit: false, canExecute: true, actorId: localOwnerParticipantId }),
+    store.ensureResourceAccessBoundary({ resourceKind: "session", resourceId: sessionA.id, sourceRoomId: roomA.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId }),
+    store.ensureResourceAccessBoundary({ resourceKind: "session", resourceId: sessionB.id, sourceRoomId: roomB.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId })
+  ]);
   await Promise.all([
     store.saveMessage({ id: "message-a", session_id: sessionA.id, role: "user", content: "search", input_locale: "ja", output_locale: "ja", created_at: now }),
     store.saveMessage({ id: "message-b", session_id: sessionB.id, role: "user", content: "search", input_locale: "ja", output_locale: "ja", created_at: now })

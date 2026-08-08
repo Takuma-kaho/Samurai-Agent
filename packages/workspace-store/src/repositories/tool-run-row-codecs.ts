@@ -6,7 +6,7 @@ export function toolRunToRow(run: ToolRunRecord): ToolRunsTable {
 return {
   id: run.id,
   run_id: run.run_id,
-  session_id: run.session_id,
+  session_id: run.session_id ?? null,
   tool_call_id: run.tool_call_id ?? null,
   provider_tool_name: run.provider_tool_name,
   action_id: run.action_id ?? null,
@@ -22,7 +22,7 @@ export function toolRunFromRow(row: ToolRunsTable): ToolRunRecord {
 return {
   id: row.id,
   run_id: row.run_id,
-  session_id: row.session_id,
+  ...(row.session_id ? { session_id: row.session_id } : {}),
   tool_call_id: row.tool_call_id ?? undefined,
   provider_tool_name: row.provider_tool_name,
   action_id: row.action_id ?? undefined,

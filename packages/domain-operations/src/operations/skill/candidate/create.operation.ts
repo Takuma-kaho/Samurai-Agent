@@ -60,7 +60,10 @@ const skillCandidateCreate = defineCommand<SkillCandidateCreatePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleSkillCandidateCreate(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleSkillCandidateCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+        if (input.usage_scope?.kind === "session") {
+          throw ports.skillMutationConflict("session_scope_write_disabled");
+        }
         const contract = ports.skillMutationContract("skill.candidate.create");
         const skillId = createId("skill");
         const markdown = renderSkillMarkdown({
@@ -72,10 +75,9 @@ const skillCandidateCreate = defineCommand<SkillCandidateCreatePorts>()({
             kind: "generated_local", summary: "Created from a local runtime operation.", verified: false
           }
         }, input.content);
-        const session = await ports.ensureSkillMutationSession();
-        const envelope = ports.createSkillMutationEnvelope(`Create skill candidate: ${input.title}`);
         const result = await ports.runSkillMutation({
-          session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
+          trustedContext: context, operationName: contract.id, inputSummary: `Create skill candidate: ${input.title}`,
+          proposedEffects: contract.proposed_effects, boundaryResourceRefs: [{ kind: "skill", id: skillId, uri: `skills/${skillId}`, label: input.title }],
           execute: async (operation) => {
             const skill = await ports.saveSkillMarkdown({ state: "candidate", skillId, markdown });
             const ref = ports.skillResourceRef(skill);

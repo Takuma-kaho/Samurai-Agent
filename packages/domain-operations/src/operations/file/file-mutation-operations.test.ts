@@ -6,8 +6,6 @@ import fileWrite from "./write.operation.js";
 const context: TrustedDomainContext = {
   inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test"
 };
-const session = { id: "session_1" } as never;
-const envelope = { id: "envelope_1" } as never;
 const operation = { id: "operation_1" } as never;
 
 describe("File mutation operation handlers", () => {
@@ -17,8 +15,6 @@ describe("File mutation operation handlers", () => {
     const createFileRollback = vi.fn(async () => ({ id: "rollback_1" }) as never);
     const handler = fileWrite.createHandler({
       resolveFilePath: () => ({ absolutePath: "/workspace/data.json", relativePath: "data.json" }),
-      ensureFileSession: async () => session,
-      createFileEnvelope: () => envelope,
       readFileTextIfExists: async () => "old",
       ensureFileParent: async () => undefined,
       writeFileText,
@@ -43,8 +39,6 @@ describe("File mutation operation handlers", () => {
     const writeFileText = vi.fn(async () => undefined);
     const handler = filePatch.createHandler({
       resolveFilePath: () => ({ absolutePath: "/workspace/note.txt", relativePath: "note.txt" }),
-      ensureFileSession: async () => session,
-      createFileEnvelope: () => envelope,
       readFileTextIfExists: async () => "hello world",
       ensureFileParent: async () => undefined,
       writeFileText,
@@ -69,8 +63,6 @@ describe("File mutation operation handlers", () => {
     const writeFileText = vi.fn(async () => undefined);
     const handler = filePatch.createHandler({
       resolveFilePath: () => ({ absolutePath: "/workspace/missing.txt", relativePath: "missing.txt" }),
-      ensureFileSession: async () => session,
-      createFileEnvelope: () => envelope,
       readFileTextIfExists: async () => undefined,
       ensureFileParent: async () => undefined,
       writeFileText,

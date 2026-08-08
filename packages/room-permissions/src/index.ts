@@ -5,7 +5,7 @@
  * particular resource repository.  It is the one place that defines who a
  * participant is and what a current membership may do.
  */
-export const participantKinds = ["human", "agent", "system"] as const;
+export const participantKinds = ["human", "agent", "external_app", "system"] as const;
 export type ParticipantKind = (typeof participantKinds)[number];
 
 export const workspaceRoles = ["owner", "admin", "member", "guest"] as const;
@@ -53,10 +53,21 @@ export const roomShareableResourceKinds = [
   "generated_surface"
 ] as const;
 export type RoomShareableResourceKind = (typeof roomShareableResourceKinds)[number];
+/** Session remains readable for legacy rows but cannot be newly shared. */
+export const newRoomShareableResourceKinds = roomShareableResourceKinds.filter((kind) => kind !== "session") as Exclude<RoomShareableResourceKind, "session">[];
 
-/** Public reference shape for an explicit Room-to-Room share. */
+/**
+ * A persisted or legacy share reference.  `session` remains here solely so
+ * old rows can be inspected or revoked; it is not a valid new-share target.
+ */
 export type RoomShareableResourceReference =
   | { kind: Exclude<RoomShareableResourceKind, "collection_record" | "file">; id: string }
+  | { kind: "collection_record"; collectionId: string; recordId: string }
+  | { kind: "file"; path: string };
+
+/** Public input shape for creating a new Room-to-Room share. */
+export type NewRoomShareableResourceReference =
+  | { kind: Exclude<RoomShareableResourceKind, "session" | "collection_record" | "file">; id: string }
   | { kind: "collection_record"; collectionId: string; recordId: string }
   | { kind: "file"; path: string };
 
@@ -67,7 +78,7 @@ export interface CanonicalRoomShareableResourceReference {
 }
 
 /** A share grants use/read in its target Room; it never changes the source. */
-export const resourceAccessModes = ["source", "shared", "legacy_owner", "denied"] as const;
+export const resourceAccessModes = ["source", "shared", "workspace", "legacy_owner", "denied"] as const;
 export type ResourceAccessMode = (typeof resourceAccessModes)[number];
 
 export const permissionReasons = [
@@ -83,6 +94,7 @@ export const permissionReasons = [
   "agent_not_in_room",
   "agent_room_permission_denied",
   "agent_workspace_permission_denied",
+  "external_app_delegation_invalid",
   "target_role_protected",
   "owner_transfer_required"
 ] as const;
@@ -102,13 +114,20 @@ export interface AgentPrincipal {
   requestedByParticipantId: string;
 }
 
+/** External apps are transport principals, never Room members. */
+export interface ExternalAppPrincipal {
+  kind: "external_app";
+  appId: string;
+  delegatedBy: HumanPrincipal | AgentPrincipal;
+}
+
 /** System is an origin label, never a Room permission bypass. */
 export interface SystemPrincipal {
   kind: "system";
   participantId: string;
 }
 
-export type ParticipantPrincipal = HumanPrincipal | AgentPrincipal | SystemPrincipal;
+export type ParticipantPrincipal = HumanPrincipal | AgentPrincipal | ExternalAppPrincipal | SystemPrincipal;
 
 export interface CurrentWorkspaceMembership {
   participantId: string;
@@ -161,6 +180,20 @@ export function isHumanParticipantId(value: string): boolean {
 
 export function isAgentParticipantId(value: string): boolean {
   return /^agent:[^\s:][^\s]*$/.test(value);
+}
+
+export function isExternalAppPrincipal(value: ParticipantPrincipal): value is ExternalAppPrincipal {
+  return value.kind === "external_app";
+}
+
+/** The delegated identity is the only identity used for Room permission. */
+export function delegatedParticipant(principal: ParticipantPrincipal): HumanPrincipal | AgentPrincipal | SystemPrincipal {
+  return principal.kind === "external_app" ? principal.delegatedBy : principal;
+}
+
+export function principalParticipantId(principal: ParticipantPrincipal): string {
+  const delegated = delegatedParticipant(principal);
+  return delegated.kind === "agent" ? agentParticipantId(delegated.agentId) : delegated.participantId;
 }
 
 export function isRoomShareableResourceKind(value: string): value is RoomShareableResourceKind {
@@ -260,6 +293,10 @@ export function evaluateWorkspacePermission(input: {
   membership?: CurrentWorkspaceMembership;
   agentPermission?: CurrentAgentWorkspacePermission;
 }): PermissionDecision {
+  if (input.principal.kind === "external_app") {
+    if (!input.principal.appId.trim()) return denied(input.action, "external_app_delegation_invalid");
+    return evaluateWorkspacePermission({ ...input, principal: input.principal.delegatedBy });
+  }
   if (input.principal.kind === "system") return denied(input.action, "principal_kind_not_supported");
   if (input.principal.kind === "agent") {
     if (input.action !== "create_room") return denied(input.action, "principal_kind_not_supported");
@@ -283,6 +320,10 @@ export function evaluateRoomPermission(input: {
   humanMembership?: CurrentRoomMembership;
   agentMembership?: CurrentRoomAgentMembership;
 }): PermissionDecision {
+  if (input.principal.kind === "external_app") {
+    if (!input.principal.appId.trim()) return denied(input.action, "external_app_delegation_invalid");
+    return evaluateRoomPermission({ ...input, principal: input.principal.delegatedBy });
+  }
   if (input.principal.kind === "system") return denied(input.action, "principal_kind_not_supported");
   if (input.principal.kind === "agent") {
     if (!input.principal.agentId.trim() || !isHumanParticipantId(input.principal.requestedByParticipantId)) {
