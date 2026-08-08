@@ -73,6 +73,7 @@ export class RunControl {
 
   async cancel(runId: string): Promise<BackendRunRecord> {
     const run = await this.requireRun(runId);
+    requireSessionBoundRun(run);
     if (hasSettledOutcome(run)) return run;
 
     if (run.status === "queued") {
@@ -156,6 +157,7 @@ export class RunControl {
 
   async resume(runId: string, input: Record<string, unknown> = {}): Promise<BackendRunRecord> {
     let run = await this.requireRun(runId);
+    requireSessionBoundRun(run);
     if (hasSettledOutcome(run)) return run;
     if (run.status !== "waiting_for_backend_input") throw new Error(`run_not_waiting:${runId}`);
     const safeInput = validateResumeInput(input);
@@ -199,6 +201,7 @@ export class RunControl {
 
   async sync(runId: string): Promise<BackendRunRecord> {
     const run = await this.requireRun(runId);
+    requireSessionBoundRun(run);
     if (hasSettledOutcome(run)) return run;
     const backend = this.backendFor(run.backend_id);
     if (!backend?.streamEvents) {
@@ -266,6 +269,7 @@ export class RunControl {
     decision: PreparedTerminalSettlement["decision"] | undefined,
     source: string
   ): Promise<PreparedTerminalSettlement> {
+    requireSessionBoundRun(run);
     const lifecycleEvent = lifecycleEventForTerminalEvidence(evidence, { requestedCancel, ...(failure ? { failure } : {}) });
     const selectedDecision = decision ?? this.lifecycle.decide(run, lifecycleEvent);
     const error = failure ?? (evidence.kind === "failed" ? evidence.error : undefined);
@@ -321,6 +325,7 @@ export class RunControl {
   }
 
   private async createOutput(run: BackendRunRecord, content: string): Promise<MessageRecord | undefined> {
+    requireSessionBoundRun(run);
     const session = await this.store.getSession(run.session_id);
     if (!session) return undefined;
     return {
@@ -341,6 +346,7 @@ export class RunControl {
   }
 
   private async recordResumeInput(run: BackendRunRecord, input: Record<string, JsonValue>): Promise<BackendRunRecord> {
+    requireSessionBoundRun(run);
     const result = await this.eventJournal.appendCanonicalEvent({
       runId: run.id,
       sessionId: run.session_id,
@@ -369,6 +375,10 @@ export class RunControl {
       promise.then((value) => finish({ kind: "settled", value }), (error: unknown) => finish({ kind: "rejected", error }));
     });
   }
+}
+
+function requireSessionBoundRun(run: BackendRunRecord): asserts run is BackendRunRecord & { session_id: string } {
+  if (!run.session_id) throw new Error(`session_bound_run_required:${run.id}`);
 }
 
 function hasSettledOutcome(run: BackendRunRecord): boolean {

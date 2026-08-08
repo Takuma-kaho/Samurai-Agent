@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { ActivityInboxItem, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import type { ActivityInboxItem, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { wikiReindexValueSchema } from "../../value-objects/wiki.js";
 
@@ -9,10 +9,8 @@ const Output = wikiReindexValueSchema;
 type OutputValue = z.infer<typeof Output>;
 
 export interface WikiReindexPorts {
-  ensureWikiSession(): Promise<SessionRecord>;
-  createWikiEnvelope(content: string): MessageEnvelope;
   reindexWikiPages(): Promise<OutputValue["resource"]>;
-  runWikiMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: "wiki.reindex"; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: OutputValue["resource"]; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: OutputValue["resource"]; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runWikiMutation(input: { trustedContext: TrustedDomainContext; operationName: "wiki.reindex"; proposedEffects: string[]; inputSummary: string; execute(operation: OperationRecord): Promise<{ resource: OutputValue["resource"]; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: OutputValue["resource"]; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const wikiReindex = defineCommand<WikiReindexPorts>()({
@@ -57,9 +55,7 @@ const wikiReindex = defineCommand<WikiReindexPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiReindex(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const session = await ports.ensureWikiSession();
-        const envelope = ports.createWikiEnvelope("Reindex wiki pages");
-        const value = await ports.runWikiMutation({ session, envelope, operationName: "wiki.reindex", proposedEffects: ["Refresh the SQLite wiki index from markdown files."], execute: async () => {
+        const value = await ports.runWikiMutation({ trustedContext: context, operationName: "wiki.reindex", inputSummary: "Reindex wiki pages", proposedEffects: ["Refresh the SQLite wiki index from markdown files."], execute: async () => {
           const resource = await ports.reindexWikiPages();
           const ref: ResourceRef = { kind: "wiki_index", id: "active", uri: "wiki/pages", label: "Wiki index" };
           return { resource, ref, summary: `Reindexed ${resource.active} active wiki pages.` };

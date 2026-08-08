@@ -50,7 +50,7 @@ export class LearningEvidenceAssembler {
 
   async assemble(runId: string): Promise<LearningEvidenceBundle | undefined> {
     const run = await this.store.getBackendRun(runId);
-    if (!run?.agent_id) return undefined;
+    if (!run?.agent_id || !run.session_id) return undefined;
     const session = await this.store.getSession(run.session_id);
     if (!session?.room_id || session.id !== run.session_id) return undefined;
     const [room, agent, messages] = await Promise.all([

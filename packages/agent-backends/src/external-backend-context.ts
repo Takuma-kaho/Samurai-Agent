@@ -230,9 +230,9 @@ function formatContextHandoffForPrompt(handoff: BackendRunInput["context_handoff
 
 export function externalBackendEnv(input: BackendRunInput): Record<string, string> {
   const env: Record<string, string> = {
-    SAMURAI_RUN_ID: input.run_id,
-    SAMURAI_SESSION_ID: input.session_id
+    SAMURAI_RUN_ID: input.run_id
   };
+  if (input.session_id) env.SAMURAI_SESSION_ID = input.session_id;
   if (input.room_id) env.SAMURAI_ROOM_ID = input.room_id;
   if (input.agent_context?.id) env.SAMURAI_AGENT_ID = input.agent_context.id;
   if (input.backend_session_key) env.SAMURAI_BACKEND_SESSION_KEY = input.backend_session_key;

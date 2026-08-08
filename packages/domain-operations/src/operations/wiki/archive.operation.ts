@@ -49,7 +49,7 @@ const wikiArchive = defineCommand<WikiArchivePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiArchive(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: await executeWikiStateTransition(ports, { id: input.wiki_id, state: "archived", operationName: "wiki.archive", proposedEffect: "Archive a wiki page without deleting its markdown.", summaryPrefix: "Archived wiki page" }) };
+        return { ok: true, value: await executeWikiStateTransition(ports, { context, id: input.wiki_id, state: "archived", operationName: "wiki.archive", proposedEffect: "Archive a wiki page without deleting its markdown.", summaryPrefix: "Archived wiki page" }) };
       }
     };
   }

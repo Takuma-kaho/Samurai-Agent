@@ -9,27 +9,23 @@ const result = { session, messages: [] } as never;
 
 describe("chat.turn.run handler", () => {
   it("uses the supplied session and validated defaults", async () => {
-    const createChatSession = vi.fn(async () => session);
     const runChatTurn = vi.fn(async () => result);
-    const handler = chatTurnRun.createHandler({ createChatSession, runChatTurn });
+    const handler = chatTurnRun.createHandler({ runChatTurn });
     const input = chatTurnRun.input.parse({ content: "Hello" });
 
     await handler.execute(contextWithSession, input);
 
-    expect(createChatSession).not.toHaveBeenCalled();
-    expect(runChatTurn).toHaveBeenCalledWith({ sessionId: session.id, content: "Hello", idempotencyKey: "turn-test-1", backend_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} });
+    expect(runChatTurn).toHaveBeenCalledWith(contextWithSession, { sessionId: session.id, content: "Hello", idempotencyKey: "turn-test-1", backend_id: undefined, agent_id: undefined, input_locale: undefined, output_locale: undefined, attachments: [], temporary_context: [], metadata: {} });
   });
 
-  it("creates a session before running when no session is supplied", async () => {
-    const createChatSession = vi.fn(async () => session);
+  it("rejects a turn when no App Session is supplied", async () => {
     const runChatTurn = vi.fn(async () => result);
-    const handler = chatTurnRun.createHandler({ createChatSession, runChatTurn });
+    const handler = chatTurnRun.createHandler({ runChatTurn });
     const input = chatTurnRun.input.parse({ content: "こんにちは", output_locale: "ja" });
 
-    await handler.execute(context, input);
+    await expect(handler.execute(context, input)).rejects.toThrow("trusted_context_session_required");
 
-    expect(createChatSession).toHaveBeenCalledWith({ output_locale: "ja" });
-    expect(createChatSession.mock.invocationCallOrder[0]).toBeLessThan(runChatTurn.mock.invocationCallOrder[0]);
+    expect(runChatTurn).not.toHaveBeenCalled();
   });
 
   it("rejects malformed attachments and temporary context", () => {

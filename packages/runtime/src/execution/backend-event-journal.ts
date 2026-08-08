@@ -6,7 +6,7 @@ import type { CanonicalLifecycleEvent } from "./run-state-machine";
 
 export interface JournalEventInput {
   runId: string;
-  sessionId: string;
+  sessionId?: string;
   backendSessionId?: string;
   attemptNo: number;
   eventType: BackendEventRecord["event_type"];
@@ -45,7 +45,7 @@ export class BackendEventJournal {
     const event: BackendEventRecord = {
       id: createId("backend_event"),
       run_id: input.runId,
-      session_id: input.sessionId,
+      ...(input.sessionId ? { session_id: input.sessionId } : {}),
       ...(journalBackendSessionId(input) ? { backend_session_id: journalBackendSessionId(input) } : {}),
       event_type: input.eventType,
       sequence: Math.max(1, existing.reduce((max, item) => Math.max(max, item.sequence), 0) + 1),
@@ -109,7 +109,7 @@ export class BackendEventJournal {
 
 function validateJournalInput(input: JournalEventInput): void {
   if (!input.runId.trim()) throw new Error("invalid_journal_run_id");
-  if (!input.sessionId.trim()) throw new Error("invalid_journal_session_id");
+  if (input.sessionId !== undefined && !input.sessionId.trim()) throw new Error("invalid_journal_session_id");
   if (!Number.isSafeInteger(input.attemptNo) || input.attemptNo <= 0) throw new Error("invalid_journal_attempt_no");
   if (input.sourceEventId !== undefined && !input.sourceEventId.trim()) throw new Error("invalid_journal_source_event_id");
   if (input.sourceSequence !== undefined && (!Number.isSafeInteger(input.sourceSequence) || input.sourceSequence <= 0)) throw new Error("invalid_journal_source_sequence");
@@ -138,7 +138,7 @@ function createEvent(input: JournalEventInput, createdAt: string, sequence: numb
   const event = {
     id: eventId ?? createId("backend_event"),
     run_id: input.runId,
-    session_id: input.sessionId,
+    ...(input.sessionId ? { session_id: input.sessionId } : {}),
     ...(journalBackendSessionId(input) ? { backend_session_id: journalBackendSessionId(input) } : {}),
     event_type: input.eventType,
     sequence: Math.max(1, sequence),

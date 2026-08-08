@@ -28,8 +28,10 @@ export function learningResourceUseFromRow(row: LearningResourceUseTable): Learn
   return {
     id: row.id,
     run_id: row.run_id,
-    session_id: row.session_id,
-    activity_context: row.room_id && row.agent_id ? { room_id: row.room_id, session_id: row.session_id, agent_id: row.agent_id } : undefined,
+    ...(row.session_id ? { session_id: row.session_id } : {}),
+    activity_context: row.room_id && row.session_id && row.agent_id
+      ? { room_id: row.room_id, session_id: row.session_id, agent_id: row.agent_id }
+      : undefined,
     resource_kind: row.resource_kind as LearningResourceUseRecord["resource_kind"],
     resource_id: row.resource_id,
     resource_version: row.resource_version ?? undefined,

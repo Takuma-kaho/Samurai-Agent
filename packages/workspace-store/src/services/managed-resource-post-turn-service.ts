@@ -5,7 +5,7 @@ import { ManagedResourceSynchronizer } from "../repositories/managed-resource-sy
 export interface HostDiagnosticPort {
   appendHostDiagnostic(input: {
     runId: string;
-    sessionId: string;
+    sessionId?: string;
     attemptNo: number;
     operationId: string;
     eventType: "host_post_turn_failed" | "host_cleanup_failed" | "host_emit_failed";

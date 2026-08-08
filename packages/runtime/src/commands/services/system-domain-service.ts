@@ -79,9 +79,7 @@ export interface SystemDomainServiceDependencies {
     write(path: string, content: string): Promise<void>;
     remove(path: string): Promise<void>;
     ensureParent(path: string): Promise<void>;
-    ensureSession(): Promise<SessionRecord>;
-    createEnvelope(content: string): MessageEnvelope;
-    runMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: RollbackRestoreResource; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<RollbackRestoreWriteResult>;
+    runMutation(input: { trustedContext: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary: string; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: RollbackRestoreResource; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<RollbackRestoreWriteResult>;
     createRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
     fileRef(path: string): ResourceRef;
     requestError(code: "not_found" | "conflict" | "forbidden", message: string): Error;
@@ -99,8 +97,6 @@ export class SystemDomainService {
   getRollbackPoint(id: string) { return this.dependencies.rollback.get(id); }
   rollbackError(code: "not_found" | "conflict" | "forbidden", message: string) { return this.dependencies.rollback.requestError(code, message); }
   resolveRollbackPath(path: string) { return this.dependencies.rollback.resolve(path); }
-  ensureRollbackSession() { return this.dependencies.rollback.ensureSession(); }
-  createRollbackEnvelope(content: string) { return this.dependencies.rollback.createEnvelope(content); }
   rollbackFileRef(path: string) { return this.dependencies.rollback.fileRef(path); }
   readRollbackFile(path: string) { return this.dependencies.rollback.read(path); }
   removeRollbackFile(path: string) { return this.dependencies.rollback.remove(path); }

@@ -9,6 +9,7 @@ import { core05RoomAgentFoundationMigration } from "./007-core05-room-agent-foun
 import { core05LearningCompletionMigration } from "./008-core05-learning-completion";
 import { core06RoomParticipantsMigration } from "./009-core06-room-participants";
 import { core06IntegrityHardeningMigration } from "./010-core06-integrity-hardening";
+import { core06SessionReferenceBoundaryMigration } from "./011-core06-session-reference-boundary";
 
 export const workspaceMigrations: readonly WorkspaceMigration[] = [
   coreBaselineMigration,
@@ -20,7 +21,8 @@ export const workspaceMigrations: readonly WorkspaceMigration[] = [
   core05RoomAgentFoundationMigration,
   core05LearningCompletionMigration,
   core06RoomParticipantsMigration,
-  core06IntegrityHardeningMigration
+  core06IntegrityHardeningMigration,
+  core06SessionReferenceBoundaryMigration
 ];
 
-export { coreBaselineMigration, gatewayDeliveryMigration, skillOptimizationMigration, toolRunErrorCodeMigration, gatewayPairingPolicyAllowedToolsMigration, preCore04SchemaNormalizationMigration, core05RoomAgentFoundationMigration, core05LearningCompletionMigration, core06RoomParticipantsMigration, core06IntegrityHardeningMigration };
+export { coreBaselineMigration, gatewayDeliveryMigration, skillOptimizationMigration, toolRunErrorCodeMigration, gatewayPairingPolicyAllowedToolsMigration, preCore04SchemaNormalizationMigration, core05RoomAgentFoundationMigration, core05LearningCompletionMigration, core06RoomParticipantsMigration, core06IntegrityHardeningMigration, core06SessionReferenceBoundaryMigration };

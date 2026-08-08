@@ -1,43 +1,31 @@
-import type { ActivityInboxItem, JsonValue, MemoryFrontmatter, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord, SupportedLocale } from "@samurai-agent/core-schemas";
+import { createId, type ActivityInboxItem, type JsonValue, type MemoryFrontmatter, type OperationRecord, type ResourceRef, type RollbackPoint, type SupportedLocale } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "../../definition/index.js";
 
-export interface MemoryCreatePorts {
-  getMemorySession(id: string): Promise<SessionRecord | undefined>;
-  createMemorySession(input: { title?: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale }): Promise<SessionRecord>;
-  ensureMemorySession(): Promise<SessionRecord>;
+export interface MemoryTopicCreatePorts {
   memoryCreateError(message: string): Error;
-  createMemoryEnvelope(input: { session: SessionRecord; content: string; inputLocale?: SupportedLocale; outputLocale?: SupportedLocale; metadata: Record<string, JsonValue>; envelopeId?: string }): MessageEnvelope;
-  writeSessionMemory(envelope: MessageEnvelope, content: string): Promise<MemoryFrontmatter>;
-  writeTopicMemory(envelope: MessageEnvelope, topicKind: string, content: string): Promise<MemoryFrontmatter>;
+  writeRoomTopicMemory(input: { context: TrustedDomainContext; memoryId: string; topicKind: string; content: string; inputLocale?: SupportedLocale; outputLocale?: SupportedLocale }): Promise<MemoryFrontmatter>;
   memoryResourceRef(memory: MemoryFrontmatter): ResourceRef;
   createMemoryRollback(operation: OperationRecord, refs: ResourceRef[], after: Record<string, JsonValue>): Promise<RollbackPoint>;
   emitMemoryCandidate(memory: MemoryFrontmatter): Promise<void>;
-  runMemoryMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: "memory.session.create" | "memory.topic.create"; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: MemoryFrontmatter; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: MemoryFrontmatter; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runMemoryMutation(input: { trustedContext: TrustedDomainContext; operationName: "memory.topic.create"; inputSummary: string; proposedEffects: string[]; boundaryResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: MemoryFrontmatter; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: MemoryFrontmatter; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
-export async function createMemory(ports: MemoryCreatePorts, input: {
-  kind: "session" | "topic"; content: string; sessionId?: string; title?: string; uiLocale?: SupportedLocale; inputLocale?: SupportedLocale;
-  outputLocale?: SupportedLocale; metadata: Record<string, JsonValue>; envelopeId?: string; topicKind?: string;
+export async function createRoomTopicMemory(ports: MemoryTopicCreatePorts, input: {
+  context: TrustedDomainContext; content: string; inputLocale?: SupportedLocale;
+  outputLocale?: SupportedLocale; topicKind: string;
 }) {
-  const session = input.sessionId
-    ? await ports.getMemorySession(input.sessionId)
-    : input.kind === "session"
-      ? await ports.createMemorySession({ title: input.title, ui_locale: input.uiLocale, output_locale: input.outputLocale })
-      : await ports.ensureMemorySession();
-  if (!session) throw ports.memoryCreateError(`Session not found: ${input.sessionId}`);
-  const envelope = ports.createMemoryEnvelope({ session, content: input.content,
-    inputLocale: input.inputLocale ?? (input.kind === "session" ? session.ui_locale : undefined),
-    outputLocale: input.outputLocale ?? (input.kind === "session" ? session.output_locale : undefined),
-    metadata: input.metadata, envelopeId: input.envelopeId });
-  const operationName = input.kind === "session" ? "memory.session.create" : "memory.topic.create";
-  return ports.runMemoryMutation({ session, envelope, operationName,
-    proposedEffects: [input.kind === "session" ? "Keep the current user intent in session memory." : "Create a visible topic memory candidate."],
+  if (!input.context.roomId) throw ports.memoryCreateError("memory_room_context_required");
+  const memoryId = createId("memory");
+  return ports.runMemoryMutation({ trustedContext: input.context, operationName: "memory.topic.create",
+    inputSummary: `Create topic memory: ${input.topicKind}`,
+    proposedEffects: ["Create a visible topic memory candidate."],
+    boundaryResourceRefs: [{ kind: "memory", id: memoryId, uri: `memory/${memoryId}.md`, label: input.topicKind }],
     execute: async (operation) => {
-      const memory = input.kind === "session"
-        ? await ports.writeSessionMemory(envelope, input.content)
-        : await ports.writeTopicMemory(envelope, input.topicKind ?? "preference", input.content);
+      const memory = await ports.writeRoomTopicMemory({ context: input.context, memoryId, topicKind: input.topicKind, content: input.content,
+        inputLocale: input.inputLocale, outputLocale: input.outputLocale });
       const ref = ports.memoryResourceRef(memory);
       const rollbackPoint = await ports.createMemoryRollback(operation, [ref], { memory_id: memory.id });
       await ports.emitMemoryCandidate(memory);
-      return { resource: memory, ref, rollbackPoint, summary: `Created ${memory.state === "session" ? "session" : "topic"} memory ${memory.topic}.` };
+      return { resource: memory, ref, rollbackPoint, summary: `Created topic memory ${memory.topic}.` };
     }});
 }

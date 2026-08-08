@@ -24,7 +24,6 @@ type InputValue = z.infer<typeof Input>;
 type OutputValue = z.infer<typeof Output>;
 
 export interface ChatTurnRunPorts {
-  createChatSession(context: TrustedDomainContext, input: { output_locale?: InputValue["output_locale"] }): Promise<OutputValue["session"]>;
   runChatTurn(context: TrustedDomainContext, input: {
     sessionId: string; content: string; idempotencyKey: string; backend_id?: string; agent_id?: string; input_locale?: InputValue["input_locale"];
     output_locale?: InputValue["output_locale"]; attachments: InputValue["attachments"];
@@ -81,7 +80,11 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
     return {
       execute: async function handleChatTurnRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         if (!context.idempotencyKey) throw new Error("idempotency_key_required");
-        const sessionId = context.sessionId ?? (await ports.createChatSession(context, { output_locale: input.output_locale })).id;
+        // Chat is an App-owned Session interaction. A Room-first caller must
+        // explicitly use `session.create` through its compatibility adapter;
+        // it must never get an invented Session as a side effect of a turn.
+        if (!context.sessionId) throw new Error("trusted_context_session_required");
+        const sessionId = context.sessionId;
         const metadata = {
           ...input.metadata,
           ...(context.surfaceOperation

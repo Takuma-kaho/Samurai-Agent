@@ -21,10 +21,11 @@ import {
   type ToolRunStatus,
   type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
+import type { AgentBackendKind, TrustedWorkspaceContext } from "@samurai-agent/core-schemas";
 import { sql, type Kysely, type Transaction } from "kysely";
 import type { WorkspaceDb } from "../kernel/workspace-db-schema";
 import { SessionSearchIndex } from "../kernel/session-search-index";
-import type { Core02SettlementInput } from "../workspace-store-contracts";
+import type { Core02SettlementInput, WorkspaceRunSettlementInput } from "../workspace-store-contracts";
 import { backendEventFromRow, backendEventToRow } from "./backend-events";
 import {
   assertCore02SettlementReplay,
@@ -261,6 +262,123 @@ async saveBackendRun(run: BackendRunRecord): Promise<BackendRunRecord> {
   return run;
 }
 
+/**
+ * Session-free admission for Host work. It writes the Room/Principal/source
+ * boundary and a private run lease; it never creates a Session or Message.
+ */
+async admitWorkspaceRun(input: {
+  context: TrustedWorkspaceContext;
+  backendId: string;
+  backendKind: AgentBackendKind;
+  runId: string;
+  requestHash: string;
+  idempotencyKey?: string;
+  agentId?: string;
+  inputSummary?: string;
+  metadata?: Record<string, JsonValue>;
+  now: string;
+}): Promise<BackendRunRecord> {
+  if (!input.context.room_id) throw new Error("workspace_run_room_required");
+  const idempotencyKey = input.idempotencyKey ?? `run:${input.runId}`;
+  const existing = await this.db.selectFrom("backend_runs").selectAll()
+    .where("room_id", "=", input.context.room_id)
+    .where("request_idempotency_key", "=", idempotencyKey)
+    .executeTakeFirst();
+  if (existing) {
+    const replay = backendRunFromRow(existing);
+    if (replay.request_hash !== input.requestHash) throw new Error("idempotency_conflict");
+    return replay;
+  }
+  const delegated = input.context.principal.kind === "external_app" ? input.context.principal.delegated_by : input.context.principal;
+  const requestedByParticipantId = delegated.kind === "agent"
+    ? delegated.requested_by_participant_id
+    : delegated.kind === "human" ? delegated.participant_id : undefined;
+  const run: BackendRunRecord = {
+    id: input.runId,
+    room_id: input.context.room_id,
+    principal: input.context.principal,
+    source: input.context.source,
+    ...(input.context.session_ref ? { session_ref: input.context.session_ref } : {}),
+    ...(input.agentId ? { agent_id: input.agentId } : {}),
+    ...(requestedByParticipantId ? { requested_by_participant_id: requestedByParticipantId } : {}),
+    backend_id: input.backendId,
+    backend_kind: input.backendKind,
+    status: "queued",
+    phase: "admitted",
+    current_attempt: 1,
+    request_idempotency_key: idempotencyKey,
+    request_hash: input.requestHash,
+    started_at: input.now,
+    input_summary: input.inputSummary ?? "",
+    metadata: input.metadata ?? {}
+  };
+  await this.executeCore02Transaction(async (transaction) => {
+    await transaction.insertInto("backend_runs").values(backendRunToRow(run)).execute();
+    await transaction.insertInto("run_leases").values({ lane_key: `run:${run.id}`, run_id: run.id, status: "held", version: 1, held_at: input.now, released_at: null }).execute();
+  });
+  return run;
+}
+
+async releaseRunLease(runId: string): Promise<void> {
+  await this.db.updateTable("run_leases")
+    .set({ status: "released", released_at: nowIso(), version: sql<number>`version + 1` })
+    .where("run_id", "=", runId)
+    .where("status", "=", "held")
+    .execute();
+}
+
+/** Terminal settlement for a Room-scoped Run. It never writes a Session or Message. */
+async commitWorkspaceRunSettlement(input: WorkspaceRunSettlementInput): Promise<BackendRunRecord> {
+  if (!isTerminalBackendRunStatus(input.nextRun.status)) throw new Error(`workspace_run_settlement_status_invalid:${input.expectedRun.id}`);
+  if (input.expectedRun.id !== input.nextRun.id || input.terminalEvent.run_id !== input.expectedRun.id) {
+    throw new Error(`workspace_run_settlement_scope_conflict:${input.expectedRun.id}`);
+  }
+  if (input.terminalEvent.event_type !== "run_completed" && input.terminalEvent.event_type !== "run_failed") {
+    throw new Error(`workspace_run_settlement_event_invalid:${input.expectedRun.id}`);
+  }
+  if (input.terminalEvent.payload.terminal_evidence === undefined) {
+    throw new Error(`workspace_run_settlement_evidence_required:${input.expectedRun.id}`);
+  }
+  return this.executeCore02Transaction(async (transaction) => {
+    const currentRow = await transaction.selectFrom("backend_runs").selectAll().where("id", "=", input.expectedRun.id).executeTakeFirst();
+    if (!currentRow) throw new Error(`workspace_run_settlement_run_not_found:${input.expectedRun.id}`);
+    const current = backendRunFromRow(currentRow);
+    if (isTerminalBackendRunStatus(current.status)) {
+      await transaction.updateTable("run_leases").set({ status: "released", released_at: nowIso(), version: sql<number>`version + 1` })
+        .where("run_id", "=", current.id).where("status", "=", "held").execute();
+      return current;
+    }
+    if (current.status !== input.expectedRun.status || (current.phase ?? null) !== (input.expectedRun.phase ?? null) || (current.current_attempt ?? 1) !== (input.expectedRun.current_attempt ?? 1)) {
+      throw new Error(`workspace_run_settlement_cas_conflict:${current.id}`);
+    }
+    const max = await transaction.selectFrom("backend_events").select(({ fn }) => fn.max("sequence").as("max_sequence")).where("run_id", "=", current.id).executeTakeFirst();
+    const event = { ...input.terminalEvent, sequence: Number(max?.max_sequence ?? 0) + 1 };
+    BackendEventRecordSchema.parse(event);
+    await transaction.insertInto("backend_events").values(backendEventToRow(event)).execute();
+    const settled: BackendRunRecord = {
+      ...input.nextRun,
+      phase: "settled",
+      ...(input.outputSummary === undefined ? {} : { output_summary: input.outputSummary }),
+      ...(input.diagnostic ? {
+        metadata: {
+          ...input.nextRun.metadata,
+          settlement_diagnostic_code: input.diagnostic.code,
+          settlement_diagnostic_message: input.diagnostic.message,
+          ...(input.diagnostic.metadata ?? {})
+        }
+      } : {}),
+      ...(input.nextRun.status === "outcome_unknown" ? { completed_at: undefined } : { completed_at: input.nextRun.completed_at ?? nowIso() })
+    };
+    const updated = await transaction.updateTable("backend_runs").set(backendRunToRow(settled))
+      .where("id", "=", current.id).where("status", "=", current.status)
+      .where("phase", "=", current.phase ?? "admitted").where("current_attempt", "=", current.current_attempt ?? 1).executeTakeFirst();
+    if (Number(updated.numUpdatedRows ?? 0) !== 1) throw new Error(`workspace_run_settlement_cas_conflict:${current.id}`);
+    await transaction.updateTable("run_leases").set({ status: "released", released_at: nowIso(), version: sql<number>`version + 1` })
+      .where("run_id", "=", current.id).where("status", "=", "held").execute();
+    return settled;
+  });
+}
+
 /** Core 02 admission: reservation, user message and queued run commit together. */
 private async executeCore02Transaction<T>(operation: (transaction: Transaction<WorkspaceDb>) => Promise<T>): Promise<T> {
   const maxAttempts = 3;
@@ -287,13 +405,37 @@ async admitTurn(input: {
   session: SessionRecord;
   binding: { id: string; kind: BackendRunRecord["backend_kind"] };
   request: { sessionId: string; content: string; envelope: MessageRecord["envelope"]; idempotencyKey: string; agentId?: string; requestedByParticipantId?: string; metadata?: JsonValue };
+  context?: TrustedWorkspaceContext;
   requestHash: string;
   runId: string;
   now: string;
 }): Promise<{ reservation: { sessionId: string; runId: string; version: number; status: "held" | "released" }; userMessage: MessageRecord; run: BackendRunRecord; replay: boolean }> {
   if (!input.request.envelope) throw new Error("message_envelope_required");
+  if (input.context?.room_id && input.context.room_id !== input.session.room_id) {
+    throw new Error(`session_adapter_room_mismatch:${input.session.id}`);
+  }
   const message: MessageRecord = { id: createId("message"), session_id: input.session.id, role: "user", content: input.request.content, input_locale: input.request.envelope.input_locale, output_locale: input.request.envelope.output_locale, envelope: input.request.envelope, created_at: input.now };
-  const run: BackendRunRecord = { id: input.runId, session_id: input.session.id, ...(input.request.agentId ? { agent_id: input.request.agentId } : {}), ...(input.request.requestedByParticipantId ? { requested_by_participant_id: input.request.requestedByParticipantId } : {}), input_message_id: message.id, backend_id: input.binding.id, backend_kind: input.binding.kind, status: "queued", phase: "admitted", current_attempt: 1, request_idempotency_key: input.request.idempotencyKey, request_hash: input.requestHash, started_at: input.now, input_summary: input.request.content.slice(0, 240), metadata: typeof input.request.metadata === "object" && input.request.metadata && !Array.isArray(input.request.metadata) ? input.request.metadata as Record<string, JsonValue> : {} };
+  const run: BackendRunRecord = {
+    id: input.runId,
+    session_id: input.session.id,
+    ...(input.session.room_id ? { room_id: input.session.room_id } : {}),
+    ...(input.context?.principal ? { principal: input.context.principal } : {}),
+    ...(input.context?.source ? { source: input.context.source } : {}),
+    ...(input.context?.session_ref ? { session_ref: input.context.session_ref } : {}),
+    ...(input.request.agentId ? { agent_id: input.request.agentId } : {}),
+    ...(input.request.requestedByParticipantId ? { requested_by_participant_id: input.request.requestedByParticipantId } : {}),
+    input_message_id: message.id,
+    backend_id: input.binding.id,
+    backend_kind: input.binding.kind,
+    status: "queued",
+    phase: "admitted",
+    current_attempt: 1,
+    request_idempotency_key: input.request.idempotencyKey,
+    request_hash: input.requestHash,
+    started_at: input.now,
+    input_summary: input.request.content.slice(0, 240),
+    metadata: typeof input.request.metadata === "object" && input.request.metadata && !Array.isArray(input.request.metadata) ? input.request.metadata as Record<string, JsonValue> : {}
+  };
   let reservationVersion = 1;
   try {
     await this.executeCore02Transaction(async (transaction) => {
@@ -326,6 +468,7 @@ async admitTurn(input: {
         if (replayRun.request_hash !== input.requestHash) {
           throw new Error("idempotency_conflict");
         }
+        if (!replayRun.input_message_id) throw new Error(`admission_replay_missing_message:${replayRun.id}`);
         const replayMessageRow = await this.db.selectFrom("messages").selectAll().where("id", "=", replayRun.input_message_id).executeTakeFirst();
         if (!replayMessageRow) {
           throw new Error(`admission_replay_missing_message:${replayRun.id}`);
@@ -505,11 +648,15 @@ async listCore02RecoveryCandidates(): Promise<BackendRunRecord[]> {
   const rows = await this.db
     .selectFrom("backend_runs")
     .leftJoin("session_run_reservations", "session_run_reservations.run_id", "backend_runs.id")
+    .leftJoin("run_leases", "run_leases.run_id", "backend_runs.id")
     .selectAll("backend_runs")
     .where((expression) => expression.or([
       expression.and([
         expression("backend_runs.status", "in", ["queued", "running", "waiting_for_backend_input"]),
-        expression("session_run_reservations.status", "=", "held")
+        expression.or([
+          expression("session_run_reservations.status", "=", "held"),
+          expression("run_leases.status", "=", "held")
+        ])
       ]),
       expression("backend_runs.status", "=", "outcome_unknown")
     ]))
@@ -526,7 +673,7 @@ async listRunHistoryEntries(sessionId?: string): Promise<RunHistoryEntry[]> {
   ]);
   const eventCounts = countBy(events, (event) => event.run_id);
   const changeCounts = countBy(changes, (change) => change.run_id);
-  return runs.map((run) => ({
+  return runs.filter((run): run is typeof run & { session_id: string } => Boolean(run.session_id)).map((run) => ({
     id: run.id,
     session_id: run.session_id,
     backend_id: run.backend_id,
@@ -574,7 +721,7 @@ async appendCore02Event(event: BackendEventRecord): Promise<{ event: BackendEven
 /** Host diagnostics share the existing backend journal and never mutate Run state. */
 async appendHostDiagnostic(input: {
   runId: string;
-  sessionId: string;
+  sessionId?: string;
   attemptNo: number;
   operationId: string;
   eventType: "host_post_turn_failed" | "host_cleanup_failed" | "host_emit_failed";
@@ -688,7 +835,7 @@ async listWorkspaceChangesForOperation(operationId: string): Promise<WorkspaceCh
 }
 
 async listChangeHistoryEntries(sessionId?: string): Promise<ChangeHistoryEntry[]> {
-  return (await this.listWorkspaceChanges(sessionId)).map((change) => ({
+  return (await this.listWorkspaceChanges(sessionId)).filter((change): change is typeof change & { session_id: string } => Boolean(change.session_id)).map((change) => ({
     id: change.id,
     session_id: change.session_id,
     run_id: change.run_id,

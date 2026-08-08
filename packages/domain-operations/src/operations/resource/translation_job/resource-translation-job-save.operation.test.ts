@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { TrustedDomainContext } from "../../../definition/index.js";
 import resourceTranslationJobSave from "./save.operation.js";
 
-const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test" };
+const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", roomId: "room_test", correlationId: "correlation_test" };
 const sourceRef = { kind: "artifact", id: "artifact_1", uri: "artifacts/source.md", label: "Source" } as const;
 
 describe("resource.translation_job.save handler", () => {
@@ -24,7 +24,7 @@ describe("resource.translation_job.save handler", () => {
       kind: "resource_translation",
       schedule: "daily",
       target_instruction: "Translate artifact/artifact_1 from ja to en.",
-      delivery_target: { channel: "resource_translation", source_ref: sourceRef, source_locale: "ja", target_locale: "en", original_hash: "hash_1", source_label: "Source" },
+      delivery_target: { channel: "resource_translation", source_ref: sourceRef, source_locale: "ja", target_locale: "en", original_hash: "hash_1", source_label: "Source", room_id: "room_test" },
       enabled: true,
       next_run_at: undefined,
       max_attempts: undefined

@@ -4,7 +4,8 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { domainQueryEntries } from "../../packages/action-catalog/src/index";
-import { localOwnerParticipantId } from "../../packages/room-permissions/src/index";
+import { isSessionCompatibleOperation } from "../../packages/domain-operations/src/definition/index";
+import { collectionRecordResourceId, localOwnerParticipantId } from "../../packages/room-permissions/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 
@@ -65,6 +66,13 @@ try {
     output_locale: "en",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z"
+  });
+  await store.ensureResourceAccessBoundary({
+    resourceKind: "session",
+    resourceId: session.id,
+    sourceRoomId: room.id,
+    ownerParticipantId: localOwnerParticipantId,
+    actorId: localOwnerParticipantId
   });
   const runId = "query-purity-run";
   await store.saveBackendRun({
@@ -151,6 +159,13 @@ try {
     updated_at: "2026-01-01T00:00:00.000Z"
   });
   await store.ensureResourceAccessBoundary({
+    resourceKind: "collection_record",
+    resourceId: collectionRecordResourceId("query-purity", "record"),
+    sourceRoomId: room.id,
+    ownerParticipantId: localOwnerParticipantId,
+    actorId: localOwnerParticipantId
+  });
+  await store.ensureResourceAccessBoundary({
     resourceKind: "collection_schema",
     resourceId: "query-purity",
     sourceRoomId: room.id,
@@ -171,9 +186,9 @@ try {
     { queryId: "curator.snapshot.list", payload: {} },
     { queryId: "presentation.plan", payload: { requested_kind: "built_in_surface" } },
     { queryId: "room.list", payload: {} },
-    { queryId: "room.member.list", payload: { room_id: room.id } },
+    { queryId: "room.member.list", payload: {} },
     { queryId: "room.ownerless.list", payload: {} },
-    { queryId: "room.resource.share.list", payload: { source_room_id: room.id, resource: { kind: "collection_schema", id: "query-purity" } } },
+    { queryId: "room.resource.share.list", payload: { resource: { kind: "collection_schema", id: "query-purity" } } },
     { queryId: "room.view", payload: { id: room.id } },
     { queryId: "generated_surface.export", payload: { surface_id: surfaceId } },
     { queryId: "collection.schema.docs", payload: {} },
@@ -214,11 +229,16 @@ try {
 
   const before = await snapshot();
   for (const queryCase of cases) {
+    const trusted = {
+      roomId: room.id,
+      ...(isSessionCompatibleOperation(queryCase.queryId) ? { sessionId: session.id } : {}),
+      ...(queryCase.trusted ?? {})
+    };
     const auditIds = new Set((await store.listAuditRecords()).map((record) => record.id));
     const result = await runtime.runRuntimeApiDomainQuery({
       query_id: queryCase.queryId,
       payload: queryCase.payload
-    }, queryCase.trusted);
+    }, trusted);
     assert.equal(result.ok, true, `${queryCase.queryId} did not execute successfully`);
     const audits = (await store.listAuditRecords()).filter((record) => !auditIds.has(record.id));
     assert.equal(audits.length, 1, `${queryCase.queryId} must write one access audit`);
@@ -230,7 +250,11 @@ try {
   const parallelResults = await Promise.all(cases.map((queryCase) => runtime.runRuntimeApiDomainQuery({
     query_id: queryCase.queryId,
     payload: queryCase.payload
-  }, queryCase.trusted)));
+  }, {
+    roomId: room.id,
+    ...(isSessionCompatibleOperation(queryCase.queryId) ? { sessionId: session.id } : {}),
+    ...(queryCase.trusted ?? {})
+  })));
   assert.equal(parallelResults.every((result) => result.ok), true);
   assert.equal((await store.listAuditRecords()).filter((record) => !parallelAuditIds.has(record.id)).length, cases.length, "parallel Queries must write one access audit each");
   assert.deepEqual(await snapshot(), before, "parallel queries changed Workspace content outside their access audits");

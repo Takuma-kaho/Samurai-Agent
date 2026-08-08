@@ -494,6 +494,88 @@ export const AgentRecordSchema = z.object({
 }).strict();
 export type AgentRecord = z.infer<typeof AgentRecordSchema>;
 
+/**
+ * A reference to an app-owned conversation or work unit.  It is metadata only:
+ * it never grants Workspace or Room access and has no SQLite foreign key.
+ */
+export const SessionRefSchema = z.object({
+  app_id: z.string().trim().min(1).max(200),
+  session_id: z.string().trim().min(1).max(512),
+  turn_id: z.string().trim().min(1).max(512).optional(),
+  message_id: z.string().trim().min(1).max(512).optional(),
+  resume_url: z.string().trim().min(1).max(4_000).optional(),
+  external_ref: z.string().trim().min(1).max(2_000).optional()
+}).strict();
+export type SessionRef = z.infer<typeof SessionRefSchema>;
+
+/** Principal is the operation identity; an External App is never a member. */
+const HumanPrincipalSchema = z.object({
+  kind: z.literal("human"),
+  participant_id: z.string().trim().min(1)
+}).strict();
+const AgentPrincipalSchema = z.object({
+  kind: z.literal("agent"),
+  agent_id: z.string().trim().min(1),
+  requested_by_participant_id: z.string().trim().min(1)
+}).strict();
+export const PrincipalSchema = z.discriminatedUnion("kind", [
+  HumanPrincipalSchema,
+  AgentPrincipalSchema,
+  z.object({
+    kind: z.literal("external_app"),
+    app_id: z.string().trim().min(1),
+    delegated_by: z.union([HumanPrincipalSchema, AgentPrincipalSchema]),
+    connector_id: z.string().trim().min(1).optional()
+  }).strict(),
+  z.object({
+    kind: z.literal("system"),
+    system_id: z.string().trim().min(1)
+  }).strict()
+]);
+export type Principal = z.infer<typeof PrincipalSchema>;
+
+export const TrustedWorkspaceSourceSchema = z.object({
+  kind: z.enum(["native_app", "external_app", "host", "system"]),
+  app_id: z.string().trim().min(1).optional(),
+  connector_id: z.string().trim().min(1).optional()
+}).strict();
+export type TrustedWorkspaceSource = z.infer<typeof TrustedWorkspaceSourceSchema>;
+
+/** Server-created context shared by Domain Operation, Query, and Host paths. */
+export const TrustedWorkspaceContextSchema = z.object({
+  workspace_id: z.string().trim().min(1),
+  room_id: z.string().trim().min(1).optional(),
+  principal: PrincipalSchema,
+  source: TrustedWorkspaceSourceSchema,
+  correlation_id: z.string().trim().min(1),
+  session_ref: SessionRefSchema.optional(),
+  run_id: z.string().trim().min(1).optional()
+}).strict().superRefine((context, issue) => {
+  const externalPrincipal = context.principal.kind === "external_app" ? context.principal : undefined;
+  const externalSource = context.source.kind === "external_app" ? context.source : undefined;
+  if (externalPrincipal && (!externalSource || externalSource.app_id !== externalPrincipal.app_id)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "external_app_context_mismatch", path: ["source"] });
+  }
+  if (externalSource && (!externalSource.app_id || !externalPrincipal || externalPrincipal.app_id !== externalSource.app_id)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "external_app_context_mismatch", path: ["principal"] });
+  }
+  if (context.source.app_id && context.session_ref && context.source.app_id !== context.session_ref.app_id) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "session_ref_app_mismatch", path: ["session_ref", "app_id"] });
+  }
+});
+export type TrustedWorkspaceContext = z.infer<typeof TrustedWorkspaceContextSchema>;
+
+/** Core execution contract. Chat adapters may add input/message fields. */
+export const WorkspaceExecutionRequestSchema = z.object({
+  context: TrustedWorkspaceContextSchema,
+  backend_id: z.string().trim().min(1).optional(),
+  agent_id: z.string().trim().min(1).optional(),
+  input_summary: z.string().max(20_000).optional(),
+  input_message_id: z.string().trim().min(1).optional(),
+  metadata: z.record(jsonValueSchema).default({})
+}).strict();
+export type WorkspaceExecutionRequest = z.infer<typeof WorkspaceExecutionRequestSchema>;
+
 /** One explicit reuse boundary for Workspace knowledge resources. */
 export const UsageScopeRefSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace") }).strict(),
@@ -513,11 +595,15 @@ export type ActivityContextRef = z.infer<typeof ActivityContextRefSchema>;
 
 export const BackendRunRecordSchema = z.object({
   id: z.string().min(1),
-  session_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  room_id: z.string().min(1).optional(),
+  principal: PrincipalSchema.optional(),
+  source: TrustedWorkspaceSourceSchema.optional(),
+  session_ref: SessionRefSchema.optional(),
   agent_id: z.string().min(1).optional(),
   /** Human participant that requested this execution; never inferred from Backend state. */
   requested_by_participant_id: z.string().min(1).optional(),
-  input_message_id: z.string().min(1),
+  input_message_id: z.string().min(1).optional(),
   output_message_id: z.string().optional(),
   backend_id: z.string().min(1),
   backend_kind: AgentBackendKindSchema,
@@ -539,7 +625,7 @@ export type BackendRunRecord = z.infer<typeof BackendRunRecordSchema>;
 const BackendEventRecordBaseSchema = z.object({
   id: z.string().min(1),
   run_id: z.string().min(1),
-  session_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
   backend_session_id: z.string().min(1).optional(),
   event_type: BackendEventTypeSchema,
   sequence: z.number().int().positive(),
@@ -799,7 +885,7 @@ const backendEventVariants = [
 export interface BackendEventRecord {
   id: string;
   run_id: string;
-  session_id: string;
+  session_id?: string;
   backend_session_id?: string;
   event_type: BackendEventType;
   sequence: number;
@@ -832,7 +918,7 @@ export type ClientEventRecord = z.infer<typeof ClientEventRecordSchema>;
 export const WorkspaceChangeRecordSchema = z.object({
   id: z.string().min(1),
   run_id: z.string().min(1),
-  session_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
   resource_ref: ResourceRefSchema,
   change_type: WorkspaceChangeTypeSchema,
   summary: z.string(),
@@ -1583,7 +1669,8 @@ export type SkillUsageRecord = z.infer<typeof SkillUsageRecordSchema>;
 export const LearningResourceUseRecordSchema = z.object({
   id: z.string().min(1),
   run_id: z.string().min(1),
-  session_id: z.string().min(1),
+  /** Native App Session is optional. A Backend Run remains the durable key. */
+  session_id: z.string().min(1).optional(),
   activity_context: ActivityContextRefSchema.optional(),
   resource_kind: LearningResourceKindSchema,
   resource_id: z.string().min(1),
@@ -2086,7 +2173,7 @@ export type EvaluationDiagnosticsReport = z.infer<typeof EvaluationDiagnosticsRe
 export const ToolRunRecordSchema = z.object({
   id: z.string().min(1),
   run_id: z.string().min(1),
-  session_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
   tool_call_id: z.string().optional(),
   provider_tool_name: z.string().min(1),
   action_id: z.string().optional(),
@@ -3054,15 +3141,20 @@ export type GrantRecord = z.infer<typeof GrantRecordSchema>;
 
 export const OperationRecordSchema = z.object({
   id: z.string().min(1),
-  session_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  /** A Run is the execution owner when an operation is not tied to an app Session. */
+  run_id: z.string().min(1).optional(),
   capability_id: z.string().min(1),
   operation: z.string().min(1),
   actor_identity: ActorIdentitySchema,
   /** Core 06 participant identity, separate from the transport ActorIdentity. */
   participant_id: z.string().min(1).optional(),
-  participant_kind: z.enum(["human", "agent", "system"]).optional(),
+  participant_kind: z.enum(["human", "agent", "external_app", "system"]).optional(),
   requested_by_participant_id: z.string().min(1).optional(),
   room_id: z.string().min(1).optional(),
+  principal: PrincipalSchema.optional(),
+  source: TrustedWorkspaceSourceSchema.optional(),
+  session_ref: SessionRefSchema.optional(),
   instruction_source: InstructionSourceSchema,
   instruction_authority: z.string().min(1),
   channel: z.string().min(1),
@@ -3334,7 +3426,7 @@ export const FileBrowserActionDiagnosticsIssueSchema = z.object({
   operation_id: z.string().min(1).optional(),
   tool_run_id: z.string().min(1).optional(),
   run_id: z.string().min(1).optional(),
-  session_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
   resource_ref: ResourceRefSchema.optional(),
   output_summary: z.string().optional(),
   created_at: z.string().datetime()
@@ -3396,9 +3488,12 @@ export const AuditRecordSchema = z.object({
   id: z.string().min(1),
   actor_identity: ActorIdentitySchema,
   participant_id: z.string().min(1).optional(),
-  participant_kind: z.enum(["human", "agent", "system"]).optional(),
+  participant_kind: z.enum(["human", "agent", "external_app", "system"]).optional(),
   requested_by_participant_id: z.string().min(1).optional(),
   room_id: z.string().min(1).optional(),
+  principal: PrincipalSchema.optional(),
+  source: TrustedWorkspaceSourceSchema.optional(),
+  session_ref: SessionRefSchema.optional(),
   operation_id: z.string().min(1),
   capability_id: z.string().min(1),
   instruction_source: InstructionSourceSchema,

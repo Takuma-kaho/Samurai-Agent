@@ -8,8 +8,6 @@ export function createFileDomainServicePorts(services: Pick<RuntimeDomainService
   return {
     "file.patch": {
       resolveFilePath: (path) => services.fileDomainService.resolveFilePath(path),
-      ensureFileSession: () => services.fileDomainService.ensureFileSession(),
-      createFileEnvelope: (session, content) => services.fileDomainService.createFileEnvelope(session, content),
       readFileTextIfExists: (path) => services.fileDomainService.readFileTextIfExists(path),
       ensureFileParent: (path) => services.fileDomainService.ensureFileParent(path),
       writeFileText: (path, content) => services.fileDomainService.writeFileText(path, content),
@@ -22,8 +20,6 @@ export function createFileDomainServicePorts(services: Pick<RuntimeDomainService
     },
     "file.write": {
       resolveFilePath: (path) => services.fileDomainService.resolveFilePath(path),
-      ensureFileSession: () => services.fileDomainService.ensureFileSession(),
-      createFileEnvelope: (session, content) => services.fileDomainService.createFileEnvelope(session, content),
       readFileTextIfExists: (path) => services.fileDomainService.readFileTextIfExists(path),
       ensureFileParent: (path) => services.fileDomainService.ensureFileParent(path),
       writeFileText: (path, content) => services.fileDomainService.writeFileText(path, content),

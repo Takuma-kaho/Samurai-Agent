@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { ActivityInboxItem, ArtifactRecord, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord, WorkspaceChangeRecord } from "@samurai-agent/core-schemas";
+import type { ActivityInboxItem, ArtifactRecord, JsonValue, OperationRecord, ResourceRef, RollbackPoint, WorkspaceChangeRecord } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 
 export interface WorkspacePath { absolutePath: string; relativePath: string }
 interface FileInfo { size: number; modifiedAt: string }
@@ -30,9 +31,7 @@ export interface FileWritePort {
   isManagedCollectionPath(path: string): boolean;
 }
 export interface FileMutationHost {
-  ensureSession(): Promise<SessionRecord>;
-  createEnvelope(session: SessionRecord, content: string): MessageEnvelope;
-  runMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: FileResource; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<FileMutationResult>;
+  runMutation(input: { trustedContext: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary: string; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: FileResource; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<FileMutationResult>;
   createRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   requestError(code: "not_found" | "conflict", message: string): Error;
 }
@@ -41,8 +40,6 @@ export class FileDomainService {
   constructor(private readonly read: FileReadPort, private readonly write: FileWritePort, private readonly host: FileMutationHost) {}
 
   resolveFilePath(path: string) { return this.read.resolve(path); }
-  ensureFileSession() { return this.host.ensureSession(); }
-  createFileEnvelope(session: SessionRecord, content: string) { return this.host.createEnvelope(session, content); }
   runFileMutation(input: Parameters<FileMutationHost["runMutation"]>[0]) { return this.host.runMutation(input); }
   async readFileTextIfExists(path: string) {
     await this.write.assertWritablePath(path);

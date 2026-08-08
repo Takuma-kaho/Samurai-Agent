@@ -16,7 +16,7 @@ import type {
   WorkspaceMemberRecord,
   WorkspaceStore
 } from "@samurai-agent/workspace-store";
-import { type RoomHumanRole, type RoomShareableResourceReference, type WorkspaceRole } from "@samurai-agent/room-permissions";
+import { delegatedParticipant, type NewRoomShareableResourceReference, type RoomHumanRole, type RoomShareableResourceReference, type WorkspaceRole } from "@samurai-agent/room-permissions";
 import { RoomAuthorizationService } from "./room-authorization-service.js";
 import { RoomResourceCatalog } from "./room-resource-catalog.js";
 
@@ -77,12 +77,14 @@ export class RoomAgentDomainService {
   ) {}
 
   async createRoom(context: TrustedDomainContext, input: { name: string }): Promise<RoomRecord> {
-    const principal = this.principal(context);
+    const principal = delegatedParticipant(this.principal(context));
     if (principal.kind === "agent") {
       await this.authorization.assertWorkspace(principal, "create_room");
       await this.authorization.assertWorkspace({ kind: "human", participantId: principal.requestedByParticipantId }, "create_room");
-    } else {
+    } else if (principal.kind === "human") {
       await this.authorization.assertWorkspace(principal, "create_room");
+    } else {
+      throw this.requestError("forbidden", "room_participant_required");
     }
     const now = nowIso();
     const ownerParticipantId = principal.kind === "agent" ? principal.requestedByParticipantId : principal.participantId;
@@ -232,7 +234,7 @@ export class RoomAgentDomainService {
     return rooms.filter((room): room is RoomRecord => Boolean(room));
   }
 
-  async shareResource(context: TrustedDomainContext, input: { sourceRoomId: string; targetRoomId: string; resource: RoomShareableResourceReference }): Promise<RoomResourceShareRecord> {
+  async shareResource(context: TrustedDomainContext, input: { sourceRoomId: string; targetRoomId: string; resource: NewRoomShareableResourceReference }): Promise<RoomResourceShareRecord> {
     const principal = this.humanPrincipal(context);
     await this.authorization.assertShare(principal, input.sourceRoomId, input.targetRoomId);
     const resource = await this.resourceCatalog.resolve(input.resource);
@@ -334,7 +336,7 @@ export class RoomAgentDomainService {
   }
 
   private humanPrincipal(context: TrustedDomainContext) {
-    const principal = this.principal(context);
+    const principal = delegatedParticipant(this.principal(context));
     if (principal.kind !== "human") throw this.requestError("forbidden", "room_human_participant_required");
     return principal;
   }

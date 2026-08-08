@@ -6,14 +6,13 @@ import { sessionValueSchema } from "../../value-objects/system-records.js";
 
 const Input = z.object({
   "output_locale": SupportedLocaleSchema.optional(),
-  "room_id": z.string().trim().min(1).optional(),
   "title": z.string().trim().min(1).max(512).optional(),
   "ui_locale": SupportedLocaleSchema.optional()
 }).strict();
 const Output = sessionValueSchema;
 
 export interface SessionCreatePorts {
-  createSession(context: TrustedDomainContext, input: { title?: string; roomId?: string; uiLocale?: z.infer<typeof SupportedLocaleSchema>; outputLocale?: z.infer<typeof SupportedLocaleSchema> }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
+  createSession(context: TrustedDomainContext, input: { title?: string; uiLocale?: z.infer<typeof SupportedLocaleSchema>; outputLocale?: z.infer<typeof SupportedLocaleSchema> }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const sessionCreate = defineCommand<SessionCreatePorts>()({
@@ -61,7 +60,6 @@ const sessionCreate = defineCommand<SessionCreatePorts>()({
       execute: async function handleSessionCreate(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const value = await ports.createSession(_context, {
           ...(input.title === undefined ? {} : { title: input.title }),
-          ...(input.room_id === undefined ? {} : { roomId: input.room_id }),
           ...(input.ui_locale === undefined ? {} : { uiLocale: input.ui_locale }),
           ...(input.output_locale === undefined ? {} : { outputLocale: input.output_locale })
         });

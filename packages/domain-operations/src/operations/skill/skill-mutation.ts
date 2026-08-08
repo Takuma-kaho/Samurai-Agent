@@ -1,4 +1,5 @@
-import type { ActivityInboxItem, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import type { ActivityInboxItem, JsonValue, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "../../definition/index.js";
 import { z } from "zod";
 import { storedSkillSchema } from "../../value-objects/skill.js";
 
@@ -6,11 +7,9 @@ export type StoredSkill = z.infer<typeof storedSkillSchema>;
 
 interface SkillMutationWorkflowPorts {
   skillMutationContract(id: "skill.patch" | "skill.candidate.create" | "skill.project.save" | "skill.support_file.save"): { id: string; proposed_effects: string[] };
-  ensureSkillMutationSession(): Promise<SessionRecord>;
-  createSkillMutationEnvelope(content: string): MessageEnvelope;
   skillResourceRef(skill: StoredSkill): ResourceRef;
   createSkillRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runSkillMutation<T>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runSkillMutation<T>(input: { trustedContext: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary: string; targetResourceRefs?: ResourceRef[]; boundaryResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
   skillMutationNotFound(message: string): Error;
   skillMutationConflict(message: string): Error;
 }

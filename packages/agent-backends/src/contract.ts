@@ -148,7 +148,8 @@ export interface BackendToolBridge {
 
 export interface BackendRunInput {
   run_id: string;
-  session_id: string;
+  /** Optional app-owned Session identity; Room/Run remain the Core identity. */
+  session_id?: string;
   room_id?: string;
   agent_context?: {
     id: string;
@@ -160,7 +161,7 @@ export interface BackendRunInput {
   /** Host-owned identity for one Room, Session, Agent, and Backend pairing. */
   backend_session_key?: string;
   backend_session_id?: string;
-  input_message_id: string;
+  input_message_id?: string;
   workspace_root?: string;
   working_directory?: string;
   envelope: MessageEnvelope;
@@ -220,7 +221,10 @@ export interface BackendRunInput {
 }
 
 export interface BackendSessionInput {
-  session_id: string;
+  /** Durable Core Run identity. It exists even when no app Session exists. */
+  run_id: string;
+  /** Optional app-owned Session identity; never synthesized for Backend startup. */
+  session_id?: string;
   session_key: string;
   room_id?: string;
   agent_id?: string;

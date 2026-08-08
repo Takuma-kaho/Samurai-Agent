@@ -1,25 +1,25 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
 import { SupportedLocaleSchema } from "@samurai-agent/core-schemas";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { memoryWriteValueSchema } from "../../../value-objects/memory.js";
-import { createMemory, type MemoryCreatePorts } from "../create-memory.js";
+import { createRoomTopicMemory, type MemoryTopicCreatePorts as MemoryTopicCreateOperationPorts } from "../create-memory.js";
 
 const Input = z.object({
   "content": z.string().min(1),
-  "input_locale": SupportedLocaleSchema.optional(), "metadata": z.record(domainJsonValueSchema).default({}),
+  "input_locale": SupportedLocaleSchema.optional(),
   "output_locale": SupportedLocaleSchema.optional(),
   "topic_kind": z.string().trim().min(1).default("preference")
 }).strict();
 const Output = memoryWriteValueSchema;
 
-export interface MemoryTopicCreatePorts extends MemoryCreatePorts {}
+export interface MemoryTopicCreatePorts extends MemoryTopicCreateOperationPorts {}
 
 const memoryTopicCreate = defineCommand<MemoryTopicCreatePorts>()({
   ...{
   "kind": "command",
   "id": "memory.topic.create",
-  "version": "4.0",
+  "version": "5.0",
   "availability": "active",
   "title": "Create topic memory",
   "description": "Create a visible topic memory candidate.",
@@ -59,7 +59,7 @@ const memoryTopicCreate = defineCommand<MemoryTopicCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleMemoryTopicCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await createMemory(ports, { kind: "topic", content: input.content, sessionId: context.sessionId, inputLocale: input.input_locale, outputLocale: input.output_locale, metadata: input.metadata, envelopeId: context.envelopeId, topicKind: input.topic_kind })) };
+        return { ok: true, value: Output.parse(await createRoomTopicMemory(ports, { context, content: input.content, inputLocale: input.input_locale, outputLocale: input.output_locale, topicKind: input.topic_kind })) };
       }
     };
   }

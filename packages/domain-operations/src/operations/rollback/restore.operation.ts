@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { ActivityInboxItem, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import type { ActivityInboxItem, JsonValue, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { rollbackRestoreValueSchema } from "../../value-objects/rollback.js";
 
@@ -13,15 +13,13 @@ export interface RollbackRestorePorts {
   getRollbackPoint(id: string): Promise<{ id: string; reversible: boolean; expires_at: string; before_snapshot: Record<string, JsonValue> } | undefined>;
   rollbackRestoreError(code: "not_found" | "conflict" | "forbidden", message: string): Error;
   resolveRollbackPath(path: string): { absolutePath: string; relativePath: string };
-  ensureRollbackSession(): Promise<SessionRecord>;
-  createRollbackEnvelope(content: string): MessageEnvelope;
   rollbackFileRef(path: string): ResourceRef;
   readRollbackFile(path: string): Promise<string | undefined>;
   removeRollbackFile(path: string): Promise<void>;
   ensureRollbackParent(path: string): Promise<void>;
   writeRollbackFile(path: string, content: string): Promise<void>;
   createRestoreRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runRollbackMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: { rollback_point_id: string; path: string; action: "written" | "deleted" }; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: { rollback_point_id: string; path: string; action: "written" | "deleted" }; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runRollbackMutation(input: { trustedContext: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary: string; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: { rollback_point_id: string; path: string; action: "written" | "deleted" }; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: { rollback_point_id: string; path: string; action: "written" | "deleted" }; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
   currentTimeMillis(): number;
 }
 
@@ -75,10 +73,9 @@ const rollbackRestore = defineCommand<RollbackRestorePorts>()({
         if (!path || (typeof content !== "string" && content !== null)) throw ports.rollbackRestoreError("conflict", "rollback_restore_unsupported_snapshot");
         const workspacePath = ports.resolveRollbackPath(path);
         if (workspacePath.relativePath === ".") throw ports.rollbackRestoreError("forbidden", "rollback_restore_requires_file_path");
-        const session = await ports.ensureRollbackSession();
-        const envelope = ports.createRollbackEnvelope(`rollback.restore: ${point.id}`);
         const ref = ports.rollbackFileRef(workspacePath.relativePath);
-        const value = await ports.runRollbackMutation({ session, envelope, operationName: "rollback.restore", proposedEffects: [`Restore rollback point ${point.id} for ${workspacePath.relativePath}.`], targetResourceRefs: [ref], execute: async (operation) => {
+        const value = await ports.runRollbackMutation({ trustedContext: context, operationName: "rollback.restore", inputSummary: `rollback.restore: ${point.id}`,
+          proposedEffects: [`Restore rollback point ${point.id} for ${workspacePath.relativePath}.`], targetResourceRefs: [ref], execute: async (operation) => {
           const current = await ports.readRollbackFile(workspacePath.absolutePath);
           if (content === null) await ports.removeRollbackFile(workspacePath.absolutePath);
           else { await ports.ensureRollbackParent(workspacePath.absolutePath); await ports.writeRollbackFile(workspacePath.absolutePath, content); }

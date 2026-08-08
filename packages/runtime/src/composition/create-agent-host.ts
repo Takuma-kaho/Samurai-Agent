@@ -27,6 +27,8 @@ export interface AgentHostCompositionOptions {
   cleanup: TurnCleanupPort;
   diagnostics: HostDiagnosticsPort;
   prepareResumeInput?: HostPorts["prepareResumeInput"];
+  assertRunAccess?: HostPorts["assertRunAccess"];
+  prepareWorkspaceExecution?: HostPorts["prepareWorkspaceExecution"];
   maxConcurrency?: number;
   postTurn?: PostTurnOperations;
   resolveDefaultBackendId?: () => Promise<string> | string;
@@ -46,6 +48,8 @@ export function createAgentHost(options: AgentHostCompositionOptions): AgentHost
     cleanup: options.cleanup,
     diagnostics: options.diagnostics,
     prepareResumeInput: options.prepareResumeInput,
+    assertRunAccess: options.assertRunAccess,
+    prepareWorkspaceExecution: options.prepareWorkspaceExecution,
     maxConcurrency: options.maxConcurrency,
     resolveDefaultBackendId: options.resolveDefaultBackendId,
     postTurn: options.postTurn

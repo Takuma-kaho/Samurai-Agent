@@ -83,14 +83,19 @@ register({ scope: "room_content", action: "edit", target: { kind: "collection_sc
 register({ scope: "room_content", action: "edit", target: { kind: "collection_schema", idField: "id", onlyIfExisting: true } }, "collection.schema.save");
 register({ scope: "room_content", action: "read", target: { kind: "collection_schema", idField: "collection_id" } }, "collection.records.list", "collection.schema.get", "collection.view.present");
 register({ scope: "room_content", action: "execute", target: { kind: "collection_schema", idField: "collection_id" } }, "collection.action.run");
-register({ scope: "room_content", action: "edit", target: { kind: "file", idField: "path" } }, "file.patch", "file.write");
+// A new file has no Resource boundary yet, so its creation is decided by the
+// active Room's edit permission. Existing files, including unbounded legacy
+// files, must still be checked through their Resource boundary.
+register({ scope: "room_content", action: "edit", target: { kind: "file", idField: "path", onlyIfExisting: true } }, "file.patch", "file.write");
 register({ scope: "room_content", action: "read", target: { kind: "file", idField: "path" } }, "file.inspect", "file.read");
 register({ scope: "room_content", action: "execute", target: { kind: "generated_surface", idField: "surface_id" } }, "generated_surface.action.run", "generated_surface.export");
 register({ scope: "room_content", action: "edit", target: { kind: "generated_surface", idField: "surface_id" } }, "generated_surface.revise", "generated_surface.interaction.record");
 register({ scope: "room_content", action: "read", target: { kind: "generated_surface", idField: "surface_id" } }, "generated_surface.state");
 register({ scope: "room_content", action: "edit", target: { kind: "memory", idField: "memory_id" } }, "memory.archive");
 register({ scope: "room_content", action: "edit", target: { kindField: "resource_kind", idField: "resource_id", allowedKinds: ["memory", "wiki", "skill"] } }, "learning.resource.usage.record", "learning.resource.version.restore", "learning.resource.version.update");
-register({ scope: "room_content", action: "edit", target: { kind: "skill", idField: "skill_id" } }, "skill.candidate.create", "skill.lifecycle.apply", "skill.patch", "skill.project.save", "skill.support_file.save", "skill.usage.record");
+register({ scope: "room_content", action: "edit" }, "skill.candidate.create");
+register({ scope: "room_content", action: "edit", target: { kind: "skill", idField: "candidate_id" } }, "skill.project.save");
+register({ scope: "room_content", action: "edit", target: { kind: "skill", idField: "skill_id" } }, "skill.lifecycle.apply", "skill.patch", "skill.support_file.save", "skill.usage.record");
 register({ scope: "room_content", action: "read", target: { kind: "skill", idField: "skill_id" } }, "skill.view");
 register({ scope: "room_content", action: "edit", target: { kind: "wiki", idField: "wiki_id" } }, "wiki.accept", "wiki.archive", "wiki.patch", "wiki.reject");
 register({ scope: "room_content", action: "edit" }, "rollback.restore", "work_item.create");

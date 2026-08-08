@@ -3,7 +3,6 @@ import { z } from "zod";
 import { SupportedLocaleSchema } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { memoryWriteValueSchema } from "../../../value-objects/memory.js";
-import { createMemory, type MemoryCreatePorts } from "../create-memory.js";
 
 const Input = z.object({
   "content": z.string().min(1),
@@ -13,7 +12,9 @@ const Input = z.object({
 }).strict();
 const Output = memoryWriteValueSchema;
 
-export interface MemorySessionCreatePorts extends MemoryCreatePorts {}
+export interface MemorySessionCreatePorts {
+  memorySessionScopeWriteDisabledError(): Error;
+}
 
 const memorySessionCreate = defineCommand<MemorySessionCreatePorts>()({
   ...{
@@ -56,7 +57,9 @@ const memorySessionCreate = defineCommand<MemorySessionCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleMemorySessionCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await createMemory(ports, { kind: "session", content: input.content, sessionId: context.sessionId, title: input.title, uiLocale: input.ui_locale, inputLocale: input.input_locale, outputLocale: input.output_locale, metadata: input.metadata, envelopeId: context.envelopeId })) };
+        void context;
+        void input;
+        throw ports.memorySessionScopeWriteDisabledError();
       }
     };
   }

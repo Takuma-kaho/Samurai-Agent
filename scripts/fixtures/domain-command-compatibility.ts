@@ -5,6 +5,7 @@ import path from "node:path";
 import { AgentBackendRegistry, type AgentBackend } from "../../packages/agent-backends/src/index";
 import { loadPluginManifests } from "../../packages/action-catalog/src/index";
 import { nowIso } from "../../packages/core-schemas/src/index";
+import { localOwnerParticipantId } from "../../packages/room-permissions/src/index";
 import { AgentRuntime, RuntimeRequestError } from "../../packages/runtime/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 
@@ -50,33 +51,35 @@ try {
   assert.equal(collisionCatalog.actions.filter(({ id }) => id === "artifact.create").length, 1);
   await rm(collisionRoot, { recursive: true, force: true });
   const now = nowIso();
-  await store.createSession({ id: "effective-session", session_key: "web:effective", title: "Effective", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now });
-  const unavailable = await unavailableRuntime.listEffectiveDomainOperations("effective-session", "runtime_api");
-  const available = await readyRuntime.listEffectiveDomainOperations("effective-session", "runtime_api");
-  const adapterAvailable = await adapterRuntime.listEffectiveDomainOperations("effective-session", "runtime_api");
+  await store.createSession({ id: "effective-session", session_key: "web:effective", room_id: "room_default", title: "Effective", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now });
+  const principal = { kind: "human" as const, participantId: localOwnerParticipantId };
+  const unavailable = await unavailableRuntime.listEffectiveDomainOperations("effective-session", "runtime_api", principal);
+  const available = await readyRuntime.listEffectiveDomainOperations("effective-session", "runtime_api", principal);
+  const adapterAvailable = await adapterRuntime.listEffectiveDomainOperations("effective-session", "runtime_api", principal);
   assert.equal(unavailable.commands.some((entry) => entry.id === "chat.turn.run"), false);
   assert.equal(available.commands.some((entry) => entry.id === "chat.turn.run"), true);
   for (const operationId of ["artifact.export_pdf", "browser.interact", "browser.navigate", "browser.screenshot"]) {
     assert.equal(unavailable.commands.some((entry) => entry.id === operationId), false, `${operationId} ignored its adapter condition`);
     assert.equal(adapterAvailable.commands.some((entry) => entry.id === operationId), true, `${operationId} was hidden despite its adapter`);
   }
-  await assert.rejects(unavailableRuntime.listEffectiveDomainOperations("forged-session", "runtime_api"));
+  await assert.rejects(unavailableRuntime.listEffectiveDomainOperations("forged-session", "runtime_api", principal));
 
   const schema = {
     id: "compatibility", version: "1", labels: { en: "Compatibility" }, descriptions: { en: "Compatibility" },
     fields: [{ id: "name", type: "string" }], refs: [], embeds: [], derived_fields: [], triggers: [], actions: [], views: [],
     permissions: { create: true, update: true, delete: true }
   };
+  const compatibilityContext = { sessionId: "effective-session", participant: principal };
   const results = [];
-  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "schemaDocs" }, "runtime_api"));
-  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "putSchema", schema }, "runtime_api", "compat-put-schema"));
-  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "getSchema", collection_id: schema.id }, "runtime_api"));
-  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "putItems", collection_id: schema.id, mode: "create", items: [{ id: "one", name: "One" }] }, "runtime_api", "compat-put-items"));
-  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "getItems", collection_id: schema.id }, "runtime_api"));
-  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "patchSchema", collection_id: schema.id, patches: [] }, "runtime_api", "compat-patch-schema"));
+  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "schemaDocs" }, "runtime_api", undefined, compatibilityContext));
+  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "putSchema", schema }, "runtime_api", "compat-put-schema", compatibilityContext));
+  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "getSchema", collection_id: schema.id }, "runtime_api", undefined, compatibilityContext));
+  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "putItems", collection_id: schema.id, mode: "create", items: [{ id: "one", name: "One" }] }, "runtime_api", "compat-put-items", compatibilityContext));
+  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "getItems", collection_id: schema.id }, "runtime_api", undefined, compatibilityContext));
+  results.push(await readyRuntime.runCollectionManageCompatibility({ action: "patchSchema", collection_id: schema.id, patches: [] }, "runtime_api", "compat-patch-schema", compatibilityContext));
   assert.deepEqual(results.map((result) => (result as Record<string, unknown>).action), ["schemaDocs", "putSchema", "getSchema", "putItems", "getItems", "patchSchema"]);
   backendReady = false;
-  const disabledAfterInventory = await readyRuntime.listEffectiveDomainOperations("effective-session", "runtime_api");
+  const disabledAfterInventory = await readyRuntime.listEffectiveDomainOperations("effective-session", "runtime_api", principal);
   assert.equal(disabledAfterInventory.commands.some((entry) => entry.id === "chat.turn.run"), false);
   await assert.rejects(readyRuntime.runDomainCommand({
     command_id: "chat.turn.run",

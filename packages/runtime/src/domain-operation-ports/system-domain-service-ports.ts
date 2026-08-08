@@ -47,8 +47,6 @@ export function createSystemDomainServicePorts(services: Pick<RuntimeDomainServi
       getRollbackPoint: (id) => services.systemDomainService.getRollbackPoint(id),
       rollbackRestoreError: (code, message) => services.systemDomainService.rollbackError(code, message),
       resolveRollbackPath: (path) => services.systemDomainService.resolveRollbackPath(path),
-      ensureRollbackSession: () => services.systemDomainService.ensureRollbackSession(),
-      createRollbackEnvelope: (content) => services.systemDomainService.createRollbackEnvelope(content),
       rollbackFileRef: (path) => services.systemDomainService.rollbackFileRef(path),
       readRollbackFile: (path) => services.systemDomainService.readRollbackFile(path),
       removeRollbackFile: (path) => services.systemDomainService.removeRollbackFile(path),

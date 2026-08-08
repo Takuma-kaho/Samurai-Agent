@@ -70,6 +70,7 @@ export class LearningResourceUseDomainService {
       && sameScope(record.usage_scope, resource.usage_scope)
     );
     if (!bodyLoaded) throw this.dependencies.requestError("conflict", "learning_resource_use_body_not_loaded");
+    if (!run.session_id) throw this.dependencies.requestError("conflict", "learning_resource_use_session_compatibility_required");
     const useRecord = await this.dependencies.recordUse({
       id: createId("learning_use"),
       run_id: run.id,

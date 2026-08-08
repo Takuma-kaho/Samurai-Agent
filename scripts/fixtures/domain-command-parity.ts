@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DomainCommandInputSource } from "../../packages/action-catalog/src/index";
 import { AgentBackendRegistry, MockBackend } from "../../packages/agent-backends/src/index";
-import { localOwnerParticipantId } from "../../packages/room-permissions/src/index";
+import { collectionRecordResourceId, localOwnerParticipantId } from "../../packages/room-permissions/src/index";
 import { AgentRuntime } from "../../packages/runtime/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 
@@ -50,21 +50,35 @@ try {
   });
 
   await store.saveCollectionSchema({ id: "parity", version: "1", labels: { en: "Parity" }, descriptions: { en: "Parity" }, fields: [{ id: "name", type: "string" }, { id: "score", type: "number" }, { id: "done", type: "boolean" }], refs: [], embeds: [], derived_fields: [], triggers: [], actions: [], views: [], permissions: { update: true } });
+  await store.ensureResourceAccessBoundary({
+    resourceKind: "collection_schema",
+    resourceId: "parity",
+    sourceRoomId: settings.default_room_id,
+    ownerParticipantId: localOwnerParticipantId,
+    actorId: localOwnerParticipantId
+  });
   const cases = Array.from({ length: 10 }, (_, index) => ({ name: `updated-${index}`, score: index + 1, done: index % 2 === 0 }));
   for (let caseIndex = 0; caseIndex < cases.length; caseIndex += 1) {
     const outputs = [];
     for (const source of sources) {
       const recordId = `record-${caseIndex}-${source}`;
       await store.saveCollectionRecord({ id: recordId, collection_id: "parity", version: 1, data: { name: "before", score: 0, done: false }, resource_refs: [], created_at: at, updated_at: at });
+      await store.ensureResourceAccessBoundary({
+        resourceKind: "collection_record",
+        resourceId: collectionRecordResourceId("parity", recordId),
+        sourceRoomId: settings.default_room_id,
+        ownerParticipantId: localOwnerParticipantId,
+        actorId: localOwnerParticipantId
+      });
       // Each non-local ingress receives its Room context from the trusted
       // server-side execution path. This mirrors provider Run, scheduled
       // work, and generated Surface dispatch instead of relying on a
       // Workspace-wide fallback.
-      const trusted = source === "provider_tool_call"
-        ? { runId: providerTurn.backendRun.id }
-        : source === "scheduled_context" || source === "generated_surface"
-          ? { sessionId: providerSession.id }
-          : undefined;
+      const trusted = {
+        roomId: settings.default_room_id,
+        sessionId: providerSession.id,
+        ...(source === "provider_tool_call" ? { runId: providerTurn.backendRun.id } : {})
+      };
       outputs.push(normalize(await runtime.runDomainCommand(
         { command_id: "collection.patch.apply", input_source: source, idempotency_key: `parity-${caseIndex}-${source}`, payload: { collection_id: "parity", record_id: recordId, expected_version: 1, changes: cases[caseIndex] } },
         trusted

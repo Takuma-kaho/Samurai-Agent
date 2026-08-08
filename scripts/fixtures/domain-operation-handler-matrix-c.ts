@@ -651,20 +651,28 @@ async function runMemoryArchiveCase(): Promise<void> {
   }));
 }
 
-function memoryCreatePorts(fixture: FixtureRuntime, kind: "session" | "topic"): object {
-  const createdMemory = { ...memory, state: kind === "session" ? "session" : "topic" };
+function memoryTopicCreatePorts(fixture: FixtureRuntime): object {
   return {
-    getMemorySession: async (id: unknown) => { fixture.record("getMemorySession", [id]); return session; },
-    createMemorySession: async (input: unknown) => { fixture.record("createMemorySession", [input]); return session; },
-    ensureMemorySession: async () => { fixture.record("ensureMemorySession", []); return session; },
     memoryCreateError: (message: unknown) => { fixture.record("memoryCreateError", [message]); return new Error(String(message)); },
-    createMemoryEnvelope: (input: unknown) => { fixture.record("createMemoryEnvelope", [input]); return envelope; },
-    writeSessionMemory: async (message: unknown, content: unknown) => { fixture.record("writeSessionMemory", [message, content]); return createdMemory; },
-    writeTopicMemory: async (message: unknown, topic: unknown, content: unknown) => { fixture.record("writeTopicMemory", [message, topic, content]); return createdMemory; },
-    memoryResourceRef: (value: unknown) => { fixture.record("memoryResourceRef", [value]); return { kind: "memory", id: "memory_fixture", uri: "memory/memory_fixture.md", label: "fixture-memory" }; },
+    writeRoomTopicMemory: async (input: { memoryId: string }) => {
+      fixture.tracker.mark(input.memoryId, "$generated:memory-id");
+      fixture.record("writeRoomTopicMemory", [input]);
+      return { ...memory, id: input.memoryId, state: "topic" };
+    },
+    memoryResourceRef: (value: unknown) => {
+      fixture.record("memoryResourceRef", [value]);
+      const candidate = value as { id: string; topic: string };
+      const uri = `memory/${candidate.id}.md`;
+      fixture.tracker.mark(uri, "memory/$generated:memory-id.md");
+      return { kind: "memory", id: candidate.id, uri, label: candidate.topic };
+    },
     createMemoryRollback: async (value: unknown, refs: unknown, after: unknown) => { fixture.record("createMemoryRollback", [value, refs, after]); return rollbackPoint; },
     emitMemoryCandidate: async (value: unknown) => { fixture.record("emitMemoryCandidate", [value]); },
-    runMemoryMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
+    runMemoryMutation: async (input: { boundaryResourceRefs?: Array<{ id: string; uri?: string }>; execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
+      for (const ref of input.boundaryResourceRefs ?? []) {
+        fixture.tracker.mark(ref.id, "$generated:memory-id");
+        if (ref.uri) fixture.tracker.mark(ref.uri, "memory/$generated:memory-id.md");
+      }
       fixture.record("runMemoryMutation", [input]);
       const executed = await input.execute(operation);
       return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [] };
@@ -673,9 +681,28 @@ function memoryCreatePorts(fixture: FixtureRuntime, kind: "session" | "topic"): 
 }
 
 async function runMemoryCreateCases(): Promise<void> {
-  await runCase("memory.session.create", caseFor("memory.session.create", "existing-session-all-fields"), (fixture) => memoryCreatePorts(fixture, "session"));
-  await runCase("memory.session.create", caseFor("memory.session.create", "create-session-defaults"), (fixture) => memoryCreatePorts(fixture, "session"));
-  await runCase("memory.topic.create", caseFor("memory.topic.create", "explicit-kind-all-fields"), (fixture) => memoryCreatePorts(fixture, "topic"));
+  const sessionCase = caseFor("memory.session.create", "legacy-session-rejected");
+  const sessionDefinition = handlerDefinition("memory.session.create");
+  const parsed = sessionDefinition.input.safeParse(sessionCase.input);
+  assert.equal(parsed.success, true, "handler_matrix_c_input_invalid:memory.session.create:legacy-session-rejected");
+  const calls: RecordedCall[] = [];
+  const tracker = new DynamicValueTracker();
+  const fixture: FixtureRuntime = { tracker, record: (method, args) => calls.push({ method, args: tracker.normalize(args) }) };
+  const handler = sessionDefinition.createHandler(strictPorts("memory.session.create", {
+    memorySessionScopeWriteDisabledError: () => {
+      fixture.record("memorySessionScopeWriteDisabledError", []);
+      return new Error("session_scope_write_disabled");
+    }
+  }));
+  await assert.rejects(
+    handler.execute(context, parsed.data as never),
+    (error: unknown) => error instanceof Error && error.message === "session_scope_write_disabled",
+    "memory.session.create must reject new Session-scope writes"
+  );
+  assert.deepEqual(calls, sessionCase.calls, "handler_matrix_c_port_contract_drift:memory.session.create:legacy-session-rejected");
+  executedCases += 1;
+  executedCalls += calls.length;
+  await runCase("memory.topic.create", caseFor("memory.topic.create", "explicit-kind-all-fields"), (fixture) => memoryTopicCreatePorts(fixture));
 }
 
 async function runMessagePresentationCases(): Promise<void> {
@@ -833,6 +860,18 @@ function skillMutationResult<T>(resource: T, rollback = rollbackPoint) {
   return { resource, operation, rollbackPoint: rollback, activity: [] };
 }
 
+function runSkillMutationFixture(fixture: FixtureRuntime) {
+  return async (input: { boundaryResourceRefs?: Array<{ id: string; uri?: string }>; execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
+    for (const ref of input.boundaryResourceRefs ?? []) {
+      fixture.tracker.mark(ref.id, "$generated:skill-id");
+      if (ref.uri) fixture.tracker.mark(ref.uri, "skills/$generated:skill-id");
+    }
+    fixture.record("runSkillMutation", [input]);
+    const executed = await input.execute(operation);
+    return skillMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint);
+  };
+}
+
 function candidateMarkdown(): string {
   return [
     "---",
@@ -859,13 +898,7 @@ function candidateMarkdown(): string {
 async function runSkillMutationCases(): Promise<void> {
   await runCase("skill.candidate.create", caseFor("skill.candidate.create", "all-public-fields"), (fixture) => ({
     skillMutationContract: (id: unknown) => { fixture.record("skillMutationContract", [id]); return skillMutationContract(String(id)); },
-    ensureSkillMutationSession: async () => { fixture.record("ensureSkillMutationSession", []); return session; },
-    createSkillMutationEnvelope: (content: unknown) => { fixture.record("createSkillMutationEnvelope", [content]); return envelope; },
-    runSkillMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
-      fixture.record("runSkillMutation", [input]);
-      const executed = await input.execute(operation);
-      return skillMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint);
-    },
+    runSkillMutation: runSkillMutationFixture(fixture),
     saveSkillMarkdown: async (input: unknown) => {
       markGeneratedSkillSave(fixture.tracker, input as Record<string, unknown>);
       fixture.record("saveSkillMarkdown", [input]);
@@ -882,14 +915,8 @@ async function runSkillMutationCases(): Promise<void> {
     getSkillForMutation: async (id: unknown) => { fixture.record("getSkillForMutation", [id]); return storedSkill; },
     readSkillMarkdown: async (id: unknown) => { fixture.record("readSkillMarkdown", [id]); return "# Old skill body"; },
     skillMutationContract: (id: unknown) => { fixture.record("skillMutationContract", [id]); return skillMutationContract(String(id)); },
-    ensureSkillMutationSession: async () => { fixture.record("ensureSkillMutationSession", []); return session; },
-    createSkillMutationEnvelope: (content: unknown) => { fixture.record("createSkillMutationEnvelope", [content]); return envelope; },
     skillResourceRef: (value: unknown) => { fixture.record("skillResourceRef", [value]); return skillRef(value as typeof storedSkill); },
-    runSkillMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
-      fixture.record("runSkillMutation", [input]);
-      const executed = await input.execute(operation);
-      return skillMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint);
-    },
+    runSkillMutation: runSkillMutationFixture(fixture),
     patchSkillRecord: async (input: unknown) => {
       fixture.record("patchSkillRecord", [input]);
       const patch = input as { title?: string; description?: string; tags?: string[] };
@@ -904,13 +931,7 @@ async function runSkillMutationCases(): Promise<void> {
   await runCase("skill.project.save", caseFor("skill.project.save", "candidate"), (fixture) => ({
     readSkillMarkdown: async (id: unknown) => { fixture.record("readSkillMarkdown", [id]); return candidateMarkdown(); },
     skillMutationContract: (id: unknown) => { fixture.record("skillMutationContract", [id]); return skillMutationContract(String(id)); },
-    ensureSkillMutationSession: async () => { fixture.record("ensureSkillMutationSession", []); return session; },
-    createSkillMutationEnvelope: (content: unknown) => { fixture.record("createSkillMutationEnvelope", [content]); return envelope; },
-    runSkillMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
-      fixture.record("runSkillMutation", [input]);
-      const executed = await input.execute(operation);
-      return skillMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint);
-    },
+    runSkillMutation: runSkillMutationFixture(fixture),
     saveSkillMarkdown: async (input: unknown) => {
       markGeneratedSkillSave(fixture.tracker, input as Record<string, unknown>);
       fixture.record("saveSkillMarkdown", [input]);
@@ -927,14 +948,8 @@ async function runSkillMutationCases(): Promise<void> {
     getSkillForMutation: async (id: unknown) => { fixture.record("getSkillForMutation", [id]); return storedSkill; },
     listSkillSupportFiles: async (id: unknown) => { fixture.record("listSkillSupportFiles", [id]); return [{ path: "references/guide.md", file_path: "skills/skill_fixture/references/guide.md", content: "Old support content" }]; },
     skillMutationContract: (id: unknown) => { fixture.record("skillMutationContract", [id]); return skillMutationContract(String(id)); },
-    ensureSkillMutationSession: async () => { fixture.record("ensureSkillMutationSession", []); return session; },
-    createSkillMutationEnvelope: (content: unknown) => { fixture.record("createSkillMutationEnvelope", [content]); return envelope; },
     skillResourceRef: (value: unknown) => { fixture.record("skillResourceRef", [value]); return skillRef(value as typeof storedSkill); },
-    runSkillMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
-      fixture.record("runSkillMutation", [input]);
-      const executed = await input.execute(operation);
-      return skillMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint);
-    },
+    runSkillMutation: runSkillMutationFixture(fixture),
     writeSkillSupportFile: async (input: unknown) => {
       fixture.record("writeSkillSupportFile", [input]);
       const value = input as { path: string; content: string };
@@ -1007,6 +1022,20 @@ function wikiMutationResult<T>(resource: T, rollback = rollbackPoint) {
   return { resource, operation, rollbackPoint: rollback, activity: [] };
 }
 
+function runWikiMutationFixture(fixture: FixtureRuntime, includeRollback = true) {
+  return async (input: { boundaryResourceRefs?: Array<{ id: string; uri?: string }>; execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
+    for (const ref of input.boundaryResourceRefs ?? []) {
+      fixture.tracker.mark(ref.id, "$generated:wiki-id");
+      if (ref.uri) fixture.tracker.mark(ref.uri, "wiki/$generated:wiki-id");
+    }
+    fixture.record("runWikiMutation", [input]);
+    const executed = await input.execute(operation);
+    return includeRollback
+      ? wikiMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint)
+      : { resource: executed.resource, operation, activity: [] };
+  };
+}
+
 async function runWikiCases(): Promise<void> {
   const stateCases = [
     ["wiki.accept", "active", "active"],
@@ -1016,13 +1045,7 @@ async function runWikiCases(): Promise<void> {
   for (const [id, caseId, state] of stateCases) {
     await runCase(id, caseFor(id, caseId), (fixture) => ({
       getWikiPage: async (wikiId: unknown) => { fixture.record("getWikiPage", [wikiId]); return storedWiki; },
-      ensureWikiSession: async () => { fixture.record("ensureWikiSession", []); return session; },
-      createWikiEnvelope: (content: unknown) => { fixture.record("createWikiEnvelope", [content]); return envelope; },
-      runWikiMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
-        fixture.record("runWikiMutation", [input]);
-        const executed = await input.execute(operation);
-        return wikiMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint);
-      },
+      runWikiMutation: runWikiMutationFixture(fixture),
       setWikiPageState: async (wikiId: unknown, nextState: unknown) => {
         fixture.record("setWikiPageState", [wikiId, nextState]);
         return { ...storedWiki, state };
@@ -1035,13 +1058,7 @@ async function runWikiCases(): Promise<void> {
   await runCase("wiki.patch", caseFor("wiki.patch", "all-public-fields"), (fixture) => ({
     getWikiPage: async (wikiId: unknown) => { fixture.record("getWikiPage", [wikiId]); return storedWiki; },
     readWikiContent: async (wikiId: unknown) => { fixture.record("readWikiContent", [wikiId]); return "Old wiki content"; },
-    ensureWikiSession: async () => { fixture.record("ensureWikiSession", []); return session; },
-    createWikiEnvelope: (content: unknown) => { fixture.record("createWikiEnvelope", [content]); return envelope; },
-    runWikiMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
-      fixture.record("runWikiMutation", [input]);
-      const executed = await input.execute(operation);
-      return wikiMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint);
-    },
+    runWikiMutation: runWikiMutationFixture(fixture),
     updateWikiPage: async (input: unknown) => {
       fixture.record("updateWikiPage", [input]);
       const patch = input as { title?: string; tags?: string[]; content_locale?: string; source_refs?: unknown[]; provenance?: typeof provenance };
@@ -1052,13 +1069,8 @@ async function runWikiCases(): Promise<void> {
   }));
 
   await runCase("wiki.proposal.create", caseFor("wiki.proposal.create", "all-public-fields"), (fixture) => ({
-    ensureWikiSession: async () => { fixture.record("ensureWikiSession", []); return session; },
-    createWikiEnvelope: (content: unknown) => { fixture.record("createWikiEnvelope", [content]); return envelope; },
-    runWikiMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
-      fixture.record("runWikiMutation", [input]);
-      const executed = await input.execute(operation);
-      return wikiMutationResult(executed.resource, executed.rollbackPoint as typeof rollbackPoint);
-    },
+    defaultWikiOutputLocale: async () => { fixture.record("defaultWikiOutputLocale", []); return "ja"; },
+    runWikiMutation: runWikiMutationFixture(fixture),
     saveWikiPage: async (record: unknown, content: unknown) => {
       markGeneratedWiki(fixture.tracker, record as Record<string, unknown>);
       fixture.record("saveWikiPage", [record, content]);
@@ -1069,13 +1081,7 @@ async function runWikiCases(): Promise<void> {
   }));
 
   await runCase("wiki.reindex", caseFor("wiki.reindex", "empty-input"), (fixture) => ({
-    ensureWikiSession: async () => { fixture.record("ensureWikiSession", []); return session; },
-    createWikiEnvelope: (content: unknown) => { fixture.record("createWikiEnvelope", [content]); return envelope; },
-    runWikiMutation: async (input: { execute(operation: unknown): Promise<{ resource: unknown; rollbackPoint?: unknown }> }) => {
-      fixture.record("runWikiMutation", [input]);
-      const executed = await input.execute(operation);
-      return { resource: executed.resource, operation, activity: [] };
-    },
+    runWikiMutation: runWikiMutationFixture(fixture, false),
     reindexWikiPages: async () => { fixture.record("reindexWikiPages", []); return { active: 2, total: 3, files: 3, indexed: 2, created: 1, updated: 1, removed: 0, skipped: 1, errors: [] }; }
   }));
 }
@@ -1230,10 +1236,7 @@ const branchAstEvidence: Record<string, readonly BranchAstEvidence[]> = {
   ],
   "evaluation.run": [],
   "memory.archive": [{ branch: "archive:session-linked-memory", file: "memory/archive.operation.ts", nodeText: "sessionMemory.some" }],
-  "memory.session.create": [
-    { branch: "session:existing", file: "memory/create-memory.ts", nodeText: "input.sessionId" },
-    { branch: "session:create", file: "memory/create-memory.ts", nodeText: "input.kind === \"session\"" }
-  ],
+  "memory.session.create": [{ branch: "session_scope:disabled", file: "memory/session/create.operation.ts", nodeText: "throw ports.memorySessionScopeWriteDisabledError()" }],
   "memory.topic.create": [{ branch: "topic:explicit-kind", file: "memory/topic/create.operation.ts", nodeText: "topicKind: input.topic_kind" }],
   "message.presentation.update": [
     { branch: "view_id:explicit", file: "message/presentation/update.operation.ts", nodeText: "typeof input.view_state.view_id === \"string\"" },

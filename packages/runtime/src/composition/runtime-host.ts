@@ -269,6 +269,42 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
     committedEventPublisher,
     admissionObserver: { observe: async (turn) => deps.core.emit("backend.run.created", turn.run) },
     prepareResumeInput: deps.preparation.prepareResumeInput,
+    assertRunAccess: deps.preparation.assertRunAccess,
+    prepareWorkspaceExecution: async ({ run, binding, request, backendInput }) => {
+      // Recheck immediately before the Backend cassette sees a Room-first
+      // request. A SessionRef never replaces this current Room decision.
+      await deps.preparation.assertRunAccess(run);
+      const userInput = request.input_summary?.trim() || run.input_summary || "Workspace execution";
+      const contextIntent = classifyBackendContextIntent(userInput);
+      const expectedOutputs = expectedBackendOutputs(userInput);
+      const activeToolBridge = createBackendToolBridge({
+        backendKind: binding.kind,
+        runId: run.id,
+        expectedOutputs,
+        contextIntent,
+        gatewayBoundaryPresent: false,
+        sessionless: true
+      });
+      if (activeToolBridge?.token) await deps.execution.registerToolBridgeToken(run.id, activeToolBridge.token);
+      const metadata: Record<string, JsonValue> = {
+        ...backendInput.metadata,
+        context_intent: contextIntent,
+        ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
+        ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {})
+      };
+      // Membership can change while a bridge token is being registered.
+      await deps.preparation.assertRunAccess(run);
+      return {
+        backendInput: {
+          ...backendInput,
+          envelope: { ...backendInput.envelope, metadata: { ...backendInput.envelope.metadata, ...metadata } },
+          metadata,
+          context_intent: contextIntent,
+          expected_outputs: expectedOutputs,
+          ...(activeToolBridge ? { tool_bridge: activeToolBridge } : {})
+        }
+      };
+    },
     toolExecution: {
       execute: async ({ run, backendInput, event, gatewayBoundaryPolicy, recordEvent }) => {
         if (event.event_type !== "tool_call_started") return;

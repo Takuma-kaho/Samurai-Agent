@@ -5,8 +5,6 @@ import wikiProposalCreate from "./proposal/create.operation.js";
 
 const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test" };
 const now = "2026-01-01T00:00:00.000Z";
-const session = { id: "session_1", output_locale: "ja" } as never;
-const envelope = { id: "envelope_1" } as never;
 const operation = { id: "operation_1" } as never;
 const page = { id: "wiki_1", slug: "hello-world", title: "Hello World", state: "proposed" as const, content_locale: "ja" as const, tags: [], source_refs: [], provenance: { kind: "user_authored" as const, summary: "test", verified: true }, created_at: now, updated_at: now, file_path: "wiki/hello-world.md" };
 
@@ -14,7 +12,7 @@ describe("Wiki write operation handlers", () => {
   it("owns proposal frontmatter creation, persistence, and rollback", async () => {
     const saveWikiPage = vi.fn(async (record, content: string) => ({ ...record, file_path: `wiki/${record.slug}.md`, content }));
     const handler = wikiProposalCreate.createHandler({
-      ensureWikiSession: async () => session, createWikiEnvelope: () => envelope, saveWikiPage,
+      defaultWikiOutputLocale: async () => "ja", saveWikiPage,
       createWikiRollback: async () => ({ id: "rollback_1" }) as never,
       runWikiMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [] }; }
     });
@@ -31,7 +29,6 @@ describe("Wiki write operation handlers", () => {
     const createWikiRollback = vi.fn(async () => ({ id: "rollback_1" }) as never);
     const handler = wikiPatch.createHandler({
       getWikiPage: async () => page, readWikiContent: async () => "Old body", updateWikiPage,
-      ensureWikiSession: async () => session, createWikiEnvelope: () => envelope,
       wikiPageNotFoundError: () => new Error("wiki_not_found"), createWikiRollback,
       runWikiMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [] }; }
     });
@@ -47,7 +44,6 @@ describe("Wiki write operation handlers", () => {
     const runWikiMutation = vi.fn();
     const handler = wikiPatch.createHandler({
       getWikiPage: async () => undefined, readWikiContent: async () => undefined, updateWikiPage: async () => undefined,
-      ensureWikiSession: async () => session, createWikiEnvelope: () => envelope,
       wikiPageNotFoundError: () => new Error("wiki_not_found"), createWikiRollback: async () => ({ id: "rollback_1" }) as never,
       runWikiMutation
     });

@@ -52,18 +52,18 @@ const skillProjectSave = defineCommand<SkillProjectSavePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleSkillProjectSave(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleSkillProjectSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const candidateMarkdown = await ports.readSkillMarkdown(input.candidate_id);
         if (!candidateMarkdown) throw ports.skillMutationNotFound(`Skill candidate not found: ${input.candidate_id}`);
         const parsed = parseSkillMarkdown(candidateMarkdown);
         if (parsed.frontmatter.state !== "candidate") throw ports.skillMutationConflict("skill_is_not_candidate");
+        if (parsed.frontmatter.usage_scope?.kind === "session") throw ports.skillMutationConflict("session_scope_write_disabled");
         const contract = ports.skillMutationContract("skill.project.save");
         const skillId = createId("skill");
         const markdown = renderSkillMarkdown({ ...parsed.frontmatter, id: skillId, state: "project", provenance: `candidate:${input.candidate_id}`, last_reviewed_at: nowIso() }, parsed.content);
-        const session = await ports.ensureSkillMutationSession();
-        const envelope = ports.createSkillMutationEnvelope(`Save project skill from candidate: ${input.candidate_id}`);
         const result = await ports.runSkillMutation({
-          session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
+          trustedContext: context, operationName: contract.id, inputSummary: `Save project skill from candidate: ${input.candidate_id}`,
+          proposedEffects: contract.proposed_effects, boundaryResourceRefs: [{ kind: "skill", id: skillId, uri: `skills/${skillId}`, label: parsed.frontmatter.title }],
           execute: async (operation) => {
             const skill = await ports.saveSkillMarkdown({ state: "project", skillId, markdown });
             const ref = ports.skillResourceRef(skill);

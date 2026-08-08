@@ -47,6 +47,13 @@ const expectedMemoryArchiveOperation = (status: "created" | "completed") => ({
 const sessionFixture = { id: "session_fixture", session_key: "session_fixture", title: "Fixture session", ui_locale: "en", output_locale: "ja", created_at: now, updated_at: now };
 const envelopeFixture = { id: "envelope_fixture", source: "web", actor_identity: "owner", session_key: "session_fixture", user_intent: "Fixture intent", attachments: [], input_locale: "en", output_locale: "ja", metadata: {}, received_at: now };
 const fixtureOperation = { id: "operation_fixture", session_id: "session_fixture", capability_id: "fixture", operation: "fixture.operation", actor_identity: "owner", instruction_source: "owner_instruction", instruction_authority: "owner", channel: "test", input_hash: "fixture_hash", target_resource_refs: [], proposed_effects: [], status: "completed", created_at: now, updated_at: now };
+const roomOnlyContext = { inputSource: "runtime_api", workspaceId: "handler-matrix-c-workspace", actorId: "handler-matrix-c-actor", correlationId: "handler-matrix-c", roomId: "room_fixture", sessionId: undefined, runId: "run_fixture", envelopeId: undefined };
+const trustedContextFixture = { inputSource: "runtime_api", workspaceId: "handler-matrix-c-workspace", actorId: "handler-matrix-c-actor", correlationId: "handler-matrix-c", roomId: "room_fixture", sessionId: "session_fixture", runId: "run_fixture", envelopeId: "envelope_fixture" };
+const roomTopicMemoryFixture = { ...memoryFixture, id: "$generated:memory-id", state: "topic" };
+const roomTopicResourceRef = { kind: "memory", id: "$generated:memory-id", uri: "memory/$generated:memory-id.md", label: "fixture-memory" };
+const roomTopicBoundaryRef = { kind: "memory", id: "$generated:memory-id", uri: "memory/$generated:memory-id.md", label: "preference" };
+const generatedSkillBoundaryRef = { kind: "skill", id: "$generated:skill-id", uri: "skills/$generated:skill-id", label: "Candidate Skill" };
+const generatedWikiBoundaryRef = { kind: "wiki", id: "$generated:wiki-id", uri: "wiki/$generated:wiki-id", label: "Wiki Proposal" };
 const presentationRenderSpec = { kind: "collection", collection_id: "collection_fixture", view_id: "view_explicit", title: "Fixture collection", columns: [], rows: [] };
 const reflectionMessages = [
   { id: "message_user", session_id: "session_fixture", role: "user", content: "Fixture user request", input_locale: "en", output_locale: "ja", created_at: now },
@@ -74,9 +81,7 @@ const storedWikiFixture = { id: "wiki_fixture", slug: "fixture-wiki", title: "Fi
 const wikiRefFixture = { kind: "wiki", id: "wiki_fixture", uri: "wiki/fixture-wiki.md", label: "Fixture Wiki" };
 const wikiStateCalls = (operationName: "wiki.accept" | "wiki.archive" | "wiki.reject", state: "active" | "archived" | "rejected", prefix: string, proposedEffect: string) => [
   { method: "getWikiPage", args: ["wiki_fixture"] },
-  { method: "ensureWikiSession", args: [] },
-  { method: "createWikiEnvelope", args: [`${prefix}: Fixture Wiki`] },
-  { method: "runWikiMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName, proposedEffects: [proposedEffect], targetResourceRefs: [wikiRefFixture], execute: "$function" }] },
+  { method: "runWikiMutation", args: [{ trustedContext: trustedContextFixture, operationName, inputSummary: `${prefix}: Fixture Wiki`, proposedEffects: [proposedEffect], targetResourceRefs: [wikiRefFixture], execute: "$function" }] },
   { method: "setWikiPageState", args: ["wiki_fixture", state] },
   { method: "createWikiRollback", args: [fixtureOperation, [wikiRefFixture], { wiki: storedWikiFixture }, { wiki: { ...storedWikiFixture, state } }] }
 ];
@@ -121,50 +126,23 @@ export const cHandlerExpectations = {
     }]
   },
   "memory.session.create": {
-    requiredBranches: ["session:existing", "session:create"],
-    cases: [
-      {
-        id: "existing-session-all-fields",
-        input: { content: "Remember this session detail.", input_locale: "en", output_locale: "ja", ui_locale: "en", title: "Session memory", metadata: { source: "fixture" } },
-        branches: ["session:existing"],
-        calls: [
-          { method: "getMemorySession", args: ["session_fixture"] },
-          { method: "createMemoryEnvelope", args: [{ session: sessionFixture, content: "Remember this session detail.", inputLocale: "en", outputLocale: "ja", metadata: { source: "fixture" }, envelopeId: "envelope_fixture" }] },
-          { method: "runMemoryMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "memory.session.create", proposedEffects: ["Keep the current user intent in session memory."], execute: "$function" }] },
-          { method: "writeSessionMemory", args: [envelopeFixture, "Remember this session detail."] },
-          { method: "memoryResourceRef", args: [memoryFixture] },
-          { method: "createMemoryRollback", args: [fixtureOperation, [memoryArchiveRef], { memory_id: "memory_fixture" }] },
-          { method: "emitMemoryCandidate", args: [memoryFixture] }
-        ]
-      },
-      {
-        id: "create-session-defaults",
-        input: { content: "Create a session for this memory.", metadata: {} },
-        branches: ["session:create"],
-        context: { sessionId: undefined, envelopeId: undefined },
-        calls: [
-          { method: "createMemorySession", args: [{ title: undefined, ui_locale: undefined, output_locale: undefined }] },
-          { method: "createMemoryEnvelope", args: [{ session: sessionFixture, content: "Create a session for this memory.", inputLocale: "en", outputLocale: "ja", metadata: {}, envelopeId: undefined }] },
-          { method: "runMemoryMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "memory.session.create", proposedEffects: ["Keep the current user intent in session memory."], execute: "$function" }] },
-          { method: "writeSessionMemory", args: [envelopeFixture, "Create a session for this memory."] },
-          { method: "memoryResourceRef", args: [memoryFixture] },
-          { method: "createMemoryRollback", args: [fixtureOperation, [memoryArchiveRef], { memory_id: "memory_fixture" }] },
-          { method: "emitMemoryCandidate", args: [memoryFixture] }
-        ]
-      }
-    ]
+    requiredBranches: ["session_scope:disabled"],
+    cases: [{
+      id: "legacy-session-rejected",
+      input: { content: "Remember this session detail.", input_locale: "en", output_locale: "ja", ui_locale: "en", title: "Session memory", metadata: { source: "fixture" } },
+      branches: ["session_scope:disabled"],
+      calls: [{ method: "memorySessionScopeWriteDisabledError", args: [] }]
+    }]
   },
   "memory.topic.create": {
     requiredBranches: ["topic:explicit-kind"],
     cases: [{
-      id: "explicit-kind-all-fields", input: { content: "Remember this preference.", input_locale: "en", output_locale: "ja", topic_kind: "preference", metadata: { source: "fixture" } }, branches: ["topic:explicit-kind"], calls: [
-        { method: "getMemorySession", args: ["session_fixture"] },
-        { method: "createMemoryEnvelope", args: [{ session: sessionFixture, content: "Remember this preference.", inputLocale: "en", outputLocale: "ja", metadata: { source: "fixture" }, envelopeId: "envelope_fixture" }] },
-        { method: "runMemoryMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "memory.topic.create", proposedEffects: ["Create a visible topic memory candidate."], execute: "$function" }] },
-        { method: "writeTopicMemory", args: [envelopeFixture, "preference", "Remember this preference."] },
-        { method: "memoryResourceRef", args: [{ ...memoryFixture, state: "topic" }] },
-        { method: "createMemoryRollback", args: [fixtureOperation, [memoryArchiveRef], { memory_id: "memory_fixture" }] },
-        { method: "emitMemoryCandidate", args: [{ ...memoryFixture, state: "topic" }] }
+      id: "explicit-kind-all-fields", input: { content: "Remember this preference.", input_locale: "en", output_locale: "ja", topic_kind: "preference" }, context: { sessionId: undefined, envelopeId: undefined }, branches: ["topic:explicit-kind"], calls: [
+        { method: "runMemoryMutation", args: [{ trustedContext: roomOnlyContext, operationName: "memory.topic.create", inputSummary: "Create topic memory: preference", proposedEffects: ["Create a visible topic memory candidate."], boundaryResourceRefs: [roomTopicBoundaryRef], execute: "$function" }] },
+        { method: "writeRoomTopicMemory", args: [{ context: roomOnlyContext, memoryId: "$generated:memory-id", topicKind: "preference", content: "Remember this preference.", inputLocale: "en", outputLocale: "ja" }] },
+        { method: "memoryResourceRef", args: [roomTopicMemoryFixture] },
+        { method: "createMemoryRollback", args: [fixtureOperation, [roomTopicResourceRef], { memory_id: "$generated:memory-id" }] },
+        { method: "emitMemoryCandidate", args: [roomTopicMemoryFixture] }
       ]
     }]
   },
@@ -339,9 +317,7 @@ export const cHandlerExpectations = {
     cases: [{
       id: "all-public-fields", input: { title: "Candidate Skill", content: "# Candidate\nUse this procedure.", description: "Candidate description", tags: ["fixture"], required_capabilities: ["filesystem"], source_refs: [resourceRef], provenance_detail: provenance, usage_scope: { kind: "room", room_id: "room_fixture" } }, branches: ["candidate:create"], calls: [
         { method: "skillMutationContract", args: ["skill.candidate.create"] },
-        { method: "ensureSkillMutationSession", args: [] },
-        { method: "createSkillMutationEnvelope", args: ["Create skill candidate: Candidate Skill"] },
-        { method: "runSkillMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "skill.candidate.create", proposedEffects: ["Fixture effect for skill.candidate.create"], execute: "$function" }] },
+        { method: "runSkillMutation", args: [{ trustedContext: trustedContextFixture, operationName: "skill.candidate.create", inputSummary: "Create skill candidate: Candidate Skill", proposedEffects: ["Fixture effect for skill.candidate.create"], boundaryResourceRefs: [generatedSkillBoundaryRef], execute: "$function" }] },
         { method: "saveSkillMarkdown", args: [{ state: "candidate", skillId: "$generated:skill-id", markdown: "$generated:skill-markdown" }] },
         { method: "skillResourceRef", args: [generatedSkillFixture("candidate")] },
         { method: "createSkillRollback", args: [fixtureOperation, [{ kind: "skill", id: "$generated:skill-id", uri: "skills/skill_fixture.md", label: "Fixture Skill" }], {}, { skill_id: "$generated:skill-id" }] }
@@ -390,10 +366,8 @@ export const cHandlerExpectations = {
         { method: "getSkillForMutation", args: ["skill_fixture"] },
         { method: "readSkillMarkdown", args: ["skill_fixture"] },
         { method: "skillMutationContract", args: ["skill.patch"] },
-        { method: "ensureSkillMutationSession", args: [] },
-        { method: "createSkillMutationEnvelope", args: ["Edit Skill: Fixture Skill"] },
         { method: "skillResourceRef", args: [storedSkillFixture] },
-        { method: "runSkillMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "skill.patch", proposedEffects: ["Fixture effect for skill.patch"], targetResourceRefs: [{ kind: "skill", id: "skill_fixture", uri: "skills/skill_fixture.md", label: "Fixture Skill" }], execute: "$function" }] },
+        { method: "runSkillMutation", args: [{ trustedContext: trustedContextFixture, operationName: "skill.patch", inputSummary: "Edit Skill: Fixture Skill", proposedEffects: ["Fixture effect for skill.patch"], targetResourceRefs: [{ kind: "skill", id: "skill_fixture", uri: "skills/skill_fixture.md", label: "Fixture Skill" }], execute: "$function" }] },
         { method: "patchSkillRecord", args: [{ id: "skill_fixture", title: "Updated Skill", description: "Updated description", tags: ["updated"], content: "# Updated\nBody" }] },
         { method: "skillResourceRef", args: [patchedSkillFixture] },
         { method: "createSkillRollback", args: [fixtureOperation, [{ kind: "skill", id: "skill_fixture", uri: "skills/skill_fixture.md", label: "Updated Skill" }], { skill: storedSkillFixture, markdown: "# Old skill body" }, { skill: patchedSkillFixture }] }
@@ -406,9 +380,7 @@ export const cHandlerExpectations = {
       id: "candidate", input: { candidate_id: "candidate_fixture" }, branches: ["candidate:project-save"], calls: [
         { method: "readSkillMarkdown", args: ["candidate_fixture"] },
         { method: "skillMutationContract", args: ["skill.project.save"] },
-        { method: "ensureSkillMutationSession", args: [] },
-        { method: "createSkillMutationEnvelope", args: ["Save project skill from candidate: candidate_fixture"] },
-        { method: "runSkillMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "skill.project.save", proposedEffects: ["Fixture effect for skill.project.save"], execute: "$function" }] },
+        { method: "runSkillMutation", args: [{ trustedContext: trustedContextFixture, operationName: "skill.project.save", inputSummary: "Save project skill from candidate: candidate_fixture", proposedEffects: ["Fixture effect for skill.project.save"], boundaryResourceRefs: [generatedSkillBoundaryRef], execute: "$function" }] },
         { method: "saveSkillMarkdown", args: [{ state: "project", skillId: "$generated:skill-id", markdown: "$generated:skill-markdown" }] },
         { method: "skillResourceRef", args: [generatedSkillFixture("project", "Candidate Skill")] },
         { method: "createSkillRollback", args: [fixtureOperation, [{ kind: "skill", id: "$generated:skill-id", uri: "skills/skill_fixture.md", label: "Candidate Skill" }], {}, { skill_id: "$generated:skill-id", candidate_id: "candidate_fixture" }] }
@@ -422,10 +394,8 @@ export const cHandlerExpectations = {
         { method: "getSkillForMutation", args: ["skill_fixture"] },
         { method: "listSkillSupportFiles", args: ["skill_fixture"] },
         { method: "skillMutationContract", args: ["skill.support_file.save"] },
-        { method: "ensureSkillMutationSession", args: [] },
-        { method: "createSkillMutationEnvelope", args: ["Save Skill support file: Fixture Skill/references/guide.md"] },
         { method: "skillResourceRef", args: [storedSkillFixture] },
-        { method: "runSkillMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "skill.support_file.save", proposedEffects: ["Fixture effect for skill.support_file.save"], targetResourceRefs: [{ kind: "skill", id: "skill_fixture", uri: "skills/skill_fixture.md", label: "Fixture Skill" }], execute: "$function" }] },
+        { method: "runSkillMutation", args: [{ trustedContext: trustedContextFixture, operationName: "skill.support_file.save", inputSummary: "Save Skill support file: Fixture Skill/references/guide.md", proposedEffects: ["Fixture effect for skill.support_file.save"], targetResourceRefs: [{ kind: "skill", id: "skill_fixture", uri: "skills/skill_fixture.md", label: "Fixture Skill" }], execute: "$function" }] },
         { method: "writeSkillSupportFile", args: [{ skillId: "skill_fixture", path: "references/guide.md", content: "Support content" }] },
         { method: "createSkillRollback", args: [fixtureOperation, [{ kind: "skill_support", id: "skill_fixture:references/guide.md", uri: "skills/skill_fixture/references/guide.md", label: "references/guide.md" }], { path: "skills/skill_fixture/references/guide.md", content: "Old support content" }, { path: "skills/skill_fixture/references/guide.md", content: "Support content" }] }
       ]
@@ -452,9 +422,7 @@ export const cHandlerExpectations = {
       id: "all-public-fields", input: { wiki_id: "wiki_fixture", title: "Updated Wiki", content: "Updated wiki content", tags: ["updated"], content_locale: "en", source_refs: [resourceRef], provenance }, branches: ["patch:all-fields"], calls: [
         { method: "getWikiPage", args: ["wiki_fixture"] },
         { method: "readWikiContent", args: ["wiki_fixture"] },
-        { method: "ensureWikiSession", args: [] },
-        { method: "createWikiEnvelope", args: ["Patch wiki page: Fixture Wiki"] },
-        { method: "runWikiMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "wiki.patch", proposedEffects: ["Edit wiki page frontmatter or markdown content."], execute: "$function" }] },
+        { method: "runWikiMutation", args: [{ trustedContext: trustedContextFixture, operationName: "wiki.patch", inputSummary: "Patch wiki page: Fixture Wiki", proposedEffects: ["Edit wiki page frontmatter or markdown content."], targetResourceRefs: [wikiRefFixture], execute: "$function" }] },
         { method: "updateWikiPage", args: [{ id: "wiki_fixture", title: "Updated Wiki", content: "Updated wiki content", tags: ["updated"], content_locale: "en", source_refs: [resourceRef], provenance }] },
         { method: "createWikiRollback", args: [fixtureOperation, [{ kind: "wiki", id: "wiki_fixture", uri: "wiki/fixture-wiki.md", label: "Updated Wiki" }], { wiki: storedWikiFixture, content: "Old wiki content" }, { wiki: patchedWikiFixture, content: "Updated wiki content" }] }
       ]
@@ -464,9 +432,7 @@ export const cHandlerExpectations = {
     requiredBranches: ["proposal:all-fields"],
     cases: [{
       id: "all-public-fields", input: { title: "Wiki Proposal", content: "Proposal content", slug: "wiki-proposal", tags: ["fixture"], source_refs: [resourceRef], content_locale: "en", provenance }, branches: ["proposal:all-fields"], calls: [
-        { method: "ensureWikiSession", args: [] },
-        { method: "createWikiEnvelope", args: ["Create wiki proposal: Wiki Proposal"] },
-        { method: "runWikiMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "wiki.proposal.create", proposedEffects: ["Create a proposed wiki markdown page."], execute: "$function" }] },
+        { method: "runWikiMutation", args: [{ trustedContext: trustedContextFixture, operationName: "wiki.proposal.create", inputSummary: "Create wiki proposal: Wiki Proposal", proposedEffects: ["Create a proposed wiki markdown page."], boundaryResourceRefs: [generatedWikiBoundaryRef], execute: "$function" }] },
         { method: "saveWikiPage", args: [{ id: "$generated:wiki-id", slug: "wiki-proposal", title: "Wiki Proposal", state: "proposed", content_locale: "en", tags: ["fixture"], source_refs: [resourceRef], provenance, created_at: "$generated:time", updated_at: "$generated:time" }, "Proposal content"] },
         { method: "createWikiRollback", args: [fixtureOperation, [{ kind: "wiki", id: "$generated:wiki-id", uri: "wiki/wiki-proposal.md", label: "Wiki Proposal" }], {}, { wiki_id: "$generated:wiki-id" }] }
       ]
@@ -475,9 +441,7 @@ export const cHandlerExpectations = {
   "wiki.reindex": {
     requiredBranches: ["reindex:all-pages"],
     cases: [{ id: "empty-input", input: {}, branches: ["reindex:all-pages"], calls: [
-      { method: "ensureWikiSession", args: [] },
-      { method: "createWikiEnvelope", args: ["Reindex wiki pages"] },
-      { method: "runWikiMutation", args: [{ session: sessionFixture, envelope: envelopeFixture, operationName: "wiki.reindex", proposedEffects: ["Refresh the SQLite wiki index from markdown files."], execute: "$function" }] },
+      { method: "runWikiMutation", args: [{ trustedContext: trustedContextFixture, operationName: "wiki.reindex", inputSummary: "Reindex wiki pages", proposedEffects: ["Refresh the SQLite wiki index from markdown files."], execute: "$function" }] },
       { method: "reindexWikiPages", args: [] }
     ] }]
   },

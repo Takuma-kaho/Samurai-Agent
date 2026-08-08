@@ -1,6 +1,7 @@
 // Domain operation module. Keep the validated Background Review write boundary explicit.
 import { LearningBackgroundReviewMutationSchema, ReflectionSuggestionRecordSchema } from "@samurai-agent/core-schemas";
 import { agentParticipantId } from "@samurai-agent/room-permissions";
+import { delegatedParticipant } from "@samurai-agent/room-permissions";
 import { z } from "zod";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 
@@ -60,9 +61,10 @@ const learningBackgroundReviewApply = defineCommand<LearningBackgroundReviewAppl
         if (!context.sessionId || !context.roomId || !context.participant || context.participant.kind === "system") {
           throw new Error("trusted_context_room_participant_required");
         }
-        const ownerParticipantId = context.participant.kind === "agent"
-          ? context.participant.requestedByParticipantId
-          : context.participant.participantId;
+        const delegated = delegatedParticipant(context.participant);
+        const ownerParticipantId = delegated.kind === "agent"
+          ? delegated.requestedByParticipantId
+          : delegated.participantId;
         return {
           ok: true,
           value: Output.parse(await ports.applyBackgroundReviewMutations({
@@ -70,9 +72,9 @@ const learningBackgroundReviewApply = defineCommand<LearningBackgroundReviewAppl
             sessionId: context.sessionId,
             roomId: context.roomId,
             ownerParticipantId,
-            creatorParticipantId: context.participant.kind === "agent"
-              ? agentParticipantId(context.participant.agentId)
-              : context.participant.participantId,
+            creatorParticipantId: delegated.kind === "agent"
+              ? agentParticipantId(delegated.agentId)
+              : delegated.participantId,
             mutations: input.mutations
           }))
         };

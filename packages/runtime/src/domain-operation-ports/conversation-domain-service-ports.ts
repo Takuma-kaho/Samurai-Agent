@@ -6,7 +6,6 @@ type Ports = Pick<DomainOperationPorts, "chat.turn.run" | "session.create" | "se
 export function createConversationDomainServicePorts(services: Pick<RuntimeDomainServices, "conversationDomainService">): Ports {
   return {
     "chat.turn.run": {
-      createChatSession: (context, input) => services.conversationDomainService.createChatSession(context, input),
       runChatTurn: (context, input) => services.conversationDomainService.executeChatTurn(context, input)
     },
     "session.create": {

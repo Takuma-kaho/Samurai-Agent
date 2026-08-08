@@ -12,7 +12,9 @@ import type {
   JsonValue,
   MessageEnvelope,
   MessageRecord,
-  SessionRecord
+  SessionRecord,
+  TrustedWorkspaceContext,
+  WorkspaceExecutionRequest
 } from "@samurai-agent/core-schemas";
 import type { PreparedTerminalSettlement } from "../execution/run-lifecycle";
 import type { BackendCancelResult, CanonicalLifecycleEvent } from "../execution/run-state-machine";
@@ -42,6 +44,22 @@ export interface PreparedTurn extends AdmittedTurn {
   readonly handoff: ContextHandoff;
   readonly backendInput: BackendRunInput;
 }
+
+/** Session-less work shares the same Executor, journal, and Backend cassette. */
+export interface PreparedWorkspaceExecution {
+  readonly run: BackendRunRecord;
+  readonly binding: BackendBinding;
+  readonly backendInput: BackendRunInput;
+  readonly gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
+}
+
+/** Runtime-owned preparation for a Room-first Run before the shared Executor starts. */
+export interface WorkspaceExecutionPreparation {
+  readonly backendInput: BackendRunInput;
+  readonly gatewayBoundaryPolicy?: GatewayBoundaryPolicy;
+}
+
+export type PreparedBackendExecution = PreparedTurn | PreparedWorkspaceExecution;
 
 /** The only Context dependency accepted by the new Host preparation path. */
 export interface TurnContextAssemblyResult {
@@ -74,13 +92,40 @@ export type TurnOutcome =
   | { kind: "failed"; run: BackendRunRecord; error: Error }
   | { kind: "outcome_unknown"; run: BackendRunRecord; error: Error };
 
+export type WorkspaceExecutionOutcome =
+  | { kind: "completed"; run: BackendRunRecord; output: TurnOutput }
+  | { kind: "waiting"; run: BackendRunRecord; waiting: { prompt: string } }
+  | { kind: "cancelled"; run: BackendRunRecord; reason: string }
+  | { kind: "failed"; run: BackendRunRecord; error: Error }
+  | { kind: "outcome_unknown"; run: BackendRunRecord; error: Error };
+
 export interface CommitTurnSettlementPort {
   commitTurnSettlement(input: TurnSettlementInput): Promise<BackendRunRecord>;
 }
 
 export interface HostStorePort extends CommitTurnSettlementPort {
   getSession(sessionId: string): Promise<SessionRecord | undefined>;
-  admitTurn(input: { session: SessionRecord; binding: BackendBinding; request: TurnRequest; requestHash: string; runId: string; now: string }): Promise<{ reservation: SessionRunReservation; userMessage: MessageRecord; run: BackendRunRecord; replay: boolean }>;
+  admitTurn(input: { session: SessionRecord; binding: BackendBinding; request: TurnRequest; context?: TrustedWorkspaceContext; requestHash: string; runId: string; now: string }): Promise<{ reservation: SessionRunReservation; userMessage: MessageRecord; run: BackendRunRecord; replay: boolean }>;
+  admitWorkspaceRun(input: {
+    context: TrustedWorkspaceContext;
+    backendId: string;
+    backendKind: AgentBackendKind;
+    runId: string;
+    requestHash: string;
+    idempotencyKey?: string;
+    agentId?: string;
+    inputSummary?: string;
+    metadata?: Record<string, JsonValue>;
+    now: string;
+  }): Promise<BackendRunRecord>;
+  commitWorkspaceRunSettlement(input: {
+    expectedRun: BackendRunRecord;
+    nextRun: BackendRunRecord;
+    terminalEvent: BackendEventRecord;
+    outputSummary?: string;
+    diagnostic?: { code: string; message: string; metadata?: Record<string, JsonValue> };
+  }): Promise<BackendRunRecord>;
+  releaseRunLease(runId: string): Promise<void>;
   getBackendRun(runId: string): Promise<BackendRunRecord | undefined>;
   listBackendEvents(input: { runId: string }): Promise<BackendEventRecord[]>;
   listMessages(sessionId: string): Promise<MessageRecord[]>;
@@ -142,14 +187,14 @@ export interface PostTurnOperations {
 export interface HostCompletionPort extends RequiredCompletionPort {}
 
 export interface TurnCleanupPort {
-  cleanup(input: { runId: string; sessionId: string }): Promise<void>;
+  cleanup(input: { runId: string; sessionId?: string }): Promise<void>;
 }
 
 export type HostDiagnosticEventType = Extract<BackendEventRecord["event_type"], "host_post_turn_failed" | "host_cleanup_failed" | "host_emit_failed">;
 
 export interface HostDiagnosticInput {
   runId: string;
-  sessionId: string;
+  sessionId?: string;
   attemptNo: number;
   operationId: string;
   eventType: HostDiagnosticEventType;
@@ -181,10 +226,18 @@ export interface HostPorts {
     run: BackendRunRecord;
     resumeInput: Record<string, JsonValue>;
   }) => Promise<ResumePreparation>;
+  /** Re-check the persisted Run principal before Room-first control or recovery work. */
+  readonly assertRunAccess?: (run: BackendRunRecord) => Promise<void>;
+  readonly prepareWorkspaceExecution?: (input: {
+    run: BackendRunRecord;
+    binding: BackendBinding;
+    request: WorkspaceExecutionRequest;
+    backendInput: BackendRunInput;
+  }) => Promise<WorkspaceExecutionPreparation>;
   readonly clock?: () => string;
   readonly maxConcurrency?: number;
   readonly resolveDefaultBackendId?: () => Promise<string> | string;
   readonly postTurn?: PostTurnOperations;
 }
 
-export interface BackendEventNormalizer { normalize(input: { runId: string; sessionId: string; attemptNo: number; event: unknown }): CanonicalLifecycleEvent | undefined; }
+export interface BackendEventNormalizer { normalize(input: { runId: string; sessionId?: string; attemptNo: number; event: unknown }): CanonicalLifecycleEvent | undefined; }

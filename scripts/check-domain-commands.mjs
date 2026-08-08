@@ -195,7 +195,7 @@ try {
   const handlerMatrixAggregate = fixtureResults.get("domain-operation-handler-matrix-aggregate");
   if (schemaMatrix.manifest?.operations !== contracts.commands + contracts.queries
     || schemaMatrix.manifest?.endpoints !== schemaMatrix.manifest.operations * 2
-    || schemaMatrix.manifest?.reviewed_schema_nodes !== 860
+    || schemaMatrix.manifest?.reviewed_schema_nodes !== 871
     || schemaMatrix.manifest?.unreviewed_schema_nodes !== 0) {
     throw new Error("domain_command_schema_matrix_hard_gate_failed");
   }

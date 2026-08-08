@@ -54,15 +54,14 @@ const skillSupportFileSave = defineCommand<SkillSupportFileSavePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleSkillSupportFileSave(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleSkillSupportFileSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const skill = await ports.getSkillForMutation(input.skill_id);
         if (!skill) throw ports.skillMutationNotFound(`Skill not found: ${input.skill_id}`);
         const before = (await ports.listSkillSupportFiles(input.skill_id)).find((file) => file.path === input.path);
         const contract = ports.skillMutationContract("skill.support_file.save");
-        const session = await ports.ensureSkillMutationSession();
-        const envelope = ports.createSkillMutationEnvelope(`Save Skill support file: ${skill.title}/${input.path}`);
         const result = await ports.runSkillMutation({
-          session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
+          trustedContext: context, operationName: contract.id, inputSummary: `Save Skill support file: ${skill.title}/${input.path}`,
+          proposedEffects: contract.proposed_effects,
           targetResourceRefs: [ports.skillResourceRef(skill)],
           execute: async (operation) => {
             const supportFile = await ports.writeSkillSupportFile({ skillId: input.skill_id, path: input.path, content: input.content });

@@ -1,8 +1,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { nowIso, type AgentRecord, type RoomRecord } from "@samurai-agent/core-schemas";
+import { nowIso, type AgentRecord, type RoomRecord, type SessionRecord } from "@samurai-agent/core-schemas";
 import { agentParticipantId, humanParticipantId, localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "./index";
 
@@ -101,6 +102,50 @@ describe("Core 06 Room participation persistence", () => {
     expect(saved).toMatchObject({ agent_id: agent.id, can_view: true, can_edit: true, can_execute: true });
     expect(agentParticipantId(agent.id)).not.toBe(localOwnerParticipantId);
     await store.close();
+  });
+
+  it("keeps a legacy Session share for diagnostics but never grants another Room access", async () => {
+    const store = await createStore();
+    const now = nowIso();
+    const source = await createRoom(store, "room-core06-legacy-session-source", now);
+    const target = await createRoom(store, "room-core06-legacy-session-target", now);
+    const session: SessionRecord = {
+      id: "session-core06-legacy-share", session_key: "legacy-share", room_id: source.id,
+      title: "Legacy shared session", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now
+    };
+    await store.createSession(session);
+    const boundary = await store.ensureResourceAccessBoundary({
+      resourceKind: "session", resourceId: session.id, sourceRoomId: source.id,
+      ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId
+    });
+    const dbPath = store.dbPath;
+    await store.close();
+
+    const database = new Database(dbPath);
+    try {
+      database.exec("DROP TRIGGER IF EXISTS core06_block_new_session_shares");
+      database.prepare(`INSERT INTO room_resource_shares(
+        id, resource_access_boundary_id, source_room_id, target_room_id, shared_by_participant_id,
+        created_at, revoked_at, revoked_by_participant_id, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`)
+        .run("legacy-session-share", boundary.id, source.id, target.id, localOwnerParticipantId, now, now);
+    } finally {
+      database.close();
+    }
+
+    const reopened = await WorkspaceStore.create({ rootDir: store.rootDir });
+    expect(await reopened.listRoomResourceShares(boundary.id)).toEqual([
+      expect.objectContaining({ id: "legacy-session-share", target_room_id: target.id })
+    ]);
+    await expect(reopened.getResourceAccessMode({
+      resourceKind: "session", resourceId: session.id, roomId: source.id, participantId: localOwnerParticipantId
+    })).resolves.toBe("source");
+    await expect(reopened.getResourceAccessMode({
+      resourceKind: "session", resourceId: session.id, roomId: target.id, participantId: localOwnerParticipantId
+    })).resolves.toBe("denied");
+    await expect(reopened.listResourceIdsAvailableInRoom({ resourceKind: "session", roomId: target.id }))
+      .resolves.not.toContain(session.id);
+    await reopened.close();
   });
 });
 

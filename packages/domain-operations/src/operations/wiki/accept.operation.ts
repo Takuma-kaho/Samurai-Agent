@@ -49,7 +49,7 @@ const wikiAccept = defineCommand<WikiAcceptPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiAccept(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: await executeWikiStateTransition(ports, { id: input.wiki_id, state: "active", operationName: "wiki.accept", proposedEffect: "Accept a wiki proposal for active retrieval.", summaryPrefix: "Accepted wiki page" }) };
+        return { ok: true, value: await executeWikiStateTransition(ports, { context, id: input.wiki_id, state: "active", operationName: "wiki.accept", proposedEffect: "Accept a wiki proposal for active retrieval.", summaryPrefix: "Accepted wiki page" }) };
       }
     };
   }

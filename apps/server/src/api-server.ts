@@ -133,10 +133,10 @@ import {
   type DomainOperationOutput,
   type DomainQueryId
 } from "@samurai-agent/domain-operations";
-import { assertTrustedRuntimePayload, resolveTrustedRuntimeApiInput, type TrustedRuntimeApiContext } from "./domain-ingress";
+import { assertTrustedRuntimePayload, resolveLegacySessionCreateIngress, resolveTrustedRuntimeApiInput, type TrustedRuntimeApiContext } from "./domain-ingress";
 import { parseSurfaceOperation, type RuntimeEventSink } from "@samurai-agent/ui-protocol";
 import { WorkspaceStore, type SessionTranscriptExport } from "@samurai-agent/workspace-store";
-import { collectionRecordResourceId } from "@samurai-agent/room-permissions";
+import { collectionRecordResourceId, localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { registerBackendEventRoutes } from "./routes/backend-events";
 import { startAutomationScheduler, type AutomationScheduler } from "./workers/automation-scheduler";
 
@@ -823,12 +823,13 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
 
   app.post("/api/chat/sessions", async (req, res, next) => {
     try {
-      const session = await runRuntimeApiCommand(runtime, req, "session.create", {
+      const ingress = await trustedLegacySessionCreateApiInput(store, {
         ...(typeof req.body?.title === "string" ? { title: req.body.title } : {}),
         ...(asSupportedLocale(req.body?.ui_locale) ? { ui_locale: req.body.ui_locale } : {}),
         ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
         ...(typeof req.body?.room_id === "string" ? { room_id: req.body.room_id } : {})
       });
+      const session = await runRuntimeApiCommand(runtime, req, "session.create", ingress.payload, ingress.context);
       res.status(201).json(session);
     } catch (error) {
       next(error);
@@ -966,6 +967,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
       if (getDomainQueryEntry(commandId)) {
         const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+          roomId: typeof req.query.room_id === "string" ? req.query.room_id : undefined,
           sessionId: req.body?.session_id,
           backendRunId: req.body?.backend_run_id
         });
@@ -977,6 +979,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         return;
       }
       const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+        roomId: typeof req.query.room_id === "string" ? req.query.room_id : undefined,
         sessionId: req.body?.session_id,
         backendRunId: req.body?.backend_run_id
       });
@@ -1000,6 +1003,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
       if (getDomainQueryEntry(req.params.commandId)) {
         const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+          roomId: typeof req.query.room_id === "string" ? req.query.room_id : undefined,
           sessionId: req.body?.session_id,
           backendRunId: req.body?.backend_run_id
         });
@@ -1011,6 +1015,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         return;
       }
       const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+        roomId: typeof req.query.room_id === "string" ? req.query.room_id : undefined,
         sessionId: req.body?.session_id,
         backendRunId: req.body?.backend_run_id
       });
@@ -1041,12 +1046,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   app.get("/api/domain/commands/effective", async (req, res, next) => {
     try {
       const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
-      if (!sessionId) {
-        domainBadRequest(res, "session_id_required");
+      const roomId = typeof req.query.room_id === "string" ? req.query.room_id : "";
+      if (!sessionId && !roomId) {
+        domainBadRequest(res, "room_id_or_session_id_required");
         return;
       }
-      const effective = await runtime.listEffectiveDomainOperations(sessionId, "runtime_api");
-      res.json({ session_id: sessionId, commands: effective.commands, input_sources: domainCommandInputSources });
+      const effective = sessionId
+        ? await runtime.listEffectiveDomainOperations(sessionId, "runtime_api", { kind: "human", participantId: localOwnerParticipantId })
+        : await runtime.listEffectiveDomainOperationsForRoom({ roomId, source: "runtime_api", principal: { kind: "human", participantId: localOwnerParticipantId } });
+      res.json({ ...(sessionId ? { session_id: sessionId } : { room_id: roomId }), commands: effective.commands, input_sources: domainCommandInputSources });
     } catch (error) {
       next(error);
     }
@@ -1055,12 +1063,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
   app.get("/api/domain/queries/effective", async (req, res, next) => {
     try {
       const sessionId = typeof req.query.session_id === "string" ? req.query.session_id : "";
-      if (!sessionId) {
-        domainBadRequest(res, "session_id_required");
+      const roomId = typeof req.query.room_id === "string" ? req.query.room_id : "";
+      if (!sessionId && !roomId) {
+        domainBadRequest(res, "room_id_or_session_id_required");
         return;
       }
-      const effective = await runtime.listEffectiveDomainOperations(sessionId, "runtime_api");
-      res.json({ session_id: sessionId, queries: effective.queries, input_sources: domainCommandInputSources });
+      const effective = sessionId
+        ? await runtime.listEffectiveDomainOperations(sessionId, "runtime_api", { kind: "human", participantId: localOwnerParticipantId })
+        : await runtime.listEffectiveDomainOperationsForRoom({ roomId, source: "runtime_api", principal: { kind: "human", participantId: localOwnerParticipantId } });
+      res.json({ ...(sessionId ? { session_id: sessionId } : { room_id: roomId }), queries: effective.queries, input_sources: domainCommandInputSources });
     } catch (error) {
       next(error);
     }
@@ -1074,6 +1085,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         return;
       }
       const ingress = await trustedRuntimeApiInput(store, jsonRecord(req.body?.payload ?? {}), {
+        roomId: typeof req.query.room_id === "string" ? req.query.room_id : undefined,
         sessionId: req.body?.session_id,
         backendRunId: req.body?.backend_run_id
       });
@@ -1475,11 +1487,12 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
         // Starting a chat is a two-step server operation: first create the
         // Session in its authorized Room, then run the turn with that trusted
         // Session reference. A turn never chooses a fallback Room itself.
-        const session = await runRuntimeApiCommand(runtime, req, "session.create", {
+        const ingress = await trustedLegacySessionCreateApiInput(store, {
           ...(asSupportedLocale(req.body?.ui_locale) ? { ui_locale: req.body.ui_locale } : {}),
           ...(asSupportedLocale(req.body?.output_locale) ? { output_locale: req.body.output_locale } : {}),
           ...(typeof req.body?.room_id === "string" ? { room_id: req.body.room_id } : {})
         });
+        const session = await runRuntimeApiCommand(runtime, req, "session.create", ingress.payload, ingress.context);
         const result = await runRuntimeApiCommand(runtime, req, "chat.turn.run", {
           content,
           ...(typeof req.body?.backend_id === "string" ? { backend_id: req.body.backend_id } : {}),
@@ -3120,7 +3133,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id });
+        await runtime.assertLocalOwnerBackendRunAccess(run);
         res.json(run);
       } catch (error) {
         next(error);
@@ -3207,7 +3220,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id, action: "execute" });
+        await runtime.assertLocalOwnerBackendRunAccess(run, "execute");
         res.json(await runtime.cancelBackendRun(req.params.runId));
       } catch (error) {
         next(error);
@@ -3221,7 +3234,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id, action: "execute" });
+        await runtime.assertLocalOwnerBackendRunAccess(run, "execute");
         res.json(await runtime.resumeBackendRun(req.params.runId, jsonRecord(req.body)));
       } catch (error) {
         next(error);
@@ -3235,7 +3248,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id, action: "execute" });
+        await runtime.assertLocalOwnerBackendRunAccess(run, "execute");
         const maxEvents = typeof req.body?.max_events === "number" ? req.body.max_events : undefined;
         const timeoutMs = typeof req.body?.timeout_ms === "number" ? req.body.timeout_ms : undefined;
         res.json(await runtime.syncBackendStream(req.params.runId, { maxEvents, timeoutMs }));
@@ -3253,7 +3266,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id });
+        await runtime.assertLocalOwnerBackendRunAccess(run);
         res.json(await store.listToolRuns({ runId: req.params.runId }));
       } catch (error) {
         next(error);
@@ -3267,7 +3280,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(404).json({ error: "backend_run_not_found" });
           return;
         }
-        await runtime.assertLocalOwnerRoomAccess({ sessionId: run.session_id });
+        await runtime.assertLocalOwnerBackendRunAccess(run);
         const status = asToolRunStatus(req.query.status);
         if (req.query.status !== undefined && !status) {
           res.status(400).json({ error: "invalid_tool_run_status" });
@@ -4459,9 +4472,16 @@ export async function trustedRuntimeApiPayload(
 export async function trustedRuntimeApiInput(
   store: WorkspaceStore,
   payload: Record<string, JsonValue>,
-  transport: { sessionId?: unknown; backendRunId?: unknown } = {}
+  transport: { roomId?: unknown; sessionId?: unknown; backendRunId?: unknown; sessionRef?: unknown; authenticatedAppId?: unknown; authenticatedParticipant?: import("@samurai-agent/room-permissions").ParticipantPrincipal; authenticatedSource?: import("@samurai-agent/core-schemas").TrustedWorkspaceSource } = {}
 ) {
   return resolveTrustedRuntimeApiInput(store, payload, transport, (code, message) => new RuntimeRequestError(code, message));
+}
+
+async function trustedLegacySessionCreateApiInput(
+  store: WorkspaceStore,
+  payload: Record<string, JsonValue>
+) {
+  return resolveLegacySessionCreateIngress(store, payload, (code, message) => new RuntimeRequestError(code, message));
 }
 
 function domainBadRequest(res: Response, code: string): void {
@@ -4629,10 +4649,13 @@ async function runDynamicRuntimeApiQuery(
   }, runtimeRequestContext(req, context))).result;
 }
 
+/** The owner-authenticated HTTP adapter selects authority before Runtime entry. */
 function runtimeRequestContext(req: Request, context: TrustedRuntimeApiContext = {}): TrustedRuntimeApiContext {
   const signal = (req as Request & { signal?: AbortSignal }).signal;
   return {
     ...context,
+    participant: context.participant ?? { kind: "human", participantId: localOwnerParticipantId },
+    source: context.source ?? { kind: "native_app", app_id: "samurai-native" },
     ...(signal ? { signal } : {})
   };
 }
@@ -8174,7 +8197,7 @@ function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | un
       deep_link: `samurai://run/${encodeURIComponent(run.id)}`,
       notification_kind: notificationKind,
       run_id: run.id,
-      session_id: run.session_id,
+      ...(run.session_id ? { session_id: run.session_id } : {}),
       backend_id: run.backend_id,
       backend_status: run.status
     },
@@ -8185,12 +8208,12 @@ function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | un
         uri: `backend-runs/${run.id}`,
         label: run.input_summary
       },
-      {
+      ...(run.session_id ? [{
         kind: "session",
         id: run.session_id,
         uri: `sessions/${run.session_id}`,
         label: "Session"
-      }
+      }] : [])
     ],
     created_at: createdAt,
     expires_at: new Date(Date.parse(createdAt) + 7 * 24 * 60 * 60 * 1000).toISOString()

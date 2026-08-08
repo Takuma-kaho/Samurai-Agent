@@ -4,7 +4,7 @@
  * ../rows, keeping the kernel free of resource conversion logic.
  */
 export type { JsonColumn } from "../rows/json-column";
-export type { SessionsTable, MessagesTable, MessagePresentationsTable, OperationsTable, BackendRunsTable, SessionRunReservationsTable, BackendEventsTable, ToolRunsTable, WorkspaceChangesTable } from "../rows/session-execution-rows";
+export type { SessionsTable, MessagesTable, MessagePresentationsTable, OperationsTable, BackendRunsTable, SessionRunReservationsTable, RunLeasesTable, BackendEventsTable, ToolRunsTable, WorkspaceChangesTable } from "../rows/session-execution-rows";
 export type { DomainCommandExecutionsTable, ObjectivesTable, WorkItemsTable, WorkDependenciesTable, RunCheckpointsTable } from "../rows/durable-work-rows";
 export type { ArtifactsTable, ArtifactRevisionsTable } from "../rows/artifact-rows";
 export type { GeneratedSurfacesTable, GeneratedSurfaceRevisionsTable, SurfaceInteractionsTable } from "../rows/generated-surface-rows";
@@ -22,7 +22,7 @@ export type { WorkspaceMembersTable, RoomMembersTable, RoomAgentsTable, AgentWor
 export type { ClientEventsTable } from "../rows/client-event-rows";
 export type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
 
-import type { SessionsTable, MessagesTable, MessagePresentationsTable, OperationsTable, BackendRunsTable, SessionRunReservationsTable, BackendEventsTable, ToolRunsTable, WorkspaceChangesTable } from "../rows/session-execution-rows";
+import type { SessionsTable, MessagesTable, MessagePresentationsTable, OperationsTable, BackendRunsTable, SessionRunReservationsTable, RunLeasesTable, BackendEventsTable, ToolRunsTable, WorkspaceChangesTable } from "../rows/session-execution-rows";
 import type { DomainCommandExecutionsTable, ObjectivesTable, WorkItemsTable, WorkDependenciesTable, RunCheckpointsTable } from "../rows/durable-work-rows";
 import type { ArtifactsTable, ArtifactRevisionsTable } from "../rows/artifact-rows";
 import type { GeneratedSurfacesTable, GeneratedSurfaceRevisionsTable, SurfaceInteractionsTable } from "../rows/generated-surface-rows";
@@ -111,6 +111,7 @@ export interface WorkspaceDb {
   grants: GrantsTable;
   backend_runs: BackendRunsTable;
   session_run_reservations: SessionRunReservationsTable;
+  run_leases: RunLeasesTable;
   backend_events: BackendEventsTable;
   client_events: ClientEventsTable;
   workspace_changes: WorkspaceChangesTable;
