@@ -1,9 +1,9 @@
 import type { ArtifactKind } from "@samurai-agent/artifacts";
+import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 import {
   GraphDocumentSchema,
   type ActivityInboxItem, type ArtifactRecord, type ArtifactRevisionRecord, type GraphDocument, type JsonValue,
-  type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint,
-  type SessionRecord, type SupportedLocale
+  type OperationRecord, type ResourceRef, type RollbackPoint, type SupportedLocale
 } from "@samurai-agent/core-schemas";
 
 interface ArtifactDraftInput {
@@ -19,13 +19,17 @@ interface MutationExecution<TExtra extends Record<string, unknown>> {
   extra: TExtra;
 }
 interface ArtifactWriteResult { resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
-export type ArtifactMutationInput<TExtra extends Record<string, unknown>> = { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<MutationExecution<TExtra>> };
+export type ArtifactMutationInput<TExtra extends Record<string, unknown>> = {
+  trustedContext: TrustedDomainContext;
+  inputSummary: string;
+  operationName: string;
+  proposedEffects: string[];
+  targetResourceRefs?: ResourceRef[];
+  execute(operation: OperationRecord): Promise<MutationExecution<TExtra>>;
+};
 export interface ArtifactExecutionPort {
   contract(id: string): { id: string; proposed_effects: string[] };
-  createSession(input: { title: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale }): Promise<SessionRecord>;
-  getSession(id: string): Promise<SessionRecord | undefined>;
-  ensureSession(): Promise<SessionRecord>;
-  createEnvelope(session: SessionRecord, content: string, inputLocale?: SupportedLocale, outputLocale?: SupportedLocale, metadata?: Record<string, JsonValue>, envelopeId?: string): MessageEnvelope;
+  defaultLocales(): Promise<{ inputLocale: SupportedLocale; outputLocale: SupportedLocale }>;
   runMutation<TExtra extends Record<string, unknown>>(input: ArtifactMutationInput<TExtra>): Promise<ArtifactWriteResult & TExtra>;
   getArtifact(id: string): Promise<ArtifactRecord | undefined>;
   readContent(id: string): Promise<string | undefined>;
@@ -44,9 +48,13 @@ export class ArtifactDomainService {
 
   contract(id: string) { return this.artifacts.contract(id); }
   getArtifact(id: string) { return this.artifacts.getArtifact(id); }
-  ensureArtifactSession() { return this.artifacts.ensureSession(); }
-  createArtifactEnvelope(session: SessionRecord, content: string, inputLocale?: SupportedLocale, outputLocale?: SupportedLocale, metadata?: Record<string, JsonValue>, envelopeId?: string) { return this.artifacts.createEnvelope(session, content, inputLocale, outputLocale, metadata, envelopeId); }
-  repairRevisionSource(id: string) { return this.artifacts.repairRevisionSource(id); }
+  artifactDefaultLocales() { return this.artifacts.defaultLocales(); }
+  async repairRevisionSource(id: string): Promise<{ repaired: boolean }> {
+    // The repository may return its internal revision for repair diagnostics.
+    // The Domain Operation contract deliberately exposes only the repair fact.
+    const { repaired } = await this.artifacts.repairRevisionSource(id);
+    return { repaired };
+  }
   artifactNotFoundError() { return this.artifacts.requestError("not_found", "artifact_not_found"); }
   runArtifactMutation<TExtra extends Record<string, unknown>>(input: ArtifactMutationInput<TExtra>) { return this.artifacts.runMutation(input); }
   getRevision(id: string) { return this.artifacts.getRevision(id); }
@@ -58,14 +66,11 @@ export class ArtifactDomainService {
   decodeImageBase64(value: string) { return Buffer.from(value, "base64"); }
   createArtifactDraft(input: ArtifactDraftInput) { return this.artifacts.createDraft(input); }
   imageArtifactNotFoundError() { return this.artifacts.requestError("not_found", "image_artifact_not_found"); }
-  getArtifactSession(id: string) { return this.artifacts.getSession(id); }
-  artifactSessionNotFoundError() { return this.artifacts.requestError("not_found", "session_not_found"); }
   validateGraphContent(content: string) { parseGraph(content, this.artifacts); }
   readArtifactContent(id: string) { return this.artifacts.readContent(id); }
   exportArtifactPdf(input: { title: string; content: string; source: ArtifactRecord }) { return this.artifacts.exportPdf(input); }
   artifactPdfSourceNotTextError() { return this.artifacts.requestError("conflict", "artifact_pdf_source_not_text"); }
   artifactPdfInvalidResultError() { return this.artifacts.requestError("provider_failed", "pdf_export_invalid_result"); }
-  createArtifactSession(input: { title: string; ui_locale?: SupportedLocale; output_locale?: SupportedLocale }) { return this.artifacts.createSession(input); }
   graphArtifactNotFoundError() { return this.artifacts.requestError("not_found", "graph_artifact_not_found"); }
   graphDocumentContentNotFoundError() { return this.artifacts.requestError("not_found", "graph_document_content_not_found"); }
   graphDocumentInvalidError() { return this.artifacts.requestError("conflict", "graph_document_invalid"); }

@@ -3,10 +3,10 @@
   "test_id": "C04",
   "command": "pnpm core:test:restore",
   "status": "passed",
-  "commit_sha": "bef9e992ab38c739bb676aeb3f757ca064bb5d76",
+  "commit_sha": "ce205d29560c12222060e5e6ba0d1ac05703b17e",
   "worktree_clean": false,
-  "source_sha256": "605bdaccea015dbd1ea90691103738f737663d51f103661cbd585ecd9dc189b2",
-  "source_graph_sha256": "3cfc412eeb068caa20902337b0bf159f31b7f4beaf5f2380fd891eef029b2bcc",
+  "source_sha256": "0d2c2e0bf3ad17b830c13a33852c8040f7b64e8a9731f8a7d145e998fab91b63",
+  "source_graph_sha256": "b8ce0360c0fcdc8406f3fdb3cd8595de617f1bd2824534736b986d98d3a3952c",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/workspace-store/src/backup/backup-id.ts",
@@ -34,15 +34,18 @@
     "scripts/verify-workspace-restore-atomicity.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-29T05:18:37.336Z",
-  "completed_at": "2026-07-29T05:18:37.671Z",
+  "started_at": "2026-08-09T08:06:57.074Z",
+  "completed_at": "2026-08-09T08:06:58.304Z",
   "assertions": [
     {
       "name": "Restore failure points",
       "actual": [
         "extract",
         "hash_verify",
-        "swap"
+        "prepared",
+        "swap",
+        "replacement_moved",
+        "restart"
       ],
       "expected": [
         "extract",
@@ -52,7 +55,7 @@
     },
     {
       "name": "Current Workspace preserved after every failure",
-      "actual": 3,
+      "actual": 6,
       "expected": 3
     },
     {
@@ -66,7 +69,10 @@
     "failure_points": [
       "extract",
       "hash_verify",
-      "swap"
+      "prepared",
+      "swap",
+      "replacement_moved",
+      "restart"
     ],
     "outcomes": [
       {
@@ -78,11 +84,23 @@
         "current_preserved": true
       },
       {
+        "phase": "prepared",
+        "current_preserved": true
+      },
+      {
         "phase": "swap",
+        "current_preserved": true
+      },
+      {
+        "phase": "replacement_moved",
+        "current_preserved": true
+      },
+      {
+        "phase": "restart",
         "current_preserved": true
       }
     ],
-    "preserved_count": 3,
+    "preserved_count": 6,
     "successful_restore_store_reusable": true
   }
 }

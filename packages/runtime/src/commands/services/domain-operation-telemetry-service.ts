@@ -1,9 +1,9 @@
-import { createId, nowIso, type BackendRunRecord, type OperationRecord, type ResourceRef, type WorkspaceChangeRecord } from "@samurai-agent/core-schemas";
+import { createId, nowIso, type BackendRunRecord, type NewWorkspaceChangeRecord, type OperationRecord, type ResourceRef, type WorkspaceChangeRecord } from "@samurai-agent/core-schemas";
 
 export interface DomainOperationTelemetryPort {
   getBackendRun(id: string): Promise<BackendRunRecord | undefined>;
   listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]>;
-  saveWorkspaceChange(change: WorkspaceChangeRecord): Promise<WorkspaceChangeRecord>;
+  saveWorkspaceChange(change: NewWorkspaceChangeRecord): Promise<WorkspaceChangeRecord>;
   emitWorkspaceChange(change: WorkspaceChangeRecord): Promise<void>;
 }
 
@@ -29,19 +29,23 @@ export class DomainOperationTelemetryService {
     if (!run || (input.sessionId !== undefined && run.session_id !== input.sessionId)) {
       throw new Error(`domain_operation_telemetry_backend_run_invalid:${input.runId}`);
     }
+    if (!run.room_id) throw new Error(`domain_operation_telemetry_backend_run_room_missing:${input.runId}`);
     const existing = (await this.port.listWorkspaceChanges(input.sessionId)).find((change) =>
-      change.run_id === input.runId && change.legacy_operation_id === input.operation.id
+      change.run_id === input.runId
+      && (change.domain_operation_id === input.operation.id || change.legacy_operation_id === input.operation.id)
     );
     if (existing) return existing;
 
-    const change: WorkspaceChangeRecord = {
+    const change: NewWorkspaceChangeRecord = {
       id: createId("change"),
       run_id: input.runId,
       ...(input.sessionId ? { session_id: input.sessionId } : {}),
+      room_id: run.room_id,
+      domain_operation_id: input.operation.id,
+      ...(input.operation.session_ref ? { session_ref: input.operation.session_ref } : {}),
       resource_ref: input.resourceRef,
       change_type: changeTypeForResource(input.resourceRef),
       summary: `Changed ${input.resourceRef.label ?? input.resourceRef.kind}/${input.resourceRef.id}.`,
-      legacy_operation_id: input.operation.id,
       correlation_id: input.correlationId,
       created_at: nowIso()
     };

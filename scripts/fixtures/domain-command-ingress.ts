@@ -64,7 +64,9 @@ interface IngressObservation {
   };
   workspaceChangeTelemetry: {
     count: number;
+    runBacked: boolean;
     allLinkedToRealBackendRuns: boolean;
+    allLinkedToExpectedCause: boolean;
   };
   execution: {
     commandId: string;
@@ -87,14 +89,21 @@ interface IngressRejectionObservation {
 const artifactCreateInvalidInputCode = "validation";
 
 const expectedWorkspaceChangeTelemetryCount: Record<IngressObservation["entrance"], number> = {
-  // WorkspaceChange is linked to a concrete BackendRun. Structured Surface
-  // operations intentionally create one synthetic run for their durable
-  // Workspace trace; ordinary direct Domain Command routes do not.
-  web_runtime_api: 0,
+  // Core08 records every committed Resource mutation once. Direct ingress is
+  // linked to Activity/Domain Operation; Backend ingress stays Run-linked.
+  web_runtime_api: 1,
   surface_operation: 1,
   provider_tool_call: 1,
   automation: 1,
-  generated_surface_action: 0
+  generated_surface_action: 1
+};
+
+const expectedWorkspaceChangeRunBacked: Record<IngressObservation["entrance"], boolean> = {
+  web_runtime_api: false,
+  surface_operation: false,
+  provider_tool_call: true,
+  automation: true,
+  generated_surface_action: false
 };
 
 const debugStage = (stage: string): void => {
@@ -585,12 +594,18 @@ async function observeArtifactCreateInner(
   assert.equal(
     changes.length,
     expectedWorkspaceChangeTelemetryCount[entrance],
-    `${entrance} must record exactly the expected BackendRun telemetry and no direct duplicate`
+    `${entrance} must record exactly one Core08 Resource change`
   );
   const operation = await server.store.getOperation(artifact.source_operation_id);
   assert.ok(operation, `${entrance} artifact must have a persisted Artifact Operation`);
-  const telemetryRuns = await Promise.all(changes.map((change) => server.store.getBackendRun(change.run_id)));
-  assert.equal(telemetryRuns.every(Boolean), true, `${entrance} WorkspaceChange telemetry must point at a real BackendRun`);
+  const runBackedChanges = changes.filter((change) => Boolean(change.run_id));
+  const directChanges = changes.filter((change) => !change.run_id);
+  const telemetryRuns = await Promise.all(runBackedChanges.map((change) => server.store.getBackendRun(change.run_id!)));
+  const runBacked = runBackedChanges.length === changes.length;
+  assert.equal(runBacked, expectedWorkspaceChangeRunBacked[entrance], `${entrance} must use the expected Core08 evidence cause`);
+  const allLinkedToExpectedCause = telemetryRuns.every(Boolean)
+    && directChanges.every((change) => Boolean(change.room_id && change.activity_id && change.domain_operation_id));
+  assert.equal(allLinkedToExpectedCause, true, `${entrance} WorkspaceChange evidence must be Run-backed or direct Activity-backed`);
   const newExecutions = (await server.store.listDomainCommandExecutions()).filter((execution) => !executionsBefore.has(execution.idempotency_key) && execution.command_id === "artifact.create");
   assert.equal(newExecutions.length, 1, `${entrance} must persist one artifact.create execution`);
   const execution = newExecutions[0]!;
@@ -608,7 +623,9 @@ async function observeArtifactCreateInner(
     operation: semanticOperation(operation),
     workspaceChangeTelemetry: {
       count: changes.length,
-      allLinkedToRealBackendRuns: telemetryRuns.every(Boolean)
+      runBacked,
+      allLinkedToRealBackendRuns: telemetryRuns.every(Boolean),
+      allLinkedToExpectedCause
     },
     execution: {
       commandId: execution.command_id,

@@ -24,7 +24,7 @@ const generatedSurfaceState = defineCommand<GeneratedSurfaceStatePorts>()({
   ...{
   "kind": "command",
   "id": "generated_surface.state",
-  "version": "3.0",
+  "version": "3.1",
   "availability": "active",
   "title": "Change generated surface state",
   "description": "Pin, unpin, or archive a Generated Surface.",
@@ -61,14 +61,19 @@ const generatedSurfaceState = defineCommand<GeneratedSurfaceStatePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGeneratedSurfaceState(_context: TrustedDomainContext, input: GeneratedSurfaceStateInput): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleGeneratedSurfaceState(context: TrustedDomainContext, input: GeneratedSurfaceStateInput): Promise<DomainResult<z.infer<typeof Output>>> {
+        if (!context.sessionId) {
+          throw ports.generatedSurfaceStateError("conflict", "generated_surface_display_state_compatibility_required");
+        }
         const state = input.action === "pin" ? "pinned" : input.action === "unpin" ? "ephemeral" : "archived";
         const surface = await ports.updateGeneratedSurfaceState(input.surface_id, state);
         if (!surface) throw ports.generatedSurfaceStateError("not_found", "generated_surface_not_found");
         const kind = input.action === "pin" ? "pinned" : input.action === "unpin" ? "unpinned" : "dismissed";
         await ports.saveGeneratedSurfaceInteraction(SurfaceInteractionRecordSchema.parse({
           id: input.interaction_id ?? createId("surface_interaction"), kind,
-          session_id: surface.session_id, message_id: input.message_id,
+          ...(context.sessionId ? { session_id: context.sessionId } : {}),
+          ...(context.sessionRef ? { session_ref: context.sessionRef } : {}),
+          ...(input.message_id ? { message_id: input.message_id } : {}),
           surface_id: surface.id, revision_id: surface.current_revision_id, created_at: nowIso()
         }));
         return { ok: true, value: Output.parse(surface) };

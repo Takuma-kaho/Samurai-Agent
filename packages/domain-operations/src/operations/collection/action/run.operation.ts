@@ -20,7 +20,7 @@ export interface CollectionActionRunRequest {
   actionId: string;
   recordId?: string;
   backendId?: string;
-  sessionId?: string;
+  trustedContext: TrustedDomainContext;
   payload: Record<string, z.infer<typeof domainJsonValueSchema>>;
 }
 
@@ -32,7 +32,7 @@ const collectionActionRun = defineCommand<CollectionActionRunPorts>()({
   ...{
   "kind": "command",
   "id": "collection.action.run",
-  "version": "4.1",
+  "version": "4.2",
   "availability": "active",
   "title": "Run collection action",
   "description": "Run a schema-defined Collection action such as patch, create, or reindex.",
@@ -83,7 +83,7 @@ const collectionActionRun = defineCommand<CollectionActionRunPorts>()({
           actionId: input.action_id,
           ...(input.record_id ? { recordId: input.record_id } : {}),
           ...(input.backend_id ? { backendId: input.backend_id } : {}),
-          ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+          trustedContext: context,
           payload: input.payload
         });
         return { ok: true, value: Output.parse(value) };

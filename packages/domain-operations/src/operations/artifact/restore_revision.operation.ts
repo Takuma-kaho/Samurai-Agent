@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { ActivityInboxItem, ArtifactRecord, ArtifactRevisionRecord, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import type { ActivityInboxItem, ArtifactRecord, ArtifactRevisionRecord, JsonValue, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactRevisionWriteValueSchema } from "../../value-objects/artifact.js";
 
@@ -17,11 +17,10 @@ export interface ArtifactRestoreRevisionPorts {
   getArtifact(id: string): Promise<ArtifactRecord | undefined>;
   getArtifactRevision(id: string): Promise<ArtifactRevisionRecord | undefined>;
   readArtifactRevisionContent(id: string): Promise<Uint8Array | undefined>;
-  ensureArtifactSession(): Promise<SessionRecord>; createArtifactEnvelope(session: SessionRecord, content: string): MessageEnvelope;
   createArtifactRevision(input: { artifactId: string; content: Uint8Array; baseRevisionId?: string; editorSource: "restore"; changeSummary: string; provenance: Record<string, JsonValue> }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   artifactRevisionNotFoundError(): Error; artifactRevisionContentNotFoundError(): Error;
-  runArtifactMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
+  runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
 }
 
 const artifactRestoreRevision = defineCommand<ArtifactRestoreRevisionPorts>()({
@@ -73,9 +72,7 @@ const artifactRestoreRevision = defineCommand<ArtifactRestoreRevisionPorts>()({
         if (!artifact || !sourceRevision || sourceRevision.artifact_id !== input.artifact_id) throw ports.artifactRevisionNotFoundError();
         const content = await ports.readArtifactRevisionContent(input.revision_id);
         if (!content) throw ports.artifactRevisionContentNotFoundError();
-        const session = await ports.ensureArtifactSession();
-        const envelope = ports.createArtifactEnvelope(session, `Restore artifact revision: ${artifact.title}`);
-        const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref, sourceRevision.file_ref], execute: async (operation) => {
+        const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Restore artifact revision: ${artifact.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref, sourceRevision.file_ref], execute: async (operation) => {
           const created = await ports.createArtifactRevision({ artifactId: input.artifact_id, content, baseRevisionId: input.base_revision_id ?? currentRevisionId(artifact), editorSource: "restore", changeSummary: input.change_summary ?? `Restored revision ${sourceRevision.revision}.`, provenance: { restored_from_revision_id: sourceRevision.id } });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonRecord(artifact) }, { artifact: jsonRecord(created.artifact) });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Restored revision ${sourceRevision.revision} of ${artifact.title}.`, extra: { revision: created.revision } };

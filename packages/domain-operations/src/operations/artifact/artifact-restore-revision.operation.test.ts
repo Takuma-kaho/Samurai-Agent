@@ -8,8 +8,6 @@ const now = "2026-01-01T00:00:00.000Z";
 const artifact: ArtifactRecord = { id: "artifact_1", title: "Notes", kind: "markdown", locale: "ja", source_locales: ["ja"], file_ref: { kind: "artifact", id: "artifact_1", uri: "artifacts/notes.md" }, metadata: { current_revision_id: "revision_2" }, source_operation_id: "operation_create", created_by: "backend", created_at: now, updated_at: now };
 const sourceRevision: ArtifactRevisionRecord = { id: "revision_1", artifact_id: artifact.id, revision: 1, file_ref: { kind: "artifact_revision", id: "revision_1", uri: "artifacts/revisions/1.md" }, blob_ref: { kind: "blob", id: "blob_1", uri: "blobs/1" }, content_hash: "hash_1", content_bytes: 4, provenance: {}, created_at: now };
 const createdRevision: ArtifactRevisionRecord = { ...sourceRevision, id: "revision_3", revision: 3, parent_revision_id: "revision_2", editor_source: "restore" };
-const session = { id: "session_1" } as never;
-const envelope = { id: "envelope_1" } as never;
 const operation = { id: "operation_1" } as never;
 
 describe("artifact.restore_revision handler", () => {
@@ -18,8 +16,7 @@ describe("artifact.restore_revision handler", () => {
     const handler = artifactRestoreRevision.createHandler({
       artifactContract: () => ({ id: "artifact.restore_revision", proposed_effects: ["Restore"] }),
       getArtifact: async () => artifact, getArtifactRevision: async () => sourceRevision,
-      readArtifactRevisionContent: async () => new Uint8Array([1, 2, 3, 4]),
-      ensureArtifactSession: async () => session, createArtifactEnvelope: () => envelope, createArtifactRevision,
+      readArtifactRevisionContent: async () => new Uint8Array([1, 2, 3, 4]), createArtifactRevision,
       createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
       artifactRevisionNotFoundError: () => new Error("revision_not_found"), artifactRevisionContentNotFoundError: () => new Error("content_not_found"),
       runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [], ...executed.extra }; }
@@ -36,7 +33,6 @@ describe("artifact.restore_revision handler", () => {
     const handler = artifactRestoreRevision.createHandler({
       artifactContract: () => ({ id: "artifact.restore_revision", proposed_effects: [] }), getArtifact: async () => artifact,
       getArtifactRevision: async () => ({ ...sourceRevision, artifact_id: "other" }), readArtifactRevisionContent,
-      ensureArtifactSession: async () => session, createArtifactEnvelope: () => envelope,
       createArtifactRevision: async () => ({ artifact, revision: createdRevision }), createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
       artifactRevisionNotFoundError: () => new Error("revision_not_found"), artifactRevisionContentNotFoundError: () => new Error("content_not_found"),
       runArtifactMutation: async () => { throw new Error("unexpected"); }

@@ -53,8 +53,10 @@ export const roomShareableResourceKinds = [
   "generated_surface"
 ] as const;
 export type RoomShareableResourceKind = (typeof roomShareableResourceKinds)[number];
-/** Session remains readable for legacy rows but cannot be newly shared. */
-export const newRoomShareableResourceKinds = roomShareableResourceKinds.filter((kind) => kind !== "session") as Exclude<RoomShareableResourceKind, "session">[];
+/** Session and Generated Surface shares remain readable/revocable only. */
+export const newRoomShareableResourceKinds = roomShareableResourceKinds.filter(
+  (kind) => kind !== "session" && kind !== "generated_surface"
+) as Exclude<RoomShareableResourceKind, "session" | "generated_surface">[];
 
 /**
  * A persisted or legacy share reference.  `session` remains here solely so
@@ -67,7 +69,7 @@ export type RoomShareableResourceReference =
 
 /** Public input shape for creating a new Room-to-Room share. */
 export type NewRoomShareableResourceReference =
-  | { kind: Exclude<RoomShareableResourceKind, "session" | "collection_record" | "file">; id: string }
+  | { kind: Exclude<RoomShareableResourceKind, "session" | "generated_surface" | "collection_record" | "file">; id: string }
   | { kind: "collection_record"; collectionId: string; recordId: string }
   | { kind: "file"; path: string };
 

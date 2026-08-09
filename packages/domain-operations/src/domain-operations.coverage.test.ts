@@ -184,7 +184,8 @@ describe("Domain Operation strict gate coverage", () => {
           if (name === "savePluginState") return (outputs.get(id) as { state?: unknown } | undefined)?.state
             ?? { manifest_id: "plugin-fixture", enabled: true, version: "1.0.0", updated_at: "2026-07-16T00:00:00.000Z" };
           if (name === "executeReflectionWorkflow") return outputs.get(id);
-          if (name === "getGeneratedSurface") return (outputs.get(id) as { surface?: unknown } | undefined)?.surface
+          if (name === "getGeneratedSurface") return (outputs.get("generated_surface.create") as { definition?: unknown } | undefined)?.definition
+            ?? (outputs.get("generated_surface.revise") as { definition?: unknown } | undefined)?.definition
             ?? (outputs.get("generated_surface.export") as { surface?: unknown } | undefined)?.surface;
           if (name === "resolveGeneratedSurfaceAction") {
             if (!generatedActionAllowed) throw new Error("generated_surface_action_disallowed");
@@ -268,6 +269,13 @@ describe("Domain Operation strict gate coverage", () => {
           if (name === "memoryResourceRef") return fixtureRecord(id).resource_ref;
           if (name === "memoryArchiveCapabilityId") return "memory";
           if (name === "createReflectionMemoryTarget" || name === "createReflectionSkillTarget" || name === "createReflectionWikiTarget") return { resource: fixtureRecord(id), ref: fixtureRecord(id).resource_ref };
+          if (name === "runGeneratedSurfaceMutation") {
+            const mutation = args[0] as {
+              execute: (operation: Record<string, unknown>) => Promise<Record<string, unknown>>;
+            };
+            const operation = fixtureRecord(id);
+            return Promise.resolve(mutation.execute(operation)).then((result) => ({ ...result, operation, activity: [] }));
+          }
           if ((name.startsWith("save") || name.startsWith("update")) && args[0] && typeof args[0] === "object") return args[0];
           if (name.startsWith("run") && args[0] && typeof args[0] === "object" && "execute" in args[0] && typeof args[0].execute === "function") {
             return Promise.resolve(args[0].execute(fixtureRecord(id))).then(() => outputs.get(id));
@@ -305,7 +313,7 @@ describe("Domain Operation strict gate coverage", () => {
         participant: { kind: "human" as const, participantId: "human:owner" },
         correlationId: `coverage-${definition.id}`,
         ...(definition.id === "chat.turn.run" ? { idempotencyKey: "coverage-chat-turn", sessionId: "coverage-chat-session" } : {}),
-        ...(definition.id === "generated_surface.create" || definition.id === "generated_surface.revise"
+        ...(definition.id === "generated_surface.create" || definition.id === "generated_surface.revise" || definition.id === "generated_surface.interaction.record" || definition.id === "generated_surface.state"
           ? { sessionId: "surface-session", runId: "surface-run" }
           : definition.id === "learning.background_review.apply"
             ? { sessionId: "reflection-session", roomId: "reflection-room", participant: { kind: "human" as const, participantId: "human:owner" } }
@@ -404,7 +412,7 @@ describe("Domain Operation strict gate coverage", () => {
       ...(generatedCreateFixture.input as Record<string, unknown>),
       bundle: { custom_view: generatedBundleWithAsset }
     });
-    await expect(generatedCreateBinding.execute({ ...generatedCreateFixture.context, sessionId: undefined } as never, generatedCreateFixture.input)).rejects.toBeInstanceOf(Error);
+    await expect(generatedCreateBinding.execute({ ...generatedCreateFixture.context, sessionId: undefined } as never, generatedCreateFixture.input)).resolves.toMatchObject({ ok: true });
 
     const generatedReviseBinding = bindings.find((binding) => binding.definition.id === "generated_surface.revise")!;
     const generatedReviseFixture = executionCases.get("generated_surface.revise")!;
@@ -420,18 +428,12 @@ describe("Domain Operation strict gate coverage", () => {
       ...(generatedReviseFixture.input as Record<string, unknown>),
       bundle: { custom_view: generatedReviseBundleWithAsset }
     });
-    await expect(generatedReviseBinding.execute({ ...generatedReviseFixture.context, sessionId: undefined } as never, generatedReviseFixture.input)).rejects.toBeInstanceOf(Error);
+    await expect(generatedReviseBinding.execute({ ...generatedReviseFixture.context, sessionId: undefined } as never, generatedReviseFixture.input)).resolves.toMatchObject({ ok: true });
 
     const graphCreateBinding = bindings.find((binding) => binding.definition.id === "graph.create")!;
     const graphCreateFixture = executionCases.get("graph.create")!;
     await graphCreateBinding.execute({ ...graphCreateFixture.context, sessionId: "graph-session" } as never, graphCreateFixture.input);
-    const missingGraphSessionPorts = new Proxy(operationPorts, {
-      get: (target, operationId) => String(operationId) !== "graph.create" ? Reflect.get(target, operationId) : new Proxy(Reflect.get(target, operationId) as object, {
-        get: (operationTarget, method) => String(method) === "getArtifactSession" ? async () => undefined : Reflect.get(operationTarget, method)
-      })
-    }) as DomainOperationPorts;
-    const missingGraphSessionBinding = bindOperationDefinitions(missingGraphSessionPorts).find((binding) => binding.definition.id === "graph.create")!;
-    await expect(missingGraphSessionBinding.execute({ ...graphCreateFixture.context, sessionId: "graph-session" } as never, graphCreateFixture.input)).rejects.toBeInstanceOf(Error);
+    await expect(graphCreateBinding.execute({ ...graphCreateFixture.context, sessionId: undefined } as never, graphCreateFixture.input)).resolves.toMatchObject({ ok: true });
 
     const sandboxBinding = bindings.find((binding) => binding.definition.id === "sandbox.exec")!;
     const sandboxFixture = executionCases.get("sandbox.exec")!;

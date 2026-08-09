@@ -7,18 +7,17 @@ import {
   type CollectionRecord,
   type CollectionSchema,
   type JsonValue,
-  type MessageEnvelope,
   type OperationRecord,
   type ResourceRef,
-  type RollbackPoint,
-  type SessionRecord
+  type RollbackPoint
 } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 import { jsonValue } from "./json-value.js";
 import type { SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
-import type { ChatTurnResult } from "./conversation-domain-service.js";
 
-type CollectionActionSession = SessionRecord;
-interface CollectionActionChat extends ChatTurnResult {
+interface CollectionActionExecution {
+  backendRun: { id: string; status: string };
+  outputText: string;
   customView?: Record<string, JsonValue>;
 }
 interface CollectionPluginExecution { status: string; handler_id?: string; output?: JsonValue; error?: string }
@@ -38,14 +37,12 @@ interface CollectionReindexResult {
 }
 type CollectionActionResource = StoredCollectionRecord
   | CollectionReindexResult
-  | { collection_id: string; action_id: string; action_kind: string; status: "completed"; backend_run_id: string; session_id: string; custom_view?: Record<string, JsonValue>; output: { backend_status: string; message_ids: string[]; custom_view?: Record<string, JsonValue> } }
+  | { collection_id: string; action_id: string; action_kind: string; status: "completed"; backend_run_id: string; session_ref?: { app_id: string; session_id: string }; custom_view?: Record<string, JsonValue>; output: { backend_status: string; output_text: string; custom_view?: Record<string, JsonValue> } }
   | { collection_id: string; action_id: string; action_kind: string; catalog_action_id: string; handler_id?: string; status: "completed"; output?: JsonValue };
 
 export interface CollectionActionPort {
-  getSession(id: string): Promise<CollectionActionSession | undefined>;
-  ensureSession(): Promise<CollectionActionSession>;
   resolveRecordData(schema: StoredCollectionSchema, record: StoredCollectionRecord): Promise<Record<string, JsonValue> | undefined>;
-  runInstruction(input: { session: CollectionActionSession; prompt: string; backendId?: string; metadata: Record<string, JsonValue>; customView: boolean }): Promise<CollectionActionChat>;
+  runInstruction(input: { context: TrustedDomainContext; prompt: string; backendId?: string; metadata: Record<string, JsonValue>; customView: boolean }): Promise<CollectionActionExecution>;
   runPlugin(input: { catalogActionId: string; payload: Record<string, JsonValue>; context: Record<string, JsonValue> }): Promise<CollectionPluginExecution>;
 }
 
@@ -54,12 +51,13 @@ export interface CollectionActionRunInput {
   actionId: string;
   backendId?: string;
   recordId?: string;
-  sessionId?: string;
+  trustedContext: TrustedDomainContext;
   payload: Record<string, JsonValue>;
 }
 
 interface StoredCollectionSchema extends CollectionSchema { file_path: string }
 interface CollectionWriteResult<T> { resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }
+export type CollectionMutationEvidenceKind = "resource_change" | "derived_repair";
 
 export interface CollectionMutationPort {
   getSchema(id: string): Promise<StoredCollectionSchema | undefined>;
@@ -73,9 +71,7 @@ export interface CollectionMutationPort {
   }>;
   mapPatchError(error: unknown): Error;
   reindex(): Promise<CollectionReindexResult>;
-  ensureSession(): Promise<SessionRecord>;
-  createEnvelope(content: string): MessageEnvelope;
-  runMutation<T, Extra extends Record<string, unknown> = {}>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & Extra> }): Promise<CollectionWriteResult<T> & Extra>;
+  runMutation<T, Extra extends Record<string, unknown> = {}>(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; evidenceKind?: CollectionMutationEvidenceKind; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & Extra> }): Promise<CollectionWriteResult<T> & Extra>;
   createRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   contract(id: "collection.schema.save" | "collection.reindex"): { id: string; proposed_effects: string[] };
   queueTrigger(input: { collectionId: string; recordId: string; event: "record.created" | "record.patched" }): Promise<void>;
@@ -105,9 +101,7 @@ export class CollectionDomainService {
   presentCollectionView(input: { collectionId: string; viewId?: string }) { return this.dependencies.queries.presentView(input); }
   collectionQueryError(message: string) { return this.dependencies.requestError("not_found", message); }
   collectionMutationContract(id: "collection.schema.save" | "collection.reindex") { return this.dependencies.mutation.contract(id); }
-  ensureCollectionMutationSession() { return this.dependencies.mutation.ensureSession(); }
-  createCollectionMutationEnvelope(content: string) { return this.dependencies.mutation.createEnvelope(content); }
-  runCollectionMutation<T, Extra extends Record<string, unknown> = {}>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & Extra> }) { return this.dependencies.mutation.runMutation<T, Extra>(input); }
+  runCollectionMutation<T, Extra extends Record<string, unknown> = {}>(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; evidenceKind?: CollectionMutationEvidenceKind; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & Extra> }) { return this.dependencies.mutation.runMutation<T, Extra>(input); }
   reindexCollectionStore() { return this.dependencies.mutation.reindex(); }
   getCollectionSchemaForMutation(id: string) { return this.dependencies.mutation.getSchema(id); }
   saveCollectionSchema(schema: CollectionSchema) { return this.dependencies.mutation.saveSchema(schema); }
@@ -124,20 +118,18 @@ export class CollectionDomainService {
   deleteCollectionRecord(collectionId: string, recordId: string) { return this.dependencies.mutation.deleteRecord(collectionId, recordId); }
   collectionMutationError(code: "forbidden" | "not_found", message: string) { return this.dependencies.requestError(code, message); }
 
-  async runAction(input: CollectionActionRunInput): Promise<CollectionWriteResult<CollectionActionResource> & { chat?: CollectionActionChat; before?: StoredCollectionRecord }> {
+  async runAction(input: CollectionActionRunInput): Promise<CollectionWriteResult<CollectionActionResource> & { before?: StoredCollectionRecord }> {
     const schema = await this.dependencies.mutation.getSchema(input.collectionId);
     if (!schema) throw this.dependencies.requestError("not_found", `Collection schema not found: ${input.collectionId}`);
     const action = findAction(schema, input.actionId);
     if (!action) throw this.dependencies.requestError("not_found", `Collection action not found: ${input.collectionId}/${input.actionId}`);
     const kind = actionKind(action);
-    const session = input.sessionId ? await this.dependencies.actions.getSession(input.sessionId) : await this.dependencies.actions.ensureSession();
-    if (!session) throw this.dependencies.requestError("not_found", `Session not found: ${input.sessionId}`);
-    const envelope = this.dependencies.mutation.createEnvelope(`Run collection action: ${input.collectionId}/${input.actionId}`);
     let patchBefore: StoredCollectionRecord | undefined;
     let createdRecord: StoredCollectionRecord | undefined;
-    const result = await this.dependencies.mutation.runMutation<CollectionActionResource, { chat?: CollectionActionChat }>({
-      session, envelope, operationName: "collection.action.run",
+    const result = await this.dependencies.mutation.runMutation<CollectionActionResource>({
+      trustedContext: input.trustedContext, inputSummary: `Run collection action: ${input.collectionId}/${input.actionId}`, operationName: "collection.action.run",
       proposedEffects: [`Run collection action ${input.collectionId}/${input.actionId}.`],
+      evidenceKind: kind === "reindex" || kind === "reindex_collection" ? "derived_repair" : "resource_change",
       execute: async (operation) => {
         if (kind === "patch_record" || kind === "patch") {
           const recordId = input.recordId ?? actionString(action, "record_id") ?? optionalString(input.payload.record_id);
@@ -177,18 +169,17 @@ export class CollectionDomainService {
           const instruction = actionInstruction(action, input.payload);
           if (!instruction) throw this.dependencies.requestError("conflict", `collection_action_instruction_required:${input.actionId}`);
           const outputSurface = actionOutputSurface(action, input.payload);
-          const chat = await this.dependencies.actions.runInstruction({ session, backendId: input.backendId,
+          const execution = await this.dependencies.actions.runInstruction({ context: input.trustedContext, backendId: input.backendId,
             prompt: instructionPrompt({ collectionId: input.collectionId, actionId: input.actionId, instruction, record,
               resolvedRecordData: record ? await this.dependencies.actions.resolveRecordData(schema, record) : undefined,
               payload: input.payload, outputSurface }), customView: outputSurface === "custom_view",
             metadata: { collection_action_operation_id: operation.id, collection_id: input.collectionId,
               collection_action_id: input.actionId, collection_action_kind: kind, ...(recordId ? { collection_record_id: recordId } : {}) }
           });
-          const actionChat = chat;
           const resource = { collection_id: input.collectionId, action_id: input.actionId, action_kind: kind, status: "completed" as const,
-            backend_run_id: chat.backendRun.id, session_id: chat.session.id, ...(chat.customView ? { custom_view: chat.customView } : {}),
-            output: { backend_status: chat.backendRun.status, message_ids: chat.messages.map((message) => message.id), ...(chat.customView ? { custom_view: chat.customView } : {}) } };
-          return { resource, ref: actionExecutionRef(input.collectionId, input.actionId, operation.id), chat: actionChat, summary: `Ran collection instruction action ${input.collectionId}/${input.actionId}.` };
+            backend_run_id: execution.backendRun.id, ...(input.trustedContext.sessionRef ? { session_ref: input.trustedContext.sessionRef } : {}), ...(execution.customView ? { custom_view: execution.customView } : {}),
+            output: { backend_status: execution.backendRun.status, output_text: execution.outputText, ...(execution.customView ? { custom_view: execution.customView } : {}) } };
+          return { resource, ref: actionExecutionRef(input.collectionId, input.actionId, operation.id), summary: `Ran collection instruction action ${input.collectionId}/${input.actionId}.` };
         }
         if (isPluginAction(action, kind)) {
           const catalogActionId = actionString(action, "catalog_action_id") ?? actionString(action, "action_catalog_id") ?? actionString(action, "plugin_action_id") ?? input.actionId;
@@ -220,9 +211,9 @@ export class CollectionDomainService {
     if (!target) return undefined;
     const schema = await this.dependencies.mutation.getSchema(target.collectionId);
     if (!schema || !findAction(schema, target.actionId)) return undefined;
-    await this.runAction({ collectionId: target.collectionId, actionId: target.actionId, recordId: target.recordId,
-      payload: { trigger_id: target.triggerId, event: target.event, action_kind: target.actionKind, automation_job_id: job.id } });
-    return `Collection trigger ${target.triggerId} ran action ${target.collectionId}/${target.actionId}.`;
+    // Core08 has no trusted Automation Room/Principal ingress yet. A trigger
+    // must fail closed instead of manufacturing a Session for a Chat turn.
+    throw this.dependencies.requestError("forbidden", "collection_automation_context_required");
   }
 
   schemaDocs() { return { action: "schemaDocs" as const, schema_docs: this.dependencies.queries.schemaDocs() }; }

@@ -1,7 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { SupportedLocaleSchema, type ActivityInboxItem, ArtifactRecord, type JsonValue, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { SupportedLocaleSchema, type ActivityInboxItem, ArtifactRecord, type JsonValue, type OperationRecord, type ResourceRef, type RollbackPoint } from "@samurai-agent/core-schemas";
+import { domainJsonValueSchema, defineCommand, trustedCreatorId, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactCreateValueSchema } from "../../value-objects/artifact.js";
 
 const Input = z.object({
@@ -17,13 +17,11 @@ type OutputValue = z.infer<typeof Output>;
 
 export interface ArtifactCreatePorts {
   artifactContract(id: "artifact.create"): { id: string; proposed_effects: string[] };
-  createArtifactSession(input: { title: string; output_locale?: z.infer<typeof SupportedLocaleSchema> }): Promise<SessionRecord>;
-  getArtifactSession(id: string): Promise<SessionRecord | undefined>; artifactSessionNotFoundError(): Error;
+  artifactDefaultLocales(): Promise<{ inputLocale: z.infer<typeof SupportedLocaleSchema>; outputLocale: z.infer<typeof SupportedLocaleSchema> }>;
   validateGraphArtifactContent(content: string): void;
-  createArtifactEnvelope(session: SessionRecord, content: string, inputLocale?: z.infer<typeof SupportedLocaleSchema>, outputLocale?: z.infer<typeof SupportedLocaleSchema>, metadata?: Record<string, JsonValue>, envelopeId?: string): MessageEnvelope;
   createArtifactDraft(input: { operation: OperationRecord; title: string; content: string; kind?: z.infer<typeof Input>["kind"]; locale: z.infer<typeof SupportedLocaleSchema>; sourceLocales: z.infer<typeof SupportedLocaleSchema>[]; createdBy: string; metadata?: Record<string, JsonValue> }): Promise<ArtifactRecord>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runArtifactMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: Record<string, never> }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: Record<string, never> }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const artifactCreate = defineCommand<ArtifactCreatePorts>()({
@@ -86,13 +84,9 @@ const artifactCreate = defineCommand<ArtifactCreatePorts>()({
     return {
       execute: async function handleArtifactCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         if (input.kind === "graph") ports.validateGraphArtifactContent(input.content);
-        const createdSession = context.sessionId ? undefined : await ports.createArtifactSession({ title: input.title, output_locale: input.output_locale });
-        const sessionId = context.sessionId ?? createdSession?.id;
-        if (!sessionId) throw ports.artifactSessionNotFoundError();
-        const session = createdSession ?? await ports.getArtifactSession(sessionId);
-        if (!session) throw ports.artifactSessionNotFoundError();
-        const inputLocale = input.input_locale ?? session.ui_locale;
-        const outputLocale = input.output_locale ?? session.output_locale;
+        const defaults = await ports.artifactDefaultLocales();
+        const inputLocale = input.input_locale ?? defaults.inputLocale;
+        const outputLocale = input.output_locale ?? defaults.outputLocale;
         const metadata = {
           ...input.metadata,
           ...(context.surfaceOperation
@@ -103,8 +97,7 @@ const artifactCreate = defineCommand<ArtifactCreatePorts>()({
             : {})
         };
         const contract = ports.artifactContract("artifact.create");
-        const envelope = ports.createArtifactEnvelope(session, input.content, inputLocale, outputLocale, metadata, context.envelopeId);
-        const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, execute: async (operation) => {
+        const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Create artifact: ${input.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, execute: async (operation) => {
           const artifact = await ports.createArtifactDraft({
             operation,
             title: input.title,
@@ -112,7 +105,7 @@ const artifactCreate = defineCommand<ArtifactCreatePorts>()({
             kind: input.kind,
             locale: outputLocale,
             sourceLocales: [inputLocale],
-            createdBy: context.actorId,
+            createdBy: trustedCreatorId(context),
             metadata
           });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref], {}, { artifact_id: artifact.id });

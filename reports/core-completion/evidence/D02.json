@@ -3,9 +3,11 @@
   "test_id": "D02",
   "command": "pnpm core:test:generated-surface",
   "status": "passed",
-  "commit_sha": "6682f514733b19b8b23f70654271e693bad532b5",
+  "commit_sha": "ce205d29560c12222060e5e6ba0d1ac05703b17e",
   "worktree_clean": false,
-  "source_sha256": "cbe6bb068f102c74f8117f5748f0cc5d25884d2863a049db9062c555cf6722a6",
+  "source_sha256": "884156fac7cc23de5a4fc8938db0d82521d06337f3c3e42923805f1be9e1fb81",
+  "source_graph_sha256": "2734d5623619bca60d32107558f1e4ffee46a5a42c2e67fb1f0a87bb85d8b9fc",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/action-catalog/src/index.ts",
     "packages/core-schemas/src/index.ts",
@@ -15,8 +17,8 @@
     "scripts/verify-generated-surface-validation.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-17T14:54:45.101Z",
-  "completed_at": "2026-07-17T14:54:45.544Z",
+  "started_at": "2026-08-09T09:05:27.314Z",
+  "completed_at": "2026-08-09T09:05:27.962Z",
   "assertions": [
     {
       "name": "Valid HTML/CSS/script/action bundle",

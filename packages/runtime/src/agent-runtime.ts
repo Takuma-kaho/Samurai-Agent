@@ -187,6 +187,7 @@ import {
   type EvaluationTraceReport,
   type SurfaceRendererRegistryEntry,
   type WikiFrontmatter,
+  type NewWorkspaceChangeRecord,
   type WorkspaceChangeRecord,
   type ToolRunRecord,
   type UsageScopeRef,
@@ -327,6 +328,7 @@ import { RoomAgentDomainService } from "./commands/services/room-agent-domain-se
 import { RoomAuthorizationError, RoomAuthorizationService } from "./commands/services/room-authorization-service";
 import { RoomResourceCatalog } from "./commands/services/room-resource-catalog";
 import { ActivityIngestService } from "./activity/activity-ingest-service";
+import { ResourceMutationActivityService, ResourceMutationEvidenceError, type ResourceMutationActivityScope } from "./activity/resource-mutation-activity-service";
 import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
 import { BackendToolBridgeService, type BackendToolBridgeCallResult } from "./host/backend-tool-bridge-service";
 import { LearningEvidenceAssembler } from "./learning/learning-evidence-assembler";
@@ -483,7 +485,12 @@ interface RecordedMutationInput<TResource, TExtra extends Record<string, unknown
    * against the current Room before a filesystem or index mutation can run.
    */
   boundaryResourceRefs?: ResourceRef[];
-  execute: (operation: OperationRecord) => Promise<{
+  /** Core08 Resource writes also leave durable Activity/Change/Usage evidence. */
+  core08Evidence?: {
+    changeType: WorkspaceChangeRecord["change_type"];
+    stage?: "modified" | "reverted";
+  };
+  execute: (operation: OperationRecord, activity?: ActivityRecord) => Promise<{
     resource: TResource;
     ref: NonNullable<OperationRecord["result_ref"]>;
     rollbackPoint?: RollbackPoint;
@@ -816,7 +823,7 @@ export class RuntimeRequestError extends Error {
   constructor(
     readonly code: RuntimeRequestErrorCode,
     message: string,
-    readonly payload?: ArchiveMemoryRuntimeResult | BackendRunErrorPayload | ResourceVersionConflictPayload | DeprecatedOperationPayload | DomainCommandReplayPayload,
+    readonly payload?: ArchiveMemoryRuntimeResult | BackendRunErrorPayload | ResourceVersionConflictPayload | DeprecatedOperationPayload | DomainCommandReplayPayload | ResourceMutationEvidenceFailurePayload,
     readonly diagnostics?: ProviderDiagnostics
   ) {
     super(message);
@@ -833,7 +840,8 @@ function requireSessionBoundRun(run: BackendRunRecord): asserts run is BackendRu
 export type RuntimeRequestErrorCode =
   | "bad_request" | "validation" | "gone" | "not_found" | "conflict" | "forbidden" | "unavailable"
   | "outcome_unknown" | "internal" | "provider_not_configured" | "provider_failed" | "backend_cancelled"
-  | "backend_execution_root_not_ready" | "domain_command_failed";
+  | "backend_execution_root_not_ready" | "domain_command_failed" | "resource_mutation_evidence_failed"
+  | "workspace_change_notification_failed";
 
 export interface DeprecatedOperationPayload {
   deprecated_operation_id: string;
@@ -845,6 +853,12 @@ export interface DomainCommandReplayPayload {
   code: string;
   retryable: boolean;
   details?: JsonValue;
+}
+
+export interface ResourceMutationEvidenceFailurePayload {
+  operation_id: string;
+  resource_ref?: ResourceRef;
+  failure_stage: "workspace_change" | "resource_usage" | "activity_finalize";
 }
 
 export interface AgentRuntimeWorkspaceOptions {
@@ -1004,6 +1018,7 @@ export class AgentRuntime {
   private readonly roomAgentDomainService: RoomAgentDomainService;
   private readonly roomAuthorizationService: RoomAuthorizationService;
   private readonly activityIngest: ActivityIngestService;
+  private readonly resourceMutationActivity: ResourceMutationActivityService;
   private readonly learningEvidenceAssembler: LearningEvidenceAssembler;
   /** Identity cache only for an already live-checked pre-Core 06 Run. */
   private readonly legacyRunRequesterIds = new Map<string, string>();
@@ -1098,6 +1113,7 @@ export class AgentRuntime {
     );
     this.roomAuthorizationService = new RoomAuthorizationService(this.store);
     this.activityIngest = new ActivityIngestService(this.store, this.roomAuthorizationService);
+    this.resourceMutationActivity = new ResourceMutationActivityService(this.store, this.activityIngest);
     const roomResourceCatalog = new RoomResourceCatalog(
       this.store,
       (input) => this.resolveWorkspacePath(input).relativePath,
@@ -1658,6 +1674,12 @@ export class AgentRuntime {
         saveInteraction: (record) => this.store.saveSurfaceInteraction(record),
         updateState: (id, state) => this.store.updateGeneratedSurfaceState(id, state),
       },
+      runMutation: <TExtra extends Record<string, unknown>>(input: import("./commands/services/generated-surface-domain-service").GeneratedSurfaceMutationInput<TExtra>) => this.runRecordedMutation<GeneratedSurfaceDefinition, TExtra>({
+        ...input,
+        context: webGatewayContext,
+        trustedContext: input.trustedContext,
+        core08Evidence: { changeType: "other" }
+      }),
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
     this.skillDomainService = new SkillDomainService({
@@ -1824,18 +1846,8 @@ export class AgentRuntime {
     });
     this.collectionDomainService = new CollectionDomainService({
       actions: {
-        getSession: (id) => this.store.getSession(id),
-        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
         resolveRecordData: (schema, record) => this.collectionActionResolvedRecordData(schema, record as CollectionRecordWithFilePath),
-        runInstruction: async (input) => {
-          const chat = await this.runChatTurn({
-            sessionId: input.session.id, content: input.prompt, backend_id: input.backendId,
-            input_locale: input.session.ui_locale as SupportedLocale, output_locale: input.session.output_locale as SupportedLocale,
-            metadata: input.metadata, gateway_context: webGatewayContext,
-            idempotency_key: `collection-action:${String(input.metadata.collection_action_operation_id ?? stableHash(input.prompt))}`
-          });
-          return { ...chat, customView: input.customView ? collectionActionCustomViewOutput(chat) : undefined };
-        },
+        runInstruction: (input) => this.runCollectionInstructionWorkspaceExecution(input),
         runPlugin: (input) => this.pluginRegistry.executeAction(input.catalogActionId, input.payload, input.context)
       },
       queries: {
@@ -1856,9 +1868,12 @@ export class AgentRuntime {
           ? new RuntimeRequestError("conflict", error.message, resourceVersionConflictPayload(error))
           : error instanceof Error ? error : new Error(String(error)),
         reindex: () => this.store.reindexCollections(),
-        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
-        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
-        runMutation: <T, Extra extends Record<string, unknown>>(input: Omit<RecordedMutationInput<T, Extra>, "context">) => runWebMutation<T, Extra>(input),
+        runMutation: <T, Extra extends Record<string, unknown>>(input: Omit<RecordedMutationInput<T, Extra>, "context" | "core08Evidence"> & { trustedContext: TrustedDomainContext; inputSummary: string; evidenceKind?: "resource_change" | "derived_repair" }) => this.runRecordedMutation<T, Extra>({
+          ...input,
+          context: webGatewayContext,
+          trustedContext: input.trustedContext,
+          ...(input.evidenceKind === "derived_repair" ? {} : { core08Evidence: { changeType: "collection_changed" } })
+        }),
         createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         contract: (id) => requireDomainCommandEntry(id),
         queueTrigger: async (input) => { await this.queueCollectionTriggerAutomations(input); }
@@ -1903,16 +1918,15 @@ export class AgentRuntime {
     });
     this.artifactDomainService = new ArtifactDomainService({
       contract: (id) => requireDomainCommandEntry(id as Parameters<typeof requireDomainCommandEntry>[0]),
-      createSession: (input) => this.createSession(input),
-      getSession: (id) => this.store.getSession(id),
-      ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
-      createEnvelope: (session, content, inputLocale, outputLocale, metadata, envelopeId) => {
-        const context = { ...webGatewayContext, session_key: session.session_key };
-        const created = createGatewayEnvelope(context, content, inputLocale, outputLocale, metadata);
-        return envelopeId ? { ...created, id: envelopeId } : created;
+      defaultLocales: async () => {
+        const settings = await this.store.getSettings();
+        return { inputLocale: settings.ui_locale, outputLocale: settings.output_locale };
       },
       runMutation: <TExtra extends Record<string, unknown>>(input: ArtifactMutationInput<TExtra>) => this.runRecordedMutation<ArtifactRecord, TExtra>({
-        ...input, context: { ...webGatewayContext, session_key: input.session.session_key },
+        ...input,
+        context: webGatewayContext,
+        trustedContext: input.trustedContext,
+        core08Evidence: { changeType: "artifact_created" },
         execute: async (operation) => {
           const result = await input.execute(operation);
           const { extra, ...base } = result;
@@ -2341,9 +2355,10 @@ export class AgentRuntime {
     await this.activityIngest.linkBackendRun({ context, activityId, backendRunId: run.id });
     if (!isSettledBackendRun(run)) return;
 
-    const [toolRuns, workspaceChanges] = await Promise.all([
+    const [toolRuns, workspaceChanges, existingUsage] = await Promise.all([
       this.store.listToolRuns({ runId: run.id }),
-      this.store.listWorkspaceChanges().then((items) => items.filter((item) => item.run_id === run.id))
+      this.store.listWorkspaceChanges().then((items) => items.filter((item) => item.run_id === run.id)),
+      this.store.listResourceUsage({ activityId })
     ]);
     const usageScope = { kind: "room" as const, room_id: activity.room_id };
     for (const toolRun of toolRuns) {
@@ -2359,6 +2374,12 @@ export class AgentRuntime {
       }
     }
     for (const change of workspaceChanges) {
+      // Core08 may have recorded the mutation while the Backend Run was still
+      // active. Replaying the Run must retain that one evidence record rather
+      // than append a second identical `modified` usage.
+      if (existingUsage.some((usage) => usage.workspace_change_id === change.id && usage.stage === "modified")) {
+        continue;
+      }
       await this.activityIngest.recordResourceUsage({
         context,
         activityId,
@@ -2366,12 +2387,12 @@ export class AgentRuntime {
         resourceRef: change.resource_ref,
         stage: "modified",
         usageScope,
-        ...(change.legacy_operation_id ? { domainOperationId: change.legacy_operation_id } : {}),
+        ...((change.domain_operation_id ?? change.legacy_operation_id) ? { domainOperationId: change.domain_operation_id ?? change.legacy_operation_id } : {}),
         workspaceChangeId: change.id
       });
     }
     const domainOperationIds = workspaceChanges
-      .map((change) => change.legacy_operation_id)
+      .map((change) => change.domain_operation_id ?? change.legacy_operation_id)
       .filter((id): id is string => Boolean(id));
     const terminal = activityTerminalOutcome(run);
     await this.activityIngest.finalizeActivity({
@@ -3278,7 +3299,7 @@ export class AgentRuntime {
     // Chat/Domain result, whose public contract is MemoryFrontmatter only.
     const memories = (await this.filterCurrentRoomResources(access, "memory", storedMemories))
       .map(({ file_path: _filePath, ...memory }) => memory);
-    const operationIds = new Set(workspaceChanges.map((change) => change.legacy_operation_id).filter((id): id is string => Boolean(id)));
+    const operationIds = new Set(workspaceChanges.map((change) => change.domain_operation_id ?? change.legacy_operation_id).filter((id): id is string => Boolean(id)));
     const scopedOperations = operations.filter((operation) => operationIds.has(operation.id));
     const artifactIds = new Set(workspaceChanges.filter((change) => change.change_type === "artifact_created").map((change) => change.resource_ref.id));
     const scopedArtifacts = artifacts.filter((artifact) => artifactIds.has(artifact.id) || artifactIds.has(artifact.file_ref.id));
@@ -4042,24 +4063,43 @@ export class AgentRuntime {
     messageId?: string;
     actionPayload?: Record<string, JsonValue>;
   }, trusted: TrustedDomainRuntimeContext = {}): Promise<{ surface: GeneratedSurfaceDefinition; action: GeneratedSurfaceActionDeclaration; command: unknown; interaction: unknown }> {
-    // A generated surface is bound to one persisted Session. Resolve that
-    // binding before dispatch so an omitted Session can never use a default
-    // Room as an authorization fallback.
     const persistedSurface = await this.store.getGeneratedSurface(input.surfaceId);
     if (!persistedSurface) throw new RuntimeRequestError("not_found", "generated_surface_not_found");
-    if (trusted.sessionId && trusted.sessionId !== persistedSurface.session_id) {
-      throw new RuntimeRequestError("conflict", `generated_surface_session_mismatch:${input.surfaceId}`);
-    }
+    // Session and SessionRef are provenance only. The resource boundary below
+    // selects the Room and is rechecked for every resolve, dispatch, and log.
+    const { sessionId: _legacySessionId, ...withoutSession } = trusted;
+    const resolutionPayload = {
+      surface_id: input.surfaceId,
+      ...(input.revisionId ? { revision_id: input.revisionId } : {}),
+      action_id: input.actionId
+    };
+    const surfaceSessionRef = withoutSession.sessionRef ?? persistedSurface.session_ref;
     const ingressTrusted: TrustedDomainRuntimeContext = {
-      ...trusted,
-      sessionId: persistedSurface.session_id,
-      correlationId: trusted.correlationId ?? stableHash({
+      ...withoutSession,
+      ...(surfaceSessionRef ? { sessionRef: surfaceSessionRef } : {}),
+      correlationId: withoutSession.correlationId ?? stableHash({
         ingress: "generated_surface_action",
         surface_id: input.surfaceId,
         revision_id: input.revisionId ?? null,
         action_id: input.actionId,
         interaction_id: input.interactionId
       })
+    };
+    const boundaryContext = await this.trustedDomainContext(
+      "generated_surface",
+      resolutionPayload,
+      ingressTrusted,
+      runtimeOperationIds.generatedSurfaceActionRun
+    );
+    if (!boundaryContext.roomId || !boundaryContext.participant) {
+      throw new RuntimeRequestError("forbidden", "generated_surface_room_context_required");
+    }
+    const actionTrusted: TrustedDomainRuntimeContext = {
+      ...ingressTrusted,
+      participant: boundaryContext.participant,
+      roomId: boundaryContext.roomId,
+      ...(boundaryContext.source ? { source: boundaryContext.source } : {}),
+      ...(boundaryContext.sessionRef ? { sessionRef: boundaryContext.sessionRef } : {})
     };
     const resolvedResult = await this.runDomainCommandWithTrustedContext({
       command_id: runtimeOperationIds.generatedSurfaceActionRun,
@@ -4071,12 +4111,8 @@ export class AgentRuntime {
         interaction_id: input.interactionId,
         phase: "resolve"
       })}`,
-      payload: {
-        surface_id: input.surfaceId,
-        revision_id: input.revisionId,
-        action_id: input.actionId
-      }
-    }, ingressTrusted);
+      payload: resolutionPayload
+    }, actionTrusted);
     const resolvedRecord = unknownRecord(resolvedResult.result);
     const surface = resolvedRecord.surface as GeneratedSurfaceDefinition | undefined;
     const action = unknownRecord(resolvedRecord.action);
@@ -4105,7 +4141,7 @@ export class AgentRuntime {
         input_source: "generated_surface",
         idempotency_key: request.idempotencyKey,
         payload: request.payload
-      }, { ...ingressTrusted, sessionId: surface.session_id }),
+      }, actionTrusted),
       recordInteraction: async (request) => this.runDomainCommandWithTrustedContext({
         command_id: runtimeOperationIds.generatedSurfaceInteractionRecord,
         input_source: "generated_surface",
@@ -4124,7 +4160,7 @@ export class AgentRuntime {
             ? safeRuntimeErrorMessage(request.error, "generated_surface_action_failed")
             : undefined
         }
-      }, { ...ingressTrusted, sessionId: surface.session_id })
+      }, actionTrusted)
     });
     return {
       surface,
@@ -4640,7 +4676,7 @@ export class AgentRuntime {
       }
       const changes = await this.store.listWorkspaceChangesForOperation(operation.id);
       for (const change of changes) {
-        if (change.legacy_operation_id === operation.id && change.correlation_id !== context.correlationId) {
+        if ((change.domain_operation_id === operation.id || change.legacy_operation_id === operation.id) && change.correlation_id !== context.correlationId) {
           await this.store.setWorkspaceChangeCorrelation(change.id, context.correlationId);
         }
       }
@@ -4700,9 +4736,17 @@ export class AgentRuntime {
     for (const ref of uniqueResourceRefs(refs)) {
       const resourceKind = canonicalRoomResourceKind(ref.kind);
       if (!resourceKind || isRoomPermissionMetadataKind(ref.kind)) continue;
+      const collectionTarget = ref.kind === "collection_record" ? collectionRecordTargetFromRef(ref) : undefined;
+      const resourceId = ref.kind === "collection_record"
+        ? collectionTarget
+          ? collectionRecordResourceId(collectionTarget.collectionId, collectionTarget.recordId)
+          : typeof record.collection_id === "string" && ref.id === record.id
+            ? collectionRecordResourceId(record.collection_id, ref.id)
+            : ref.id
+        : ref.id;
       await this.store.ensureResourceAccessBoundary({
         resourceKind,
-        resourceId: ref.id,
+        resourceId,
         sourceRoomId: context.roomId,
         ownerParticipantId,
         creatorParticipantId: principalParticipantId(context.participant),
@@ -4847,7 +4891,7 @@ export class AgentRuntime {
 
   private async backendWorkspaceChangesForOperation(runId: string, sessionId: string | undefined, operationId: string): Promise<WorkspaceChangeRecord[]> {
     return (await this.store.listWorkspaceChanges(sessionId)).filter((change) =>
-      change.run_id === runId && change.legacy_operation_id === operationId
+      change.run_id === runId && (change.domain_operation_id === operationId || change.legacy_operation_id === operationId)
     );
   }
 
@@ -5015,6 +5059,10 @@ export class AgentRuntime {
     if (!session) {
       throw new RuntimeRequestError("not_found", `Session not found: ${input.session_id}`);
     }
+    if (!session.room_id) {
+      throw new RuntimeRequestError("conflict", `surface_operation_room_required:${session.id}`);
+    }
+    const surfaceRoomId = session.room_id;
 
     const settings = await this.store.getSettings();
     const inputLocale = input.input_locale ?? session.ui_locale ?? settings.ui_locale;
@@ -5042,18 +5090,18 @@ export class AgentRuntime {
       }
     );
 
-    // A structured Surface has no provider BackendRun, but it still needs the
-    // same WorkspaceChange trace as a backend-created artifact. Reuse an
-    // existing trace when the Surface operation is replayed so idempotency is
-    // preserved across retries.
+    // Core08's Artifact mutation already records a direct Activity/Change
+    // trace. The legacy Surface adapter only supplies its old run-backed
+    // fallback if that evidence is unavailable; it must not duplicate it.
     const existingWorkspaceChange = (await this.store.listWorkspaceChanges(session.id)).find((change) =>
-      change.legacy_operation_id === result.operation.id
+      (change.domain_operation_id === result.operation.id || change.legacy_operation_id === result.operation.id)
       && change.resource_ref.id === result.resource.id
     );
     const workspaceChange = existingWorkspaceChange ?? await (async () => {
       const surfaceRun = await this.store.saveBackendRun({
         id: createId("run"),
         session_id: session.id,
+        room_id: surfaceRoomId,
         input_message_id: input.id,
         backend_id: "surface-operation",
         backend_kind: "samurai_native",
@@ -5072,10 +5120,11 @@ export class AgentRuntime {
         id: createId("change"),
         run_id: surfaceRun.id,
         session_id: session.id,
+        room_id: surfaceRoomId,
+        domain_operation_id: result.operation.id,
         resource_ref: result.resource.file_ref,
         change_type: "artifact_created",
         summary: surfaceOperationWorkspaceSummary(input, result.resource),
-        legacy_operation_id: result.operation.id,
         created_at: nowIso()
       });
       await this.emit("workspace.change.created", change);
@@ -5571,20 +5620,20 @@ export class AgentRuntime {
   }
 
   async saveCollectionSchema(schema: CollectionSchema): Promise<CollectionSchemaRuntimeResult> {
-    const result = await this.runDomainCommand({
-      command_id: runtimeOperationIds.collectionSchemaSave,
-      idempotency_key: createId("collection_schema_save_request"),
-      payload: schema
-    });
-    return result.result as CollectionSchemaRuntimeResult;
+    return await this.runLocalCollectionCommand(runtimeOperationIds.collectionSchemaSave, schema, createId("collection_schema_save_request"));
   }
 
   async reindexCollections(): Promise<CollectionReindexRuntimeResult> {
-    return await this.runtimeDomainApi.reindexCollections() as CollectionReindexRuntimeResult;
+    return await this.runLocalCollectionCommand(requireDomainCommandEntry("collection.reindex").id, {}, createId("collection_reindex_request"));
   }
 
   async createCollectionRecord(record: CollectionRecord): Promise<CollectionRecordRuntimeResult> {
-    return await this.runtimeDomainApi.createCollectionRecord(record) as CollectionRecordRuntimeResult;
+    return await this.runLocalCollectionCommand(collectionRecordCreateCommandId(), {
+      collection_id: record.collection_id,
+      record_id: record.id,
+      data: record.data,
+      resource_refs: record.resource_refs
+    }, `collection_record_create_request:${stableHash(record)}`);
   }
 
   private async collectionManageGetItems(schema: CollectionSchemaWithFilePath, options: { ids?: string[]; fields?: string[] } = {}): Promise<{
@@ -6099,14 +6148,19 @@ export class AgentRuntime {
     if (expectedVersion === undefined) {
       throw new RuntimeRequestError("not_found", `Collection record not found: ${input.collectionId}/${input.recordId}`);
     }
-    return await this.runtimeDomainApi.applyCollectionPatch({
-      ...input,
-      patch: { ...input.patch, expected_version: expectedVersion }
-    }) as CollectionPatchRuntimeResult;
+    const payload = {
+      collection_id: input.collectionId,
+      record_id: input.recordId,
+      patch_id: input.patch.id,
+      changes: input.patch.changes,
+      expected_version: expectedVersion
+    };
+    return await this.runLocalCollectionCommand(runtimeOperationIds.collectionPatchApply, payload, `collection_patch_apply:${stableHash(payload)}`);
   }
 
   async deleteCollectionRecord(input: { collectionId: string; recordId: string; viewId?: string }): Promise<CollectionDeleteRuntimeResult> {
-    return await this.runtimeDomainApi.deleteCollectionRecord(input) as CollectionDeleteRuntimeResult;
+    const payload = { collection_id: input.collectionId, record_id: input.recordId, ...(input.viewId ? { view_id: input.viewId } : {}) };
+    return await this.runLocalCollectionCommand(requireDomainCommandEntry("collection.record.delete").id, payload, `collection_record_delete:${stableHash(payload)}`);
   }
 
   async listCollectionActions(collectionId?: string): Promise<CollectionActionDescriptor[]> {
@@ -6125,14 +6179,84 @@ export class AgentRuntime {
     sessionId?: string;
     payload?: Record<string, unknown>;
   }): Promise<CollectionActionRuntimeResult> {
-    return await this.runtimeDomainApi.runCollectionAction({
+    const payload = {
       collection_id: input.collectionId,
       action_id: input.actionId,
       ...(input.backendId === undefined ? {} : { backend_id: input.backendId }),
       ...(input.recordId === undefined ? {} : { record_id: input.recordId }),
-      ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }),
       payload: jsonRecord(input.payload ?? {})
-    }) as CollectionActionRuntimeResult;
+    };
+    return await this.runLocalCollectionCommand(
+      requireDomainCommandEntry("collection.action.run").id,
+      payload,
+      `collection_action_run_request:${stableHash(payload)}`,
+      input.sessionId
+    );
+  }
+
+  /** Native App compatibility resolves a trusted Room first, then uses Core08. */
+  private async runLocalCollectionCommand<T>(
+    commandId: string,
+    payload: Record<string, unknown>,
+    idempotencyKey: string,
+    sessionId?: string
+  ): Promise<T> {
+    const result = await this.runDomainCommandWithTrustedContext({
+      command_id: commandId,
+      idempotency_key: idempotencyKey,
+      payload
+    }, await this.collectionCompatibilityContext(sessionId));
+    return result.result as T;
+  }
+
+  private async collectionCompatibilityContext(sessionId?: string): Promise<TrustedDomainRuntimeContext> {
+    const session = sessionId ? await this.store.getSession(sessionId) : undefined;
+    if (sessionId && !session) throw new RuntimeRequestError("not_found", `Session not found: ${sessionId}`);
+    const settings = await this.store.getSettings();
+    const roomId = session?.room_id ?? settings.default_room_id;
+    if (!roomId) throw new RuntimeRequestError("forbidden", "collection_room_context_required");
+    return {
+      participant: { kind: "human", participantId: localOwnerParticipantId },
+      roomId,
+      source: { kind: "native_app", app_id: "samurai-native" },
+      ...(session ? { sessionId: session.id, sessionRef: { app_id: "samurai-native", session_id: session.id } } : {})
+    };
+  }
+
+  /** Collection AI actions use the Session-free Workspace Execution boundary. */
+  private async runCollectionInstructionWorkspaceExecution(input: {
+    context: TrustedDomainContext;
+    prompt: string;
+    backendId?: string;
+    metadata: Record<string, JsonValue>;
+    customView: boolean;
+  }): Promise<{ backendRun: { id: string; status: string }; outputText: string; customView?: Record<string, JsonValue> }> {
+    const { context } = input;
+    if (!context.roomId || !context.participant) {
+      throw new RuntimeRequestError("forbidden", "collection_action_room_context_required");
+    }
+    const outcome = await this.runWorkspaceExecution({
+      context: {
+        workspace_id: context.workspaceId,
+        room_id: context.roomId,
+        principal: trustedPrincipalFromParticipant(context.participant),
+        source: context.source ?? { kind: "native_app" },
+        correlation_id: `collection-action:${context.correlationId}:${String(input.metadata.collection_action_operation_id ?? stableHash(input.prompt))}`,
+        ...(context.sessionRef ? { session_ref: context.sessionRef } : {})
+      },
+      ...(input.backendId ? { backend_id: input.backendId } : {}),
+      input_summary: input.prompt,
+      metadata: input.metadata
+    });
+    if (outcome.kind !== "completed") {
+      throw new RuntimeRequestError("conflict", `collection_instruction_execution_${outcome.kind}`);
+    }
+    const outputText = outcome.output.content;
+    return {
+      backendRun: outcome.run,
+      outputText,
+      ...(input.customView ? { customView: collectionActionCustomViewOutput(outputText) } : {})
+    };
   }
 
 
@@ -8527,15 +8651,21 @@ export class AgentRuntime {
         evidence_refs: mutation.evidence_refs,
         created_at: now
       });
-      await this.store.saveWorkspaceChange({
-        id: createId("change"),
-        run_id: reflectionRun.source_run_id ?? reflectionRun.id,
-        session_id: session.id,
-        resource_ref: targetRef,
-        change_type: mutation.kind.startsWith("memory") ? "memory_suggested" : mutation.kind.startsWith("wiki") ? "other" : "skill_candidate_created",
-        summary: `Background Review ${reflectionRun.id} applied ${mutation.kind}: ${mutation.reason}`,
-        created_at: now
-      });
+      // This legacy path is disabled, but keep its dormant implementation
+      // honest: reflection IDs are not BackendRun IDs and cannot be used as
+      // a substitute cause for a new Workspace Change.
+      if (reflectionRun.source_run_id && reflectionRun.activity_context?.room_id) {
+        await this.store.saveWorkspaceChange({
+          id: createId("change"),
+          run_id: reflectionRun.source_run_id,
+          session_id: session.id,
+          room_id: reflectionRun.activity_context.room_id,
+          resource_ref: targetRef,
+          change_type: mutation.kind.startsWith("memory") ? "memory_suggested" : mutation.kind.startsWith("wiki") ? "other" : "skill_candidate_created",
+          summary: `Background Review ${reflectionRun.id} applied ${mutation.kind}: ${mutation.reason}`,
+          created_at: now
+        });
+      }
     }
     return suggestions;
   }
@@ -8645,7 +8775,7 @@ export class AgentRuntime {
     }
   ): ReflectionSuggestionRecord[] {
     const eventsByRun = groupByRunId(input.backendEvents);
-    const changesByRun = groupByRunId(input.workspaceChanges);
+    const changesByRun = groupByRunId(runBoundWorkspaceChanges(input.workspaceChanges));
     const toolsByRun = groupByRunId(input.toolRuns);
     const suggestions: ReflectionSuggestionRecord[] = [];
     const seen = new Set<string>();
@@ -8982,6 +9112,28 @@ export class AgentRuntime {
     return count >= maxMessages;
   }
 
+  private resourceMutationActivityContext(context: TrustedDomainContext | undefined): TrustedWorkspaceContext {
+    if (!context?.participant || !context.roomId) {
+      throw new RuntimeRequestError("forbidden", "resource_mutation_room_context_required");
+    }
+    const principal = trustedPrincipalFromParticipant(context.participant);
+    const source = context.source ?? (principal.kind === "external_app"
+      ? { kind: "external_app" as const, app_id: principal.app_id }
+      : { kind: "host" as const });
+    return {
+      // Core07 Activity records use this stable Workspace identity. Domain
+      // Command execution has its own idempotency namespace, so never use its
+      // root hash as a second Activity workspace identity here.
+      workspace_id: "workspace",
+      room_id: context.roomId,
+      principal,
+      source,
+      correlation_id: context.correlationId,
+      ...(context.sessionRef ? { session_ref: context.sessionRef } : {}),
+      ...(context.runId ? { run_id: context.runId } : {})
+    };
+  }
+
   private async runRecordedMutation<TResource, TExtra extends Record<string, unknown> = {}>(input: RecordedMutationInput<TResource, TExtra>): Promise<RuntimeWriteResult<TResource> & TExtra> {
     const trustedContext = input.trustedContext ?? this.activeDomainContext.getStore();
     const operation = await this.createOperation(input.session, input.envelope, input.operationName, input.proposedEffects, {
@@ -8991,13 +9143,22 @@ export class AgentRuntime {
       inputRef: input.inputRef,
       targetResourceRefs: input.targetResourceRefs
     });
+    let activityScope: ResourceMutationActivityScope | undefined;
+    let resourceCommitted = false;
 
     try {
+      if (input.core08Evidence) {
+        activityScope = await this.resourceMutationActivity.begin({
+          context: this.resourceMutationActivityContext(trustedContext),
+          operation,
+          instructionSummary: input.inputSummary ?? input.operationName
+        });
+      }
       await this.ensureRecordedMutationResourceAccessBoundaries([
         ...(input.targetResourceRefs ?? []),
         ...(input.boundaryResourceRefs ?? [])
       ], trustedContext, undefined);
-      const execution = await input.execute(operation);
+      const execution = await input.execute(operation, activityScope?.activity);
       await this.ensureRecordedMutationResourceAccessBoundaries([
         ...(input.targetResourceRefs ?? []),
         ...(input.boundaryResourceRefs ?? []),
@@ -9007,6 +9168,29 @@ export class AgentRuntime {
       operation.result_ref = execution.ref;
       operation.updated_at = nowIso();
       await this.store.updateOperation(operation);
+      resourceCommitted = true;
+      if (input.core08Evidence && activityScope) {
+        const change = await this.resourceMutationActivity.recordCommitted({
+          scope: activityScope,
+          operation,
+          resourceRef: execution.ref,
+          changeType: input.core08Evidence.changeType,
+          ...(input.core08Evidence.stage ? { stage: input.core08Evidence.stage } : {}),
+          summary: execution.summary,
+          ...((resourceContentHash(execution.resource) ? { contentHash: resourceContentHash(execution.resource) } : {}))
+        });
+        try {
+          await this.emit("workspace.change.created", change);
+        } catch (error) {
+          // Delivery is not the evidence itself.  Preserve the committed
+          // Resource/Operation and report this separately so a retry cannot
+          // create another revision merely because a client missed an event.
+          throw new RuntimeRequestError(
+            "workspace_change_notification_failed",
+            `workspace_change_notification_failed:${safeRuntimeErrorMessage(error)}`
+          );
+        }
+      }
       let activity: ActivityInboxItem[] = [];
       try {
         activity = await this.rebuildActivity();
@@ -9023,10 +9207,36 @@ export class AgentRuntime {
         ...((extra as unknown) as TExtra)
       };
     } catch (error) {
+      if (error instanceof ResourceMutationEvidenceError) {
+        throw new RuntimeRequestError(
+          "resource_mutation_evidence_failed",
+          error.message,
+          {
+            operation_id: operation.id,
+            ...(operation.result_ref ? { resource_ref: operation.result_ref } : {}),
+            failure_stage: error.stage
+          }
+        );
+      }
+      if (resourceCommitted) {
+        // The Resource and Operation are authoritative at this point.  A
+        // post-commit error is intentionally replayed as failure rather than
+        // re-running the mutation or rewriting its completed Operation.
+        if (error instanceof RuntimeRequestError) throw error;
+        throw new RuntimeRequestError("internal", `resource_mutation_post_commit_failed:${safeRuntimeErrorMessage(error)}`);
+      }
       operation.status = "failed";
       operation.error = safeRuntimeErrorMessage(error);
       operation.updated_at = nowIso();
       await this.store.updateOperation(operation);
+      if (input.core08Evidence) {
+        await this.resourceMutationActivity.recordFailed({
+          scope: activityScope,
+          operation,
+          code: "resource_mutation_failed",
+          summary: operation.error
+        });
+      }
       if (error instanceof RuntimeRequestError) {
         throw error;
       }
@@ -9178,6 +9388,17 @@ function activityResourceUsageId(input: {
 
 function core07Hash(value: unknown): string {
   return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function resourceContentHash(resource: unknown): string | undefined {
+  const record = unknownRecord(resource);
+  return typeof record.content_hash === "string" && record.content_hash.trim()
+    ? record.content_hash
+    : undefined;
+}
+
+function runBoundWorkspaceChanges(changes: WorkspaceChangeRecord[]): Array<WorkspaceChangeRecord & { run_id: string }> {
+  return changes.filter((change): change is WorkspaceChangeRecord & { run_id: string } => Boolean(change.run_id));
 }
 
 function activityTerminalOutcome(run: BackendRunRecord): {
@@ -12255,6 +12476,7 @@ function parseRuntimeRequestErrorCode(code: string): RuntimeRequestErrorCode {
     case "forbidden": case "unavailable": case "outcome_unknown": case "internal":
     case "provider_not_configured": case "provider_failed": case "backend_cancelled":
     case "backend_execution_root_not_ready": case "domain_command_failed":
+    case "resource_mutation_evidence_failed": case "workspace_change_notification_failed":
       return code;
     default:
       return "internal";
@@ -12359,12 +12581,14 @@ function gatewayBoundaryToolFeedback(decision: GatewayBoundaryToolDecision): Bac
   };
 }
 
-function gatewayBoundaryToolBlockedChange(run: BackendRunRecord, decision: GatewayBoundaryToolDecision): WorkspaceChangeRecord {
+function gatewayBoundaryToolBlockedChange(run: BackendRunRecord, decision: GatewayBoundaryToolDecision): NewWorkspaceChangeRecord {
+  if (!run.room_id) throw new RuntimeRequestError("conflict", `gateway_boundary_backend_run_room_missing:${run.id}`);
   const policyRef = decision.policy ? gatewayBoundaryPolicyRef(decision.policy) : backendRunRef(run);
   return {
     id: createId("change"),
     run_id: run.id,
     session_id: run.session_id,
+    room_id: run.room_id,
     resource_ref: policyRef,
     change_type: "other",
     summary: `Gateway boundary blocked tool ${decision.provider_tool_name} (${decision.action_id}).`,
@@ -12970,7 +13194,7 @@ function buildEvaluationTraceReport(input: {
   now: string;
 }): EvaluationTraceReport {
   const eventsByRun = groupByRunId(input.backendEvents);
-  const changesByRun = groupByRunId(input.workspaceChanges);
+  const changesByRun = groupByRunId(runBoundWorkspaceChanges(input.workspaceChanges));
   const toolsByRun = groupByRunId(input.toolRuns);
   const runScores = input.backendRuns.slice(0, 50).map((run) => {
     const events = eventsByRun.get(run.id) ?? [];
@@ -13280,8 +13504,7 @@ function collectionActionOutputSurface(action: Record<string, JsonValue>, payloa
     ?? (typeof payload.output_surface === "string" && payload.output_surface.trim() ? payload.output_surface.trim() : undefined);
 }
 
-function collectionActionCustomViewOutput(chat: RunChatTurnResult): Record<string, JsonValue> | undefined {
-  const content = [...chat.messages].reverse().find((message) => message.role === "agent")?.content ?? "";
+function collectionActionCustomViewOutput(content: string): Record<string, JsonValue> | undefined {
   const parsed = parseJsonObjectFromText(content);
   if (!parsed) {
     return undefined;

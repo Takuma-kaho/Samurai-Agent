@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { ActivityInboxItem, ArtifactRecord, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import type { ActivityInboxItem, ArtifactRecord, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactRepairWriteValueSchema } from "../../value-objects/artifact.js";
 
@@ -10,11 +10,9 @@ const Output = artifactRepairWriteValueSchema;
 export interface ArtifactRepairPorts {
   artifactContract(id: "artifact.repair"): { id: string; proposed_effects: string[] };
   getArtifact(id: string): Promise<ArtifactRecord | undefined>;
-  ensureArtifactSession(): Promise<SessionRecord>;
-  createArtifactEnvelope(session: SessionRecord, content: string): MessageEnvelope;
   repairArtifactRevisionSource(id: string): Promise<{ repaired: boolean }>;
   artifactNotFoundError(): Error;
-  runArtifactMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { repair: { repaired: boolean } } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; repair: { repaired: boolean } }>;
+  runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { repair: { repaired: boolean } } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; repair: { repaired: boolean } }>;
 }
 
 const artifactRepair = defineCommand<ArtifactRepairPorts>()({
@@ -62,9 +60,7 @@ const artifactRepair = defineCommand<ArtifactRepairPorts>()({
         const contract = ports.artifactContract("artifact.repair");
         const artifact = await ports.getArtifact(input.artifact_id);
         if (!artifact) throw ports.artifactNotFoundError();
-        const session = await ports.ensureArtifactSession();
-        const envelope = ports.createArtifactEnvelope(session, `Repair artifact source: ${artifact.title}`);
-        const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async () => {
+        const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Repair artifact source: ${artifact.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async () => {
           const repair = await ports.repairArtifactRevisionSource(input.artifact_id);
           return { resource: artifact, ref: artifact.file_ref, summary: repair.repaired ? `Repaired artifact ${artifact.title}.` : `Artifact ${artifact.title} did not require repair.`, extra: { repair } };
         }});

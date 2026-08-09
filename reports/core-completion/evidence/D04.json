@@ -3,9 +3,11 @@
   "test_id": "D04",
   "command": "pnpm core:test:surface-lifecycle",
   "status": "passed",
-  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "commit_sha": "ce205d29560c12222060e5e6ba0d1ac05703b17e",
   "worktree_clean": false,
-  "source_sha256": "4368b675c7ad2ad7dd147bb57e67b87aafa1a40fa47799ee2a2f084fe1a15675",
+  "source_sha256": "c443ae3d70fe69f4cda6e8e93879d363f8513536c8c05b3cafa25a4dc87b4b88",
+  "source_graph_sha256": "023c3eeae85bced7e5b3320aebc08b639908dc78f76eb8bcd1b5b6c5c10ac9d0",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "apps/server/src/api-server.ts",
     "apps/server/src/index.ts",
@@ -20,18 +22,31 @@
     "packages/runtime/src/presentation/generated-surface.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/generated-surface-lifecycle.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-generated-surface-lifecycle.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-13T15:15:11.803Z",
-  "completed_at": "2026-07-13T15:15:12.517Z",
+  "started_at": "2026-08-09T09:05:28.379Z",
+  "completed_at": "2026-08-09T09:05:29.389Z",
   "assertions": [
     {
       "name": "Reload preserves content hash",
@@ -49,7 +64,7 @@
       "expected": true
     },
     {
-      "name": "Export/import preserves bundle hash",
+      "name": "Backup restores Artifact and Collection primary resources without Surface files",
       "actual": true,
       "expected": true
     },
@@ -65,35 +80,21 @@
       {
         "operation": "collection.patch.apply",
         "status": "completed",
-        "decision": "allow_with_audit",
         "version": 2,
         "data": {
           "name": "done"
-        },
-        "audited": true
+        }
       },
       {
         "operation": "collection.patch.apply",
         "status": "completed",
-        "decision": "allow_with_audit",
         "version": 2,
         "data": {
           "name": "done"
-        },
-        "audited": true
-      },
-      {
-        "operation": "collection.patch.apply",
-        "status": "completed",
-        "decision": "allow_with_audit",
-        "version": 2,
-        "data": {
-          "name": "done"
-        },
-        "audited": true
+        }
       }
     ],
-    "generated_action_audited": true,
+    "generated_action_has_activity": true,
     "stale_validation_rejected": true,
     "reload_same_hash": true,
     "same_surface_id": true,
@@ -103,7 +104,8 @@
     "cross_client_resource_state": {
       "name": "done"
     },
-    "export_import_hash_equal": true,
+    "backup_preserves_primary_resources": true,
+    "derived_surface_bundle_omitted": true,
     "interactions": [
       "action",
       "pinned"

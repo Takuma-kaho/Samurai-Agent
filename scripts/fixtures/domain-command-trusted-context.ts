@@ -305,6 +305,19 @@ try {
     created_at: fixtureCreatedAt,
     updated_at: fixtureCreatedAt
   });
+  // The verifier deliberately mutates Surface creation to target this
+  // different Session. Keep the decoy row valid so that fault injection must
+  // fail on trusted-context ownership, not an incidental SQLite foreign key.
+  await workspace.createSession({
+    id: "forged-session",
+    session_key: "forged-session",
+    room_id: "trusted-room",
+    title: "Decoy Generated Surface Session",
+    ui_locale: "en",
+    output_locale: "en",
+    created_at: fixtureCreatedAt,
+    updated_at: fixtureCreatedAt
+  });
 
   // IN07 is an actual effective-inventory check, not a label. The normal
   // Runtime has an available Backend and the built-in Plugin registry; this

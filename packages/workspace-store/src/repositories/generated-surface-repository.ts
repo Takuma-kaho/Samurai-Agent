@@ -35,18 +35,19 @@ export class GeneratedSurfaceRepository {
       if (!absolute.startsWith(root)) throw new Error("generated_surface_file_path_invalid");
       return { ...file, absolute };
     });
-    for (const file of absoluteFiles) {
-      const absolute = file.absolute;
-      await mkdir(path.dirname(absolute), { recursive: true });
-      await writeFile(absolute, file.content, { flag: "wx" });
-    }
+    const writtenFiles: typeof absoluteFiles = [];
     try {
+      for (const file of absoluteFiles) {
+        await mkdir(path.dirname(file.absolute), { recursive: true });
+        await writeFile(file.absolute, file.content, { flag: "wx" });
+        writtenFiles.push(file);
+      }
       await this.db.transaction().execute(async (transaction) => {
         await transaction.insertInto("generated_surfaces").values(generatedSurfaceToRow(input.definition)).onConflict((conflict) => conflict.column("id").doUpdateSet(generatedSurfaceToRow(input.definition))).execute();
         await transaction.insertInto("generated_surface_revisions").values(generatedSurfaceRevisionToRow(input.revision)).execute();
       });
     } catch (error) {
-      await Promise.all(absoluteFiles.map((file) => rm(file.absolute, { force: true })));
+      await Promise.all(writtenFiles.map((file) => rm(file.absolute, { force: true })));
       throw error;
     }
     return { definition: input.definition, revision: input.revision };
@@ -75,11 +76,18 @@ export class GeneratedSurfaceRepository {
   async readGeneratedSurfaceBundle(revisionId: string): Promise<{ html: string; css?: string; script?: string } | undefined> {
     const revision = await this.getGeneratedSurfaceRevision(revisionId);
     if (!revision) return undefined;
-    return {
-      html: await readFile(path.join(this.rootDir, revision.html_ref.uri), "utf8"),
-      ...(revision.css_ref ? { css: await readFile(path.join(this.rootDir, revision.css_ref.uri), "utf8") } : {}),
-      ...(revision.script_ref ? { script: await readFile(path.join(this.rootDir, revision.script_ref.uri), "utf8") } : {})
-    };
+    try {
+      const html = await readFile(path.join(this.rootDir, revision.html_ref.uri), "utf8");
+      const css = revision.css_ref ? await readFile(path.join(this.rootDir, revision.css_ref.uri), "utf8") : undefined;
+      const script = revision.script_ref ? await readFile(path.join(this.rootDir, revision.script_ref.uri), "utf8") : undefined;
+      return { html, ...(css === undefined ? {} : { css }), ...(script === undefined ? {} : { script }) };
+    } catch (error) {
+      // Surface bundles are derived cache/compatibility data in new backups.
+      // A missing file is therefore a cache miss; corruption and permission
+      // failures remain visible instead of being mistaken for an empty view.
+      if (isMissingFileError(error)) return undefined;
+      throw error;
+    }
   }
 
   async readGeneratedSurfaceAssets(revisionId: string): Promise<Array<{ path: string; content: Buffer }>> {
@@ -110,12 +118,19 @@ export class GeneratedSurfaceRepository {
   }
 
   async saveSurfaceInteraction(record: SurfaceInteractionRecord): Promise<SurfaceInteractionRecord> {
-    await this.db.insertInto("surface_interactions").values(surfaceInteractionToRow(record)).execute();
-    return record;
+    await this.db.insertInto("surface_interactions").values(surfaceInteractionToRow(record))
+      .onConflict((conflict) => conflict.column("id").doNothing()).execute();
+    const stored = await this.db.selectFrom("surface_interactions").selectAll().where("id", "=", record.id).executeTakeFirst();
+    if (!stored) throw new Error("surface_interaction_idempotency_claim_lost");
+    return parse<SurfaceInteractionRecord>(stored.interaction_json);
   }
 
   async listSurfaceInteractions(surfaceId: string): Promise<SurfaceInteractionRecord[]> {
     return (await this.db.selectFrom("surface_interactions").selectAll().where("surface_id", "=", surfaceId).orderBy("created_at", "asc").execute()).map((row) => parse<SurfaceInteractionRecord>(row.interaction_json));
   }
 
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT";
 }

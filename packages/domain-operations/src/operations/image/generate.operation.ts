@@ -1,7 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { SupportedLocaleSchema, type ActivityInboxItem, ArtifactRecord, type ArtifactRevisionRecord, type JsonValue, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { SupportedLocaleSchema, type ActivityInboxItem, ArtifactRecord, type ArtifactRevisionRecord, type JsonValue, type OperationRecord, type ResourceRef, type RollbackPoint } from "@samurai-agent/core-schemas";
+import { domainJsonValueSchema, defineCommand, trustedCreatorId, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactRevisionWriteValueSchema } from "../../value-objects/artifact.js";
 
 const Input = z.object({
@@ -22,12 +22,12 @@ const Output = artifactRevisionWriteValueSchema;
 
 export interface ImageGeneratePorts {
   artifactContract(id: "image.generate"): { id: string; proposed_effects: string[] };
-  ensureArtifactSession(): Promise<SessionRecord>; createArtifactEnvelope(session: SessionRecord, content: string): MessageEnvelope;
+  artifactDefaultLocales(): Promise<{ inputLocale: z.infer<typeof SupportedLocaleSchema>; outputLocale: z.infer<typeof SupportedLocaleSchema> }>;
   decodeImageBase64(value: string): Uint8Array;
   createArtifactDraft(input: { operation: OperationRecord; title: string; content: { bytes: Uint8Array; mime_type: string; extension: string; preview?: string }; kind: "image"; locale: z.infer<typeof SupportedLocaleSchema>; sourceLocales: z.infer<typeof SupportedLocaleSchema>[]; createdBy: string; metadata: Record<string, JsonValue> }): Promise<ArtifactRecord>;
   createArtifactRevision(input: { artifactId: string; content: Uint8Array; extension: string; producerRunId: string; editorSource: "image_provider"; changeSummary: string; provenance: Record<string, JsonValue> }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runArtifactMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
+  runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
 }
 
 const imageGenerate = defineCommand<ImageGeneratePorts>()({
@@ -79,10 +79,9 @@ const imageGenerate = defineCommand<ImageGeneratePorts>()({
         const bytes = ports.decodeImageBase64(input.data_base64);
         const extension = extensions[input.mime_type];
         const provenance = imageProvenance(input);
-        const session = await ports.ensureArtifactSession();
-        const envelope = ports.createArtifactEnvelope(session, `Save generated image: ${input.title}`);
-        const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, execute: async (operation) => {
-          const artifact = await ports.createArtifactDraft({ operation, title: input.title, content: { bytes, mime_type: input.mime_type, extension, preview: input.preview }, kind: "image", locale: input.output_locale ?? session.output_locale, sourceLocales: [input.input_locale ?? session.ui_locale], createdBy: "image_provider", metadata: { image_operation: "generate", ...provenance } });
+        const defaults = await ports.artifactDefaultLocales();
+        const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Save generated image: ${input.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, execute: async (operation) => {
+          const artifact = await ports.createArtifactDraft({ operation, title: input.title, content: { bytes, mime_type: input.mime_type, extension, preview: input.preview }, kind: "image", locale: input.output_locale ?? defaults.outputLocale, sourceLocales: [input.input_locale ?? defaults.inputLocale], createdBy: trustedCreatorId(context), metadata: { image_operation: "generate", ...provenance } });
           const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: bytes, extension, producerRunId: input.source_run_id, editorSource: "image_provider", changeSummary: "Saved generated image provider result.", provenance });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], {}, { artifact_id: artifact.id });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Saved generated image ${artifact.title}.`, extra: { revision: created.revision } };

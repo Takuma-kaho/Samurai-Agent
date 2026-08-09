@@ -33,6 +33,14 @@ export class WorkspacePaths {
     return catalogWorkspaceBackupRoots();
   }
 
+  /**
+   * Restore clears the legacy Surface cache so a restored SQLite row cannot
+   * point at a stale bundle. This is intentionally broader than a new backup.
+   */
+  get restoreRoots(): readonly string[] {
+    return [...this.backupRoots, "surfaces"];
+  }
+
   resourceBoundaries(): WorkspaceResourceBoundary[] {
     return workspaceResourceBoundaries();
   }
@@ -48,6 +56,10 @@ export async function ensureWorkspaceLayout(rootDir: string): Promise<void> {
 
 export function workspaceBackupRoots(): string[] {
   return catalogWorkspaceBackupRoots();
+}
+
+export function workspaceRestoreRoots(): string[] {
+  return [...catalogWorkspaceBackupRoots(), "surfaces"];
 }
 
 export function workspaceResourceBoundaries(): WorkspaceResourceBoundary[] {

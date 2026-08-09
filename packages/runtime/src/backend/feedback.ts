@@ -5,6 +5,7 @@ import {
   type BackendRunRecord,
   type JsonValue,
   type MemoryFrontmatter,
+  type NewWorkspaceChangeRecord,
   type OperationRecord,
   type ResourceRef,
   type ToolRunRecord,
@@ -19,7 +20,7 @@ const memoryTopicCreateCommand = getDomainCommandForProviderToolName("remember_t
 
 export interface FeedbackResult {
   events: BackendOutputEvent[];
-  workspaceChanges: WorkspaceChangeRecord[];
+  workspaceChanges: NewWorkspaceChangeRecord[];
   artifacts: ArtifactRecord[];
   memories: MemoryFrontmatter[];
   operations: OperationRecord[];

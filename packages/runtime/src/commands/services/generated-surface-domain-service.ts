@@ -2,12 +2,18 @@ import {
   createId,
   nowIso,
   stableHash,
+  type ActivityInboxItem,
+  type ActivityRecord,
   type GeneratedSurfaceDefinition,
   type GeneratedSurfaceActionDeclaration,
   type GeneratedSurfaceRevisionRecord,
+  type OperationRecord,
+  type ResourceRef,
+  type RollbackPoint,
   type SurfaceGenerationRequest,
   type SurfaceInteractionRecord
 } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 import {
   buildGeneratedSurfaceRevision,
   type GeneratedSurfaceBundleInput
@@ -42,9 +48,31 @@ export interface GeneratedSurfaceRevisionSaveRequest {
   assets?: GeneratedSurfaceBundleInput["assets"];
 }
 
+export interface GeneratedSurfaceMutationInput<TExtra extends Record<string, unknown> = {}> {
+  trustedContext: TrustedDomainContext;
+  inputSummary: string;
+  operationName: string;
+  proposedEffects: string[];
+  targetResourceRefs?: ResourceRef[];
+  execute(operation: OperationRecord, activity?: ActivityRecord): Promise<{
+    resource: GeneratedSurfaceDefinition;
+    ref: ResourceRef;
+    rollbackPoint?: RollbackPoint;
+    summary: string;
+  } & TExtra>;
+}
+
+export interface GeneratedSurfaceMutationResult<TExtra extends Record<string, unknown> = {}> {
+  resource: GeneratedSurfaceDefinition;
+  operation: OperationRecord;
+  rollbackPoint?: RollbackPoint;
+  activity: ActivityInboxItem[];
+}
+
 export class GeneratedSurfaceDomainService {
   constructor(private readonly dependencies: {
     surfaces: GeneratedSurfacePort;
+    runMutation<TExtra extends Record<string, unknown>>(input: GeneratedSurfaceMutationInput<TExtra>): Promise<GeneratedSurfaceMutationResult<TExtra> & TExtra>;
     requestError: (code: "conflict" | "forbidden" | "not_found", message: string) => Error;
   }) {}
 
@@ -73,5 +101,6 @@ export class GeneratedSurfaceDomainService {
   generatedSurfaceFingerprint(value: string) { return stableHash(value); }
   buildSurfaceRevision(input: GeneratedSurfaceRevisionBuildRequest) { return buildGeneratedSurfaceRevision(input); }
   saveSurfaceRevision(input: GeneratedSurfaceRevisionSaveRequest) { return this.dependencies.surfaces.saveRevision(input); }
+  runSurfaceMutation<TExtra extends Record<string, unknown>>(input: GeneratedSurfaceMutationInput<TExtra>) { return this.dependencies.runMutation(input); }
   surfaceError(code: "conflict" | "forbidden" | "not_found", message: string) { return this.dependencies.requestError(code, message); }
 }

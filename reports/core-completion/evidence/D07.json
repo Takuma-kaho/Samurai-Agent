@@ -3,9 +3,11 @@
   "test_id": "D07",
   "command": "pnpm core:test:artifact",
   "status": "passed",
-  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
-  "worktree_clean": true,
-  "source_sha256": "3b49e6f44d82bc795596a0665ab73e60d83de7f11b685016011f42bc4105467c",
+  "commit_sha": "ce205d29560c12222060e5e6ba0d1ac05703b17e",
+  "worktree_clean": false,
+  "source_sha256": "fa0ecb1f6e758f012e16565a9e313213d9a50b43ff4f7af0fe32bb140f8c5409",
+  "source_graph_sha256": "a698149afd29a6f272102745095baa6e83511a0dc11b5833b7b5c8638814a9fa",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/action-catalog/src/index.ts",
     "packages/core-schemas/src/index.ts",
@@ -13,18 +15,31 @@
     "packages/runtime/src/index.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/artifact-revisions.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-artifact-revisions.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-13T07:14:55.077Z",
-  "completed_at": "2026-07-13T07:15:28.699Z",
+  "started_at": "2026-08-09T09:05:24.765Z",
+  "completed_at": "2026-08-09T09:05:25.760Z",
   "assertions": [
     {
       "name": "Immutable revision lineage",
@@ -52,9 +67,14 @@
       "expected": true
     },
     {
-      "name": "Every revision and repair audited",
+      "name": "Every revision and repair has Activity evidence",
       "actual": 4,
       "expected": 4
+    },
+    {
+      "name": "Session-free mutations do not create Sessions",
+      "actual": true,
+      "expected": true
     },
     {
       "name": "Export/import preserves hashes",
@@ -66,16 +86,17 @@
     "status": "passed",
     "revisions": 3,
     "lineage": [
-      "artifact_revision_f18eddb25f734492",
-      "artifact_revision_f18eddb25f734492",
-      "artifact_revision_9ff73e74003c4687"
+      "artifact_revision_e6817e55aef04cce",
+      "artifact_revision_e6817e55aef04cce",
+      "artifact_revision_d32299a54a904277"
     ],
     "hashes_unique": true,
     "conflict_rejected": true,
     "restored_revision": true,
     "old_revision_redisplay": true,
     "missing_source_repaired": true,
-    "audit_records": 4,
-    "export_import_hash_equal": true
+    "activity_evidence": 4,
+    "export_import_hash_equal": true,
+    "session_count_unchanged": true
   }
 }

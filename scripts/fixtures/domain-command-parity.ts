@@ -43,10 +43,36 @@ try {
     actorId: localOwnerParticipantId
   });
   const providerSession = await runtime.createSession({ title: "Provider parity" });
-  const providerTurn = await runtime.runChatTurn({
-    sessionId: providerSession.id,
+  const providerRun = await store.saveBackendRun({
+    id: "provider-parity-run",
+    session_id: providerSession.id,
+    room_id: settings.default_room_id,
+    principal: { kind: "human", participant_id: localOwnerParticipantId },
+    source: { kind: "host" },
     agent_id: settings.default_agent_id,
-    content: "Prepare a verified provider run for command parity."
+    requested_by_participant_id: localOwnerParticipantId,
+    backend_id: backend.id,
+    backend_kind: backend.kind,
+    status: "running",
+    started_at: at,
+    input_summary: "Prepare a verified provider run for command parity.",
+    metadata: {}
+  });
+  await store.createActivity({
+    id: "provider-parity-activity",
+    workspace_id: "workspace",
+    room_id: settings.default_room_id,
+    principal: { kind: "human", participant_id: localOwnerParticipantId },
+    source: { kind: "host" },
+    status: "recording",
+    idempotency_key: "provider-parity-activity",
+    instruction_summary: "Verify provider Domain Command parity.",
+    verification: [],
+    backend_run_id: providerRun.id,
+    domain_operation_ids: [],
+    provenance: { kind: "trusted_context", source_id: providerRun.id, recorded_at: at },
+    created_at: at,
+    updated_at: at
   });
 
   await store.saveCollectionSchema({ id: "parity", version: "1", labels: { en: "Parity" }, descriptions: { en: "Parity" }, fields: [{ id: "name", type: "string" }, { id: "score", type: "number" }, { id: "done", type: "boolean" }], refs: [], embeds: [], derived_fields: [], triggers: [], actions: [], views: [], permissions: { update: true } });
@@ -77,7 +103,7 @@ try {
       const trusted = {
         roomId: settings.default_room_id,
         sessionId: providerSession.id,
-        ...(source === "provider_tool_call" ? { runId: providerTurn.backendRun.id } : {})
+        ...(source === "provider_tool_call" ? { runId: providerRun.id } : {})
       };
       outputs.push(normalize(await runtime.runDomainCommand(
         { command_id: "collection.patch.apply", input_source: source, idempotency_key: `parity-${caseIndex}-${source}`, payload: { collection_id: "parity", record_id: recordId, expected_version: 1, changes: cases[caseIndex] } },

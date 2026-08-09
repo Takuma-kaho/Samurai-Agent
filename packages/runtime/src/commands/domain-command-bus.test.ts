@@ -100,6 +100,45 @@ describe("DurableDomainCommandBus", () => {
     await store.close();
   });
 
+  it("freezes a committed Resource when only its evidence failed and never reruns it", async () => {
+    const store = await createStore();
+    const bus = new DurableDomainCommandBus(store);
+    let handlerCalls = 0;
+    const evidenceFailure = {
+      code: "conflict",
+      message: "domain_operation_handler_failed:artifact.create:resource_mutation_evidence_failed",
+      handlerCause: {
+        code: "resource_mutation_evidence_failed",
+        message: "resource_mutation_evidence_failed:resource_usage:workspace_change_write_failed",
+        payload: {
+          operation_id: "operation-core08",
+          resource_ref: { kind: "artifact", id: "artifact-core08", uri: "artifacts/core08.md" },
+          failure_stage: "resource_usage"
+        }
+      }
+    };
+
+    await expect(bus.execute({
+      commandId: "artifact.create", inputSource: "runtime_api", payload: { title: "Core08" }, idempotencyKey: "core08-evidence-failure"
+    }, async () => {
+      handlerCalls += 1;
+      throw evidenceFailure;
+    })).rejects.toBe(evidenceFailure);
+
+    await expect(new DurableDomainCommandBus(store).execute({
+      commandId: "artifact.create", inputSource: "runtime_api", payload: { title: "Core08" }, idempotencyKey: "core08-evidence-failure"
+    }, async () => {
+      handlerCalls += 1;
+      return { should_not_run: true };
+    })).rejects.toMatchObject({
+      name: "DomainCommandReplayError",
+      code: "resource_mutation_evidence_failed",
+      details: expect.objectContaining({ failure_stage: "resource_usage" })
+    });
+    expect(handlerCalls).toBe(1);
+    await store.close();
+  });
+
   it("resolves every durable recovery branch", async () => {
     const now = new Date(0).toISOString();
     const input = { commandId: "test.recovery", inputSource: "test", payload: {}, idempotencyKey: "recovery" };

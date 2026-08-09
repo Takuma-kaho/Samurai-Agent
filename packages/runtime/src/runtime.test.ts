@@ -5277,7 +5277,7 @@ rl.on("line", (line) => {
 
     expect(result.result_kind).toBe("collection_action");
     expect(result.result.operation.operation).toBe("collection.action.run");
-    expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["custom_view", "chat"]);
+    expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["custom_view"]);
     expect(result.render_spec).toMatchObject({
       kind: "custom_view",
       props: {
@@ -5295,22 +5295,17 @@ rl.on("line", (line) => {
         })
       }
     });
-    expect(result.render_specs?.[1]).toMatchObject({
-      kind: "chat",
-      props: {
-        session_id: session.id,
-        backend_run_id: expect.any(String)
-      }
+    expect(result.result.resource).toMatchObject({
+      backend_run_id: expect.any(String),
+      output: { output_text: "整理しました。" }
     });
-    const actionChat = "chat" in result.result ? result.result.chat : undefined;
-    expect(actionChat?.messages.some((message) => message.role === "agent" && message.content === "整理しました。")).toBe(true);
     expect(providerInputs[0]?.envelope.user_intent).toContain("Summarize the selected movie note");
     expect(providerInputs[0]?.envelope.user_intent).toContain("movie_1");
     expect(providerInputs[0]?.envelope.user_intent).toContain("\"score\": 95");
     expect(providerInputs[0]?.envelope.user_intent).toContain("感想を整理");
     expect(providerInputs[0]?.envelope.user_intent).toContain("selected_record_id");
     expect(providerInputs[0]?.envelope.user_intent).toContain("record_snapshot");
-    expect(messages.some((message) => message.role === "agent" && message.content === "整理しました。")).toBe(true);
+    expect(messages.some((message) => message.role === "agent")).toBe(false);
   });
 
   it("returns generated Custom View HTML from Collection instruction actions when requested", async () => {
@@ -5390,7 +5385,7 @@ rl.on("line", (line) => {
     const generated = result.render_specs?.find((spec) =>
       spec.kind === "custom_view" && spec.props.renderer === "generic"
     );
-    expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["custom_view", "custom_view", "chat"]);
+    expect(result.render_specs?.map((spec) => spec.kind)).toEqual(["custom_view", "custom_view"]);
     expect(generated).toMatchObject({
       kind: "custom_view",
       title: "映画ログボード",

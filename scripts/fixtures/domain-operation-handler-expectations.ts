@@ -116,7 +116,7 @@ export const handlerExpectations = {
         actionId: "action_fixture",
         recordId: "record_fixture",
         backendId: "backend_fixture",
-        sessionId: "session_fixture",
+        trustedContext,
         payload: { approved: true }
       }]
     }]

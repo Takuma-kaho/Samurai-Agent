@@ -1,4 +1,4 @@
-import { CollectionRecordSchema, CollectionSchemaSchema } from "@samurai-agent/core-schemas";
+import { CollectionRecordSchema, CollectionSchemaSchema, SessionRefSchema } from "@samurai-agent/core-schemas";
 import { z } from "zod";
 import { domainJsonValueSchema } from "../definition/index.js";
 import { surfaceRenderSpecSchema } from "./surface-render.js";
@@ -28,8 +28,8 @@ const collectionActionResourceSchema = z.union([
   z.object({ schemas: collectionReindexPartitionSchema, records: collectionReindexPartitionSchema }).strict(),
   z.object({
     collection_id: z.string().min(1), action_id: z.string().min(1), action_kind: z.string().min(1), status: z.literal("completed"),
-    backend_run_id: z.string().min(1), session_id: z.string().min(1), custom_view: z.record(domainJsonValueSchema).optional(),
-    output: z.object({ backend_status: z.string().min(1), message_ids: z.array(z.string().min(1)), custom_view: z.record(domainJsonValueSchema).optional() }).strict()
+    backend_run_id: z.string().min(1), session_ref: SessionRefSchema.optional(), custom_view: z.record(domainJsonValueSchema).optional(),
+    output: z.object({ backend_status: z.string().min(1), output_text: z.string(), custom_view: z.record(domainJsonValueSchema).optional() }).strict()
   }).strict(),
   z.object({
     collection_id: z.string().min(1), action_id: z.string().min(1), action_kind: z.string().min(1),

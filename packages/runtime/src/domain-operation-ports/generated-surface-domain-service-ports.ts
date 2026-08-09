@@ -17,9 +17,9 @@ export function createGeneratedSurfaceDomainServicePorts(services: Pick<RuntimeD
       createGeneratedSurfaceRequestId: () => services.generatedSurfaceDomainService.createGeneratedSurfaceRequestId(),
       generatedSurfaceNow: () => services.generatedSurfaceDomainService.generatedSurfaceNow(),
       generatedSurfaceFingerprint: (value) => services.generatedSurfaceDomainService.generatedSurfaceFingerprint(value),
-      generatedSurfaceCreateError: (message) => services.generatedSurfaceDomainService.surfaceError("conflict", message),
       buildGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.buildSurfaceRevision(input),
-      saveGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.saveSurfaceRevision(input)
+      saveGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.saveSurfaceRevision(input),
+      runGeneratedSurfaceMutation: (input) => services.generatedSurfaceDomainService.runSurfaceMutation(input)
     },
     "generated_surface.interaction.record": {
       getGeneratedSurface: (id) => services.generatedSurfaceDomainService.getSurface(id),
@@ -33,7 +33,8 @@ export function createGeneratedSurfaceDomainServicePorts(services: Pick<RuntimeD
       generatedSurfaceFingerprint: (value) => services.generatedSurfaceDomainService.generatedSurfaceFingerprint(value),
       buildGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.buildSurfaceRevision(input),
       saveGeneratedSurfaceRevision: (input) => services.generatedSurfaceDomainService.saveSurfaceRevision(input),
-      generatedSurfaceReviseError: (message) => services.generatedSurfaceDomainService.surfaceError("not_found", message)
+      generatedSurfaceReviseError: (message) => services.generatedSurfaceDomainService.surfaceError("not_found", message),
+      runGeneratedSurfaceMutation: (input) => services.generatedSurfaceDomainService.runSurfaceMutation(input)
     },
     "generated_surface.state": {
       updateGeneratedSurfaceState: (id, state) => services.generatedSurfaceDomainService.updateSurfaceState(id, state),

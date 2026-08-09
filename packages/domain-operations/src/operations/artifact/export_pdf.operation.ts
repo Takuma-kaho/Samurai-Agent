@@ -1,7 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { ActivityInboxItem, ArtifactRecord, JsonValue, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import type { ActivityInboxItem, ArtifactRecord, JsonValue, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
+import { defineCommand, trustedCreatorId, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactWriteValueSchema } from "../../value-objects/artifact.js";
 
 const Input = z.object({ "artifact_id": z.string().trim().min(1) }).strict();
@@ -12,10 +12,9 @@ export interface ArtifactExportPdfPorts {
   getArtifact(id: string): Promise<ArtifactRecord | undefined>; readArtifactContent(id: string): Promise<string | undefined>;
   exportArtifactPdf(input: { title: string; content: string; source: ArtifactRecord }): Promise<{ adapterId: string; bytes: Uint8Array }>;
   artifactNotFoundError(): Error; artifactPdfSourceNotTextError(): Error; artifactPdfInvalidResultError(): Error;
-  ensureArtifactSession(): Promise<SessionRecord>; createArtifactEnvelope(session: SessionRecord, content: string): MessageEnvelope;
   createArtifactDraft(input: { operation: OperationRecord; title: string; content: { bytes: Uint8Array; mime_type: "application/pdf"; extension: "pdf"; preview: string }; kind: "pdf"; locale: ArtifactRecord["locale"]; sourceLocales: ArtifactRecord["source_locales"]; createdBy: string; metadata: Record<string, JsonValue> }): Promise<ArtifactRecord>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runArtifactMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: Record<string, never> }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: Record<string, never> }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const artifactExportPdf = defineCommand<ArtifactExportPdfPorts>()({
@@ -72,10 +71,8 @@ const artifactExportPdf = defineCommand<ArtifactExportPdfPorts>()({
         const exported = await ports.exportArtifactPdf({ title: source.title, content, source });
         if (!isPdf(exported.bytes)) throw ports.artifactPdfInvalidResultError();
         const contract = ports.artifactContract("artifact.export_pdf");
-        const session = await ports.ensureArtifactSession();
-        const envelope = ports.createArtifactEnvelope(session, `Export PDF: ${source.title}`);
-        const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [source.file_ref], execute: async (operation) => {
-          const pdf = await ports.createArtifactDraft({ operation, title: `${source.title}.pdf`, content: { bytes: exported.bytes, mime_type: "application/pdf", extension: "pdf", preview: source.title }, kind: "pdf", locale: source.locale, sourceLocales: source.source_locales, createdBy: "pdf_export_adapter", metadata: { source_artifact_id: source.id, source_revision_id: typeof source.metadata.current_revision_id === "string" ? source.metadata.current_revision_id : null, export_adapter_id: exported.adapterId } });
+        const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Export PDF: ${source.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [source.file_ref], execute: async (operation) => {
+          const pdf = await ports.createArtifactDraft({ operation, title: `${source.title}.pdf`, content: { bytes: exported.bytes, mime_type: "application/pdf", extension: "pdf", preview: source.title }, kind: "pdf", locale: source.locale, sourceLocales: source.source_locales, createdBy: trustedCreatorId(context), metadata: { source_artifact_id: source.id, source_revision_id: typeof source.metadata.current_revision_id === "string" ? source.metadata.current_revision_id : null, export_adapter_id: exported.adapterId } });
           const rollbackPoint = await ports.createArtifactRollback(operation, [source.file_ref, pdf.file_ref], {}, { artifact_id: pdf.id, source_artifact_id: source.id });
           return { resource: pdf, ref: pdf.file_ref, rollbackPoint, summary: `Exported ${source.title} as PDF.`, extra: {} };
         }});

@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { CollectionSchemaSchema, type ActivityInboxItem, type CollectionSchema, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
+import { CollectionSchemaSchema, type ActivityInboxItem, type CollectionSchema, type OperationRecord, type ResourceRef, type RollbackPoint } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { storedCollectionSchema } from "../../../value-objects/collection.js";
 import { collectionSchemaWriteValueSchema } from "../../../value-objects/collection.js";
@@ -32,9 +32,7 @@ export interface CollectionSchemaSavePorts {
   collectionSchemaRef(schema: z.infer<typeof storedCollectionSchema>): ResourceRef;
   createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, z.infer<typeof domainJsonValueSchema>>, after: Record<string, z.infer<typeof domainJsonValueSchema>>): Promise<RollbackPoint>;
   collectionMutationContract(id: "collection.schema.save"): { id: string; proposed_effects: string[] };
-  ensureCollectionMutationSession(): Promise<SessionRecord>;
-  createCollectionMutationEnvelope(content: string): MessageEnvelope;
-  runCollectionMutation<T>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runCollectionMutation<T>(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
@@ -83,14 +81,12 @@ const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionSchemaSave(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleCollectionSchemaSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const schema = toCollectionSchema(input);
         const existing = await ports.getCollectionSchemaForMutation(schema.id);
         const contract = ports.collectionMutationContract("collection.schema.save");
-        const session = await ports.ensureCollectionMutationSession();
-        const envelope = ports.createCollectionMutationEnvelope(`Save collection schema: ${schema.id}`);
         const result = await ports.runCollectionMutation({
-          session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
+          trustedContext: context, inputSummary: `Save collection schema: ${schema.id}`, operationName: contract.id, proposedEffects: contract.proposed_effects,
           targetResourceRefs: existing ? [ports.collectionSchemaRef(existing)] : [],
           execute: async (operation) => {
             const saved = existing ? await ports.updateCollectionSchema(schema) : await ports.saveCollectionSchema(schema);

@@ -6,10 +6,8 @@ type Ports = Pick<DomainOperationPorts, "artifact.create" | "artifact.export_pdf
 export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainServices, "artifactDomainService">): Ports {
   return {
     "artifact.create": {
-      artifactContract: (id) => services.artifactDomainService.contract(id), createArtifactSession: (input) => services.artifactDomainService.createArtifactSession(input),
-      getArtifactSession: (id) => services.artifactDomainService.getArtifactSession(id), artifactSessionNotFoundError: () => services.artifactDomainService.artifactSessionNotFoundError(),
+      artifactContract: (id) => services.artifactDomainService.contract(id), artifactDefaultLocales: () => services.artifactDomainService.artifactDefaultLocales(),
       validateGraphArtifactContent: (content) => services.artifactDomainService.validateGraphContent(content),
-      createArtifactEnvelope: (session, content, inputLocale, outputLocale, metadata, envelopeId) => services.artifactDomainService.createArtifactEnvelope(session, content, inputLocale, outputLocale, metadata, envelopeId),
       createArtifactDraft: (input) => services.artifactDomainService.createArtifactDraft(input), createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)
     },
@@ -17,16 +15,13 @@ export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainSer
       artifactContract: (id) => services.artifactDomainService.contract(id), getArtifact: (id) => services.artifactDomainService.getArtifact(id),
       readArtifactContent: (id) => services.artifactDomainService.readArtifactContent(id), exportArtifactPdf: (input) => services.artifactDomainService.exportArtifactPdf(input),
       artifactNotFoundError: () => services.artifactDomainService.artifactNotFoundError(), artifactPdfSourceNotTextError: () => services.artifactDomainService.artifactPdfSourceNotTextError(),
-      artifactPdfInvalidResultError: () => services.artifactDomainService.artifactPdfInvalidResultError(), ensureArtifactSession: () => services.artifactDomainService.ensureArtifactSession(),
-      createArtifactEnvelope: (session, content) => services.artifactDomainService.createArtifactEnvelope(session, content), createArtifactDraft: (input) => services.artifactDomainService.createArtifactDraft(input),
+      artifactPdfInvalidResultError: () => services.artifactDomainService.artifactPdfInvalidResultError(), createArtifactDraft: (input) => services.artifactDomainService.createArtifactDraft(input),
       createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)
     },
     "artifact.repair": {
       artifactContract: (id) => services.artifactDomainService.contract(id),
       getArtifact: (id) => services.artifactDomainService.getArtifact(id),
-      ensureArtifactSession: () => services.artifactDomainService.ensureArtifactSession(),
-      createArtifactEnvelope: (session, content) => services.artifactDomainService.createArtifactEnvelope(session, content),
       repairArtifactRevisionSource: (id) => services.artifactDomainService.repairRevisionSource(id),
       artifactNotFoundError: () => services.artifactDomainService.artifactNotFoundError(),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)
@@ -36,7 +31,6 @@ export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainSer
       getArtifact: (id) => services.artifactDomainService.getArtifact(id),
       getArtifactRevision: (id) => services.artifactDomainService.getRevision(id),
       readArtifactRevisionContent: (id) => services.artifactDomainService.readRevisionContent(id),
-      ensureArtifactSession: () => services.artifactDomainService.ensureArtifactSession(), createArtifactEnvelope: (session, content) => services.artifactDomainService.createArtifactEnvelope(session, content),
       createArtifactRevision: (input) => services.artifactDomainService.createRevision(input),
       createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       artifactRevisionNotFoundError: () => services.artifactDomainService.artifactRevisionNotFoundError(),
@@ -46,17 +40,13 @@ export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainSer
     "artifact.revise": {
       artifactContract: (id) => services.artifactDomainService.contract(id), getArtifact: (id) => services.artifactDomainService.getArtifact(id),
       artifactNotFoundError: () => services.artifactDomainService.artifactNotFoundError(),
-      getArtifactSession: (id) => services.artifactDomainService.getArtifactSession(id), ensureArtifactSession: () => services.artifactDomainService.ensureArtifactSession(),
-      artifactSessionNotFoundError: () => services.artifactDomainService.artifactSessionNotFoundError(), validateGraphArtifactContent: (content) => services.artifactDomainService.validateGraphContent(content),
-      createArtifactEnvelope: (session, content) => services.artifactDomainService.createArtifactEnvelope(session, content),
+      validateGraphArtifactContent: (content) => services.artifactDomainService.validateGraphContent(content),
       createArtifactRevision: (input) => services.artifactDomainService.createRevision(input), createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)
     },
     "graph.create": {
       artifactContract: (id) => services.artifactDomainService.contract(id), validateGraphArtifactContent: (content) => services.artifactDomainService.validateGraphContent(content),
-      createArtifactSession: (input) => services.artifactDomainService.createArtifactSession(input), getArtifactSession: (id) => services.artifactDomainService.getArtifactSession(id),
-      artifactSessionNotFoundError: () => services.artifactDomainService.artifactSessionNotFoundError(),
-      createArtifactEnvelope: (session, content, inputLocale, outputLocale, metadata, envelopeId) => services.artifactDomainService.createArtifactEnvelope(session, content, inputLocale, outputLocale, metadata, envelopeId),
+      artifactDefaultLocales: () => services.artifactDomainService.artifactDefaultLocales(),
       createArtifactDraft: (input) => services.artifactDomainService.createArtifactDraft(input), createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)
     },
@@ -64,14 +54,12 @@ export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainSer
       artifactContract: (id) => services.artifactDomainService.contract(id), getArtifact: (id) => services.artifactDomainService.getArtifact(id),
       readArtifactContent: (id) => services.artifactDomainService.readArtifactContent(id), graphArtifactNotFoundError: () => services.artifactDomainService.graphArtifactNotFoundError(),
       graphDocumentContentNotFoundError: () => services.artifactDomainService.graphDocumentContentNotFoundError(), graphDocumentInvalidError: () => services.artifactDomainService.graphDocumentInvalidError(),
-      ensureArtifactSession: () => services.artifactDomainService.ensureArtifactSession(), createArtifactEnvelope: (session, content) => services.artifactDomainService.createArtifactEnvelope(session, content),
       createArtifactRevision: (input) => services.artifactDomainService.createRevision(input), createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)
     },
     "image.edit": {
       artifactContract: (id) => services.artifactDomainService.contract(id),
       getArtifact: (id) => services.artifactDomainService.getArtifact(id), imageArtifactNotFoundError: () => services.artifactDomainService.imageArtifactNotFoundError(),
-      ensureArtifactSession: () => services.artifactDomainService.ensureArtifactSession(), createArtifactEnvelope: (session, content) => services.artifactDomainService.createArtifactEnvelope(session, content),
       decodeImageBase64: (value) => services.artifactDomainService.decodeImageBase64(value),
       createArtifactRevision: (input) => services.artifactDomainService.createRevision(input),
       createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
@@ -79,7 +67,7 @@ export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainSer
     },
     "image.generate": {
       artifactContract: (id) => services.artifactDomainService.contract(id),
-      ensureArtifactSession: () => services.artifactDomainService.ensureArtifactSession(), createArtifactEnvelope: (session, content) => services.artifactDomainService.createArtifactEnvelope(session, content),
+      artifactDefaultLocales: () => services.artifactDomainService.artifactDefaultLocales(),
       decodeImageBase64: (value) => services.artifactDomainService.decodeImageBase64(value),
       createArtifactDraft: (input) => services.artifactDomainService.createArtifactDraft(input),
       createArtifactRevision: (input) => services.artifactDomainService.createRevision(input),

@@ -185,7 +185,7 @@ const pluginOutput = {
 const collectionActionOutput = {
   resource: {
     collection_id: "collection_fixture", action_id: "action_fixture", action_kind: "custom_instruction", status: "completed" as const,
-    backend_run_id: "backend_run_fixture", session_id: "session_fixture", output: { backend_status: "completed", message_ids: [] }
+    backend_run_id: "backend_run_fixture", output: { backend_status: "completed", output_text: "Fixture output" }
   },
   operation: {
     id: "operation_fixture", session_id: "session_fixture", capability_id: "collection", operation: "collection.action.run",

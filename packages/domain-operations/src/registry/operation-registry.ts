@@ -148,7 +148,7 @@ async function executeWithContextCancellation(
   }
 }
 
-const handlerErrorCodes = new Set(["not_found", "unavailable", "conflict", "outcome_unknown", "bad_request", "validation", "forbidden", "provider_not_configured", "provider_failed", "backend_cancelled", "backend_execution_root_not_ready"]);
+const handlerErrorCodes = new Set(["not_found", "unavailable", "conflict", "outcome_unknown", "bad_request", "validation", "forbidden", "provider_not_configured", "provider_failed", "backend_cancelled", "backend_execution_root_not_ready", "resource_mutation_evidence_failed", "workspace_change_notification_failed"]);
 
 function normalizeHandlerError(error: unknown, operationId: string): DomainOperationError {
   if (error instanceof DomainOperationError) return error;
