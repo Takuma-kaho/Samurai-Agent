@@ -8317,6 +8317,11 @@ function runtimeErrorPayload(payload: NonNullable<RuntimeRequestError["payload"]
       workspaceChanges: payload.workspaceChanges
     };
   }
+  if ("operation_id" in payload && "failure_stage" in payload) {
+    // Core08 can fail after the Resource itself was committed. This is an
+    // error-detail payload, not an Archive Memory result.
+    return payload;
+  }
   return archiveMemoryPayload(payload);
 }
 
