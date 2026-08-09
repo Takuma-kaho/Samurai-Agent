@@ -494,9 +494,9 @@ function projectedInputFieldKeys(definition: OperationDefinition, file: string):
 function operationHandler(ast: ts.SourceFile, file: string): FunctionLike {
   const handlers: FunctionLike[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isPropertyAssignment(node) && propertyName(node) === "execute" && isFunctionLike(node.initializer) && node.initializer.parameters.length >= 2) {
+    if (ts.isPropertyAssignment(node) && propertyName(node) === "execute" && isFunctionLike(node.initializer) && hasDomainHandlerParameters(node.initializer)) {
       handlers.push(node.initializer);
-    } else if (ts.isMethodDeclaration(node) && propertyName(node) === "execute" && node.parameters.length >= 2) {
+    } else if (ts.isMethodDeclaration(node) && propertyName(node) === "execute" && hasDomainHandlerParameters(node)) {
       handlers.push(node);
     }
     ts.forEachChild(node, visit);
@@ -506,6 +506,17 @@ function operationHandler(ast: ts.SourceFile, file: string): FunctionLike {
   const input = handlers[0]!.parameters[1];
   if (!input || !ts.isIdentifier(input.name)) throw new Error(`input_field_usage_handler_input_missing:${file}`);
   return handlers[0]!;
+}
+
+function hasDomainHandlerParameters(handler: FunctionLike): boolean {
+  const context = handler.parameters[0]?.name;
+  const input = handler.parameters[1]?.name;
+  return Boolean(context
+    && input
+    && ts.isIdentifier(context)
+    && ts.isIdentifier(input)
+    && /^_?context$/.test(context.text)
+    && /^_?input$/.test(input.text));
 }
 
 function usedInputFields(ast: ts.SourceFile, handler: FunctionLike, fields: readonly string[]): Set<string> {

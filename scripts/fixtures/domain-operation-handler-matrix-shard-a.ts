@@ -196,6 +196,7 @@ function createPortRecorder(operationId: string, testCase: AHandlerCaseExpectati
 function portResponse(method: string, args: unknown[], operationId: string, testCase: AHandlerCaseExpectation, definition: OperationDefinition): unknown {
   if (method.endsWith("Error") || method.includes("NotFoundError") || method.includes("QueryError")) return new Error(method);
   if (method === "artifactContract" || method === "collectionMutationContract") return { id: operationId, proposed_effects: proposedEffects(operationId) };
+  if (method === "artifactDefaultLocales") return { inputLocale: "en", outputLocale: "en" };
   if (method === "createArtifactEnvelope" || method === "createCollectionMutationEnvelope" || method === "createFileEnvelope" || method === "createBrowserEnvelope") return envelope;
   if (method === "createRollbackEnvelope") return envelope;
   if (method === "createArtifactSession" || method === "getArtifactSession" || method === "ensureArtifactSession" || method === "ensureCollectionMutationSession" || method === "ensureFileSession" || method === "ensureBrowserSession" || method === "ensureRollbackSession") return session;
@@ -211,7 +212,7 @@ function portResponse(method: string, args: unknown[], operationId: string, test
   if (method === "createArtifactRevision") return { artifact: operationId === "graph.patch" ? graphArtifact : artifact, revision };
   if (method === "createArtifactRollback" || method === "createCollectionRollback" || method === "createFileRollback" || method === "createBrowserRollback" || method === "createRestoreRollback") return rollbackPoint();
   if (method === "repairArtifactRevisionSource") return { repaired: true };
-  if (method === "runArtifactMutation" || method === "runCollectionMutation" || method === "runFileMutation" || method === "runBrowserMutation" || method === "runRollbackMutation") return runMutation(args[0], operationId, definition);
+  if (method === "runArtifactMutation" || method === "runCollectionMutation" || method === "runGeneratedSurfaceMutation" || method === "runFileMutation" || method === "runBrowserMutation" || method === "runRollbackMutation") return runMutation(args[0], operationId, definition);
   if (method === "getCollectionSchema" || method === "getCollectionSchemaForMutation") return operationId === "collection.schema.save" && testCase.id.startsWith("create") ? undefined : collectionSchema;
   if (method === "collectionDeleteAllowed") return true;
   if (method === "getCollectionRecord") return collectionRecord;
@@ -261,6 +262,10 @@ async function runMutation(request: unknown, operationId: string, definition: Op
   if (operationId === "collection.record.create" || operationId === "collection.record.delete") return { resource: collectionRecord, operation, activity: [] };
   if (operationId === "collection.reindex") return { resource: collectionIndex(), operation, activity: [] };
   if (operationId === "collection.schema.save") return { resource: collectionSchema, operation, activity: [] };
+  if (operationId === "generated_surface.create" || operationId === "generated_surface.revise") return { resource: surface, revision: surfaceRevision, operation, activity: [] };
+  if (operationId === "artifact.repair") return { resource: artifact, repair: { repaired: true }, operation, activity: [] };
+  if (operationId === "artifact.revise" || operationId === "artifact.restore_revision") return { resource: artifact, revision, operation, activity: [] };
+  if (operationId === "graph.patch") return { resource: graphArtifact, revision, operation, activity: [] };
   return { resource: operationId === "graph.patch" ? graphArtifact : artifact, operation, activity: [] };
 }
 

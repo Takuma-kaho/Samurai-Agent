@@ -745,10 +745,9 @@ function inspectCriticalInputContracts(
     return;
   }
   if (operationId === "collection.action.run") {
-    // `session_id` is server-owned trusted context, not caller DTO data.  The
-    // Operation may forward it only after Registry ingress has constructed the
-    // TrustedDomainContext.  Keeping it out of Input prevents a Surface or API
-    // payload from selecting another user's session.
+    // Room, Principal, and optional SessionRef are server-owned trusted
+    // context, not caller DTO data. Keeping them out of Input prevents a
+    // Surface or API payload from selecting another authorization context.
     const allowed = ["collection_id", "action_id", "record_id", "backend_id", "payload"];
     const actual = [...inputProperties.keys()].sort();
     if (actual.length !== allowed.length || actual.some((name, index) => name !== [...allowed].sort()[index])) {
@@ -771,11 +770,11 @@ function inspectCriticalInputContracts(
     if (!portMethodUsesNamedDto(ast, "runCollectionAction", "CollectionActionRunRequest")) {
       output.push({ gate: "CT05", file: relative, detail: "collection_action_port_raw_record" });
     }
-    if (!collectionActionRequestHasTrustedSession(ast)) {
-      output.push({ gate: "CT05", file: relative, detail: "collection_action_port_trusted_session_missing" });
+    if (!collectionActionRequestHasTrustedContext(ast)) {
+      output.push({ gate: "CT05", file: relative, detail: "collection_action_port_trusted_context_missing" });
     }
-    if (!collectionActionHandlerUsesTrustedSessionOnly(ast)) {
-      output.push({ gate: "CT05", file: relative, detail: "collection_action_handler_trusted_session_mapping" });
+    if (!collectionActionHandlerUsesTrustedContextOnly(ast)) {
+      output.push({ gate: "CT05", file: relative, detail: "collection_action_handler_trusted_context_mapping" });
     }
     return;
   }
@@ -855,26 +854,29 @@ function portMethodUsesNamedDto(ast: ts.SourceFile, methodName: string, typeName
 }
 
 /**
- * The Service needs a session identifier for instruction actions, but that
- * value is deliberately not part of the public Zod DTO.  Keep the bridge type
- * explicit so it cannot silently regress to a raw record or force callers to
- * smuggle `session_id` through the contract.
+ * The Service needs the complete server-owned TrustedDomainContext. Keep the
+ * bridge type explicit so it cannot silently regress to a raw record or force
+ * callers to smuggle Room, Principal, or SessionRef through the public DTO.
  */
-function collectionActionRequestHasTrustedSession(ast: ts.SourceFile): boolean {
+function collectionActionRequestHasTrustedContext(ast: ts.SourceFile): boolean {
   const request = ast.statements.find((statement): statement is ts.InterfaceDeclaration => ts.isInterfaceDeclaration(statement)
     && statement.name.text === "CollectionActionRunRequest");
-  const session = request?.members.find((member): member is ts.PropertySignature => ts.isPropertySignature(member)
-    && propertyName(member.name) === "sessionId");
-  return Boolean(session?.questionToken && session.type?.kind === ts.SyntaxKind.StringKeyword);
+  const trustedContext = request?.members.find((member): member is ts.PropertySignature => ts.isPropertySignature(member)
+    && propertyName(member.name) === "trustedContext");
+  return Boolean(trustedContext
+    && !trustedContext.questionToken
+    && trustedContext.type
+    && ts.isTypeReferenceNode(trustedContext.type)
+    && ts.isIdentifier(trustedContext.type.typeName)
+    && trustedContext.type.typeName.text === "TrustedDomainContext");
 }
 
 /**
- * Verify the value crossing into the Port originates from TrustedDomainContext
- * and that the Handler never reads a caller-owned `input.session_id`.  This is
- * AST based rather than a source-text convention, so renaming whitespace or
- * reformatting cannot make the check pass.
+ * Verify the Port receives the Registry-created TrustedDomainContext and that
+ * the Handler never reads a caller-owned `input.session_id`. This is AST based
+ * rather than a source-text convention, so formatting cannot make it pass.
  */
-function collectionActionHandlerUsesTrustedSessionOnly(ast: ts.SourceFile): boolean {
+function collectionActionHandlerUsesTrustedContextOnly(ast: ts.SourceFile): boolean {
   const handler = nodes(ast).find((node): node is ts.FunctionExpression => ts.isFunctionExpression(node)
     && node.name?.text === "handleCollectionActionRun");
   if (!handler?.body) return false;
@@ -890,33 +892,11 @@ function collectionActionHandlerUsesTrustedSessionOnly(ast: ts.SourceFile): bool
       || node.expression.name.text !== "runCollectionAction") return false;
     const request = node.arguments[0];
     if (!request || !ts.isObjectLiteralExpression(request)) return false;
-    return request.properties.some((property) => {
-      if (!ts.isSpreadAssignment(property)) return false;
-      const expression = unwrapParentheses(property.expression);
-      if (!expression || !ts.isConditionalExpression(expression)) return false;
-      const conditional = expression;
-      return isContextSessionAccess(conditional.condition)
-        && ts.isObjectLiteralExpression(conditional.whenTrue)
-        && conditional.whenTrue.properties.some((candidate) => ts.isPropertyAssignment(candidate)
-          && propertyName(candidate.name) === "sessionId"
-          && isContextSessionAccess(candidate.initializer));
-    });
+    return request.properties.some((property) => ts.isPropertyAssignment(property)
+      && propertyName(property.name) === "trustedContext"
+      && ts.isIdentifier(property.initializer)
+      && property.initializer.text === "context");
   });
-}
-
-function unwrapParentheses(node: ts.Node): ts.Node | undefined {
-  let current: ts.Node | undefined = node;
-  while (current && ts.isParenthesizedExpression(current)) {
-    current = current.expression;
-  }
-  return current;
-}
-
-function isContextSessionAccess(node: ts.Node): boolean {
-  return ts.isPropertyAccessExpression(node)
-    && ts.isIdentifier(node.expression)
-    && node.expression.text === "context"
-    && node.name.text === "sessionId";
 }
 
 function nodes(rootNode: ts.Node): ts.Node[] {

@@ -18,7 +18,7 @@ export interface GraphCreatePorts {
   artifactContract(id: "graph.create"): { id: string; proposed_effects: string[] };
   validateGraphArtifactContent(content: string): void;
   artifactDefaultLocales(): Promise<{ inputLocale: z.infer<typeof SupportedLocaleSchema>; outputLocale: z.infer<typeof SupportedLocaleSchema> }>;
-  createArtifactDraft(input: { operation: OperationRecord; title: string; content: string; kind: "graph"; locale: z.infer<typeof SupportedLocaleSchema>; sourceLocales: z.infer<typeof SupportedLocaleSchema>[]; createdBy: string }): Promise<ArtifactRecord>;
+  createArtifactDraft(input: { operation: OperationRecord; title: string; content: string; kind: "graph"; locale: z.infer<typeof SupportedLocaleSchema>; sourceLocales: z.infer<typeof SupportedLocaleSchema>[]; createdBy: string; metadata: Record<string, JsonValue> }): Promise<ArtifactRecord>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: Record<string, never> }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
@@ -77,7 +77,7 @@ const graphCreate = defineCommand<GraphCreatePorts>()({
         const outputLocale = input.output_locale ?? defaults.outputLocale;
         const contract = ports.artifactContract("graph.create");
         const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Create graph: ${input.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, execute: async (operation) => {
-          const artifact = await ports.createArtifactDraft({ operation, title: input.title, content: input.content, kind: "graph", locale: outputLocale, sourceLocales: [inputLocale], createdBy: trustedCreatorId(context) });
+          const artifact = await ports.createArtifactDraft({ operation, title: input.title, content: input.content, kind: "graph", locale: outputLocale, sourceLocales: [inputLocale], createdBy: trustedCreatorId(context), metadata: input.metadata });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref], {}, { artifact_id: artifact.id });
           return { resource: artifact, ref: artifact.file_ref, rollbackPoint, summary: `Created artifact ${artifact.title}.`, extra: {} };
         }});

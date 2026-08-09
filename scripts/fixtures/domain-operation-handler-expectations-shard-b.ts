@@ -293,9 +293,9 @@ const browserMutation = (operationName: string, url: string) => ({
   proposedEffects: [`${operationName} ${url} without mutating external state.`],
   execute: fn
 });
-const artifactMutation = (operationName: string, proposedEffects: readonly string[], extra: Record<string, unknown> = {}) => ({
-  session,
-  envelope,
+const artifactMutation = (operationName: string, inputSummary: string, proposedEffects: readonly string[], extra: Record<string, unknown> = {}) => ({
+  trustedContext: handlerContext,
+  inputSummary,
   operationName,
   proposedEffects,
   execute: fn,
@@ -866,9 +866,7 @@ export const bHandlerExpectations = {
           call("getArtifact", "image_artifact_fixture"),
           call("artifactContract", "image.edit"),
           call("decodeImageBase64", "QUJDRA=="),
-          call("ensureArtifactSession"),
-          call("createArtifactEnvelope", session, "Save edited image: Fixture image"),
-          call("runArtifactMutation", artifactMutation("image.edit", ["Save an edited image result as a new Artifact revision while preserving the original asset."], { targetResourceRefs: [imageArtifactRef] })),
+          call("runArtifactMutation", artifactMutation("image.edit", "Save edited image: Fixture image", ["Save an edited image result as a new Artifact revision while preserving the original asset."], { targetResourceRefs: [imageArtifactRef] })),
           call("createArtifactRevision", { artifactId: "image_artifact_fixture", content: new Uint8Array([1, 2, 3]), extension: imageExtension(mimeType), baseRevisionId: full ? "base_revision_fixture" : "image_revision_fixture", producerRunId: "run_fixture", editorSource: "image_provider", changeSummary: full ? `Saved ${mimeType}` : "Saved image provider edit.", provenance }),
           call("createArtifactRollback", operation, [imageArtifactRef, imageRevisionRef], { artifact: imageArtifact }, { artifact: imageArtifact })
         ]
@@ -894,10 +892,9 @@ export const bHandlerExpectations = {
         calls: [
           call("artifactContract", "image.generate"),
           call("decodeImageBase64", "QUJDRA=="),
-          call("ensureArtifactSession"),
-          call("createArtifactEnvelope", session, `Save generated image: ${title}`),
-          call("runArtifactMutation", artifactMutation("image.generate", ["Save a generated image provider result as an Artifact."])),
-          call("createArtifactDraft", { operation, title, content: { bytes: new Uint8Array([1, 2, 3]), mime_type: mimeType, extension: imageExtension(mimeType), preview }, kind: "image", locale: outputLocale, sourceLocales: [inputLocale], createdBy: "image_provider", metadata: { image_operation: "generate", ...provenance } }),
+          call("artifactDefaultLocales"),
+          call("runArtifactMutation", artifactMutation("image.generate", `Save generated image: ${title}`, ["Save a generated image provider result as an Artifact."])),
+          call("createArtifactDraft", { operation, title, content: { bytes: new Uint8Array([1, 2, 3]), mime_type: mimeType, extension: imageExtension(mimeType), preview }, kind: "image", locale: outputLocale, sourceLocales: [inputLocale], createdBy: "handler-matrix-actor", metadata: { image_operation: "generate", ...provenance } }),
           call("createArtifactRevision", { artifactId: "generated_image_fixture", content: new Uint8Array([1, 2, 3]), extension: imageExtension(mimeType), producerRunId: "run_fixture", editorSource: "image_provider", changeSummary: "Saved generated image provider result.", provenance }),
           call("createArtifactRollback", operation, [generatedImageArtifactRef, imageRevisionRef], {}, { artifact_id: "generated_image_fixture" })
         ]
