@@ -1,7 +1,7 @@
 # Core08 Scope Ledger
 
-状態: **完了（修正後のFocused verification済み）**  
-開始時点: 2026-08-09  
+状態: **完了（修正後のFocused verification済み）**
+開始時点: 2026-08-09
 開始HEAD: `ce205d2`
 
 ## 対象

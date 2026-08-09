@@ -544,7 +544,8 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
         yield { event_type: "run_failed", terminal_evidence: { kind: "indeterminate", reason: "transport_lost", providerStarted: true, mayHaveSideEffects: true }, payload: { error_code: "backend_process_close_unconfirmed", message: `${input.label} process close could not be confirmed.`, reason: "process_close_unconfirmed", retryable: false } } satisfies BackendOutputEvent;
         return;
       }
-      if (cancellationRequested && !providerTerminalBeforeCancellation) {
+      // stdout can contain a completed provider terminal that is only parsed while cancellation drains the stream.
+      if (cancellationRequested && !providerTerminalBeforeCancellation && !terminalIsCompleted) {
         if (cancellationConfirmed) {
           yield { event_type: "run_failed", terminal_evidence: { kind: "cancelled", source: "process_exit" }, payload: { error_code: "backend_cancelled", message: `${input.label} was cancelled.`, reason: "cancelled", retryable: false, ...(close.exitCode !== null ? { exit_code: close.exitCode } : {}), ...(close.signal ? { signal: close.signal } : {}) } } satisfies BackendOutputEvent;
         } else if (closeEvent) {
@@ -554,7 +555,7 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
         }
         return;
       }
-      if (terminalIsCompleted && close.exitCode !== 0 && !(cancellationRequested && providerTerminalBeforeCancellation)) {
+      if (terminalIsCompleted && close.exitCode !== 0 && !cancellationRequested) {
         yield processFailure();
       } else {
         yield(processErrorSummary
