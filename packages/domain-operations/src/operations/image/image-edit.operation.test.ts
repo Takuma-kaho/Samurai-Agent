@@ -7,8 +7,6 @@ const context: TrustedDomainContext = { inputSource: "provider_tool_call", works
 const now = "2026-01-01T00:00:00.000Z";
 const artifact: ArtifactRecord = { id: "image_1", title: "Source", kind: "image", locale: "ja", source_locales: ["ja"], file_ref: { kind: "artifact", id: "image_1", uri: "artifacts/source.png" }, metadata: { current_revision_id: "revision_1" }, source_operation_id: "operation_1", created_by: "image_provider", created_at: now, updated_at: now };
 const revision: ArtifactRevisionRecord = { id: "revision_2", artifact_id: artifact.id, revision: 2, parent_revision_id: "revision_1", file_ref: { kind: "artifact_revision", id: "revision_2", uri: "artifacts/revisions/2.png" }, blob_ref: { kind: "blob", id: "blob_2", uri: "blobs/2" }, content_hash: "hash", content_bytes: 3, provenance: {}, created_at: now };
-const session = { id: "session_1" } as never;
-const envelope = { id: "envelope_1" } as never;
 const operation = { id: "operation_2" } as never;
 
 describe("image.edit handler", () => {
@@ -17,8 +15,7 @@ describe("image.edit handler", () => {
     const createArtifactRevision = vi.fn(async () => ({ artifact: { ...artifact, metadata: { current_revision_id: revision.id } }, revision }));
     const handler = imageEdit.createHandler({
       artifactContract: () => ({ id: "image.edit", proposed_effects: ["Edit image"] }), getArtifact: async () => artifact,
-      imageArtifactNotFoundError: () => new Error("image_not_found"), ensureArtifactSession: async () => session,
-      createArtifactEnvelope: () => envelope, decodeImageBase64: () => bytes, createArtifactRevision,
+      imageArtifactNotFoundError: () => new Error("image_not_found"), decodeImageBase64: () => bytes, createArtifactRevision,
       createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
       runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [], ...executed.extra }; }
     });
@@ -34,8 +31,7 @@ describe("image.edit handler", () => {
     const decodeImageBase64 = vi.fn();
     const handler = imageEdit.createHandler({
       artifactContract: () => ({ id: "image.edit", proposed_effects: [] }), getArtifact: async () => ({ ...artifact, kind: "markdown" }),
-      imageArtifactNotFoundError: () => new Error("image_not_found"), ensureArtifactSession: async () => session,
-      createArtifactEnvelope: () => envelope, decodeImageBase64,
+      imageArtifactNotFoundError: () => new Error("image_not_found"), decodeImageBase64,
       createArtifactRevision: async () => ({ artifact, revision }), createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
       runArtifactMutation: async () => { throw new Error("unexpected"); }
     });

@@ -7,8 +7,6 @@ const context: TrustedDomainContext = { inputSource: "provider_tool_call", works
 const now = "2026-01-01T00:00:00.000Z";
 const artifact: ArtifactRecord = { id: "image_1", title: "Generated image", kind: "image", locale: "ja", source_locales: ["ja"], file_ref: { kind: "artifact", id: "image_1", uri: "artifacts/image.png" }, metadata: {}, source_operation_id: "operation_1", created_by: "image_provider", created_at: now, updated_at: now };
 const revision: ArtifactRevisionRecord = { id: "revision_1", artifact_id: artifact.id, revision: 1, file_ref: { kind: "artifact_revision", id: "revision_1", uri: "artifacts/revisions/1.png" }, blob_ref: { kind: "blob", id: "blob_1", uri: "blobs/1" }, content_hash: "hash", content_bytes: 3, provenance: {}, created_at: now };
-const session = { id: "session_1", ui_locale: "ja", output_locale: "ja" } as never;
-const envelope = { id: "envelope_1" } as never;
 const operation = { id: "operation_1" } as never;
 
 describe("image.generate handler", () => {
@@ -18,7 +16,7 @@ describe("image.generate handler", () => {
     const createArtifactRevision = vi.fn(async () => ({ artifact, revision }));
     const handler = imageGenerate.createHandler({
       artifactContract: () => ({ id: "image.generate", proposed_effects: ["Save image"] }),
-      ensureArtifactSession: async () => session, createArtifactEnvelope: () => envelope,
+      artifactDefaultLocales: async () => ({ inputLocale: "ja", outputLocale: "ja" }),
       decodeImageBase64: () => bytes, createArtifactDraft, createArtifactRevision,
       createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
       runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [], ...executed.extra }; }

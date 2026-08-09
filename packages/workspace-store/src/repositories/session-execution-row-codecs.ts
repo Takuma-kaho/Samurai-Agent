@@ -164,8 +164,12 @@ export function backendRunFromRow(row: BackendRunsTable): BackendRunRecord {
 export function workspaceChangeToRow(change: WorkspaceChangeRecord): WorkspaceChangesTable {
   return {
     id: change.id,
-    run_id: change.run_id,
+    run_id: change.run_id ?? null,
     session_id: change.session_id ?? null,
+    room_id: change.room_id ?? null,
+    activity_id: change.activity_id ?? null,
+    domain_operation_id: change.domain_operation_id ?? null,
+    session_ref_json: change.session_ref ? stringify(change.session_ref) : null,
     resource_ref_json: stringify(change.resource_ref),
     change_type: change.change_type,
     summary: change.summary,
@@ -178,8 +182,12 @@ export function workspaceChangeToRow(change: WorkspaceChangeRecord): WorkspaceCh
 export function workspaceChangeFromRow(row: WorkspaceChangesTable): WorkspaceChangeRecord {
   return {
     id: row.id,
-    run_id: row.run_id,
+    ...(row.run_id ? { run_id: row.run_id } : {}),
     ...(row.session_id ? { session_id: row.session_id } : {}),
+    ...(row.room_id ? { room_id: row.room_id } : {}),
+    ...(row.activity_id ? { activity_id: row.activity_id } : {}),
+    ...(row.domain_operation_id ? { domain_operation_id: row.domain_operation_id } : {}),
+    ...(row.session_ref_json ? { session_ref: parse(row.session_ref_json) } : {}),
     resource_ref: parse(row.resource_ref_json),
     change_type: row.change_type as WorkspaceChangeRecord["change_type"],
     summary: row.summary,

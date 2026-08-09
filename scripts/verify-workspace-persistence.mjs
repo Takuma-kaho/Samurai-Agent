@@ -15,6 +15,10 @@ const esbuild = path.join(root, "node_modules/.pnpm", packageDir, "node_modules"
 const cacheRoot = path.join(root, "node_modules/.cache");
 mkdirSync(cacheRoot, { recursive: true });
 const temporaryRoot = mkdtempSync(path.join(cacheRoot, "samurai-workspace-persistence-"));
+const onlyArgument = process.argv.find((argument) => argument.startsWith("--only="));
+const only = onlyArgument
+  ? new Set(onlyArgument.slice("--only=".length).split(",").map((name) => name.trim()).filter(Boolean))
+  : undefined;
 
 function text(value) {
   return typeof value === "string" ? value : value?.toString("utf8") ?? "";
@@ -89,23 +93,28 @@ function runVitest(name, testFiles) {
 }
 
 try {
-  const checks = [
-    runFixture("workspace-persistence", "scripts/fixtures/workspace-persistence.ts"),
-    runFixture("workspace-migration", "scripts/fixtures/workspace-migration.ts"),
-    runFixture("workspace-file-transaction-recovery", "scripts/fixtures/workspace-file-transaction-recovery.ts"),
-    runFixture("workspace-restore-atomicity", "scripts/fixtures/workspace-restore-atomicity.ts"),
-    runFixture("workspace-bundle-restore", "scripts/fixtures/workspace-bundle-restore.ts"),
-    runFixture("workspace-restore-recovery", "scripts/fixtures/workspace-restore-recovery.ts"),
-    runFixture("workspace-portability", "scripts/fixtures/workspace-portability.ts"),
-    runFixture("session-search-index", "scripts/fixtures/session-search-index.ts"),
-    runVitest("workspace-store-compatibility", ["packages/workspace-store/src/workspace-store.test.ts"]),
-    runVitest("core02_transaction_contracts", [
+  const availableChecks = [
+    { name: "workspace-persistence", run: () => runFixture("workspace-persistence", "scripts/fixtures/workspace-persistence.ts") },
+    { name: "workspace-migration", run: () => runFixture("workspace-migration", "scripts/fixtures/workspace-migration.ts") },
+    { name: "workspace-file-transaction-recovery", run: () => runFixture("workspace-file-transaction-recovery", "scripts/fixtures/workspace-file-transaction-recovery.ts") },
+    { name: "workspace-restore-atomicity", run: () => runFixture("workspace-restore-atomicity", "scripts/fixtures/workspace-restore-atomicity.ts") },
+    { name: "workspace-bundle-restore", run: () => runFixture("workspace-bundle-restore", "scripts/fixtures/workspace-bundle-restore.ts") },
+    { name: "workspace-restore-recovery", run: () => runFixture("workspace-restore-recovery", "scripts/fixtures/workspace-restore-recovery.ts") },
+    { name: "workspace-portability", run: () => runFixture("workspace-portability", "scripts/fixtures/workspace-portability.ts") },
+    { name: "session-search-index", run: () => runFixture("session-search-index", "scripts/fixtures/session-search-index.ts") },
+    { name: "workspace-store-compatibility", run: () => runVitest("workspace-store-compatibility", ["packages/workspace-store/src/workspace-store.test.ts"]) },
+    { name: "core02_transaction_contracts", run: () => runVitest("core02_transaction_contracts", [
       "packages/workspace-store/src/core02-admission.test.ts",
       "packages/workspace-store/src/core02-event-identity.test.ts",
       "packages/workspace-store/src/core02-settlement.test.ts"
-    ]),
-    runVitest("host_terminal_diagnostic", ["packages/runtime/src/host/agent-host.test.ts"])
+    ]) },
+    { name: "host_terminal_diagnostic", run: () => runVitest("host_terminal_diagnostic", ["packages/runtime/src/host/agent-host.test.ts"]) }
   ];
+  const selected = only ? availableChecks.filter((check) => only.has(check.name)) : availableChecks;
+  if (only && (selected.length !== only.size || selected.length === 0)) {
+    throw new Error(`workspace_persistence_unknown_check:${[...only].filter((name) => !selected.some((check) => check.name === name)).join(",")}`);
+  }
+  const checks = selected.map((check) => check.run());
   const status = checks.some((check) => check.status === "failed")
     ? "failed"
     : checks.some((check) => check.status === "unverified")

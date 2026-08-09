@@ -73,7 +73,10 @@ const owners: readonly WorkspaceResourceOwner[] = [
   {
     owner: "generated_surface",
     directories: ["surfaces"],
-    backup_roots: ["surfaces"],
+    // Surface bundles are a regenerable compatibility cache. Keep their
+    // directory and rows for legacy reads, but do not make a new backup
+    // depend on them.
+    backup_roots: [],
     sqlite_tables: ["generated_surfaces", "generated_surface_revisions", "surface_interactions"]
   },
   {
@@ -145,7 +148,7 @@ const owners: readonly WorkspaceResourceOwner[] = [
 ];
 
 const legacyBoundaries: readonly WorkspaceResourceBoundary[] = [
-  { resource: "generated_surfaces", source_of_truth: "filesystem", file_roots: ["surfaces"], sqlite_tables: ["generated_surfaces", "generated_surface_revisions", "surface_interactions"], sqlite_role: "metadata", note: "Versioned Generated Surface bundles live in Workspace files; SQLite tracks revisions, state, and interactions." },
+  { resource: "generated_surfaces", source_of_truth: "derived", file_roots: ["surfaces"], sqlite_tables: ["generated_surfaces", "generated_surface_revisions", "surface_interactions"], sqlite_role: "metadata", note: "Generated Surface bundles are regenerable display compatibility data; Artifact and Collection remain the Workspace source of truth." },
   { resource: "profile", source_of_truth: "filesystem", file_roots: ["profile"], sqlite_tables: ["settings", "plugin_states"], sqlite_role: "metadata", note: "Profile and SOUL-style identity files live in the workspace; settings rows hold operational preferences." },
   { resource: "memory", source_of_truth: "filesystem", file_roots: ["memory"], sqlite_tables: ["memory_index"], sqlite_role: "index", note: "Memory markdown is the durable source; SQLite is used for search, state, and retrieval metadata." },
   { resource: "knowledge_wiki", source_of_truth: "filesystem", file_roots: ["wiki/pages"], sqlite_tables: ["wiki_index"], sqlite_role: "index", note: "Knowledge Wiki markdown is the durable source; SQLite is a repairable active/search index." },
@@ -178,7 +181,7 @@ export function workspaceBackupRoots(): string[] {
   // Preserve the Phase 1 manifest order.  New ownership metadata may add
   // tables, but backup root ordering is part of the existing file contract.
   const ownedRoots = new Set(owners.flatMap((owner) => owner.backup_roots));
-  return ["artifacts", "profile", "memory", "skills", "wiki", "rollback", "collections", "surfaces"].filter((root) => ownedRoots.has(root));
+  return ["artifacts", "profile", "memory", "skills", "wiki", "rollback", "collections"].filter((root) => ownedRoots.has(root));
 }
 
 export function workspaceResourceBoundaries(): WorkspaceResourceBoundary[] {

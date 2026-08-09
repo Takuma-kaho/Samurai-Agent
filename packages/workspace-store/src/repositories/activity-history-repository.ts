@@ -220,20 +220,33 @@ export class ActivityHistoryRepository {
       throw new Error("resource_usage_workspace_change_required");
     }
     if (record.workspace_change_id) {
-      const change = await this.db.selectFrom("workspace_changes").select(["run_id", "legacy_operation_id", "resource_ref_json"])
+      const change = await this.db.selectFrom("workspace_changes").select([
+        "run_id", "room_id", "activity_id", "domain_operation_id",
+        "legacy_operation_id", "resource_ref_json"
+      ])
         .where("id", "=", record.workspace_change_id)
         .executeTakeFirst();
       if (!change) throw new Error("resource_usage_workspace_change_not_found");
-      const run = await this.db.selectFrom("backend_runs").select(["room_id"])
-        .where("id", "=", change.run_id)
-        .executeTakeFirst();
-      if (!run || run.room_id !== activity.room_id || (activity.backend_run_id && change.run_id !== activity.backend_run_id)) {
+      if (change.room_id && change.room_id !== activity.room_id) {
+        throw new Error("resource_usage_workspace_change_scope_invalid");
+      }
+      if (change.activity_id && change.activity_id !== activity.id) throw new Error("resource_usage_workspace_change_activity_mismatch");
+      if (change.run_id) {
+        const run = await this.db.selectFrom("backend_runs").select(["room_id"])
+          .where("id", "=", change.run_id)
+          .executeTakeFirst();
+        if (!run || run.room_id !== activity.room_id || (activity.backend_run_id && change.run_id !== activity.backend_run_id)) {
+          throw new Error("resource_usage_workspace_change_scope_invalid");
+        }
+      } else if (!change.room_id) {
+        // Only legacy Run-backed changes may omit a Room. New direct writes
+        // must name their Room instead of inheriting it from a Session.
         throw new Error("resource_usage_workspace_change_scope_invalid");
       }
       if (!sameValue(parseResourceRef(change.resource_ref_json), record.resource_ref)) {
         throw new Error("resource_usage_workspace_change_resource_mismatch");
       }
-      if (record.domain_operation_id && change.legacy_operation_id !== record.domain_operation_id) {
+      if (record.domain_operation_id && change.domain_operation_id !== record.domain_operation_id && change.legacy_operation_id !== record.domain_operation_id) {
         throw new Error("resource_usage_workspace_change_operation_mismatch");
       }
     }

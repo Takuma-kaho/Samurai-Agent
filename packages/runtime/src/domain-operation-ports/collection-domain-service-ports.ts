@@ -10,8 +10,6 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       runCollectionAction: (input) => services.collectionDomainService.runAction(input)
     },
     "collection.patch.apply": {
-      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
-      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
       applyCollectionRecordPatch: (input) => services.collectionDomainService.applyCollectionRecordPatch(input),
       mapCollectionPatchError: (error) => services.collectionDomainService.mapCollectionPatchError(error),
       collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
@@ -20,8 +18,6 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.record.create": {
-      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
-      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
       saveCollectionRecord: (record) => services.collectionDomainService.saveCollectionRecord(record),
       collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
       createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
@@ -35,15 +31,11 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       deleteCollectionRecord: (collectionId, recordId) => services.collectionDomainService.deleteCollectionRecord(collectionId, recordId),
       collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
       collectionMutationError: (code, message) => services.collectionDomainService.collectionMutationError(code, message),
-      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
-      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
       createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
       runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.reindex": {
       collectionMutationContract: (id) => services.collectionDomainService.collectionMutationContract(id),
-      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
-      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
       reindexCollectionStore: () => services.collectionDomainService.reindexCollectionStore(),
       runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
@@ -54,8 +46,6 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       collectionSchemaRef: (schema) => services.collectionDomainService.collectionSchemaRef(schema),
       createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
       collectionMutationContract: (id) => services.collectionDomainService.collectionMutationContract(id),
-      ensureCollectionMutationSession: () => services.collectionDomainService.ensureCollectionMutationSession(),
-      createCollectionMutationEnvelope: (content) => services.collectionDomainService.createCollectionMutationEnvelope(content),
       runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.records.list": readOnlyQueryPort<Ports["collection.records.list"]>({

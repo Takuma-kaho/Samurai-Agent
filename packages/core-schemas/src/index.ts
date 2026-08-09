@@ -1211,8 +1211,14 @@ export type ClientEventRecord = z.infer<typeof ClientEventRecordSchema>;
 
 export const WorkspaceChangeRecordSchema = z.object({
   id: z.string().min(1),
-  run_id: z.string().min(1),
+  /** A Run is optional for direct Workspace mutations. */
+  run_id: z.string().min(1).optional(),
   session_id: z.string().min(1).optional(),
+  /** New rows carry the Room explicitly; legacy rows remain readable without inference. */
+  room_id: z.string().min(1).optional(),
+  activity_id: z.string().min(1).optional(),
+  domain_operation_id: z.string().min(1).optional(),
+  session_ref: SessionRefSchema.optional(),
   resource_ref: ResourceRefSchema,
   change_type: WorkspaceChangeTypeSchema,
   summary: z.string(),
@@ -1221,6 +1227,24 @@ export const WorkspaceChangeRecordSchema = z.object({
   created_at: z.string().datetime()
 }).strict();
 export type WorkspaceChangeRecord = z.infer<typeof WorkspaceChangeRecordSchema>;
+
+/**
+ * New writes must name their trusted Room and one current execution cause.
+ * The broader read schema above intentionally remains compatible with rows
+ * created before Core08, including legacy operation references.
+ */
+export const NewWorkspaceChangeRecordSchema = WorkspaceChangeRecordSchema.extend({
+  room_id: z.string().min(1),
+  legacy_operation_id: z.never().optional()
+}).superRefine((value, context) => {
+  if (!value.run_id && !value.activity_id && !value.domain_operation_id) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "workspace_change_cause_required"
+    });
+  }
+});
+export type NewWorkspaceChangeRecord = z.infer<typeof NewWorkspaceChangeRecordSchema>;
 
 export const SkillIndexEntryReadModelSchema = z.object({
   id: z.string().min(1),
@@ -3583,7 +3607,11 @@ export type GeneratedSurfaceActionDeclaration = z.infer<typeof GeneratedSurfaceA
 
 export const SurfaceGenerationRequestSchema = z.object({
   id: z.string().min(1),
-  session_id: z.string().min(1),
+  /** Session is provenance only. A Surface can be requested without one. */
+  session_id: z.string().min(1).optional(),
+  session_ref: SessionRefSchema.optional(),
+  activity_id: z.string().min(1).optional(),
+  domain_operation_id: z.string().min(1).optional(),
   user_intent: z.string().min(1),
   source_resource_refs: z.array(ResourceRefSchema),
   allowed_domain_commands: z.array(z.string().min(1)),
@@ -3611,7 +3639,10 @@ export type GeneratedSurfaceValidationReport = z.infer<typeof GeneratedSurfaceVa
 export const GeneratedSurfaceDefinitionSchema = z.object({
   id: z.string().min(1),
   state: GeneratedSurfaceStateSchema,
-  session_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  session_ref: SessionRefSchema.optional(),
+  activity_id: z.string().min(1).optional(),
+  domain_operation_id: z.string().min(1).optional(),
   title: z.string().min(1),
   input_data_schema: z.record(jsonValueSchema),
   actions: z.array(GeneratedSurfaceActionDeclarationSchema),
@@ -3634,6 +3665,9 @@ export const GeneratedSurfaceRevisionRecordSchema = z.object({
   revision: z.number().int().positive(),
   parent_revision_id: z.string().min(1).optional(),
   producer_run_id: z.string().min(1).optional(),
+  activity_id: z.string().min(1).optional(),
+  domain_operation_id: z.string().min(1).optional(),
+  source_resource_refs: z.array(ResourceRefSchema).default([]),
   prompt_fingerprint: z.string().min(1),
   knowledge_refs: z.array(ResourceRefSchema),
   skill_refs: z.array(ResourceRefSchema),
@@ -3650,7 +3684,10 @@ export type GeneratedSurfaceRevisionRecord = z.infer<typeof GeneratedSurfaceRevi
 export const SurfaceInteractionRecordSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["opened", "action", "corrected", "regenerated", "pinned", "unpinned", "dismissed"]),
-  session_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  session_ref: SessionRefSchema.optional(),
+  activity_id: z.string().min(1).optional(),
+  domain_operation_id: z.string().min(1).optional(),
   message_id: z.string().min(1).optional(),
   surface_id: z.string().min(1),
   revision_id: z.string().min(1),

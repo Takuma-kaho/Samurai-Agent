@@ -1,5 +1,5 @@
 import { toStrictJsonSchema, type JsonValue } from "@samurai-agent/core-schemas";
-import type { ParticipantPrincipal } from "@samurai-agent/room-permissions";
+import { principalParticipantId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { z } from "zod";
 import { domainOperationAccess, type DomainAccessClassification } from "./access-classification.js";
 
@@ -54,8 +54,6 @@ export const sessionCompatibleOperationIds = new Set<string>([
   "external.send",
   "external.send.dispatch",
   "external.send.prepare",
-  "image.edit",
-  "image.generate",
   "mcp.call",
   "sandbox.exec",
   "skill.lifecycle.apply",
@@ -65,31 +63,8 @@ export const sessionCompatibleOperationIds = new Set<string>([
   "skill.optimization.rollback",
   "skill.optimization.start",
   "message.presentation.update",
-  "artifact.create",
-  "artifact.export_pdf",
-  "artifact.repair",
-  "artifact.restore_revision",
-  "artifact.revise",
-  "collection.action.run",
   "collection.manage",
-  "collection.patch.apply",
-  "collection.record.create",
-  "collection.record.delete",
-  "collection.records.list",
-  "collection.reindex",
-  "collection.schema.docs",
-  "collection.schema.get",
-  "collection.schema.save",
-  "collection.search",
-  "collection.view.present",
-  "generated_surface.action.run",
-  "generated_surface.create",
-  "generated_surface.export",
-  "generated_surface.interaction.record",
-  "generated_surface.revise",
   "generated_surface.state",
-  "graph.create",
-  "graph.patch"
 ]);
 
 export function isSessionCompatibleOperation(operationId: string): boolean {
@@ -142,6 +117,11 @@ export interface TrustedDomainContext {
   idempotencyKey?: string;
   signal?: AbortSignal;
   deadlineAt?: number;
+}
+
+/** Artifact ownership is selected from trusted ingress identity, never payload. */
+export function trustedCreatorId(context: TrustedDomainContext): string {
+  return context.participant ? principalParticipantId(context.participant) : context.actorId;
 }
 
 export interface CommandOperationPort<I, O> {

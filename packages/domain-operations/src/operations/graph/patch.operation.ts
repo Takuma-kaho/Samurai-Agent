@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { GraphDocumentSchema, GraphEdgeSchema, GraphNodeSchema, type ActivityInboxItem, ArtifactRecord, ArtifactRevisionRecord, type GraphDocument, type JsonValue, type MessageEnvelope, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
+import { GraphDocumentSchema, GraphEdgeSchema, GraphNodeSchema, type ActivityInboxItem, ArtifactRecord, ArtifactRevisionRecord, type GraphDocument, type JsonValue, type OperationRecord, type ResourceRef, type RollbackPoint } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactRevisionWriteValueSchema } from "../../value-objects/artifact.js";
 
@@ -22,10 +22,9 @@ export interface GraphPatchPorts {
   artifactContract(id: "graph.patch"): { id: string; proposed_effects: string[] };
   getArtifact(id: string): Promise<ArtifactRecord | undefined>; readArtifactContent(id: string): Promise<string | undefined>;
   graphArtifactNotFoundError(): Error; graphDocumentContentNotFoundError(): Error; graphDocumentInvalidError(): Error;
-  ensureArtifactSession(): Promise<SessionRecord>; createArtifactEnvelope(session: SessionRecord, content: string): MessageEnvelope;
   createArtifactRevision(input: { artifactId: string; content: string; extension: "json"; baseRevisionId?: string; editorSource: "chat" | "surface" | "provider" | "image_provider" | "restore" | "system"; changeSummary: string; provenance: Record<string, JsonValue> }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
-  runArtifactMutation(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
+  runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
 }
 
 const graphPatch = defineCommand<GraphPatchPorts>()({
@@ -75,16 +74,14 @@ const graphPatch = defineCommand<GraphPatchPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleGraphPatch(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleGraphPatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const artifact = await ports.getArtifact(input.artifact_id);
         if (!artifact || artifact.kind !== "graph") throw ports.graphArtifactNotFoundError();
         const content = await ports.readArtifactContent(input.artifact_id);
         if (!content) throw ports.graphDocumentContentNotFoundError();
         const next = applyPatch(parseGraph(content, ports), input, ports);
         const contract = ports.artifactContract("graph.patch");
-        const session = await ports.ensureArtifactSession();
-        const envelope = ports.createArtifactEnvelope(session, `Edit graph: ${artifact.title}`);
-        const value = await ports.runArtifactMutation({ session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async (operation) => {
+        const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Edit graph: ${artifact.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async (operation) => {
           const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: `${JSON.stringify(next, null, 2)}\n`, extension: "json", baseRevisionId: input.base_revision_id ?? currentRevisionId(artifact), editorSource: input.editor_source ?? "system", changeSummary: input.change_summary ?? "Updated graph nodes and edges.", provenance: input.provenance });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonRecord(artifact) }, { artifact: jsonRecord(created.artifact) });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Updated graph ${artifact.title}.`, extra: { revision: created.revision } };

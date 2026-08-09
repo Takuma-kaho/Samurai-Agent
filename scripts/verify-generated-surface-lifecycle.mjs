@@ -12,15 +12,15 @@ try {
   execFileSync(esbuild, [path.join(root, "scripts/fixtures/generated-surface-lifecycle.ts"), "--bundle", "--platform=node", "--format=esm", "--external:better-sqlite3", `--outfile=${output}`], { cwd: root, stdio: "inherit" });
   const startedAt = new Date().toISOString(); const rawResult = execFileSync(process.execPath, [output], { cwd: root, encoding: "utf8" }).trim(); const result = JSON.parse(rawResult); const completedAt = new Date().toISOString(); const evidenceDir = path.join(root, "reports/core-completion/evidence"); mkdirSync(evidenceDir, { recursive: true }); const sourceEvidence = committedSourceEvidence(root, sourceFiles);
   writeFileSync(path.join(evidenceDir, "D03.json"), `${JSON.stringify({ schema_version: 1, test_id: "D03", command: "pnpm core:test:surface-lifecycle", status: "passed", ...sourceEvidence, started_at: startedAt, completed_at: completedAt, assertions: [
-    { name: "Generated, Human, and Agent command parity", actual: new Set(result.command_parity.map((item) => JSON.stringify(item))).size, expected: 1 },
-    { name: "Generated action is audited", actual: result.generated_action_audited, expected: true },
+    { name: "Generated and direct command parity", actual: new Set(result.command_parity.map((item) => JSON.stringify(item))).size, expected: 1 },
+    { name: "Generated action has Activity evidence", actual: result.generated_action_has_activity, expected: true },
     { name: "Generated action uses normal version validation", actual: result.stale_validation_rejected, expected: true }
   ], result }, null, 2)}\n`);
   writeFileSync(path.join(evidenceDir, "D04.json"), `${JSON.stringify({ schema_version: 1, test_id: "D04", command: "pnpm core:test:surface-lifecycle", status: "passed", ...sourceEvidence, started_at: startedAt, completed_at: completedAt, assertions: [
     { name: "Reload preserves content hash", actual: result.reload_same_hash, expected: true },
     { name: "Revision keeps same Surface id and parent lineage", actual: result.same_surface_id && result.parent_lineage, expected: true },
     { name: "Pin persists", actual: result.pinned, expected: true },
-    { name: "Export/import preserves bundle hash", actual: result.export_import_hash_equal, expected: true },
+    { name: "Backup restores Artifact and Collection primary resources without Surface files", actual: result.backup_preserves_primary_resources, expected: true },
     { name: "Immutable revisions remain available", actual: result.revisions, expected: 2 }
   ], result }, null, 2)}\n`); process.stdout.write(`${rawResult}\n`);
 } finally { rmSync(temporaryRoot, { recursive: true, force: true }); }

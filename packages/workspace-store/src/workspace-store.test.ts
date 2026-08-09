@@ -24,6 +24,7 @@ import {
   type MessageEnvelope,
   type OperationRecord,
   type PolicyDecisionRecord,
+  type NewWorkspaceChangeRecord,
   type SessionRecord,
   type SkillFrontmatter,
   type WorkspaceChangeRecord,
@@ -71,7 +72,7 @@ describe("workspace store", () => {
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
-    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   });
 
   it("persists message presentations for chat cards", async () => {
@@ -533,6 +534,7 @@ describe("workspace store", () => {
   it("builds workspace read models from indexes and history tables", async () => {
     const store = await createTempStore();
     const now = nowIso();
+    const room = await store.createRoom({ id: "room-read-model", name: "Read model", created_at: now, updated_at: now });
     const session = await createSessionRecord(store, "Read model session");
     await store.saveSkillMarkdown({
       state: "active",
@@ -542,6 +544,7 @@ describe("workspace store", () => {
     const run: BackendRunRecord = {
       id: "run_read_model",
       session_id: session.id,
+      room_id: room.id,
       input_message_id: "message_in",
       output_message_id: "message_out",
       backend_id: "samurai-native",
@@ -632,10 +635,11 @@ describe("workspace store", () => {
       created_at: now,
       updated_at: now
     };
-    const change: WorkspaceChangeRecord = {
+    const change: NewWorkspaceChangeRecord = {
       id: "change_read_model",
       run_id: run.id,
       session_id: session.id,
+      room_id: room.id,
       resource_ref: artifactRef,
       change_type: "artifact_created",
       summary: "Created artifact.",

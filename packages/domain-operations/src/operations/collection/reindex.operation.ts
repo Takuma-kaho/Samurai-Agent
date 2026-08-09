@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { ActivityInboxItem, MessageEnvelope, OperationRecord, ResourceRef, RollbackPoint, SessionRecord } from "@samurai-agent/core-schemas";
+import type { ActivityInboxItem, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { collectionReindexWriteValueSchema } from "../../value-objects/collection.js";
 
@@ -9,17 +9,15 @@ const Output = collectionReindexWriteValueSchema;
 
 export interface CollectionReindexPorts {
   collectionMutationContract(id: "collection.reindex"): { id: string; proposed_effects: string[] };
-  ensureCollectionMutationSession(): Promise<SessionRecord>;
-  createCollectionMutationEnvelope(content: string): MessageEnvelope;
   reindexCollectionStore(): Promise<z.infer<typeof Output>["resource"]>;
-  runCollectionMutation<T>(input: { session: SessionRecord; envelope: MessageEnvelope; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
+  runCollectionMutation<T>(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; evidenceKind?: "resource_change" | "derived_repair"; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 const collectionReindex = defineCommand<CollectionReindexPorts>()({
   ...{
   "kind": "command",
   "id": "collection.reindex",
-  "version": "3.0",
+  "version": "3.1",
   "availability": "active",
   "title": "Reindex collections",
   "description": "Refresh Collection SQLite indexes from schema and record files.",
@@ -57,12 +55,10 @@ const collectionReindex = defineCommand<CollectionReindexPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleCollectionReindex(_context: TrustedDomainContext, _input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleCollectionReindex(context: TrustedDomainContext, _input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const contract = ports.collectionMutationContract("collection.reindex");
-        const session = await ports.ensureCollectionMutationSession();
-        const envelope = ports.createCollectionMutationEnvelope("Reindex collections");
         const result = await ports.runCollectionMutation({
-          session, envelope, operationName: contract.id, proposedEffects: contract.proposed_effects,
+          trustedContext: context, inputSummary: "Reindex collections", operationName: contract.id, proposedEffects: contract.proposed_effects, evidenceKind: "derived_repair",
           execute: async () => {
             const resource = await ports.reindexCollectionStore();
             return {

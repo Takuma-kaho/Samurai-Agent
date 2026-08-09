@@ -397,6 +397,7 @@ export class WorkspaceStore {
     facade.commitCore02LifecycleEvent = session.commitCore02LifecycleEvent.bind(session);
     facade.listBackendEvents = session.listBackendEvents.bind(session);
     facade.saveWorkspaceChange = session.saveWorkspaceChange.bind(session);
+    facade.commitResourceMutationEvidence = session.commitResourceMutationEvidence.bind(session);
     facade.setWorkspaceChangeCorrelation = session.setWorkspaceChangeCorrelation.bind(session);
     facade.listWorkspaceChanges = session.listWorkspaceChanges.bind(session);
     facade.listWorkspaceChangesForOperation = session.listWorkspaceChangesForOperation.bind(session);
@@ -796,6 +797,7 @@ export interface WorkspaceStore {
   commitCore02LifecycleEvent: SessionExecutionRepository["commitCore02LifecycleEvent"];
   listBackendEvents: SessionExecutionRepository["listBackendEvents"];
   saveWorkspaceChange: SessionExecutionRepository["saveWorkspaceChange"];
+  commitResourceMutationEvidence: SessionExecutionRepository["commitResourceMutationEvidence"];
   setWorkspaceChangeCorrelation: SessionExecutionRepository["setWorkspaceChangeCorrelation"];
   listWorkspaceChanges: SessionExecutionRepository["listWorkspaceChanges"];
   listWorkspaceChangesForOperation: SessionExecutionRepository["listWorkspaceChangesForOperation"];

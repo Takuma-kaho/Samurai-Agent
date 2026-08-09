@@ -7,8 +7,6 @@ const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId:
 const now = "2026-01-01T00:00:00.000Z";
 const source: ArtifactRecord = { id: "artifact_1", title: "Report", kind: "markdown", locale: "ja", source_locales: ["ja"], file_ref: { kind: "artifact", id: "artifact_1", uri: "artifacts/report.md" }, metadata: { current_revision_id: "revision_1" }, source_operation_id: "operation_1", created_by: "backend", created_at: now, updated_at: now };
 const pdf: ArtifactRecord = { ...source, id: "artifact_pdf", title: "Report.pdf", kind: "pdf", file_ref: { kind: "artifact", id: "artifact_pdf", uri: "artifacts/report.pdf" }, created_by: "pdf_export_adapter" };
-const session = { id: "session_1" } as never;
-const envelope = { id: "envelope_1" } as never;
 const operation = { id: "operation_2" } as never;
 
 describe("artifact.export_pdf handler", () => {
@@ -19,8 +17,7 @@ describe("artifact.export_pdf handler", () => {
       artifactContract: () => ({ id: "artifact.export_pdf", proposed_effects: ["Export PDF"] }), getArtifact: async () => source,
       readArtifactContent: async () => "# Report", exportArtifactPdf: async () => ({ adapterId: "pdf_adapter", bytes }),
       artifactNotFoundError: () => new Error("artifact_not_found"), artifactPdfSourceNotTextError: () => new Error("source_not_text"),
-      artifactPdfInvalidResultError: () => new Error("invalid_pdf"), ensureArtifactSession: async () => session,
-      createArtifactEnvelope: () => envelope, createArtifactDraft, createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
+      artifactPdfInvalidResultError: () => new Error("invalid_pdf"), createArtifactDraft, createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
       runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [] }; }
     });
 
@@ -36,8 +33,7 @@ describe("artifact.export_pdf handler", () => {
       artifactContract: () => ({ id: "artifact.export_pdf", proposed_effects: [] }), getArtifact: async () => source,
       readArtifactContent: async () => "body", exportArtifactPdf: async () => ({ adapterId: "bad", bytes: new Uint8Array([1, 2, 3]) }),
       artifactNotFoundError: () => new Error("artifact_not_found"), artifactPdfSourceNotTextError: () => new Error("source_not_text"),
-      artifactPdfInvalidResultError: () => new Error("invalid_pdf"), ensureArtifactSession: async () => session,
-      createArtifactEnvelope: () => envelope, createArtifactDraft: async () => pdf, createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
+      artifactPdfInvalidResultError: () => new Error("invalid_pdf"), createArtifactDraft: async () => pdf, createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
       runArtifactMutation
     });
 

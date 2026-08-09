@@ -1,9 +1,9 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { nowIso, type AgentRecord, type MemoryFrontmatter, type RoomRecord, type SessionRecord } from "@samurai-agent/core-schemas";
-import { agentParticipantId, humanParticipantId, localOwnerParticipantId } from "@samurai-agent/room-permissions";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { nowIso, type AgentRecord, type CollectionSchema, type MemoryFrontmatter, type RoomRecord, type SessionRecord } from "@samurai-agent/core-schemas";
+import { agentParticipantId, collectionRecordResourceId, humanParticipantId, localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime } from "./agent-runtime.js";
 import { RoomAuthorizationError, RoomAuthorizationService } from "./commands/services/room-authorization-service.js";
@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("Core 06 runtime authorization", () => {
-  it("does not expose Session as a new Room-share target", async () => {
+  it("does not expose Session or Generated Surface as a new Room-share target", async () => {
     const store = await createStore();
     const runtime = new AgentRuntime(store);
     await expect(runtime.runRuntimeApiDomainCommand({
@@ -36,6 +36,48 @@ describe("Core 06 runtime authorization", () => {
       roomId: "room_default",
       participant: { kind: "human", participantId: localOwnerParticipantId }
     })).rejects.toMatchObject({ code: "validation" });
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "room.resource.share",
+      idempotency_key: "core08-generated-surface-share-schema",
+      payload: {
+        target_room_id: "room_default",
+        resource: { kind: "generated_surface", id: "legacy-derived-surface" }
+      }
+    }, {
+      roomId: "room_default",
+      participant: { kind: "human", participantId: localOwnerParticipantId }
+    })).rejects.toMatchObject({ code: "validation" });
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("keeps an old Generated Surface share inspectable and revocable", async () => {
+    const store = await createStore();
+    const now = nowIso();
+    const target = await store.createRoomWithOwner(roomRecord("room-core08-surface-share-target", now), localOwnerParticipantId);
+    const boundary = await store.ensureResourceAccessBoundary({
+      resourceKind: "generated_surface", resourceId: "legacy-derived-surface", sourceRoomId: "room_default",
+      ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId
+    });
+    await store.shareResource({
+      resourceAccessBoundaryId: boundary.id, sourceRoomId: "room_default", targetRoomId: target.id, actorId: localOwnerParticipantId
+    });
+    const runtime = new AgentRuntime(store);
+    const trusted = { roomId: "room_default", participant: { kind: "human" as const, participantId: localOwnerParticipantId } };
+
+    const listed = await runtime.runRuntimeApiDomainQuery({
+      query_id: "room.resource.share.list",
+      payload: { resource: { kind: "generated_surface", id: "legacy-derived-surface" } }
+    }, trusted);
+    expect(listed.result).toEqual([expect.objectContaining({ target_room_id: target.id })]);
+
+    await runtime.runRuntimeApiDomainCommand({
+      command_id: "room.resource.share.revoke",
+      idempotency_key: "core08-legacy-surface-share-revoke",
+      payload: { target_room_id: target.id, resource: { kind: "generated_surface", id: "legacy-derived-surface" } }
+    }, trusted);
+    expect(await store.listRoomResourceShares(boundary.id)).toEqual([]);
+
     await runtime.shutdownMcpProcessPool();
     await store.close();
   });
@@ -269,18 +311,213 @@ describe("Core 06 runtime authorization", () => {
     await store.close();
   });
 
-  it("does not create a fake Session for a Session-compatible Artifact command", async () => {
+  it("creates an Artifact from trusted Room context without creating a Session", async () => {
     const store = await createStore();
     const runtime = new AgentRuntime(store);
     const before = await store.listSessions();
 
-    await expect(runtime.runRuntimeApiDomainCommand({
+    const result = await runtime.runRuntimeApiDomainCommand({
       command_id: "artifact.create",
       idempotency_key: "core06-artifact-without-session",
       payload: { title: "No fake Session", content: "Room-scoped execution" }
-    }, { roomId: "room_default", participant: { kind: "human", participantId: localOwnerParticipantId } })).rejects.toMatchObject({ code: "unavailable" });
+    }, { roomId: "room_default", participant: { kind: "human", participantId: localOwnerParticipantId } });
 
     expect(await store.listSessions()).toEqual(before);
+    const artifact = (result.result as { resource: { id: string } }).resource;
+    expect(await store.getResourceAccessBoundary("artifact", artifact.id)).toMatchObject({ source_room_id: "room_default" });
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("keeps a Sessionless Artifact in its Room and records one idempotent Activity trail", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const beforeSessions = await store.listSessions();
+    const otherOwner = humanParticipantId("core08-other-room-owner");
+    await store.addWorkspaceMember({ participantId: otherOwner, role: "member", actorId: localOwnerParticipantId });
+    const otherRoom = await store.createRoomWithOwner(roomRecord("room-core08-other", nowIso()), otherOwner);
+    const directContext = { roomId: "room_default", participant: { kind: "human" as const, participantId: localOwnerParticipantId } };
+    const command = {
+      command_id: "artifact.create",
+      idempotency_key: "core08-artifact-idempotent",
+      payload: { title: "Room-bound Artifact", content: "Session is optional provenance." }
+    } as const;
+
+    const first = await runtime.runRuntimeApiDomainCommand(command, directContext);
+    const replayed = await runtime.runRuntimeApiDomainCommand(command, directContext);
+    const artifact = (first.result as { resource: { id: string; created_by: string } }).resource;
+    expect((replayed.result as { resource: { id: string } }).resource.id).toBe(artifact.id);
+    expect(artifact.created_by).toBe(localOwnerParticipantId);
+    expect((await store.listArtifacts()).filter((item) => item.id === artifact.id)).toHaveLength(1);
+    expect(await store.listSessions()).toEqual(beforeSessions);
+
+    const change = (await store.listWorkspaceChanges()).filter((item) => item.resource_ref.kind === "artifact" && item.resource_ref.id === artifact.id);
+    expect(change).toHaveLength(1);
+    expect(change[0]).toMatchObject({ room_id: "room_default", activity_id: expect.any(String), domain_operation_id: expect.any(String) });
+    const activity = (await store.listActivities({ workspaceId: "workspace", roomId: "room_default" }))
+      .find((item) => item.id === change[0]?.activity_id);
+    expect(activity?.status).toBe("completed");
+    expect(await store.listResourceUsage({ activityId: activity!.id })).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource_ref: expect.objectContaining({ kind: "artifact", id: artifact.id }), stage: "modified" })
+    ]));
+
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "artifact.revise",
+      idempotency_key: "core08-forged-session-ref",
+      payload: { artifact_id: artifact.id, content: "must not cross Rooms" }
+    }, {
+      roomId: otherRoom.id,
+      participant: { kind: "human", participantId: otherOwner },
+      sessionRef: { app_id: "forged-app", session_id: "forged-session" }
+    })).rejects.toMatchObject({ code: "forbidden" });
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "artifact.create",
+      idempotency_key: "core08-payload-context-rejected",
+      payload: { title: "Rejected", content: "payload cannot pick a Room", room_id: otherRoom.id }
+    }, directContext)).rejects.toMatchObject({ code: "bad_request" });
+    expect(await store.readArtifactContent(artifact.id)).toBe("Session is optional provenance.");
+    expect(await store.listSessions()).toEqual(beforeSessions);
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("keeps a committed Artifact and Operation when only Core08 evidence fails", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const trusted = { roomId: "room_default", participant: { kind: "human" as const, participantId: localOwnerParticipantId } };
+    const command = {
+      command_id: "artifact.create",
+      idempotency_key: "core08-evidence-failure-freeze",
+      payload: { title: "Committed before evidence", content: "The Artifact must not be duplicated." }
+    } as const;
+    const evidenceFailure = vi.spyOn(store, "commitResourceMutationEvidence")
+      .mockRejectedValueOnce(new Error("workspace_change_write_failed"));
+
+    await expect(runtime.runRuntimeApiDomainCommand(command, trusted)).rejects.toMatchObject({
+      code: "resource_mutation_evidence_failed",
+      payload: expect.objectContaining({ failure_stage: "workspace_change" })
+    });
+    evidenceFailure.mockRestore();
+
+    const artifacts = (await store.listArtifacts()).filter((artifact) => artifact.title === "Committed before evidence");
+    expect(artifacts).toHaveLength(1);
+    const operation = (await store.listOperations()).find((candidate) => candidate.result_ref?.id === artifacts[0]?.id);
+    expect(operation).toMatchObject({ status: "completed", operation: "artifact.create" });
+    const activity = (await store.listActivities({ workspaceId: "workspace", roomId: "room_default" }))
+      .find((candidate) => candidate.domain_operation_ids.includes(operation!.id));
+    expect(activity).toMatchObject({ status: "failed", failure: expect.objectContaining({ code: "resource_mutation_evidence_failed" }) });
+    expect((await store.listWorkspaceChanges()).filter((change) => change.resource_ref.id === artifacts[0]?.id)).toEqual([]);
+    expect(await store.listResourceUsage({ activityId: activity!.id })).toEqual([]);
+
+    await expect(runtime.runRuntimeApiDomainCommand(command, trusted)).rejects.toMatchObject({
+      code: "resource_mutation_evidence_failed",
+      payload: expect.objectContaining({ conflict: "domain_command_replay" })
+    });
+    expect((await store.listArtifacts()).filter((artifact) => artifact.title === "Committed before evidence")).toHaveLength(1);
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("keeps a Sessionless Collection mutation in its Room and rejects stale or foreign patches", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const beforeSessions = await store.listSessions();
+    const otherOwner = humanParticipantId("core08-collection-other-room-owner");
+    await store.addWorkspaceMember({ participantId: otherOwner, role: "member", actorId: localOwnerParticipantId });
+    const otherRoom = await store.createRoomWithOwner(roomRecord("room-core08-collection-other", nowIso()), otherOwner);
+    const directContext = { roomId: "room_default", participant: { kind: "human" as const, participantId: localOwnerParticipantId } };
+    const schema: CollectionSchema = {
+      id: "core08-sessionless-collection", version: "1",
+      labels: { en: "Sessionless Collection" }, descriptions: { en: "Room-owned data" },
+      fields: [{ id: "name", type: "string" }], refs: [], embeds: [], derived_fields: [], triggers: [], actions: [{ id: "repair-index", kind: "reindex" }], views: [], permissions: { update: true }
+    };
+
+    await runtime.runRuntimeApiDomainCommand({ command_id: "collection.schema.save", idempotency_key: "core08-collection-schema", payload: schema }, directContext);
+    const created = await runtime.runRuntimeApiDomainCommand({
+      command_id: "collection.record.create", idempotency_key: "core08-collection-record",
+      payload: { collection_id: schema.id, record_id: "record", data: { name: "before" }, resource_refs: [] }
+    }, directContext);
+    const record = (created.result as { resource: { id: string } }).resource;
+    const patched = await runtime.runRuntimeApiDomainCommand({
+      command_id: "collection.patch.apply", idempotency_key: "core08-collection-patch",
+      payload: { collection_id: schema.id, record_id: record.id, expected_version: 1, changes: { name: "after" } }
+    }, directContext);
+    expect((patched.result as { resource: { version: number; data: { name: string } } }).resource).toMatchObject({ version: 2, data: { name: "after" } });
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "collection.patch.apply", idempotency_key: "core08-collection-stale",
+      payload: { collection_id: schema.id, record_id: record.id, expected_version: 1, changes: { name: "stale" } }
+    }, directContext)).rejects.toMatchObject({ code: "conflict" });
+    await expect(runtime.runRuntimeApiDomainCommand({
+      command_id: "collection.patch.apply", idempotency_key: "core08-collection-foreign",
+      payload: { collection_id: schema.id, record_id: record.id, expected_version: 2, changes: { name: "foreign" } }
+    }, {
+      roomId: otherRoom.id,
+      participant: { kind: "human", participantId: otherOwner },
+      sessionRef: { app_id: "forged-app", session_id: "forged-collection-session" }
+    })).rejects.toMatchObject({ code: "forbidden" });
+
+    expect(await store.getResourceAccessBoundary("collection_schema", schema.id)).toMatchObject({ source_room_id: "room_default" });
+    expect(await store.getResourceAccessBoundary("collection_record", collectionRecordResourceId(schema.id, record.id))).toMatchObject({ source_room_id: "room_default" });
+    expect(await store.getCollectionRecord(schema.id, record.id)).toMatchObject({ version: 2, data: { name: "after" } });
+
+    const changesBeforeReindex = await store.listWorkspaceChanges();
+    const activitiesBeforeReindex = await store.listActivities({ workspaceId: "workspace", roomId: "room_default" });
+    await runtime.runRuntimeApiDomainCommand({
+      command_id: "collection.action.run", idempotency_key: "core08-collection-derived-reindex",
+      payload: { collection_id: schema.id, action_id: "repair-index" }
+    }, directContext);
+    expect(await store.listWorkspaceChanges()).toHaveLength(changesBeforeReindex.length);
+    expect(await store.listActivities({ workspaceId: "workspace", roomId: "room_default" })).toHaveLength(activitiesBeforeReindex.length);
+    expect(await store.listSessions()).toEqual(beforeSessions);
+
+    await runtime.shutdownMcpProcessPool();
+    await store.close();
+  });
+
+  it("uses the Generated Surface Room boundary instead of a forged SessionRef", async () => {
+    const store = await createStore();
+    const runtime = new AgentRuntime(store);
+    const beforeSessions = await store.listSessions();
+    const directContext = { roomId: "room_default", participant: { kind: "human" as const, participantId: localOwnerParticipantId } };
+    const created = await runtime.runRuntimeApiDomainCommand({
+      command_id: "generated_surface.create",
+      idempotency_key: "core08-surface-room-boundary",
+      payload: {
+        request: {
+          user_intent: "Show a temporary control", source_resource_refs: [], allowed_domain_commands: ["artifact.create"],
+          selected_knowledge_refs: [], selected_skill_refs: [], client_capabilities: { generated_surface: true },
+          expected_lifetime: "session", fallback_chain: ["artifact", "text"]
+        },
+        bundle: {
+          title: "Temporary control", html: '<main><button data-action-id="create">Create</button></main>', actions: [{
+            id: "create", label: "Create", command_id: "artifact.create", input_schema: { type: "object" },
+            payload_template: { title: "Not allowed", content: "foreign Room cannot run this" }, requires_confirmation: false
+          }]
+        }
+      }
+    }, directContext);
+    const surface = (created.result as { definition: { id: string; current_revision_id: string; session_id?: string } }).definition;
+    expect(surface.session_id).toBeUndefined();
+    expect(await store.getResourceAccessBoundary("generated_surface", surface.id)).toMatchObject({ source_room_id: "room_default" });
+
+    const otherOwner = humanParticipantId("core08-surface-other-room-owner");
+    await store.addWorkspaceMember({ participantId: otherOwner, role: "member", actorId: localOwnerParticipantId });
+    const otherRoom = await store.createRoomWithOwner(roomRecord("room-core08-surface-other", nowIso()), otherOwner);
+    await expect(runtime.runGeneratedSurfaceAction({
+      surfaceId: surface.id,
+      revisionId: surface.current_revision_id,
+      actionId: "create",
+      interactionId: "core08-forged-surface-action"
+    }, {
+      roomId: otherRoom.id,
+      participant: { kind: "human", participantId: otherOwner },
+      sessionRef: { app_id: "forged-app", session_id: "forged-surface-session" }
+    })).rejects.toMatchObject({ code: "forbidden" });
+    expect(await store.listSessions()).toEqual(beforeSessions);
+    expect(await store.listArtifacts()).toHaveLength(0);
+
     await runtime.shutdownMcpProcessPool();
     await store.close();
   });
@@ -352,7 +589,7 @@ describe("Core 06 runtime authorization", () => {
     await store.close();
   });
 
-  it("hides the closed Session compatibility set from a Room-only inventory", async () => {
+  it("lists Core08 Room Resources while keeping remaining Session compatibility commands hidden", async () => {
     const store = await createStore();
     const runtime = new AgentRuntime(store);
 
@@ -367,7 +604,10 @@ describe("Core 06 runtime authorization", () => {
     expect(commandIds.has("memory.topic.create")).toBe(true);
     expect(commandIds.has("skill.candidate.create")).toBe(true);
     expect(commandIds.has("wiki.proposal.create")).toBe(true);
-    expect(commandIds.has("artifact.create")).toBe(false);
+    expect(commandIds.has("artifact.create")).toBe(true);
+    expect(commandIds.has("collection.schema.save")).toBe(true);
+    expect(commandIds.has("collection.record.create")).toBe(true);
+    expect(commandIds.has("generated_surface.create")).toBe(true);
     expect(commandIds.has("chat.turn.run")).toBe(false);
     expect(commandIds.has("memory.session.create")).toBe(false);
     expect(commandIds.has("session.create")).toBe(false);

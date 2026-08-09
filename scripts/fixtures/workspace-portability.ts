@@ -12,10 +12,11 @@ const source = await WorkspaceStore.create({ rootDir: sourceRoot });
 const target = await WorkspaceStore.create({ rootDir: targetRoot });
 try {
   const now = nowIso();
-  await source.createSession({ id: "portable-session", session_key: "web:portable:main", title: "Portable session", ui_locale: "en", output_locale: "ja", created_at: now, updated_at: now });
+  await source.createRoom({ id: "portable-room", name: "Portable Room", created_at: now, updated_at: now });
+  await source.createSession({ id: "portable-session", room_id: "portable-room", session_key: "web:portable:main", title: "Portable session", ui_locale: "en", output_locale: "ja", created_at: now, updated_at: now });
   await source.patchSettings({ output_locale: "en" });
   await source.saveMessage({ id: "portable-input", session_id: "portable-session", role: "user", content: "Portable request", input_locale: "en", output_locale: "en", created_at: now });
-  await source.saveBackendRun({ id: "portable-run", session_id: "portable-session", input_message_id: "portable-input", backend_id: "fixture", backend_kind: "samurai_native", status: "completed", started_at: now, completed_at: now, input_summary: "Portable request", metadata: {} });
+  await source.saveBackendRun({ id: "portable-run", session_id: "portable-session", room_id: "portable-room", input_message_id: "portable-input", backend_id: "fixture", backend_kind: "samurai_native", status: "completed", started_at: now, completed_at: now, input_summary: "Portable request", metadata: {} });
   await source.saveBackendEvent({ id: "portable-event", run_id: "portable-run", session_id: "portable-session", event_type: "text_delta", sequence: 1, payload: { text: "Portable event" }, resource_refs: [], created_at: now });
   const artifactPath = await source.writeArtifactContent("portable-artifact", "# Portable artifact\n");
   await source.saveArtifactMetadata({
@@ -23,7 +24,7 @@ try {
     file_ref: { kind: "artifact", id: "portable-artifact", uri: artifactPath, label: "Portable artifact" }, metadata: {},
     source_operation_id: "portable-operation", created_by: "fixture", created_at: now, updated_at: now
   });
-  await source.saveWorkspaceChange({ id: "portable-change", run_id: "portable-run", session_id: "portable-session", resource_ref: { kind: "artifact", id: "portable-artifact", uri: artifactPath }, change_type: "artifact_created", summary: "Portable artifact created", created_at: now });
+  await source.saveWorkspaceChange({ id: "portable-change", run_id: "portable-run", session_id: "portable-session", room_id: "portable-room", resource_ref: { kind: "artifact", id: "portable-artifact", uri: artifactPath }, change_type: "artifact_created", summary: "Portable artifact created", created_at: now });
   await source.enqueueGatewayDelivery({ id: "portable-delivery", session_key: "web:portable:main", channel: "webhook", status: "pending", idempotency_key: "portable-delivery", payload: { artifact: "portable-artifact" }, attempt: 0, max_attempts: 3, created_at: now, updated_at: now });
   const schema: CollectionSchema = {
     id: "portable-items", version: "1", labels: { en: "Portable items" }, descriptions: { en: "Portable items" },
@@ -82,9 +83,10 @@ try {
     event: await source.listBackendEvents({ runId: "portable-run" }),
     history: await source.listWorkspaceChanges("portable-session"),
     queue: await source.listGatewayDeliveries(),
-    surface: await source.getGeneratedSurface("portable-surface"),
-    surfaceBundle: await source.readGeneratedSurfaceBundle("portable-surface-revision")
+    surface: await source.getGeneratedSurface("portable-surface")
   };
+  const sourceSurfaceBundle = await source.readGeneratedSurfaceBundle("portable-surface-revision");
+  assert.ok(sourceSurfaceBundle, "The source fixture must contain a derived Surface bundle before export.");
   const exported = await source.exportWorkspaceBundle(exportRoot);
   await target.importWorkspaceBundle(exported.path);
   const targetSnapshot = {
@@ -101,15 +103,16 @@ try {
     event: await target.listBackendEvents({ runId: "portable-run" }),
     history: await target.listWorkspaceChanges("portable-session"),
     queue: await target.listGatewayDeliveries(),
-    surface: await target.getGeneratedSurface("portable-surface"),
-    surfaceBundle: await target.readGeneratedSurfaceBundle("portable-surface-revision")
+    surface: await target.getGeneratedSurface("portable-surface")
   };
+  const targetSurfaceBundle = await target.readGeneratedSurfaceBundle("portable-surface-revision");
   assert.equal(stableHash(targetSnapshot), stableHash(sourceSnapshot));
+  assert.equal(targetSurfaceBundle, undefined, "A new portable Bundle must not require a derived Surface bundle.");
   assert.deepEqual(targetSnapshot.record?.resource_refs, sourceSnapshot.record?.resource_refs);
   assert.deepEqual(targetSnapshot.memory?.source_refs, sourceSnapshot.memory?.source_refs);
   assert.deepEqual(targetSnapshot.skill?.source_refs, sourceSnapshot.skill?.source_refs);
 
-  process.stdout.write(`${JSON.stringify({ status: "passed", source_hash: stableHash(sourceSnapshot), target_hash: stableHash(targetSnapshot), refs_preserved: true, resources: ["session", "event", "artifact", "surface", "memory", "wiki", "skill", "collection", "settings", "queue", "history"] })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "passed", source_hash: stableHash(sourceSnapshot), target_hash: stableHash(targetSnapshot), refs_preserved: true, derived_surface_bundle_omitted: true, resources: ["session", "event", "artifact", "surface_metadata", "memory", "wiki", "skill", "collection", "settings", "queue", "history"] })}\n`);
 } finally {
   await source.close();
   await target.close();

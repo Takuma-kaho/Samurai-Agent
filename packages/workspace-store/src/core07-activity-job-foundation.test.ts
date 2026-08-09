@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ActivityRecord, BackendRunRecord, ResourceUsageRecord, WorkspaceChangeRecord, WorkspaceJobRecord } from "@samurai-agent/core-schemas";
+import type { ActivityRecord, BackendRunRecord, NewWorkspaceChangeRecord, ResourceUsageRecord, WorkspaceChangeRecord, WorkspaceJobRecord } from "@samurai-agent/core-schemas";
 import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "./index";
 
@@ -118,9 +118,10 @@ async function linkActualChange(store: WorkspaceStore, activity: ActivityRecord)
   };
   await store.saveBackendRun(run);
   await store.linkActivityBackendRun({ activityId: activity.id, backendRunId: run.id, now: t0 });
-  const change: WorkspaceChangeRecord = {
+  const change: NewWorkspaceChangeRecord = {
     id: `change-${activity.id}`,
     run_id: run.id,
+    room_id: activity.room_id,
     resource_ref: { kind: "memory", id: "memory-change", uri: "memory/memory-change" },
     change_type: "other",
     summary: "An actual Workspace Change used by Activity evidence.",
@@ -205,6 +206,7 @@ describe("Core07 Activity History and Workspace Job persistence", () => {
     const foreignChange = await store.saveWorkspaceChange({
       id: "change-core07-foreign-change",
       run_id: "run-core07-foreign-change",
+      room_id: foreignRoom.id,
       resource_ref: { kind: "memory", id: "memory-foreign-change", uri: "memory/foreign-change" },
       change_type: "other",
       summary: "A different Room's change.",

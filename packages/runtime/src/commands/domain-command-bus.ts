@@ -241,12 +241,18 @@ function candidateCorrelationId(input: DurableDomainCommandInput): string {
 
 function domainExecutionError(error: unknown): { code: string; message: string; retryable: boolean; details?: JsonValue } {
   if (error && typeof error === "object") {
-    const value = error as { code?: unknown; message?: unknown; retryable?: unknown; details?: unknown };
+    // DomainOperationError keeps the concrete Runtime error as handlerCause.
+    // Persist that cause so an idempotent replay reports the same outcome
+    // instead of degrading it to the registry's generic "conflict" wrapper.
+    const wrapped = error as { handlerCause?: unknown };
+    const value = wrapped.handlerCause && typeof wrapped.handlerCause === "object"
+      ? wrapped.handlerCause as { code?: unknown; message?: unknown; retryable?: unknown; details?: unknown; payload?: unknown }
+      : error as { code?: unknown; message?: unknown; retryable?: unknown; details?: unknown; payload?: unknown };
     return {
       code: typeof value.code === "string" ? value.code : "domain_command_failed",
       message: typeof value.message === "string" ? value.message : String(error),
       retryable: value.retryable === true,
-      ...(value.details !== undefined ? { details: toJsonValue(value.details) } : {})
+      ...(value.details !== undefined ? { details: toJsonValue(value.details) } : value.payload !== undefined ? { details: toJsonValue(value.payload) } : {})
     };
   }
   return { code: "domain_command_failed", message: String(error), retryable: false };

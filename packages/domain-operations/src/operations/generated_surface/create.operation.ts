@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { ResourceRefSchema, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord, type SurfaceGenerationRequest } from "@samurai-agent/core-schemas";
+import { ResourceRefSchema, type ActivityInboxItem, type ActivityRecord, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord, type OperationRecord, type ResourceRef, type RollbackPoint, type SurfaceGenerationRequest } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { generatedSurfaceSavedValueSchema } from "../../value-objects/generated-surface.js";
 
@@ -61,9 +61,9 @@ export interface GeneratedSurfaceCreatePorts {
   createGeneratedSurfaceRequestId(): string;
   generatedSurfaceNow(): string;
   generatedSurfaceFingerprint(value: string): string;
-  generatedSurfaceCreateError(message: string): Error;
   buildGeneratedSurfaceRevision(input: { request: SurfaceGenerationRequest; bundle: GeneratedSurfaceBundleInput; producerRunId?: string; promptFingerprint?: string; existing?: GeneratedSurfaceDefinition }): { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord };
   saveGeneratedSurfaceRevision(input: { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; html: string; css?: string; script?: string; assets?: GeneratedSurfaceBundleInput["assets"] }): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord }>;
+  runGeneratedSurfaceMutation<TExtra extends Record<string, unknown>>(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord, activity?: ActivityRecord): Promise<{ resource: GeneratedSurfaceDefinition; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & TExtra> }): Promise<{ resource: GeneratedSurfaceDefinition; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] } & TExtra>;
 }
 
 const generatedSurfaceCreate = defineCommand<GeneratedSurfaceCreatePorts>()({
@@ -114,36 +114,52 @@ const generatedSurfaceCreate = defineCommand<GeneratedSurfaceCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGeneratedSurfaceCreate(context: TrustedDomainContext, input: GeneratedSurfaceCreateInput): Promise<DomainResult<z.infer<typeof Output>>> {
-        if (!context.sessionId) throw ports.generatedSurfaceCreateError("generated_surface_session_required");
         const bundle = "custom_view" in input.bundle ? input.bundle.custom_view : input.bundle;
-        const request: SurfaceGenerationRequest = {
-          id: ports.createGeneratedSurfaceRequestId(),
-          session_id: context.sessionId,
-          user_intent: input.request.user_intent,
-          source_resource_refs: input.request.source_resource_refs,
-          allowed_domain_commands: input.request.allowed_domain_commands,
-          selected_knowledge_refs: input.request.selected_knowledge_refs,
-          selected_skill_refs: input.request.selected_skill_refs,
-          client_capabilities: input.request.client_capabilities,
-          expected_lifetime: input.request.expected_lifetime,
-          fallback_chain: input.request.fallback_chain,
-          created_at: ports.generatedSurfaceNow()
-        };
-        const built = ports.buildGeneratedSurfaceRevision({
-          request,
-          bundle,
-          producerRunId: context.runId,
-          promptFingerprint: ports.generatedSurfaceFingerprint(input.request.user_intent)
+        const saved = await ports.runGeneratedSurfaceMutation<{ revision: GeneratedSurfaceRevisionRecord }>({
+          trustedContext: context,
+          inputSummary: `Create generated surface: ${bundle.title}`,
+          operationName: "generated_surface.create",
+          proposedEffects: ["Validate and persist a versioned Generated Surface bundle."],
+          execute: async (operation, activity) => {
+            const request: SurfaceGenerationRequest = {
+              id: ports.createGeneratedSurfaceRequestId(),
+              ...(context.sessionId ? { session_id: context.sessionId } : {}),
+              ...(context.sessionRef ? { session_ref: context.sessionRef } : {}),
+              ...(activity ? { activity_id: activity.id } : {}),
+              domain_operation_id: operation.id,
+              user_intent: input.request.user_intent,
+              source_resource_refs: input.request.source_resource_refs,
+              allowed_domain_commands: input.request.allowed_domain_commands,
+              selected_knowledge_refs: input.request.selected_knowledge_refs,
+              selected_skill_refs: input.request.selected_skill_refs,
+              client_capabilities: input.request.client_capabilities,
+              expected_lifetime: !context.sessionId && input.request.expected_lifetime === "pinned" ? "session" : input.request.expected_lifetime,
+              fallback_chain: input.request.fallback_chain,
+              created_at: ports.generatedSurfaceNow()
+            };
+            const built = ports.buildGeneratedSurfaceRevision({
+              request,
+              bundle,
+              producerRunId: context.runId,
+              promptFingerprint: ports.generatedSurfaceFingerprint(input.request.user_intent)
+            });
+            const persisted = await ports.saveGeneratedSurfaceRevision({
+              definition: built.definition,
+              revision: built.revision,
+              html: bundle.html,
+              css: bundle.css,
+              script: bundle.script,
+              assets: bundle.assets
+            });
+            return {
+              resource: persisted.definition,
+              ref: { kind: "generated_surface", id: persisted.definition.id, uri: `surfaces/${persisted.definition.id}`, label: persisted.definition.title },
+              summary: `Created generated surface ${persisted.definition.title}.`,
+              revision: persisted.revision
+            };
+          }
         });
-        const saved = await ports.saveGeneratedSurfaceRevision({
-          definition: built.definition,
-          revision: built.revision,
-          html: bundle.html,
-          css: bundle.css,
-          script: bundle.script,
-          assets: bundle.assets
-        });
-        return { ok: true, value: Output.parse(saved) };
+        return { ok: true, value: Output.parse({ definition: saved.resource, revision: saved.revision }) };
       }
     };
   }

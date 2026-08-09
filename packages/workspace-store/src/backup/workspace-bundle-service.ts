@@ -195,7 +195,7 @@ export class WorkspaceBundleService {
 
   /** Expands a verified Bundle into a Workspace-shaped restore Stage. */
   async materializeWorkspaceStage(verified: VerifiedWorkspaceBundle, stageRoot: string): Promise<void> {
-    const roots = this.kernel.paths.backupRoots;
+    const roots = this.kernel.paths.restoreRoots;
     await mkdir(stageRoot, { recursive: true });
     for (const root of roots) await mkdir(path.join(stageRoot, root), { recursive: true });
 
@@ -232,8 +232,13 @@ export class WorkspaceBundleService {
   }
 
   private async validationOptions(): Promise<WorkspaceBundleValidationOptions> {
+    const backupRoots = this.kernel.paths.backupRoots;
+    const restoreRoots = this.kernel.paths.restoreRoots;
     return {
-      allowedRoots: this.kernel.paths.backupRoots,
+      // `surfaces` was part of Core04--07 Bundles. Core08 no longer emits it,
+      // but continues to verify and restore that compatibility payload.
+      allowedRoots: restoreRoots,
+      acceptedRootSets: [backupRoots, restoreRoots],
       resourceBoundaries: this.kernel.paths.resourceBoundaries(),
       latestSchemaVersion: Math.max(workspaceMigrations.at(-1)?.version ?? 0, await this.currentSchemaVersion())
     };

@@ -22,6 +22,7 @@ type ResourceCatalogStore = Pick<WorkspaceStore,
   | "getCollectionSchema"
   | "getCollectionRecord"
   | "getGeneratedSurface"
+  | "getResourceAccessBoundary"
 >;
 
 /**
@@ -77,8 +78,9 @@ export class RoomResourceCatalog {
       case "generated_surface": {
         const surface = await this.store.getGeneratedSurface(canonical.resourceId);
         if (!surface) return undefined;
+        const boundary = await this.store.getResourceAccessBoundary("generated_surface", canonical.resourceId);
         const session = surface.session_id ? await this.store.getSession(surface.session_id) : undefined;
-        return withMetadata(canonical, surface, session?.room_id);
+        return withMetadata(canonical, surface, boundary?.source_room_id ?? session?.room_id);
       }
       case "file":
         return await this.fileExists(canonical.resourceId) ? canonical : undefined;

@@ -210,7 +210,7 @@ Activity Historyは、外部アプリの作業からKnowledge Hostが扱える�
 | Skill | 再利用する作業手順 | Workspace / Room |
 | Artifact | 文書、コード、表、画像などの成果物 | Workspace |
 | Collection | 構造化された業務データ | Workspace / Room |
-| Surface | 必要時だけ表示する画面 | Native App |
+| Surface | 必要時だけ表示する画面 | App側の一時投影 |
 | Session | 会話・作業の履歴 | 利用アプリ |
 
 Activityは材料、Knowledgeは選別された結果である。履歴を残しただけでKnowledgeになったとは扱わない。
@@ -487,11 +487,14 @@ Chat、Session、App Agent、SurfaceはNative Appの状態である。Workspace 
 - Gateway、Automation、Sandboxの基盤
 - Chat APIとSession単位のRuntime経路
 
-一方、現在の接続部分はSession中心である。
+Core06〜08の移行済み範囲では、Room・PrincipalをTrusted Contextで決め、SessionなしでArtifact・Collectionの主要保存とGenerated Surfaceの作成・改訂・Actionを実行できる。
 
-- Backend Run入力にSession参照が必要
-- APIや検索・学習経路にSession IDを要求する箇所がある
-- Room、Agent、Backend RunがSessionを通して結び付いている
+- ArtifactとCollectionはWorkspaceの正本で、Roomは`resource_access_boundaries`で直接認可する
+- SessionRefは任意の出所であり、消してもResourceの正本や権限根拠にならない
+- 保存の証拠はActivity、Workspace Change、ResourceUsageへ接続する
+- Generated Surfaceは派生表示で、新BackupはSurface bundleなしでもArtifact・Collectionを復元できる。旧Surfaceを含むBackupは互換Restoreする
+
+Chat、Session一覧、Gateway、Automation、HTTP／MCP／Pluginの正式な外部接続は後続Coreの範囲である。
 
 現在の完了レポートはsource差分を含むため、基盤の存在と「検証済み完了」を分けて扱う。
 
@@ -513,6 +516,14 @@ Core01〜05の基盤は残す。Core06以降でSessionをWorkspaceの必須親�
 Core07で追加するのは、Activity History、Resource利用履歴、限定したWorkspace Job、交換可能なProcessor境界までである。
 
 - Activity保存後に学習Jobを自動起動しない。
+
+### 15.4 Core08の現在の停止地点
+
+Core08は、Artifact・Collection・Generated SurfaceのSession必須依存を外す範囲までを扱う。
+
+- Native AppのSession付き操作は互換Adapterとして残す
+- SurfaceのDOM、開閉、表示順などはWorkspaceへ保存しない
+- Gateway、Automation、外部公開API、自動学習はCore08では追加しない
 - JobのProcessor結果は保存するが、Memory・Knowledge・Skillへ適用しない。
 - 本番用Processor、外部アプリ接続、MCP・Plugin adapterは後続Coreで扱う。
 

@@ -90,7 +90,7 @@ try {
   assert.equal(manifest.format_version, 2);
   assert.equal(manifest.source_root, ".");
   assert.equal(typeof manifest.schema_version, "number");
-  assert.deepEqual(manifest.file_roots, ["artifacts", "profile", "memory", "skills", "wiki", "rollback", "collections", "surfaces"]);
+  assert.deepEqual(manifest.file_roots, ["artifacts", "profile", "memory", "skills", "wiki", "rollback", "collections"]);
   assert.ok(Object.keys(manifest.file_hashes as Record<string, string>).every((entry) => !entry.startsWith("/") && !entry.includes("\\")));
 
   const backupDatabase = new Database(path.join(root, backup.path, "workspace.sqlite"), { readonly: true });
@@ -144,12 +144,31 @@ try {
   assert.equal(await store.getSession("v1-later-session"), undefined);
   assert.deepEqual(await readdir(path.join(root, "surfaces")), []);
 
+  // New backups omit regenerable Surface bundles, while a historical bundle
+  // that contains them must still restore intact.
+  await writeFile(path.join(root, "surfaces", "legacy-surface.html"), "legacy surface bundle\n");
+  const surfaceCompatSource = await store.createWorkspaceBackup();
+  const surfaceCompatId = "backup_surface_compatibility";
+  const surfaceCompatDirectory = await cloneBackup(surfaceCompatSource.id, surfaceCompatId);
+  const surfaceCompatManifest = await readManifest(surfaceCompatId);
+  const surfaceRoots = surfaceCompatManifest.file_roots as string[];
+  surfaceRoots.push("surfaces");
+  const surfaceBundleTarget = path.join(surfaceCompatDirectory, "files", "surfaces", "legacy-surface.html");
+  await mkdir(path.dirname(surfaceBundleTarget), { recursive: true });
+  await cp(path.join(root, "surfaces", "legacy-surface.html"), surfaceBundleTarget, { force: false });
+  (surfaceCompatManifest.file_hashes as Record<string, string>)["files/surfaces/legacy-surface.html"] = await hashFileSha256(surfaceBundleTarget);
+  await writeFile(path.join(surfaceCompatDirectory, "manifest.json"), `${JSON.stringify(surfaceCompatManifest, null, 2)}\n`);
+  await writeFile(path.join(root, "surfaces", "current-only.html"), "current surface\n");
+  await store.restoreWorkspaceBackup(surfaceCompatId);
+  assert.equal(await readFile(path.join(root, "surfaces", "legacy-surface.html"), "utf8"), "legacy surface bundle\n");
+  await assert.rejects(readFile(path.join(root, "surfaces", "current-only.html"), "utf8"));
+
   const legacySource = await store.createWorkspaceBackup();
   const legacyId = "backup_legacy_schema";
   const legacyDirectory = await cloneBackup(legacySource.id, legacyId);
   await replaceWithLegacyDatabase(legacyDirectory, await readManifest(legacyId));
   const legacyRestore = await store.restoreWorkspaceBackup(legacyId);
-  assert.equal((await store.listSchemaMigrations()).at(-1)?.version, 6);
+  assert.equal((await store.listSchemaMigrations()).at(-1)?.version, workspaceMigrations.at(-1)?.version);
   await store.restoreWorkspaceBackup(legacyRestore.pre_restore_backup_id);
   assert.equal((await store.getSession("post-backup-session"))?.title, "Post backup state");
 
@@ -241,6 +260,8 @@ try {
     manifest_v2: true,
     v1_restore: true,
     v1_missing_root_stages_empty: true,
+    new_backup_surface_omitted: true,
+    legacy_surface_restore: true,
     rejected_invalid_bundles: 12,
     completed_backup_visibility: true,
     pre_restore_backup: true,

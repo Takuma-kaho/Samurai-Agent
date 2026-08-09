@@ -228,7 +228,7 @@ describe("Core 06 workspace execution", () => {
     await store.close();
   });
 
-  it("routes a Sessionless HTTP Tool Bridge query through the Run and Room", async () => {
+  it("routes a Sessionless Artifact Tool Bridge mutation through the Run, Room, and Activity", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-core06-workspace-bridge-"));
     roots.push(root);
     const store = await WorkspaceStore.create({ rootDir: root });
@@ -242,27 +242,15 @@ describe("Core 06 workspace execution", () => {
       async *runTurn(input) {
         expect(input.tool_bridge?.enabled).toBe(true);
         expect(input.tool_bridge?.tools.map((tool) => tool.name)).toContain("samurai.memory.search");
-        expect(input.tool_bridge?.tools.map((tool) => tool.name)).not.toContain("samurai.artifact.create");
-        const bridgeResult = await runtime.runBackendToolBridgeCall({
+        expect(input.tool_bridge?.tools.map((tool) => tool.name)).toContain("samurai.artifact.create");
+        const artifactResult = await runtime.runBackendToolBridgeCall({
           runId: input.run_id,
           token: input.tool_bridge?.token ?? "",
-          toolName: "mcp__samurai__memory_search",
-          toolCallId: "workspace-memory-search",
-          toolInput: { query: "not-found", limit: 4 }
+          toolName: "artifact_create",
+          toolCallId: "workspace-artifact-create",
+          toolInput: { title: "Sessionless artifact", content: "Room-scoped Artifact" }
         });
-        expect(bridgeResult.status).toBe("completed");
-        await expect(
-          runtime.runBackendToolBridgeCall({
-            runId: input.run_id,
-            token: input.tool_bridge?.token ?? "",
-            toolName: "artifact_create",
-            toolCallId: "workspace-hidden-artifact",
-            toolInput: { title: "hidden", content: "must not run" }
-          })
-        ).rejects.toMatchObject({
-          code: "conflict",
-          message: "session_compatibility_required:artifact.create"
-        });
+        expect(artifactResult.status).toBe("completed");
         yield { event_type: "run_started", payload: { input_summary: "bridge" } };
         yield {
           event_type: "run_completed",
@@ -294,6 +282,13 @@ describe("Core 06 workspace execution", () => {
     expect(events.some((event) => event.event_type === "tool_call_started")).toBe(true);
     expect(events.some((event) => event.event_type === "tool_call_output")).toBe(true);
     expect(events.every((event) => event.session_id === undefined)).toBe(true);
+    const artifact = (await store.listArtifacts()).find((item) => item.title === "Sessionless artifact");
+    expect(artifact).toBeDefined();
+    expect(await store.getResourceAccessBoundary("artifact", artifact!.id)).toMatchObject({ source_room_id: room!.id });
+    const activity = await store.getActivityByBackendRunId(result.run.id);
+    expect(activity?.domain_operation_ids).toContain(artifact!.source_operation_id);
+    expect((await store.listResourceUsage({ activityId: activity!.id }))
+      .some((usage) => usage.resource_ref.id === artifact!.id && usage.stage === "modified")).toBe(true);
 
     await runtime.shutdownMcpProcessPool();
     await store.close();

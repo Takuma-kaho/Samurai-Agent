@@ -449,13 +449,17 @@ Backend Port → Backend cassette implementation
 
 現行コードには、Workspace Store、Room permission、Agent Backend、Memory・Skill・Learning、Artifact、Collection、Generated Surface、Gatewayの基盤がある。
 
-ただし、接続経路はSession中心である。
+Core06・Core07・Core08の範囲では、次をSessionなしで扱える。
 
-- BackendRun入力にSession参照が必要
-- Server APIや検索・学習経路がSession IDを要求する
-- Room、Agent、BackendRunの関係がSessionに結び付いている
+- Room・PrincipalをTrusted Contextで決めるDomain Operation
+- Artifactの作成、改訂、復元、修復、PDF出力
+- CollectionのSchema、Record、Patch、Deleteと、既存Workspace Executionを使うAI指示Action
+- Generated Surfaceの作成・改訂・Action。SurfaceのRoomは`resource_access_boundaries`で決め、SessionRefは任意の出所だけとして残す
+- Activity、Workspace Change、ResourceUsageによる変更証跡
 
-したがって、現在の実装を完成形と同一視しない。Session中心の経路を段階的に参照情報へ変える。
+新しいBackupはArtifact・Collectionの正本を対象にし、Generated Surfaceのbundleは再生成可能な互換データとして除く。旧Surfaceを含むBackupは引き続きRestoreできる。
+
+Chat、Session一覧、Gateway、Automation、HTTP／MCP／Pluginの正式な外部接続は、依然として後続境界である。したがって、現在の実装を製品全体の完成と同一視しない。
 
 ### 13.2 Coreの移行単位
 
@@ -488,6 +492,15 @@ Core07は、`ActivityRecord`、`ResourceUsageRecord`、`WorkspaceJob`、`Activit
 - `activity_processing` Jobは明示enqueueでのみ実行し、Activity保存から自動作成しない。
 - Processorは読み取り専用の構造化結果を返し、Workspace StoreやMemory・Knowledge・Skillを直接変更しない。
 - MCP/API/Pluginのtransportと本番学習ProcessorはCore09以降で接続する。
+
+### 13.5 Core08の移行停止地点
+
+Core08は、Artifact・Collectionの保存とGenerated Surfaceの操作をSessionの必須親から外す移行単位である。
+
+- Artifact・CollectionのRoom境界は`resource_access_boundaries`を正本にし、SessionRefから逆算しない。
+- 保存ごとにDomain Operation、Workspace Change、Activity、ResourceUsageを接続するが、Activity保存からJobや学習は自動起動しない。
+- Surfaceは表示契約と派生bundleであり、DOM、開閉、pin表示、分割比率、表示順をWorkspace正本へ保存しない。
+- Native AppのSession付き操作は互換Adapterとして残す。Core08からGateway、Automation、外部公開APIは追加しない。
 
 ---
 

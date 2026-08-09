@@ -16,7 +16,8 @@ try {
     { name: "Earlier revision restores as a new revision", actual: result.restored_revision, expected: true },
     { name: "Revision hashes differ and old revision redisplays", actual: result.hashes_unique && result.old_revision_redisplay, expected: true },
     { name: "Missing source repaired from verified blob", actual: result.missing_source_repaired, expected: true },
-    { name: "Every revision and repair audited", actual: result.audit_records, expected: 4 },
+    { name: "Every revision and repair has Activity evidence", actual: result.activity_evidence, expected: 4 },
+    { name: "Session-free mutations do not create Sessions", actual: result.session_count_unchanged, expected: true },
     { name: "Export/import preserves hashes", actual: result.export_import_hash_equal, expected: true }
   ], result }, null, 2)}\n`); process.stdout.write(`${rawResult}\n`);
 } finally { rmSync(temporaryRoot, { recursive: true, force: true }); }

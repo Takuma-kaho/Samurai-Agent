@@ -6,13 +6,16 @@ import {
   createId,
   nowIso,
   redactPrivateData,
+  stableStringify,
   type BackendEventRecord,
   type BackendRunRecord,
   type ChangeHistoryEntry,
   type JsonValue,
   type MessagePresentationRecord,
   type MessageRecord,
+  type NewWorkspaceChangeRecord,
   type OperationRecord,
+  type ResourceUsageRecord,
   type RunHistoryEntry,
   type SessionCompactionRecord,
   type SessionRecord,
@@ -21,7 +24,7 @@ import {
   type ToolRunStatus,
   type WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
-import type { AgentBackendKind, TrustedWorkspaceContext } from "@samurai-agent/core-schemas";
+import { NewWorkspaceChangeRecordSchema, type AgentBackendKind, type TrustedWorkspaceContext } from "@samurai-agent/core-schemas";
 import { sql, type Kysely, type Transaction } from "kysely";
 import type { WorkspaceDb } from "../kernel/workspace-db-schema";
 import { SessionSearchIndex } from "../kernel/session-search-index";
@@ -59,6 +62,29 @@ import {
 import { stringify } from "./serialization";
 import { groupToolRunDiagnostics, normalizeToolRunDiagnosticsLimit } from "./tool-run-diagnostics";
 import { toolRunFromRow, toolRunToRow } from "./tool-run-row-codecs";
+import { ActivityHistoryRepository } from "./activity-history-repository";
+
+export type ResourceMutationEvidenceFailureStage = "workspace_change" | "resource_usage" | "activity_finalize";
+
+/**
+ * The Resource itself has already been committed when this is raised.  The
+ * caller must preserve that commit and make the command replay its failure,
+ * rather than attempting a second mutation.
+ */
+export class ResourceMutationEvidenceCommitError extends Error {
+  readonly name = "ResourceMutationEvidenceCommitError";
+
+  constructor(
+    readonly stage: ResourceMutationEvidenceFailureStage,
+    readonly failure: unknown
+  ) {
+    super(`resource_mutation_evidence_failed:${stage}:${failureMessage(failure)}`);
+  }
+}
+
+function failureMessage(error: unknown): string {
+  return error instanceof Error && error.message.trim() ? error.message : "unknown";
+}
 
 /** Session, message, run, event, reservation, tool, and workspace-change persistence. */
 export class SessionExecutionRepository {
@@ -672,7 +698,7 @@ async listRunHistoryEntries(sessionId?: string): Promise<RunHistoryEntry[]> {
     this.listWorkspaceChanges(sessionId)
   ]);
   const eventCounts = countBy(events, (event) => event.run_id);
-  const changeCounts = countBy(changes, (change) => change.run_id);
+  const changeCounts = countBy(changes.filter((change): change is WorkspaceChangeRecord & { run_id: string } => Boolean(change.run_id)), (change) => change.run_id);
   return runs.filter((run): run is typeof run & { session_id: string } => Boolean(run.session_id)).map((run) => ({
     id: run.id,
     session_id: run.session_id,
@@ -802,13 +828,69 @@ async listBackendEvents(input: { runId?: string; sessionId?: string; afterSequen
 
 
 
-async saveWorkspaceChange(change: WorkspaceChangeRecord): Promise<WorkspaceChangeRecord> {
-  const operation = change.legacy_operation_id ? await this.getOperation(change.legacy_operation_id) : undefined;
-  const correlated = !change.correlation_id && operation?.correlation_id
+async saveWorkspaceChange(changeInput: NewWorkspaceChangeRecord): Promise<WorkspaceChangeRecord> {
+  if (!changeInput.room_id) {
+    throw new Error("workspace_change_room_required");
+  }
+  if (!changeInput.run_id && !changeInput.activity_id && !changeInput.domain_operation_id) {
+    throw new Error("workspace_change_cause_required");
+  }
+  if (changeInput.legacy_operation_id !== undefined) {
+    throw new Error("workspace_change_legacy_operation_write_forbidden");
+  }
+  const change = NewWorkspaceChangeRecordSchema.parse(changeInput);
+  const operationId = change.domain_operation_id;
+  const operation = operationId ? await this.getOperation(operationId) : undefined;
+  const correlated: NewWorkspaceChangeRecord = !change.correlation_id && operation?.correlation_id
     ? { ...change, correlation_id: operation.correlation_id }
     : change;
-  await this.db.insertInto("workspace_changes").values(workspaceChangeToRow(correlated)).execute();
-  return correlated;
+  await this.db.insertInto("workspace_changes").values(workspaceChangeToRow(correlated))
+    .onConflict((conflict) => conflict.column("id").doNothing()).execute();
+  const row = await this.db.selectFrom("workspace_changes").selectAll().where("id", "=", correlated.id).executeTakeFirst();
+  if (!row) throw new Error("workspace_change_idempotency_claim_lost");
+  const saved = workspaceChangeFromRow(row);
+  if (!this.sameWorkspaceChangeClaim(saved, correlated)) throw new Error("workspace_change_idempotency_conflict");
+  return saved;
+}
+
+/**
+ * Core08 evidence is one SQLite unit: either Change, Usage, and direct
+ * Activity completion all exist, or none do.  Artifact/Collection files are
+ * intentionally outside this transaction because they are already committed
+ * through their own recovery protocol.
+ */
+async commitResourceMutationEvidence(input: {
+  change: NewWorkspaceChangeRecord;
+  resourceUsage: ResourceUsageRecord;
+  directActivity?: {
+    activityId: string;
+    resultSummary: string;
+    domainOperationIds: string[];
+    now: string;
+  };
+}): Promise<{ change: WorkspaceChangeRecord; resourceUsage: ResourceUsageRecord; activity?: import("@samurai-agent/core-schemas").ActivityRecord }> {
+  return this.db.transaction().execute(async (transaction) => {
+    const session = new SessionExecutionRepository(transaction, this.rootDir, this.search);
+    const activityHistory = new ActivityHistoryRepository(transaction);
+    let stage: ResourceMutationEvidenceFailureStage = "workspace_change";
+    try {
+      const change = await session.saveWorkspaceChange(input.change);
+      stage = "resource_usage";
+      const resourceUsage = await activityHistory.recordResourceUsage(input.resourceUsage);
+      if (!input.directActivity) return { change, resourceUsage };
+      stage = "activity_finalize";
+      const activity = await activityHistory.finalizeActivity({
+        activityId: input.directActivity.activityId,
+        status: "completed",
+        resultSummary: input.directActivity.resultSummary,
+        domainOperationIds: input.directActivity.domainOperationIds,
+        now: input.directActivity.now
+      });
+      return { change, resourceUsage, activity };
+    } catch (error) {
+      throw new ResourceMutationEvidenceCommitError(stage, error);
+    }
+  });
 }
 
 async setWorkspaceChangeCorrelation(changeId: string, correlationId: string): Promise<void> {
@@ -828,14 +910,17 @@ async listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]>
 async listWorkspaceChangesForOperation(operationId: string): Promise<WorkspaceChangeRecord[]> {
   const rows = await this.db.selectFrom("workspace_changes")
     .selectAll()
-    .where("legacy_operation_id", "=", operationId)
+    .where((eb) => eb.or([
+      eb("legacy_operation_id", "=", operationId),
+      eb("domain_operation_id", "=", operationId)
+    ]))
     .orderBy("created_at", "desc")
     .execute();
   return rows.map(workspaceChangeFromRow);
 }
 
 async listChangeHistoryEntries(sessionId?: string): Promise<ChangeHistoryEntry[]> {
-  return (await this.listWorkspaceChanges(sessionId)).filter((change): change is typeof change & { session_id: string } => Boolean(change.session_id)).map((change) => ({
+  return (await this.listWorkspaceChanges(sessionId)).filter((change): change is typeof change & { session_id: string; run_id: string } => Boolean(change.session_id && change.run_id)).map((change) => ({
     id: change.id,
     session_id: change.session_id,
     run_id: change.run_id,
@@ -875,6 +960,34 @@ async listToolRuns(input: { runId?: string; sessionId?: string } = {}): Promise<
   }
   const rows = await query.orderBy("created_at", "desc").execute();
   return rows.map(toolRunFromRow);
+}
+
+private sameWorkspaceChangeClaim(existing: WorkspaceChangeRecord, requested: WorkspaceChangeRecord): boolean {
+  return stableStringify({
+    run_id: existing.run_id,
+    session_id: existing.session_id,
+    room_id: existing.room_id,
+    activity_id: existing.activity_id,
+    domain_operation_id: existing.domain_operation_id,
+    session_ref: existing.session_ref,
+    resource_ref: existing.resource_ref,
+    change_type: existing.change_type,
+    summary: existing.summary,
+    legacy_operation_id: existing.legacy_operation_id,
+    correlation_id: existing.correlation_id
+  }) === stableStringify({
+    run_id: requested.run_id,
+    session_id: requested.session_id,
+    room_id: requested.room_id,
+    activity_id: requested.activity_id,
+    domain_operation_id: requested.domain_operation_id,
+    session_ref: requested.session_ref,
+    resource_ref: requested.resource_ref,
+    change_type: requested.change_type,
+    summary: requested.summary,
+    legacy_operation_id: requested.legacy_operation_id,
+    correlation_id: requested.correlation_id
+  });
 }
 
 async getToolRunDiagnostics(input: {

@@ -8,7 +8,7 @@ import { WorkspaceBundleService } from "../backup/workspace-bundle-service";
 import { normalizeBackupId } from "../backup/backup-id";
 import { WorkspaceDatabase } from "../kernel/workspace-database";
 import type { WorkspaceKernelService } from "../kernel/workspace-kernel-service";
-import { workspaceBackupRoots } from "../kernel/workspace-paths";
+import { workspaceRestoreRoots } from "../kernel/workspace-paths";
 import type { WorkspaceHealthReport, WorkspaceIntegrityReport, WorkspaceRestoreResult } from "../workspace-store-contracts";
 
 const journalName = ".restore-journal.json";
@@ -86,7 +86,7 @@ export class WorkspaceRestoreCoordinator {
         backupId: id,
         stagePath,
         rollbackPath,
-        roots: this.kernel.paths.backupRoots
+        roots: this.kernel.paths.restoreRoots
       });
       await writeRestoreJournal(this.kernel.rootDir, journal);
       this.restoreFailureInjector?.("prepared");
@@ -119,7 +119,7 @@ export class WorkspaceRestoreCoordinator {
           backup_id: id,
           pre_restore_backup_id: preRestoreBackup.id,
           restored_at: nowIso(),
-          restored_paths: [...this.kernel.paths.backupRoots],
+          restored_paths: [...this.kernel.paths.restoreRoots],
           db_restored: true,
           manifest: verified.manifest,
           pre_restore_health: preRestoreHealth,
@@ -307,7 +307,7 @@ function parseRestoreJournal(rootDir: string, value: unknown): RestoreJournal {
   const rootStates = current.roots as Record<string, unknown>;
   if (
     new Set(roots).size !== roots.length
-    || !sameStrings(roots, workspaceBackupRoots())
+    || !sameStrings(roots, workspaceRestoreRoots())
     || !roots.every((root) => validRootName(root) && isJournalPathState(rootDir, rootStates[root], root))
   ) {
     throw new Error("workspace_restore_journal_invalid");

@@ -13,7 +13,10 @@ export const workspaceBundleDatabaseFile = "workspace.sqlite";
 export const workspaceBundleFilesDirectory = "files";
 
 export interface WorkspaceBundleValidationOptions {
+  /** Every root this version can safely read, including legacy cache roots. */
   allowedRoots: readonly string[];
+  /** Exact root sets accepted from versioned Bundle manifests. */
+  acceptedRootSets?: readonly (readonly string[])[];
   resourceBoundaries: readonly WorkspaceResourceBoundary[];
   latestSchemaVersion: number;
 }
@@ -45,7 +48,7 @@ export async function verifyWorkspaceBundle(
 ): Promise<VerifiedWorkspaceBundle> {
   const { manifest, text } = await readWorkspaceBundleManifest(bundleRoot, options.resourceBoundaries);
   const formatVersion = isV2Manifest(manifest) ? 2 : 1;
-  const roots = validateManifestRoots(manifest, options.allowedRoots, formatVersion);
+  const roots = validateManifestRoots(manifest, options.allowedRoots, options.acceptedRootSets, formatVersion);
   const hashes = validateManifestHashes(manifest.file_hashes, options.allowedRoots, roots);
   const tree = await scanSafeTree(bundleRoot, "workspace_bundle_file_type_invalid");
   const actualFiles = tree.files.map((entry) => entry.path).sort();
@@ -185,12 +188,18 @@ function hashRecord(value: unknown): Record<string, string> {
   return Object.fromEntries(entries as Array<[string, string]>);
 }
 
-function validateManifestRoots(manifest: WorkspaceBackupManifest, allowedRoots: readonly string[], formatVersion: 1 | 2): string[] {
+function validateManifestRoots(
+  manifest: WorkspaceBackupManifest,
+  allowedRoots: readonly string[],
+  acceptedRootSets: readonly (readonly string[])[] | undefined,
+  formatVersion: 1 | 2
+): string[] {
   const roots = manifest.file_roots.map((root) => assertSafeBundleRelativePath(root, "workspace_bundle_root_invalid"));
   if (new Set(roots).size !== roots.length || roots.some((root) => !allowedRoots.includes(root))) {
     throw new Error("workspace_bundle_root_invalid");
   }
-  if (formatVersion === 2 && !sameStrings(roots, [...allowedRoots])) {
+  const accepted = acceptedRootSets ?? [allowedRoots];
+  if (formatVersion === 2 && !accepted.some((rootSet) => sameStrings(roots, [...rootSet]))) {
     throw new Error("workspace_bundle_root_set_invalid");
   }
   return roots;
@@ -232,7 +241,7 @@ function validateBundleDirectories(
     if (!root || !allowedRoots.includes(root) || !roots.includes(root)) throw new Error("workspace_bundle_extra_path");
   }
   if (formatVersion === 2) {
-    for (const root of allowedRoots) {
+    for (const root of roots) {
       if (!directories.includes(`${workspaceBundleFilesDirectory}/${root}`)) throw new Error(`workspace_bundle_root_missing:${root}`);
     }
   }

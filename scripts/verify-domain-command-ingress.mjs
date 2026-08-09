@@ -71,7 +71,7 @@ try {
     result.gateway_admission?.gateway_command_executions !== 1 ||
     result.direct_store_mutation !== false ||
     !Array.isArray(result.workspace_change_telemetry) ||
-    !result.workspace_change_telemetry.every((telemetry) => telemetry.allLinkedToRealBackendRuns === true)
+    !result.workspace_change_telemetry.every((telemetry) => telemetry.allLinkedToExpectedCause === true)
   ) {
     throw new Error(`Domain Command ingress fixture did not prove all required invariants: ${JSON.stringify(result)}`);
   }
@@ -93,7 +93,7 @@ try {
       { name: "Success and error parity", actual: { result: result.result_parity, error: result.error_parity }, expected: { result: true, error: true } },
       { name: "Invalid artifact.create has the canonical validation code and is rejected before every Handler with no artifact side effect", actual: result.rejection_parity, expected: "validation and five zero-side-effect rejections" },
       { name: "Gateway transport admission cannot create Room content before participant authentication", actual: result.gateway_admission, expected: "blocked with no Session, Chat, boundary policy, or Artifact" },
-      { name: "WorkspaceChange telemetry links only to real BackendRuns", actual: result.workspace_change_telemetry, expected: "all linked" },
+      { name: "WorkspaceChange links to a BackendRun or direct Activity evidence", actual: result.workspace_change_telemetry, expected: "all linked" },
       { name: "Direct Store mutations", actual: result.direct_store_mutation, expected: false }
     ],
     result

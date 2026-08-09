@@ -115,7 +115,8 @@ export function buildGeneratedSurfaceRevision(input: {
   const bundleHash = sha256(`${input.bundle.html}\0${input.bundle.css ?? ""}\0${input.bundle.script ?? ""}\0${JSON.stringify(input.bundle.actions)}\0${JSON.stringify(input.bundle.assets ?? [])}`);
   const revision = GeneratedSurfaceRevisionRecordSchema.parse({
     id: revisionId, surface_id: surfaceId, revision: revisionNumber, parent_revision_id: input.existing?.current_revision_id,
-    producer_run_id: input.producerRunId, prompt_fingerprint: input.promptFingerprint ?? stableHash(input.request.user_intent),
+    producer_run_id: input.producerRunId, activity_id: input.request.activity_id, domain_operation_id: input.request.domain_operation_id,
+    source_resource_refs: input.request.source_resource_refs, prompt_fingerprint: input.promptFingerprint ?? stableHash(input.request.user_intent),
     knowledge_refs: input.request.selected_knowledge_refs, skill_refs: input.request.selected_skill_refs,
     html_ref: htmlRef, css_ref: cssRef, script_ref: scriptRef, asset_refs: assetRefs, bundle_hash: bundleHash, validation_report: validation, created_at: now
   });
@@ -123,6 +124,9 @@ export function buildGeneratedSurfaceRevision(input: {
     id: surfaceId,
     state: input.existing?.state ?? (input.request.expected_lifetime === "pinned" ? "pinned" : "ephemeral"),
     session_id: input.request.session_id,
+    session_ref: input.request.session_ref,
+    activity_id: input.request.activity_id,
+    domain_operation_id: input.request.domain_operation_id,
     title: input.bundle.title,
     input_data_schema: input.bundle.input_data_schema ?? {},
     actions: input.bundle.actions,

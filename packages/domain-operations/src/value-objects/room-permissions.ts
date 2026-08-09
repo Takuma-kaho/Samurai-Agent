@@ -66,7 +66,7 @@ export const roomShareableResourceReferenceSchema = z.discriminatedUnion("kind",
 ]);
 export type RoomShareableResourceReferenceValue = z.infer<typeof roomShareableResourceReferenceSchema>;
 
-/** New shares intentionally exclude app-owned Session records. */
+/** New shares exclude app-owned Sessions and derived Generated Surfaces. */
 export const newRoomShareableResourceReferenceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("artifact"), id: z.string().trim().min(1) }).strict(),
   z.object({ kind: z.literal("memory"), id: z.string().trim().min(1) }).strict(),
@@ -74,8 +74,7 @@ export const newRoomShareableResourceReferenceSchema = z.discriminatedUnion("kin
   z.object({ kind: z.literal("skill"), id: z.string().trim().min(1) }).strict(),
   z.object({ kind: z.literal("collection_schema"), id: z.string().trim().min(1) }).strict(),
   z.object({ kind: z.literal("collection_record"), collection_id: z.string().trim().min(1), record_id: z.string().trim().min(1) }).strict(),
-  z.object({ kind: z.literal("file"), path: z.string().trim().min(1) }).strict(),
-  z.object({ kind: z.literal("generated_surface"), id: z.string().trim().min(1) }).strict()
+  z.object({ kind: z.literal("file"), path: z.string().trim().min(1) }).strict()
 ]);
 export type NewRoomShareableResourceReferenceValue = z.infer<typeof newRoomShareableResourceReferenceSchema>;
 
