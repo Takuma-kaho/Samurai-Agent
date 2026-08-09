@@ -1,12 +1,12 @@
 # Core 実装進捗台帳
 
-最終更新: 2026-08-08
+最終更新: 2026-08-09
 
-現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-04は「完了」**、**新Core-06は「完了」**、**Core-03・Core-05・Core-07・Core-08は「基盤あり・個別完了作業は未着手」**である。
+現在の判定は、**Core-01は「残課題あり」**、**Core-02は「実装中」**、**Core-04・新Core-06・Core-07は「完了」**、**Core-03・Core-05・Core-08・Core-09は「基盤あり・個別完了作業は未着手」**である。
 
 ## 0. この文書の目的
 
-- Core-01〜Core-08の進捗、残課題、検証結果を1か所で管理する。
+- Core-01〜Core-09の進捗、残課題、検証結果を1か所で管理する。
 - 今後はCoreを1つずつ進め、着手・実装・検証・完了判定のたびにこの文書を更新する。
 - この文書は進捗台帳であり、設計の正本は [PRINCIPLES.md](../PRINCIPLES.md)、[SAMURAI_AGENT_MANUAL.md](../SAMURAI_AGENT_MANUAL.md)、[ARCHITECTURE.md](../ARCHITECTURE.md)、[PUBLIC_NAMING.md](../PUBLIC_NAMING.md)、[WEB_UI_DESIGN.md](../WEB_UI_DESIGN.md) とする。
 - Core全体の完了条件は [core-completion-plan.md](./core-completion-plan.md)、Core-01固有の条件は [core-01-domain-command-oss-quality-completion-plan.md](./core-01-domain-command-oss-quality-completion-plan.md) を使う。
@@ -32,8 +32,9 @@
 | 4 | Workspace・永続化 | 完了。Phase 1〜3で責務分離、原子的更新、検索・同期、Bundle/Restoreを確認 |
 | 5 | Memory・Wiki・Skill・学習ループ | 基盤実装済み。Background Review、Evaluation、Curatorが存在 |
 | 6 | Room・Principal・Permission・Session参照境界 | 完了。旧Room権限基盤に加え、Sessionを任意参照へ分離し、Room・Principal・Run中心の入口と実行を実装・検証した |
-| 7 | Presentation・Generated Surface | 概ね実装済み。表示形式の選択、Surface契約、生成Surfaceがある |
-| 8 | Gateway・Automation・外部境界 | 概ね実装済み。routing、pairing、sandbox、定期実行がある |
+| 7 | Activity History・限定Workspace Job | 完了。Activity、利用履歴、読み取り専用Processor、耐久Job基盤を実装・検証 |
+| 8 | Artifact・Collection・SurfaceのSession分離 | 基盤あり。個別完了作業は未着手 |
+| 9 | Gateway・Automation・外部アプリ接続 | 基盤あり。transportと正式な外部接続は未着手 |
 
 上表は2026-07-19時点の開始スナップショットである。行数と実装状態は、各Coreの着手時に再計測する。
 
@@ -47,8 +48,9 @@
 | Core-04 | **完了** | Phase 1〜3でfilesystem/SQLiteの正本境界、原子的更新、検索・同期、移植可能なBundle/Restoreを実装・検証 | [core-04-phase-3-implementation-review.md](./core-04-phase-3-implementation-review.md) |
 | Core-05 | 基盤あり・個別完了作業は未着手 | Memory、Wiki、Skill、Review、Evaluation、Curator | 未作成。着手時に作成する |
 | Core-06 | **完了** | 人とAgentのRoom参加、役割・個別許可、共有境界、Session参照境界、解除即時反映 | 本節のCore-06チェックリスト |
-| Core-07 | 基盤あり・個別完了作業は未着手 | Presentation選択、Surface契約、Generated Surface | 未作成。着手時に作成する |
-| Core-08 | 基盤あり・個別完了作業は未着手 | routing、pairing、sandbox、Automation | 未作成。着手時に作成する |
+| Core-07 | **完了** | Activity History、Resource利用履歴、限定Workspace Job、読み取り専用Processor境界 | [core-07-activity-job-foundation-plan.md](./core-07-activity-job-foundation-plan.md) / [core-07-scope-ledger.md](./core-07-scope-ledger.md) |
+| Core-08 | 基盤あり・個別完了作業は未着手 | Artifact、Collection、SurfaceのSession分離 | 未作成。着手時に作成する |
+| Core-09 | 基盤あり・個別完了作業は未着手 | Gateway、Automation、外部アプリ接続 | 未作成。着手時に作成する |
 
 ## 4. Core別チェックリスト
 
@@ -149,7 +151,7 @@
 
 - Core-02は、専用台帳でPhase 0〜2と`C02-FINAL-01`だけを管理する。
 - Core-02のPhase 3〜7、本番切替、旧Runtime削除、全体Hard Gateは`unverified`のまま残す。
-- Core-04の完了根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)に残す。新Core-06だけは本台帳の専用チェックリストで管理し、Core-03・Core-05・Core-07・Core-08の詳細チェックリストと完了条件は、引き続き作成しない。
+- Core-04の完了根拠は[Phase 3実装レビュー](./core-04-phase-3-implementation-review.md)に残す。新Core-06だけは本台帳の専用チェックリストで管理する。Core-07は[専用計画](./core-07-activity-job-foundation-plan.md)と[Scope台帳](./core-07-scope-ledger.md)で管理し、Core-03・Core-05・Core-08・Core-09の詳細チェックリストと完了条件は、引き続き作成しない。
 
 ## 6. 更新ルール
 
@@ -180,6 +182,7 @@
 | 2026-08-04 | 新Core-06 | 前回実装後の深い本番経路を調整。全操作分類を明示し、候補先行・直前再確認、共有先の読み取り境界、ファイル・履歴・診断・予約処理のRoom境界、SQLite migration 010の整合性を追加 | focused Vitest 3 files / 15 tests、関連4 packageのtypecheck、`node scripts/generate-domain-operation-index.mjs --check`（150 bindings）、`git diff --check`が成功。総合Domain ingress確認はCore 06対象外のGateway fixtureで停止したため、成功扱いにしていない | 次のCoreは別途決定する |
 | 2026-08-06 | 新Core-06 | 先行セルフレビューの3件（Memory偽Session、External App Context不一致、SessionなしHost別経路）と旧Chat APIの`room_id`互換漏れを修正。`010`→`011` migrationの既存行保持テストを追加 | `pnpm core:06:verify`はFocused Vitest 10 files / 72 tests、関連7 packageのtypecheck、生成Operation整合、architecture boundary、diff checkまで成功。だがSessionなし`wiki.proposal.create`でSession行が0件から1件へ増えることを実測。`apps/server/src/index.test.ts`はexit 130で未検証。変更は未コミット・未push | Wiki・Skill等の`ensureSession`経路をOperation単位でA〜Eへ分類し、Core06対象をRoom・Principal・Run中心化またはSessionなし入口で閉鎖してから再判定する |
 | 2026-08-08 | 新Core-06 | 全`ensureSession`経路をA〜Eと閉じた互換一覧へ照合し、Curator漏れを修正。SessionなしWiki/Skill/Memory/Fileを共通Room経路へ整理し、Session共有Schema、Workspace共通知識候補、Core05 fixtureをCore06契約へ補正 | `pnpm core:06:verify`成功（Focused Vitest 11 files / 88 tests、関連7 package typecheck、150 generated bindings、architecture boundary、diff check）。追加の集中検証は3 files / 30 testsとWorkspace Store/Runtime typecheckが成功。変更は未コミット・未push | Core07以降のActivity、Artifact/Collection/Surface完全分離、実Gateway接続は各Coreの着手時に扱う |
+| 2026-08-09 | Core-07 | Activity、Resource利用履歴、Migration 012/013、限定Workspace Job、Processor境界を実装。Sessionあり/なしRun、Room認可、変更参照、retry・heartbeat・cancel・recoveryを接続 | `pnpm core:07:verify`成功（Architecture boundary、Core05〜07 focused tests、3 package typecheck、diff check）。Backup/RestoreとSQLite最終状態保護もCore07 focused testで確認 | 自動学習、Memory生成、経験則化、Skill化、外部アプリ接続は未実装のまま後続Coreで扱う |
 
 追記用テンプレート:
 

@@ -22,7 +22,9 @@ export type WorkspacePersistenceOwner =
   | "gateway"
   | "workspace_metadata"
   | "room_agent"
-  | "access_history";
+  | "access_history"
+  | "activity_history"
+  | "workspace_job";
 
 export interface WorkspaceResourceOwner {
   owner: WorkspacePersistenceOwner;
@@ -127,6 +129,18 @@ const owners: readonly WorkspaceResourceOwner[] = [
     directories: ["rollback"],
     backup_roots: ["rollback"],
     sqlite_tables: ["policy_decisions", "approval_requests", "audit_records", "rollback_points", "grants"]
+  },
+  {
+    owner: "activity_history",
+    directories: [],
+    backup_roots: [],
+    sqlite_tables: ["activity_records", "resource_usage_records"]
+  },
+  {
+    owner: "workspace_job",
+    directories: [],
+    backup_roots: [],
+    sqlite_tables: ["workspace_jobs", "workspace_job_attempts"]
   }
 ];
 
@@ -146,7 +160,9 @@ const legacyBoundaries: readonly WorkspaceResourceBoundary[] = [
   { resource: "client_event_queue", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["client_events"], sqlite_role: "queue", note: "Client events are queued OS/UI requests for Web, Desktop, or future clients; Runtime and Desktop stay decoupled through this table." },
   { resource: "localized_derivatives", source_of_truth: "derived", file_roots: [], sqlite_tables: ["resource_translations"], sqlite_role: "metadata", note: "Resource translations are derived records tied to source resource hashes and can fall back to original text." },
   { resource: "workspace_kernel", source_of_truth: "sqlite", file_roots: ["backups"], sqlite_tables: ["schema_migrations", "migration_journal", "workspace_file_transactions"], sqlite_role: "history", note: "The persistence kernel owns database lifecycle, migration history, backup manifests, and file transaction recovery." },
-  { resource: "durable_work", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["domain_command_executions", "objectives", "work_items", "work_dependencies", "run_checkpoints"], sqlite_role: "queue", note: "Objectives and durable work are SQLite execution state with explicit leases and checkpoints." }
+  { resource: "durable_work", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["domain_command_executions", "objectives", "work_items", "work_dependencies", "run_checkpoints"], sqlite_role: "queue", note: "Objectives and durable work are SQLite execution state with explicit leases and checkpoints." },
+  { resource: "activity_history", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["activity_records", "resource_usage_records"], sqlite_role: "history", note: "Activity History stores Room-scoped work evidence and Resource-use facts without copying Resource bodies." },
+  { resource: "workspace_job", source_of_truth: "sqlite", file_roots: [], sqlite_tables: ["workspace_jobs", "workspace_job_attempts"], sqlite_role: "queue", note: "Workspace Jobs store durable, versioned Activity processing attempts; Core07 processors remain read-only." }
 ];
 
 export function workspaceResourceOwners(): WorkspaceResourceOwner[] {

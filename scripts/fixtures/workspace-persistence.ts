@@ -237,7 +237,9 @@ async function verifyActualWriteOwnership(): Promise<void> {
     automation: ["repositories/automation-repository.ts"],
     gateway: ["repositories/gateway-repository.ts"],
     workspace_metadata: ["repositories/workspace-metadata-repository.ts"],
-    access_history: ["repositories/access-history-repository.ts"]
+    access_history: ["repositories/access-history-repository.ts"],
+    activity_history: ["repositories/activity-history-repository.ts"],
+    workspace_job: ["repositories/workspace-job-repository.ts"]
   };
   const ownerByTable = new Map(
     workspaceResourceOwners().flatMap((owner) => owner.sqlite_tables.map((table) => [table, owner.owner] as const))

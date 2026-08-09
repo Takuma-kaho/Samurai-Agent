@@ -33,6 +33,8 @@ export interface TurnRequest {
   metadata?: Record<string, JsonValue>;
   temporaryContext?: TemporaryContextAttachment[];
   gatewayBoundaryPolicy?: import("@samurai-agent/core-schemas").GatewayBoundaryPolicy;
+  /** Internal Core07 linkage. It is never copied into Backend input metadata. */
+  activityId?: string;
 }
 
 export interface BackendBinding { readonly id: string; readonly kind: AgentBackendKind; readonly backend: AgentBackend; }
@@ -157,6 +159,11 @@ export interface AdmissionObserverPort {
   observe(input: AdmittedTurn): Promise<void>;
 }
 
+/** Critical persistence that must complete before a Backend sees an admitted turn. */
+export interface AdmissionGuardPort {
+  guard(input: AdmittedTurn): Promise<void>;
+}
+
 export interface TurnToolExecutionPort {
   execute(input: {
     run: BackendRunRecord;
@@ -219,6 +226,7 @@ export interface HostPorts {
   readonly preflight: TurnPreflightPort;
   readonly committedEventPublisher: CommittedEventPublisherPort;
   readonly admissionObserver: AdmissionObserverPort;
+  readonly admissionGuard?: AdmissionGuardPort;
   readonly toolExecution: TurnToolExecutionPort;
   readonly cleanup: TurnCleanupPort;
   readonly diagnostics: HostDiagnosticsPort;
@@ -228,6 +236,8 @@ export interface HostPorts {
   }) => Promise<ResumePreparation>;
   /** Re-check the persisted Run principal before Room-first control or recovery work. */
   readonly assertRunAccess?: (run: BackendRunRecord) => Promise<void>;
+  /** Lets the composition repair durable evidence after a recovered Run settles. */
+  readonly recoveredRunObserver?: (run: BackendRunRecord) => Promise<void>;
   readonly prepareWorkspaceExecution?: (input: {
     run: BackendRunRecord;
     binding: BackendBinding;

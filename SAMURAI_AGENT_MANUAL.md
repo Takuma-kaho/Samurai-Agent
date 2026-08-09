@@ -508,6 +508,16 @@ Chat、Session、App Agent、SurfaceはNative Appの状態である。Workspace 
 
 Core01〜05の基盤は残す。Core06以降でSessionをWorkspaceの必須親から外し、ActivityとKnowledgeの流れへ組み替える。
 
+### 15.3 Core07の現在の停止地点
+
+Core07で追加するのは、Activity History、Resource利用履歴、限定したWorkspace Job、交換可能なProcessor境界までである。
+
+- Activity保存後に学習Jobを自動起動しない。
+- JobのProcessor結果は保存するが、Memory・Knowledge・Skillへ適用しない。
+- 本番用Processor、外部アプリ接続、MCP・Plugin adapterは後続Coreで扱う。
+
+つまり、Core07完了は「自動学習完成」ではない。将来の学習方式を差し替えられる履歴と実行基盤が完成した状態を指す。
+
 ---
 
 ## 16. 未決定・将来検討

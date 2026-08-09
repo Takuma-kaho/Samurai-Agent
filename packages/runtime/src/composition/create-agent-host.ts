@@ -4,6 +4,7 @@ import { AgentHost } from "../host/agent-host";
 import { TurnCompletionCoordinator } from "../host/turn-completion-coordinator";
 import type {
   AdmissionObserverPort,
+  AdmissionGuardPort,
   CommittedEventPublisherPort,
   HostCompletionPort,
   HostContextPort,
@@ -23,6 +24,7 @@ export interface AgentHostCompositionOptions {
   preflight: TurnPreflightPort;
   committedEventPublisher: CommittedEventPublisherPort;
   admissionObserver: AdmissionObserverPort;
+  admissionGuard?: AdmissionGuardPort;
   toolExecution: TurnToolExecutionPort;
   cleanup: TurnCleanupPort;
   diagnostics: HostDiagnosticsPort;
@@ -44,6 +46,7 @@ export function createAgentHost(options: AgentHostCompositionOptions): AgentHost
     preflight: options.preflight,
     committedEventPublisher: options.committedEventPublisher,
     admissionObserver: options.admissionObserver,
+    admissionGuard: options.admissionGuard,
     toolExecution: options.toolExecution,
     cleanup: options.cleanup,
     diagnostics: options.diagnostics,

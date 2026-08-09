@@ -69,7 +69,11 @@ export interface RuntimeHostCompositionDependencies {
     assertRunAccess(run: BackendRunRecord): Promise<void>;
     contextPreviewPortsForTurn(turn: AdmittedTurn): ContextPreviewPorts;
     prepareResumeInput(input: { run: BackendRunRecord; resumeInput: Record<string, JsonValue> }): Promise<{ backendInput: BackendRunInput; gatewayBoundaryPolicy?: GatewayBoundaryPolicy }>;
+    recordActivityResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void>;
     recordLearningResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void>;
+    linkActivityToRun(input: { activityId: string; run: BackendRunRecord }): Promise<void>;
+    linkWorkspaceActivityToRun(input: { context: import("@samurai-agent/core-schemas").TrustedWorkspaceContext; run: BackendRunRecord }): Promise<void>;
+    observeRecoveredRun(run: BackendRunRecord): Promise<void>;
     workingDirectory(): string;
     workingDirectoryMode(): "workspace" | "repo";
     resolveDefaultBackendId(): string;
@@ -189,6 +193,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
           ? { freeze_snapshot_id: candidates.freeze_snapshot.id, freeze_snapshot_hash: candidates.freeze_snapshot.stable_hash }
           : {})
       };
+      await deps.preparation.recordActivityResourceUses(turn, candidates);
       await deps.preparation.recordLearningResourceUses(turn, candidates);
       // A participant may have been removed while the context was assembled.
       // Do not let an already-created Backend input become a new execution.
@@ -268,12 +273,19 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
     preflight: { prepare: async ({ request }) => deps.preparation.prepareRequest(request) },
     committedEventPublisher,
     admissionObserver: { observe: async (turn) => deps.core.emit("backend.run.created", turn.run) },
+    admissionGuard: {
+      guard: async (turn) => {
+        if (turn.request.activityId) await deps.preparation.linkActivityToRun({ activityId: turn.request.activityId, run: turn.run });
+      }
+    },
     prepareResumeInput: deps.preparation.prepareResumeInput,
     assertRunAccess: deps.preparation.assertRunAccess,
+    recoveredRunObserver: deps.preparation.observeRecoveredRun,
     prepareWorkspaceExecution: async ({ run, binding, request, backendInput }) => {
       // Recheck immediately before the Backend cassette sees a Room-first
       // request. A SessionRef never replaces this current Room decision.
       await deps.preparation.assertRunAccess(run);
+      await deps.preparation.linkWorkspaceActivityToRun({ context: request.context, run });
       const userInput = request.input_summary?.trim() || run.input_summary || "Workspace execution";
       const contextIntent = classifyBackendContextIntent(userInput);
       const expectedOutputs = expectedBackendOutputs(userInput);
