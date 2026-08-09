@@ -480,6 +480,15 @@ Backend Port → Backend cassette implementation
 
 を分けて記録する。
 
+### 13.4 Core07の移行停止地点
+
+Core07は、`ActivityRecord`、`ResourceUsageRecord`、`WorkspaceJob`、`ActivityProcessorPort`を追加する移行単位である。
+
+- Activityの確定は事実の保存であり、学習結果の採用ではない。
+- `activity_processing` Jobは明示enqueueでのみ実行し、Activity保存から自動作成しない。
+- Processorは読み取り専用の構造化結果を返し、Workspace StoreやMemory・Knowledge・Skillを直接変更しない。
+- MCP/API/Pluginのtransportと本番学習ProcessorはCore09以降で接続する。
+
 ---
 
 ## 14. 参照元

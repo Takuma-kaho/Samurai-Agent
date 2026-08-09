@@ -576,6 +576,150 @@ export const WorkspaceExecutionRequestSchema = z.object({
 }).strict();
 export type WorkspaceExecutionRequest = z.infer<typeof WorkspaceExecutionRequestSchema>;
 
+/** Core07 keeps work evidence separate from Backend events and UI notifications. */
+export const activityRecordStatuses = ["recording", "completed", "failed", "cancelled", "outcome_unknown"] as const;
+export const resourceUsageStages = ["referenced", "read", "applied", "modified", "reverted"] as const;
+export const workspaceJobKinds = ["activity_processing"] as const;
+export const workspaceJobStatuses = ["queued", "running", "completed", "failed", "cancelled"] as const;
+export const workspaceJobAttemptStatuses = ["running", "completed", "failed", "cancelled"] as const;
+export const activityVerificationStatuses = ["passed", "failed", "inconclusive"] as const;
+export const core07ErrorCodes = [
+  "activity_context_room_required",
+  "activity_context_mismatch",
+  "activity_correction_scope_invalid",
+  "activity_initial_status_must_be_recording",
+  "activity_finalized_immutable",
+  "activity_invalid_transition",
+  "activity_idempotency_conflict",
+  "activity_idempotency_claim_lost",
+  "activity_not_found",
+  "activity_not_finalized",
+  "activity_backend_run_conflict",
+  "activity_backend_run_scope_invalid",
+  "activity_domain_operation_scope_invalid",
+  "activity_query_room_boundary_denied",
+  "activity_system_principal_not_authorized",
+  "resource_usage_workspace_change_required",
+  "resource_usage_domain_operation_scope_invalid",
+  "resource_usage_idempotency_claim_lost",
+  "resource_usage_idempotency_conflict",
+  "resource_usage_room_scope_mismatch",
+  "resource_usage_workspace_change_not_found",
+  "resource_usage_workspace_change_scope_invalid",
+  "resource_usage_workspace_change_resource_mismatch",
+  "resource_usage_workspace_change_operation_mismatch",
+  "resource_usage_workspace_job_attempt_scope_invalid",
+  "resource_usage_workspace_job_attempt_closed",
+  "resource_usage_immutable",
+  "workspace_job_processor_read_only",
+  "workspace_job_not_found",
+  "workspace_job_initial_state_invalid",
+  "workspace_job_activity_scope_invalid",
+  "workspace_job_invalid_transition",
+  "workspace_job_idempotency_conflict",
+  "workspace_job_idempotency_claim_lost",
+  "workspace_job_claim_lost",
+  "workspace_job_attempt_conflict",
+  "workspace_job_attempt_immutable",
+  "workspace_job_attempt_not_prepared",
+  "workspace_job_lease_duration_invalid",
+  "workspace_job_heartbeat_duration_invalid",
+  "workspace_job_lease_expired",
+  "workspace_job_cancelled",
+  "workspace_job_failed",
+  "activity_processor_not_registered",
+  "activity_processor_already_registered",
+  "activity_processor_result_invalid",
+  "activity_processor_failed"
+] as const;
+
+export const ActivityRecordStatusSchema = z.enum(activityRecordStatuses);
+export type ActivityRecordStatus = z.infer<typeof ActivityRecordStatusSchema>;
+export const ResourceUsageStageSchema = z.enum(resourceUsageStages);
+export type ResourceUsageStage = z.infer<typeof ResourceUsageStageSchema>;
+export const WorkspaceJobKindSchema = z.enum(workspaceJobKinds);
+export type WorkspaceJobKind = z.infer<typeof WorkspaceJobKindSchema>;
+export const WorkspaceJobStatusSchema = z.enum(workspaceJobStatuses);
+export type WorkspaceJobStatus = z.infer<typeof WorkspaceJobStatusSchema>;
+export const WorkspaceJobAttemptStatusSchema = z.enum(workspaceJobAttemptStatuses);
+export type WorkspaceJobAttemptStatus = z.infer<typeof WorkspaceJobAttemptStatusSchema>;
+export const ActivityVerificationStatusSchema = z.enum(activityVerificationStatuses);
+export type ActivityVerificationStatus = z.infer<typeof ActivityVerificationStatusSchema>;
+export const Core07ErrorCodeSchema = z.enum(core07ErrorCodes);
+export type Core07ErrorCode = z.infer<typeof Core07ErrorCodeSchema>;
+
+export class Core07StateTransitionError extends Error {
+  constructor(readonly code: Extract<Core07ErrorCode, "activity_finalized_immutable" | "activity_invalid_transition" | "workspace_job_invalid_transition">) {
+    super(code);
+    this.name = "Core07StateTransitionError";
+  }
+}
+
+/** A compact provenance record; Activity never contains a transcript or model reasoning. */
+export const ActivityProvenanceSchema = z.object({
+  kind: z.enum(["trusted_context", "host", "backend", "domain_operation", "system"]),
+  source_id: z.string().trim().min(1).max(512).optional(),
+  recorded_at: z.string().datetime()
+}).strict();
+export type ActivityProvenance = z.infer<typeof ActivityProvenanceSchema>;
+
+export const ActivityVerificationRecordSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  kind: z.enum(["assertion", "test", "manual", "backend"]),
+  status: ActivityVerificationStatusSchema,
+  summary: z.string().trim().min(1).max(20_000),
+  source_operation_id: z.string().trim().min(1).max(512).optional(),
+  recorded_at: z.string().datetime()
+}).strict();
+export type ActivityVerificationRecord = z.infer<typeof ActivityVerificationRecordSchema>;
+
+export const ActivityFailureSchema = z.object({
+  code: z.string().trim().min(1).max(256),
+  summary: z.string().trim().min(1).max(20_000)
+}).strict();
+export type ActivityFailure = z.infer<typeof ActivityFailureSchema>;
+
+/**
+ * Structured evidence for one Room-scoped work unit.  Terminal records are
+ * immutable; later corrections are separate Activity records.
+ */
+export const ActivityRecordSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  workspace_id: z.string().trim().min(1).max(512),
+  room_id: z.string().trim().min(1).max(512),
+  principal: PrincipalSchema,
+  source: TrustedWorkspaceSourceSchema,
+  status: ActivityRecordStatusSchema,
+  idempotency_key: z.string().trim().min(1).max(512),
+  instruction_summary: z.string().trim().min(1).max(20_000),
+  result_summary: z.string().trim().min(1).max(20_000).optional(),
+  verification: z.array(ActivityVerificationRecordSchema).max(200).default([]),
+  failure: ActivityFailureSchema.optional(),
+  correction_of_activity_id: z.string().trim().min(1).max(512).optional(),
+  session_ref: SessionRefSchema.optional(),
+  backend_run_id: z.string().trim().min(1).max(512).optional(),
+  domain_operation_ids: z.array(z.string().trim().min(1).max(512)).max(200).default([]),
+  provenance: ActivityProvenanceSchema,
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  finalized_at: z.string().datetime().optional()
+}).strict().superRefine((record, issue) => {
+  if (record.status === "recording") {
+    if (record.finalized_at) issue.addIssue({ code: z.ZodIssueCode.custom, message: "recording_activity_cannot_be_finalized", path: ["finalized_at"] });
+    if (record.result_summary) issue.addIssue({ code: z.ZodIssueCode.custom, message: "recording_activity_cannot_have_result", path: ["result_summary"] });
+    if (record.failure) issue.addIssue({ code: z.ZodIssueCode.custom, message: "recording_activity_cannot_have_failure", path: ["failure"] });
+    return;
+  }
+  if (!record.finalized_at) issue.addIssue({ code: z.ZodIssueCode.custom, message: "finalized_activity_requires_timestamp", path: ["finalized_at"] });
+  if (record.status === "completed" && !record.result_summary) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "completed_activity_requires_result", path: ["result_summary"] });
+  }
+  if (record.status !== "completed" && !record.failure) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "non_completed_activity_requires_failure", path: ["failure"] });
+  }
+});
+export type ActivityRecord = z.infer<typeof ActivityRecordSchema>;
+
 /** One explicit reuse boundary for Workspace knowledge resources. */
 export const UsageScopeRefSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace") }).strict(),
@@ -584,6 +728,156 @@ export const UsageScopeRefSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("session"), session_id: z.string().min(1) }).strict()
 ]);
 export type UsageScopeRef = z.infer<typeof UsageScopeRefSchema>;
+
+/** A Resource reference is recorded without copying the Resource body. */
+export const ResourceUsageRecordSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  activity_id: z.string().trim().min(1).max(512),
+  workspace_job_attempt_id: z.string().trim().min(1).max(512).optional(),
+  resource_ref: ResourceRefSchema,
+  resource_version: z.string().trim().min(1).max(512).optional(),
+  content_hash: z.string().trim().min(1).max(512).optional(),
+  usage_scope: UsageScopeRefSchema,
+  stage: ResourceUsageStageSchema,
+  domain_operation_id: z.string().trim().min(1).max(512).optional(),
+  workspace_change_id: z.string().trim().min(1).max(512).optional(),
+  created_at: z.string().datetime()
+}).strict().superRefine((record, issue) => {
+  if ((record.stage === "modified" || record.stage === "reverted") && !record.workspace_change_id) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "resource_usage_workspace_change_required", path: ["workspace_change_id"] });
+  }
+});
+export type ResourceUsageRecord = z.infer<typeof ResourceUsageRecordSchema>;
+
+export const ActivityProcessorResourceVersionSchema = z.object({
+  resource_ref: ResourceRefSchema,
+  resource_version: z.string().trim().min(1).max(512).optional(),
+  content_hash: z.string().trim().min(1).max(512).optional()
+}).strict();
+export type ActivityProcessorResourceVersion = z.infer<typeof ActivityProcessorResourceVersionSchema>;
+
+export const ActivityProcessorModelInfoSchema = z.object({
+  provider: z.string().trim().min(1).max(256),
+  model_id: z.string().trim().min(1).max(512)
+}).strict();
+export type ActivityProcessorModelInfo = z.infer<typeof ActivityProcessorModelInfoSchema>;
+
+/** Processor output is structured and versioned, but cannot mutate the Workspace. */
+export const ActivityProcessorResultSchema = z.object({
+  processor_id: z.string().trim().min(1).max(512),
+  processor_version: z.string().trim().min(1).max(512),
+  output_schema_version: z.string().trim().min(1).max(512),
+  output: z.record(jsonValueSchema),
+  summary: z.string().trim().min(1).max(20_000),
+  model: ActivityProcessorModelInfoSchema.optional(),
+  diagnostics: z.array(z.object({
+    code: z.string().trim().min(1).max(256),
+    summary: z.string().trim().min(1).max(20_000)
+  }).strict()).max(200).default([])
+}).strict();
+export type ActivityProcessorResult = z.infer<typeof ActivityProcessorResultSchema>;
+
+export const WorkspaceJobRecordSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  workspace_id: z.string().trim().min(1).max(512),
+  room_id: z.string().trim().min(1).max(512),
+  root_activity_id: z.string().trim().min(1).max(512),
+  kind: WorkspaceJobKindSchema,
+  processor_id: z.string().trim().min(1).max(512),
+  processor_version: z.string().trim().min(1).max(512),
+  idempotency_key: z.string().trim().min(1).max(512),
+  status: WorkspaceJobStatusSchema,
+  attempt_count: z.number().int().nonnegative(),
+  max_attempts: z.number().int().positive(),
+  retryable: z.boolean(),
+  cancel_requested_at: z.string().datetime().optional(),
+  lease_owner: z.string().trim().min(1).max(512).optional(),
+  lease_expires_at: z.string().datetime().optional(),
+  heartbeat_at: z.string().datetime().optional(),
+  retry_after_at: z.string().datetime().optional(),
+  error_code: z.string().trim().min(1).max(256).optional(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  started_at: z.string().datetime().optional(),
+  completed_at: z.string().datetime().optional()
+}).strict().superRefine((record, issue) => {
+  const leased = Boolean(record.lease_owner || record.lease_expires_at || record.heartbeat_at);
+  if (record.attempt_count > record.max_attempts) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "workspace_job_attempt_count_exceeds_max", path: ["attempt_count"] });
+  }
+  if (record.status === "queued" && record.attempt_count >= record.max_attempts && record.attempt_count > 0) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "queued_workspace_job_exhausted_attempts", path: ["attempt_count"] });
+  }
+  if (record.status === "running" && (!record.lease_owner || !record.lease_expires_at || !record.heartbeat_at)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "running_workspace_job_requires_lease", path: ["lease_owner"] });
+  }
+  if (record.status !== "running" && leased) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "non_running_workspace_job_cannot_hold_lease", path: ["lease_owner"] });
+  }
+  if ((record.status === "completed" || record.status === "failed" || record.status === "cancelled") && !record.completed_at) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "terminal_workspace_job_requires_timestamp", path: ["completed_at"] });
+  }
+});
+export type WorkspaceJobRecord = z.infer<typeof WorkspaceJobRecordSchema>;
+
+export const WorkspaceJobAttemptRecordSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  workspace_job_id: z.string().trim().min(1).max(512),
+  attempt_no: z.number().int().positive(),
+  activity_id: z.string().trim().min(1).max(512),
+  processor_id: z.string().trim().min(1).max(512),
+  processor_version: z.string().trim().min(1).max(512),
+  model: ActivityProcessorModelInfoSchema.optional(),
+  prompt_or_policy_version: z.string().trim().min(1).max(512).optional(),
+  input_schema_version: z.string().trim().min(1).max(512),
+  output_schema_version: z.string().trim().min(1).max(512).optional(),
+  resource_versions: z.array(ActivityProcessorResourceVersionSchema).max(2_000),
+  input_hash: z.string().trim().min(1).max(512).optional(),
+  output_hash: z.string().trim().min(1).max(512).optional(),
+  output: z.record(jsonValueSchema).optional(),
+  summary: z.string().trim().min(1).max(20_000).optional(),
+  diagnostics: z.array(z.object({
+    code: z.string().trim().min(1).max(256),
+    summary: z.string().trim().min(1).max(20_000)
+  }).strict()).max(200).default([]),
+  status: WorkspaceJobAttemptStatusSchema,
+  error_code: z.string().trim().min(1).max(256).optional(),
+  started_at: z.string().datetime(),
+  prepared_at: z.string().datetime().optional(),
+  completed_at: z.string().datetime().optional()
+}).strict().superRefine((attempt, issue) => {
+  if (attempt.status === "completed") {
+    if (!attempt.completed_at) issue.addIssue({ code: z.ZodIssueCode.custom, message: "completed_workspace_job_attempt_requires_timestamp", path: ["completed_at"] });
+    if (!attempt.prepared_at || !attempt.input_hash || !attempt.output || !attempt.output_hash || !attempt.summary || !attempt.output_schema_version) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, message: "completed_workspace_job_attempt_requires_output", path: ["output"] });
+    }
+  }
+  if ((attempt.status === "failed" || attempt.status === "cancelled") && (!attempt.completed_at || !attempt.error_code)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "terminal_workspace_job_attempt_requires_error", path: ["error_code"] });
+  }
+});
+export type WorkspaceJobAttemptRecord = z.infer<typeof WorkspaceJobAttemptRecordSchema>;
+
+export const ActivityProcessorInputSchema = z.object({
+  activity: ActivityRecordSchema,
+  resource_usage: z.array(ResourceUsageRecordSchema),
+  resource_versions: z.array(ActivityProcessorResourceVersionSchema),
+  input_schema_version: z.string().trim().min(1).max(512)
+}).strict();
+export type ActivityProcessorInput = z.infer<typeof ActivityProcessorInputSchema>;
+
+/** A finalized Activity never changes; use a correction Activity instead. */
+export function assertActivityStatusTransition(from: ActivityRecordStatus, to: ActivityRecordStatus): void {
+  if (from !== "recording") throw new Core07StateTransitionError("activity_finalized_immutable");
+  if (to === "recording") throw new Core07StateTransitionError("activity_invalid_transition");
+}
+
+/** Jobs retry by returning to queued; a terminal Job is never re-opened. */
+export function assertWorkspaceJobStatusTransition(from: WorkspaceJobStatus, to: WorkspaceJobStatus): void {
+  const allowed = (from === "queued" && (to === "running" || to === "cancelled"))
+    || (from === "running" && (to === "queued" || to === "completed" || to === "failed" || to === "cancelled"));
+  if (!allowed) throw new Core07StateTransitionError("workspace_job_invalid_transition");
+}
 
 /** The concrete Room, Session, and Agent that produced an activity. */
 export const ActivityContextRefSchema = z.object({

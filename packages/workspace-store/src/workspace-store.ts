@@ -19,6 +19,7 @@ import { WorkspaceBundleService } from "./backup/workspace-bundle-service";
 import { WorkspaceKernelService } from "./kernel/workspace-kernel-service";
 import { WorkspacePaths } from "./kernel/workspace-paths";
 import { AccessHistoryRepository } from "./repositories/access-history-repository";
+import { ActivityHistoryRepository } from "./repositories/activity-history-repository";
 import { ArtifactRepository } from "./repositories/artifact-repository";
 import { AutomationRepository } from "./repositories/automation-repository";
 import { ClientEventQueueRepository } from "./repositories/client-event-queue-repository";
@@ -35,6 +36,7 @@ import { RoomPermissionRepository } from "./repositories/room-permission-reposit
 import { SessionExecutionRepository } from "./repositories/session-execution-repository";
 import { SkillRepository } from "./repositories/skill-repository";
 import { WorkspaceMetadataRepository } from "./repositories/workspace-metadata-repository";
+import { WorkspaceJobRepository } from "./repositories/workspace-job-repository";
 import { ManagedResourcePostTurnService } from "./services/managed-resource-post-turn-service";
 import { WorkspaceMaintenanceGuard } from "./services/workspace-maintenance-guard";
 import { WorkspaceMaintenanceService } from "./services/workspace-maintenance-service";
@@ -59,6 +61,8 @@ interface WorkspaceComposition {
   roomAgent: RoomAgentRepository;
   roomPermissions: RoomPermissionRepository;
   accessHistory: AccessHistoryRepository;
+  activityHistory: ActivityHistoryRepository;
+  workspaceJobs: WorkspaceJobRepository;
   managedResources: ManagedResourceSynchronizer;
   queries: WorkspaceQueryService;
   bundles: WorkspaceBundleService;
@@ -200,6 +204,8 @@ export class WorkspaceStore {
     const roomAgent = new RoomAgentRepository(db);
     const roomPermissions = new RoomPermissionRepository(db);
     const accessHistory = new AccessHistoryRepository(db, this.rootDir);
+    const activityHistory = new ActivityHistoryRepository(db);
+    const workspaceJobs = new WorkspaceJobRepository(db, activityHistory);
     const collections = new CollectionRepository(
       db,
       this.rootDir,
@@ -283,6 +289,8 @@ export class WorkspaceStore {
       roomAgent,
       roomPermissions,
       accessHistory,
+      activityHistory,
+      workspaceJobs,
       managedResources,
       queries,
       bundles,
@@ -296,7 +304,7 @@ export class WorkspaceStore {
   /** Keep every legacy entry point explicit; no Proxy or string dispatch is used. */
   private bindCompatibilityApi(): void {
     const facade = this as WorkspaceStore;
-    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, gateway, metadata, roomAgent, roomPermissions, accessHistory, queries, bundles, restore, maintenance } = this.composition;
+    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, gateway, metadata, roomAgent, roomPermissions, accessHistory, activityHistory, workspaceJobs, queries, bundles, restore, maintenance } = this.composition;
 
     facade.migrate = this.kernel.migrate.bind(this.kernel);
     facade.listSchemaMigrations = this.kernel.listSchemaMigrations.bind(this.kernel);
@@ -396,6 +404,32 @@ export class WorkspaceStore {
     facade.saveToolRun = session.saveToolRun.bind(session);
     facade.listToolRuns = session.listToolRuns.bind(session);
     facade.getToolRunDiagnostics = session.getToolRunDiagnostics.bind(session);
+
+    facade.createActivity = activityHistory.createActivity.bind(activityHistory);
+    facade.getActivity = activityHistory.getActivity.bind(activityHistory);
+    facade.getActivityByIdempotency = activityHistory.getActivityByIdempotency.bind(activityHistory);
+    facade.getActivityByBackendRunId = activityHistory.getActivityByBackendRunId.bind(activityHistory);
+    facade.listActivities = activityHistory.listActivities.bind(activityHistory);
+    facade.linkActivityBackendRun = activityHistory.linkActivityBackendRun.bind(activityHistory);
+    facade.finalizeActivity = activityHistory.finalizeActivity.bind(activityHistory);
+    facade.ingestFinalizedActivity = activityHistory.ingestFinalizedActivity.bind(activityHistory);
+    facade.recordResourceUsage = activityHistory.recordResourceUsage.bind(activityHistory);
+    facade.getResourceUsage = activityHistory.getResourceUsage.bind(activityHistory);
+    facade.listResourceUsage = activityHistory.listResourceUsage.bind(activityHistory);
+    facade.enqueueWorkspaceJob = workspaceJobs.enqueueWorkspaceJob.bind(workspaceJobs);
+    facade.getWorkspaceJob = workspaceJobs.getWorkspaceJob.bind(workspaceJobs);
+    facade.getWorkspaceJobByIdempotency = workspaceJobs.getWorkspaceJobByIdempotency.bind(workspaceJobs);
+    facade.listWorkspaceJobs = workspaceJobs.listWorkspaceJobs.bind(workspaceJobs);
+    facade.getWorkspaceJobAttempt = workspaceJobs.getWorkspaceJobAttempt.bind(workspaceJobs);
+    facade.listWorkspaceJobAttempts = workspaceJobs.listWorkspaceJobAttempts.bind(workspaceJobs);
+    facade.claimWorkspaceJob = workspaceJobs.claimWorkspaceJob.bind(workspaceJobs);
+    facade.prepareWorkspaceJobAttempt = workspaceJobs.prepareWorkspaceJobAttempt.bind(workspaceJobs);
+    facade.heartbeatWorkspaceJob = workspaceJobs.heartbeatWorkspaceJob.bind(workspaceJobs);
+    facade.isWorkspaceJobCancellationRequested = workspaceJobs.isWorkspaceJobCancellationRequested.bind(workspaceJobs);
+    facade.requestWorkspaceJobCancel = workspaceJobs.requestWorkspaceJobCancel.bind(workspaceJobs);
+    facade.completeWorkspaceJob = workspaceJobs.completeWorkspaceJob.bind(workspaceJobs);
+    facade.failWorkspaceJob = workspaceJobs.failWorkspaceJob.bind(workspaceJobs);
+    facade.reconcileExpiredWorkspaceJobs = workspaceJobs.reconcileExpiredWorkspaceJobs.bind(workspaceJobs);
 
     facade.saveClientEvent = clientEvents.saveClientEvent.bind(clientEvents);
     facade.getClientEvent = clientEvents.getClientEvent.bind(clientEvents);
@@ -769,6 +803,32 @@ export interface WorkspaceStore {
   saveToolRun: SessionExecutionRepository["saveToolRun"];
   listToolRuns: SessionExecutionRepository["listToolRuns"];
   getToolRunDiagnostics: SessionExecutionRepository["getToolRunDiagnostics"];
+
+  createActivity: ActivityHistoryRepository["createActivity"];
+  getActivity: ActivityHistoryRepository["getActivity"];
+  getActivityByIdempotency: ActivityHistoryRepository["getActivityByIdempotency"];
+  getActivityByBackendRunId: ActivityHistoryRepository["getActivityByBackendRunId"];
+  listActivities: ActivityHistoryRepository["listActivities"];
+  linkActivityBackendRun: ActivityHistoryRepository["linkActivityBackendRun"];
+  finalizeActivity: ActivityHistoryRepository["finalizeActivity"];
+  ingestFinalizedActivity: ActivityHistoryRepository["ingestFinalizedActivity"];
+  recordResourceUsage: ActivityHistoryRepository["recordResourceUsage"];
+  getResourceUsage: ActivityHistoryRepository["getResourceUsage"];
+  listResourceUsage: ActivityHistoryRepository["listResourceUsage"];
+  enqueueWorkspaceJob: WorkspaceJobRepository["enqueueWorkspaceJob"];
+  getWorkspaceJob: WorkspaceJobRepository["getWorkspaceJob"];
+  getWorkspaceJobByIdempotency: WorkspaceJobRepository["getWorkspaceJobByIdempotency"];
+  listWorkspaceJobs: WorkspaceJobRepository["listWorkspaceJobs"];
+  getWorkspaceJobAttempt: WorkspaceJobRepository["getWorkspaceJobAttempt"];
+  listWorkspaceJobAttempts: WorkspaceJobRepository["listWorkspaceJobAttempts"];
+  claimWorkspaceJob: WorkspaceJobRepository["claimWorkspaceJob"];
+  prepareWorkspaceJobAttempt: WorkspaceJobRepository["prepareWorkspaceJobAttempt"];
+  heartbeatWorkspaceJob: WorkspaceJobRepository["heartbeatWorkspaceJob"];
+  isWorkspaceJobCancellationRequested: WorkspaceJobRepository["isWorkspaceJobCancellationRequested"];
+  requestWorkspaceJobCancel: WorkspaceJobRepository["requestWorkspaceJobCancel"];
+  completeWorkspaceJob: WorkspaceJobRepository["completeWorkspaceJob"];
+  failWorkspaceJob: WorkspaceJobRepository["failWorkspaceJob"];
+  reconcileExpiredWorkspaceJobs: WorkspaceJobRepository["reconcileExpiredWorkspaceJobs"];
 
   saveClientEvent: ClientEventQueueRepository["saveClientEvent"];
   getClientEvent: ClientEventQueueRepository["getClientEvent"];

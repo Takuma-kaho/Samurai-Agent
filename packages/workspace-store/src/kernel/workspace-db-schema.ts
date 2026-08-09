@@ -21,6 +21,7 @@ export type { RoomsTable, AgentsTable } from "../rows/room-agent-rows";
 export type { WorkspaceMembersTable, RoomMembersTable, RoomAgentsTable, AgentWorkspacePermissionsTable, ResourceAccessBoundariesTable, RoomResourceSharesTable } from "../rows/room-permission-rows";
 export type { ClientEventsTable } from "../rows/client-event-rows";
 export type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
+export type { ActivityRecordsTable, ResourceUsageRecordsTable, WorkspaceJobsTable, WorkspaceJobAttemptsTable } from "../rows/activity-job-rows";
 
 import type { SessionsTable, MessagesTable, MessagePresentationsTable, OperationsTable, BackendRunsTable, SessionRunReservationsTable, RunLeasesTable, BackendEventsTable, ToolRunsTable, WorkspaceChangesTable } from "../rows/session-execution-rows";
 import type { DomainCommandExecutionsTable, ObjectivesTable, WorkItemsTable, WorkDependenciesTable, RunCheckpointsTable } from "../rows/durable-work-rows";
@@ -39,6 +40,7 @@ import type { RoomsTable, AgentsTable } from "../rows/room-agent-rows";
 import type { WorkspaceMembersTable, RoomMembersTable, RoomAgentsTable, AgentWorkspacePermissionsTable, ResourceAccessBoundariesTable, RoomResourceSharesTable } from "../rows/room-permission-rows";
 import type { ClientEventsTable } from "../rows/client-event-rows";
 import type { WorkspaceFileTransactionsTable, MigrationJournalTable } from "../rows/workspace-kernel-rows";
+import type { ActivityRecordsTable, ResourceUsageRecordsTable, WorkspaceJobsTable, WorkspaceJobAttemptsTable } from "../rows/activity-job-rows";
 
 export interface WorkspaceDb {
   rooms: RoomsTable;
@@ -117,4 +119,8 @@ export interface WorkspaceDb {
   workspace_changes: WorkspaceChangesTable;
   resource_translations: ResourceTranslationsTable;
   migration_journal: MigrationJournalTable;
+  activity_records: ActivityRecordsTable;
+  resource_usage_records: ResourceUsageRecordsTable;
+  workspace_jobs: WorkspaceJobsTable;
+  workspace_job_attempts: WorkspaceJobAttemptsTable;
 }

@@ -27,3 +27,8 @@ export * from "./host/turn-admission";
 export * from "./host/turn-preparer";
 export * from "./host/turn-completion-coordinator";
 export * from "./host/turn-preparation-policy";
+export * from "./activity/activity-ingest-port";
+export * from "./activity/activity-ingest-service";
+export * from "./activity/activity-history-query-service";
+export * from "./activity/activity-processor-port";
+export * from "./activity/workspace-job-worker";

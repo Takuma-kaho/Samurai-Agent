@@ -73,7 +73,11 @@ export class AgentHost {
       ports.cleanup,
       async (run) => {
         requireSessionBoundRun(run);
-        const task = this.queue.enqueue(run.session_id, () => this.executeRecoveredRun(run));
+        const task = this.queue.enqueue(run.session_id, async () => {
+          const outcome = await this.executeRecoveredRun(run);
+          await this.ports.recoveredRunObserver?.(outcome.run);
+          return outcome;
+        });
         void task.catch((error) => this.recordDiagnostic(run, "host_cleanup_failed", "recovery_enqueue", error));
       },
       ports.diagnostics,
@@ -398,7 +402,7 @@ export class AgentHost {
       if (run.session_id || isSettled(run) || !run.room_id || !run.principal) continue;
       try {
         if (run.status === "queued") {
-          await this.runWorkspaceExecution({
+          const outcome = await this.runWorkspaceExecution({
             context: {
               workspace_id: "workspace",
               room_id: run.room_id,
@@ -413,8 +417,10 @@ export class AgentHost {
             ...(run.input_summary ? { input_summary: run.input_summary } : {}),
             metadata: run.metadata
           });
+          await this.ports.recoveredRunObserver?.(outcome.run);
         } else if (run.status === "running" || run.status === "waiting_for_backend_input") {
-          await this.syncWorkspaceRun(run.id);
+          const recovered = await this.syncWorkspaceRun(run.id);
+          await this.ports.recoveredRunObserver?.(recovered);
         }
       } catch (error) {
         await this.recordDiagnostic(run, "host_cleanup_failed", "workspace_recovery", error);
@@ -546,6 +552,7 @@ export class AgentHost {
   private async executeAdmitted(admitted: AdmittedTurn, signal?: AbortSignal, observeAdmission = false): Promise<TurnOutcome> {
     requireSessionBoundRun(admitted.run);
     const sessionId = admitted.run.session_id;
+    await this.ports.admissionGuard?.guard(admitted);
     if (observeAdmission) {
       try {
         await this.ports.admissionObserver.observe(admitted);

@@ -90,6 +90,7 @@ import {
 } from "@samurai-agent/domain-operations";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { connect as netConnect, type Socket } from "node:net";
 import path from "node:path";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
@@ -107,6 +108,7 @@ import {
 import {
   type ActivityInboxItem,
   type ActivityContextRef,
+  type ActivityRecord,
   type AgentBackendKind,
   type AgentRecord,
   type ApprovalRequest,
@@ -190,6 +192,7 @@ import {
   type UsageScopeRef,
   type Principal,
   type WorkspaceExecutionRequest,
+  type TrustedWorkspaceContext,
   GatewayRepairResultSchema,
   GatewaySandboxWorkspaceSyncResultSchema,
   gatewayChannels,
@@ -197,7 +200,8 @@ import {
   type SupportedLocale,
   createId,
   nowIso,
-  stableHash
+  stableHash,
+  stableStringify
 } from "@samurai-agent/core-schemas";
 import {
   actualLearningResourceUses,
@@ -322,6 +326,7 @@ import { ExternalSendDomainService } from "./commands/services/external-send-dom
 import { RoomAgentDomainService } from "./commands/services/room-agent-domain-service";
 import { RoomAuthorizationError, RoomAuthorizationService } from "./commands/services/room-authorization-service";
 import { RoomResourceCatalog } from "./commands/services/room-resource-catalog";
+import { ActivityIngestService } from "./activity/activity-ingest-service";
 import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
 import { BackendToolBridgeService, type BackendToolBridgeCallResult } from "./host/backend-tool-bridge-service";
 import { LearningEvidenceAssembler } from "./learning/learning-evidence-assembler";
@@ -998,6 +1003,7 @@ export class AgentRuntime {
   private readonly externalSendDomainService: ExternalSendDomainService;
   private readonly roomAgentDomainService: RoomAgentDomainService;
   private readonly roomAuthorizationService: RoomAuthorizationService;
+  private readonly activityIngest: ActivityIngestService;
   private readonly learningEvidenceAssembler: LearningEvidenceAssembler;
   /** Identity cache only for an already live-checked pre-Core 06 Run. */
   private readonly legacyRunRequesterIds = new Map<string, string>();
@@ -1091,6 +1097,7 @@ export class AgentRuntime {
       (code, message) => new RuntimeRequestError(code, message)
     );
     this.roomAuthorizationService = new RoomAuthorizationService(this.store);
+    this.activityIngest = new ActivityIngestService(this.store, this.roomAuthorizationService);
     const roomResourceCatalog = new RoomResourceCatalog(
       this.store,
       (input) => this.resolveWorkspacePath(input).relativePath,
@@ -1998,7 +2005,11 @@ export class AgentRuntime {
             ...(gatewayBoundaryPolicy ? { gatewayBoundaryPolicy } : {})
           };
         },
+        recordActivityResourceUses: (turn, preview) => this.recordActivityResourceUses(turn, preview),
         recordLearningResourceUses: (turn, preview) => this.recordLearningResourceUses(turn, preview),
+        linkActivityToRun: ({ activityId, run }) => this.linkActivityToRun(activityId, run),
+        linkWorkspaceActivityToRun: ({ context, run }) => this.linkWorkspaceActivityToRun(context, run),
+        observeRecoveredRun: (run) => this.captureActivityForStoredRun(run),
         workingDirectory: () => this.backendWorkingDirectory(),
         workingDirectoryMode: () => this.backendWorkingDirectoryMode(),
         resolveDefaultBackendId: () => this.defaultBackendIdForRun()
@@ -2260,6 +2271,162 @@ export class AgentRuntime {
         content_hash: contentHash, stage: "selected", ...(activityContext ? { activity_context: activityContext } : {}), metadata: { kind: result.kind, title: result.title }, created_at: nowIso()
       });
     }
+  }
+
+  /** Core07 records actual context use independently from legacy Learning Evidence. */
+  private async recordActivityResourceUses(turn: AdmittedTurn, preview: ContextPreview): Promise<void> {
+    const activityId = turn.request.activityId;
+    if (!activityId) return;
+    const activity = await this.store.getActivity(activityId);
+    if (!activity || activity.status !== "recording") return;
+    const context = activityTrustedContext(activity);
+    const usageScope = { kind: "room" as const, room_id: activity.room_id };
+    const record = async (input: {
+      resourceRef: ResourceRef;
+      stage: "referenced" | "read";
+      resourceVersion?: string;
+      contentHash?: string;
+    }) => this.activityIngest.recordResourceUsage({
+      context,
+      activityId,
+      id: activityResourceUsageId({ activityId, stage: input.stage, resourceRef: input.resourceRef, contentHash: input.contentHash }),
+      resourceRef: input.resourceRef,
+      stage: input.stage,
+      usageScope,
+      ...(input.resourceVersion ? { resourceVersion: input.resourceVersion } : {}),
+      ...(input.contentHash ? { contentHash: input.contentHash } : {})
+    });
+    for (const skill of preview.selected_skills) {
+      const resource = await this.store.getSkill(skill.id);
+      const contentHash = resource?.frontmatter.content_hash;
+      await record({
+        resourceRef: resource ? { ...skillRef(resource), ...(resource.frontmatter.version ? { version: resource.frontmatter.version } : {}) } : { kind: "skill", id: skill.id, uri: `skill/${skill.id}`, label: skill.title },
+        stage: "referenced",
+        ...(resource?.frontmatter.version ? { resourceVersion: resource.frontmatter.version } : {}),
+        ...(contentHash ? { contentHash } : {})
+      });
+    }
+    for (const memory of preview.active_memory) {
+      const resource = await this.store.getMemory(memory.id);
+      const contentHash = resource?.content_hash ?? core07Hash(memory.content);
+      await record({
+        resourceRef: resource ? { ...memoryRef(resource), ...(resource.version ? { version: resource.version } : {}) } : { kind: "memory", id: memory.id, uri: `memory/${memory.id}`, label: memory.topic },
+        stage: "read",
+        ...(resource?.version ? { resourceVersion: resource.version } : {}),
+        contentHash
+      });
+    }
+    for (const wiki of preview.knowledge_wiki) {
+      const resource = await this.store.getWiki(wiki.id);
+      const contentHash = resource?.content_hash ?? core07Hash(wiki.content);
+      await record({
+        resourceRef: resource ? { ...wikiRef(resource), ...(resource.version ? { version: resource.version } : {}) } : { kind: "wiki", id: wiki.id, uri: `wiki/${wiki.id}`, label: wiki.title },
+        stage: "read",
+        ...(resource?.version ? { resourceVersion: resource.version } : {}),
+        contentHash
+      });
+    }
+    for (const result of preview.session_search) {
+      const resourceRef = { kind: `session_search:${result.kind}`, id: result.id, uri: `session-search/${result.kind}/${result.id}`, label: result.title };
+      await record({ resourceRef, stage: "referenced", contentHash: core07Hash(result.summary) });
+    }
+  }
+
+  /** Links one Activity to its Run, then records only durable outcomes and real changes. */
+  private async captureActivityForRun(activityId: string, run: BackendRunRecord): Promise<void> {
+    const activity = await this.store.getActivity(activityId);
+    if (!activity) throw new Error("activity_not_found");
+    if (activity.status !== "recording") return;
+    const context = activityTrustedContext(activity);
+    await this.activityIngest.linkBackendRun({ context, activityId, backendRunId: run.id });
+    if (!isSettledBackendRun(run)) return;
+
+    const [toolRuns, workspaceChanges] = await Promise.all([
+      this.store.listToolRuns({ runId: run.id }),
+      this.store.listWorkspaceChanges().then((items) => items.filter((item) => item.run_id === run.id))
+    ]);
+    const usageScope = { kind: "room" as const, room_id: activity.room_id };
+    for (const toolRun of toolRuns) {
+      for (const resourceRef of toolRun.resource_refs) {
+        await this.activityIngest.recordResourceUsage({
+          context,
+          activityId,
+          id: activityResourceUsageId({ activityId, stage: "referenced", resourceRef, sourceId: toolRun.id }),
+          resourceRef,
+          stage: "referenced",
+          usageScope
+        });
+      }
+    }
+    for (const change of workspaceChanges) {
+      await this.activityIngest.recordResourceUsage({
+        context,
+        activityId,
+        id: activityResourceUsageId({ activityId, stage: "modified", resourceRef: change.resource_ref, sourceId: change.id }),
+        resourceRef: change.resource_ref,
+        stage: "modified",
+        usageScope,
+        ...(change.legacy_operation_id ? { domainOperationId: change.legacy_operation_id } : {}),
+        workspaceChangeId: change.id
+      });
+    }
+    const domainOperationIds = workspaceChanges
+      .map((change) => change.legacy_operation_id)
+      .filter((id): id is string => Boolean(id));
+    const terminal = activityTerminalOutcome(run);
+    await this.activityIngest.finalizeActivity({
+      context,
+      activityId,
+      status: terminal.status,
+      ...(terminal.resultSummary ? { resultSummary: terminal.resultSummary } : {}),
+      ...(terminal.failure ? { failure: terminal.failure } : {}),
+      backendRunId: run.id,
+      domainOperationIds
+    });
+  }
+
+  private async linkActivityToRun(activityId: string, run: BackendRunRecord): Promise<void> {
+    const activity = await this.store.getActivity(activityId);
+    if (!activity) throw new Error("activity_not_found");
+    await this.activityIngest.linkBackendRun({ context: activityTrustedContext(activity), activityId, backendRunId: run.id });
+  }
+
+  private async linkWorkspaceActivityToRun(context: TrustedWorkspaceContext, run: BackendRunRecord): Promise<void> {
+    const activity = await this.store.getActivityByIdempotency({
+      workspaceId: context.workspace_id,
+      idempotencyKey: `workspace:${context.correlation_id}`
+    });
+    if (!activity) throw new Error("activity_not_found");
+    await this.activityIngest.linkBackendRun({ context: activityTrustedContext(activity), activityId: activity.id, backendRunId: run.id });
+  }
+
+  /** A Host exception is never projected as a successful Activity. */
+  private async finalizeActivityAfterHostError(activityId: string, error: unknown): Promise<void> {
+    const activity = await this.store.getActivity(activityId);
+    if (!activity || activity.status !== "recording") return;
+    await this.activityIngest.finalizeActivity({
+      context: activityTrustedContext(activity),
+      activityId,
+      status: "outcome_unknown",
+      failure: {
+        code: "activity_host_execution_interrupted",
+        summary: summarize(safeRuntimeErrorMessage(error), 2_000) || "Host execution did not settle an Activity outcome."
+      }
+    });
+  }
+
+  private async captureActivityForStoredRun(run: BackendRunRecord): Promise<void> {
+    let activity = await this.store.getActivityByBackendRunId(run.id);
+    // A crash can happen after the Run is admitted but before its Activity
+    // link commits. The idempotency key is the only safe fallback; it does not
+    // invent a Session or search across Rooms.
+    if (!activity && run.request_idempotency_key) {
+      const idempotencyKey = run.session_id
+        ? `chat:${run.session_id}:${run.request_idempotency_key}`
+        : `workspace:${run.request_idempotency_key}`;
+      activity = await this.store.getActivityByIdempotency({ workspaceId: "workspace", idempotencyKey });
+    }
+    if (activity) await this.captureActivityForRun(activity.id, run);
   }
 
   /** Completion is cheap: it stores typed evidence signals only and never calls a review model. */
@@ -3028,6 +3195,13 @@ export class AgentRuntime {
     // Compatibility callers may omit a key. This key is unique per call, so
     // it does not promise idempotency across transport retries.
     const idempotencyKey = input.idempotency_key?.trim() || `compat:${createId("idempotency")}`;
+    const activity = session.room_id
+      ? await this.activityIngest.startActivity({
+          context: chatActivityTrustedContext(session, requesterParticipantId, idempotencyKey, input.agent_id),
+          idempotencyKey: `chat:${session.id}:${idempotencyKey}`,
+          instructionSummary: summarize(input.content, 2_000) || "Chat turn"
+        })
+      : undefined;
     let outcome: Awaited<ReturnType<AgentHost["runTurn"]>>;
     try {
       outcome = await this.requireAgentHost().runTurn({
@@ -3040,9 +3214,11 @@ export class AgentRuntime {
         idempotencyKey,
         metadata: jsonRecord(input.metadata ?? {}),
         temporaryContext: input.temporary_context,
-        gatewayBoundaryPolicy: input.gateway_boundary_policy
+        gatewayBoundaryPolicy: input.gateway_boundary_policy,
+        ...(activity ? { activityId: activity.id } : {})
       });
     } catch (error) {
+      if (activity) await this.finalizeActivityAfterHostError(activity.id, error);
       const message = error instanceof Error ? error.message : String(error);
       if (message.startsWith("backend_not_registered:") || message.startsWith("backend_not_ready:")) {
         throw new RuntimeRequestError("conflict", message);
@@ -3053,6 +3229,7 @@ export class AgentRuntime {
     // durable Run before projecting the legacy facade result so diagnostics
     // and recovery corrections are never based on an in-memory snapshot.
     const committedRun = await this.store.getBackendRun(outcome.run.id) ?? outcome.run;
+    if (activity) await this.captureActivityForRun(activity.id, committedRun);
     await this.assertRunAgentExecution(committedRun);
     const result = await this.projectChatTurn(committedRun);
     if (outcome.kind === "failed") {
@@ -3152,10 +3329,23 @@ export class AgentRuntime {
           agentId: effectiveAgentId
         });
       }
-      return await this.requireAgentHost().runWorkspaceExecution({
-        ...input,
-        ...(effectiveAgentId ? { agent_id: effectiveAgentId } : {})
+      const activity = await this.activityIngest.startActivity({
+        context: input.context,
+        idempotencyKey: `workspace:${input.context.correlation_id}`,
+        instructionSummary: summarize(input.input_summary ?? "Workspace execution", 2_000)
       });
+      try {
+        const outcome = await this.requireAgentHost().runWorkspaceExecution({
+          ...input,
+          ...(effectiveAgentId ? { agent_id: effectiveAgentId } : {})
+        });
+        const committedRun = await this.store.getBackendRun(outcome.run.id) ?? outcome.run;
+        await this.captureActivityForRun(activity.id, committedRun);
+        return outcome;
+      } catch (error) {
+        await this.finalizeActivityAfterHostError(activity.id, error);
+        throw error;
+      }
     } catch (error) {
       if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
       throw error;
@@ -3168,6 +3358,7 @@ export class AgentRuntime {
     if (run.session_id) await this.assertRunAgentExecution(run);
     else await this.assertWorkspaceRunAgentExecution(run);
     const cancelled = await this.requireAgentHost().cancelRun(runId);
+    await this.captureActivityForStoredRun(cancelled);
     const lockKey = typeof cancelled.metadata.gateway_boundary_concurrency_lock_key === "string"
       ? cancelled.metadata.gateway_boundary_concurrency_lock_key.trim()
       : "";
@@ -3192,7 +3383,9 @@ export class AgentRuntime {
       if (!run) throw new RuntimeRequestError("not_found", "backend_run_not_found");
       if (run.session_id) await this.assertRunAgentExecution(run);
       else await this.assertWorkspaceRunAgentExecution(run);
-      return await this.requireAgentHost().resumeRun(runId, input);
+      const resumed = await this.requireAgentHost().resumeRun(runId, input);
+      await this.captureActivityForStoredRun(resumed);
+      return resumed;
     } catch (error) {
       if (String(error).includes("run_not_found")) throw new RuntimeRequestError("not_found", "backend_run_not_found");
       throw error;
@@ -3206,6 +3399,7 @@ export class AgentRuntime {
     if (existingRun.session_id) await this.assertRunAgentExecution(existingRun);
     else await this.assertWorkspaceRunAgentExecution(existingRun);
     const run = await this.requireAgentHost().syncRun(runId);
+    await this.captureActivityForStoredRun(run);
     const syncEventId = `control:sync:${run.id}:${run.current_attempt ?? 1}`;
     const syncEvent = await this.store.appendCore02Event({
       id: syncEventId,
@@ -8932,6 +9126,75 @@ function createEnvelope(
 
 function summarize(value: string, maxLength = 160): string {
   return value.trim().replace(/\s+/g, " ").slice(0, maxLength);
+}
+
+function chatActivityTrustedContext(
+  session: SessionRecord,
+  participantId: string,
+  idempotencyKey: string,
+  agentId?: string
+): TrustedWorkspaceContext {
+  if (!session.room_id) throw new Error("activity_context_room_required");
+  return {
+    // Matches the existing Native App-to-Host adapter's Workspace identity.
+    workspace_id: "workspace",
+    room_id: session.room_id,
+    principal: agentId
+      ? { kind: "agent", agent_id: agentId, requested_by_participant_id: participantId }
+      : { kind: "human", participant_id: participantId },
+    source: { kind: "native_app", app_id: "samurai-native" },
+    correlation_id: `activity:chat:${session.id}:${idempotencyKey}`,
+    session_ref: { app_id: "samurai-native", session_id: session.id }
+  };
+}
+
+function activityTrustedContext(activity: ActivityRecord): TrustedWorkspaceContext {
+  return {
+    workspace_id: activity.workspace_id,
+    room_id: activity.room_id,
+    principal: activity.principal,
+    source: activity.source,
+    correlation_id: `activity:${activity.id}`,
+    ...(activity.session_ref ? { session_ref: activity.session_ref } : {}),
+    ...(activity.backend_run_id ? { run_id: activity.backend_run_id } : {})
+  };
+}
+
+function activityResourceUsageId(input: {
+  activityId: string;
+  stage: "referenced" | "read" | "applied" | "modified" | "reverted";
+  resourceRef: ResourceRef;
+  contentHash?: string;
+  sourceId?: string;
+}): string {
+  return `activity_use_${core07Hash({
+    activity_id: input.activityId,
+    stage: input.stage,
+    resource_ref: input.resourceRef,
+    content_hash: input.contentHash ?? null,
+    source_id: input.sourceId ?? null
+  })}`;
+}
+
+function core07Hash(value: unknown): string {
+  return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function activityTerminalOutcome(run: BackendRunRecord): {
+  status: Exclude<ActivityRecord["status"], "recording">;
+  resultSummary?: string;
+  failure?: { code: string; summary: string };
+} {
+  if (run.status === "completed") {
+    return { status: "completed", resultSummary: summarize(run.output_summary ?? "Backend run completed.", 2_000) || "Backend run completed." };
+  }
+  if (run.status === "cancelled") {
+    return { status: "cancelled", failure: { code: run.error_code ?? "backend_cancelled", summary: "Backend run was cancelled." } };
+  }
+  if (run.status === "failed") {
+    return { status: "failed", failure: { code: run.error_code ?? "backend_failed", summary: summarize(run.output_summary ?? "Backend run failed.", 2_000) || "Backend run failed." } };
+  }
+  return { status: "outcome_unknown", failure: { code: run.error_code ?? "backend_outcome_unknown", summary: "Backend run outcome is unknown." } };
 }
 
 function surfaceOperationPrompt(operation: SurfaceOperation): string {

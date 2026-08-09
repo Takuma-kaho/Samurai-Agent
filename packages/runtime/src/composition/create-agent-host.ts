@@ -4,6 +4,7 @@ import { AgentHost } from "../host/agent-host";
 import { TurnCompletionCoordinator } from "../host/turn-completion-coordinator";
 import type {
   AdmissionObserverPort,
+  AdmissionGuardPort,
   CommittedEventPublisherPort,
   HostCompletionPort,
   HostContextPort,
@@ -23,11 +24,13 @@ export interface AgentHostCompositionOptions {
   preflight: TurnPreflightPort;
   committedEventPublisher: CommittedEventPublisherPort;
   admissionObserver: AdmissionObserverPort;
+  admissionGuard?: AdmissionGuardPort;
   toolExecution: TurnToolExecutionPort;
   cleanup: TurnCleanupPort;
   diagnostics: HostDiagnosticsPort;
   prepareResumeInput?: HostPorts["prepareResumeInput"];
   assertRunAccess?: HostPorts["assertRunAccess"];
+  recoveredRunObserver?: HostPorts["recoveredRunObserver"];
   prepareWorkspaceExecution?: HostPorts["prepareWorkspaceExecution"];
   maxConcurrency?: number;
   postTurn?: PostTurnOperations;
@@ -44,11 +47,13 @@ export function createAgentHost(options: AgentHostCompositionOptions): AgentHost
     preflight: options.preflight,
     committedEventPublisher: options.committedEventPublisher,
     admissionObserver: options.admissionObserver,
+    admissionGuard: options.admissionGuard,
     toolExecution: options.toolExecution,
     cleanup: options.cleanup,
     diagnostics: options.diagnostics,
     prepareResumeInput: options.prepareResumeInput,
     assertRunAccess: options.assertRunAccess,
+    recoveredRunObserver: options.recoveredRunObserver,
     prepareWorkspaceExecution: options.prepareWorkspaceExecution,
     maxConcurrency: options.maxConcurrency,
     resolveDefaultBackendId: options.resolveDefaultBackendId,
