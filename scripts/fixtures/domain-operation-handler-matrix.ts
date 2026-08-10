@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { TrustedDomainContext } from "../../packages/domain-operations/src/definition/index";
+import activityHistoryList from "../../packages/domain-operations/src/operations/activity/history/list.operation";
 import agentBackendBind from "../../packages/domain-operations/src/operations/agent/backend/bind.operation";
 import agentCreate from "../../packages/domain-operations/src/operations/agent/create.operation";
 import agentList from "../../packages/domain-operations/src/operations/agent/list.operation";
@@ -406,6 +407,10 @@ await run("curator.snapshot.list", () => curatorSnapshotList.createHandler({
 await run("gateway.concurrency_lock.expire", () => gatewayConcurrencyLockExpire.createHandler({
   expireGatewayConcurrencyLocks(input) { return record("gateway.concurrency_lock.expire", "expireGatewayConcurrencyLocks", [input], gatewayExpiredLocksOutput); }
 }).execute(context, handlerExpectations["gateway.concurrency_lock.expire"].input));
+
+await run("activity.history.list", () => activityHistoryList.createHandler({
+  listActivityHistory(input) { return record("activity.history.list", "listActivityHistory", [input], []); }
+}).execute(context, handlerExpectations["activity.history.list"].input));
 
 await run("session.search", () => sessionSearch.createHandler({
   searchSessions(_context, query, limit) { return record("session.search", "searchSessions", [_context, query, limit], searchSessionOutput); }

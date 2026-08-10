@@ -487,14 +487,17 @@ Chat、Session、App Agent、SurfaceはNative Appの状態である。Workspace 
 - Gateway、Automation、Sandboxの基盤
 - Chat APIとSession単位のRuntime経路
 
-Core06〜08の移行済み範囲では、Room・PrincipalをTrusted Contextで決め、SessionなしでArtifact・Collectionの主要保存とGenerated Surfaceの作成・改訂・Actionを実行できる。
+Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで決め、SessionなしでArtifact・Collectionの主要保存とGenerated Surfaceの作成・改訂・Actionを実行できる。
 
 - ArtifactとCollectionはWorkspaceの正本で、Roomは`resource_access_boundaries`で直接認可する
 - SessionRefは任意の出所であり、消してもResourceの正本や権限根拠にならない
 - 保存の証拠はActivity、Workspace Change、ResourceUsageへ接続する
 - Generated Surfaceは派生表示で、新BackupはSurface bundleなしでもArtifact・Collectionを復元できる。旧Surfaceを含むBackupは互換Restoreする
+- External App Connectionはsecretを保存せず、委任元、Room上限、入口上限を永続化する。ConnectionはRoom membershipを追加しない
+- Formal ingressのQuery、Domain Operation、Activity Ingestは共通Resolverで現在のRoom権限を再評価する。既存Chat／Session経路は互換経路のまま分離する
+- AutomationはRoom／Authorityを保存し、実行直前に再認可する。旧Jobは`rebind_required`で止め、SessionなしExecutorがないkindは安全停止する
 
-Chat、Session一覧、Gateway、Automation、HTTP／MCP／Pluginの正式な外部接続は後続Coreの範囲である。
+本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Core09のReference Adapterは内部契約の検証用であり、製品用の接続Protocolではない。
 
 現在の完了レポートはsource差分を含むため、基盤の存在と「検証済み完了」を分けて扱う。
 
@@ -528,6 +531,16 @@ Core08は、Artifact・Collection・Generated SurfaceのSession必須依存を�
 - 本番用Processor、外部アプリ接続、MCP・Plugin adapterは後続Coreで扱う。
 
 つまり、Core07完了は「自動学習完成」ではない。将来の学習方式を差し替えられる履歴と実行基盤が完成した状態を指す。
+
+### 15.5 Core09の現在の停止地点
+
+Core09は、External AppとAutomationの共通入口をSessionから分離する範囲までを扱う。
+
+- ConnectionはConnector evidence、委任元、Room上限、入口上限の積集合で判定し、PairingをRoom権限へ変換しない
+- Query、Domain Operation、Activity Ingestは共通Resolverを通る。Activity保存からJob、Memory、Knowledge、Skillを自動作成しない
+- Automationは実行直前の権限失効を`blocked`として残し、Retryと混同しない。`wiki_reindex`以外の既存kindはSessionなしExecutorが確定するまで安全停止する
+- Connection metadataとAutomation provenanceはBackup／Restoreするが、Token、Cookie、OAuth secret、App Session全文は保存しない
+- 本番MCP／Plugin／OAuth／HTTP、任意Job API、Realtime、Memory／Skill方式、UIは後続で決める
 
 ---
 

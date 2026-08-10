@@ -13,6 +13,8 @@ import { core06SessionReferenceBoundaryMigration } from "./011-core06-session-re
 import { core07ActivityHistoryMigration } from "./012-core07-activity-history";
 import { core07WorkspaceJobsMigration } from "./013-core07-workspace-jobs";
 import { core08ResourceSessionBoundaryMigration } from "./014-core08-resource-session-boundary";
+import { core09ExternalIngressAutomationBoundaryMigration } from "./015-core09-external-ingress-automation-boundary";
+import { core09AutomationManagerLocksMigration } from "./016-core09-automation-manager-locks";
 
 export const workspaceMigrations: readonly WorkspaceMigration[] = [
   coreBaselineMigration,
@@ -28,7 +30,9 @@ export const workspaceMigrations: readonly WorkspaceMigration[] = [
   core06SessionReferenceBoundaryMigration,
   core07ActivityHistoryMigration,
   core07WorkspaceJobsMigration,
-  core08ResourceSessionBoundaryMigration
+  core08ResourceSessionBoundaryMigration,
+  core09ExternalIngressAutomationBoundaryMigration,
+  core09AutomationManagerLocksMigration
 ];
 
-export { coreBaselineMigration, gatewayDeliveryMigration, skillOptimizationMigration, toolRunErrorCodeMigration, gatewayPairingPolicyAllowedToolsMigration, preCore04SchemaNormalizationMigration, core05RoomAgentFoundationMigration, core05LearningCompletionMigration, core06RoomParticipantsMigration, core06IntegrityHardeningMigration, core06SessionReferenceBoundaryMigration, core07ActivityHistoryMigration, core07WorkspaceJobsMigration, core08ResourceSessionBoundaryMigration };
+export { coreBaselineMigration, gatewayDeliveryMigration, skillOptimizationMigration, toolRunErrorCodeMigration, gatewayPairingPolicyAllowedToolsMigration, preCore04SchemaNormalizationMigration, core05RoomAgentFoundationMigration, core05LearningCompletionMigration, core06RoomParticipantsMigration, core06IntegrityHardeningMigration, core06SessionReferenceBoundaryMigration, core07ActivityHistoryMigration, core07WorkspaceJobsMigration, core08ResourceSessionBoundaryMigration, core09ExternalIngressAutomationBoundaryMigration, core09AutomationManagerLocksMigration };

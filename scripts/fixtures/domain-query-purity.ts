@@ -174,6 +174,7 @@ try {
   });
 
   const cases = [
+    { queryId: "activity.history.list", payload: { limit: 5 } },
     { queryId: "agent.list", payload: {} },
     { queryId: "agent.view", payload: { id: agent.id } },
     { queryId: "collection.view.present", payload: { collection_id: "query-purity" } },

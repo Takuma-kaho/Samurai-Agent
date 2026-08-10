@@ -29,7 +29,8 @@ const collectionRecordsList = defineQuery<CollectionRecordsListPorts>()({
     "runtime_api",
     "provider_tool_call",
     "surface_operation",
-    "generated_surface"
+    "generated_surface",
+    "external_app"
   ],
   "effect": "read_only",
   "idempotency": "none",

@@ -20,6 +20,10 @@ export type DomainAccessClassification =
   // permits the unbound Gateway transport to record and pair inbound contact,
   // but never grants Room, Chat, Agent, Tool, or Workspace content access.
   | { scope: "gateway_admission" }
+  // The scheduler itself is not an authority.  This scope is available only
+  // to the internal scheduler ingress; the handler must resolve the Job's
+  // persisted authority after it acquires the Job lock.
+  | { scope: "automation_execution" }
   | { scope: "workspace_control" }
   | { scope: "legacy_owner" }
   | { scope: "room_content"; action: RoomContentAction; target?: DomainResourceTarget | readonly DomainResourceTarget[] };
@@ -48,10 +52,13 @@ register({ scope: "room_collaboration" },
 // cannot inherit any wider authority from the Gateway transport.
 register({ scope: "gateway_admission" }, "gateway.inbound.route");
 
+register({ scope: "automation_execution" }, "automation.job.run");
+
 // These controls intentionally concern Workspace-wide operational state, not
 // Room content. They remain an explicit Workspace-admin path.
 register({ scope: "workspace_control" },
-  "automation.job.release_lock", "automation.job.requeue", "automation.job.run", "automation.job.save", "automation.job.set_status",
+  "automation.job.release_lock", "automation.job.requeue",
+  "external_app.connection.create", "external_app.connection.update_scope", "external_app.connection.revoke",
   "client.event.ack", "client.event.deliver", "client.event.expire", "client.event.fail", "client.event.save",
   "gateway.concurrency_lock.expire", "gateway.mcp_config.save", "gateway.pairing_policy.save",
   "gateway.pairing.approve", "gateway.pairing.expire", "gateway.pairing.reject", "gateway.pairing.revoke", "gateway.pairing.rotate",
@@ -66,12 +73,16 @@ register({ scope: "legacy_owner" },
 );
 
 register({ scope: "room_content", action: "edit" }, "artifact.create", "graph.create", "generated_surface.create", "memory.session.create", "memory.topic.create", "message.presentation.update", "objective.create", "objective.transition", "wiki.proposal.create");
+register({ scope: "room_content", action: "edit" },
+  "automation.job.save", "automation.job.set_status", "automation.job.rebind_authority",
+  "automation.job.manager_stop", "automation.job.manager_resume", "automation.job.reauthorize"
+);
 register({ scope: "room_content", action: "edit", target: {
   resourceRefField: "source_ref",
   allowedKinds: ["artifact", "memory", "wiki", "skill", "collection_record"]
 } }, "resource.translation.save", "resource.translation_job.save");
 register({ scope: "room_content", action: "execute" }, "artifact.export_pdf", "browser.download_to_workspace", "browser.extract", "browser.interact", "browser.navigate", "browser.screenshot", "chat.turn.run", "evaluation.run", "external.send", "external.send.dispatch", "external.send.prepare", "image.generate", "learning.background_review.apply", "mcp.call", "presentation.plan", "reflection.run", "reflection.suggestion.apply", "sandbox.exec", "session.create", "skill.optimization.cancel", "skill.optimization.promote", "skill.optimization.reject", "skill.optimization.rollback", "skill.optimization.start", "work_item.follow_up", "work_item.steer");
-register({ scope: "room_content", action: "read" }, "collection.schema.docs", "collection.search", "file.list", "memory.search", "session.search", "skill.search", "wiki.search");
+register({ scope: "room_content", action: "read" }, "activity.history.list", "collection.schema.docs", "collection.search", "file.list", "memory.search", "session.search", "skill.search", "wiki.search");
 register({ scope: "room_content", action: "edit", target: { kind: "artifact", idField: "artifact_id" } }, "artifact.repair", "artifact.restore_revision", "artifact.revise", "graph.patch", "image.edit");
 register({ scope: "room_content", action: "edit", target: [
   { kind: "collection_schema", idField: "collection_id" },

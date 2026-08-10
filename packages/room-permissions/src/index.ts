@@ -94,6 +94,8 @@ export const permissionReasons = [
   "room_membership_removed",
   "room_role_denied",
   "agent_not_in_room",
+  "agent_not_found",
+  "agent_disabled",
   "agent_room_permission_denied",
   "agent_workspace_permission_denied",
   "external_app_delegation_invalid",
@@ -120,6 +122,8 @@ export interface AgentPrincipal {
 export interface ExternalAppPrincipal {
   kind: "external_app";
   appId: string;
+  /** Authenticated connector provenance; never a Room permission by itself. */
+  connectorId?: string;
   delegatedBy: HumanPrincipal | AgentPrincipal;
 }
 

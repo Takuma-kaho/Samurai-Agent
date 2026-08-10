@@ -243,6 +243,7 @@ import {
   executeSandboxWorkspaceSync,
   executeMcpToolInvocation,
   expirePairing,
+  GatewayFormalWorkspaceIngress,
   gatewayMcpConfigToBoundaryRef,
   httpMcpServerConfigFromGatewayConfig,
   revokePairing,
@@ -315,7 +316,8 @@ import {
 import { ClientEventDomainService } from "./commands/services/client-event-domain-service";
 import { GatewayDomainService } from "./commands/services/gateway-domain-service";
 import { WikiDomainService } from "./commands/services/wiki-domain-service";
-import { AutomationDomainService, type ScheduledAutomationContext } from "./commands/services/automation-domain-service";
+import { AutomationDomainService } from "./commands/services/automation-domain-service";
+import { Core09AutomationDomainService } from "./commands/services/core09-automation-domain-service";
 import { DomainOperationTelemetryService } from "./commands/services/domain-operation-telemetry-service";
 import { GeneratedSurfaceDomainService } from "./commands/services/generated-surface-domain-service";
 import { SkillDomainService } from "./commands/services/skill-domain-service";
@@ -324,10 +326,16 @@ import { ConversationDomainService } from "./commands/services/conversation-doma
 import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
 import { ExternalSendDomainService } from "./commands/services/external-send-domain-service";
+import { ExternalAppConnectionDomainService } from "./commands/services/external-app-connection-domain-service";
 import { RoomAgentDomainService } from "./commands/services/room-agent-domain-service";
 import { RoomAuthorizationError, RoomAuthorizationService } from "./commands/services/room-authorization-service";
 import { RoomResourceCatalog } from "./commands/services/room-resource-catalog";
 import { ActivityIngestService } from "./activity/activity-ingest-service";
+import { ActivityHistoryQueryService } from "./activity/activity-history-query-service";
+import { ActivityHistoryDomainService } from "./commands/services/activity-history-domain-service";
+import { ExternalAppContextResolver } from "./external-app/external-app-context-resolver";
+import { ExternalAppIngress } from "./external-app/external-app-ingress";
+import { ReferenceExternalAppAdapter } from "./external-app/reference-adapter";
 import { ResourceMutationActivityService, ResourceMutationEvidenceError, type ResourceMutationActivityScope } from "./activity/resource-mutation-activity-service";
 import { createRuntimeAgentHost, type HostExternalAssistSyncInput, type RuntimeHostCompositionDependencies } from "./composition/runtime-host";
 import { BackendToolBridgeService, type BackendToolBridgeCallResult } from "./host/backend-tool-bridge-service";
@@ -567,15 +575,6 @@ export interface AutomationSchedulePreview {
   next_run_at: string;
 }
 
-export interface ResourceTranslationJobRuntimeDetails {
-  translation: ResourceTranslationRecord;
-  backendRunId: string;
-  source_ref: ResourceRef;
-  source_locale: SupportedLocale;
-  target_locale: SupportedLocale;
-  original_hash: string;
-}
-
 export interface GatewayInboundRuntimeResult {
   inbound: GatewayInboundMessageRecord;
   pairing?: GatewayPairingRecord;
@@ -697,7 +696,7 @@ export interface TrustedDomainRuntimeContext {
 }
 
 /** Actors that the Runtime can assign without consulting a user payload. */
-export type TrustedActorIdentity = Extract<ActorIdentity, "owner" | "owner_scheduled" | "paired_contact">;
+export type TrustedActorIdentity = Extract<ActorIdentity, "owner" | "owner_scheduled" | "paired_contact" | "external_app">;
 
 export interface DomainCommandRuntimeResult<TResult = unknown> {
   command: DomainCommandEntry;
@@ -734,13 +733,15 @@ export interface CollectionPatchRuntimeResult extends RuntimeWriteResult<Collect
 
 export interface AutomationRunRuntimeResult {
   automationRun: AutomationRunRecord;
-  operation: OperationRecord;
+  operation?: OperationRecord;
   policyDecision?: PolicyDecisionRecord;
   auditRecord?: AuditRecord;
   rollbackPoint?: RollbackPoint;
   activity: ActivityInboxItem[];
   memoryReviewTrace?: ReflectionRuntimeResult;
   curatorResult?: ReflectionRuntimeResult;
+  /** Authorization blocks are a durable terminal result, not a retryable failure. */
+  blocked?: true;
 }
 
 export interface ReflectionRuntimeResult {
@@ -1006,6 +1007,7 @@ export class AgentRuntime {
   private readonly gatewayDomainService: GatewayDomainService;
   private readonly wikiDomainService: WikiDomainService;
   private readonly automationDomainService: AutomationDomainService;
+  private readonly core09AutomationDomainService: Core09AutomationDomainService;
   private readonly generatedSurfaceDomainService: GeneratedSurfaceDomainService;
   private readonly skillDomainService: SkillDomainService<SkillWithFilePath>;
   private readonly collectionDomainService: CollectionDomainService;
@@ -1015,9 +1017,11 @@ export class AgentRuntime {
   private readonly fileDomainService: FileDomainService;
   private readonly browserDomainService: BrowserDomainService;
   private readonly externalSendDomainService: ExternalSendDomainService;
+  private readonly externalAppConnectionDomainService: ExternalAppConnectionDomainService;
   private readonly roomAgentDomainService: RoomAgentDomainService;
   private readonly roomAuthorizationService: RoomAuthorizationService;
   private readonly activityIngest: ActivityIngestService;
+  private readonly activityHistoryDomainService: ActivityHistoryDomainService;
   private readonly resourceMutationActivity: ResourceMutationActivityService;
   private readonly learningEvidenceAssembler: LearningEvidenceAssembler;
   /** Identity cache only for an already live-checked pre-Core 06 Run. */
@@ -1113,6 +1117,10 @@ export class AgentRuntime {
     );
     this.roomAuthorizationService = new RoomAuthorizationService(this.store);
     this.activityIngest = new ActivityIngestService(this.store, this.roomAuthorizationService);
+    this.activityHistoryDomainService = new ActivityHistoryDomainService(
+      new ActivityHistoryQueryService(this.store, this.roomAuthorizationService),
+      (context) => this.resourceMutationActivityContext(context)
+    );
     this.resourceMutationActivity = new ResourceMutationActivityService(this.store, this.activityIngest);
     const roomResourceCatalog = new RoomResourceCatalog(
       this.store,
@@ -1165,14 +1173,6 @@ export class AgentRuntime {
           const resource = target ? await this.store.getCollectionRecord(target.collectionId, target.recordId) : undefined;
           return resource ? { ref: collectionRecordRef(resource), source_locale: localeFromJson(resource.data.content_locale), content: JSON.stringify(resource.data, null, 2) } : undefined;
         }
-      },
-      execution: {
-        runChat: (input) => this.runChatTurn({
-          sessionId: input.sessionId, content: input.content, input_locale: input.inputLocale, output_locale: input.outputLocale,
-          metadata: input.metadata, gateway_context: input.context as GatewayContext
-        }),
-        saveWorkspaceChange: (change) => this.store.saveWorkspaceChange(change),
-        emitWorkspaceChange: async (change) => { await this.emit("workspace.change.created", change); }
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
@@ -1434,7 +1434,13 @@ export class AgentRuntime {
         pruneSnapshots: (retain) => this.store.pruneLearningSnapshots(retain)
       },
       evaluation: {
-        ensureSession: () => this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled evaluation"),
+        // Core09 deliberately does not recreate a Session just to keep the
+        // pre-Core09 learning automation alive.  A Sessionless executor has
+        // not been designed for this kind yet, so stop before any read/write
+        // work rather than manufacture an authority-bearing Session.
+        ensureSession: async () => {
+          throw new RuntimeRequestError("unavailable", "automation_sessionless_executor_unsupported:learning_evaluation");
+        },
         listSkills: () => this.store.listSkills(), listBackendRuns: () => this.store.listBackendRuns(),
         listBackendEvents: () => this.store.listBackendEvents(), listWorkspaceChanges: () => this.store.listWorkspaceChanges(),
         listToolRuns: () => this.store.listToolRuns(), listAuditRecords: () => this.store.listAuditRecords(),
@@ -1447,7 +1453,11 @@ export class AgentRuntime {
         nextRunAt: (fromMs) => nextRunFromSchedule("daily", fromMs)
       },
       curator: {
-        ensureSession: () => this.ensureSessionForContext(cronMemoryReviewGatewayContext, "Scheduled curator"),
+        // See the evaluation boundary above.  Curator remains safely stopped
+        // until it receives its own explicit Sessionless execution boundary.
+        ensureSession: async () => {
+          throw new RuntimeRequestError("unavailable", "automation_sessionless_executor_unsupported:skill_curator");
+        },
         // Curator has no Room requester. It may examine only pre-Core 06
         // unbounded data, which remains explicitly Owner-only, never current
         // Room-bound resources belonging to another participant.
@@ -1633,35 +1643,49 @@ export class AgentRuntime {
     });
     this.automationDomainService = new AutomationDomainService({
       automation: {
-        releaseLock: (jobId, now) => this.store.releaseAutomationJobLock(jobId, now),
-        requeue: (jobId, nextRunAt) => this.store.requeueAutomationJob(jobId, { nextRunAt }),
-        getJob: (jobId) => this.store.getAutomationJob(jobId),
-        acquireLock: (jobId, input) => this.store.acquireAutomationJobLock(jobId, input)
+        releaseLock: (jobId, lockOwnerToken, now) => this.store.releaseAutomationJobLock(jobId, { lockOwnerToken, ...(now ? { now } : {}) }),
+        requeue: (jobId, nextRunAt) => this.store.requeueAutomationJob(jobId, { nextRunAt })
       },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.core09AutomationDomainService = new Core09AutomationDomainService({
+      store: {
+        saveAutomationJob: (job) => this.store.saveAutomationJob(job),
+        getAutomationJob: (id) => this.store.getAutomationJob(id),
+        acquireAutomationJobLock: (id, input) => this.store.acquireAutomationJobLock(id, input),
+        createAutomationRun: (run) => this.store.createAutomationRun(run),
+        attachAutomationRunEvidence: (input) => this.store.attachAutomationRunEvidence(input),
+        settleAutomationRun: (input) => this.store.settleAutomationRun(input),
+        listExpiredAutomationRunClaims: (now) => this.store.listExpiredAutomationRunClaims(now),
+        getExternalAppConnection: (id) => this.store.getExternalAppConnection(id),
+        getExternalAppConnectionByConnector: (input) => this.store.getExternalAppConnectionByConnector(input)
+      },
+      roomAuthorization: this.roomAuthorizationService,
       mutation: {
-        saveJob: (job) => this.store.saveAutomationJob(job),
-        ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
-        createEnvelope: (content) => createGatewayEnvelope(webGatewayContext, content),
-        runMutation: (input) => runWebMutation(input),
-        createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
-        ref: (job) => automationJobRef(job),
-        contract: (id) => requireDomainCommandEntry(id)
+        runMutation: (input) => this.runRecordedMutation({
+          ...input,
+          context: this.gatewayContextForTrustedDomainContext(input.trustedContext)
+        })
       },
       execution: {
-        createRun: (input) => this.store.createAutomationRun(input),
-        updateRun: (record) => this.store.updateAutomationRun(record),
-        ensureSession: (context, title, roomId) => this.ensureSessionForContext(context, title, roomId ? { roomId } : {}),
-        createEnvelope: (context, content) => createGatewayEnvelope(context, content),
-        runMutation: <T>(input: RecordedMutationInput<T>) => this.runRecordedMutation<T>(input),
         reindexWiki: () => this.store.reindexWiki(),
-        runCurator: () => this.learningDomainService.runCurator(),
-        runMemoryReview: () => this.runCore05PendingRoomReview(),
-        runEvaluation: () => this.appliedLearningEvaluationDomainService.run(),
-        runTranslation: (job, session, context) => this.runResourceTranslationJob(job, session, context),
-        runCollectionTrigger: (job) => this.collectionDomainService.executeTriggerJob(job),
-        runInstruction: (job, session, context) => this.runAutomationInstructionJob(job, session, context),
-        errorMessage: (error) => safeRuntimeErrorMessage(error),
         retryAt: (failureCount) => nextRetryAt(failureCount)
+      },
+      requestError: (code, message) => new RuntimeRequestError(code, message)
+    });
+    this.externalAppConnectionDomainService = new ExternalAppConnectionDomainService({
+      workspaceId: "workspace",
+      store: {
+        saveExternalAppConnection: (record) => this.store.saveExternalAppConnection(record),
+        getExternalAppConnection: (id) => this.store.getExternalAppConnection(id),
+        revokeExternalAppConnection: (input) => this.store.revokeExternalAppConnection(input)
+      },
+      roomAuthorization: this.roomAuthorizationService,
+      mutation: {
+        runMutation: (input) => this.runRecordedMutation({
+          ...input,
+          context: this.gatewayContextForTrustedDomainContext(input.trustedContext)
+        })
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
@@ -1868,9 +1892,9 @@ export class AgentRuntime {
           ? new RuntimeRequestError("conflict", error.message, resourceVersionConflictPayload(error))
           : error instanceof Error ? error : new Error(String(error)),
         reindex: () => this.store.reindexCollections(),
-        runMutation: <T, Extra extends Record<string, unknown>>(input: Omit<RecordedMutationInput<T, Extra>, "context" | "core08Evidence"> & { trustedContext: TrustedDomainContext; inputSummary: string; evidenceKind?: "resource_change" | "derived_repair" }) => this.runRecordedMutation<T, Extra>({
-          ...input,
-          context: webGatewayContext,
+      runMutation: <T, Extra extends Record<string, unknown>>(input: Omit<RecordedMutationInput<T, Extra>, "context" | "core08Evidence"> & { trustedContext: TrustedDomainContext; inputSummary: string; evidenceKind?: "resource_change" | "derived_repair" }) => this.runRecordedMutation<T, Extra>({
+        ...input,
+        context: this.gatewayContextForTrustedDomainContext(input.trustedContext),
           trustedContext: input.trustedContext,
           ...(input.evidenceKind === "derived_repair" ? {} : { core08Evidence: { changeType: "collection_changed" } })
         }),
@@ -1924,7 +1948,7 @@ export class AgentRuntime {
       },
       runMutation: <TExtra extends Record<string, unknown>>(input: ArtifactMutationInput<TExtra>) => this.runRecordedMutation<ArtifactRecord, TExtra>({
         ...input,
-        context: webGatewayContext,
+        context: this.gatewayContextForTrustedDomainContext(input.trustedContext),
         trustedContext: input.trustedContext,
         core08Evidence: { changeType: "artifact_created" },
         execute: async (operation) => {
@@ -1952,12 +1976,14 @@ export class AgentRuntime {
     this.domainOperationRegistry = new DomainOperationRegistry(createDomainOperationPorts({
       artifactDomainService: this.artifactDomainService,
       automationDomainService: this.automationDomainService,
+      core09AutomationDomainService: this.core09AutomationDomainService,
       browserDomainService: this.browserDomainService,
       clientEventDomainService: this.clientEventDomainService,
       collectionDomainService: this.collectionDomainService,
       conversationDomainService: this.conversationDomainService,
       executionDomainService: this.executionDomainService,
       externalSendDomainService: this.externalSendDomainService,
+      externalAppConnectionDomainService: this.externalAppConnectionDomainService,
       fileDomainService: this.fileDomainService,
       gatewayDomainService: this.gatewayDomainService,
       generatedSurfaceDomainService: this.generatedSurfaceDomainService,
@@ -1976,7 +2002,8 @@ export class AgentRuntime {
       translationDomainService: this.translationDomainService,
       wikiDomainService: this.wikiDomainService,
       searchDomainService,
-      roomAgentDomainService: this.roomAgentDomainService
+      roomAgentDomainService: this.roomAgentDomainService,
+      activityHistoryDomainService: this.activityHistoryDomainService
     }));
     this.externalAssistProviders = normalizeExternalAssistProviders(externalAssistProvider);
     this.contextPreviewAdapter = new WorkspaceContextPreviewAdapter(this.store, {
@@ -4211,7 +4238,7 @@ export class AgentRuntime {
       throw new RuntimeRequestError("forbidden", `domain_command_source_not_allowed:${command.id}:${inputSource}`);
     }
     const payload = jsonDefinedRecord(input.payload === undefined ? {} : input.payload);
-    assertNoTrustedContextPayloadFields(payload);
+    assertNoTrustedContextPayloadFields(payload, command.id === runtimeOperationIds.externalAppConnectionCreate ? ["app_id", "connector_id"] : []);
     const inputIssue = validateDomainCommandInput(command, payload);
     if (inputIssue) {
       throw new RuntimeRequestError("validation", `domain_command_input_invalid:${command.id}:${inputIssue.path}:${inputIssue.message}`);
@@ -4305,6 +4332,39 @@ export class AgentRuntime {
     return this.runDomainQueryWithTrustedContext(input, trusted);
   }
 
+  /**
+   * Internal-only Core09 adapter factory. It has no HTTP, MCP, OAuth, or
+   * credential surface; a real transport must authenticate before it reaches
+   * this boundary.
+   */
+  createExternalAppIngress(): ExternalAppIngress {
+    const resolver = new ExternalAppContextResolver({
+      workspaceId: "workspace",
+      connections: {
+        getExternalAppConnectionByConnector: (input) => this.store.getExternalAppConnectionByConnector(input)
+      },
+      roomAuthorization: this.roomAuthorizationService
+    });
+    return new ExternalAppIngress({
+      resolver,
+      runtime: {
+        runDomainQuery: (input, trusted) => this.runDomainQuery(input, trusted),
+        runDomainCommand: (input, trusted) => this.runDomainCommand(input, trusted)
+      },
+      activityIngest: this.activityIngest
+    });
+  }
+
+  /** Fixture-only proof of the Core09 boundary; this is not a transport protocol. */
+  createReferenceExternalAppAdapter(): ReferenceExternalAppAdapter {
+    return new ReferenceExternalAppAdapter(this.createExternalAppIngress());
+  }
+
+  /** Gateway may delegate to the same formal ingress without entering Chat dispatch. */
+  createGatewayFormalWorkspaceIngress(): GatewayFormalWorkspaceIngress {
+    return new GatewayFormalWorkspaceIngress(this.createExternalAppIngress());
+  }
+
   /** Runtime API adapters use this after they have resolved trusted resources. */
   async runRuntimeApiDomainQuery(
     input: Omit<DomainQueryRuntimeInput, "input_source">,
@@ -4335,6 +4395,9 @@ export class AgentRuntime {
       throw new RuntimeRequestError("unavailable", `domain_operation_unavailable:${query.id}`);
     }
     const inputSource = input.input_source ?? "runtime_api";
+    // Formal External App queries are a strict read boundary: not even an
+    // audit-row projection may turn them into a Workspace write.
+    const recordQueryAudit = inputSource !== "external_app";
     if (!query.allowed_sources.includes(inputSource)) {
       throw new RuntimeRequestError("forbidden", `domain_query_source_not_allowed:${query.id}:${inputSource}`);
     }
@@ -4348,10 +4411,12 @@ export class AgentRuntime {
     try {
       await this.assertDomainOperationAuthorized(query, payload, trustedContext);
     } catch (error) {
-      await this.recordDomainAccessAuditSafely(query, payload, { error: safeRuntimeErrorMessage(error, "room_authorization_denied") }, trustedContext, {
-        allowed: false,
-        reason: safeRuntimeErrorMessage(error, "room_authorization_denied")
-      });
+      if (recordQueryAudit) {
+        await this.recordDomainAccessAuditSafely(query, payload, { error: safeRuntimeErrorMessage(error, "room_authorization_denied") }, trustedContext, {
+          allowed: false,
+          reason: safeRuntimeErrorMessage(error, "room_authorization_denied")
+        });
+      }
       throw error;
     }
     if (!trustedContext.sessionId && isSessionCompatibleOperation(query.id)) {
@@ -4364,17 +4429,21 @@ export class AgentRuntime {
         async () => (await this.domainOperationRegistry.execute(trustedContext, query.id, payload)).value
       );
     } catch (error) {
-      await this.recordDomainAccessAuditSafely(query, payload, { error: safeRuntimeErrorMessage(error, "domain_query_failed") }, trustedContext, {
-        allowed: true,
-        reason: "execution_failed"
-      });
+      if (recordQueryAudit) {
+        await this.recordDomainAccessAuditSafely(query, payload, { error: safeRuntimeErrorMessage(error, "domain_query_failed") }, trustedContext, {
+          allowed: true,
+          reason: "execution_failed"
+        });
+      }
       if (error instanceof DomainOperationError) {
         if (error.handlerCause instanceof RuntimeRequestError) throw error.handlerCause;
         throw runtimeRequestErrorFromDomainOperationError(error);
       }
       throw error;
     }
-    await this.recordDomainAccessAuditSafely(query, payload, result, trustedContext, { allowed: true, reason: "allowed" });
+    if (recordQueryAudit) {
+      await this.recordDomainAccessAuditSafely(query, payload, result, trustedContext, { allowed: true, reason: "allowed" });
+    }
     const renderSpecs = assertDomainQueryRenderSpecs(query, await this.domainQueryRenderSpecs(query, result));
     const output: DomainQueryRuntimeResult = {
       query,
@@ -4503,6 +4572,16 @@ export class AgentRuntime {
       }
       if (!principal || (principal.kind === "system" && principalParticipantId(principal) !== "system:unbound-gateway")) {
         throw new RuntimeRequestError("forbidden", "gateway_admission_principal_required");
+      }
+      return;
+    }
+    // The scheduler starts an Automation attempt but is never its authority.
+    // Core09AutomationDomainService takes the durable lock, reloads the Job,
+    // and then resolves the saved principal/Connection and current Room
+    // permission before any executor runs.
+    if (entry.access.scope === "automation_execution") {
+      if (context.inputSource !== "automation" && context.inputSource !== "scheduled_context") {
+        throw new RuntimeRequestError("forbidden", "automation_scheduler_source_required");
       }
       return;
     }
@@ -4901,7 +4980,7 @@ export class AgentRuntime {
     trusted: TrustedDomainRuntimeContext = {},
     operationId?: string
   ): Promise<TrustedDomainContext> {
-    assertNoTrustedContextPayloadFields(payload);
+    assertNoTrustedContextPayloadFields(payload, operationId === runtimeOperationIds.externalAppConnectionCreate ? ["app_id", "connector_id"] : []);
     const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey, roomId: trustedRoomId, sessionRef, source } = trusted;
     assertTrustedRuntimeContextActive({ signal, deadlineAt });
     const actorIdentity = trustedActorIdentityForSource(inputSource);
@@ -5521,7 +5600,15 @@ export class AgentRuntime {
     next_run_at?: string;
     max_attempts?: number;
   }): Promise<AutomationJobRuntimeResult> {
-    return await this.runtimeDomainApi.saveAutomationJob(input) as AutomationJobRuntimeResult;
+    // Native compatibility picks the persisted local Room before the command;
+    // the public DTO itself never chooses a Room or Authority.
+    const result = await this.runDomainCommandWithTrustedContext({
+      command_id: runtimeOperationIds.automationJobSave,
+      input_source: "runtime_api",
+      idempotency_key: `automation_job_save:${stableHash(input)}`,
+      payload: input
+    }, await this.collectionCompatibilityContext());
+    return result.result as AutomationJobRuntimeResult;
   }
 
   previewAutomationSchedule(schedule: string, from = nowIso()): AutomationSchedulePreview {
@@ -5541,6 +5628,8 @@ export class AgentRuntime {
     now = nowIso(),
     context: Pick<TrustedDomainRuntimeContext, "signal" | "deadlineAt"> = {}
   ): Promise<AutomationRunRuntimeResult[]> {
+    assertTrustedRuntimeContextActive(context);
+    await this.core09AutomationDomainService.recoverInterruptedRuns(now);
     assertTrustedRuntimeContextActive(context);
     const jobs = await this.store.listAutomationJobs({ dueAt: now, enabledOnly: true });
     assertTrustedRuntimeContextActive(context);
@@ -6262,66 +6351,6 @@ export class AgentRuntime {
 
   async runMemoryReviewAutomation(): Promise<AutomationRunRuntimeResult> {
     return await this.runtimeDomainApi.runMemoryReviewAutomation() as AutomationRunRuntimeResult;
-  }
-
-
-  private async runResourceTranslationJob(
-    job: AutomationJobRecord,
-    session: SessionRecord,
-    context: ScheduledAutomationContext
-  ): Promise<ResourceTranslationJobRuntimeDetails> {
-    await this.assertScheduledTranslationSourceAccess(job, session);
-    return this.translationDomainService.executeJob(job, session, context);
-  }
-
-  /** The scheduled translator rechecks the persisted source immediately before it reads it. */
-  private async assertScheduledTranslationSourceAccess(job: AutomationJobRecord, session: SessionRecord): Promise<void> {
-    if (!session.room_id) throw new RuntimeRequestError("conflict", `automation_session_room_missing:${session.id}`);
-    const sourceRef = translationSourceRefFromAutomationJob(job);
-    if (!sourceRef) throw new RuntimeRequestError("conflict", "automation_translation_source_missing");
-    const kind = canonicalRoomResourceKind(sourceRef.kind);
-    if (!kind) throw new RuntimeRequestError("conflict", "automation_translation_source_kind_invalid");
-    const resourceId = kind === "collection_record"
-      ? (() => {
-          const target = collectionRecordTargetFromRef(sourceRef);
-          return target ? collectionRecordResourceId(target.collectionId, target.recordId) : undefined;
-        })()
-      : sourceRef.id;
-    if (!resourceId) throw new RuntimeRequestError("conflict", "automation_translation_source_ref_invalid");
-    try {
-      await this.roomAuthorizationService.assertResource(
-        { kind: "human", participantId: localOwnerParticipantId },
-        { roomId: session.room_id, action: "read", resourceKind: kind, resourceId }
-      );
-    } catch (error) {
-      if (error instanceof RoomAuthorizationError) throw new RuntimeRequestError("forbidden", error.message);
-      throw error;
-    }
-  }
-
-  private async runAutomationInstructionJob(
-    job: AutomationJobRecord,
-    session: SessionRecord,
-    context: ScheduledAutomationContext
-  ): Promise<{ summary: string; backendRunId: string }> {
-    const chat = await this.runChatTurn({
-      sessionId: session.id,
-      content: job.target_instruction,
-      idempotency_key: `automation:${job.id}:${job.next_run_at ?? "now"}`,
-      output_locale: session.output_locale,
-      metadata: {
-        automation_job_id: job.id,
-        automation_job_kind: job.kind,
-        automation_job_title: job.title,
-        automation_schedule: job.schedule,
-        automation_delivery_target: job.delivery_target
-      },
-      gateway_context: context
-    });
-    return {
-      backendRunId: chat.backendRun.id,
-      summary: `Automation instruction ran backend ${chat.backendRun.backend_id} with status ${chat.backendRun.status}.`
-    };
   }
 
   private async queueCollectionTriggerAutomations(input: {
@@ -9132,6 +9161,23 @@ export class AgentRuntime {
       ...(context.sessionRef ? { session_ref: context.sessionRef } : {}),
       ...(context.runId ? { run_id: context.runId } : {})
     };
+  }
+
+  /** Operation labels follow the server-owned ingress, never a public payload. */
+  private gatewayContextForTrustedDomainContext(context: TrustedDomainContext): GatewayContext {
+    if (context.inputSource === "external_app" || context.participant?.kind === "external_app") {
+      return {
+        source: "webhook",
+        actor_identity: "external_app",
+        instruction_source: "external_content",
+        channel: "external_app",
+        session_key: `external_app:${context.source?.app_id ?? "unknown"}:${context.source?.connector_id ?? "unknown"}`
+      };
+    }
+    if (context.inputSource === "automation" || context.inputSource === "scheduled_context") {
+      return cronMemoryReviewGatewayContext;
+    }
+    return webGatewayContext;
   }
 
   private async runRecordedMutation<TResource, TExtra extends Record<string, unknown> = {}>(input: RecordedMutationInput<TResource, TExtra>): Promise<RuntimeWriteResult<TResource> & TExtra> {
@@ -13766,21 +13812,6 @@ function automationJobRef(job: AutomationJobRecord) {
   };
 }
 
-function translationSourceRefFromAutomationJob(job: AutomationJobRecord): ResourceRef | undefined {
-  const source = unknownRecord(job.delivery_target.source_ref);
-  const kind = typeof source.kind === "string" ? source.kind.trim() : "";
-  const id = typeof source.id === "string" ? source.id.trim() : "";
-  const uri = typeof source.uri === "string" ? source.uri : "";
-  if (!kind || !id || !uri) return undefined;
-  return {
-    kind,
-    id,
-    uri,
-    ...(typeof source.version === "string" ? { version: source.version } : {}),
-    ...(typeof source.label === "string" ? { label: source.label } : {})
-  };
-}
-
 function htmlToText(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -14508,6 +14539,7 @@ const trustedContextPayloadFields = new Set([
   "source_room_id",
   "principal",
   "app_id",
+  "connector_id",
   "delegated_by",
   "session_ref"
 ]);
@@ -14520,8 +14552,9 @@ function isPersistedSessionCompatibilityOperation(operationId: string): boolean 
   return isSessionCompatibleOperation(operationId) && !sessionCreatingCompatibilityOperationIds.has(operationId);
 }
 
-function assertNoTrustedContextPayloadFields(payload: Record<string, JsonValue>): void {
-  const field = Object.keys(payload).find((key) => trustedContextPayloadFields.has(key));
+function assertNoTrustedContextPayloadFields(payload: Record<string, JsonValue>, allowed: readonly string[] = []): void {
+  const allowedFields = new Set(allowed);
+  const field = Object.keys(payload).find((key) => trustedContextPayloadFields.has(key) && !allowedFields.has(key));
   if (field) throw new RuntimeRequestError("bad_request", `untrusted_domain_context:${field}`);
 }
 
@@ -14532,6 +14565,8 @@ function trustedActorIdentityForSource(inputSource: DomainCommandInputSource): T
       return "owner_scheduled";
     case "gateway_inbound":
       return "paired_contact";
+    case "external_app":
+      return "external_app";
     case "surface_operation":
     case "provider_tool_call":
     case "runtime_api":
@@ -14543,7 +14578,7 @@ function trustedActorIdentityForSource(inputSource: DomainCommandInputSource): T
 function sameParticipant(left: ParticipantPrincipal, right: ParticipantPrincipal): boolean {
   if (left.kind !== right.kind || principalParticipantId(left) !== principalParticipantId(right)) return false;
   if (left.kind === "external_app" && right.kind === "external_app") {
-    return left.appId === right.appId && sameParticipant(left.delegatedBy, right.delegatedBy);
+    return left.appId === right.appId && left.connectorId === right.connectorId && sameParticipant(left.delegatedBy, right.delegatedBy);
   }
   if (left.kind !== "agent" || right.kind !== "agent") return true;
   return left.agentId === right.agentId && left.requestedByParticipantId === right.requestedByParticipantId;
@@ -14592,6 +14627,9 @@ function assertTrustedExternalAppContext(
     if (!externalSource || !externalSource.app_id || externalSource.app_id !== participant.appId) {
       throw new RuntimeRequestError("forbidden", "external_app_context_mismatch");
     }
+    if (participant.connectorId && externalSource.connector_id !== participant.connectorId) {
+      throw new RuntimeRequestError("forbidden", "external_app_connector_mismatch");
+    }
   } else if (externalSource) {
     throw new RuntimeRequestError("forbidden", "external_app_principal_required");
   }
@@ -14614,7 +14652,8 @@ function trustedPrincipalFromParticipant(participant: ParticipantPrincipal): Pri
       return {
         kind: "external_app",
         app_id: participant.appId,
-        delegated_by: trustedDelegatedPrincipalFromParticipant(participant.delegatedBy)
+        delegated_by: trustedDelegatedPrincipalFromParticipant(participant.delegatedBy),
+        ...(participant.connectorId ? { connector_id: participant.connectorId } : {})
       };
     case "system":
       return { kind: "system", system_id: participant.participantId };
@@ -14665,6 +14704,7 @@ function isRoomPermissionMetadataKind(kind: string): boolean {
 
 function instructionSourceForDomainInput(inputSource: DomainCommandInputSource): InstructionSource {
   if (inputSource === "provider_tool_call") return "agent_reasoning";
+  if (inputSource === "external_app") return "external_content";
   if (inputSource === "gateway_inbound") return "paired_identity_message";
   if (inputSource === "automation" || inputSource === "scheduled_context") return "scheduled_context";
   if (inputSource === "generated_surface") return "owner_approved_policy";

@@ -1,6 +1,7 @@
 import type { SkillFrontmatter } from "@samurai-agent/core-schemas";
 import type { ArtifactDomainService } from "./commands/services/artifact-domain-service.js";
 import type { AutomationDomainService } from "./commands/services/automation-domain-service.js";
+import type { Core09AutomationDomainService } from "./commands/services/core09-automation-domain-service.js";
 import type { BrowserDomainService } from "./commands/services/browser-domain-service.js";
 import type { ClientEventDomainService } from "./commands/services/client-event-domain-service.js";
 import type { CollectionDomainService } from "./commands/services/collection-domain-service.js";
@@ -8,6 +9,7 @@ import type { Core05BackgroundReviewMutationDomainService } from "./commands/ser
 import type { ConversationDomainService } from "./commands/services/conversation-domain-service.js";
 import type { ExecutionDomainService } from "./commands/services/execution-domain-service.js";
 import type { ExternalSendDomainService } from "./commands/services/external-send-domain-service.js";
+import type { ExternalAppConnectionDomainService } from "./commands/services/external-app-connection-domain-service.js";
 import type { FileDomainService } from "./commands/services/file-domain-service.js";
 import type { GatewayDomainService } from "./commands/services/gateway-domain-service.js";
 import type { GeneratedSurfaceDomainService } from "./commands/services/generated-surface-domain-service.js";
@@ -26,6 +28,7 @@ import type { TranslationDomainService } from "./commands/services/translation-d
 import type { WikiDomainService } from "./commands/services/wiki-domain-service.js";
 import type { SearchDomainService } from "./commands/services/search-domain-service.js";
 import type { RoomAgentDomainService } from "./commands/services/room-agent-domain-service.js";
+import type { ActivityHistoryDomainService } from "./commands/services/activity-history-domain-service.js";
 
 type RuntimeSkill = {
   id: string;
@@ -43,6 +46,7 @@ type RuntimeSkill = {
 export interface RuntimeDomainServices {
   artifactDomainService: ArtifactDomainService;
   automationDomainService: AutomationDomainService;
+  core09AutomationDomainService: Core09AutomationDomainService;
   browserDomainService: BrowserDomainService;
   clientEventDomainService: ClientEventDomainService;
   collectionDomainService: CollectionDomainService;
@@ -50,6 +54,7 @@ export interface RuntimeDomainServices {
   conversationDomainService: ConversationDomainService;
   executionDomainService: ExecutionDomainService;
   externalSendDomainService: ExternalSendDomainService;
+  externalAppConnectionDomainService: ExternalAppConnectionDomainService;
   fileDomainService: FileDomainService;
   gatewayDomainService: GatewayDomainService;
   generatedSurfaceDomainService: GeneratedSurfaceDomainService;
@@ -68,4 +73,5 @@ export interface RuntimeDomainServices {
   wikiDomainService: WikiDomainService;
   searchDomainService: SearchDomainService;
   roomAgentDomainService: RoomAgentDomainService;
+  activityHistoryDomainService: ActivityHistoryDomainService;
 }

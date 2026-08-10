@@ -8,6 +8,10 @@
 import assert from "node:assert/strict";
 import type { TrustedDomainContext } from "../../packages/domain-operations/src/definition/index";
 import automationJobReleaseLock from "../../packages/domain-operations/src/operations/automation/job/release_lock.operation";
+import automationJobManagerResume from "../../packages/domain-operations/src/operations/automation/job/manager_resume.operation";
+import automationJobManagerStop from "../../packages/domain-operations/src/operations/automation/job/manager_stop.operation";
+import automationJobReauthorize from "../../packages/domain-operations/src/operations/automation/job/reauthorize.operation";
+import automationJobRebindAuthority from "../../packages/domain-operations/src/operations/automation/job/rebind_authority.operation";
 import automationJobRequeue from "../../packages/domain-operations/src/operations/automation/job/requeue.operation";
 import automationJobRun from "../../packages/domain-operations/src/operations/automation/job/run.operation";
 import automationJobSave from "../../packages/domain-operations/src/operations/automation/job/save.operation";
@@ -19,6 +23,9 @@ import chatTurnRun from "../../packages/domain-operations/src/operations/chat/tu
 import externalSend from "../../packages/domain-operations/src/operations/external/send.operation";
 import externalSendPrepare from "../../packages/domain-operations/src/operations/external/send/prepare.operation";
 import externalSendDispatch from "../../packages/domain-operations/src/operations/external/send/dispatch.operation";
+import externalAppConnectionCreate from "../../packages/domain-operations/src/operations/external_app/connection/create.operation";
+import externalAppConnectionRevoke from "../../packages/domain-operations/src/operations/external_app/connection/revoke.operation";
+import externalAppConnectionUpdateScope from "../../packages/domain-operations/src/operations/external_app/connection/update_scope.operation";
 import gatewayInboundRoute from "../../packages/domain-operations/src/operations/gateway/inbound/route.operation";
 import gatewayMcpConfigSave from "../../packages/domain-operations/src/operations/gateway/mcp_config/save.operation";
 import gatewayPairingPolicySave from "../../packages/domain-operations/src/operations/gateway/pairing_policy/save.operation";
@@ -62,11 +69,19 @@ const externalSendRecord = { id: "external_send_fixture", channel: "webhook", st
 const artifact = { id: "image_artifact_fixture", title: "Fixture image", kind: "image", locale: "en", source_locales: ["en"], file_ref: { kind: "artifact", id: "image_artifact_fixture", uri: "artifacts/image_artifact_fixture.png", label: "Fixture image" }, metadata: { current_revision_id: "image_revision_fixture" }, source_operation_id: "operation_fixture", created_by: "fixture", created_at: now, updated_at: now };
 const generatedArtifact = { id: "generated_image_fixture", title: "Generated image", kind: "image", locale: "en", source_locales: ["en"], file_ref: { kind: "artifact", id: "generated_image_fixture", uri: "artifacts/generated_image_fixture.png", label: "Generated image" }, metadata: {}, source_operation_id: "operation_fixture", created_by: "image_provider", created_at: now, updated_at: now };
 const revision = { id: "image_revision_fixture", artifact_id: "image_artifact_fixture", revision: 1, parent_revision_id: undefined, source_ref: artifact.file_ref, file_ref: { kind: "artifact_revision", id: "image_revision_fixture", uri: "artifacts/image_artifact_fixture/revisions/image_revision_fixture", label: "Fixture image revision" }, blob_ref: { kind: "file", id: "blobs/image_revision_fixture", uri: "blobs/image_revision_fixture", label: "Fixture image blob" }, content_hash: "fixture_hash", content_bytes: 3, created_at: now };
-const startedAutomationRun = { id: "automation_run_fixture", kind: "daily_digest", source: "automation_job", status: "started", started_at: now };
-const scheduledAutomationRun = { ...startedAutomationRun, session_id: "session_fixture" };
-const completedAutomationRun = { ...scheduledAutomationRun, backend_run_id: "backend_run_fixture", status: "completed", operation_id: "operation_fixture", completed_at: now };
-const startedMemoryReviewRun = { id: "automation_run_fixture", kind: "memory_review", source: "cron", status: "started", started_at: now };
-const memoryReviewTrace = { reflectionRun: { id: "reflection_run_fixture", kind: "background_review", session_id: "session_fixture", status: "completed", input_summary: "Fixture memory review", output_summary: "No changes", started_at: now, completed_at: now }, suggestions: [] };
+const sessionlessAutomationRun = {
+  id: "automation_run_fixture",
+  kind: "wiki_reindex",
+  source: "automation_job",
+  status: "completed" as const,
+  job_id: "automation_fixture",
+  workspace_id: "handler-matrix-workspace",
+  room_id: "room_fixture",
+  authority: { kind: "direct_principal" as const, principal: { kind: "human" as const, participant_id: "human:owner" } },
+  started_at: now,
+  completed_at: now
+};
+const sessionlessAutomationRunResult = { resource: sessionlessAutomationRun, automationRun: sessionlessAutomationRun, activity: [] };
 
 type Definition = { readonly input: { parse(value: unknown): unknown; safeParse(value: unknown): { success: boolean; data?: unknown } }; readonly createHandler: (ports: never) => { execute(context: TrustedDomainContext, input: never): Promise<{ ok: boolean; value?: unknown }> } };
 type Recorder = <T>(method: string, args: unknown[], value: T) => T;
@@ -97,8 +112,17 @@ async function runCase(id: keyof typeof bHandlerExpectations, testCase: BHandler
     return value;
   };
   const ports = createPorts(record, runMutation);
-  const result = await definition.createHandler(ports as never).execute({ ...context, ...(testCase.context ?? {}) }, parsed.data as never);
-  assert.equal(result.ok, true, `handler_matrix_b_handler_result_invalid:${id}:${testCase.id}`);
+  const execute = () => definition.createHandler(ports as never).execute({ ...context, ...(testCase.context ?? {}) }, parsed.data as never);
+  if (testCase.throws) {
+    await assert.rejects(
+      execute,
+      (error: unknown) => error instanceof Error && error.message === testCase.throws,
+      `handler_matrix_b_expected_safe_stop_missing:${id}:${testCase.id}`
+    );
+  } else {
+    const result = await execute();
+    assert.equal(result.ok, true, `handler_matrix_b_handler_result_invalid:${id}:${testCase.id}`);
+  }
   assert.equal(cursor, expected.length, `handler_matrix_b_port_call_count_drift:${id}:${testCase.id}`);
   assert.equal(calls.length, expected.length, `handler_matrix_b_port_contract_drift:${id}:${testCase.id}`);
   const branches = seenBranches.get(id) ?? new Set<string>();
@@ -169,6 +193,10 @@ function expectedCallArg(testCase: BHandlerCaseExpectation, method: string, inde
 
 const definitions: Record<string, unknown> = {
   "automation.job.release_lock": automationJobReleaseLock,
+  "automation.job.manager_resume": automationJobManagerResume,
+  "automation.job.manager_stop": automationJobManagerStop,
+  "automation.job.reauthorize": automationJobReauthorize,
+  "automation.job.rebind_authority": automationJobRebindAuthority,
   "automation.job.requeue": automationJobRequeue,
   "automation.job.run": automationJobRun,
   "automation.job.save": automationJobSave,
@@ -180,6 +208,9 @@ const definitions: Record<string, unknown> = {
   "external.send": externalSend,
   "external.send.prepare": externalSendPrepare,
   "external.send.dispatch": externalSendDispatch,
+  "external_app.connection.create": externalAppConnectionCreate,
+  "external_app.connection.revoke": externalAppConnectionRevoke,
+  "external_app.connection.update_scope": externalAppConnectionUpdateScope,
   "gateway.inbound.route": gatewayInboundRoute,
   "gateway.mcp_config.save": gatewayMcpConfigSave,
   "gateway.pairing_policy.save": gatewayPairingPolicySave,
@@ -200,37 +231,23 @@ const definitions: Record<string, unknown> = {
 };
 
 async function main(): Promise<void> {
-  assert.equal(bHandlerOperationCount, 29, "handler_matrix_b_operation_count_drift");
-  assert.equal(Object.keys(bHandlerExpectations).length, 29, "handler_matrix_b_static_expectation_count_drift");
+  assert.equal(bHandlerOperationCount, 36, "handler_matrix_b_operation_count_drift");
+  assert.equal(Object.keys(bHandlerExpectations).length, 36, "handler_matrix_b_static_expectation_count_drift");
 
   for (const testCase of bHandlerExpectations["automation.job.release_lock"].cases) await runCase("automation.job.release_lock", testCase, findDefinition("automation.job.release_lock"), (r) => ({ releaseAutomationJobLock: asyncRec(r, "releaseAutomationJobLock", automationJob) }));
   for (const testCase of bHandlerExpectations["automation.job.requeue"].cases) await runCase("automation.job.requeue", testCase, findDefinition("automation.job.requeue"), (r) => ({ requeueAutomationJob: asyncRec(r, "requeueAutomationJob", automationJob) }));
-  await runCase("automation.job.run", bHandlerExpectations["automation.job.run"].cases[0]!, findDefinition("automation.job.run"), (r, m) => ({
-    getAutomationJob: asyncRec(r, "getAutomationJob", automationJob),
-    acquireAutomationJobLock: asyncRec(r, "acquireAutomationJobLock", automationJob),
-    createAutomationRun: asyncRec(r, "createAutomationRun", startedAutomationRun),
-    ensureScheduledAutomationSession: asyncRec(r, "ensureScheduledAutomationSession", session),
-    updateAutomationRun: (() => { let count = 0; return async (...args: unknown[]) => { const value = count++ === 0 ? scheduledAutomationRun : completedAutomationRun; r("updateAutomationRun", args, value); return value; }; })(),
-    createScheduledAutomationEnvelope: rec(r, "createScheduledAutomationEnvelope", envelope),
-    automationJobRef: rec(r, "automationJobRef", { kind: "automation_job", id: "automation_fixture", uri: "automation-jobs/automation_fixture", label: "Fixture automation" }),
-    runScheduledAutomationMutation: mutationRec(r, "runScheduledAutomationMutation", m, { resource: startedAutomationRun, operation, activity: [] }),
-    runAutomationInstruction: asyncRec(r, "runAutomationInstruction", { backendRunId: "backend_run_fixture", summary: "Fixture automation completed." }),
-    saveAutomationJobRecord: asyncRec(r, "saveAutomationJobRecord", automationJob),
-    automationExecutionError: rec(r, "automationExecutionError", new Error("automation execution error")),
-    automationErrorMessage: rec(r, "automationErrorMessage", "automation execution error"),
-    automationRetryAt: rec(r, "automationRetryAt", now)
-  }));
-  for (const testCase of bHandlerExpectations["automation.job.save"].cases) await runCase("automation.job.save", testCase, findDefinition("automation.job.save"), (r, m) => {
-    const saved = expectedCallArg(testCase, "saveAutomationJobRecord");
-    return { automationJobContract: rec(r, "automationJobContract", { id: "automation.job.save", proposed_effects: ["Save an automation job definition."] }), ensureAutomationSession: asyncRec(r, "ensureAutomationSession", session), createAutomationEnvelope: rec(r, "createAutomationEnvelope", envelope), runAutomationJobMutation: mutationRec(r, "runAutomationJobMutation", m, mutationValue("automation.job.save")), saveAutomationJobRecord: asyncRec(r, "saveAutomationJobRecord", saved), automationJobRef: (...args: unknown[]) => r("automationJobRef", args, { kind: "automation_job", id: String((args[0] as { id?: unknown }).id), uri: `automation-jobs/${String((args[0] as { id?: unknown }).id)}`, label: String((args[0] as { title?: unknown }).title) }), createAutomationRollback: asyncRec(r, "createAutomationRollback", { id: "rollback_fixture" }) };
-  });
-  for (const testCase of bHandlerExpectations["automation.job.set_status"].cases) await runCase("automation.job.set_status", testCase, findDefinition("automation.job.set_status"), (r, m) => {
-    const saved = { ...automationJob, status: testCase.input.status, locked_until: testCase.input.status === "disabled" ? undefined : automationJob.locked_until };
-    const current = { ...automationJob, locked_until: "2099-01-01T00:00:00.000Z" };
-    return { getAutomationJob: async (...args: unknown[]) => r("getAutomationJob", args, current), automationJobContract: rec(r, "automationJobContract", { id: "automation.job.set_status", proposed_effects: ["Change an Automation job between enabled and disabled."] }), ensureAutomationSession: asyncRec(r, "ensureAutomationSession", session), createAutomationEnvelope: rec(r, "createAutomationEnvelope", envelope), automationJobRef: (...args: unknown[]) => r("automationJobRef", args, { kind: "automation_job", id: "automation_fixture", uri: "automation-jobs/automation_fixture", label: "Fixture automation" }), runAutomationJobMutation: mutationRec(r, "runAutomationJobMutation", m, mutationValue("automation.job.set_status")), saveAutomationJobRecord: asyncRec(r, "saveAutomationJobRecord", saved), createAutomationRollback: asyncRec(r, "createAutomationRollback", { id: "rollback_fixture" }) };
-  });
-  await runCase("automation.memory_review.run", bHandlerExpectations["automation.memory_review.run"].cases[0]!, findDefinition("automation.memory_review.run"), (r, m) => ({
-    createAutomationRun: asyncRec(r, "createAutomationRun", startedMemoryReviewRun), ensureScheduledAutomationSession: asyncRec(r, "ensureScheduledAutomationSession", session), updateAutomationRun: (() => { let count = 0; return async (...args: unknown[]) => { const value = count++ === 0 ? { ...startedMemoryReviewRun, session_id: "session_fixture" } : { ...startedMemoryReviewRun, session_id: "session_fixture", status: "completed", operation_id: "operation_fixture", completed_at: now }; r("updateAutomationRun", args, value); return value; }; })(), createScheduledAutomationEnvelope: rec(r, "createScheduledAutomationEnvelope", envelope), runScheduledAutomationMutation: mutationRec(r, "runScheduledAutomationMutation", m, { resource: { ...startedMemoryReviewRun, session_id: "session_fixture" }, operation, activity: [] }), runScheduledMemoryReview: asyncRec(r, "runScheduledMemoryReview", memoryReviewTrace), automationErrorMessage: rec(r, "automationErrorMessage", "fixture error") ,
+  for (const testCase of bHandlerExpectations["automation.job.run"].cases) await runCase("automation.job.run", testCase, findDefinition("automation.job.run"), (r) => ({ runSessionlessAutomationJob: asyncRec(r, "runSessionlessAutomationJob", sessionlessAutomationRunResult) }));
+  for (const testCase of bHandlerExpectations["automation.job.save"].cases) await runCase("automation.job.save", testCase, findDefinition("automation.job.save"), (r) => ({ saveSessionlessAutomationJob: asyncRec(r, "saveSessionlessAutomationJob", automationJob) }));
+  for (const testCase of bHandlerExpectations["automation.job.set_status"].cases) await runCase("automation.job.set_status", testCase, findDefinition("automation.job.set_status"), (r) => ({ setSessionlessAutomationJobStatus: asyncRec(r, "setSessionlessAutomationJobStatus", automationJob) }));
+  for (const testCase of bHandlerExpectations["automation.job.manager_resume"].cases) await runCase("automation.job.manager_resume", testCase, findDefinition("automation.job.manager_resume"), (r) => ({ managerResumeSessionlessAutomationJob: asyncRec(r, "managerResumeSessionlessAutomationJob", automationJob) }));
+  for (const testCase of bHandlerExpectations["automation.job.manager_stop"].cases) await runCase("automation.job.manager_stop", testCase, findDefinition("automation.job.manager_stop"), (r) => ({ managerStopSessionlessAutomationJob: asyncRec(r, "managerStopSessionlessAutomationJob", automationJob) }));
+  for (const testCase of bHandlerExpectations["automation.job.reauthorize"].cases) await runCase("automation.job.reauthorize", testCase, findDefinition("automation.job.reauthorize"), (r) => ({ reauthorizeSessionlessAutomationJob: asyncRec(r, "reauthorizeSessionlessAutomationJob", automationJob) }));
+  for (const testCase of bHandlerExpectations["automation.job.rebind_authority"].cases) await runCase("automation.job.rebind_authority", testCase, findDefinition("automation.job.rebind_authority"), (r) => ({ rebindSessionlessAutomationJobAuthority: asyncRec(r, "rebindSessionlessAutomationJobAuthority", automationJob) }));
+  await runCase("automation.memory_review.run", bHandlerExpectations["automation.memory_review.run"].cases[0]!, findDefinition("automation.memory_review.run"), (r) => ({
+    sessionlessMemoryReviewUnsupported: () => {
+      r("sessionlessMemoryReviewUnsupported", [], undefined);
+      throw new Error("automation_sessionless_executor_unsupported:memory_review");
+    }
   }));
 
   for (const testCase of bHandlerExpectations["browser.interact"].cases) await runCase("browser.interact", testCase, findDefinition("browser.interact"), (r, m) => ({ ensureBrowserSession: asyncRec(r, "ensureBrowserSession", session), createBrowserEnvelope: rec(r, "createBrowserEnvelope", envelope), runBrowserMutation: mutationRec(r, "runBrowserMutation", m, { resource: { ...session, url: "https://example.com/fixture", adapterId: "fixture_browser", action: testCase.input.action ?? "navigate", text: "Fixture browser text" }, ref: { kind: "browser", id: "browser_hash", uri: "browser/browser_hash", label: "Browser" }, summary: "fixture" }), interactWithBrowser: asyncRec(r, "interactWithBrowser", { ...session, url: "https://example.com/fixture", adapterId: "fixture_browser", action: testCase.input.action ?? "navigate", text: "Fixture browser text" }), stableBrowserHash: rec(r, "stableBrowserHash", "browser_hash") }));
@@ -247,6 +264,9 @@ async function main(): Promise<void> {
   for (const testCase of bHandlerExpectations["external.send"].cases) await runCase("external.send", testCase, findDefinition("external.send"), (r, m) => externalPorts(r, m, testCase));
   for (const testCase of bHandlerExpectations["external.send.prepare"].cases) await runCase("external.send.prepare", testCase, findDefinition("external.send.prepare"), (r, m) => externalPorts(r, m, testCase));
   for (const testCase of bHandlerExpectations["external.send.dispatch"].cases) await runCase("external.send.dispatch", testCase, findDefinition("external.send.dispatch"), (r, m) => externalPorts(r, m, testCase));
+  for (const testCase of bHandlerExpectations["external_app.connection.create"].cases) await runCase("external_app.connection.create", testCase, findDefinition("external_app.connection.create"), (r) => ({ createExternalAppConnection: asyncRec(r, "createExternalAppConnection", { resource: { id: "connection_fixture" } }) }));
+  for (const testCase of bHandlerExpectations["external_app.connection.revoke"].cases) await runCase("external_app.connection.revoke", testCase, findDefinition("external_app.connection.revoke"), (r) => ({ revokeExternalAppConnection: asyncRec(r, "revokeExternalAppConnection", { resource: { id: "connection_fixture" } }) }));
+  for (const testCase of bHandlerExpectations["external_app.connection.update_scope"].cases) await runCase("external_app.connection.update_scope", testCase, findDefinition("external_app.connection.update_scope"), (r) => ({ updateExternalAppConnectionScope: asyncRec(r, "updateExternalAppConnectionScope", { resource: { id: "connection_fixture" } }) }));
 
   for (const testCase of bHandlerExpectations["gateway.inbound.route"].cases) await runCase("gateway.inbound.route", testCase, findDefinition("gateway.inbound.route"), (r) => ({ routeGatewayInbound: asyncRec(r, "routeGatewayInbound", { session, route: "fixture-route", accepted: true }) }));
   for (const testCase of bHandlerExpectations["gateway.mcp_config.save"].cases) await runCase("gateway.mcp_config.save", testCase, findDefinition("gateway.mcp_config.save"), (r) => ({ saveGatewayMcpConfig: asyncRec(r, "saveGatewayMcpConfig", testCase.input) }));
@@ -267,7 +287,7 @@ async function main(): Promise<void> {
 
   for (const [id, expectation] of Object.entries(bHandlerExpectations)) assert.deepEqual([...seenBranches.get(id) ?? []].sort(), [...expectation.requiredBranches].sort(), `handler_matrix_b_branch_coverage_missing:${id}`);
   assert.equal(executedCases, bHandlerCaseCount, "handler_matrix_b_cases_not_all_executed");
-  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["RH06", "RH07", "RH08"], shard: "B", covered_operations: bHandlerOperationCount, covered_operation_ids: Object.keys(bHandlerExpectations).sort(), required_operations: 29, remaining_operations: 0, cases: executedCases, port_calls: executedCalls, expectation_mode: "static_method_args_order_count_forbidden" })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "passed", gates: ["RH06", "RH07", "RH08"], shard: "B", covered_operations: bHandlerOperationCount, covered_operation_ids: Object.keys(bHandlerExpectations).sort(), required_operations: 36, remaining_operations: 0, cases: executedCases, port_calls: executedCalls, expectation_mode: "static_method_args_order_count_forbidden" })}\n`);
 }
 
 void main();

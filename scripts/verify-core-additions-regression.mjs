@@ -47,7 +47,7 @@ writeEvidence("B01", [{ name: "Backend selection is consistent", actual: backend
 writeEvidence("B02", [{ name: "Skill outcome is evaluated", actual: task.comparable_assessment, expected: "helpful" }, { name: "Safe revision is promoted", actual: guardrails.decision, expected: "promote" }], { task, guardrails });
 writeEvidence("B03", [{ name: "Curator snapshot rollback is exact", actual: curator.snapshot_rollback_exact, expected: true }, { name: "Pinned resource is protected", actual: curator.pinned_protected, expected: true }], curator);
 writeEvidence("B04", [{ name: "Automation side effect runs once", actual: race.side_effects, expected: 1 }, { name: "Schedule survives restart", actual: schedule.restart_preserved, expected: true }], { race, schedule });
-writeEvidence("B05", [{ name: "Heartbeat extends work", actual: race.heartbeat_extended, expected: true }, { name: "Restart reclaims zombie", actual: race.restart_reclaim, expected: true }], race);
+writeEvidence("B05", [{ name: "Lock owner token protects work", actual: race.token_bound, expected: true }, { name: "Restart reclaims zombie", actual: race.restart_reclaim, expected: true }], race);
 writeEvidence("B06", [{ name: "Secrets are redacted from learning sources", actual: privacy.learning_source_redacted, expected: true }, { name: "Content body remains usable", actual: privacy.body_preserved, expected: true }], privacy);
 writeEvidence("B07", [{ name: "Delegated capability contracts pass", actual: ["X01", "X02", "X03", "X04", "X05"].every((id) => existsSync(path.join(evidenceDir, `${id}.json`))), expected: true }], { delegated_contracts: true });
 writeEvidence("C01", [{ name: "Thread session mapping restores", actual: restart.session_mapping_restored, expected: true }], restart);

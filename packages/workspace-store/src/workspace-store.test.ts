@@ -3,6 +3,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import {
   createId,
   nowIso,
@@ -72,7 +73,7 @@ describe("workspace store", () => {
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
-    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
   });
 
   it("persists message presentations for chat cards", async () => {
@@ -1077,7 +1078,18 @@ describe("workspace store", () => {
     const store = await createTempStore();
     const now = "2026-01-01T00:00:00.000Z";
     const future = "2026-01-01T01:00:00.000Z";
+    const roomId = (await store.getSettings()).default_room_id!;
+    const schedulable = {
+      workspace_id: "workspace",
+      room_id: roomId,
+      authority: { kind: "direct_principal" as const, principal: { kind: "human" as const, participant_id: localOwnerParticipantId } },
+      created_principal_snapshot: { kind: "human" as const, participant_id: localOwnerParticipantId },
+      source_snapshot: { kind: "host" as const },
+      authorization_state: "ready" as const,
+      authorized_at: now
+    };
     const dueJob = automationJobRecord({
+      ...schedulable,
       id: "automation_due",
       title: "Due job",
       next_run_at: now,
@@ -1085,12 +1097,15 @@ describe("workspace store", () => {
       failure_count: 1
     });
     const lockedJob = automationJobRecord({
+      ...schedulable,
       id: "automation_locked",
       title: "Locked job",
       next_run_at: now,
-      locked_until: future
+      locked_until: future,
+      lock_owner_token: "workspace-store-test-lock"
     });
     const exhaustedJob = automationJobRecord({
+      ...schedulable,
       id: "automation_exhausted",
       title: "Exhausted job",
       status: "disabled",
@@ -1103,7 +1118,7 @@ describe("workspace store", () => {
     await store.saveAutomationJob(lockedJob);
     await store.saveAutomationJob(exhaustedJob);
     const summary = await store.getAutomationQueueSummary(now);
-    const released = await store.releaseAutomationJobLock("automation_locked", now);
+    const released = await store.releaseAutomationJobLock("automation_locked", { lockOwnerToken: "workspace-store-test-lock", now });
     const requeued = await store.requeueAutomationJob("automation_exhausted", { now });
     await store.close();
 
@@ -1893,10 +1908,27 @@ function automationJobRecord(patch: Partial<AutomationJobRecord> = {}): Automati
     schedule: patch.schedule ?? "daily",
     target_instruction: patch.target_instruction ?? "Run automation",
     delivery_target: patch.delivery_target ?? { channel: "activity" },
+    workspace_id: patch.workspace_id,
+    room_id: patch.room_id,
+    authority: patch.authority,
+    created_principal_snapshot: patch.created_principal_snapshot,
+    source_snapshot: patch.source_snapshot,
+    connection_id: patch.connection_id,
+    session_ref: patch.session_ref,
+    authorization_state: patch.authorization_state,
+    authorization_error_code: patch.authorization_error_code,
+    authorized_at: patch.authorized_at,
+    blocked_at: patch.blocked_at,
+    rebound_at: patch.rebound_at,
+    management_state: patch.management_state,
+    management_operation_id: patch.management_operation_id,
+    created_operation_id: patch.created_operation_id,
+    rebound_operation_id: patch.rebound_operation_id,
     next_run_at: patch.next_run_at ?? now,
     last_run_at: patch.last_run_at,
     retry_after_at: patch.retry_after_at,
     locked_until: patch.locked_until,
+    lock_owner_token: patch.lock_owner_token,
     failure_count: patch.failure_count ?? 0,
     max_attempts: patch.max_attempts ?? 3,
     last_error: patch.last_error,

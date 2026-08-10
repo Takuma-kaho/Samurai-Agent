@@ -412,18 +412,7 @@ export interface WorkspaceRestoreResult {
   health: WorkspaceHealthReport;
 }
 
-export interface AutomationRunRecord {
-  id: string;
-  kind: string;
-  source: string;
-  session_id?: string;
-  backend_run_id?: string;
-  status: "started" | "completed" | "failed";
-  operation_id?: string;
-  started_at: string;
-  completed_at?: string;
-  error?: string;
-}
+export type { AutomationRunRecord } from "@samurai-agent/core-schemas";
 
 export interface MemoryArchiveSnapshot {
   frontmatter: MemoryFrontmatter;

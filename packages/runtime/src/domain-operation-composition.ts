@@ -10,6 +10,7 @@ import { createCore05BackgroundReviewMutationDomainServicePorts } from "./domain
 import { createConversationDomainServicePorts } from "./domain-operation-ports/conversation-domain-service-ports.js";
 import { createExecutionDomainServicePorts } from "./domain-operation-ports/execution-domain-service-ports.js";
 import { createExternalSendDomainServicePorts } from "./domain-operation-ports/external-send-domain-service-ports.js";
+import { createExternalAppConnectionDomainServicePorts } from "./domain-operation-ports/external-app-connection-domain-service-ports.js";
 import { createFileDomainServicePorts } from "./domain-operation-ports/file-domain-service-ports.js";
 import { createGatewayDomainServicePorts } from "./domain-operation-ports/gateway-domain-service-ports.js";
 import { createGeneratedSurfaceDomainServicePorts } from "./domain-operation-ports/generated-surface-domain-service-ports.js";
@@ -27,6 +28,7 @@ import { createTranslationDomainServicePorts } from "./domain-operation-ports/tr
 import { createWikiDomainServicePorts } from "./domain-operation-ports/wiki-domain-service-ports.js";
 import { createSearchDomainServicePorts } from "./domain-operation-ports/search-domain-service-ports.js";
 import { createRoomAgentDomainServicePorts } from "./domain-operation-ports/room-agent-domain-service-ports.js";
+import { createActivityHistoryDomainServicePorts } from "./domain-operation-ports/activity-history-domain-service-ports.js";
 
 export type { RuntimeDomainServices } from "./domain-operation-services.js";
 
@@ -42,6 +44,7 @@ export function createDomainOperationPorts(services: RuntimeDomainServices): Dom
     ...createConversationDomainServicePorts(services),
     ...createExecutionDomainServicePorts(services),
     ...createExternalSendDomainServicePorts(services),
+    ...createExternalAppConnectionDomainServicePorts(services),
     ...createFileDomainServicePorts(services),
     ...createGatewayDomainServicePorts(services),
     ...createGeneratedSurfaceDomainServicePorts(services),
@@ -58,7 +61,8 @@ export function createDomainOperationPorts(services: RuntimeDomainServices): Dom
     ...createTranslationDomainServicePorts(services),
     ...createWikiDomainServicePorts(services),
     ...createSearchDomainServicePorts(services),
-    ...createRoomAgentDomainServicePorts(services)
+    ...createRoomAgentDomainServicePorts(services),
+    ...createActivityHistoryDomainServicePorts(services)
   };
   const missingQueryPorts = domainQueryIds.filter((id) => !(id in ports));
   if (missingQueryPorts.length > 0) throw new Error(`domain_query_ports_incomplete:${missingQueryPorts.join(",")}`);

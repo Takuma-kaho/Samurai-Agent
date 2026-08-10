@@ -15,6 +15,7 @@ export type { LearningResourceUseTable, LearningEvaluationTable, LearningSnapsho
 export type { WikiIndexTable } from "../rows/wiki-rows";
 export type { CollectionSchemasTable, CollectionRecordsTable, CollectionPatchesTable } from "../rows/collection-rows";
 export type { AutomationJobsTable, AutomationRunsTable } from "../rows/automation-rows";
+export type { ExternalAppConnectionsTable, ExternalAppConnectionRoomsTable, ExternalAppConnectionIngressClassesTable } from "../rows/external-app-connection-rows";
 export type { ExternalSendsTable, GatewayPairingsTable, GatewayPairingPoliciesTable, GatewayRoutingPoliciesTable, GatewayInboundMessagesTable, GatewayDeliveriesTable, GatewayBoundaryPoliciesTable, GatewayMcpConfigsTable, GatewayConcurrencyLocksTable, GatewaySandboxInstancesTable, GatewaySandboxWorkspaceSyncsTable } from "../rows/gateway-rows";
 export type { SettingsTable, PluginStatesTable, ResourceTranslationsTable } from "../rows/workspace-metadata-rows";
 export type { RoomsTable, AgentsTable } from "../rows/room-agent-rows";
@@ -34,6 +35,7 @@ import type { LearningResourceUseTable, LearningEvaluationTable, LearningSnapsho
 import type { WikiIndexTable } from "../rows/wiki-rows";
 import type { CollectionSchemasTable, CollectionRecordsTable, CollectionPatchesTable } from "../rows/collection-rows";
 import type { AutomationJobsTable, AutomationRunsTable } from "../rows/automation-rows";
+import type { ExternalAppConnectionsTable, ExternalAppConnectionRoomsTable, ExternalAppConnectionIngressClassesTable } from "../rows/external-app-connection-rows";
 import type { ExternalSendsTable, GatewayPairingsTable, GatewayPairingPoliciesTable, GatewayRoutingPoliciesTable, GatewayInboundMessagesTable, GatewayDeliveriesTable, GatewayBoundaryPoliciesTable, GatewayMcpConfigsTable, GatewayConcurrencyLocksTable, GatewaySandboxInstancesTable, GatewaySandboxWorkspaceSyncsTable } from "../rows/gateway-rows";
 import type { SettingsTable, PluginStatesTable, ResourceTranslationsTable } from "../rows/workspace-metadata-rows";
 import type { RoomsTable, AgentsTable } from "../rows/room-agent-rows";
@@ -93,6 +95,9 @@ export interface WorkspaceDb {
   collection_patches: CollectionPatchesTable;
   automation_jobs: AutomationJobsTable;
   automation_runs: AutomationRunsTable;
+  external_app_connections: ExternalAppConnectionsTable;
+  external_app_connection_rooms: ExternalAppConnectionRoomsTable;
+  external_app_connection_ingress_classes: ExternalAppConnectionIngressClassesTable;
   external_sends: ExternalSendsTable;
   gateway_pairings: GatewayPairingsTable;
   gateway_pairing_policies: GatewayPairingPoliciesTable;

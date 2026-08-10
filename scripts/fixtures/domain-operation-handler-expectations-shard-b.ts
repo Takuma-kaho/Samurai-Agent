@@ -26,6 +26,8 @@ export interface BHandlerCaseExpectation {
   readonly id: string;
   readonly input: Record<string, unknown>;
   readonly branches: readonly string[];
+  /** A deliberate safe-stop is an expected terminal outcome, not a success. */
+  readonly throws?: string;
   readonly context?: {
     readonly sessionId?: string;
     readonly runId?: string;
@@ -320,8 +322,8 @@ export const bHandlerExpectations = {
   "automation.job.release_lock": {
     requiredBranches: ["now:explicit", "now:default"],
     cases: [
-      { id: "explicit-now", input: { job_id: "automation_fixture", now }, branches: ["now:explicit"], calls: [call("releaseAutomationJobLock", "automation_fixture", now)] },
-      { id: "default-now", input: { job_id: "automation_fixture" }, branches: ["now:default"], calls: [call("releaseAutomationJobLock", "automation_fixture", undefined)] }
+      { id: "explicit-now", input: { job_id: "automation_fixture", lock_owner_token: "automation-fixture-lock", now }, branches: ["now:explicit"], calls: [call("releaseAutomationJobLock", "automation_fixture", "automation-fixture-lock", now)] },
+      { id: "default-now", input: { job_id: "automation_fixture", lock_owner_token: "automation-fixture-lock" }, branches: ["now:default"], calls: [call("releaseAutomationJobLock", "automation_fixture", "automation-fixture-lock", undefined)] }
     ]
   },
   "automation.job.requeue": {
@@ -332,43 +334,11 @@ export const bHandlerExpectations = {
     ]
   },
   "automation.job.run": {
-    requiredBranches: ["lock:acquired", "kind:daily_digest"],
-    cases: [{
-      id: "daily-digest",
-      input: { job_id: "automation_fixture", now },
-      branches: ["lock:acquired", "kind:daily_digest"],
-      calls: [
-        call("getAutomationJob", "automation_fixture"),
-        call("acquireAutomationJobLock", "automation_fixture", { lockedUntil: "2026-07-17T00:15:00.000Z", now }),
-        call("createAutomationRun", startedAutomationRun),
-        call("ensureScheduledAutomationSession", scheduledContext, "Fixture automation"),
-        call("updateAutomationRun", scheduledAutomationRun),
-        call("createScheduledAutomationEnvelope", scheduledContext, "Run the fixture automation."),
-        call("automationJobRef", automationJob),
-        call("runScheduledAutomationMutation", {
-          session,
-          envelope,
-          context: scheduledContext,
-          operationName: "automation.job.run",
-          inputRef: fixtureAutomationJobRef,
-          proposedEffects: ["Run automation job Fixture automation."],
-          execute: fn
-        }),
-        call("runAutomationInstruction", automationJob, session, scheduledContext),
-        call("updateAutomationRun", completedAutomationRun),
-        call("saveAutomationJobRecord", {
-          ...automationJob,
-          status: "enabled",
-          last_run_at: "$generated:time",
-          next_run_at: "$generated:time",
-          retry_after_at: undefined,
-          locked_until: undefined,
-          failure_count: 0,
-          last_error: undefined,
-          updated_at: "$generated:time"
-        })
-      ]
-    }]
+    requiredBranches: ["now:explicit", "now:default"],
+    cases: [
+      { id: "explicit-now", input: { job_id: "automation_fixture", now }, branches: ["now:explicit"], calls: [call("runSessionlessAutomationJob", { jobId: "automation_fixture", now })] },
+      { id: "default-now", input: { job_id: "automation_fixture" }, branches: ["now:default"], calls: [call("runSessionlessAutomationJob", { jobId: "automation_fixture", now: "$generated:time" })] }
+    ]
   },
   "automation.job.save": {
     requiredBranches: [
@@ -379,7 +349,6 @@ export const bHandlerExpectations = {
       "next_run_at:generated"
     ],
     cases: automationJobKinds.map((kind, index) => {
-      const generated = generatedAutomationJob(kind, index);
       const input = {
         kind,
         title: `Automation ${kind}`,
@@ -388,19 +357,16 @@ export const bHandlerExpectations = {
         ...(index === 0 ? { delivery_target: { channel: "activity", destination: "fixture" }, enabled: true, max_attempts: 5, next_run_at: "2026-07-18T00:00:00.000Z" } : {}),
         ...(index === 1 ? { enabled: false } : {})
       };
+      const request = {
+        delivery_target: index === 0 ? { channel: "activity", destination: "fixture" } : { channel: "activity" },
+        max_attempts: index === 0 ? 5 : 3,
+        ...input
+      };
       return {
         id: `kind-${kind}`,
         input,
         branches: [`kind:${kind}`, index === 1 ? "status:disabled" : "status:enabled", index === 0 ? "next_run_at:explicit" : "next_run_at:generated"],
-        calls: [
-          call("automationJobContract", "automation.job.save"),
-          call("ensureAutomationSession"),
-          call("createAutomationEnvelope", `Save automation job: Automation ${kind}`),
-          call("runAutomationJobMutation", automationMutation("automation.job.save", ["Save an automation job definition."])),
-          call("saveAutomationJobRecord", generated),
-          call("automationJobRef", generated),
-          call("createAutomationRollback", operation, [automationJobRef("$generated:automation-id", `Automation ${kind}`)], {}, { automation_job: generated })
-        ]
+        calls: [call("saveSessionlessAutomationJob", { context: handlerContext, request })]
       };
     })
   },
@@ -411,60 +377,117 @@ export const bHandlerExpectations = {
         id: "enable",
         input: { job_id: "automation_fixture", status: "enabled" },
         branches: ["status:enabled"],
-        calls: [
-          call("getAutomationJob", "automation_fixture"),
-          call("automationJobContract", "automation.job.set_status"),
-          call("ensureAutomationSession"),
-          call("createAutomationEnvelope", "Resume automation: Fixture automation"),
-          call("automationJobRef", automationJob),
-          call("runAutomationJobMutation", automationMutation("automation.job.set_status", ["Change an Automation job between enabled and disabled."], { targetResourceRefs: [fixtureAutomationJobRef] })),
-          call("saveAutomationJobRecord", { ...automationJob, status: "enabled", locked_until: "2099-01-01T00:00:00.000Z", updated_at: "$generated:time" }),
-          call("automationJobRef", { ...automationJob, status: "enabled", locked_until: "2099-01-01T00:00:00.000Z", updated_at: "$generated:time" }),
-          call("createAutomationRollback", operation, [fixtureAutomationJobRef], { automation_job: automationJob }, { automation_job: { ...automationJob, status: "enabled", locked_until: "2099-01-01T00:00:00.000Z", updated_at: "$generated:time" } })
-        ]
+        calls: [call("setSessionlessAutomationJobStatus", { context: handlerContext, jobId: "automation_fixture", status: "enabled" })]
       },
       {
         id: "disable",
         input: { job_id: "automation_fixture", status: "disabled" },
         branches: ["status:disabled"],
-        calls: [
-          call("getAutomationJob", "automation_fixture"),
-          call("automationJobContract", "automation.job.set_status"),
-          call("ensureAutomationSession"),
-          call("createAutomationEnvelope", "Pause automation: Fixture automation"),
-          call("automationJobRef", automationJob),
-          call("runAutomationJobMutation", automationMutation("automation.job.set_status", ["Change an Automation job between enabled and disabled."], { targetResourceRefs: [fixtureAutomationJobRef] })),
-          call("saveAutomationJobRecord", { ...automationJob, status: "disabled", locked_until: undefined, updated_at: "$generated:time" }),
-          call("automationJobRef", { ...automationJob, status: "disabled", locked_until: undefined, updated_at: "$generated:time" }),
-          call("createAutomationRollback", operation, [fixtureAutomationJobRef], { automation_job: automationJob }, { automation_job: { ...automationJob, status: "disabled", updated_at: "$generated:time" } })
-        ]
+        calls: [call("setSessionlessAutomationJobStatus", { context: handlerContext, jobId: "automation_fixture", status: "disabled" })]
       }
     ]
   },
+  "automation.job.manager_resume": {
+    requiredBranches: ["management:resume"],
+    cases: [{ id: "resume", input: { job_id: "automation_fixture" }, branches: ["management:resume"], calls: [call("managerResumeSessionlessAutomationJob", { context: handlerContext, jobId: "automation_fixture" })] }]
+  },
+  "automation.job.manager_stop": {
+    requiredBranches: ["note:explicit", "note:default"],
+    cases: [
+      { id: "with-note", input: { job_id: "automation_fixture", note: "Room manager stopped this job." }, branches: ["note:explicit"], calls: [call("managerStopSessionlessAutomationJob", { context: handlerContext, jobId: "automation_fixture", note: "Room manager stopped this job." })] },
+      { id: "without-note", input: { job_id: "automation_fixture" }, branches: ["note:default"], calls: [call("managerStopSessionlessAutomationJob", { context: handlerContext, jobId: "automation_fixture" })] }
+    ]
+  },
+  "automation.job.reauthorize": {
+    requiredBranches: ["authorization:explicit-recheck"],
+    cases: [{ id: "reauthorize", input: { job_id: "automation_fixture" }, branches: ["authorization:explicit-recheck"], calls: [call("reauthorizeSessionlessAutomationJob", { context: handlerContext, jobId: "automation_fixture" })] }]
+  },
+  "automation.job.rebind_authority": {
+    requiredBranches: ["authority:explicit-rebind"],
+    cases: [{ id: "rebind", input: { job_id: "automation_fixture" }, branches: ["authority:explicit-rebind"], calls: [call("rebindSessionlessAutomationJobAuthority", { context: handlerContext, jobId: "automation_fixture" })] }]
+  },
   "automation.memory_review.run": {
-    requiredBranches: ["scheduled:memory-review"],
+    requiredBranches: ["executor:unsupported"],
     cases: [{
-      id: "scheduled",
+      id: "safe-stop",
       input: {},
-      branches: ["scheduled:memory-review"],
-      calls: [
-        call("createAutomationRun", startedMemoryReviewRun),
-        call("ensureScheduledAutomationSession", scheduledMemoryReviewContext, "Scheduled memory review"),
-        call("updateAutomationRun", scheduledMemoryReviewRun),
-        call("createScheduledAutomationEnvelope", scheduledMemoryReviewContext, "Run scheduled memory review."),
-        call("runScheduledAutomationMutation", {
-          session,
-          envelope,
-          context: scheduledMemoryReviewContext,
-          operationName: "automation.memory_review.run",
-          inputRef: { kind: "automation_run", id: "$generated:automation_run-id", uri: "automation-runs/$generated:automation_run-id", label: "Automation run" },
-          proposedEffects: ["Run scheduled memory review and deterministic curator without external effects."],
-          execute: fn
-        }),
-        call("runScheduledMemoryReview", session),
-        call("updateAutomationRun", completedMemoryReviewRun)
-      ]
+      branches: ["executor:unsupported"],
+      throws: "automation_sessionless_executor_unsupported:memory_review",
+      calls: [call("sessionlessMemoryReviewUnsupported")]
     }]
+  },
+  "external_app.connection.create": {
+    requiredBranches: ["delegated_principal:human", "delegated_principal:agent", "metadata:explicit", "metadata:default"],
+    cases: [
+      {
+        id: "human-explicit-metadata",
+        input: { connector_id: "connector_fixture", app_id: "app_fixture", delegated_principal: { kind: "human", participant_id: "human:owner" }, allowed_room_ids: ["room_fixture"], ingress_classes: ["query", "domain_operation", "activity_ingest"], non_secret_metadata: { label: "Fixture connection", environment: "development" } },
+        branches: ["delegated_principal:human", "metadata:explicit"],
+        calls: [call("createExternalAppConnection", {
+          context: handlerContext,
+          request: {
+            connector_id: "connector_fixture",
+            app_id: "app_fixture",
+            delegated_principal: { kind: "human", participant_id: "human:owner" },
+            allowed_room_ids: ["room_fixture"],
+            ingress_classes: ["query", "domain_operation", "activity_ingest"],
+            non_secret_metadata: { label: "Fixture connection", environment: "development" }
+          }
+        })]
+      },
+      {
+        id: "agent-default-metadata",
+        input: { connector_id: "connector_fixture_agent", app_id: "app_fixture", delegated_principal: { kind: "agent", agent_id: "agent_fixture", requested_by_participant_id: "human:owner" }, allowed_room_ids: ["room_fixture"], ingress_classes: ["query"] },
+        branches: ["delegated_principal:agent", "metadata:default"],
+        calls: [call("createExternalAppConnection", {
+          context: handlerContext,
+          request: {
+            connector_id: "connector_fixture_agent",
+            app_id: "app_fixture",
+            delegated_principal: { kind: "agent", agent_id: "agent_fixture", requested_by_participant_id: "human:owner" },
+            allowed_room_ids: ["room_fixture"],
+            ingress_classes: ["query"],
+            non_secret_metadata: {}
+          }
+        })]
+      }
+    ]
+  },
+  "external_app.connection.revoke": {
+    requiredBranches: ["status:revoked"],
+    cases: [{ id: "revoke", input: { connection_id: "connection_fixture" }, branches: ["status:revoked"], calls: [call("revokeExternalAppConnection", { context: handlerContext, connectionId: "connection_fixture" })] }]
+  },
+  "external_app.connection.update_scope": {
+    requiredBranches: ["metadata:explicit", "metadata:omitted"],
+    cases: [
+      {
+        id: "explicit-metadata",
+        input: { connection_id: "connection_fixture", allowed_room_ids: ["room_fixture"], ingress_classes: ["query", "activity_ingest"], non_secret_metadata: { label: "Narrowed fixture connection" } },
+        branches: ["metadata:explicit"],
+        calls: [call("updateExternalAppConnectionScope", {
+          context: handlerContext,
+          request: {
+            connection_id: "connection_fixture",
+            allowed_room_ids: ["room_fixture"],
+            ingress_classes: ["query", "activity_ingest"],
+            non_secret_metadata: { label: "Narrowed fixture connection" }
+          }
+        })]
+      },
+      {
+        id: "omitted-metadata",
+        input: { connection_id: "connection_fixture", allowed_room_ids: ["room_fixture"], ingress_classes: ["query"] },
+        branches: ["metadata:omitted"],
+        calls: [call("updateExternalAppConnectionScope", {
+          context: handlerContext,
+          request: {
+            connection_id: "connection_fixture",
+            allowed_room_ids: ["room_fixture"],
+            ingress_classes: ["query"]
+          }
+        })]
+      }
+    ]
   },
   "browser.interact": {
     requiredBranches: ["action:navigate", "action:click", "action:input"],

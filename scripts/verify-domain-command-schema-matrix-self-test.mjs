@@ -58,6 +58,7 @@ function runMatrix(sandbox) {
     fixture, "--bundle", "--platform=node", "--format=esm", "--external:better-sqlite3",
     `--alias:@samurai-agent/core-schemas=${path.join(sourceRoot, "packages/core-schemas/src/index.ts")}`,
     `--alias:@samurai-agent/gateway=${path.join(sourceRoot, "packages/gateway/src/index.ts")}`,
+    `--alias:@samurai-agent/room-permissions=${path.join(sourceRoot, "packages/room-permissions/src/index.ts")}`,
     `--alias:@samurai-agent/skills=${path.join(sourceRoot, "packages/skills/src/index.ts")}`,
     `--outfile=${bundle}`
   ], {

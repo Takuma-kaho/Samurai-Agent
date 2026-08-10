@@ -6,7 +6,7 @@ import gatewayMcpConfigSave from "./operations/gateway/mcp_config/save.operation
 import gatewayInboundRoute from "./operations/gateway/inbound/route.operation.js";
 
 describe("Domain Operation strict gate coverage", () => {
-  it("loads and executes the complete 150-operation strict gate", () => {
+  it("loads and executes the complete 158-operation strict gate", () => {
     expect(true).toBe(true);
   });
 
@@ -204,6 +204,13 @@ describe("Domain Operation strict gate coverage", () => {
           if (name === "saveGeneratedSurfaceRevision") return { definition: (args[0] as Record<string, unknown>).definition, revision: (args[0] as Record<string, unknown>).revision };
           if (name === "updateGeneratedSurfaceState") return outputs.get(id);
           if (name === "createAutomationRun" || name === "updateAutomationRun" || name === "saveAutomationJobRecord") return args[0];
+          if ([
+            "saveSessionlessAutomationJob", "setSessionlessAutomationJobStatus", "runSessionlessAutomationJob",
+            "managerResumeSessionlessAutomationJob", "managerStopSessionlessAutomationJob",
+            "reauthorizeSessionlessAutomationJob", "rebindSessionlessAutomationJobAuthority",
+            "createExternalAppConnection", "updateExternalAppConnectionScope", "revokeExternalAppConnection"
+          ].includes(name)) return outputs.get(id);
+          if (name === "sessionlessMemoryReviewUnsupported") throw new Error("automation_sessionless_executor_unsupported:memory_review");
           if (name === "releaseAutomationJobLock" || name === "requeueAutomationJob") return outputs.get(id);
           if (/^(acknowledge|deliver|fail|save)ClientEvent$/.test(name)) return outputs.get(id);
           if ([
@@ -332,6 +339,14 @@ describe("Domain Operation strict gate coverage", () => {
           : {})
       };
       executionCases.set(definition.id, { input, context });
+      if (definition.id === "automation.memory_review.run") {
+        await expect(binding.execute(context, input)).rejects.toThrow("automation_sessionless_executor_unsupported:memory_review");
+        for (const inputSource of definition.sources.slice(1)) {
+          await expect(binding.execute({ ...context, inputSource, correlationId: `coverage-${definition.id}-${inputSource}` }, input))
+            .rejects.toThrow("automation_sessionless_executor_unsupported:memory_review");
+        }
+        continue;
+      }
       if (definition.id === "memory.session.create") {
         await expect(binding.execute(context, input)).rejects.toThrow("memorySessionScopeWriteDisabledError");
         for (const inputSource of definition.sources.slice(1)) {
@@ -364,8 +379,8 @@ describe("Domain Operation strict gate coverage", () => {
       if (count === 0 && definition.id !== "presentation.plan") throw new Error(`${definition.id} did not call its Port`);
     }
 
-    expect(bindings).toHaveLength(150);
-    expect(portCalls.size).toBe(149);
+    expect(bindings).toHaveLength(158);
+    expect(portCalls.size).toBe(157);
 
     for (const operationId of ["artifact.create", "chat.turn.run"] as const) {
       const binding = bindings.find((candidate) => candidate.definition.id === operationId)!;

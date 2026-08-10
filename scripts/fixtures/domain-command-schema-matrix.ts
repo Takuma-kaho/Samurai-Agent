@@ -151,9 +151,162 @@ const definitionById = new Map(definitions.map((definition) => [definition.id, d
 // to return `session_scope_write_disabled`. Its public fields must not be
 // consumed or persisted after Core06 stopped new Session-scope writes.
 const terminalInputRejectionOperationIds = new Set(["memory.session.create"]);
+// This Core09 legacy kind is intentionally a stable safe-stop: it never has
+// a successful output path until a Session-free executor exists. Its exact
+// terminal error is asserted by the handler matrix instead.
+const terminalNoSuccessOperationIds = new Set(["automation.memory_review.run"]);
 const staticAjv = createAjv();
 const projectionAjv = createAjv();
 const ts: typeof import("typescript") = createRequire(resolve(process.env.SAMURAI_REPO_ROOT ?? process.cwd(), "package.json"))("typescript");
+// JSON Schema cannot represent ActivityRecordSchema's terminal-status
+// invariants. Keep this explicit, static completed Activity sample so the
+// matrix still tests a value accepted by both the frozen contract and Zod.
+const sessionlessAutomationJobWriteSample = {
+  resource: {
+    id: "automation-schema-matrix",
+    title: "Schema matrix automation",
+    kind: "wiki_reindex",
+    status: "disabled",
+    schedule: "0 9 * * *",
+    target_instruction: "Reindex Room-scoped knowledge.",
+    delivery_target: { channel: "activity" },
+    workspace_id: "schema-matrix-workspace",
+    room_id: "schema-matrix-room",
+    authority: { kind: "direct_principal", principal: { kind: "human", participant_id: "human:schema-matrix" } },
+    created_principal_snapshot: { kind: "human", participant_id: "human:schema-matrix" },
+    source_snapshot: { kind: "host" },
+    authorization_state: "ready",
+    authorized_at: "2026-01-01T00:00:00.000Z",
+    management_state: "allowed",
+    failure_count: 0,
+    max_attempts: 3,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z"
+  },
+  operation: {
+    id: "operation-schema-matrix",
+    capability_id: "automation.job.save",
+    operation: "automation.job.save",
+    actor_identity: "owner",
+    instruction_source: "owner_instruction",
+    instruction_authority: "human:schema-matrix",
+    channel: "runtime_api",
+    input_hash: "schema-matrix",
+    target_resource_refs: [{ kind: "artifact", id: "artifact-schema-matrix", uri: "artifacts/schema-matrix.md", label: "Schema matrix artifact" }],
+    proposed_effects: ["Save a sessionless Automation Job."],
+    status: "completed",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z"
+  },
+  rollbackPoint: {
+    id: "rollback-schema-matrix",
+    operation_id: "operation-schema-matrix",
+    affected_resources: [{ kind: "artifact", id: "artifact-schema-matrix", uri: "artifacts/schema-matrix.md", label: "Schema matrix artifact" }],
+    before_snapshot: { version: 1 },
+    after_snapshot: { version: 2 },
+    reversible: true,
+    irreversible_effects: ["none"],
+    created_at: "2026-01-01T00:00:00.000Z",
+    expires_at: "2026-01-02T00:00:00.000Z"
+  },
+  activity: [{
+    id: "activity-inbox-schema-matrix",
+    activity_type: "auto_run",
+    severity: "info",
+    title: "Automation contract verified",
+    summary: "The sessionless Automation write contract is valid.",
+    operation_id: "automation.job.save",
+    approval_request_id: "approval-schema-matrix",
+    audit_record_id: "audit-schema-matrix",
+    rollback_point_id: "rollback-schema-matrix",
+    created_at: "2026-01-01T00:00:00.000Z"
+  }]
+};
+const sessionlessAutomationRunSample = {
+  id: "automation-run-schema-matrix",
+  kind: "wiki_reindex",
+  source: "automation_job",
+  status: "completed",
+  job_id: "automation-schema-matrix",
+  workspace_id: "schema-matrix-workspace",
+  room_id: "schema-matrix-room",
+  authority: { kind: "direct_principal", principal: { kind: "human", participant_id: "human:schema-matrix" } },
+  activity_id: "activity-schema-matrix",
+  started_at: "2026-01-01T00:00:00.000Z",
+  completed_at: "2026-01-01T00:00:00.000Z"
+};
+const sessionlessAutomationJobRunSample = {
+  resource: sessionlessAutomationRunSample,
+  automationRun: sessionlessAutomationRunSample,
+  operation: sessionlessAutomationJobWriteSample.operation,
+  activity: sessionlessAutomationJobWriteSample.activity
+};
+const externalAppConnectionWriteSample = {
+  resource: {
+    id: "connection-schema-matrix",
+    workspace_id: "schema-matrix-workspace",
+    connector_id: "connector-schema-matrix",
+    app_id: "app-schema-matrix",
+    status: "active",
+    delegated_principal: { kind: "human", participant_id: "human:schema-matrix" },
+    allowed_room_ids: ["schema-matrix-room"],
+    ingress_classes: ["query"],
+    non_secret_metadata: { label: "Schema matrix connection", environment: "development" },
+    created_by: { kind: "human", participant_id: "human:schema-matrix" },
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z"
+  },
+  operation: sessionlessAutomationJobWriteSample.operation,
+  rollbackPoint: sessionlessAutomationJobWriteSample.rollbackPoint,
+  activity: sessionlessAutomationJobWriteSample.activity
+};
+const semanticValidSamples = new Map<string, unknown>([
+  ["activity.history.list:output", {
+    items: [{
+      id: "activity-schema-matrix",
+      workspace_id: "schema-matrix-workspace",
+      room_id: "schema-matrix-room",
+      principal: { kind: "human", participant_id: "human:schema-matrix" },
+      source: { kind: "host" },
+      status: "completed",
+      idempotency_key: "activity.history.list:schema-matrix",
+      instruction_summary: "Read structured Activity evidence.",
+      result_summary: "Activity evidence was listed.",
+      verification: [{
+        id: "verification-schema-matrix",
+        kind: "assertion",
+        status: "passed",
+        summary: "The Activity record is structurally valid.",
+        source_operation_id: "activity.history.list",
+        recorded_at: "2026-01-01T00:00:00.000Z"
+      }],
+      domain_operation_ids: ["activity.history.list"],
+      provenance: { kind: "trusted_context", source_id: "schema-matrix", recorded_at: "2026-01-01T00:00:00.000Z" },
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      finalized_at: "2026-01-01T00:00:00.000Z"
+    }]
+  }],
+  ...[
+    "automation.job.manager_resume",
+    "automation.job.manager_stop",
+    "automation.job.reauthorize",
+    "automation.job.rebind_authority",
+    "automation.job.save",
+    "automation.job.set_status",
+    "resource.translation_job.save"
+  ].map((operationId) => [`${operationId}:output`, sessionlessAutomationJobWriteSample] as const),
+  ...[
+    "automation.job.release_lock",
+    "automation.job.requeue"
+  ].map((operationId) => [`${operationId}:output`, sessionlessAutomationJobWriteSample.resource] as const),
+  ["automation.job.run:output", sessionlessAutomationJobRunSample],
+  ...[
+    "external_app.connection.create",
+    "external_app.connection.revoke",
+    "external_app.connection.update_scope"
+  ].map((operationId) => [`${operationId}:output`, externalAppConnectionWriteSample] as const)
+]);
 
 await main();
 
@@ -162,8 +315,8 @@ async function main(): Promise<void> {
   const inputUsage = assertInputFieldUsage();
   const expectedOperations = [...manifest.operations].sort((left, right) => left.id.localeCompare(right.id));
   const expectedById = new Map(expectedOperations.map((operation) => [operation.id, operation]));
-  assert.equal(expectedOperations.length, 150, "schema_manifest_operation_count_mismatch:150");
-  assert.equal(definitions.length, 150, "schema_matrix_definition_count_mismatch:150");
+  assert.equal(expectedOperations.length, 158, "schema_manifest_operation_count_mismatch:158");
+  assert.equal(definitions.length, 158, "schema_matrix_definition_count_mismatch:158");
   assert.deepEqual([...expectedById.keys()], definitions.map((definition) => definition.id), "schema_manifest_definition_id_set_mismatch");
 
   const counters = { input: emptyCounter(), output: emptyCounter() };
@@ -193,22 +346,24 @@ async function main(): Promise<void> {
     const actualInputValidator = projectionAjv.compile(actualInput);
     const actualOutputValidator = projectionAjv.compile(actualOutput);
     const validInput = completeSample(staticInput);
-    const validOutput = completeSample(staticOutput);
+    const validOutput = semanticValidSamples.get(`${expected.id}:output`) ?? completeSample(staticOutput);
     validOutputs.set(definition.id, validOutput);
     assertAccepted(expected.id, "input", validInput, expectedInputValidator, actualInputValidator, definition.input.safeParse(validInput).success);
-    assertAccepted(expected.id, "output", validOutput, expectedOutputValidator, actualOutputValidator, definition.output.safeParse(validOutput).success);
 
     const inputCases = invalidCases(staticInput, validInput, expectedInputValidator);
-    const outputCases = invalidCases(staticOutput, validOutput, expectedOutputValidator);
     assertFullCaseCoverage(expected.id, "input", staticInputFields, inputCases);
-    assertFullCaseCoverage(expected.id, "output", staticOutputFields, outputCases);
-
-    await assertValidBinding(definition, validInput, validOutput);
     for (const testCase of inputCases) {
       assertRejected(expected.id, "input", testCase, actualInputValidator, definition.input.safeParse(testCase.value).success);
       await assertInputBindingRejects(definition, validOutput, testCase);
       count(counters.input, testCase.kind);
     }
+
+    if (terminalNoSuccessOperationIds.has(expected.id)) continue;
+
+    assertAccepted(expected.id, "output", validOutput, expectedOutputValidator, actualOutputValidator, definition.output.safeParse(validOutput).success);
+    const outputCases = invalidCases(staticOutput, validOutput, expectedOutputValidator);
+    assertFullCaseCoverage(expected.id, "output", staticOutputFields, outputCases);
+    await assertValidBinding(definition, validInput, validOutput);
     for (const testCase of outputCases) {
       assertRejected(expected.id, "output", testCase, actualOutputValidator, definition.output.safeParse(testCase.value).success);
       await assertOutputBindingRejects(definition, validInput, testCase);
@@ -244,6 +399,7 @@ async function main(): Promise<void> {
     output: counters.output,
     parity: { zod: true, ajv: true, bind_operation_definition: true },
     input_field_usage: inputUsage,
+    terminal_no_success_operations: [...terminalNoSuccessOperationIds].sort(),
     global_payload_limits: { ...manifest.global_payload_limits, boundary_checks: 6 }
   };
   process.stdout.write(`${JSON.stringify(summary)}\n`);
@@ -257,18 +413,18 @@ function validateManifest(value: StaticSchemaManifest): void {
   assert.equal(value.review_policy.canonical_reference_key, "$schema_ref", "schema_manifest_catalog_reference_key_invalid");
   assert.equal(value.review_policy.review_unit, "canonical_schema_node", "schema_manifest_review_unit_invalid");
   assert.equal(value.review_policy.recursive_json_value, "global_json_value", "schema_manifest_recursive_json_value_invalid");
-  assert.equal(value.review.required_operations, 150, "schema_manifest_required_operation_count_invalid");
+  assert.equal(value.review.required_operations, 158, "schema_manifest_required_operation_count_invalid");
   assert.equal(value.operations.length, value.review.required_operations, "schema_manifest_operation_count_mismatch");
   const commands = value.operations.filter((operation) => operation.kind === "command").length;
   const queries = value.operations.filter((operation) => operation.kind === "query").length;
-  assert.equal(commands, 125, "schema_manifest_command_count_mismatch");
-  assert.equal(queries, 25, "schema_manifest_query_count_mismatch");
-  assert.equal(value.review.reviewed_operations, 150, "schema_manifest_reviewed_operation_count_mismatch");
+  assert.equal(commands, 132, "schema_manifest_command_count_mismatch");
+  assert.equal(queries, 26, "schema_manifest_query_count_mismatch");
+  assert.equal(value.review.reviewed_operations, 158, "schema_manifest_reviewed_operation_count_mismatch");
   assert.equal(value.review.unreviewed_operations, 0, "schema_manifest_unreviewed_operations");
-  assert.equal(value.review.required_endpoints, 300, "schema_manifest_required_endpoint_count_invalid");
-  assert.equal(value.review.reviewed_endpoints, 300, "schema_manifest_reviewed_endpoint_count_invalid");
+  assert.equal(value.review.required_endpoints, 316, "schema_manifest_required_endpoint_count_invalid");
+  assert.equal(value.review.reviewed_endpoints, 316, "schema_manifest_reviewed_endpoint_count_invalid");
   assert.equal(value.review.unreviewed_endpoints, 0, "schema_manifest_unreviewed_endpoints");
-  assert.equal(value.review.required_schema_nodes, 871, "schema_catalog_required_node_count_invalid");
+  assert.equal(value.review.required_schema_nodes, 907, "schema_catalog_required_node_count_invalid");
   assert.equal(value.review.reviewed_schema_nodes, value.review.required_schema_nodes, "schema_catalog_reviewed_node_count_invalid");
   assert.equal(value.review.unreviewed_schema_nodes, 0, "schema_catalog_unreviewed_nodes");
   assert.equal(value.global_payload_limits.review, "reviewed", "schema_manifest_global_limit_unreviewed");

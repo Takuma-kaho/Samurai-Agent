@@ -27,6 +27,12 @@ import {
   stableHash
 } from "@samurai-agent/core-schemas";
 
+export {
+  GatewayFormalWorkspaceIngress,
+  type FormalWorkspaceIngressPort,
+  type FormalWorkspaceTarget
+} from "./formal-workspace-ingress.js";
+
 const mcpProcessCloseGraceMs = 1_000;
 const mcpProcessCloseKillWaitMs = 1_000;
 
