@@ -43,7 +43,15 @@ const externalAppConnectionCreate = defineCommand<ExternalAppConnectionCreatePor
   input: Input,
   output: Output,
   createHandler(ports) {
-    return { execute: async function handleExternalAppConnectionCreate(context: TrustedDomainContext, request: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+    return { execute: async function handleExternalAppConnectionCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      const request = {
+        connector_id: input.connector_id,
+        app_id: input.app_id,
+        delegated_principal: input.delegated_principal,
+        allowed_room_ids: input.allowed_room_ids,
+        ingress_classes: input.ingress_classes,
+        non_secret_metadata: input.non_secret_metadata
+      };
       return { ok: true, value: await ports.createExternalAppConnection({ context, request }) };
     } };
   }

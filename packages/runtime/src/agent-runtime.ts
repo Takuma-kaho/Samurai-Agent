@@ -4238,7 +4238,7 @@ export class AgentRuntime {
       throw new RuntimeRequestError("forbidden", `domain_command_source_not_allowed:${command.id}:${inputSource}`);
     }
     const payload = jsonDefinedRecord(input.payload === undefined ? {} : input.payload);
-    assertNoTrustedContextPayloadFields(payload, command.id === "external_app.connection.create" ? ["app_id", "connector_id"] : []);
+    assertNoTrustedContextPayloadFields(payload, command.id === runtimeOperationIds.externalAppConnectionCreate ? ["app_id", "connector_id"] : []);
     const inputIssue = validateDomainCommandInput(command, payload);
     if (inputIssue) {
       throw new RuntimeRequestError("validation", `domain_command_input_invalid:${command.id}:${inputIssue.path}:${inputIssue.message}`);
@@ -4980,7 +4980,7 @@ export class AgentRuntime {
     trusted: TrustedDomainRuntimeContext = {},
     operationId?: string
   ): Promise<TrustedDomainContext> {
-    assertNoTrustedContextPayloadFields(payload, operationId === "external_app.connection.create" ? ["app_id", "connector_id"] : []);
+    assertNoTrustedContextPayloadFields(payload, operationId === runtimeOperationIds.externalAppConnectionCreate ? ["app_id", "connector_id"] : []);
     const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey, roomId: trustedRoomId, sessionRef, source } = trusted;
     assertTrustedRuntimeContextActive({ signal, deadlineAt });
     const actorIdentity = trustedActorIdentityForSource(inputSource);
@@ -5603,7 +5603,7 @@ export class AgentRuntime {
     // Native compatibility picks the persisted local Room before the command;
     // the public DTO itself never chooses a Room or Authority.
     const result = await this.runDomainCommandWithTrustedContext({
-      command_id: "automation.job.save",
+      command_id: runtimeOperationIds.automationJobSave,
       input_source: "runtime_api",
       idempotency_key: `automation_job_save:${stableHash(input)}`,
       payload: input

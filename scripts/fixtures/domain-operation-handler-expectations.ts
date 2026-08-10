@@ -26,6 +26,32 @@ const trustedContext = {
 } as const;
 
 export const handlerExpectations = {
+  "activity.history.list": {
+    input: {
+      principal_id: "human:owner",
+      source_kind: "external_app",
+      source_id: "app_fixture",
+      status: "completed",
+      created_after: "2026-07-01T00:00:00.000Z",
+      created_before: "2026-07-31T00:00:00.000Z",
+      limit: 25
+    },
+    calls: [{
+      method: "listActivityHistory",
+      args: [{
+        context: trustedContext,
+        request: {
+          principal_id: "human:owner",
+          source_kind: "external_app",
+          source_id: "app_fixture",
+          status: "completed",
+          created_after: "2026-07-01T00:00:00.000Z",
+          created_before: "2026-07-31T00:00:00.000Z",
+          limit: 25
+        }
+      }]
+    }]
+  },
   "agent.backend.bind": {
     input: { id: "agent_fixture", backend_id: "backend_next" },
     calls: [{ method: "bindAgentBackend", args: [trustedContext, { id: "agent_fixture", backendId: "backend_next" }] }]

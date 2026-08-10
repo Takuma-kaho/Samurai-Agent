@@ -18,7 +18,9 @@ export const runtimeOperationIds = Object.freeze({
   mcpCall: domainOperationIdFor("mcpCall"),
   generatedSurfaceActionRun: domainOperationIdFor("generatedSurfaceActionRun"),
   generatedSurfaceInteractionRecord: domainOperationIdFor("generatedSurfaceInteractionRecord"),
-  collectionPatchApply: domainOperationIdFor("collectionPatchApply")
+  collectionPatchApply: domainOperationIdFor("collectionPatchApply"),
+  automationJobSave: domainOperationIdFor("automationJobSave"),
+  externalAppConnectionCreate: domainOperationIdFor("externalAppConnectionCreate")
 });
 
 export type RuntimeOperationId = (typeof runtimeOperationIds)[keyof typeof runtimeOperationIds];

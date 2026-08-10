@@ -26,7 +26,13 @@ const externalAppConnectionUpdateScope = defineCommand<ExternalAppConnectionUpda
   },
   input: Input, output: Output,
   createHandler(ports) {
-    return { execute: async function handleExternalAppConnectionUpdateScope(context: TrustedDomainContext, request: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+    return { execute: async function handleExternalAppConnectionUpdateScope(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      const request = {
+        connection_id: input.connection_id,
+        allowed_room_ids: input.allowed_room_ids,
+        ingress_classes: input.ingress_classes,
+        ...(input.non_secret_metadata ? { non_secret_metadata: input.non_secret_metadata } : {})
+      };
       return { ok: true, value: await ports.updateExternalAppConnectionScope({ context, request }) };
     } };
   }

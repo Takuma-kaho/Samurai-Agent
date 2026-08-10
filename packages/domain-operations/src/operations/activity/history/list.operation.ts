@@ -29,7 +29,16 @@ const activityHistoryList = defineQuery<ActivityHistoryListPorts>()({
   },
   input: Input, output: Output,
   createHandler(ports) {
-    return { execute: async function handleActivityHistoryList(context: TrustedDomainContext, request: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+    return { execute: async function handleActivityHistoryList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      const request = {
+        ...(input.principal_id ? { principal_id: input.principal_id } : {}),
+        ...(input.source_kind ? { source_kind: input.source_kind } : {}),
+        ...(input.source_id ? { source_id: input.source_id } : {}),
+        ...(input.status ? { status: input.status } : {}),
+        ...(input.created_after ? { created_after: input.created_after } : {}),
+        ...(input.created_before ? { created_before: input.created_before } : {}),
+        ...(input.limit ? { limit: input.limit } : {})
+      };
       return { ok: true, value: { items: await ports.listActivityHistory({ context, request }) } };
     } };
   }

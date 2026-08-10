@@ -56,7 +56,17 @@ const automationJobSave = defineCommand<AutomationJobSavePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleAutomationJobSave(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: await ports.saveSessionlessAutomationJob({ context, request: input }) };
+        const request = {
+          delivery_target: input.delivery_target,
+          ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+          kind: input.kind,
+          max_attempts: input.max_attempts,
+          ...(input.next_run_at ? { next_run_at: input.next_run_at } : {}),
+          schedule: input.schedule,
+          target_instruction: input.target_instruction,
+          title: input.title
+        };
+        return { ok: true, value: await ports.saveSessionlessAutomationJob({ context, request }) };
       }
     };
   }
