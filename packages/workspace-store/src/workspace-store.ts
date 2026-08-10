@@ -22,6 +22,7 @@ import { AccessHistoryRepository } from "./repositories/access-history-repositor
 import { ActivityHistoryRepository } from "./repositories/activity-history-repository";
 import { ArtifactRepository } from "./repositories/artifact-repository";
 import { AutomationRepository } from "./repositories/automation-repository";
+import { ExternalAppConnectionRepository } from "./repositories/external-app-connection-repository";
 import { ClientEventQueueRepository } from "./repositories/client-event-queue-repository";
 import { CollectionRepository } from "./repositories/collection-repository";
 import { DurableWorkRepository } from "./repositories/durable-work-repository";
@@ -56,6 +57,7 @@ interface WorkspaceComposition {
   learning: LearningRepository;
   collections: CollectionRepository;
   automation: AutomationRepository;
+  externalAppConnections: ExternalAppConnectionRepository;
   gateway: GatewayRepository;
   metadata: WorkspaceMetadataRepository;
   roomAgent: RoomAgentRepository;
@@ -199,6 +201,7 @@ export class WorkspaceStore {
     const wiki = new KnowledgeWikiRepository(db, this.rootDir);
     const skills = new SkillRepository(db, this.rootDir);
     const automation = new AutomationRepository(db);
+    const externalAppConnections = new ExternalAppConnectionRepository(db);
     const gateway = new GatewayRepository(db);
     const metadata = new WorkspaceMetadataRepository(db);
     const roomAgent = new RoomAgentRepository(db);
@@ -284,6 +287,7 @@ export class WorkspaceStore {
       learning,
       collections,
       automation,
+      externalAppConnections,
       gateway,
       metadata,
       roomAgent,
@@ -304,7 +308,7 @@ export class WorkspaceStore {
   /** Keep every legacy entry point explicit; no Proxy or string dispatch is used. */
   private bindCompatibilityApi(): void {
     const facade = this as WorkspaceStore;
-    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, gateway, metadata, roomAgent, roomPermissions, accessHistory, activityHistory, workspaceJobs, queries, bundles, restore, maintenance } = this.composition;
+    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, externalAppConnections, gateway, metadata, roomAgent, roomPermissions, accessHistory, activityHistory, workspaceJobs, queries, bundles, restore, maintenance } = this.composition;
 
     facade.migrate = this.kernel.migrate.bind(this.kernel);
     facade.listSchemaMigrations = this.kernel.listSchemaMigrations.bind(this.kernel);
@@ -604,7 +608,6 @@ export class WorkspaceStore {
     facade.getAutomationJob = automation.getAutomationJob.bind(automation);
     facade.listAutomationJobs = automation.listAutomationJobs.bind(automation);
     facade.acquireAutomationJobLock = automation.acquireAutomationJobLock.bind(automation);
-    facade.heartbeatAutomationJobLock = automation.heartbeatAutomationJobLock.bind(automation);
     facade.releaseAutomationJobLock = automation.releaseAutomationJobLock.bind(automation);
     facade.requeueAutomationJob = automation.requeueAutomationJob.bind(automation);
     facade.getAutomationQueueSummary = automation.getAutomationQueueSummary.bind(automation);
@@ -612,6 +615,15 @@ export class WorkspaceStore {
     facade.updateAutomationRun = automation.updateAutomationRun.bind(automation);
     facade.getAutomationRun = automation.getAutomationRun.bind(automation);
     facade.listAutomationRuns = automation.listAutomationRuns.bind(automation);
+    facade.attachAutomationRunEvidence = automation.attachAutomationRunEvidence.bind(automation);
+    facade.settleAutomationRun = automation.settleAutomationRun.bind(automation);
+    facade.listExpiredAutomationRunClaims = automation.listExpiredAutomationRunClaims.bind(automation);
+
+    facade.saveExternalAppConnection = externalAppConnections.saveExternalAppConnection.bind(externalAppConnections);
+    facade.getExternalAppConnection = externalAppConnections.getExternalAppConnection.bind(externalAppConnections);
+    facade.getExternalAppConnectionByConnector = externalAppConnections.getExternalAppConnectionByConnector.bind(externalAppConnections);
+    facade.listExternalAppConnections = externalAppConnections.listExternalAppConnections.bind(externalAppConnections);
+    facade.revokeExternalAppConnection = externalAppConnections.revokeExternalAppConnection.bind(externalAppConnections);
 
     facade.saveExternalSend = gateway.saveExternalSend.bind(gateway);
     facade.getExternalSend = gateway.getExternalSend.bind(gateway);
@@ -1004,7 +1016,6 @@ export interface WorkspaceStore {
   getAutomationJob: AutomationRepository["getAutomationJob"];
   listAutomationJobs: AutomationRepository["listAutomationJobs"];
   acquireAutomationJobLock: AutomationRepository["acquireAutomationJobLock"];
-  heartbeatAutomationJobLock: AutomationRepository["heartbeatAutomationJobLock"];
   releaseAutomationJobLock: AutomationRepository["releaseAutomationJobLock"];
   requeueAutomationJob: AutomationRepository["requeueAutomationJob"];
   getAutomationQueueSummary: AutomationRepository["getAutomationQueueSummary"];
@@ -1012,6 +1023,15 @@ export interface WorkspaceStore {
   updateAutomationRun: AutomationRepository["updateAutomationRun"];
   getAutomationRun: AutomationRepository["getAutomationRun"];
   listAutomationRuns: AutomationRepository["listAutomationRuns"];
+  attachAutomationRunEvidence: AutomationRepository["attachAutomationRunEvidence"];
+  settleAutomationRun: AutomationRepository["settleAutomationRun"];
+  listExpiredAutomationRunClaims: AutomationRepository["listExpiredAutomationRunClaims"];
+
+  saveExternalAppConnection: ExternalAppConnectionRepository["saveExternalAppConnection"];
+  getExternalAppConnection: ExternalAppConnectionRepository["getExternalAppConnection"];
+  getExternalAppConnectionByConnector: ExternalAppConnectionRepository["getExternalAppConnectionByConnector"];
+  listExternalAppConnections: ExternalAppConnectionRepository["listExternalAppConnections"];
+  revokeExternalAppConnection: ExternalAppConnectionRepository["revokeExternalAppConnection"];
 
   saveExternalSend: GatewayRepository["saveExternalSend"];
   getExternalSend: GatewayRepository["getExternalSend"];

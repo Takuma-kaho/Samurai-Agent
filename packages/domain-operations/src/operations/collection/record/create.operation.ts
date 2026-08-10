@@ -33,7 +33,8 @@ const collectionRecordCreate = defineCommand<CollectionRecordCreatePorts>()({
     "runtime_api",
     "provider_tool_call",
     "scheduled_context",
-    "generated_surface"
+    "generated_surface",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",

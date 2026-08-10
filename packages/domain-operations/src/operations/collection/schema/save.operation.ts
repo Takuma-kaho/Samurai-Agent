@@ -45,7 +45,8 @@ const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
   "description": "Save a Collection schema with validated fields and Workspace view definitions.",
   "sources": [
     "runtime_api",
-    "provider_tool_call"
+    "provider_tool_call",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",

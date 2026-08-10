@@ -23,6 +23,7 @@ const job: AutomationJobRecord = {
   target_instruction: "Create a digest",
   delivery_target: { channel: "activity" },
   locked_until: "2099-01-01T00:00:00.000Z",
+  lock_owner_token: "lock-test-token",
   failure_count: 1,
   max_attempts: 3,
   created_at: "2026-01-01T00:00:00.000Z",
@@ -31,7 +32,7 @@ const job: AutomationJobRecord = {
 
 describe("Automation job queue operation handlers", () => {
   it("passes the validated lock-release arguments to the queue port", async () => {
-    const releaseAutomationJobLock = vi.fn(async () => ({ ...job, locked_until: undefined }));
+    const releaseAutomationJobLock = vi.fn(async () => ({ ...job, locked_until: undefined, lock_owner_token: undefined }));
     const handler = automationJobReleaseLock.createHandler({
       releaseAutomationJobLock,
       automationJobNotFoundError: () => new Error("automation_job_not_found")
@@ -39,10 +40,11 @@ describe("Automation job queue operation handlers", () => {
 
     const result = await handler.execute(context, {
       job_id: job.id,
+      lock_owner_token: "lock-test-token",
       now: "2026-02-01T00:00:00.000Z"
     });
 
-    expect(releaseAutomationJobLock).toHaveBeenCalledWith(job.id, "2026-02-01T00:00:00.000Z");
+    expect(releaseAutomationJobLock).toHaveBeenCalledWith(job.id, "lock-test-token", "2026-02-01T00:00:00.000Z");
     expect(result.value.locked_until).toBeUndefined();
   });
 
@@ -52,7 +54,7 @@ describe("Automation job queue operation handlers", () => {
       automationJobNotFoundError: () => new Error("automation_job_not_found")
     });
 
-    await expect(handler.execute(context, { job_id: "missing" })).rejects.toThrow("automation_job_not_found");
+    await expect(handler.execute(context, { job_id: "missing", lock_owner_token: "lock-test-token" })).rejects.toThrow("automation_job_not_found");
   });
 
   it("passes the validated requeue arguments to the queue port", async () => {
@@ -77,9 +79,10 @@ describe("Automation job queue operation handlers", () => {
   });
 
   it("serializes optional job fields without leaking undefined into rollback JSON", () => {
-    const serialized = automationJobJson({ ...job, locked_until: undefined, retry_after_at: undefined });
+    const serialized = automationJobJson({ ...job, locked_until: undefined, lock_owner_token: undefined, retry_after_at: undefined });
 
     expect(serialized).not.toHaveProperty("locked_until");
+    expect(serialized).not.toHaveProperty("lock_owner_token");
     expect(serialized).not.toHaveProperty("retry_after_at");
   });
 

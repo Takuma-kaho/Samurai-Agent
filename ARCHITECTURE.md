@@ -449,17 +449,20 @@ Backend Port → Backend cassette implementation
 
 現行コードには、Workspace Store、Room permission、Agent Backend、Memory・Skill・Learning、Artifact、Collection、Generated Surface、Gatewayの基盤がある。
 
-Core06・Core07・Core08の範囲では、次をSessionなしで扱える。
+Core06〜Core09の範囲では、次をSessionなしで扱える。
 
 - Room・PrincipalをTrusted Contextで決めるDomain Operation
 - Artifactの作成、改訂、復元、修復、PDF出力
 - CollectionのSchema、Record、Patch、Deleteと、既存Workspace Executionを使うAI指示Action
 - Generated Surfaceの作成・改訂・Action。SurfaceのRoomは`resource_access_boundaries`で決め、SessionRefは任意の出所だけとして残す
 - Activity、Workspace Change、ResourceUsageによる変更証跡
+- secretを持たないExternal App Connection、委任元、Room上限、入口上限の永続化
+- Connector evidenceから現在のRoom権限を再評価するFormal ingress。外部AppのQuery、Domain Operation、Activity Ingestは共通Resolverを通る
+- Room／Authorityを永続化したAutomation。旧Jobは`rebind_required`で停止し、現在は`wiki_reindex`だけをSessionなしで実行する
 
 新しいBackupはArtifact・Collectionの正本を対象にし、Generated Surfaceのbundleは再生成可能な互換データとして除く。旧Surfaceを含むBackupは引き続きRestoreできる。
 
-Chat、Session一覧、Gateway、Automation、HTTP／MCP／Pluginの正式な外部接続は、依然として後続境界である。したがって、現在の実装を製品全体の完成と同一視しない。
+既存Chat／Session経路は互換機能として残る。Core09はin-processのReference Adapterまでであり、本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChatは後続境界である。したがって、現在の実装を製品全体の完成と同一視しない。
 
 ### 13.2 Coreの移行単位
 
@@ -501,6 +504,16 @@ Core08は、Artifact・Collectionの保存とGenerated Surfaceの操作をSessio
 - 保存ごとにDomain Operation、Workspace Change、Activity、ResourceUsageを接続するが、Activity保存からJobや学習は自動起動しない。
 - Surfaceは表示契約と派生bundleであり、DOM、開閉、pin表示、分割比率、表示順をWorkspace正本へ保存しない。
 - Native AppのSession付き操作は互換Adapterとして残す。Core08からGateway、Automation、外部公開APIは追加しない。
+
+### 13.6 Core09の移行停止地点
+
+Core09は、外部AppとAutomationがSessionを作らずにWorkspace Coreを使うための認証・認可境界を追加する移行単位である。
+
+- ConnectionはConnector evidence、委任元、Room上限、入口上限を持つが、Room membershipや個別Operation ACLを追加しない。CredentialはWorkspaceへ保存しない。
+- Formal ingressはQuery、Domain Operation、Activity Ingestの3入口だけで、すべて同じResolverと現在のRoom権限を使う。Queryは外部経路では書き込みをしない。
+- Gateway Pairingはtransport admissionのままにし、既存Chat／Session dispatchをFormal ingressから呼ばない。
+- Automationは実行直前にAuthorityを再評価する。認可失効は`blocked`として記録し、Retry budgetを消費しない。SessionなしExecutorがないkindは安全停止する。
+- 本番Transport、外部Credential管理UX、任意Workspace Job API、自動Memory／Knowledge／Skill化、Room realtimeはCore09に含めない。
 
 ---
 

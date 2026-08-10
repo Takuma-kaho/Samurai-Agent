@@ -35,6 +35,7 @@ type RoomAuthorizationStore = Pick<WorkspaceStore,
   | "getRoomMember"
   | "getRoomAgent"
   | "getAgentWorkspacePermission"
+  | "getAgent"
   | "listRoomIdsForHuman"
   | "listRoomIdsForAgent"
   | "listResourceIdsAvailableInRoom"
@@ -59,6 +60,11 @@ export class RoomAuthorizationService {
 
   async workspaceDecision(principal: ParticipantPrincipal, action: WorkspaceAction) {
     const delegated = delegatedParticipant(principal);
+    if (delegated.kind === "agent") {
+      const agent = await this.store.getAgent(delegated.agentId);
+      if (!agent) return { allowed: false, action, reason: "agent_not_found" } as const;
+      if (!agent.enabled) return { allowed: false, action, reason: "agent_disabled" } as const;
+    }
     const [membership, agentPermission] = await Promise.all([
       delegated.kind === "human" ? this.store.getWorkspaceMember(delegated.participantId) : Promise.resolve(undefined),
       delegated.kind === "agent" ? this.store.getAgentWorkspacePermission(delegated.agentId) : Promise.resolve(undefined)
@@ -83,6 +89,11 @@ export class RoomAuthorizationService {
     if (delegated.kind === "human") {
       const workspace = await this.store.getWorkspaceMember(delegated.participantId);
       if (!workspace) return deniedRoomDecision(action, "workspace_membership_missing");
+    }
+    if (delegated.kind === "agent") {
+      const agent = await this.store.getAgent(delegated.agentId);
+      if (!agent) return deniedRoomDecision(action, "agent_not_found");
+      if (!agent.enabled) return deniedRoomDecision(action, "agent_disabled");
     }
     const membership = delegated.kind === "human"
       ? await this.store.getRoomMember(roomId, delegated.participantId)
@@ -196,6 +207,8 @@ export class RoomAuthorizationService {
     const delegated = delegatedParticipant(principal);
     if (delegated.kind === "human") return new Set(await this.store.listRoomIdsForHuman(delegated.participantId));
     if (delegated.kind === "agent") {
+      const agent = await this.store.getAgent(delegated.agentId);
+      if (!agent || !agent.enabled) return new Set();
       const [agentRooms, requesterRooms] = await Promise.all([
         this.store.listRoomIdsForAgent(delegated.agentId),
         this.store.listRoomIdsForHuman(delegated.requestedByParticipantId)
@@ -207,7 +220,7 @@ export class RoomAuthorizationService {
   }
 }
 
-function deniedRoomDecision(action: RoomAction, reason: "workspace_membership_missing"): PermissionDecision {
+function deniedRoomDecision(action: RoomAction, reason: Extract<PermissionDecision["reason"], "workspace_membership_missing" | "agent_not_found" | "agent_disabled">): PermissionDecision {
   return { allowed: false, action, reason };
 }
 

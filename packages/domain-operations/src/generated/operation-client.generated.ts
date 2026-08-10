@@ -2,6 +2,7 @@
 import { domainOperationIds, type DomainOperationId } from "./operation-index.generated.js";
 
 export const domainOperationClient = Object.freeze({
+  activityHistoryList: (): typeof domainOperationIds.activityHistoryList => domainOperationIds.activityHistoryList,
   agentBackendBind: (): typeof domainOperationIds.agentBackendBind => domainOperationIds.agentBackendBind,
   agentCreate: (): typeof domainOperationIds.agentCreate => domainOperationIds.agentCreate,
   agentList: (): typeof domainOperationIds.agentList => domainOperationIds.agentList,
@@ -13,6 +14,10 @@ export const domainOperationClient = Object.freeze({
   artifactRepair: (): typeof domainOperationIds.artifactRepair => domainOperationIds.artifactRepair,
   artifactRestoreRevision: (): typeof domainOperationIds.artifactRestoreRevision => domainOperationIds.artifactRestoreRevision,
   artifactRevise: (): typeof domainOperationIds.artifactRevise => domainOperationIds.artifactRevise,
+  automationJobManagerResume: (): typeof domainOperationIds.automationJobManagerResume => domainOperationIds.automationJobManagerResume,
+  automationJobManagerStop: (): typeof domainOperationIds.automationJobManagerStop => domainOperationIds.automationJobManagerStop,
+  automationJobReauthorize: (): typeof domainOperationIds.automationJobReauthorize => domainOperationIds.automationJobReauthorize,
+  automationJobRebindAuthority: (): typeof domainOperationIds.automationJobRebindAuthority => domainOperationIds.automationJobRebindAuthority,
   automationJobReleaseLock: (): typeof domainOperationIds.automationJobReleaseLock => domainOperationIds.automationJobReleaseLock,
   automationJobRequeue: (): typeof domainOperationIds.automationJobRequeue => domainOperationIds.automationJobRequeue,
   automationJobRun: (): typeof domainOperationIds.automationJobRun => domainOperationIds.automationJobRun,
@@ -48,6 +53,9 @@ export const domainOperationClient = Object.freeze({
   curatorSnapshotCreate: (): typeof domainOperationIds.curatorSnapshotCreate => domainOperationIds.curatorSnapshotCreate,
   curatorSnapshotList: (): typeof domainOperationIds.curatorSnapshotList => domainOperationIds.curatorSnapshotList,
   evaluationRun: (): typeof domainOperationIds.evaluationRun => domainOperationIds.evaluationRun,
+  externalAppConnectionCreate: (): typeof domainOperationIds.externalAppConnectionCreate => domainOperationIds.externalAppConnectionCreate,
+  externalAppConnectionRevoke: (): typeof domainOperationIds.externalAppConnectionRevoke => domainOperationIds.externalAppConnectionRevoke,
+  externalAppConnectionUpdateScope: (): typeof domainOperationIds.externalAppConnectionUpdateScope => domainOperationIds.externalAppConnectionUpdateScope,
   externalSend: (): typeof domainOperationIds.externalSend => domainOperationIds.externalSend,
   externalSendDispatch: (): typeof domainOperationIds.externalSendDispatch => domainOperationIds.externalSendDispatch,
   externalSendPrepare: (): typeof domainOperationIds.externalSendPrepare => domainOperationIds.externalSendPrepare,

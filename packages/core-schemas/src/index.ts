@@ -45,6 +45,7 @@ export const actorIdentities = [
   "owner",
   "owner_scheduled",
   "paired_contact",
+  "external_app",
   "external_unknown",
   "webhook_source",
   "system"
@@ -147,6 +148,12 @@ export const skillOptimizationCandidateStatuses = ["proposed", "passed", "reject
 export const skillOptimizationDatasetSources = ["real", "golden", "synthetic"] as const;
 export const skillOptimizationDatasetSplits = ["train", "validation", "holdout"] as const;
 export const automationJobStatuses = ["enabled", "disabled", "archived"] as const;
+export const externalAppConnectionStatuses = ["active", "revoked"] as const;
+export const externalAppIngressClasses = ["query", "domain_operation", "activity_ingest"] as const;
+export const automationAuthorizationStates = ["ready", "rebind_required", "blocked"] as const;
+export const automationAuthorityKinds = ["direct_principal", "external_connection"] as const;
+export const automationManagementStates = ["allowed", "manager_stopped"] as const;
+export const automationRunStatuses = ["started", "completed", "failed", "blocked"] as const;
 export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed"] as const;
 export const externalSendChannels = ["webhook", "email", "slack", "telegram", "line"] as const;
 export const externalSendTransportStatuses = ["ready", "dry_run_only", "not_configured"] as const;
@@ -214,6 +221,12 @@ export const LearningEvaluationVerdictSchema = z.enum(learningEvaluationVerdicts
 export const LearningBudgetUnitSchema = z.enum(learningBudgetUnits);
 export const LearningCandidateSignalKindSchema = z.enum(learningCandidateSignalKinds);
 export const AutomationJobStatusSchema = z.enum(automationJobStatuses);
+export const ExternalAppConnectionStatusSchema = z.enum(externalAppConnectionStatuses);
+export const ExternalAppIngressClassSchema = z.enum(externalAppIngressClasses);
+export const AutomationAuthorizationStateSchema = z.enum(automationAuthorizationStates);
+export const AutomationAuthorityKindSchema = z.enum(automationAuthorityKinds);
+export const AutomationManagementStateSchema = z.enum(automationManagementStates);
+export const AutomationRunStatusSchema = z.enum(automationRunStatuses);
 export const ExternalSendStatusSchema = z.enum(externalSendStatuses);
 export const ExternalSendChannelSchema = z.enum(externalSendChannels);
 export const ExternalSendTransportStatusSchema = z.enum(externalSendTransportStatuses);
@@ -278,6 +291,12 @@ export type LearningEvaluationVerdict = z.infer<typeof LearningEvaluationVerdict
 export type LearningBudgetUnit = z.infer<typeof LearningBudgetUnitSchema>;
 export type LearningCandidateSignalKind = z.infer<typeof LearningCandidateSignalKindSchema>;
 export type AutomationJobStatus = z.infer<typeof AutomationJobStatusSchema>;
+export type ExternalAppConnectionStatus = z.infer<typeof ExternalAppConnectionStatusSchema>;
+export type ExternalAppIngressClass = z.infer<typeof ExternalAppIngressClassSchema>;
+export type AutomationAuthorizationState = z.infer<typeof AutomationAuthorizationStateSchema>;
+export type AutomationAuthorityKind = z.infer<typeof AutomationAuthorityKindSchema>;
+export type AutomationManagementState = z.infer<typeof AutomationManagementStateSchema>;
+export type AutomationRunStatus = z.infer<typeof AutomationRunStatusSchema>;
 export type ExternalSendStatus = z.infer<typeof ExternalSendStatusSchema>;
 export type ExternalSendChannel = z.infer<typeof ExternalSendChannelSchema>;
 export type ExternalSendTransportStatus = z.infer<typeof ExternalSendTransportStatusSchema>;
@@ -509,11 +528,11 @@ export const SessionRefSchema = z.object({
 export type SessionRef = z.infer<typeof SessionRefSchema>;
 
 /** Principal is the operation identity; an External App is never a member. */
-const HumanPrincipalSchema = z.object({
+export const HumanPrincipalSchema = z.object({
   kind: z.literal("human"),
   participant_id: z.string().trim().min(1)
 }).strict();
-const AgentPrincipalSchema = z.object({
+export const AgentPrincipalSchema = z.object({
   kind: z.literal("agent"),
   agent_id: z.string().trim().min(1),
   requested_by_participant_id: z.string().trim().min(1)
@@ -533,6 +552,55 @@ export const PrincipalSchema = z.discriminatedUnion("kind", [
   }).strict()
 ]);
 export type Principal = z.infer<typeof PrincipalSchema>;
+
+/** A Connection may delegate only to a durable Human or Agent identity. */
+export const DelegatedPrincipalSchema = z.union([HumanPrincipalSchema, AgentPrincipalSchema]);
+export type DelegatedPrincipal = z.infer<typeof DelegatedPrincipalSchema>;
+
+/** Secret-free proof produced by a Transport Adapter after authentication. */
+export const ConnectorEvidenceSchema = z.object({
+  connector_id: z.string().trim().min(1).max(200),
+  app_id: z.string().trim().min(1).max(200)
+}).strict();
+export type ConnectorEvidence = z.infer<typeof ConnectorEvidenceSchema>;
+
+/** Connection metadata is a deliberately small operational label, never credential storage. */
+export const connectionMetadataEnvironments = ["development", "staging", "production"] as const;
+export const NonSecretConnectionMetadataSchema = z.object({
+  label: z.string().trim().min(1).max(200).optional(),
+  environment: z.enum(connectionMetadataEnvironments).optional()
+}).strict();
+
+/**
+ * A narrowed external entry configuration. It is not a Room membership or an
+ * operation ACL; current Room and operation authorization remains authoritative.
+ */
+export const ExternalAppConnectionRecordSchema = z.object({
+  id: z.string().trim().min(1),
+  workspace_id: z.string().trim().min(1),
+  connector_id: z.string().trim().min(1).max(200),
+  app_id: z.string().trim().min(1).max(200),
+  status: ExternalAppConnectionStatusSchema,
+  delegated_principal: DelegatedPrincipalSchema,
+  allowed_room_ids: z.array(z.string().trim().min(1)).min(1)
+    .refine((ids) => new Set(ids).size === ids.length, "duplicate_connection_room_scope")
+    .refine((ids) => !ids.includes("*"), "wildcard_connection_room_scope_forbidden"),
+  ingress_classes: z.array(ExternalAppIngressClassSchema).min(1)
+    .refine((classes) => new Set(classes).size === classes.length, "duplicate_connection_ingress_class"),
+  non_secret_metadata: NonSecretConnectionMetadataSchema.default({}),
+  created_by: DelegatedPrincipalSchema,
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  revoked_at: z.string().datetime().optional()
+}).strict().superRefine((connection, issue) => {
+  if (connection.status === "revoked" && !connection.revoked_at) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "revoked_connection_requires_timestamp", path: ["revoked_at"] });
+  }
+  if (connection.status === "active" && connection.revoked_at) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "active_connection_cannot_have_revoked_timestamp", path: ["revoked_at"] });
+  }
+});
+export type ExternalAppConnectionRecord = z.infer<typeof ExternalAppConnectionRecordSchema>;
 
 export const TrustedWorkspaceSourceSchema = z.object({
   kind: z.enum(["native_app", "external_app", "host", "system"]),
@@ -2558,17 +2626,117 @@ export const AutomationJobRecordSchema = z.object({
   schedule: z.string().min(1),
   target_instruction: z.string().min(1),
   delivery_target: z.record(jsonValueSchema),
+  workspace_id: z.string().trim().min(1).optional(),
+  room_id: z.string().trim().min(1).optional(),
+  authority: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("direct_principal"), principal: DelegatedPrincipalSchema }).strict(),
+    z.object({
+      kind: z.literal("external_connection"),
+      connection_id: z.string().trim().min(1),
+      connector_id: z.string().trim().min(1),
+      app_id: z.string().trim().min(1),
+      delegated_principal: DelegatedPrincipalSchema
+    }).strict()
+  ]).optional(),
+  created_principal_snapshot: PrincipalSchema.optional(),
+  source_snapshot: TrustedWorkspaceSourceSchema.optional(),
+  connection_id: z.string().trim().min(1).optional(),
+  session_ref: SessionRefSchema.optional(),
+  authorization_state: AutomationAuthorizationStateSchema.default("rebind_required"),
+  authorization_error_code: z.string().trim().min(1).optional(),
+  authorized_at: z.string().datetime().optional(),
+  blocked_at: z.string().datetime().optional(),
+  rebound_at: z.string().datetime().optional(),
+  management_state: AutomationManagementStateSchema.default("allowed"),
+  management_operation_id: z.string().trim().min(1).optional(),
+  created_operation_id: z.string().trim().min(1).optional(),
+  rebound_operation_id: z.string().trim().min(1).optional(),
   next_run_at: z.string().datetime().optional(),
   last_run_at: z.string().datetime().optional(),
   retry_after_at: z.string().datetime().optional(),
   locked_until: z.string().datetime().optional(),
+  lock_owner_token: z.string().trim().min(1).optional(),
   failure_count: z.number().int().nonnegative().default(0),
   max_attempts: z.number().int().positive().default(3),
   last_error: z.string().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
-}).strict();
+}).strict().superRefine((job, issue) => {
+  if (job.authority?.kind === "external_connection") {
+    if (job.connection_id !== job.authority.connection_id) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, path: ["connection_id"], message: "automation_connection_authority_mismatch" });
+    }
+  } else if (job.connection_id) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["connection_id"], message: "automation_direct_authority_connection_forbidden" });
+  }
+  if (job.authorization_state === "ready") {
+    for (const field of ["workspace_id", "room_id", "authority", "created_principal_snapshot", "source_snapshot", "authorized_at"] as const) {
+      if (!job[field]) {
+        issue.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `automation_ready_${field}_required` });
+      }
+    }
+  }
+  if (job.management_state === "manager_stopped" && job.status !== "disabled") {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["status"], message: "automation_manager_stopped_requires_disabled_status" });
+  }
+  if (Boolean(job.locked_until) !== Boolean(job.lock_owner_token)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["lock_owner_token"], message: "automation_lock_token_pair_required" });
+  }
+});
 export type AutomationJobRecord = z.infer<typeof AutomationJobRecordSchema>;
+
+export const AutomationRunRecordSchema = z.object({
+  id: z.string().trim().min(1),
+  kind: z.string().trim().min(1),
+  source: z.string().trim().min(1),
+  session_id: z.string().trim().min(1).optional(),
+  session_ref: SessionRefSchema.optional(),
+  backend_run_id: z.string().trim().min(1).optional(),
+  status: AutomationRunStatusSchema,
+  operation_id: z.string().trim().min(1).optional(),
+  job_id: z.string().trim().min(1).optional(),
+  workspace_id: z.string().trim().min(1).optional(),
+  room_id: z.string().trim().min(1).optional(),
+  authority: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("direct_principal"), principal: DelegatedPrincipalSchema }).strict(),
+    z.object({
+      kind: z.literal("external_connection"),
+      connection_id: z.string().trim().min(1),
+      connector_id: z.string().trim().min(1),
+      app_id: z.string().trim().min(1),
+      delegated_principal: DelegatedPrincipalSchema
+    }).strict()
+  ]).optional(),
+  connector_id: z.string().trim().min(1).optional(),
+  app_id: z.string().trim().min(1).optional(),
+  activity_id: z.string().trim().min(1).optional(),
+  error_code: z.string().trim().min(1).optional(),
+  started_at: z.string().datetime(),
+  completed_at: z.string().datetime().optional(),
+  blocked_at: z.string().datetime().optional(),
+  error: z.string().optional()
+}).strict().superRefine((run, issue) => {
+  if (!run.job_id) return;
+  for (const field of ["workspace_id", "room_id", "authority"] as const) {
+    if (!run[field]) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `automation_run_${field}_required` });
+    }
+  }
+  if (run.session_id) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["session_id"], message: "automation_core09_run_session_forbidden" });
+  }
+  if (run.authority?.kind === "external_connection") {
+    if (run.connector_id !== run.authority.connector_id) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, path: ["connector_id"], message: "automation_run_connector_authority_mismatch" });
+    }
+    if (run.app_id !== run.authority.app_id) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, path: ["app_id"], message: "automation_run_app_authority_mismatch" });
+    }
+  } else if (run.connector_id || run.app_id) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["authority"], message: "automation_run_direct_authority_connector_forbidden" });
+  }
+});
+export type AutomationRunRecord = z.infer<typeof AutomationRunRecordSchema>;
 
 export const ExternalSendRecordSchema = z.object({
   id: z.string().min(1),

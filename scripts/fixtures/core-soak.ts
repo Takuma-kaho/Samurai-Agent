@@ -58,7 +58,7 @@ try {
       await store.completeGatewayDelivery(delivery.id, { now, receipt: { status: 200 } });
     }
     for (const automation of await store.listAutomationJobs({ dueAt: now, enabledOnly: true })) {
-      const locked = await store.acquireAutomationJobLock(automation.id, { now, lockedUntil: expired });
+      const locked = await store.acquireAutomationJobLock(automation.id, { now, lockedUntil: expired, lockOwnerToken: `soak-${cycle}-${automation.id}` });
       if (locked) await store.requeueAutomationJob(automation.id, { now, nextRunAt: new Date(Date.parse(now) + 60_000).toISOString() });
     }
     await runtime.runCuratorJob({ respectIdleGate: false });

@@ -1,12 +1,12 @@
 import type { DomainOperationPorts } from "@samurai-agent/domain-operations";
 import type { RuntimeDomainServices } from "../domain-operation-services.js";
 
-type Ports = Pick<DomainOperationPorts, "automation.job.release_lock" | "automation.job.requeue" | "automation.job.run" | "automation.job.save" | "automation.job.set_status" | "automation.memory_review.run">;
+type Ports = Pick<DomainOperationPorts, "automation.job.release_lock" | "automation.job.requeue" | "automation.job.run" | "automation.job.save" | "automation.job.set_status" | "automation.job.rebind_authority" | "automation.job.manager_stop" | "automation.job.manager_resume" | "automation.job.reauthorize" | "automation.memory_review.run">;
 
-export function createAutomationDomainServicePorts(services: Pick<RuntimeDomainServices, "automationDomainService">): Ports {
+export function createAutomationDomainServicePorts(services: Pick<RuntimeDomainServices, "automationDomainService" | "core09AutomationDomainService">): Ports {
   return {
     "automation.job.release_lock": {
-      releaseAutomationJobLock: (jobId, now) => services.automationDomainService.releaseLock(jobId, now),
+      releaseAutomationJobLock: (jobId, lockOwnerToken, now) => services.automationDomainService.releaseLock(jobId, lockOwnerToken, now),
       automationJobNotFoundError: () => services.automationDomainService.notFoundError()
     },
     "automation.job.requeue": {
@@ -14,48 +14,28 @@ export function createAutomationDomainServicePorts(services: Pick<RuntimeDomainS
       automationJobNotFoundError: () => services.automationDomainService.notFoundError()
     },
     "automation.job.run": {
-      getAutomationJob: (id) => services.automationDomainService.getJob(id),
-      acquireAutomationJobLock: (id, input) => services.automationDomainService.acquireAutomationJobLock(id, input),
-      automationExecutionError: (code, message) => services.automationDomainService.jobError(code, message),
-      createAutomationRun: (input) => services.automationDomainService.createExecutionRun(input),
-      updateAutomationRun: (record) => services.automationDomainService.updateExecutionRun(record),
-      ensureScheduledAutomationSession: (context, title, roomId) => services.automationDomainService.ensureExecutionSession(context, title, roomId),
-      createScheduledAutomationEnvelope: (context, content) => services.automationDomainService.createExecutionEnvelope(context, content),
-      runScheduledAutomationMutation: (input) => services.automationDomainService.runExecutionMutation(input),
-      automationJobRef: (job) => services.automationDomainService.jobRef(job),
-      saveAutomationJobRecord: (job) => services.automationDomainService.saveJobRecord(job),
-      reindexAutomationWiki: () => services.automationDomainService.reindexAutomationWiki(),
-      runAutomationCurator: () => services.automationDomainService.runAutomationCurator(),
-      runAutomationMemoryReview: (session) => services.automationDomainService.runAutomationMemoryReview(session),
-      runAutomationEvaluation: () => services.automationDomainService.runAutomationEvaluation(),
-      runAutomationTranslation: (job, session, context) => services.automationDomainService.runAutomationTranslation(job, session, context),
-      runAutomationCollectionTrigger: (job) => services.automationDomainService.runAutomationCollectionTrigger(job),
-      runAutomationInstruction: (job, session, context) => services.automationDomainService.runAutomationInstruction(job, session, context),
-      automationErrorMessage: (error) => services.automationDomainService.executionErrorMessage(error),
-      automationRetryAt: (failureCount) => services.automationDomainService.automationRetryAt(failureCount)
+      runSessionlessAutomationJob: (input) => services.core09AutomationDomainService.run(input)
     },
     "automation.job.save": {
-      automationJobContract: (id) => services.automationDomainService.jobContract(id), ensureAutomationSession: () => services.automationDomainService.ensureMutationSession(),
-      createAutomationEnvelope: (content) => services.automationDomainService.createMutationEnvelope(content), getAutomationJob: (id) => services.automationDomainService.getJob(id),
-      saveAutomationJobRecord: (job) => services.automationDomainService.saveJobRecord(job), automationJobRef: (job) => services.automationDomainService.jobRef(job),
-      createAutomationRollback: (operation, refs, before, after) => services.automationDomainService.createJobRollback(operation, refs, before, after),
-      runAutomationJobMutation: (input) => services.automationDomainService.runJobMutation(input), automationJobError: (code, message) => services.automationDomainService.jobError(code, message)
+      saveSessionlessAutomationJob: (input) => services.core09AutomationDomainService.save(input)
     },
     "automation.job.set_status": {
-      automationJobContract: (id) => services.automationDomainService.jobContract(id), ensureAutomationSession: () => services.automationDomainService.ensureMutationSession(),
-      createAutomationEnvelope: (content) => services.automationDomainService.createMutationEnvelope(content), getAutomationJob: (id) => services.automationDomainService.getJob(id),
-      saveAutomationJobRecord: (job) => services.automationDomainService.saveJobRecord(job), automationJobRef: (job) => services.automationDomainService.jobRef(job),
-      createAutomationRollback: (operation, refs, before, after) => services.automationDomainService.createJobRollback(operation, refs, before, after),
-      runAutomationJobMutation: (input) => services.automationDomainService.runJobMutation(input), automationJobError: (code, message) => services.automationDomainService.jobError(code, message)
+      setSessionlessAutomationJobStatus: (input) => services.core09AutomationDomainService.setStatus(input)
+    },
+    "automation.job.rebind_authority": {
+      rebindSessionlessAutomationJobAuthority: (input) => services.core09AutomationDomainService.rebind(input)
+    },
+    "automation.job.manager_stop": {
+      managerStopSessionlessAutomationJob: (input) => services.core09AutomationDomainService.managerStop(input)
+    },
+    "automation.job.manager_resume": {
+      managerResumeSessionlessAutomationJob: (input) => services.core09AutomationDomainService.managerResume(input)
+    },
+    "automation.job.reauthorize": {
+      reauthorizeSessionlessAutomationJob: (input) => services.core09AutomationDomainService.reauthorize(input)
     },
     "automation.memory_review.run": {
-      createAutomationRun: (input) => services.automationDomainService.createExecutionRun(input),
-      updateAutomationRun: (record) => services.automationDomainService.updateExecutionRun(record),
-      ensureScheduledAutomationSession: (context, title) => services.automationDomainService.ensureExecutionSession(context, title),
-      createScheduledAutomationEnvelope: (context, content) => services.automationDomainService.createExecutionEnvelope(context, content),
-      runScheduledAutomationMutation: (input) => services.automationDomainService.runExecutionMutation(input),
-      runScheduledMemoryReview: (session) => services.automationDomainService.runExecutionMemoryReview(session),
-      automationErrorMessage: (error) => services.automationDomainService.executionErrorMessage(error)
+      sessionlessMemoryReviewUnsupported: () => services.core09AutomationDomainService.memoryReviewUnsupported()
     }
   };
 }

@@ -81,7 +81,12 @@ export async function runDueAutomation<T>(input: {
       results.push(outcome.result as T);
     } catch (error) {
       if (input.isLockedError(error)) continue;
-      throw error;
+      if (error instanceof Error && (error.message === "domain_ingress_cancelled" || error.message === "domain_ingress_deadline_exceeded")) {
+        throw error;
+      }
+      // A durable per-job failure has already been recorded by the scheduler.
+      // Continue so one broken job never starves the next due Job.
+      continue;
     }
   }
   return results;

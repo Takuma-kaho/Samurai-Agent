@@ -339,7 +339,7 @@ export const bHandlerExpectations = {
       branches: ["lock:acquired", "kind:daily_digest"],
       calls: [
         call("getAutomationJob", "automation_fixture"),
-        call("acquireAutomationJobLock", "automation_fixture", { lockedUntil: "2026-07-17T00:15:00.000Z", now }),
+        call("acquireAutomationJobLock", "automation_fixture", { lockedUntil: "2026-07-17T00:15:00.000Z", lockOwnerToken: "automation-fixture-lock", now }),
         call("createAutomationRun", startedAutomationRun),
         call("ensureScheduledAutomationSession", scheduledContext, "Fixture automation"),
         call("updateAutomationRun", scheduledAutomationRun),

@@ -36,7 +36,8 @@ const artifactCreate = defineCommand<ArtifactCreatePorts>()({
     "surface_operation",
     "provider_tool_call",
     "generated_surface",
-    "runtime_api"
+    "runtime_api",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",

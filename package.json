@@ -20,6 +20,7 @@
     "core:06:verify": "node scripts/verify-core06.mjs",
     "core:07:verify": "node scripts/verify-core07.mjs",
     "core:08:verify": "node scripts/verify-core08.mjs",
+    "core:09:verify": "node scripts/verify-core09.mjs",
     "core:verify": "node scripts/verify-core-completion.mjs",
     "core:host-runtime:check": "node scripts/check-core-host-runtime.mjs",
     "core:host-runtime:verify": "node scripts/verify-core-host-runtime.mjs",

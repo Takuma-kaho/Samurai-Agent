@@ -1,10 +1,29 @@
-import { nowIso, type AutomationJobRecord } from "@samurai-agent/core-schemas";
+import { AutomationJobRecordSchema, AutomationRunRecordSchema, nowIso, type AutomationJobRecord, type AutomationRunRecord } from "@samurai-agent/core-schemas";
 import type { Kysely } from "kysely";
 import type { WorkspaceDb } from "../kernel/workspace-db-schema";
-import type { AutomationQueueSummary, AutomationRunRecord } from "../workspace-store-contracts";
+import type { AutomationQueueSummary } from "../workspace-store-contracts";
 import { automationJobFromRow, automationJobToRow } from "./automation-row-codecs";
 import { automationRunFromRow, automationRunToRow } from "./automation-run-row-codecs";
 import { countAutomationJobs, isAutomationJobDue } from "./collection-codecs";
+
+export interface AutomationRunSettlementInput {
+  jobId: string;
+  runId: string;
+  lockOwnerToken: string;
+  outcome: "completed" | "failed" | "blocked" | "manager_stopped";
+  now: string;
+  /** Used only for a successful recurring run. */
+  nextRunAt?: string;
+  /** Used only for ordinary retryable failures. */
+  retryAfterAt?: string;
+  errorCode?: string;
+  error?: string;
+}
+
+export interface AutomationRunClaim {
+  job: AutomationJobRecord;
+  run: AutomationRunRecord;
+}
 
 /** Scheduled automation jobs and their durable run ledger. */
 export class AutomationRepository {
@@ -32,6 +51,8 @@ export class AutomationRepository {
     const dueAt = input.dueAt;
     if (dueAt) {
       query = query
+        .where("authorization_state", "=", "ready")
+        .where("management_state", "=", "allowed")
         .where((eb) => eb.or([
           eb("next_run_at", "is", null),
           eb("next_run_at", "<=", dueAt)
@@ -50,11 +71,13 @@ export class AutomationRepository {
     return rows.map(automationJobFromRow);
   }
 
-  async acquireAutomationJobLock(jobId: string, input: { lockedUntil: string; now?: string }): Promise<AutomationJobRecord | undefined> {
+  async acquireAutomationJobLock(jobId: string, input: { lockedUntil: string; lockOwnerToken: string; now?: string }): Promise<AutomationJobRecord | undefined> {
     const now = input.now ?? nowIso();
     const updated = await this.db.updateTable("automation_jobs")
-      .set({ locked_until: input.lockedUntil, updated_at: now })
+      .set({ locked_until: input.lockedUntil, lock_owner_token: input.lockOwnerToken, updated_at: now })
       .where("id","=",jobId).where("status","=","enabled")
+      .where("authorization_state", "=", "ready")
+      .where("management_state", "=", "allowed")
       .where((eb)=>eb.or([eb("locked_until","is",null),eb("locked_until","<=",now)]))
       .where((eb)=>eb.or([eb("next_run_at","is",null),eb("next_run_at","<=",now)]))
       .where((eb)=>eb.or([eb("retry_after_at","is",null),eb("retry_after_at","<=",now)]))
@@ -62,16 +85,14 @@ export class AutomationRepository {
     return Number(updated.numUpdatedRows) === 1 ? this.getAutomationJob(jobId) : undefined;
   }
 
-  async heartbeatAutomationJobLock(jobId:string,input:{expectedLockedUntil:string;lockedUntil:string;now?:string}):Promise<AutomationJobRecord|undefined>{const now=input.now??nowIso();const updated=await this.db.updateTable("automation_jobs").set({locked_until:input.lockedUntil,updated_at:now}).where("id","=",jobId).where("locked_until","=",input.expectedLockedUntil).where("locked_until",">",now).executeTakeFirst();return Number(updated.numUpdatedRows)===1?this.getAutomationJob(jobId):undefined}
-
-  async releaseAutomationJobLock(jobId: string, now = nowIso()): Promise<AutomationJobRecord | undefined> {
-    const job = await this.getAutomationJob(jobId);
-    if (!job) {
-      return undefined;
-    }
-    const released = { ...job, locked_until: undefined, updated_at: now };
-    await this.saveAutomationJob(released);
-    return released;
+  async releaseAutomationJobLock(jobId: string, input: { lockOwnerToken: string; now?: string }): Promise<AutomationJobRecord | undefined> {
+    const now = input.now ?? nowIso();
+    const updated = await this.db.updateTable("automation_jobs")
+      .set({ locked_until: null, lock_owner_token: null, updated_at: now })
+      .where("id", "=", jobId)
+      .where("lock_owner_token", "=", input.lockOwnerToken)
+      .executeTakeFirst();
+    return Number(updated.numUpdatedRows) === 1 ? this.getAutomationJob(jobId) : undefined;
   }
 
   async requeueAutomationJob(jobId: string, input: { nextRunAt?: string; now?: string } = {}): Promise<AutomationJobRecord | undefined> {
@@ -80,12 +101,14 @@ export class AutomationRepository {
     if (!job) {
       return undefined;
     }
+    if (job.authorization_state !== "ready" || job.management_state !== "allowed" || job.lock_owner_token) return job;
     const requeued: AutomationJobRecord = {
       ...job,
       status: "enabled",
       next_run_at: input.nextRunAt ?? now,
       retry_after_at: undefined,
       locked_until: undefined,
+      lock_owner_token: undefined,
       failure_count: 0,
       last_error: undefined,
       updated_at: now
@@ -96,7 +119,7 @@ export class AutomationRepository {
 
   async getAutomationQueueSummary(now = nowIso()): Promise<AutomationQueueSummary> {
     const jobs = await this.listAutomationJobs();
-    const enabled = jobs.filter((job) => job.status === "enabled");
+    const enabled = jobs.filter((job) => job.status === "enabled" && job.authorization_state === "ready" && job.management_state === "allowed");
     const dueJobs = enabled.filter((job) => isAutomationJobDue(job, now));
     const lockedJobs = jobs.filter((job) => job.locked_until && job.locked_until > now);
     const retryDueJobs = enabled.filter((job) => job.retry_after_at && job.retry_after_at <= now);
@@ -148,4 +171,131 @@ export class AutomationRepository {
     return rows.map(automationRunFromRow);
   }
 
+  /** Links the already-created Operation/Activity before an executor is called. */
+  async attachAutomationRunEvidence(input: {
+    jobId: string;
+    runId: string;
+    lockOwnerToken: string;
+    operationId: string;
+    activityId?: string;
+  }): Promise<AutomationRunRecord | undefined> {
+    return this.db.transaction().execute(async (transaction) => {
+      const jobRow = await transaction.selectFrom("automation_jobs").selectAll().where("id", "=", input.jobId).executeTakeFirst();
+      if (!jobRow || jobRow.lock_owner_token !== input.lockOwnerToken) return undefined;
+      const runRow = await transaction.selectFrom("automation_runs").selectAll().where("id", "=", input.runId).executeTakeFirst();
+      if (!runRow || runRow.status !== "started" || runRow.job_id !== input.jobId) return undefined;
+      const updated = AutomationRunRecordSchema.parse({
+        ...automationRunFromRow(runRow),
+        operation_id: input.operationId,
+        ...(input.activityId ? { activity_id: input.activityId } : {})
+      });
+      await transaction.updateTable("automation_runs").set(automationRunToRow(updated)).where("id", "=", input.runId).execute();
+      return updated;
+    });
+  }
+
+  /** Settles the Job and Run together, but only for the scheduler claim owner. */
+  async settleAutomationRun(input: AutomationRunSettlementInput): Promise<AutomationRunClaim | undefined> {
+    return this.db.transaction().execute(async (transaction) => {
+      const [jobRow, runRow] = await Promise.all([
+        transaction.selectFrom("automation_jobs").selectAll().where("id", "=", input.jobId).executeTakeFirst(),
+        transaction.selectFrom("automation_runs").selectAll().where("id", "=", input.runId).executeTakeFirst()
+      ]);
+      if (!jobRow || !runRow || jobRow.lock_owner_token !== input.lockOwnerToken || runRow.status !== "started" || runRow.job_id !== input.jobId) {
+        return undefined;
+      }
+      const job = automationJobFromRow(jobRow);
+      const run = automationRunFromRow(runRow);
+      const settledRun = settledRunRecord(run, input);
+      const settledJob = settledJobRecord(job, input);
+      await transaction.updateTable("automation_runs").set(automationRunToRow(settledRun)).where("id", "=", input.runId).execute();
+      await transaction.updateTable("automation_jobs")
+        .set(automationJobToRow(settledJob))
+        .where("id", "=", input.jobId)
+        .where("lock_owner_token", "=", input.lockOwnerToken)
+        .execute();
+      return { job: settledJob, run: settledRun };
+    });
+  }
+
+  /** Claims whose durable owner lock has expired and whose executor cannot be trusted to resume. */
+  async listExpiredAutomationRunClaims(now = nowIso()): Promise<AutomationRunClaim[]> {
+    const runs = await this.db.selectFrom("automation_runs").selectAll().where("status", "=", "started").where("job_id", "is not", null).execute();
+    const claims: AutomationRunClaim[] = [];
+    for (const row of runs) {
+      const run = automationRunFromRow(row);
+      if (!run.job_id) continue;
+      const job = await this.getAutomationJob(run.job_id);
+      if (job?.locked_until && job.locked_until <= now && job.lock_owner_token) claims.push({ job, run });
+    }
+    return claims;
+  }
+
+}
+
+function settledRunRecord(run: AutomationRunRecord, input: AutomationRunSettlementInput): AutomationRunRecord {
+  if (input.outcome === "completed") {
+    return AutomationRunRecordSchema.parse({ ...run, status: "completed", completed_at: input.now });
+  }
+  if (input.outcome === "failed") {
+    return AutomationRunRecordSchema.parse({
+      ...run,
+      status: "failed",
+      completed_at: input.now,
+      ...(input.errorCode ? { error_code: input.errorCode } : {}),
+      ...(input.error ? { error: input.error } : {})
+    });
+  }
+  return AutomationRunRecordSchema.parse({
+    ...run,
+    status: "blocked",
+    completed_at: input.now,
+    blocked_at: input.now,
+    ...(input.errorCode ? { error_code: input.errorCode } : {}),
+    ...(input.error ? { error: input.error } : {})
+  });
+}
+
+function settledJobRecord(job: AutomationJobRecord, input: AutomationRunSettlementInput): AutomationJobRecord {
+  const released = { ...job, locked_until: undefined, lock_owner_token: undefined, last_run_at: input.now, updated_at: input.now };
+  if (input.outcome === "completed") {
+    return AutomationJobRecordSchema.parse({
+      ...released,
+      status: job.management_state === "manager_stopped" ? "disabled" : isOneShot(job.schedule) ? "disabled" : job.status,
+      next_run_at: job.management_state === "manager_stopped" || isOneShot(job.schedule) ? undefined : input.nextRunAt,
+      retry_after_at: undefined,
+      failure_count: 0,
+      last_error: undefined
+    });
+  }
+  if (input.outcome === "failed") {
+    const failureCount = (job.failure_count ?? 0) + 1;
+    const retryable = failureCount < (job.max_attempts ?? 3) && job.management_state === "allowed";
+    return AutomationJobRecordSchema.parse({
+      ...released,
+      status: retryable ? "enabled" : "disabled",
+      retry_after_at: retryable ? input.retryAfterAt : undefined,
+      failure_count: failureCount,
+      ...(input.error ? { last_error: input.error } : {})
+    });
+  }
+  if (input.outcome === "blocked") {
+    return AutomationJobRecordSchema.parse({
+      ...released,
+      status: "disabled",
+      authorization_state: "blocked",
+      authorization_error_code: input.errorCode ?? "automation_authorization_blocked",
+      blocked_at: input.now,
+      ...(input.error ? { last_error: input.error } : {})
+    });
+  }
+  return AutomationJobRecordSchema.parse({
+    ...released,
+    status: "disabled",
+    ...(input.error ? { last_error: input.error } : {})
+  });
+}
+
+function isOneShot(schedule: string): boolean {
+  return ["once", "one-shot", "oneshot"].includes(schedule.trim().toLowerCase());
 }

@@ -5,12 +5,13 @@ import { automationJobValueSchema } from "../../../value-objects/automation.js";
 
 const Input = z.object({
   "job_id": z.string().trim().min(1),
+  "lock_owner_token": z.string().trim().min(1),
   "now": z.string().datetime().optional()
 }).strict();
 const Output = automationJobValueSchema;
 
 export interface AutomationJobReleaseLockPorts {
-  releaseAutomationJobLock(jobId: string, now?: string): Promise<z.infer<typeof Output> | undefined>;
+  releaseAutomationJobLock(jobId: string, lockOwnerToken: string, now?: string): Promise<z.infer<typeof Output> | undefined>;
   automationJobNotFoundError(): Error;
 }
 
@@ -55,7 +56,7 @@ const automationJobReleaseLock = defineCommand<AutomationJobReleaseLockPorts>()(
   createHandler(ports) {
     return {
       execute: async function handleAutomationJobReleaseLock(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const job = await ports.releaseAutomationJobLock(input.job_id, input.now);
+        const job = await ports.releaseAutomationJobLock(input.job_id, input.lock_owner_token, input.now);
         if (!job) throw ports.automationJobNotFoundError();
         return { ok: true, value: job };
       }
