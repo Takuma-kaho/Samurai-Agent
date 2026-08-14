@@ -88,7 +88,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^5.2.4",
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "^13.0.3",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "kysely": "^0.28.17",

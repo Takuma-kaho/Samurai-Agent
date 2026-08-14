@@ -15,7 +15,7 @@
   "dependencies": {
     "@samurai-agent/core-schemas": "workspace:*",
     "@samurai-agent/room-permissions": "workspace:*",
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "^13.0.3",
     "kysely": "^0.28.17"
   }
 }
