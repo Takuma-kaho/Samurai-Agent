@@ -27,7 +27,9 @@ Samuraiの中心を「単一Agent」「Chatアプリ」「AIチーム」と表�
 | 公開用語 | 意味 |
 | --- | --- |
 | Workspace | 人間のKnowledgeを保管する正本 |
+| Workspace Server | Workspaceを提供するPostgreSQLベースのServer |
 | Room | Knowledge、共有、閲覧権限を分ける境界 |
+| Account | 公開鍵に結び付いた、Server間で再利用できる本人識別子 |
 | Native App | SamuraiのChat、Session、Surfaceを提供する外部アプリ |
 | External App | Codex、Claude Codeなど、Workspaceを利用する外部アプリ |
 | Session | アプリ側の会話・作業単位 |
@@ -49,6 +51,14 @@ Samuraiの中心を「単一Agent」「Chatアプリ」「AIチーム」と表�
 ### Workspace
 
 「作業画面」ではなく「知識の保管庫」と説明する。
+
+### Workspace Server
+
+HostedとSelf-hostで同じWorkspace仕様を提供するServerと説明する。Hostedの共有DBとSelf-hostの専用DBは、提供形態の違いであり、Workspaceの責務を変えない。
+
+### Account
+
+AccountはRoom権限そのものではない。公開鍵で本人を確認する識別子であり、Owner・Admin・Member・Guestの権限はWorkspaceとRoomで別に決まる。
 
 ### Room
 

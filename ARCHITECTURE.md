@@ -331,16 +331,35 @@ System Principalも権限を迂回しない。External Appは、接続できた�
 
 ## 9. 永続化とバックアップ
 
-### 9.1 Workspace Store
+### 9.1 Workspace StoreとWorkspace Server
 
-Workspace Storeは、Workspaceの正本をファイルとSQLiteへ保存する。
+既存CoreのWorkspace Storeは、互換・旧データ読取のためファイルとSQLiteを使う。
 
 - ファイル：人間が直接読めるKnowledgeやArtifact
 - SQLite：整合性、検索、履歴、Queue、Index
 
 UI stateや一時的なSurface stateをWorkspace正本へ混ぜない。
 
-### 9.2 Workspace Backup
+通常の複数端末・共有運用は、`Workspace Server 02`のPostgreSQL経路を使う。
+
+- Self-hostは1 Workspace＝1 Server＝専用PostgreSQL。Serverは設定された1つのWorkspace ID以外を受け付けない
+- Hostedは複数WorkspaceでアプリとPostgreSQLを共有する。すべてのWorkspace所有行に`workspace_id`を持たせる
+- アプリ接続は、所有者ではなくRLSを迂回できないruntime roleで行う。各transactionは`account_id`と`workspace_id`をPostgreSQLへ設定し、RLSが検索、履歴、Job、ファイルmetadataを最終的に絞る
+- Knowledgeなどの本体は`workspaces/<workspace_id>/files/`の人間が読めるファイルとして残す。DBとファイルは復旧可能なfile transactionで結ぶ
+- 旧`workspace.sqlite`はread-onlyのBundle作成だけに使う。既存Core APIを暗黙にPostgreSQLへ混在させない
+
+Accountは公開鍵から決まる安定IDである。同じ公開鍵をHostedとSelf-hostへ登録できるが、Room権限は各Workspaceで独立して判定する。
+
+### 9.2 Workspace Bundle v3と移転
+
+Workspace Bundle v3はDB imageではなく、JSON/JSONLの記録と人が読めるファイルからなる移植形式である。
+
+- Room、権限、記録、履歴、Job、版番号、ファイルhashを含む
+- private key、password、token、credential形式のJSON値・ファイルは拒否する
+- 移転元はread-onlyにしてBundleを作り、移転先へread-onlyで仮取り込み、件数とfile hashを確認してからactiveにする
+- 失敗時は移転先の新規データを消し、移転元をactiveへ戻せる
+
+### 9.3 Workspace Backup
 
 Workspace Backupに含めるもの。
 
@@ -352,7 +371,7 @@ Workspace Backupに含めるもの。
 - BackendRun、WorkspaceJobの必要な履歴
 - Workspace fileとindex
 
-### 9.3 App Session Backup
+### 9.4 App Session Backup
 
 App Session Backupは、Native Appまたは外部アプリが所有する。
 
@@ -459,10 +478,11 @@ Core06〜Core09の範囲では、次をSessionなしで扱える。
 - secretを持たないExternal App Connection、委任元、Room上限、入口上限の永続化
 - Connector evidenceから現在のRoom権限を再評価するFormal ingress。外部AppのQuery、Domain Operation、Activity Ingestは共通Resolverを通る
 - Room／Authorityを永続化したAutomation。旧Jobは`rebind_required`で停止し、現在は`wiki_reindex`だけをSessionなしで実行する
+- `Workspace Server 02`のPostgreSQL schema、RLS runtime role、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成
 
 新しいBackupはArtifact・Collectionの正本を対象にし、Generated Surfaceのbundleは再生成可能な互換データとして除く。旧Surfaceを含むBackupは引き続きRestoreできる。
 
-既存Chat／Session経路は互換機能として残る。Core09はin-processのReference Adapterまでであり、本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChatは後続境界である。したがって、現在の実装を製品全体の完成と同一視しない。
+既存Chat／Session経路とSQLite Core APIは互換機能として残る。`Workspace Server 02`は別のPostgreSQL Server entryであり、既存Chat APIを置換しない。実PostgreSQLのRLS拒否は、接続先を指定した`server:02:verify`でHostedとSelf-hostの両方を確認する。したがって、現在の実装を製品全体の完成と同一視しない。
 
 ### 13.2 Coreの移行単位
 

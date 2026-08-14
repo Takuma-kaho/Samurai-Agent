@@ -1,3 +1,4 @@
+import { createHash, createPrivateKey, createPublicKey, randomUUID, sign } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -6,16 +7,31 @@ import {
   BrowserWindow,
   clipboard,
   desktopCapturer,
+  dialog,
   globalShortcut,
   ipcMain,
   Menu,
   nativeImage,
   Notification,
+  safeStorage,
   shell,
-  Tray
+  Tray,
+  type MessageBoxOptions
 } from "electron";
 import { createDesktopConfig, type DesktopConfig } from "./config.js";
 import { appShotHtml, quickAskHtml, statusPageHtml } from "./html.js";
+import {
+  activeWorkspaceConnection,
+  loadWorkspaceConnectionRegistry,
+  saveWorkspaceConnectionRegistry,
+  selectWorkspaceConnection,
+  upsertWorkspaceConnection,
+  type WorkspaceConnection,
+  type WorkspaceConnectionInput,
+  type WorkspaceConnectionRegistry
+} from "./workspace-connections.js";
+import { createWorkspaceIdentityStore, type WorkspaceIdentityStore } from "./workspace-identities.js";
+import { createWorkspaceAccountSignaturePayload, workspaceAccountIdFromPublicKey } from "./workspace-request-signing.js";
 
 interface HealthState {
   ok: boolean;
@@ -43,7 +59,9 @@ interface AppShotInput {
   content: string;
 }
 
-type DeepLinkTarget = { kind: "workspace" | "session" | "artifact" | "run" | "quick-ask"; id?: string };
+type DeepLinkTarget =
+  | { kind: "workspace" | "session" | "artifact" | "run" | "quick-ask"; id?: string }
+  | { kind: "workspace-invite"; serverUrl: string; workspaceId: string; token: string };
 
 interface TemporaryContextItem {
   id: string;
@@ -107,6 +125,9 @@ let latestHealth: HealthState = {
 };
 let pendingDeepLink: string | undefined;
 let mainWindowLoadToken = 0;
+let workspaceConnectionRegistry: WorkspaceConnectionRegistry = { version: 1, connections: [] };
+let workspaceConnectionRegistryPath = "";
+let workspaceIdentityStore: WorkspaceIdentityStore | undefined;
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -130,6 +151,7 @@ app.on("open-url", (event, url) => {
 
 app.whenReady().then(async () => {
   registerProtocolHandler();
+  await initializeWorkspaceConnections();
   registerIpcHandlers();
   createTray();
   registerShortcuts();
@@ -173,7 +195,7 @@ async function createMainWindow(): Promise<void> {
     title: "Samurai Agent",
     webPreferences: {
       preload: preloadPath,
-      additionalArguments: [`--samurai-api-base-url=${config.apiBaseUrl}`],
+      additionalArguments: desktopArguments(config),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -362,8 +384,12 @@ function registerIpcHandlers(): void {
     config: {
       mode: config.mode,
       apiBaseUrl: config.apiBaseUrl,
-      webDevUrl: config.webDevUrl
+      webDevUrl: config.webDevUrl,
+      workspaceServerUrl: config.workspaceServerUrl,
+      workspaceId: config.workspaceId,
+      accountId: config.accountId
     },
+    workspaceConnections: publicWorkspaceConnections(),
     health: latestHealth
   }));
   ipcMain.handle("samurai:window:open", () => {
@@ -372,6 +398,49 @@ function registerIpcHandlers(): void {
   ipcMain.handle("samurai:window:reload", async () => {
     await loadMainWindow();
   });
+  ipcMain.handle("samurai:workspace-connections:list", () => publicWorkspaceConnections());
+  ipcMain.handle("samurai:workspace-connections:upsert", async (_event, input: unknown) => {
+    const submission = workspaceConnectionSubmission(input);
+    let candidate = submission.connection;
+    if (submission.privateKey) {
+      const identity = requireWorkspaceIdentityStore();
+      const publicKey = publicKeyFromPrivateKey(submission.privateKey);
+      if (workspaceAccountIdFromPublicKey(publicKey) !== candidate.accountId) throw new Error("workspace_identity_account_mismatch");
+      candidate = {
+        ...candidate,
+        credentialRef: await identity.save(candidate.accountId, submission.privateKey)
+      };
+    }
+    workspaceConnectionRegistry = upsertWorkspaceConnection(workspaceConnectionRegistry, candidate);
+    await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+    return publicWorkspaceConnections();
+  });
+  ipcMain.handle("samurai:workspace-connections:select", async (_event, connectionId: unknown) => {
+    if (typeof connectionId !== "string") throw new Error("workspace_connection_not_found");
+    workspaceConnectionRegistry = selectWorkspaceConnection(workspaceConnectionRegistry, connectionId);
+    await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+    applyWorkspaceConnection(activeWorkspaceConnection(workspaceConnectionRegistry));
+    return publicWorkspaceConnections();
+  });
+  ipcMain.handle("samurai:workspace-server:register-active-account", async (_event, displayName: unknown) => {
+    const connection = requireActiveWorkspaceConnection();
+    const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    const publicKey = publicKeyFromPrivateKey(privateKey);
+    if (workspaceAccountIdFromPublicKey(publicKey) !== connection.accountId) throw new Error("workspace_identity_account_mismatch");
+    const result = await signedWorkspaceServerRequest(connection, privateKey, {
+      method: "POST",
+      path: "/api/account/register",
+      workspaceScoped: false,
+      body: {
+        account_id: connection.accountId,
+        public_key: publicKey,
+        display_name: typeof displayName === "string" && displayName.trim() ? displayName.trim().slice(0, 160) : "Samurai Account"
+      }
+    });
+    if (result.status < 200 || result.status >= 300) throw new Error(`workspace_account_registration_failed:${result.status}`);
+    return result.body;
+  });
+  ipcMain.handle("samurai:workspace-server:status", async () => workspaceServerStatus());
   ipcMain.handle("samurai:app:quit", () => {
     isQuitting = true;
     app.quit();
@@ -390,6 +459,211 @@ function registerIpcHandlers(): void {
     const appShot = validateAppShotInput(input);
     return await submitAppShot(appShot, config);
   });
+}
+
+async function initializeWorkspaceConnections(): Promise<void> {
+  workspaceConnectionRegistryPath = path.join(app.getPath("userData"), "workspace-connections.json");
+  workspaceIdentityStore = createWorkspaceIdentityStore(path.join(app.getPath("userData"), "workspace-identities.json"), safeStorage);
+  workspaceConnectionRegistry = await loadWorkspaceConnectionRegistry(workspaceConnectionRegistryPath);
+  if (config.workspaceServerUrl && config.workspaceId && config.accountId) {
+    const environmentConnection: WorkspaceConnectionInput = {
+      label: "Environment",
+      serverUrl: config.workspaceServerUrl,
+      workspaceId: config.workspaceId,
+      accountId: config.accountId
+    };
+    const hasEnvironmentConnection = workspaceConnectionRegistry.connections.some((connection) =>
+      connection.serverUrl === config.workspaceServerUrl
+      && connection.workspaceId === config.workspaceId
+      && connection.accountId === config.accountId
+    );
+    if (!hasEnvironmentConnection) {
+      workspaceConnectionRegistry = upsertWorkspaceConnection(workspaceConnectionRegistry, environmentConnection);
+      await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+    }
+  }
+  applyWorkspaceConnection(activeWorkspaceConnection(workspaceConnectionRegistry));
+}
+
+function publicWorkspaceConnections(): {
+  activeConnectionId?: string;
+  connections: Array<Omit<WorkspaceConnection, "credentialRef">>;
+} {
+  return {
+    ...(workspaceConnectionRegistry.activeConnectionId ? { activeConnectionId: workspaceConnectionRegistry.activeConnectionId } : {}),
+    connections: workspaceConnectionRegistry.connections.map(({ credentialRef: _credentialRef, ...connection }) => connection)
+  };
+}
+
+function workspaceConnectionSubmission(value: unknown): { connection: WorkspaceConnectionInput; privateKey?: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("workspace_connection_invalid");
+  const input = value as Record<string, unknown>;
+  const required = (key: string): string => {
+    const field = input[key];
+    if (typeof field !== "string" || !field.trim()) throw new Error("workspace_connection_invalid");
+    return field.trim();
+  };
+  const optional = (key: string): string | undefined => {
+    const field = input[key];
+    if (field === undefined) return undefined;
+    if (typeof field !== "string") throw new Error("workspace_connection_invalid");
+    return field.trim() || undefined;
+  };
+  const privateKey = optional("privateKey");
+  return {
+    connection: {
+    ...(optional("id") ? { id: optional("id") } : {}),
+    label: required("label"),
+    serverUrl: required("serverUrl"),
+    workspaceId: required("workspaceId"),
+    accountId: required("accountId"),
+    ...(optional("credentialRef") ? { credentialRef: optional("credentialRef") } : {})
+    },
+    ...(privateKey ? { privateKey } : {})
+  };
+}
+
+function applyWorkspaceConnection(connection: WorkspaceConnection | undefined): void {
+  if (!connection) return;
+  // Workspace Server is a separate boundary from the legacy Chat/Core API.
+  // Selecting it must never silently redirect the Chat UI to an incompatible
+  // endpoint; Server 02-specific clients consume these explicit values.
+  config.workspaceServerUrl = connection.serverUrl;
+  config.workspaceId = connection.workspaceId;
+  config.accountId = connection.accountId;
+}
+
+interface WorkspaceServerRequestInput {
+  method: "GET" | "POST" | "PUT" | "DELETE";
+  path: string;
+  body?: Record<string, unknown>;
+  operationId?: string;
+  workspaceScoped: boolean;
+}
+
+function requireWorkspaceIdentityStore(): WorkspaceIdentityStore {
+  if (!workspaceIdentityStore) throw new Error("workspace_identity_store_unavailable");
+  return workspaceIdentityStore;
+}
+
+function requireActiveWorkspaceConnection(): WorkspaceConnection {
+  const connection = activeWorkspaceConnection(workspaceConnectionRegistry);
+  if (!connection) throw new Error("workspace_connection_not_selected");
+  return connection;
+}
+
+async function requireActiveWorkspacePrivateKey(connection: WorkspaceConnection): Promise<string> {
+  if (!connection.credentialRef?.startsWith("electron-safe-storage://workspace-account/")) {
+    throw new Error("workspace_identity_required");
+  }
+  const privateKey = await requireWorkspaceIdentityStore().load(connection.accountId);
+  if (!privateKey) throw new Error("workspace_identity_required");
+  return privateKey;
+}
+
+function publicKeyFromPrivateKey(privateKey: string): string {
+  try {
+    return createPublicKey(createPrivateKey(privateKey)).export({ format: "pem", type: "spki" }).toString();
+  } catch {
+    throw new Error("workspace_identity_private_key_invalid");
+  }
+}
+
+async function signedWorkspaceServerRequest(
+  connection: WorkspaceConnection,
+  privateKey: string,
+  input: WorkspaceServerRequestInput
+): Promise<{ status: number; body: unknown }> {
+  const url = new URL(input.path, `${connection.serverUrl}/`);
+  const base = new URL(connection.serverUrl);
+  if (url.origin !== base.origin || !url.pathname.startsWith("/api/")) throw new Error("workspace_server_request_origin_invalid");
+  const requestId = `request_${randomUUID()}`;
+  const timestamp = String(Date.now());
+  const body = input.body ?? {};
+  const signaturePayload = createWorkspaceAccountSignaturePayload({
+    method: input.method,
+    path: url.pathname,
+    ...(input.workspaceScoped ? { workspaceId: connection.workspaceId } : {}),
+    ...(input.operationId ? { operationId: input.operationId } : {}),
+    requestId,
+    timestamp,
+    body
+  });
+  const signature = sign(null, Buffer.from(signaturePayload), createPrivateKey(privateKey)).toString("base64url");
+  const response = await fetch(url, {
+    method: input.method,
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+    headers: {
+      "content-type": "application/json",
+      "x-samurai-account-id": connection.accountId,
+      "x-samurai-request-id": requestId,
+      "x-samurai-timestamp": timestamp,
+      "x-samurai-signature": signature,
+      ...(input.workspaceScoped ? { "x-samurai-workspace-id": connection.workspaceId } : {}),
+      ...(input.operationId ? { "x-samurai-operation-id": input.operationId } : {})
+    },
+    ...(input.method === "GET" || input.method === "DELETE" ? {} : { body: JSON.stringify(body) })
+  });
+  const text = await response.text();
+  let responseBody: unknown = undefined;
+  if (text) {
+    try { responseBody = JSON.parse(text); } catch { responseBody = { error: "workspace_server_response_invalid" }; }
+  }
+  return { status: response.status, body: responseBody };
+}
+
+async function workspaceServerStatus(): Promise<{
+  connection?: Omit<WorkspaceConnection, "credentialRef">;
+  identityAvailable: boolean;
+  health?: { status: number; body: unknown };
+  workspace?: { status: number; body: unknown };
+  rooms?: { status: number; body: unknown };
+}> {
+  const connection = activeWorkspaceConnection(workspaceConnectionRegistry);
+  if (!connection) return { identityAvailable: false };
+  let health: { status: number; body: unknown } | undefined;
+  try {
+    const response = await fetch(new URL("/api/health", `${connection.serverUrl}/`), { redirect: "error", signal: AbortSignal.timeout(8_000) });
+    const text = await response.text();
+    health = { status: response.status, body: text ? JSON.parse(text) : undefined };
+  } catch {
+    health = { status: 0, body: { error: "workspace_server_unreachable" } };
+  }
+  const identityAvailable = Boolean(connection.credentialRef && await requireWorkspaceIdentityStore().has(connection.accountId));
+  if (!identityAvailable) {
+    const { credentialRef: _credentialRef, ...publicConnection } = connection;
+    return { connection: publicConnection, identityAvailable, health };
+  }
+  try {
+    const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    const workspace = await signedWorkspaceServerRequest(connection, privateKey, {
+      method: "GET",
+      path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}`,
+      workspaceScoped: true
+    });
+    const rooms = workspace.status >= 200 && workspace.status < 300
+      ? await signedWorkspaceServerRequest(connection, privateKey, {
+        method: "GET",
+        path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}/rooms`,
+        workspaceScoped: true
+      })
+      : undefined;
+    const { credentialRef: _credentialRef, ...publicConnection } = connection;
+    return { connection: publicConnection, identityAvailable, health, workspace, ...(rooms ? { rooms } : {}) };
+  } catch (error) {
+    const { credentialRef: _credentialRef, ...publicConnection } = connection;
+    return { connection: publicConnection, identityAvailable, health, workspace: { status: 0, body: { error: error instanceof Error ? error.message : "workspace_server_request_failed" } } };
+  }
+}
+
+function desktopArguments(input: DesktopConfig): string[] {
+  return [
+    `--samurai-api-base-url=${input.apiBaseUrl}`,
+    ...(input.workspaceServerUrl ? [`--samurai-workspace-server-url=${input.workspaceServerUrl}`] : []),
+    ...(input.workspaceId ? [`--samurai-workspace-id=${input.workspaceId}`] : []),
+    ...(input.accountId ? [`--samurai-account-id=${input.accountId}`] : [])
+  ];
 }
 
 function openQuickAsk(input: { initialContent?: string; statusText?: string; sourceFeature?: QuickAskInput["sourceFeature"] } = {}): void {
@@ -411,7 +685,7 @@ function openQuickAsk(input: { initialContent?: string; statusText?: string; sou
     show: false,
     webPreferences: {
       preload: preloadPath,
-      additionalArguments: [`--samurai-api-base-url=${config.apiBaseUrl}`],
+      additionalArguments: desktopArguments(config),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -488,7 +762,7 @@ async function openAppShot(): Promise<void> {
     show: false,
     webPreferences: {
       preload: preloadPath,
-      additionalArguments: [`--samurai-api-base-url=${config.apiBaseUrl}`],
+      additionalArguments: desktopArguments(config),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -729,6 +1003,10 @@ async function routeDeepLinkToRenderer(url: string): Promise<void> {
     })));
     return;
   }
+  if (target.kind === "workspace-invite") {
+    await acceptWorkspaceInvitation(target);
+    return;
+  }
   if (target.kind === "quick-ask") {
     openQuickAsk();
     return;
@@ -772,6 +1050,15 @@ function parseDeepLink(url: string): DeepLinkTarget | undefined {
     if (kind === "quick-ask") {
       return { kind: "quick-ask" };
     }
+    if (kind === "workspace-invite") {
+      const serverUrl = normalizeInvitationServerUrl(parsed.searchParams.get("server"));
+      const workspaceId = parsed.searchParams.get("workspace_id")?.trim();
+      const token = parsed.searchParams.get("token")?.trim();
+      if (!serverUrl || !workspaceId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(workspaceId) || !token || token.length > 512) {
+        return undefined;
+      }
+      return { kind: "workspace-invite", serverUrl, workspaceId, token };
+    }
     if ((kind === "session" || kind === "artifact" || kind === "run") && pathParts[0]) {
       return { kind, id: pathParts[0] };
     }
@@ -781,12 +1068,105 @@ function parseDeepLink(url: string): DeepLinkTarget | undefined {
   return undefined;
 }
 
+async function acceptWorkspaceInvitation(target: Extract<DeepLinkTarget, { kind: "workspace-invite" }>): Promise<void> {
+  try {
+    const active = requireActiveWorkspaceConnection();
+    const privateKey = await requireActiveWorkspacePrivateKey(active);
+    const publicKey = publicKeyFromPrivateKey(privateKey);
+    if (workspaceAccountIdFromPublicKey(publicKey) !== active.accountId) throw new Error("workspace_identity_account_mismatch");
+    const confirmation = await showWorkspaceInvitationDialog({
+      type: "question",
+      buttons: ["参加する", "キャンセル"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "Workspaceへの招待",
+      message: "このWorkspaceに参加しますか？",
+      detail: `${target.serverUrl}\n${target.workspaceId}`
+    });
+    if (confirmation.response !== 0) return;
+    const proposed = upsertWorkspaceConnection(workspaceConnectionRegistry, {
+      label: `招待: ${target.workspaceId}`,
+      serverUrl: target.serverUrl,
+      workspaceId: target.workspaceId,
+      accountId: active.accountId,
+      ...(active.credentialRef ? { credentialRef: active.credentialRef } : {})
+    });
+    const connection = proposed.connections.find((item) =>
+      item.serverUrl === target.serverUrl && item.workspaceId === target.workspaceId && item.accountId === active.accountId
+    );
+    if (!connection) throw new Error("workspace_invitation_connection_invalid");
+    const registered = await signedWorkspaceServerRequest(connection, privateKey, {
+      method: "POST",
+      path: "/api/account/register",
+      workspaceScoped: false,
+      body: { account_id: connection.accountId, public_key: publicKey, display_name: "Samurai Account" }
+    });
+    if (registered.status < 200 || registered.status >= 300) throw new Error(`workspace_account_registration_failed:${registered.status}`);
+    const accepted = await signedWorkspaceServerRequest(connection, privateKey, {
+      method: "POST",
+      path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}/invitations/accept`,
+      workspaceScoped: true,
+      // The same link retried by the same Account must replay its original
+      // acceptance result if the network failed after the server committed.
+      operationId: invitationAcceptanceOperationId(connection, target.token),
+      body: { invite_token: target.token }
+    });
+    if (accepted.status < 200 || accepted.status >= 300) throw new Error(`workspace_invitation_acceptance_failed:${accepted.status}`);
+    workspaceConnectionRegistry = selectWorkspaceConnection(proposed, connection.id);
+    await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+    applyWorkspaceConnection(connection);
+    await showWorkspaceInvitationDialog({
+      type: "info",
+      message: "Workspaceに参加しました。",
+      detail: target.workspaceId
+    });
+  } catch (error) {
+    await showWorkspaceInvitationDialog({
+      type: "error",
+      title: "招待に参加できません",
+      message: "接続先と本人情報を確認して、もう一度リンクを開いてください。",
+      detail: error instanceof Error ? error.message : "workspace_invitation_failed"
+    });
+  }
+}
+
+function invitationAcceptanceOperationId(connection: Pick<WorkspaceConnection, "serverUrl" | "workspaceId" | "accountId">, token: string): string {
+  const fingerprint = createHash("sha256")
+    .update(`${connection.serverUrl}\n${connection.workspaceId}\n${connection.accountId}\n${token}`)
+    .digest("hex");
+  return `invite_accept_${fingerprint.slice(0, 40)}`;
+}
+
+async function showWorkspaceInvitationDialog(options: MessageBoxOptions) {
+  return mainWindow
+    ? dialog.showMessageBox(mainWindow, options)
+    : dialog.showMessageBox(options);
+}
+
+function normalizeInvitationServerUrl(value: string | null): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash
+      || (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))) {
+      return undefined;
+    }
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return undefined;
+  }
+}
+
 async function checkDeepLinkTargetAvailability(
   target: DeepLinkTarget,
   inputConfig: DesktopConfig
 ): Promise<{ ok: true } | { ok: false; detail?: string }> {
   if (target.kind === "workspace" || target.kind === "quick-ask") {
     return { ok: true };
+  }
+  if (target.kind === "workspace-invite") {
+    return { ok: false, detail: "Invitation links are handled before legacy Core navigation." };
   }
   if (!target.id) {
     return { ok: false, detail: `${target.kind} id is missing.` };

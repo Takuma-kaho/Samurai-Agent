@@ -6,6 +6,9 @@ export interface DesktopConfig {
   mode: DesktopMode;
   apiBaseUrl: string;
   apiHealthUrl: string;
+  workspaceServerUrl?: string;
+  workspaceId?: string;
+  accountId?: string;
   webDevUrl: string;
   packagedWebEntryPath: string;
   appShotShortcut: string;
@@ -32,6 +35,9 @@ export function createDesktopConfig(input: {
     mode,
     apiBaseUrl,
     apiHealthUrl: `${apiBaseUrl}/api/health`,
+    ...(env.SAMURAI_DESKTOP_WORKSPACE_SERVER_URL?.trim() ? { workspaceServerUrl: normalizeBaseUrl(env.SAMURAI_DESKTOP_WORKSPACE_SERVER_URL) } : {}),
+    ...(env.SAMURAI_DESKTOP_WORKSPACE_ID?.trim() ? { workspaceId: env.SAMURAI_DESKTOP_WORKSPACE_ID.trim() } : {}),
+    ...(env.SAMURAI_DESKTOP_ACCOUNT_ID?.trim() ? { accountId: env.SAMURAI_DESKTOP_ACCOUNT_ID.trim() } : {}),
     webDevUrl,
     packagedWebEntryPath,
     appShotShortcut: env.SAMURAI_DESKTOP_APP_SHOT_SHORTCUT ?? "CommandOrControl+Shift+A",

@@ -18,6 +18,7 @@ import type { AutomationRunSummary, SkillIndexEntry, WikiDetail } from "../lib/a
 import ManagementSurfaces from "./ManagementSurfaces.vue";
 import type { AutomationJobRecord, WikiFrontmatter } from "@samurai-agent/core-schemas";
 import type { LocaleKey } from "@samurai-agent/localization";
+import WorkspaceConnectionSettings, { type NativeWorkspaceConnection } from "./WorkspaceConnectionSettings.vue";
 
 type ViewMode = "chat" | "search" | "settings" | "runs" | "collections" | "memory" | "wiki" | "skills" | "automations";
 type Label = (key: LocaleKey) => string;
@@ -38,6 +39,15 @@ const props = defineProps<{
   captureModes: CaptureMode[];
   externalProviderRoles: ExternalProviderRole[];
   patchSettings: (patch: Partial<Omit<SettingsRecord, "updated_at">>) => void | Promise<void>;
+  workspaceConnectionAvailable: boolean;
+  workspaceConnectionLoading: boolean;
+  workspaceConnectionError: string | null;
+  workspaceServerStatus?: { message: string; tone: "ready" | "warning" | "error" };
+  activeWorkspaceConnectionId?: string;
+  workspaceConnections: NativeWorkspaceConnection[];
+  selectWorkspaceConnection: (connectionId: string) => void | Promise<void>;
+  saveWorkspaceConnection: (input: { label: string; serverUrl: string; workspaceId: string; accountId: string; privateKey?: string }) => void | Promise<void>;
+  registerWorkspaceServerAccount?: () => void | Promise<void>;
   localeDisplayName: (locale: SupportedLocale) => string;
   captureModeLabel: (mode: CaptureMode) => string;
   externalProviderRoleLabel: (role: ExternalProviderRole) => string;
@@ -156,6 +166,20 @@ const emit = defineEmits<{ "update:searchQuery": [value: string] }>();
           </button>
         </div>
       </div>
+    </div>
+    <div v-if="props.workspaceConnectionAvailable" class="settings-group lit-surface workspace-connection-group">
+      <WorkspaceConnectionSettings
+        :ui-locale="props.settings.ui_locale"
+        :available="props.workspaceConnectionAvailable"
+        :loading="props.workspaceConnectionLoading"
+        :error="props.workspaceConnectionError"
+        :server-status="props.workspaceServerStatus"
+        :active-connection-id="props.activeWorkspaceConnectionId"
+        :connections="props.workspaceConnections"
+        :select-connection="props.selectWorkspaceConnection"
+        :save-connection="props.saveWorkspaceConnection"
+        :register-account="props.registerWorkspaceServerAccount"
+      />
     </div>
   </section>
 

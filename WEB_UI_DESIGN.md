@@ -131,6 +131,14 @@ Workspace PeekはWorkspaceデータの投影であり、Workspaceの保存単位
 
 長文の思想説明、常時必要ではない設定、履歴全体は置かない。
 
+### 4.5 Workspace Connection
+
+Settingsには、Hosted、自宅、会社などの接続先を切り替える軽い一覧を置ける。
+
+- 表示・保存するのは`サーバーURL＋Workspace ID＋Account`だけ
+- private keyは表示・同期・Workspace Backupの対象にしない
+- 接続先を切り替えても、ChatのSession一覧と別WorkspaceのKnowledgeを同じ表示へ混ぜない
+
 ---
 
 ## 5. Chatから現れるSurface

@@ -1,0 +1,1255 @@
+import { createHash, createHmac } from "node:crypto";
+import { assertOpaqueId } from "./config";
+import { assertAccountIdMatchesPublicKey, canonicalJson } from "./auth";
+import { WorkspaceServerError } from "./errors";
+import { PostgresWorkspaceDatabase, type WorkspaceSql } from "./postgres";
+import type {
+  WorkspaceAccount,
+  WorkspaceAuditEntry,
+  WorkspaceEvent,
+  WorkspaceFile,
+  WorkspaceInvitation,
+  WorkspaceJob,
+  WorkspaceMembershipRole,
+  WorkspaceMembership,
+  WorkspaceRecord,
+  WorkspaceRecordPayload,
+  WorkspaceRequestContext,
+  WorkspaceRoom,
+  WorkspaceRoomMembership,
+  WorkspaceServerMode,
+  WorkspaceState,
+  WorkspaceSummary
+} from "./types";
+
+const roleSet = new Set<WorkspaceMembershipRole>(["owner", "admin", "member", "guest"]);
+const recordTypePattern = /^[a-z][a-z0-9_]{0,63}$/;
+const maxSearchTextLength = 500_000;
+
+export interface WorkspaceServerStoreOptions {
+  database: PostgresWorkspaceDatabase;
+  mode: WorkspaceServerMode;
+  selfHostWorkspaceId?: string;
+  /** The locally configured owner is the only Account that may restore an empty Self-host server. */
+  selfHostInitialAdminId?: string;
+  storageRoot: string;
+  invitationTokenSecret: string;
+}
+
+export interface CreateWorkspaceInput {
+  id?: string;
+  name: string;
+  ownerAccountId: string;
+  operationId: string;
+  hostingMode?: WorkspaceServerMode;
+  databasePlacement?: "shared" | "dedicated";
+}
+
+export interface PutRecordInput {
+  roomId: string;
+  recordType: string;
+  id: string;
+  expectedVersion: number;
+  payload: WorkspaceRecordPayload;
+  searchText?: string;
+}
+
+export interface PutRecordResult {
+  record: WorkspaceRecord;
+  event: WorkspaceEvent;
+  replayed: boolean;
+}
+
+export interface PutJobResult {
+  job: WorkspaceJob;
+  event: WorkspaceEvent;
+}
+
+export interface CreateInvitationResult {
+  invitation: WorkspaceInvitation;
+  token: string;
+}
+
+export interface SetWorkspaceMemberInput {
+  accountId: string;
+  role: WorkspaceMembershipRole;
+  state: "active" | "revoked";
+  /** Use 0 when this Account has no membership row yet. */
+  expectedVersion: number;
+}
+
+export interface SetRoomMemberInput extends SetWorkspaceMemberInput {
+  roomId: string;
+}
+
+/**
+ * PostgreSQL-backed Workspace data service. It deliberately stores every
+ * Workspace-owned datum with a Workspace and Room boundary; runtime clients
+ * receive only this service, not an unrestricted database connection.
+ */
+export class WorkspaceServerStore {
+  readonly database: PostgresWorkspaceDatabase;
+  readonly mode: WorkspaceServerMode;
+  readonly selfHostWorkspaceId?: string;
+  readonly selfHostInitialAdminId?: string;
+  readonly storageRoot: string;
+  private readonly invitationTokenSecret: string;
+
+  constructor(options: WorkspaceServerStoreOptions) {
+    if (options.mode === "self_host" && (!options.selfHostWorkspaceId || !options.selfHostInitialAdminId)) {
+      throw new WorkspaceServerError("self_host_initial_admin_required", 500);
+    }
+    this.database = options.database;
+    this.mode = options.mode;
+    this.selfHostWorkspaceId = options.selfHostWorkspaceId;
+    this.selfHostInitialAdminId = options.selfHostInitialAdminId;
+    this.storageRoot = options.storageRoot;
+    this.invitationTokenSecret = options.invitationTokenSecret;
+  }
+
+  assertSelfHostInitialAdmin(accountId: string): void {
+    if (this.mode !== "self_host") return;
+    if (!this.selfHostInitialAdminId || accountId !== this.selfHostInitialAdminId) {
+      throw new WorkspaceServerError("self_host_initial_admin_required", 403);
+    }
+  }
+
+  async registerAccount(input: { id: string; publicKey: string; displayName: string }): Promise<WorkspaceAccount> {
+    assertOpaqueId(input.id, "account_id_invalid");
+    if (!input.publicKey.trim()) throw new WorkspaceServerError("account_public_key_required", 400);
+    if (!input.displayName.trim()) throw new WorkspaceServerError("account_display_name_required", 400);
+    assertAccountIdMatchesPublicKey(input.id, input.publicKey);
+    return this.database.withContext({ accountId: input.id }, async (sql) => {
+      await sql.query(
+        `INSERT INTO accounts(id, public_key, display_name)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.id, input.publicKey, input.displayName.trim()]
+      );
+      const result = await sql.query<AccountRow>(
+        "SELECT id, public_key, display_name, created_at, updated_at FROM accounts WHERE id = $1",
+        [input.id]
+      );
+      const account = result.rows[0];
+      if (!account) throw new WorkspaceServerError("account_registration_failed", 500);
+      if (account.public_key !== input.publicKey) throw new WorkspaceServerError("account_public_key_conflict", 409);
+      if (account.display_name !== input.displayName.trim()) {
+        const updated = await sql.query<AccountRow>(
+          `UPDATE accounts SET display_name = $2, updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, public_key, display_name, created_at, updated_at`,
+          [input.id, input.displayName.trim()]
+        );
+        return accountFromRow(updated.rows[0] ?? account);
+      }
+      return accountFromRow(account);
+    });
+  }
+
+  async getAccountPublicKey(accountId: string): Promise<string | undefined> {
+    assertOpaqueId(accountId, "account_id_invalid");
+    return this.database.withContext({ accountId }, async (sql) => {
+      const result = await sql.query<{ public_key: string }>("SELECT public_key FROM accounts WHERE id = $1 AND status = 'active'", [accountId]);
+      return result.rows[0]?.public_key;
+    });
+  }
+
+  async ensureInitialSelfHostedWorkspace(input: {
+    workspaceId: string;
+    ownerAccountId: string;
+    ownerPublicKey: string;
+    ownerDisplayName: string;
+    workspaceName?: string;
+  }): Promise<{ created: boolean; workspaceId: string; roomId?: string }> {
+    if (this.mode !== "self_host" || this.selfHostWorkspaceId !== input.workspaceId) {
+      throw new WorkspaceServerError("self_host_workspace_mismatch", 400);
+    }
+    await this.registerAccount({ id: input.ownerAccountId, publicKey: input.ownerPublicKey, displayName: input.ownerDisplayName });
+    const operationId = operationScopedId("selfhost_bootstrap", input.workspaceId, input.ownerAccountId);
+    try {
+      const created = await this.createWorkspace({
+        id: input.workspaceId,
+        name: input.workspaceName?.trim() || "Samurai Workspace",
+        ownerAccountId: input.ownerAccountId,
+        operationId,
+        hostingMode: "self_host",
+        databasePlacement: "dedicated"
+      });
+      return { created: true, workspaceId: created.workspace.id, roomId: created.defaultRoom.id };
+    } catch (error) {
+      if (!(error instanceof WorkspaceServerError) || error.code !== "workspace_id_conflict") throw error;
+      await this.getWorkspace({ workspaceId: input.workspaceId, accountId: input.ownerAccountId });
+      return { created: false, workspaceId: input.workspaceId };
+    }
+  }
+
+  async createWorkspace(input: CreateWorkspaceInput): Promise<{ workspace: WorkspaceSummary; defaultRoom: WorkspaceRoom }> {
+    const workspaceId = input.id ?? operationScopedId("workspace", input.ownerAccountId, input.operationId);
+    assertOpaqueId(workspaceId, "workspace_id_invalid");
+    assertOpaqueId(input.ownerAccountId, "account_id_invalid");
+    assertOpaqueId(input.operationId, "workspace_operation_id_invalid");
+    if (!input.name.trim()) throw new WorkspaceServerError("workspace_name_required", 400);
+    const mode = input.hostingMode ?? this.mode;
+    if (this.mode === "self_host" && workspaceId !== this.selfHostWorkspaceId) {
+      throw new WorkspaceServerError("workspace_not_found", 404);
+    }
+    const roomId = operationScopedId("room", workspaceId, input.operationId);
+    return this.runAccountIdempotent(input.ownerAccountId, input.operationId, workspaceId, {
+      action: "workspace.create",
+      input: { id: workspaceId, name: input.name.trim(), mode, databasePlacement: input.databasePlacement }
+    }, async (sql) => {
+      try {
+        await sql.query("SELECT samurai_create_workspace($1, $2, $3, $4, $5, $6)", [
+          workspaceId,
+          input.name.trim(),
+          mode,
+          input.databasePlacement ?? (mode === "self_host" ? "dedicated" : "shared"),
+          roomId,
+          "General"
+        ]);
+      } catch (error) {
+        if (postgresMessage(error).includes("workspace_id_conflict")) throw new WorkspaceServerError("workspace_id_conflict", 409);
+        throw error;
+      }
+      const workspace = (await sql.query<WorkspaceSummaryRow>(
+        `SELECT id, name, state, hosting_mode, storage_namespace, database_placement, version, created_at, updated_at
+         FROM workspaces WHERE id = $1`,
+        [workspaceId]
+      )).rows[0];
+      if (!workspace) throw new WorkspaceServerError("workspace_creation_failed", 500);
+      return {
+        workspace: workspaceSummaryFromRow({ ...workspace, role: "owner" }),
+        defaultRoom: {
+          id: roomId,
+          workspaceId,
+          name: "General",
+          version: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }
+      };
+    });
+  }
+
+  async listWorkspaces(accountId: string): Promise<WorkspaceSummary[]> {
+    assertOpaqueId(accountId, "account_id_invalid");
+    return this.database.withContext({ accountId }, async (sql) => {
+      const result = await sql.query<WorkspaceSummaryRow>(
+        `SELECT w.id, w.name, w.state, w.hosting_mode, w.storage_namespace, w.database_placement, w.version, w.created_at, w.updated_at, m.role
+         FROM workspaces AS w
+         JOIN workspace_members AS m ON m.workspace_id = w.id
+         WHERE m.account_id = $1 AND m.state = 'active'
+         ORDER BY w.updated_at DESC`,
+        [accountId]
+      );
+      return result.rows.map(workspaceSummaryFromRow);
+    });
+  }
+
+  async getWorkspace(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<WorkspaceSummary> {
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<WorkspaceSummaryRow>(
+        `SELECT w.id, w.name, w.state, w.hosting_mode, w.storage_namespace, w.database_placement, w.version, w.created_at, w.updated_at, m.role
+         FROM workspaces AS w
+         JOIN workspace_members AS m ON m.workspace_id = w.id
+         WHERE w.id = $1 AND m.account_id = $2 AND m.state = 'active'`,
+        [context.workspaceId, context.accountId]
+      );
+      const workspace = result.rows[0];
+      if (!workspace) throw new WorkspaceServerError("workspace_not_found", 404);
+      return workspaceSummaryFromRow(workspace);
+    });
+  }
+
+  async listRooms(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<WorkspaceRoom[]> {
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<RoomRow>(
+        "SELECT workspace_id, id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 ORDER BY created_at",
+        [context.workspaceId]
+      );
+      return result.rows.map(roomFromRow);
+    });
+  }
+
+  async createRoom(context: WorkspaceRequestContext, input: { id?: string; name: string; expectedWorkspaceVersion: number }): Promise<WorkspaceRoom> {
+    if (!input.name.trim()) throw new WorkspaceServerError("room_name_required", 400);
+    assertExpectedVersion(input.expectedWorkspaceVersion, "workspace_expected_version_invalid", 1);
+    const id = input.id ?? operationScopedId("room", context.workspaceId, context.operationId);
+    assertOpaqueId(id, "room_id_invalid");
+    return this.runIdempotent(context, { action: "room.create", input: { id, name: input.name, expectedWorkspaceVersion: input.expectedWorkspaceVersion } }, async (sql) => {
+      await this.assertWorkspaceWritable(sql, context.workspaceId);
+      try {
+        await sql.query("SELECT samurai_create_room($1, $2, $3, $4)", [context.workspaceId, id, input.name.trim(), input.expectedWorkspaceVersion]);
+      } catch (error) {
+        if (postgresMessage(error).includes("workspace_version_conflict")) {
+          throw await this.workspaceVersionConflict(sql, context.workspaceId);
+        }
+        throw error;
+      }
+      const result = await sql.query<RoomRow>(
+        "SELECT workspace_id, id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
+        [context.workspaceId, id]
+      );
+      const room = result.rows[0];
+      if (!room) throw new WorkspaceServerError("room_creation_failed", 500);
+      const mapped = roomFromRow(room);
+      await this.insertAudit(sql, context, {
+        action: "room.create",
+        subjectKind: "room",
+        subjectId: mapped.id,
+        beforeVersion: 0,
+        afterVersion: mapped.version,
+        details: { workspace_version: input.expectedWorkspaceVersion }
+      });
+      return mapped;
+    });
+  }
+
+  async setWorkspaceMember(context: WorkspaceRequestContext, input: SetWorkspaceMemberInput): Promise<WorkspaceMembership> {
+    assertOpaqueId(input.accountId, "account_id_invalid");
+    assertRole(input.role);
+    assertExpectedVersion(input.expectedVersion, "workspace_membership_expected_version_invalid", 0);
+    return this.runIdempotent(context, { action: "workspace.member.set", input }, async (sql) => {
+      const before = await this.selectWorkspaceMember(sql, context.workspaceId, input.accountId);
+      try {
+        await sql.query("SELECT samurai_set_workspace_member($1, $2, $3, $4, $5)", [context.workspaceId, input.accountId, input.role, input.state, input.expectedVersion]);
+      } catch (error) {
+        if (postgresMessage(error).includes("workspace_membership_version_conflict")) {
+          throw await this.workspaceMemberVersionConflict(sql, context.workspaceId, input.accountId);
+        }
+        throw error;
+      }
+      const member = await this.selectWorkspaceMember(sql, context.workspaceId, input.accountId);
+      if (!member) throw new WorkspaceServerError("workspace_membership_update_failed", 500);
+      await this.insertAudit(sql, context, {
+        action: "workspace.member.set",
+        subjectKind: "workspace_member",
+        subjectId: input.accountId,
+        beforeVersion: before?.version ?? 0,
+        afterVersion: member.version,
+        details: { role: member.role, state: member.state }
+      });
+      return member;
+    });
+  }
+
+  async setRoomMember(context: WorkspaceRequestContext, input: SetRoomMemberInput): Promise<WorkspaceRoomMembership> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.accountId, "account_id_invalid");
+    assertRole(input.role);
+    assertExpectedVersion(input.expectedVersion, "room_membership_expected_version_invalid", 0);
+    return this.runIdempotent(context, { action: "room.member.set", input }, async (sql) => {
+      const before = await this.selectRoomMember(sql, context.workspaceId, input.roomId, input.accountId);
+      try {
+        await sql.query("SELECT samurai_set_room_member($1, $2, $3, $4, $5, $6)", [context.workspaceId, input.roomId, input.accountId, input.role, input.state, input.expectedVersion]);
+      } catch (error) {
+        if (postgresMessage(error).includes("room_membership_version_conflict")) {
+          throw await this.roomMemberVersionConflict(sql, context.workspaceId, input.roomId, input.accountId);
+        }
+        throw error;
+      }
+      const member = await this.selectRoomMember(sql, context.workspaceId, input.roomId, input.accountId);
+      if (!member) throw new WorkspaceServerError("room_membership_update_failed", 500);
+      await this.insertAudit(sql, context, {
+        action: "room.member.set",
+        roomId: input.roomId,
+        subjectKind: "room_member",
+        subjectId: input.accountId,
+        beforeVersion: before?.version ?? 0,
+        afterVersion: member.version,
+        details: { role: member.role, state: member.state }
+      });
+      return member;
+    });
+  }
+
+  async createInvitation(context: WorkspaceRequestContext, input: {
+    roomId?: string;
+    workspaceRole: WorkspaceMembershipRole;
+    roomRole?: WorkspaceMembershipRole;
+    expiresAt: string;
+    expectedWorkspaceVersion: number;
+  }): Promise<CreateInvitationResult> {
+    if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
+    assertRole(input.workspaceRole);
+    if (input.roomRole) assertRole(input.roomRole);
+    assertExpectedVersion(input.expectedWorkspaceVersion, "workspace_expected_version_invalid", 1);
+    const expiresAt = new Date(input.expiresAt);
+    if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
+      throw new WorkspaceServerError("workspace_invitation_expiry_invalid", 400);
+    }
+    const token = invitationToken(this.invitationTokenSecret, context);
+    const invitationId = operationScopedId("invite", context.workspaceId, context.operationId);
+    const invitation = await this.runIdempotent(context, { action: "workspace.invitation.create", input: { ...input, invitationId } }, async (sql) => {
+      await this.assertWorkspaceWritable(sql, context.workspaceId);
+      try {
+        await sql.query("SELECT samurai_create_workspace_invitation($1, $2, $3, $4, $5, $6, $7::TIMESTAMPTZ, $8)", [
+          context.workspaceId,
+          invitationId,
+          input.roomId ?? null,
+          invitationTokenHash(this.invitationTokenSecret, token),
+          input.workspaceRole,
+          input.roomRole ?? null,
+          expiresAt.toISOString(),
+          input.expectedWorkspaceVersion
+        ]);
+      } catch (error) {
+        if (postgresMessage(error).includes("workspace_version_conflict")) {
+          throw await this.workspaceVersionConflict(sql, context.workspaceId);
+        }
+        throw error;
+      }
+      const saved = await sql.query<InvitationRow>(
+        `SELECT workspace_id, id, room_id, workspace_role, room_role, version, expires_at, created_at, revoked_at, accepted_at
+         FROM workspace_invitations WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, invitationId]
+      );
+      const row = saved.rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_invitation_creation_failed", 500);
+      const invitation = invitationFromRow(row);
+      await this.insertAudit(sql, context, {
+        action: "workspace.invitation.create",
+        roomId: invitation.roomId,
+        subjectKind: "invitation",
+        subjectId: invitation.id,
+        beforeVersion: 0,
+        afterVersion: invitation.version,
+        details: { workspace_role: invitation.workspaceRole, room_role: invitation.roomRole ?? null, expires_at: invitation.expiresAt, workspace_version: input.expectedWorkspaceVersion }
+      });
+      return invitation;
+    });
+    return { invitation, token };
+  }
+
+  async acceptInvitation(context: WorkspaceRequestContext, token: string): Promise<{ workspaceRole: WorkspaceMembershipRole; roomId?: string; roomRole?: WorkspaceMembershipRole; invitationVersion: number }> {
+    if (!token || token.length > 512) throw new WorkspaceServerError("workspace_invitation_invalid", 400);
+    const tokenHash = invitationTokenHash(this.invitationTokenSecret, token);
+    // An invitee has an Account but is intentionally not a Workspace member
+    // yet. Keep this retry ledger at the Account boundary; allowing it in the
+    // Workspace operation ledger would let any registered Account create rows
+    // in a Workspace it cannot access.
+    return this.runAccountIdempotent(context.accountId, context.operationId, context.workspaceId, {
+      action: "workspace.invitation.accept",
+      input: { workspaceId: context.workspaceId, tokenHash }
+    }, async (sql) => {
+      const result = await sql.query<{ workspace_role: WorkspaceMembershipRole; room_id: string | null; room_role: WorkspaceMembershipRole | null; invitation_version: number | string }>(
+        "SELECT workspace_role, room_id, room_role, invitation_version FROM samurai_accept_invitation($1, $2)",
+        [context.workspaceId, tokenHash]
+      );
+      const row = result.rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_invitation_invalid", 400);
+      const accepted = {
+        workspaceRole: row.workspace_role,
+        ...(row.room_id ? { roomId: row.room_id } : {}),
+        ...(row.room_role ? { roomRole: row.room_role } : {}),
+        invitationVersion: Number(row.invitation_version)
+      };
+      await this.insertAudit(sql, context, {
+        action: "workspace.invitation.accept",
+        roomId: accepted.roomId,
+        subjectKind: "invitation",
+        subjectId: "accepted",
+        afterVersion: accepted.invitationVersion,
+        details: { workspace_role: accepted.workspaceRole, room_role: accepted.roomRole ?? null }
+      });
+      return accepted;
+    });
+  }
+
+  async revokeInvitation(context: WorkspaceRequestContext, invitationId: string, expectedVersion: number): Promise<void> {
+    assertOpaqueId(invitationId, "workspace_invitation_id_invalid");
+    assertExpectedVersion(expectedVersion, "workspace_invitation_expected_version_invalid", 1);
+    return this.runIdempotent(context, { action: "workspace.invitation.revoke", input: { invitationId, expectedVersion } }, async (sql) => {
+      try {
+        await sql.query("SELECT samurai_revoke_invitation($1, $2, $3)", [context.workspaceId, invitationId, expectedVersion]);
+      } catch (error) {
+        if (postgresMessage(error).includes("workspace_invitation_version_conflict")) {
+          throw await this.invitationVersionConflict(sql, context.workspaceId, invitationId);
+        }
+        throw error;
+      }
+      await this.insertAudit(sql, context, {
+        action: "workspace.invitation.revoke",
+        subjectKind: "invitation",
+        subjectId: invitationId,
+        beforeVersion: expectedVersion,
+        afterVersion: expectedVersion + 1
+      });
+    });
+  }
+
+  async getRecord(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { recordType: string; id: string }): Promise<WorkspaceRecord> {
+    assertRecordType(input.recordType);
+    assertOpaqueId(input.id, "record_id_invalid");
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<RecordRow>(
+        `SELECT workspace_id, room_id, record_type, id, version, payload, content_hash, created_at, updated_at
+         FROM workspace_records WHERE record_type = $1 AND id = $2`,
+        [input.recordType, input.id]
+      );
+      const row = result.rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_record_not_found", 404);
+      return recordFromRow(row);
+    });
+  }
+
+  async listRecords(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId?: string; recordType?: string; limit?: number }): Promise<WorkspaceRecord[]> {
+    if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
+    if (input.recordType) assertRecordType(input.recordType);
+    const limit = boundedLimit(input.limit);
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<RecordRow>(
+        `SELECT workspace_id, room_id, record_type, id, version, payload, content_hash, created_at, updated_at
+         FROM workspace_records
+         WHERE ($1::TEXT IS NULL OR room_id = $1)
+           AND ($2::TEXT IS NULL OR record_type = $2)
+         ORDER BY updated_at DESC
+         LIMIT $3`,
+        [input.roomId ?? null, input.recordType ?? null, limit]
+      );
+      return result.rows.map(recordFromRow);
+    });
+  }
+
+  /** Intentionally has no explicit Workspace WHERE: RLS is the final boundary. */
+  async listRecordsForRlsProbe(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<WorkspaceRecord[]> {
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<RecordRow>(
+        "SELECT workspace_id, room_id, record_type, id, version, payload, content_hash, created_at, updated_at FROM workspace_records ORDER BY updated_at"
+      );
+      return result.rows.map(recordFromRow);
+    });
+  }
+
+  async searchRecords(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { query: string; roomId?: string; limit?: number }): Promise<WorkspaceRecord[]> {
+    if (!input.query.trim()) return [];
+    if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
+    const limit = boundedLimit(input.limit);
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<RecordRow>(
+        `SELECT workspace_id, room_id, record_type, id, version, payload, content_hash, created_at, updated_at
+         FROM workspace_records
+         WHERE search_text ILIKE '%' || $1 || '%'
+           AND ($2::TEXT IS NULL OR room_id = $2)
+         ORDER BY similarity(search_text, $1) DESC, updated_at DESC
+         LIMIT $3`,
+        [input.query.trim(), input.roomId ?? null, limit]
+      );
+      return result.rows.map(recordFromRow);
+    });
+  }
+
+  async putRecord(context: WorkspaceRequestContext, input: PutRecordInput): Promise<PutRecordResult> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertRecordType(input.recordType);
+    assertOpaqueId(input.id, "record_id_invalid");
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0) {
+      throw new WorkspaceServerError("workspace_record_expected_version_invalid", 400);
+    }
+    const payloadText = canonicalJson(input.payload);
+    const searchText = normalizeSearchText(input.searchText ?? payloadText);
+    return this.runIdempotent(context, { action: "workspace.record.put", input }, async (sql) => {
+      await this.assertWorkspaceWritable(sql, context.workspaceId);
+      const saved = await sql.query<RecordRow>(
+        `INSERT INTO workspace_records(
+           workspace_id, room_id, record_type, id, version, payload, search_text, content_hash, created_by, updated_by
+         ) VALUES ($1, $2, $3, $4, 1, $5::JSONB, $6, $7, $8, $8)
+         ON CONFLICT (workspace_id, record_type, id) DO UPDATE SET
+           room_id = EXCLUDED.room_id,
+           version = workspace_records.version + 1,
+           payload = EXCLUDED.payload,
+           search_text = EXCLUDED.search_text,
+           content_hash = EXCLUDED.content_hash,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()
+         WHERE workspace_records.version = $9
+         RETURNING workspace_id, room_id, record_type, id, version, payload, content_hash, created_at, updated_at`,
+        [context.workspaceId, input.roomId, input.recordType, input.id, payloadText, searchText, hash(payloadText), context.accountId, input.expectedVersion]
+      );
+      const row = saved.rows[0];
+      if (!row) await this.throwRecordVersionConflict(sql, context.workspaceId, input.recordType, input.id);
+      const record = recordFromRow(row!);
+      const event = await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "workspace.record.updated",
+        recordType: input.recordType,
+        recordId: input.id,
+        payload: { version: record.version, content_hash: record.contentHash }
+      });
+      await this.insertAudit(sql, context, {
+        action: "workspace.record.put",
+        roomId: input.roomId,
+        subjectKind: input.recordType,
+        subjectId: input.id,
+        beforeVersion: input.expectedVersion,
+        afterVersion: record.version,
+        details: { content_hash: record.contentHash }
+      });
+      return { record, event, replayed: false };
+    });
+  }
+
+  async deleteRecord(context: WorkspaceRequestContext, input: { roomId: string; recordType: string; id: string; expectedVersion: number }): Promise<{ event: WorkspaceEvent; replayed: boolean }> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertRecordType(input.recordType);
+    assertOpaqueId(input.id, "record_id_invalid");
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new WorkspaceServerError("workspace_record_expected_version_invalid", 400);
+    }
+    return this.runIdempotent(context, { action: "workspace.record.delete", input }, async (sql) => {
+      await this.assertWorkspaceWritable(sql, context.workspaceId);
+      const deleted = await sql.query<{ id: string }>(
+        `DELETE FROM workspace_records
+         WHERE workspace_id = $1 AND room_id = $2 AND record_type = $3 AND id = $4 AND version = $5
+         RETURNING id`,
+        [context.workspaceId, input.roomId, input.recordType, input.id, input.expectedVersion]
+      );
+      if (!deleted.rows[0]) await this.throwRecordVersionConflict(sql, context.workspaceId, input.recordType, input.id);
+      const event = await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "workspace.record.deleted",
+        recordType: input.recordType,
+        recordId: input.id,
+        payload: { version: input.expectedVersion }
+      });
+      await this.insertAudit(sql, context, {
+        action: "workspace.record.delete",
+        roomId: input.roomId,
+        subjectKind: input.recordType,
+        subjectId: input.id,
+        beforeVersion: input.expectedVersion,
+        afterVersion: input.expectedVersion + 1
+      });
+      return { event, replayed: false };
+    });
+  }
+
+  async listEvents(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId?: string; afterId?: number; limit?: number }): Promise<WorkspaceEvent[]> {
+    if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
+    const afterId = input.afterId ?? 0;
+    if (!Number.isSafeInteger(afterId) || afterId < 0) throw new WorkspaceServerError("workspace_event_cursor_invalid", 400);
+    const limit = boundedLimit(input.limit);
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<EventRow>(
+        `SELECT id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at
+         FROM workspace_events
+         WHERE id > $1 AND ($2::TEXT IS NULL OR room_id = $2)
+         ORDER BY id ASC LIMIT $3`,
+        [afterId, input.roomId ?? null, limit]
+      );
+      return result.rows.map(eventFromRow);
+    });
+  }
+
+  async putJob(context: WorkspaceRequestContext, input: {
+    roomId: string;
+    id?: string;
+    kind: string;
+    idempotencyKey: string;
+    expectedVersion?: number;
+    status?: WorkspaceJob["status"];
+    payload: WorkspaceRecordPayload;
+  }): Promise<PutJobResult> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.idempotencyKey, "workspace_job_idempotency_key_invalid");
+    const id = input.id ?? operationScopedId("job", context.workspaceId, context.operationId);
+    assertOpaqueId(id, "workspace_job_id_invalid");
+    const expectedVersion = input.expectedVersion ?? 0;
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) throw new WorkspaceServerError("workspace_job_expected_version_invalid", 400);
+    const payload = canonicalJson(input.payload);
+    return this.runIdempotent(context, { action: "workspace.job.put", input: { ...input, id } }, async (sql) => {
+      await this.assertWorkspaceWritable(sql, context.workspaceId);
+      const saved = await sql.query<JobRow>(
+        `INSERT INTO workspace_jobs(workspace_id, room_id, id, kind, status, version, idempotency_key, payload, created_by, updated_by)
+         VALUES ($1, $2, $3, $4, $5, 1, $6, $7::JSONB, $8, $8)
+         ON CONFLICT (workspace_id, id) DO UPDATE SET
+           status = EXCLUDED.status,
+           version = workspace_jobs.version + 1,
+           payload = EXCLUDED.payload,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()
+         WHERE workspace_jobs.version = $9
+         RETURNING workspace_id, room_id, id, kind, status, version, idempotency_key, payload, created_at, updated_at`,
+        [context.workspaceId, input.roomId, id, input.kind, input.status ?? "queued", input.idempotencyKey, payload, context.accountId, expectedVersion]
+      );
+      const row = saved.rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_job_version_conflict", 409);
+      const event = await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "workspace.job.updated",
+        payload: { job_id: id, version: Number(row.version), status: row.status }
+      });
+      const job = jobFromRow(row);
+      await this.insertAudit(sql, context, {
+        action: "workspace.job.put",
+        roomId: input.roomId,
+        subjectKind: "workspace_job",
+        subjectId: id,
+        beforeVersion: expectedVersion,
+        afterVersion: job.version,
+        details: { status: job.status, kind: job.kind }
+      });
+      return { job, event };
+    });
+  }
+
+  async assertRoomReadable(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string): Promise<void> {
+    assertOpaqueId(roomId, "room_id_invalid");
+    await this.database.withContext(context, async (sql) => {
+      const result = await sql.query<{ id: string }>("SELECT id FROM rooms WHERE workspace_id = $1 AND id = $2", [context.workspaceId, roomId]);
+      if (!result.rows[0]) throw new WorkspaceServerError("room_not_found_or_access_denied", 404);
+    });
+  }
+
+  /** Checks edit permission before a file body is staged on disk. */
+  async assertRoomWritable(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string): Promise<void> {
+    assertOpaqueId(roomId, "room_id_invalid");
+    await this.database.withContext(context, async (sql) => {
+      const result = await sql.query<{ writable: boolean }>(
+        "SELECT samurai_workspace_is_writable($1) AND samurai_can_room($1, $2, 'edit') AS writable",
+        [context.workspaceId, roomId]
+      );
+      if (result.rows[0]?.writable !== true) throw new WorkspaceServerError("room_not_writable_or_access_denied", 403);
+    });
+  }
+
+  async getWorkspaceMember(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, accountId: string): Promise<WorkspaceMembership | undefined> {
+    assertOpaqueId(accountId, "account_id_invalid");
+    return this.database.withContext(context, async (sql) => this.selectWorkspaceMember(sql, context.workspaceId, accountId));
+  }
+
+  async getRoomMember(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, accountId: string): Promise<WorkspaceRoomMembership | undefined> {
+    assertOpaqueId(roomId, "room_id_invalid");
+    assertOpaqueId(accountId, "account_id_invalid");
+    return this.database.withContext(context, async (sql) => this.selectRoomMember(sql, context.workspaceId, roomId, accountId));
+  }
+
+  async listAuditEntries(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { afterId?: number; limit?: number } = {}): Promise<WorkspaceAuditEntry[]> {
+    const afterId = input.afterId ?? 0;
+    if (!Number.isSafeInteger(afterId) || afterId < 0) throw new WorkspaceServerError("workspace_audit_cursor_invalid", 400);
+    const limit = boundedLimit(input.limit);
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<AuditRow>(
+        `SELECT id, workspace_id, room_id, actor_account_id, action, outcome, operation_id, subject_kind, subject_id,
+                before_version, after_version, details, created_at
+         FROM workspace_audit_entries
+         WHERE workspace_id = $1 AND id > $2
+         ORDER BY id ASC LIMIT $3`,
+        [context.workspaceId, afterId, limit]
+      );
+      return result.rows.map(auditFromRow);
+    });
+  }
+
+  /** Used by file and transfer services while they are already inside one RLS transaction. */
+  async insertAudit(sql: WorkspaceSql, context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "operationId">, input: {
+    action: string;
+    outcome?: "completed" | "rejected" | "failed";
+    roomId?: string;
+    subjectKind?: string;
+    subjectId?: string;
+    beforeVersion?: number;
+    afterVersion?: number;
+    details?: WorkspaceRecordPayload;
+  }): Promise<void> {
+    await sql.query(
+      `SELECT samurai_append_workspace_audit(
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::JSONB
+       )`,
+      [
+        context.workspaceId,
+        input.roomId ?? null,
+        input.action,
+        input.outcome ?? "completed",
+        context.operationId,
+        input.subjectKind ?? null,
+        input.subjectId ?? null,
+        input.beforeVersion ?? null,
+        input.afterVersion ?? null,
+        canonicalJson(input.details ?? {})
+      ]
+    );
+  }
+
+  async runIdempotent<T>(
+    context: WorkspaceRequestContext,
+    request: { action: string; input: unknown },
+    action: (sql: WorkspaceSql) => Promise<T>
+  ): Promise<T> {
+    assertOpaqueId(context.workspaceId, "workspace_id_invalid");
+    assertOpaqueId(context.accountId, "account_id_invalid");
+    assertOpaqueId(context.operationId, "operation_id_invalid");
+    const requestHash = hash(canonicalJson(request));
+    let originalFailure: unknown;
+    const value = await this.database.withContext(context, async (sql) => {
+      const inserted = await sql.query<{ id: string }>(
+        `INSERT INTO workspace_operations(workspace_id, id, idempotency_key, actor_account_id, request_hash, status)
+         VALUES ($1, $2, $2, $3, $4, 'running')
+         ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+         RETURNING id`,
+        [context.workspaceId, context.operationId, context.accountId, requestHash]
+      );
+      if (!inserted.rows[0]) {
+        const existing = await sql.query<{ request_hash: string; status: string; result: unknown }>(
+          "SELECT request_hash, status, result FROM workspace_operations WHERE workspace_id = $1 AND idempotency_key = $2",
+          [context.workspaceId, context.operationId]
+        );
+        const operation = existing.rows[0];
+        if (!operation || operation.request_hash !== requestHash) throw new WorkspaceServerError("workspace_operation_id_reused", 409);
+        if (operation.status === "failed") throw new WorkspaceServerError("workspace_operation_previously_failed", 409);
+        if (operation.status !== "completed" || operation.result === null) throw new WorkspaceServerError("workspace_operation_in_progress", 409);
+        return operation.result as T;
+      }
+      // A rejected write can be a PostgreSQL error.  PostgreSQL marks the
+      // surrounding transaction as failed in that case, so keep the business
+      // action behind a savepoint before recording its durable failed result.
+      await sql.query("SAVEPOINT samurai_workspace_operation_action");
+      let completed: T;
+      try {
+        completed = await action(sql);
+      } catch (error) {
+        await sql.query("ROLLBACK TO SAVEPOINT samurai_workspace_operation_action");
+        await sql.query("RELEASE SAVEPOINT samurai_workspace_operation_action");
+        const code = operationErrorCode(error);
+        await sql.query(
+          `UPDATE workspace_operations SET status = 'failed', error_code = $3, updated_at = NOW()
+           WHERE workspace_id = $1 AND id = $2`,
+          [context.workspaceId, context.operationId, code]
+        );
+        // Invitation acceptance is the one Workspace mutation that can be
+        // attempted before the caller has a membership. Keep its failed
+        // operation durable, but do not grant an arbitrary authenticated
+        // Account permission to append an audit row to another Workspace.
+        if (await this.selectWorkspaceMember(sql, context.workspaceId, context.accountId)) {
+          await this.insertAudit(sql, context, {
+            action: request.action,
+            outcome: error instanceof WorkspaceServerError && error.status < 500 ? "rejected" : "failed",
+            subjectKind: "operation",
+            subjectId: context.operationId,
+            details: { error_code: code }
+          });
+        }
+        originalFailure = error;
+        return undefined as T;
+      }
+      await sql.query("RELEASE SAVEPOINT samurai_workspace_operation_action");
+      await sql.query(
+        `UPDATE workspace_operations SET status = 'completed', result = $3::JSONB, updated_at = NOW()
+         WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, context.operationId, canonicalJson(completed === undefined ? {} : completed)]
+      );
+      return completed;
+    });
+    if (originalFailure) throw originalFailure;
+    return value;
+  }
+
+  /** Account-level operations create a Workspace before a Workspace operation ledger exists. */
+  async runAccountIdempotent<T>(
+    accountId: string,
+    operationId: string,
+    workspaceId: string,
+    request: { action: string; input: unknown },
+    action: (sql: WorkspaceSql) => Promise<T>
+  ): Promise<T> {
+    assertOpaqueId(accountId, "account_id_invalid");
+    assertOpaqueId(operationId, "workspace_operation_id_invalid");
+    assertOpaqueId(workspaceId, "workspace_id_invalid");
+    const requestHash = hash(canonicalJson(request));
+    return this.database.withContext({ accountId, workspaceId }, async (sql) => {
+      const inserted = await sql.query<{ id: string }>(
+        `INSERT INTO account_operations(account_id, id, request_hash, status)
+         VALUES ($1, $2, $3, 'running')
+         ON CONFLICT (account_id, id) DO NOTHING
+         RETURNING id`,
+        [accountId, operationId, requestHash]
+      );
+      if (!inserted.rows[0]) {
+        const existing = await sql.query<{ request_hash: string; status: string; result: unknown }>(
+          "SELECT request_hash, status, result FROM account_operations WHERE account_id = $1 AND id = $2",
+          [accountId, operationId]
+        );
+        const operation = existing.rows[0];
+        if (!operation || operation.request_hash !== requestHash) throw new WorkspaceServerError("workspace_operation_id_reused", 409);
+        if (operation.status !== "completed" || operation.result === null) throw new WorkspaceServerError("workspace_operation_in_progress", 409);
+        return operation.result as T;
+      }
+      const value = await action(sql);
+      await sql.query(
+        `UPDATE account_operations SET status = 'completed', result = $3::JSONB, updated_at = NOW()
+         WHERE account_id = $1 AND id = $2`,
+        [accountId, operationId, canonicalJson(value === undefined ? {} : value)]
+      );
+      return value;
+    });
+  }
+
+  private async assertWorkspaceWritable(sql: WorkspaceSql, workspaceId: string): Promise<void> {
+    const result = await sql.query<{ state: WorkspaceState }>("SELECT state FROM workspaces WHERE id = $1", [workspaceId]);
+    const state = result.rows[0]?.state;
+    if (!state) throw new WorkspaceServerError("workspace_not_found", 404);
+    if (state !== "active") throw new WorkspaceServerError("workspace_read_only", 409);
+  }
+
+  private async selectWorkspaceMember(sql: WorkspaceSql, workspaceId: string, accountId: string): Promise<WorkspaceMembership | undefined> {
+    const result = await sql.query<MembershipRow>(
+      `SELECT workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at
+       FROM workspace_members WHERE workspace_id = $1 AND account_id = $2`,
+      [workspaceId, accountId]
+    );
+    return result.rows[0] ? workspaceMembershipFromRow(result.rows[0]) : undefined;
+  }
+
+  private async selectRoomMember(sql: WorkspaceSql, workspaceId: string, roomId: string, accountId: string): Promise<WorkspaceRoomMembership | undefined> {
+    const result = await sql.query<RoomMembershipRow>(
+      `SELECT workspace_id, room_id, account_id, role, state, version, created_at, updated_at, revoked_at
+       FROM room_members WHERE workspace_id = $1 AND room_id = $2 AND account_id = $3`,
+      [workspaceId, roomId, accountId]
+    );
+    return result.rows[0] ? roomMembershipFromRow(result.rows[0]) : undefined;
+  }
+
+  private async workspaceVersionConflict(sql: WorkspaceSql, workspaceId: string): Promise<never> {
+    const result = await sql.query<{ version: number | string }>("SELECT version FROM workspaces WHERE id = $1", [workspaceId]);
+    throw new WorkspaceServerError("workspace_version_conflict", 409, { latest_version: result.rows[0] ? Number(result.rows[0].version) : null });
+  }
+
+  private async workspaceMemberVersionConflict(sql: WorkspaceSql, workspaceId: string, accountId: string): Promise<never> {
+    const member = await this.selectWorkspaceMember(sql, workspaceId, accountId);
+    throw new WorkspaceServerError("workspace_membership_version_conflict", 409, { latest_version: member?.version ?? null });
+  }
+
+  private async roomMemberVersionConflict(sql: WorkspaceSql, workspaceId: string, roomId: string, accountId: string): Promise<never> {
+    const member = await this.selectRoomMember(sql, workspaceId, roomId, accountId);
+    throw new WorkspaceServerError("room_membership_version_conflict", 409, { latest_version: member?.version ?? null });
+  }
+
+  private async invitationVersionConflict(sql: WorkspaceSql, workspaceId: string, invitationId: string): Promise<never> {
+    const result = await sql.query<{ version: number | string }>(
+      "SELECT version FROM workspace_invitations WHERE workspace_id = $1 AND id = $2",
+      [workspaceId, invitationId]
+    );
+    throw new WorkspaceServerError("workspace_invitation_version_conflict", 409, { latest_version: result.rows[0] ? Number(result.rows[0].version) : null });
+  }
+
+  private async throwRecordVersionConflict(sql: WorkspaceSql, workspaceId: string, recordType: string, id: string): Promise<never> {
+    const latest = await sql.query<{ version: number }>(
+      "SELECT version FROM workspace_records WHERE workspace_id = $1 AND record_type = $2 AND id = $3",
+      [workspaceId, recordType, id]
+    );
+    throw new WorkspaceServerError("workspace_record_version_conflict", 409, {
+      latest_version: latest.rows[0] ? Number(latest.rows[0].version) : null
+    });
+  }
+
+  private async insertEvent(sql: WorkspaceSql, context: WorkspaceRequestContext, input: {
+    roomId: string;
+    kind: string;
+    recordType?: string;
+    recordId?: string;
+    payload: WorkspaceRecordPayload;
+  }): Promise<WorkspaceEvent> {
+    const saved = await sql.query<EventRow>(
+      `INSERT INTO workspace_events(workspace_id, room_id, kind, record_type, record_id, operation_id, payload)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::JSONB)
+       RETURNING id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at`,
+      [context.workspaceId, input.roomId, input.kind, input.recordType ?? null, input.recordId ?? null, context.operationId, canonicalJson(input.payload)]
+    );
+    const event = saved.rows[0];
+    if (!event) throw new WorkspaceServerError("workspace_event_creation_failed", 500);
+    return eventFromRow(event);
+  }
+}
+
+interface AccountRow {
+  id: string;
+  public_key: string;
+  display_name: string;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface WorkspaceSummaryRow {
+  id: string;
+  name: string;
+  state: WorkspaceState;
+  hosting_mode: WorkspaceServerMode;
+  storage_namespace: string;
+  database_placement: "shared" | "dedicated";
+  version: number | string;
+  role: WorkspaceMembershipRole;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface RoomRow {
+  workspace_id: string;
+  id: string;
+  name: string;
+  version: number | string;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface RecordRow {
+  workspace_id: string;
+  room_id: string;
+  record_type: string;
+  id: string;
+  version: number | string;
+  payload: WorkspaceRecordPayload | string;
+  content_hash: string;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface EventRow {
+  id: number | string;
+  workspace_id: string;
+  room_id: string;
+  kind: string;
+  record_type: string | null;
+  record_id: string | null;
+  operation_id: string;
+  payload: WorkspaceRecordPayload | string;
+  created_at: Date | string;
+}
+
+interface JobRow {
+  workspace_id: string;
+  room_id: string;
+  id: string;
+  kind: string;
+  status: WorkspaceJob["status"];
+  version: number | string;
+  idempotency_key: string;
+  payload: WorkspaceRecordPayload | string;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface InvitationRow {
+  workspace_id: string;
+  id: string;
+  room_id: string | null;
+  workspace_role: WorkspaceMembershipRole;
+  room_role: WorkspaceMembershipRole | null;
+  version: number | string;
+  expires_at: Date | string;
+  created_at: Date | string;
+  revoked_at: Date | string | null;
+  accepted_at: Date | string | null;
+}
+
+interface MembershipRow {
+  workspace_id: string;
+  account_id: string;
+  role: WorkspaceMembershipRole;
+  state: "active" | "revoked";
+  version: number | string;
+  created_at: Date | string;
+  updated_at: Date | string;
+  revoked_at: Date | string | null;
+}
+
+interface RoomMembershipRow extends MembershipRow {
+  room_id: string;
+}
+
+interface AuditRow {
+  id: number | string;
+  workspace_id: string;
+  room_id: string | null;
+  actor_account_id: string;
+  action: string;
+  outcome: "completed" | "rejected" | "failed";
+  operation_id: string | null;
+  subject_kind: string | null;
+  subject_id: string | null;
+  before_version: number | string | null;
+  after_version: number | string | null;
+  details: WorkspaceRecordPayload | string;
+  created_at: Date | string;
+}
+
+function accountFromRow(row: AccountRow): WorkspaceAccount {
+  return { id: row.id, publicKey: row.public_key, displayName: row.display_name, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+}
+
+function workspaceSummaryFromRow(row: WorkspaceSummaryRow): WorkspaceSummary {
+  return {
+    id: row.id,
+    name: row.name,
+    state: row.state,
+    hostingMode: row.hosting_mode,
+    storageNamespace: row.storage_namespace,
+    databasePlacement: row.database_placement,
+    version: Number(row.version),
+    role: row.role,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function roomFromRow(row: RoomRow): WorkspaceRoom {
+  return { id: row.id, workspaceId: row.workspace_id, name: row.name, version: Number(row.version), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+}
+
+function recordFromRow(row: RecordRow): WorkspaceRecord {
+  return {
+    workspaceId: row.workspace_id,
+    roomId: row.room_id,
+    recordType: row.record_type,
+    id: row.id,
+    version: Number(row.version),
+    payload: jsonObject(row.payload),
+    contentHash: row.content_hash,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function eventFromRow(row: EventRow): WorkspaceEvent {
+  return {
+    id: Number(row.id),
+    workspaceId: row.workspace_id,
+    roomId: row.room_id,
+    kind: row.kind,
+    ...(row.record_type ? { recordType: row.record_type } : {}),
+    ...(row.record_id ? { recordId: row.record_id } : {}),
+    operationId: row.operation_id,
+    payload: jsonObject(row.payload),
+    createdAt: iso(row.created_at)
+  };
+}
+
+function jobFromRow(row: JobRow): WorkspaceJob {
+  return {
+    workspaceId: row.workspace_id,
+    roomId: row.room_id,
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    version: Number(row.version),
+    idempotencyKey: row.idempotency_key,
+    payload: jsonObject(row.payload),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function invitationFromRow(row: InvitationRow): WorkspaceInvitation {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    ...(row.room_id ? { roomId: row.room_id } : {}),
+    workspaceRole: row.workspace_role,
+    ...(row.room_role ? { roomRole: row.room_role } : {}),
+    version: Number(row.version),
+    expiresAt: iso(row.expires_at),
+    createdAt: iso(row.created_at),
+    ...(row.revoked_at ? { revokedAt: iso(row.revoked_at) } : {}),
+    ...(row.accepted_at ? { acceptedAt: iso(row.accepted_at) } : {})
+  };
+}
+
+function workspaceMembershipFromRow(row: MembershipRow): WorkspaceMembership {
+  return {
+    workspaceId: row.workspace_id,
+    accountId: row.account_id,
+    role: row.role,
+    state: row.state,
+    version: Number(row.version),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    ...(row.revoked_at ? { revokedAt: iso(row.revoked_at) } : {})
+  };
+}
+
+function roomMembershipFromRow(row: RoomMembershipRow): WorkspaceRoomMembership {
+  return { ...workspaceMembershipFromRow(row), roomId: row.room_id };
+}
+
+function auditFromRow(row: AuditRow): WorkspaceAuditEntry {
+  return {
+    id: Number(row.id),
+    workspaceId: row.workspace_id,
+    ...(row.room_id ? { roomId: row.room_id } : {}),
+    actorAccountId: row.actor_account_id,
+    action: row.action,
+    outcome: row.outcome,
+    ...(row.operation_id ? { operationId: row.operation_id } : {}),
+    ...(row.subject_kind ? { subjectKind: row.subject_kind } : {}),
+    ...(row.subject_id ? { subjectId: row.subject_id } : {}),
+    ...(row.before_version === null ? {} : { beforeVersion: Number(row.before_version) }),
+    ...(row.after_version === null ? {} : { afterVersion: Number(row.after_version) }),
+    details: jsonObject(row.details),
+    createdAt: iso(row.created_at)
+  };
+}
+
+function jsonObject(value: WorkspaceRecordPayload | string): WorkspaceRecordPayload {
+  if (typeof value === "string") {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new WorkspaceServerError("workspace_json_payload_invalid", 500);
+    return parsed as WorkspaceRecordPayload;
+  }
+  return value;
+}
+
+function iso(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+function assertRecordType(value: string): void {
+  if (!recordTypePattern.test(value)) throw new WorkspaceServerError("workspace_record_type_invalid", 400);
+}
+
+function assertRole(value: string): asserts value is WorkspaceMembershipRole {
+  if (!roleSet.has(value as WorkspaceMembershipRole)) throw new WorkspaceServerError("workspace_role_invalid", 400);
+}
+
+function assertExpectedVersion(value: number, code: string, minimum: number): void {
+  if (!Number.isSafeInteger(value) || value < minimum) throw new WorkspaceServerError(code, 400);
+}
+
+function postgresMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "";
+}
+
+function operationErrorCode(error: unknown): string {
+  const code = error instanceof WorkspaceServerError ? error.code : postgresMessage(error).split("\n", 1)[0] || "workspace_operation_failed";
+  return code.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 160) || "workspace_operation_failed";
+}
+
+function boundedLimit(value: number | undefined): number {
+  const limit = value ?? 100;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new WorkspaceServerError("workspace_query_limit_invalid", 400);
+  return limit;
+}
+
+function normalizeSearchText(value: string): string {
+  return value.replaceAll("\0", "").slice(0, maxSearchTextLength);
+}
+
+function hash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function invitationTokenHash(secret: string, token: string): string {
+  return createHmac("sha256", secret).update("samurai-invitation-hash-v1|").update(token).digest("hex");
+}
+
+function invitationToken(secret: string, context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "operationId">): string {
+  return createHmac("sha256", secret)
+    .update(`samurai-invitation-token-v1|${context.workspaceId}|${context.accountId}|${context.operationId}`)
+    .digest("base64url");
+}
+
+function operationScopedId(kind: string, scope: string, operationId: string): string {
+  return `${kind}_${createHash("sha256").update(`${kind}|${scope}|${operationId}`).digest("hex").slice(0, 40)}`;
+}
+
+function storageNamespace(workspaceId: string): string {
+  return `workspaces/${workspaceId}`;
+}

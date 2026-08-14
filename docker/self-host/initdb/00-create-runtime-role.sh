@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+: "${SAMURAI_DATABASE_RUNTIME_PASSWORD:?SAMURAI_DATABASE_RUNTIME_PASSWORD is required}"
+
+psql --set ON_ERROR_STOP=1 \
+  --username "$POSTGRES_USER" \
+  --dbname "$POSTGRES_DB" \
+  --set runtime_password="$SAMURAI_DATABASE_RUNTIME_PASSWORD" <<'EOSQL'
+CREATE ROLE samurai_app LOGIN PASSWORD :'runtime_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+GRANT CONNECT ON DATABASE samurai TO samurai_app;
+GRANT USAGE ON SCHEMA public TO samurai_app;
+EOSQL
