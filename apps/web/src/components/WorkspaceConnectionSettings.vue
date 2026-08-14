@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
 import Check from "lucide-vue-next/dist/esm/icons/check.js";
+import ClipboardPaste from "lucide-vue-next/dist/esm/icons/clipboard-paste.js";
 import Link2 from "lucide-vue-next/dist/esm/icons/link-2.js";
 import Plus from "lucide-vue-next/dist/esm/icons/plus.js";
 import type { SupportedLocale } from "@samurai-agent/core-schemas";
@@ -24,11 +25,12 @@ const props = defineProps<{
   connections: NativeWorkspaceConnection[];
   serverStatus?: { message: string; tone: "ready" | "warning" | "error" };
   selectConnection: (connectionId: string) => void | Promise<void>;
-  saveConnection: (input: { label: string; serverUrl: string; workspaceId: string; accountId: string; privateKey?: string }) => void | Promise<void>;
+  saveConnection: (input: { label: string; serverUrl: string; workspaceId: string; accountId: string }) => void | Promise<void>;
   registerAccount?: () => void | Promise<void>;
+  importIdentity?: () => void | Promise<void>;
 }>();
 
-const draft = reactive({ label: "", serverUrl: "", workspaceId: "", accountId: "", privateKey: "" });
+const draft = reactive({ label: "", serverUrl: "", workspaceId: "", accountId: "" });
 const formError = ref<string | null>(null);
 const saving = ref(false);
 const japanese = computed(() => props.uiLocale === "ja");
@@ -45,14 +47,12 @@ async function addConnection(): Promise<void> {
       label: draft.label.trim(),
       serverUrl: draft.serverUrl.trim(),
       workspaceId: draft.workspaceId.trim(),
-      accountId: draft.accountId.trim(),
-      ...(draft.privateKey.trim() ? { privateKey: draft.privateKey.trim() } : {})
+      accountId: draft.accountId.trim()
     });
     draft.label = "";
     draft.serverUrl = "";
     draft.workspaceId = "";
     draft.accountId = "";
-    draft.privateKey = "";
   } catch {
     formError.value = japanese.value ? "接続先を保存できませんでした。" : "Could not save this connection.";
   } finally {
@@ -66,8 +66,8 @@ async function addConnection(): Promise<void> {
     <div class="settings-head">{{ japanese ? "Workspace Server" : "Workspace Server" }}</div>
     <p class="workspace-connection-note">
       {{ japanese
-        ? "接続先一覧には URL・Workspace ID・Account だけを保存します。秘密鍵を入力した場合だけ、この端末の保護領域へ保存します。"
-        : "Connections keep only the URL, Workspace ID, and Account. A supplied private key is saved only in this device's protected storage." }}
+        ? "接続先一覧には URL・Workspace ID・Account だけを保存します。秘密鍵はWeb画面へ入れず、Desktopがこの端末の保護領域へ直接読み込みます。"
+        : "Connections keep only the URL, Workspace ID, and Account. The Desktop imports a private key directly into protected storage without exposing it to this page." }}
     </p>
 
     <p v-if="props.serverStatus" class="workspace-connection-status" :class="`is-${props.serverStatus.tone}`">{{ props.serverStatus.message }}</p>
@@ -110,12 +110,11 @@ async function addConnection(): Promise<void> {
         <span>Account</span>
         <input v-model="draft.accountId" maxlength="128" placeholder="account_..." autocomplete="off" />
       </label>
-      <label>
-        <span>{{ japanese ? "秘密鍵（任意・この端末だけ）" : "Private key (optional, this device only)" }}</span>
-        <textarea v-model="draft.privateKey" rows="3" maxlength="20000" autocapitalize="off" autocomplete="off" spellcheck="false" :placeholder="japanese ? '初回登録時だけ貼り付け' : 'Paste only for first-time setup'" />
-      </label>
       <p v-if="props.error || formError" class="workspace-connection-error">{{ formError ?? props.error }}</p>
       <button class="workspace-connection-add" type="submit" :disabled="saving || props.loading"><Plus :size="15" />{{ japanese ? "接続先を保存" : "Save connection" }}</button>
+      <button v-if="props.activeConnectionId && props.importIdentity" class="workspace-connection-register" type="button" :disabled="saving || props.loading" @click="props.importIdentity">
+        <ClipboardPaste :size="15" />{{ japanese ? "コピー済みの秘密鍵をこの端末へ安全に読み込む" : "Import copied private key into this device" }}
+      </button>
       <button v-if="props.activeConnectionId && props.registerAccount" class="workspace-connection-register" type="button" :disabled="saving || props.loading" @click="props.registerAccount">
         {{ japanese ? "本人情報をサーバーへ登録" : "Register account with server" }}
       </button>

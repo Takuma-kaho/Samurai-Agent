@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -30,10 +30,28 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_transfer_export_retry_is_idempotent");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_audit_history_respects_room_access");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_account_status_is_not_escalated");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_hierarchy_and_membership_guards");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_hierarchy_privacy_and_realtime_integrity");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_hierarchy_invitation_and_import_guards");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_hierarchy_reactivation_does_not_restore_room_access");
     expect(schema).toContain("samurai_has_workspace_membership");
     expect(schema).toContain("target_receipt->>'target_integrity_hash' IS DISTINCT FROM exported_hash");
     expect(schema).toContain("workspace_transfer_bundle_conflict");
     expect(schema).toContain("room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read')");
     expect(schema).toContain("target_status NOT IN ('active', 'disabled')");
+    expect(schema).toContain("parent_room_id");
+    expect(schema).toContain("samurai_move_room");
+    expect(schema).toContain("room_hierarchy_cycle");
+    expect(schema).toContain("room_parent_membership_required");
+    expect(schema).toContain("room_last_owner_cannot_be_removed");
+    expect(schema).toContain("AND state = 'active'");
+    expect(schema).toContain("ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED");
+    expect(schema).toContain("samurai.workspace.room_hierarchy:");
+    expect(schema).toContain("A role demotion is not a removal cascade");
+    expect(schema).toContain("samurai_room_member_change_impact");
+    expect(schema).toContain("room_parent_not_available");
+    expect(schema).toContain("samurai_import_workspace_member");
+    expect(schema).toContain("workspace_invitation_operation_id_required");
+    expect(schema).toContain("samurai_clear_stale_room_memberships_on_workspace_activation");
   });
 });

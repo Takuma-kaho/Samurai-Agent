@@ -42,7 +42,7 @@ function verifyStaticContract() {
   assert(schema.includes("workspace_last_owner_cannot_be_revoked"), "server02_owner_role_guard_missing");
   assert(schema.includes("REVOKE CREATE ON SCHEMA public FROM PUBLIC"), "server02_public_schema_create_not_revoked");
   assert(!schema.includes("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public"), "server02_runtime_role_grant_too_broad");
-  assert(server.includes("emitRoomWorkspaceEvent"), "server02_room_realtime_isolation_missing");
+  assert(server.includes("emitAuthorizedRoomWorkspaceEvent"), "server02_room_realtime_isolation_missing");
   assert(server.includes("authenticateInvitationAcceptance"), "server02_invitation_acceptance_auth_missing");
   assert(server.includes("workspaceInvitationLink"), "server02_invitation_link_missing");
   assert(server.includes("x-samurai-operation-id"), "server02_operation_id_missing");

@@ -9,11 +9,19 @@ import X from "lucide-vue-next/dist/esm/icons/x.js";
 import type { ArtifactRecord, JsonValue, MemoryFrontmatter } from "@samurai-agent/core-schemas";
 import type { LocaleKey } from "@samurai-agent/localization";
 import type { SurfaceRenderKind, SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
-import type { ArtifactDetail, MemoryDetail } from "../lib/api";
+import type {
+  ArtifactDetail,
+  DesktopRoomMemberPreview,
+  DesktopRoomMovePreview,
+  DesktopWorkspaceRoom,
+  DesktopWorkspaceRoomMembership,
+  MemoryDetail
+} from "../lib/api";
 import type { CanvasMode } from "../lib/surface-view-helpers";
 import CollectionWorkspaceView from "./CollectionWorkspaceView.vue";
 import CustomViewFrame from "./CustomViewFrame.vue";
 import GeneratedSurfaceFrame from "./GeneratedSurfaceFrame.vue";
+import WorkspaceRoomTree from "./WorkspaceRoomTree.vue";
 
 type SurfaceField = { name: string; label: string; type: string; value: unknown };
 type TableColumn = { key: string; label: string };
@@ -58,6 +66,20 @@ const props = defineProps<{
   artifactContentUrl: (artifact: ArtifactRecord) => string;
   markdownPreviewHtml: (content: string) => string;
   memoryStateLabel: (state: MemoryFrontmatter["state"]) => string;
+  workspaceRoomAvailable: boolean;
+  workspaceRoomLoading: boolean;
+  workspaceRoomError: string | null;
+  workspaceRoomWorkspaceVersion?: number;
+  workspaceRoomWorkspaceRole?: "owner" | "admin" | "member" | "guest";
+  workspaceRooms: DesktopWorkspaceRoom[];
+  selectedWorkspaceRoomId?: string;
+  selectWorkspaceRoom: (roomId: string) => void | Promise<void>;
+  createWorkspaceRoom: (input: { name: string; parentRoomId?: string; expectedWorkspaceVersion: number; operationId: string }) => Promise<void>;
+  previewWorkspaceRoomMove: (input: { roomId: string; parentRoomId: string | null }) => Promise<DesktopRoomMovePreview>;
+  moveWorkspaceRoom: (input: { roomId: string; parentRoomId: string | null; expectedRoomVersion: number; expectedWorkspaceVersion: number; operationId: string }) => Promise<void>;
+  listWorkspaceRoomMembers: (roomId: string) => Promise<DesktopWorkspaceRoomMembership[]>;
+  previewWorkspaceRoomMember: (input: { roomId: string; accountId: string; role: "owner" | "admin" | "member" | "guest"; state: "active" | "revoked" }) => Promise<DesktopRoomMemberPreview>;
+  setWorkspaceRoomMember: (input: { roomId: string; accountId: string; role: "owner" | "admin" | "member" | "guest"; state: "active" | "revoked"; expectedVersion: number; operationId: string }) => Promise<void>;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
@@ -89,6 +111,24 @@ const emit = defineEmits<{ close: [] }>();
           <button class="icon-button" type="button" :title="props.label('action.close')" :aria-label="props.label('action.close')" @click="emit('close')"><X :size="16" /></button>
         </div>
       </header>
+
+      <WorkspaceRoomTree
+        v-if="props.workspaceRoomAvailable"
+        :available="props.workspaceRoomAvailable"
+        :loading="props.workspaceRoomLoading"
+        :error="props.workspaceRoomError"
+        :workspace-version="props.workspaceRoomWorkspaceVersion"
+        :workspace-role="props.workspaceRoomWorkspaceRole"
+        :rooms="props.workspaceRooms"
+        :selected-room-id="props.selectedWorkspaceRoomId"
+        :select-room="props.selectWorkspaceRoom"
+        :create-room="props.createWorkspaceRoom"
+        :preview-move="props.previewWorkspaceRoomMove"
+        :move-room="props.moveWorkspaceRoom"
+        :list-members="props.listWorkspaceRoomMembers"
+        :preview-member="props.previewWorkspaceRoomMember"
+        :set-member="props.setWorkspaceRoomMember"
+      />
 
       <template v-if="props.activeArtifact || props.activeSurfaceSpec">
         <section v-if="props.activeSurfaceSpec && props.canvasMode === 'edit'" class="surface-render lit-surface">

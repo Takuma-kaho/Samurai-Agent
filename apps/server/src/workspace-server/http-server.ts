@@ -14,7 +14,7 @@ import {
   type WorkspaceServerConfig
 } from "@samurai-agent/workspace-server";
 import { createWorkspaceServerCore } from "./core";
-import { emitRoomWorkspaceEvent, roomSocketRoom, workspaceSocketRoom } from "./realtime";
+import { WorkspaceRealtimeGate, roomSocketRoom, workspaceSocketRoom } from "./realtime";
 
 interface AuthenticatedRequest extends Request {
   samurai?: { accountId: string; requestId: string; timestamp: string; workspaceId?: string };
@@ -46,6 +46,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   app.use(cors({ origin: corsOrigins.length > 0 ? [...corsOrigins] : false, credentials: false }));
   app.use(express.json({ limit: "36mb" }));
   const io = new SocketServer(httpServer, { cors: { origin: corsOrigins.length > 0 ? [...corsOrigins] : false, credentials: false } });
+  const realtimeGate = new WorkspaceRealtimeGate();
 
   const authenticate = accountAuthenticator(store);
   const authenticateWorkspace = workspaceAuthenticator(store, config);
@@ -157,40 +158,112 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/rooms", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const room = await commands.createRoom(operationContext(req), {
-      id: optionalStringField(body, "room_id"),
-      name: stringField(body, "name"),
-      expectedWorkspaceVersion: numberField(body, "expected_workspace_version")
+    const context = workspaceContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const created = await commands.createRoom(operationContext(req), {
+        id: optionalStringField(body, "room_id"),
+        name: stringField(body, "name"),
+        ...(optionalStringField(body, "parent_room_id") ? { parentRoomId: optionalStringField(body, "parent_room_id") } : {}),
+        expectedWorkspaceVersion: numberField(body, "expected_workspace_version")
+      });
+      if (!created.replayed) {
+        await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: created.room.id, kind: "room.created" });
+      }
+      return created;
     });
-    res.status(201).json({ room });
+    res.status(result.replayed ? 200 : 201).json({ room: result.room, replayed: result.replayed });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/rooms/:roomId/members", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json({ members: await store.listRoomMembers(workspaceContext(req), pathParam(req, "roomId")) });
+  }));
+
+  app.post("/api/workspaces/:workspaceId/rooms/:roomId/parent/preview", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const preview = await store.previewRoomMove(workspaceContext(req), {
+      roomId: pathParam(req, "roomId"),
+      parentRoomId: nullableStringField(body, "parent_room_id")
+    });
+    res.json({ preview });
+  }));
+
+  app.put("/api/workspaces/:workspaceId/rooms/:roomId/parent", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = workspaceContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const moved = await commands.moveRoom(operationContext(req), {
+        roomId: pathParam(req, "roomId"),
+        parentRoomId: nullableStringField(body, "parent_room_id"),
+        expectedRoomVersion: numberField(body, "expected_room_version"),
+        expectedWorkspaceVersion: numberField(body, "expected_workspace_version")
+      });
+      if (!moved.replayed) {
+        for (const roomId of moved.revalidationRoomIds) {
+          await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId, kind: "room.moved" });
+        }
+      }
+      return moved;
+    });
+    res.json({ room: result.room, affected_room_ids: result.affectedRoomIds, replayed: result.replayed });
+  }));
+
+  app.post("/api/workspaces/:workspaceId/rooms/:roomId/members/:accountId/preview", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const preview = await store.previewRoomMemberChange(workspaceContext(req), {
+      roomId: pathParam(req, "roomId"),
+      accountId: pathParam(req, "accountId"),
+      role: roleField(body, "role"),
+      state: membershipStateField(body, "state")
+    });
+    res.json({ preview });
   }));
 
   app.put("/api/workspaces/:workspaceId/members/:accountId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const memberAccountId = pathParam(req, "accountId");
-    const member = await commands.setWorkspaceMember(operationContext(req), {
-      accountId: memberAccountId,
-      role: roleField(body, "role"),
-      state: membershipStateField(body, "state"),
-      expectedVersion: numberField(body, "expected_version")
+    const context = workspaceContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const changed = await commands.setWorkspaceMember(operationContext(req), {
+        accountId: memberAccountId,
+        role: roleField(body, "role"),
+        state: membershipStateField(body, "state"),
+        expectedVersion: numberField(body, "expected_version")
+      });
+      if (!changed.replayed) {
+        await revalidateWorkspaceMemberSockets(io, store, context.workspaceId, memberAccountId);
+        for (const roomId of changed.revalidationRoomIds) {
+          await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId, kind: "room.member.changed" });
+        }
+      }
+      return changed;
     });
-    await revalidateWorkspaceMemberSockets(io, store, workspaceContext(req).workspaceId, memberAccountId);
-    res.json({ member });
+    res.json({ member: result.member, replayed: result.replayed });
   }));
 
   app.put("/api/workspaces/:workspaceId/rooms/:roomId/members/:accountId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const roomId = pathParam(req, "roomId");
     const memberAccountId = pathParam(req, "accountId");
-    const member = await commands.setRoomMember(operationContext(req), {
-      roomId,
-      accountId: memberAccountId,
-      role: roleField(body, "role"),
-      state: membershipStateField(body, "state"),
-      expectedVersion: numberField(body, "expected_version")
+    const context = workspaceContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const changed = await commands.setRoomMember(operationContext(req), {
+        roomId,
+        accountId: memberAccountId,
+        role: roleField(body, "role"),
+        state: membershipStateField(body, "state"),
+        expectedVersion: numberField(body, "expected_version")
+      });
+      if (!changed.replayed) {
+        for (const affectedRoomId of changed.revalidationRoomIds) {
+          await revalidateRoomMemberSockets(io, store, context.workspaceId, affectedRoomId, memberAccountId);
+        }
+        for (const affectedRoomId of changed.revalidationRoomIds) {
+          await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: affectedRoomId, kind: "room.member.changed" });
+        }
+      }
+      return changed;
     });
-    await revalidateRoomMemberSockets(io, store, workspaceContext(req).workspaceId, roomId, memberAccountId);
-    res.json({ member });
+    res.json({ member: result.member, affected_room_ids: result.affectedRoomIds, replayed: result.replayed });
   }));
 
   app.post("/api/workspaces/:workspaceId/invitations", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -211,8 +284,22 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/invitations/accept", authenticateInvitationAcceptance, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const accepted = await commands.acceptInvitation(operationContext(req), stringField(body, "invite_token"));
-    res.json({ accepted });
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const accepted = await commands.acceptInvitation(context, stringField(body, "invite_token"));
+      if (!accepted.replayed) {
+        for (const roomId of accepted.revalidationRoomIds) {
+          await revalidateRoomMemberSockets(io, store, context.workspaceId, roomId, context.accountId);
+          await emitAuthorizedRoomWorkspaceEvent(io, store, {
+            workspaceId: context.workspaceId,
+            roomId,
+            kind: "room.member.changed"
+          });
+        }
+      }
+      return accepted;
+    });
+    res.json({ accepted: result.accepted, replayed: result.replayed });
   }));
 
   app.post("/api/workspaces/:workspaceId/invitations/:invitationId/revoke", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -222,8 +309,10 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   }));
 
   app.get("/api/workspaces/:workspaceId/records", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_records_room_id_required", 400);
     const records = await store.listRecords(workspaceContext(req), {
-      ...(queryString(req, "room_id") ? { roomId: queryString(req, "room_id") } : {}),
+      roomId,
       ...(queryString(req, "record_type") ? { recordType: queryString(req, "record_type") } : {}),
       ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
     });
@@ -231,49 +320,63 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   }));
 
   app.get("/api/workspaces/:workspaceId/records/:recordType/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
-    res.json({ record: await store.getRecord(workspaceContext(req), { recordType: pathParam(req, "recordType"), id: pathParam(req, "recordId") }) });
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_record_room_id_required", 400);
+    res.json({ record: await store.getRecord(workspaceContext(req), { roomId, recordType: pathParam(req, "recordType"), id: pathParam(req, "recordId") }) });
   }));
 
   app.put("/api/workspaces/:workspaceId/records/:recordType/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const result = await commands.putRecord(operationContext(req), {
-      roomId: stringField(body, "room_id"),
-      recordType: pathParam(req, "recordType"),
-      id: pathParam(req, "recordId"),
-      expectedVersion: numberField(body, "expected_version"),
-      payload: objectField(body, "payload"),
-      ...(optionalStringField(body, "search_text") ? { searchText: optionalStringField(body, "search_text") } : {})
+    const context = workspaceContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await commands.putRecord(operationContext(req), {
+        roomId: stringField(body, "room_id"),
+        recordType: pathParam(req, "recordType"),
+        id: pathParam(req, "recordId"),
+        expectedVersion: numberField(body, "expected_version"),
+        payload: objectField(body, "payload"),
+        ...(optionalStringField(body, "search_text") ? { searchText: optionalStringField(body, "search_text") } : {})
+      });
+      if (!saved.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, saved.event);
+      return saved;
     });
-    emitWorkspaceEvent(io, result.event);
     res.json(result);
   }));
 
   app.delete("/api/workspaces/:workspaceId/records/:recordType/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const result = await commands.deleteRecord(operationContext(req), {
-      roomId: stringField(body, "room_id"),
-      recordType: pathParam(req, "recordType"),
-      id: pathParam(req, "recordId"),
-      expectedVersion: numberField(body, "expected_version")
+    const context = workspaceContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const deleted = await commands.deleteRecord(operationContext(req), {
+        roomId: stringField(body, "room_id"),
+        recordType: pathParam(req, "recordType"),
+        id: pathParam(req, "recordId"),
+        expectedVersion: numberField(body, "expected_version")
+      });
+      if (!deleted.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, deleted.event);
+      return deleted;
     });
-    emitWorkspaceEvent(io, result.event);
     res.json(result);
   }));
 
   app.get("/api/workspaces/:workspaceId/search", authenticateWorkspace, asyncRoute(async (req, res) => {
     const query = queryString(req, "q");
     if (!query) throw new WorkspaceServerError("workspace_search_query_required", 400);
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_search_room_id_required", 400);
     const records = await store.searchRecords(workspaceContext(req), {
       query,
-      ...(queryString(req, "room_id") ? { roomId: queryString(req, "room_id") } : {}),
+      roomId,
       ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
     });
     res.json({ records });
   }));
 
   app.get("/api/workspaces/:workspaceId/events", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_events_room_id_required", 400);
     const events = await store.listEvents(workspaceContext(req), {
-      ...(queryString(req, "room_id") ? { roomId: queryString(req, "room_id") } : {}),
+      roomId,
       ...(queryNumber(req, "after") !== undefined ? { afterId: queryNumber(req, "after") } : {}),
       ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
     });
@@ -290,22 +393,28 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/jobs", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const result = await commands.putJob(operationContext(req), {
-      roomId: stringField(body, "room_id"),
-      ...(optionalStringField(body, "job_id") ? { id: optionalStringField(body, "job_id") } : {}),
-      kind: stringField(body, "kind"),
-      idempotencyKey: stringField(body, "idempotency_key"),
-      ...(body.expected_version === undefined ? {} : { expectedVersion: numberField(body, "expected_version") }),
-      ...(optionalStringField(body, "status") ? { status: jobStatusField(body, "status") } : {}),
-      payload: objectField(body, "payload")
+    const context = workspaceContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await commands.putJob(operationContext(req), {
+        roomId: stringField(body, "room_id"),
+        ...(optionalStringField(body, "job_id") ? { id: optionalStringField(body, "job_id") } : {}),
+        kind: stringField(body, "kind"),
+        idempotencyKey: stringField(body, "idempotency_key"),
+        ...(body.expected_version === undefined ? {} : { expectedVersion: numberField(body, "expected_version") }),
+        ...(optionalStringField(body, "status") ? { status: jobStatusField(body, "status") } : {}),
+        payload: objectField(body, "payload")
+      });
+      if (!saved.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, saved.event);
+      return saved;
     });
-    emitWorkspaceEvent(io, result.event);
-    res.status(201).json({ job: result.job });
+    res.status(result.replayed ? 200 : 201).json({ job: result.job, replayed: result.replayed });
   }));
 
   app.get("/api/workspaces/:workspaceId/files/{*filePath}", authenticateWorkspace, asyncRoute(async (req, res) => {
     const filePath = wildcardParam(req.params.filePath);
-    const read = await files.read(workspaceContext(req), filePath);
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_file_room_id_required", 400);
+    const read = await files.read(workspaceContext(req), { roomId, path: filePath });
     res.setHeader("content-type", "application/octet-stream");
     res.setHeader("x-samurai-file-version", String(read.file.version));
     res.setHeader("x-samurai-file-sha256", read.file.sha256);
@@ -317,14 +426,18 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
     const filePath = wildcardParam(req.params.filePath);
     const content = Buffer.from(stringField(body, "content_base64"), "base64");
     if (content.byteLength > 8 * 1024 * 1024) throw new WorkspaceServerError("workspace_file_too_large", 413);
-    const result = await commands.writeFile(operationContext(req), {
-      roomId: stringField(body, "room_id"),
-      path: filePath,
-      content,
-      expectedVersion: numberField(body, "expected_version")
+    const context = workspaceContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await commands.writeFile(operationContext(req), {
+        roomId: stringField(body, "room_id"),
+        path: filePath,
+        content,
+        expectedVersion: numberField(body, "expected_version")
+      });
+      if (!saved.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, saved.event);
+      return saved;
     });
-    emitWorkspaceEvent(io, result.event);
-    res.json({ file: result.file, event: result.event });
+    res.json({ file: result.file, event: result.event, replayed: result.replayed });
   }));
 
   app.post("/api/workspaces/:workspaceId/transfers", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -409,8 +522,10 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
       try {
         const body = objectBody(input);
         const roomId = stringField(body, "room_id");
-        await store.assertRoomReadable(identity, roomId);
-        socket.join(roomSocketRoom(identity.workspaceId, roomId));
+        await realtimeGate.run(identity.workspaceId, async () => {
+          await store.assertRoomReadable(identity, roomId);
+          socket.join(roomSocketRoom(identity.workspaceId, roomId));
+        });
         acknowledge?.({ ok: true });
       } catch (error) {
         acknowledge?.({ ok: false, error: publicError(error) });
@@ -419,11 +534,13 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
     socket.on("workspace:resync", async (input: unknown, acknowledge?: (result: unknown) => void) => {
       try {
         const body = objectBody(input);
-        const roomId = optionalStringField(body, "room_id");
-        if (roomId) await store.assertRoomReadable(identity, roomId);
-        const events = await store.listEvents(identity, {
-          ...(roomId ? { roomId } : {}),
-          ...(typeof body.after === "number" ? { afterId: body.after } : {})
+        const roomId = stringField(body, "room_id");
+        const events = await realtimeGate.run(identity.workspaceId, async () => {
+          await store.assertRoomReadable(identity, roomId);
+          return store.listEvents(identity, {
+            roomId,
+            ...(typeof body.after === "number" ? { afterId: body.after } : {})
+          });
         });
         acknowledge?.({ ok: true, events });
       } catch (error) {
@@ -550,8 +667,47 @@ function authenticated(req: Request): NonNullable<AuthenticatedRequest["samurai"
   return value;
 }
 
-function emitWorkspaceEvent(io: SocketServer, event: { workspaceId: string; roomId: string }): void {
-  emitRoomWorkspaceEvent(io, event);
+/**
+ * A Room event is never broadcast to the Workspace as a whole.  A socket is
+ * checked again immediately before delivery, inside the same local gate used
+ * by hierarchy and membership changes.  This closes the post-commit window
+ * where a stale Socket.IO room subscription could otherwise disclose an
+ * event after its access was revoked.
+ *
+ * Hierarchy events also reach directly-authorized Workspace sockets that have
+ * not yet joined the new Room channel.  That lets their tree refresh without
+ * revealing the Room to parent-only members.
+ */
+async function emitAuthorizedRoomWorkspaceEvent(
+  io: SocketServer,
+  store: WorkspaceServerStore,
+  event: { workspaceId: string; roomId: string; kind?: string }
+): Promise<void> {
+  for (const socket of io.sockets.sockets.values()) {
+    const identity = socket.data.samurai as { workspaceId?: string; accountId?: string } | undefined;
+    if (identity?.workspaceId !== event.workspaceId || !identity.accountId) continue;
+    const roomChannel = roomSocketRoom(event.workspaceId, event.roomId);
+    const wasSubscribed = socket.rooms.has(roomChannel);
+    let delivered = false;
+    try {
+      delivered = await store.deliverRoomRealtimeIfReadable(
+        { workspaceId: event.workspaceId, accountId: identity.accountId },
+        event.roomId,
+        () => { socket.emit("workspace:event", event); }
+      );
+    } catch {
+      delivered = false;
+    }
+    if (!delivered) {
+      socket.leave(roomChannel);
+      // A Socket that never knew this Room must receive no Room identifier.
+      // Otherwise a normal hidden-Room update becomes an existence oracle.
+      if (wasSubscribed) {
+        socket.emit("workspace:room-access-revoked", { workspaceId: event.workspaceId, roomId: event.roomId });
+      }
+      continue;
+    }
+  }
 }
 
 async function revalidateWorkspaceMemberSockets(io: SocketServer, store: WorkspaceServerStore, workspaceId: string, accountId: string): Promise<void> {
@@ -584,12 +740,19 @@ async function revalidateRoomMemberSockets(io: SocketServer, store: WorkspaceSer
   for (const socket of io.sockets.sockets.values()) {
     const identity = socket.data.samurai as { workspaceId?: string; accountId?: string } | undefined;
     if (identity?.workspaceId === workspaceId && identity.accountId === accountId) {
+      const roomChannel = roomSocketRoom(workspaceId, roomId);
+      const wasSubscribed = socket.rooms.has(roomChannel);
       try {
         await store.assertRoomReadable({ workspaceId, accountId }, roomId);
         socket.emit("workspace:room-access-changed", { workspaceId, roomId });
       } catch {
-        socket.leave(roomSocketRoom(workspaceId, roomId));
-        socket.emit("workspace:room-access-revoked", { workspaceId, roomId });
+        socket.leave(roomChannel);
+        // A connection which was never subscribed must not learn a hidden
+        // Room id merely because an old/redundant revoke command is replayed
+        // against its membership row.
+        if (wasSubscribed) {
+          socket.emit("workspace:room-access-revoked", { workspaceId, roomId });
+        }
       }
     }
   }
@@ -707,6 +870,15 @@ function optionalStringField(body: Record<string, unknown>, key: string): string
   return value.trim();
 }
 
+/** A move must state its destination explicitly; null means Workspace root. */
+function nullableStringField(body: Record<string, unknown>, key: string): string | undefined {
+  if (!(key in body)) throw new WorkspaceServerError(`${key}_required`, 400);
+  const value = body[key];
+  if (value === null) return undefined;
+  if (typeof value !== "string" || !value.trim()) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value.trim();
+}
+
 function numberField(body: Record<string, unknown>, key: string): number {
   const value = body[key];
   if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new WorkspaceServerError(`${key}_invalid`, 400);
@@ -813,7 +985,19 @@ function optionalPathParam(req: Request, key: string): string | undefined {
 function normalizeError(error: unknown): WorkspaceServerError {
   if (error instanceof WorkspaceServerError) return error;
   const message = error instanceof Error ? error.message : "workspace_server_internal_error";
-  if (/permission_denied|owner_permission_required/.test(message)) return new WorkspaceServerError("workspace_permission_denied", 403);
+  // Missing and inaccessible Rooms deliberately share one public response.
+  // Never let an endpoint reveal whether a private Room id happens to exist.
+  if (/room_(?:not_available|parent_not_available|not_found_or_access_denied)/.test(message)) {
+    return new WorkspaceServerError("room_not_available", 404);
+  }
+  const conflictCode = message.match(/(?:room_(?:parent_membership_required|move_parent_membership_required|hierarchy_cycle|last_owner_cannot_be_removed|membership_version_conflict|version_conflict)|workspace_(?:membership_version_conflict|last_owner_cannot_be_revoked|record_room_change_forbidden|file_room_change_forbidden|account_not_active))/)?.[0];
+  if (conflictCode) return new WorkspaceServerError(conflictCode, 409);
+  if (/room_membership_invalid/.test(message)) return new WorkspaceServerError("room_membership_invalid", 400);
+  if (/workspace_admin_permission_required/.test(message)) return new WorkspaceServerError("workspace_admin_permission_required", 403);
+  if (/workspace_owner_permission_required/.test(message)) return new WorkspaceServerError("workspace_owner_permission_required", 403);
+  if (/workspace_permission_denied/.test(message)) return new WorkspaceServerError("workspace_permission_denied", 403);
+  if (/workspace_membership_required/.test(message)) return new WorkspaceServerError("workspace_membership_required", 409);
+  if (/permission_denied|owner_permission_required|admin_permission_required/.test(message)) return new WorkspaceServerError("workspace_permission_denied", 403);
   if (/invitation_invalid|membership_invalid/.test(message)) return new WorkspaceServerError("workspace_request_rejected", 400);
   if (/version_conflict|read_only|transfer_not_ready|transfer_source_not_active|transfer_receipt_invalid/.test(message)) {
     return new WorkspaceServerError("workspace_update_conflict", 409);

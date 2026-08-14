@@ -102,6 +102,13 @@ export class WorkspaceServerCommandService {
     return this.store.createRoom(context, input);
   }
 
+  moveRoom(
+    context: Parameters<WorkspaceServerStore["moveRoom"]>[0],
+    input: Parameters<WorkspaceServerStore["moveRoom"]>[1]
+  ) {
+    return this.store.moveRoom(context, input);
+  }
+
   setWorkspaceMember(
     context: Parameters<WorkspaceServerStore["setWorkspaceMember"]>[0],
     input: Parameters<WorkspaceServerStore["setWorkspaceMember"]>[1]

@@ -116,6 +116,8 @@ Memory、Skill、Run History、Backend設定を常設メニューに並べすぎ
 - Workspace側は独立してスクロールする
 - split比率はUI preferenceとしてlocalStorageに保存する
 - mobileでは1カラムに落とす
+- Workspace Server接続がある時は、閲覧権限のあるRoomだけを平坦な一覧からツリーとして投影する。親Roomにいるだけでは見えない子Roomの名前・件数・通知を補完表示しない
+- Room作成、子Room作成、移動、メンバー変更は明示操作にする。初期の移動はドラッグ＆ドロップにせず、移動先と影響するメンバーを確認してから実行する
 
 Workspace PeekはWorkspaceデータの投影であり、Workspaceの保存単位ではない。
 

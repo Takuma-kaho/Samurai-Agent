@@ -15,6 +15,7 @@
     "server:02:dev": "pnpm --filter @samurai-agent/server run workspace-server",
     "server:02:migrate": "pnpm --filter @samurai-agent/server run workspace-server:admin -- migrate",
     "server:02:verify": "node scripts/verify-server-02.mjs",
+    "server:03:verify": "node scripts/verify-server-03.mjs",
     "dev:parallel": "pnpm --parallel --filter @samurai-agent/server --filter @samurai-agent/web run dev",
     "doctor": "node scripts/doctor.mjs",
     "backend:release:verify": "node scripts/verify-backend-release-readiness.mjs",

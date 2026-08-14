@@ -300,6 +300,51 @@ export interface DesktopWorkspaceServerStatus {
   rooms?: { status: number; body: unknown };
 }
 
+export interface DesktopWorkspaceRoom {
+  id: string;
+  workspaceId: string;
+  parentRoomId?: string;
+  name: string;
+  version: number;
+  /** Capability for this Room only; it does not grant access to descendants. */
+  canManage?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceRoomMembership {
+  workspaceId: string;
+  roomId: string;
+  accountId: string;
+  role: "owner" | "admin" | "member" | "guest";
+  state: "active" | "revoked";
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt?: string;
+}
+
+export interface DesktopRoomMovePreview {
+  allowed: boolean;
+  reason?: string;
+  blockingAccountIds: string[];
+  requiredAncestorRoomIds: string[];
+}
+
+export interface DesktopRoomMemberPreview {
+  allowed: boolean;
+  reason?: string;
+  affectedRoomIds: string[];
+  blockingOwnerRoomIds: string[];
+}
+
+export interface DesktopWorkspaceRealtimeEvent {
+  type: "event" | "access_changed" | "access_revoked" | "room_access_changed" | "room_access_revoked";
+  workspaceId: string;
+  roomId?: string;
+  kind?: string;
+}
+
 declare global {
   interface Window {
     samuraiDesktop?: {
@@ -313,11 +358,45 @@ declare global {
         serverUrl: string;
         workspaceId: string;
         accountId: string;
-        privateKey?: string;
       }) => Promise<DesktopWorkspaceConnectionState>;
       selectWorkspaceConnection?: (connectionId: string) => Promise<DesktopWorkspaceConnectionState>;
+      importActiveWorkspaceIdentityFromClipboard?: () => Promise<DesktopWorkspaceConnectionState>;
       registerWorkspaceServerAccount?: (displayName?: string) => Promise<unknown>;
       getWorkspaceServerStatus?: () => Promise<DesktopWorkspaceServerStatus>;
+      listWorkspaceRooms?: () => Promise<{ rooms: DesktopWorkspaceRoom[] }>;
+      listWorkspaceRoomMembers?: (roomId: string) => Promise<{ members: DesktopWorkspaceRoomMembership[] }>;
+      createWorkspaceRoom?: (input: {
+        name: string;
+        parentRoomId?: string;
+        expectedWorkspaceVersion: number;
+        operationId: string;
+      }) => Promise<{ room: DesktopWorkspaceRoom; replayed?: boolean }>;
+      previewWorkspaceRoomMove?: (input: {
+        roomId: string;
+        parentRoomId: string | null;
+      }) => Promise<{ preview: DesktopRoomMovePreview }>;
+      moveWorkspaceRoom?: (input: {
+        roomId: string;
+        parentRoomId: string | null;
+        expectedRoomVersion: number;
+        expectedWorkspaceVersion: number;
+        operationId: string;
+      }) => Promise<{ room: DesktopWorkspaceRoom; affected_room_ids: string[]; replayed?: boolean }>;
+      previewWorkspaceRoomMember?: (input: {
+        roomId: string;
+        accountId: string;
+        role: "owner" | "admin" | "member" | "guest";
+        state: "active" | "revoked";
+      }) => Promise<{ preview: DesktopRoomMemberPreview }>;
+      setWorkspaceRoomMember?: (input: {
+        roomId: string;
+        accountId: string;
+        role: "owner" | "admin" | "member" | "guest";
+        state: "active" | "revoked";
+        expectedVersion: number;
+        operationId: string;
+      }) => Promise<{ member: DesktopWorkspaceRoomMembership; affected_room_ids: string[]; replayed?: boolean }>;
+      onWorkspaceServerEvent?: (listener: (event: DesktopWorkspaceRealtimeEvent | undefined) => void) => () => void;
     };
   }
 }

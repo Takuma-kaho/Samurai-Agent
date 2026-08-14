@@ -19,6 +19,13 @@ import ManagementSurfaces from "./ManagementSurfaces.vue";
 import type { AutomationJobRecord, WikiFrontmatter } from "@samurai-agent/core-schemas";
 import type { LocaleKey } from "@samurai-agent/localization";
 import WorkspaceConnectionSettings, { type NativeWorkspaceConnection } from "./WorkspaceConnectionSettings.vue";
+import WorkspaceRoomTree from "./WorkspaceRoomTree.vue";
+import type {
+  DesktopRoomMemberPreview,
+  DesktopRoomMovePreview,
+  DesktopWorkspaceRoom,
+  DesktopWorkspaceRoomMembership
+} from "../lib/api";
 
 type ViewMode = "chat" | "search" | "settings" | "runs" | "collections" | "memory" | "wiki" | "skills" | "automations";
 type Label = (key: LocaleKey) => string;
@@ -43,10 +50,25 @@ const props = defineProps<{
   workspaceConnectionLoading: boolean;
   workspaceConnectionError: string | null;
   workspaceServerStatus?: { message: string; tone: "ready" | "warning" | "error" };
+  workspaceRoomAvailable: boolean;
+  workspaceRoomLoading: boolean;
+  workspaceRoomError: string | null;
+  workspaceRoomWorkspaceVersion?: number;
+  workspaceRoomWorkspaceRole?: "owner" | "admin" | "member" | "guest";
+  workspaceRooms: DesktopWorkspaceRoom[];
+  selectedWorkspaceRoomId?: string;
+  selectWorkspaceRoom: (roomId: string) => void | Promise<void>;
+  createWorkspaceRoom: (input: { name: string; parentRoomId?: string; expectedWorkspaceVersion: number; operationId: string }) => Promise<void>;
+  previewWorkspaceRoomMove: (input: { roomId: string; parentRoomId: string | null }) => Promise<DesktopRoomMovePreview>;
+  moveWorkspaceRoom: (input: { roomId: string; parentRoomId: string | null; expectedRoomVersion: number; expectedWorkspaceVersion: number; operationId: string }) => Promise<void>;
+  listWorkspaceRoomMembers: (roomId: string) => Promise<DesktopWorkspaceRoomMembership[]>;
+  previewWorkspaceRoomMember: (input: { roomId: string; accountId: string; role: "owner" | "admin" | "member" | "guest"; state: "active" | "revoked" }) => Promise<DesktopRoomMemberPreview>;
+  setWorkspaceRoomMember: (input: { roomId: string; accountId: string; role: "owner" | "admin" | "member" | "guest"; state: "active" | "revoked"; expectedVersion: number; operationId: string }) => Promise<void>;
   activeWorkspaceConnectionId?: string;
   workspaceConnections: NativeWorkspaceConnection[];
   selectWorkspaceConnection: (connectionId: string) => void | Promise<void>;
-  saveWorkspaceConnection: (input: { label: string; serverUrl: string; workspaceId: string; accountId: string; privateKey?: string }) => void | Promise<void>;
+  saveWorkspaceConnection: (input: { label: string; serverUrl: string; workspaceId: string; accountId: string }) => void | Promise<void>;
+  importWorkspaceIdentity?: () => void | Promise<void>;
   registerWorkspaceServerAccount?: () => void | Promise<void>;
   localeDisplayName: (locale: SupportedLocale) => string;
   captureModeLabel: (mode: CaptureMode) => string;
@@ -178,7 +200,26 @@ const emit = defineEmits<{ "update:searchQuery": [value: string] }>();
         :connections="props.workspaceConnections"
         :select-connection="props.selectWorkspaceConnection"
         :save-connection="props.saveWorkspaceConnection"
+        :import-identity="props.importWorkspaceIdentity"
         :register-account="props.registerWorkspaceServerAccount"
+      />
+    </div>
+    <div v-if="props.workspaceRoomAvailable" class="settings-group lit-surface workspace-connection-group">
+      <WorkspaceRoomTree
+        :available="props.workspaceRoomAvailable"
+        :loading="props.workspaceRoomLoading"
+        :error="props.workspaceRoomError"
+        :workspace-version="props.workspaceRoomWorkspaceVersion"
+        :workspace-role="props.workspaceRoomWorkspaceRole"
+        :rooms="props.workspaceRooms"
+        :selected-room-id="props.selectedWorkspaceRoomId"
+        :select-room="props.selectWorkspaceRoom"
+        :create-room="props.createWorkspaceRoom"
+        :preview-move="props.previewWorkspaceRoomMove"
+        :move-room="props.moveWorkspaceRoom"
+        :list-members="props.listWorkspaceRoomMembers"
+        :preview-member="props.previewWorkspaceRoomMember"
+        :set-member="props.setWorkspaceRoomMember"
       />
     </div>
   </section>
