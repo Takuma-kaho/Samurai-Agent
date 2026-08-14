@@ -1,11 +1,8 @@
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer, type Server as HttpServer } from "node:http";
-import { mkdir, rm } from "node:fs/promises";
-import path from "node:path";
 import { Server as SocketServer } from "socket.io";
 import {
-  WorkspaceBundleV3Service,
   WorkspaceServerError,
   WorkspaceServerStore,
   assertOpaqueId,
@@ -13,7 +10,6 @@ import {
   readWorkspaceBundleV3Transport,
   resolveRequestWorkspaceId,
   verifyAccountSignature,
-  writeWorkspaceBundleV3Transport,
   type WorkspaceRequestContext,
   type WorkspaceServerConfig
 } from "@samurai-agent/workspace-server";
@@ -29,14 +25,12 @@ export interface WorkspaceServerHttp {
   httpServer: HttpServer;
   io: SocketServer;
   config: WorkspaceServerConfig;
-  store: WorkspaceServerStore;
-  bundles: WorkspaceBundleV3Service;
   close(): Promise<void>;
 }
 
 export async function createWorkspaceServerHttp(config = loadWorkspaceServerConfig()): Promise<WorkspaceServerHttp> {
   const core = await createWorkspaceServerCore(config);
-  const { store, files, bundles } = core;
+  const { store, files, bundles, commands } = core;
   const app = express();
   const httpServer = createServer(app);
   const corsOrigins = config.corsOrigins;
@@ -83,7 +77,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
       publicKey,
       payload: { method: req.method, path: req.path, requestId: signed.requestId, timestamp: signed.timestamp, body }
     });
-    const account = await store.registerAccount({ id: accountId, publicKey, displayName });
+    const account = await commands.registerAccount({ id: accountId, publicKey, displayName });
     res.status(201).json({ account });
   }));
 
@@ -95,7 +89,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   app.post("/api/workspaces", authenticate, asyncRoute(async (req, res) => {
     if (config.mode !== "hosted") throw new WorkspaceServerError("self_host_accepts_one_workspace", 409);
     const body = objectBody(req.body);
-    const workspace = await store.createWorkspace({
+    const workspace = await commands.createWorkspace({
       id: stringField(body, "workspace_id"),
       name: stringField(body, "name"),
       ownerAccountId: authenticated(req).accountId,
@@ -110,30 +104,22 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   app.post("/api/workspaces/imports", authenticate, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const targetWorkspaceId = stringField(body, "target_workspace_id");
-    const operationId = assertOpaqueId(stringHeader(req, "x-samurai-operation-id"), "workspace_operation_id_invalid");
-    // Operation IDs are client-provided and only unique per Account. Keep
-    // uploaded Bundles in an Account namespace so one authenticated person
-    // cannot collide with another person's in-progress import.
-    const staging = path.join(config.storageRoot, ".uploads", authenticated(req).accountId, `bundle_${operationId}`);
-    await mkdir(path.dirname(staging), { recursive: true, mode: 0o700 });
-    try {
-      const bundle = await writeWorkspaceBundleV3Transport({ transport: body.bundle, destination: staging });
-      const imported = await bundles.importNew({ accountId: authenticated(req).accountId, operationId }, {
-        sourceDirectory: bundle.directory,
-        targetWorkspaceId,
-        ...(optionalStringField(body, "target_workspace_name") ? { targetWorkspaceName: optionalStringField(body, "target_workspace_name") } : {})
-      });
-      res.status(201).json({ workspace_id: imported.workspaceId, manifest: imported.manifest, ...(imported.receipt ? { receipt: imported.receipt } : {}) });
-    } finally {
-      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
-    }
+    const imported = await commands.importWorkspaceBundleTransport({
+      accountId: authenticated(req).accountId,
+      operationId: stringHeader(req, "x-samurai-operation-id")
+    }, {
+      transport: body.bundle,
+      targetWorkspaceId,
+      ...(optionalStringField(body, "target_workspace_name") ? { targetWorkspaceName: optionalStringField(body, "target_workspace_name") } : {})
+    });
+    res.status(201).json({ workspace_id: imported.workspaceId, manifest: imported.manifest, ...(imported.receipt ? { receipt: imported.receipt } : {}) });
   }));
 
   /** Chunked target import avoids loading a whole Workspace Bundle into RAM. */
   app.post("/api/workspaces/imports/staging", authenticate, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const operationId = stringHeader(req, "x-samurai-operation-id");
-    await bundles.stageIncomingBundle({ accountId: authenticated(req).accountId, operationId }, {
+    await commands.stageWorkspaceBundle({ accountId: authenticated(req).accountId, operationId }, {
       targetWorkspaceId: stringField(body, "target_workspace_id"),
       ...(optionalStringField(body, "target_workspace_name") ? { targetWorkspaceName: optionalStringField(body, "target_workspace_name") } : {}),
       manifest: workspaceBundleManifestField(body, "manifest")
@@ -146,7 +132,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
     const operationId = pathParam(req, "operationId");
     if (operationId !== stringHeader(req, "x-samurai-operation-id")) throw new WorkspaceServerError("workspace_operation_id_mismatch", 400);
     const content = Buffer.from(base64Field(body, "content_base64"), "base64");
-    await bundles.putIncomingBundleEntry(
+    await commands.writeWorkspaceBundleEntry(
       { accountId: authenticated(req).accountId, operationId },
       wildcardParam(req.params.entryPath),
       content
@@ -157,7 +143,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   app.post("/api/workspaces/imports/staging/:operationId/complete", authenticate, asyncRoute(async (req, res) => {
     const operationId = pathParam(req, "operationId");
     if (operationId !== stringHeader(req, "x-samurai-operation-id")) throw new WorkspaceServerError("workspace_operation_id_mismatch", 400);
-    const imported = await bundles.completeIncomingBundle({ accountId: authenticated(req).accountId, operationId });
+    const imported = await commands.completeWorkspaceBundleImport({ accountId: authenticated(req).accountId, operationId });
     res.status(201).json({ workspace_id: imported.workspaceId, manifest: imported.manifest, ...(imported.receipt ? { receipt: imported.receipt } : {}) });
   }));
 
@@ -171,7 +157,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/rooms", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const room = await store.createRoom(operationContext(req), {
+    const room = await commands.createRoom(operationContext(req), {
       id: optionalStringField(body, "room_id"),
       name: stringField(body, "name"),
       expectedWorkspaceVersion: numberField(body, "expected_workspace_version")
@@ -182,7 +168,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   app.put("/api/workspaces/:workspaceId/members/:accountId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const memberAccountId = pathParam(req, "accountId");
-    const member = await store.setWorkspaceMember(operationContext(req), {
+    const member = await commands.setWorkspaceMember(operationContext(req), {
       accountId: memberAccountId,
       role: roleField(body, "role"),
       state: membershipStateField(body, "state"),
@@ -196,7 +182,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
     const body = objectBody(req.body);
     const roomId = pathParam(req, "roomId");
     const memberAccountId = pathParam(req, "accountId");
-    const member = await store.setRoomMember(operationContext(req), {
+    const member = await commands.setRoomMember(operationContext(req), {
       roomId,
       accountId: memberAccountId,
       role: roleField(body, "role"),
@@ -209,7 +195,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/invitations", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const result = await store.createInvitation(operationContext(req), {
+    const result = await commands.createInvitation(operationContext(req), {
       ...(optionalStringField(body, "room_id") ? { roomId: optionalStringField(body, "room_id") } : {}),
       workspaceRole: roleField(body, "workspace_role"),
       ...(optionalStringField(body, "room_role") ? { roomRole: roleField(body, "room_role") } : {}),
@@ -225,13 +211,13 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/invitations/accept", authenticateInvitationAcceptance, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const accepted = await store.acceptInvitation(operationContext(req), stringField(body, "invite_token"));
+    const accepted = await commands.acceptInvitation(operationContext(req), stringField(body, "invite_token"));
     res.json({ accepted });
   }));
 
   app.post("/api/workspaces/:workspaceId/invitations/:invitationId/revoke", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    await store.revokeInvitation(operationContext(req), pathParam(req, "invitationId"), numberField(body, "expected_version"));
+    await commands.revokeInvitation(operationContext(req), pathParam(req, "invitationId"), numberField(body, "expected_version"));
     res.status(204).end();
   }));
 
@@ -250,7 +236,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.put("/api/workspaces/:workspaceId/records/:recordType/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const result = await store.putRecord(operationContext(req), {
+    const result = await commands.putRecord(operationContext(req), {
       roomId: stringField(body, "room_id"),
       recordType: pathParam(req, "recordType"),
       id: pathParam(req, "recordId"),
@@ -264,7 +250,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.delete("/api/workspaces/:workspaceId/records/:recordType/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const result = await store.deleteRecord(operationContext(req), {
+    const result = await commands.deleteRecord(operationContext(req), {
       roomId: stringField(body, "room_id"),
       recordType: pathParam(req, "recordType"),
       id: pathParam(req, "recordId"),
@@ -304,7 +290,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/jobs", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    const result = await store.putJob(operationContext(req), {
+    const result = await commands.putJob(operationContext(req), {
       roomId: stringField(body, "room_id"),
       ...(optionalStringField(body, "job_id") ? { id: optionalStringField(body, "job_id") } : {}),
       kind: stringField(body, "kind"),
@@ -331,7 +317,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
     const filePath = wildcardParam(req.params.filePath);
     const content = Buffer.from(stringField(body, "content_base64"), "base64");
     if (content.byteLength > 8 * 1024 * 1024) throw new WorkspaceServerError("workspace_file_too_large", 413);
-    const result = await files.write(operationContext(req), {
+    const result = await commands.writeFile(operationContext(req), {
       roomId: stringField(body, "room_id"),
       path: filePath,
       content,
@@ -343,9 +329,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/transfers", authenticateWorkspace, asyncRoute(async (req, res) => {
     const context = operationContext(req);
-    const destination = path.join(config.storageRoot, "exports", context.workspaceId, `transfer_${context.operationId}`);
-    await mkdir(path.dirname(destination), { recursive: true });
-    const result = await bundles.beginTransfer(context, destination);
+    const result = await commands.beginTransfer(context);
     res.status(201).json({
       transfer_id: result.transferId,
       manifest: result.manifest,
@@ -375,7 +359,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
 
   app.post("/api/workspaces/:workspaceId/transfers/:transferId/receipt", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
-    await bundles.recordTransferReceipt(operationContext(req), {
+    await commands.recordTransferReceipt(operationContext(req), {
       transferId: pathParam(req, "transferId"),
       targetWorkspaceId: stringField(body, "target_workspace_id"),
       receipt: transferReceiptField(body, "receipt")
@@ -384,12 +368,12 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   }));
 
   app.post("/api/workspaces/:workspaceId/transfers/:transferId/rollback", authenticateWorkspace, asyncRoute(async (req, res) => {
-    await bundles.rollbackTransfer(operationContext(req), pathParam(req, "transferId"));
+    await commands.rollbackTransfer(operationContext(req), pathParam(req, "transferId"));
     res.status(204).end();
   }));
 
   app.post("/api/workspaces/:workspaceId/transfers/:transferId/complete", authenticateWorkspace, asyncRoute(async (req, res) => {
-    await bundles.completeTransfer(operationContext(req), pathParam(req, "transferId"));
+    await commands.completeTransfer(operationContext(req), pathParam(req, "transferId"));
     res.status(204).end();
   }));
 
@@ -458,8 +442,6 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
     httpServer,
     io,
     config,
-    store,
-    bundles,
     async close(): Promise<void> {
       await new Promise<void>((resolve) => io.close(() => resolve()));
       if (httpServer.listening) {

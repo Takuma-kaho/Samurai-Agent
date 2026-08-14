@@ -3,6 +3,7 @@ import {
   PostgresWorkspaceDatabase,
   WorkspaceBundleV3Service,
   WorkspaceFileStore,
+  WorkspaceServerCommandService,
   WorkspaceServerError,
   WorkspaceServerStore,
   loadWorkspaceServerConfig,
@@ -15,6 +16,7 @@ export interface WorkspaceServerCore {
   store: WorkspaceServerStore;
   files: WorkspaceFileStore;
   bundles: WorkspaceBundleV3Service;
+  commands: WorkspaceServerCommandService;
   close(): Promise<void>;
 }
 
@@ -64,12 +66,15 @@ export async function createWorkspaceServerCore(config = loadWorkspaceServerConf
         throw new WorkspaceServerError("workspace_file_recovery_required", 503);
       }
     }
+    const bundles = new WorkspaceBundleV3Service(store);
+    const commands = new WorkspaceServerCommandService({ store, files, bundles });
     return {
       config,
       database,
       store,
       files,
-      bundles: new WorkspaceBundleV3Service(store),
+      bundles,
+      commands,
       close: () => database.close()
     };
   } catch (error) {

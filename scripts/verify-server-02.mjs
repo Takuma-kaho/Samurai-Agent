@@ -6,9 +6,13 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function run(label, command, args) {
+function run(label, command, args, options = {}) {
   console.log(`[Server02] ${label}`);
-  const result = spawnSync(command, args, { cwd: root, stdio: "inherit", env: process.env });
+  const result = spawnSync(command, args, {
+    cwd: root,
+    stdio: "inherit",
+    env: { ...process.env, ...(options.env ?? {}) }
+  });
   if (result.status !== 0) {
     const detail = result.signal ? `signal=${result.signal}` : `exit=${result.status ?? "unknown"}`;
     throw new Error(`${label}:${detail}`);
@@ -30,6 +34,8 @@ function verifyStaticContract() {
   const config = read("packages/workspace-server/src/config.ts");
   const sqliteMigration = read("packages/workspace-server/src/sqlite-migration.ts");
   const compose = read("docker/self-host/compose.yaml");
+  const packageJson = JSON.parse(read("package.json"));
+  const lockfile = read("pnpm-lock.yaml");
   assert(schema.includes("ENABLE ROW LEVEL SECURITY"), "server02_rls_missing");
   assert(schema.includes("samurai_current_workspace_id()"), "server02_workspace_context_missing");
   assert(schema.includes("account_operations"), "server02_workspace_creation_idempotency_missing");
@@ -40,6 +46,12 @@ function verifyStaticContract() {
   assert(server.includes("authenticateInvitationAcceptance"), "server02_invitation_acceptance_auth_missing");
   assert(server.includes("workspaceInvitationLink"), "server02_invitation_link_missing");
   assert(server.includes("x-samurai-operation-id"), "server02_operation_id_missing");
+  assert(server.includes("commands."), "server02_http_command_boundary_missing");
+  const nanoidOverride = packageJson.pnpm?.overrides?.nanoid;
+  assert(typeof nanoidOverride === "string" && patchedNanoidVersion(nanoidOverride), "server02_nanoid_security_override_missing");
+  assert(lockfile.includes(`\n  nanoid: ${nanoidOverride}\n`), "server02_nanoid_lockfile_override_drift");
+  const lockedNanoidVersions = [...lockfile.matchAll(/\n  nanoid@(\d+\.\d+\.\d+):/g)].map((match) => match[1]);
+  assert(lockedNanoidVersions.length > 0 && lockedNanoidVersions.every(patchedNanoidVersion), "server02_nanoid_vulnerable_lockfile_entry");
   assert(bundle.includes("verifyWorkspaceBundleV3"), "server02_bundle_hash_verification_missing");
   assert(schema.includes("target_status <> 'active'"), "server02_import_account_boundary_missing");
   assert(schema.includes("samurai_finalize_workspace_file_transaction"), "server02_file_recovery_boundary_missing");
@@ -82,8 +94,23 @@ function liveProbeConfiguration() {
   return true;
 }
 
+function patchedNanoidVersion(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!match) return false;
+  const [, major, minor, patch] = match.map(Number);
+  return major > 3 || (major === 3 && (minor > 3 || (minor === 3 && patch >= 18)));
+}
+
 try {
   verifyStaticContract();
+  run("architecture boundaries", "node", ["scripts/verify-architecture-boundaries.mjs"], {
+    env: { SAMURAI_EVIDENCE_MODE: "deferred" }
+  });
+  if (process.env.CI === "true" || process.env.SAMURAI_SERVER_VERIFY_ONLINE_AUDIT === "yes") {
+    run("high severity dependency audit", "pnpm", ["audit", "--audit-level=high"]);
+  } else {
+    console.log("[Server02] オンライン依存監査はCIまたは明示指定時に実行します。");
+  }
   run("Workspace Server typecheck", "pnpm", ["--filter", "@samurai-agent/workspace-server", "run", "typecheck"]);
   run("HTTP Server typecheck", "pnpm", ["--filter", "@samurai-agent/server", "run", "typecheck"]);
   run("Desktop connection typecheck", "pnpm", ["--filter", "@samurai-agent/desktop", "run", "typecheck"]);
