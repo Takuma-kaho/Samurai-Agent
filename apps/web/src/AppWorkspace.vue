@@ -67,6 +67,8 @@ import {
   type SkillIndexEntry,
   type WikiDetail,
   type ProviderErrorPayload,
+  type DesktopWorkspaceConnectionState,
+  type DesktopWorkspaceServerStatus,
   type SearchResult,
   type SessionDetail,
   type SurfaceContractPayload
@@ -147,6 +149,16 @@ const settings = ref<SettingsRecord>({
   external_provider_role: "assistive",
   updated_at: new Date().toISOString()
 });
+const workspaceConnectionState = ref<DesktopWorkspaceConnectionState>({ connections: [] });
+const workspaceConnectionLoading = ref(false);
+const workspaceConnectionError = ref<string | null>(null);
+const workspaceServerStatus = ref<DesktopWorkspaceServerStatus | null>(null);
+const workspaceConnectionAvailable = computed(() => typeof window !== "undefined" && Boolean(
+  window.samuraiDesktop?.listWorkspaceConnections
+  && window.samuraiDesktop?.upsertWorkspaceConnection
+  && window.samuraiDesktop?.selectWorkspaceConnection
+  && window.samuraiDesktop?.getWorkspaceServerStatus
+));
 const sessions = ref<SessionRecord[]>([]);
 const activeSession = ref<SessionRecord | null>(null);
 const messages = ref<MessageRecord[]>([]);
@@ -481,6 +493,7 @@ onMounted(async () => {
   if (storedSettings) {
     settings.value = storedSettings;
   }
+  void loadWorkspaceConnections();
   connectSocket();
   await Promise.all([loadSettings(), loadAgentBackends(), loadSurfaceContract(), loadSessionsWithRetry()]);
   window.addEventListener("hashchange", desktopDeepLinkHashHandler);
@@ -1191,6 +1204,108 @@ async function patchSettings(patch: Partial<Omit<SettingsRecord, "updated_at">>)
   persistSettings(settings.value);
 }
 
+async function loadWorkspaceConnections(): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge) return;
+  workspaceConnectionLoading.value = true;
+  workspaceConnectionError.value = null;
+  try {
+    workspaceConnectionState.value = await bridge.listWorkspaceConnections();
+    await refreshWorkspaceServerStatus();
+  } catch {
+    workspaceConnectionError.value = settings.value.ui_locale === "ja" ? "接続先一覧を読み込めませんでした。" : "Could not load Workspace Server connections.";
+  } finally {
+    workspaceConnectionLoading.value = false;
+  }
+}
+
+async function selectWorkspaceConnection(connectionId: string): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge) return;
+  workspaceConnectionLoading.value = true;
+  workspaceConnectionError.value = null;
+  try {
+    workspaceConnectionState.value = await bridge.selectWorkspaceConnection(connectionId);
+    await refreshWorkspaceServerStatus();
+  } catch {
+    workspaceConnectionError.value = settings.value.ui_locale === "ja" ? "接続先を切り替えられませんでした。" : "Could not switch the Workspace Server connection.";
+  } finally {
+    workspaceConnectionLoading.value = false;
+  }
+}
+
+async function saveWorkspaceConnection(input: { label: string; serverUrl: string; workspaceId: string; accountId: string; privateKey?: string }): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge) return;
+  workspaceConnectionLoading.value = true;
+  workspaceConnectionError.value = null;
+  try {
+    workspaceConnectionState.value = await bridge.upsertWorkspaceConnection(input);
+    await refreshWorkspaceServerStatus();
+  } catch {
+    workspaceConnectionError.value = settings.value.ui_locale === "ja" ? "接続先を保存できませんでした。" : "Could not save the Workspace Server connection.";
+    throw new Error("workspace_connection_save_failed");
+  } finally {
+    workspaceConnectionLoading.value = false;
+  }
+}
+
+async function registerWorkspaceServerAccount(): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.registerWorkspaceServerAccount) return;
+  workspaceConnectionLoading.value = true;
+  workspaceConnectionError.value = null;
+  try {
+    await bridge.registerWorkspaceServerAccount("Samurai Account");
+    await refreshWorkspaceServerStatus();
+  } catch {
+    workspaceConnectionError.value = settings.value.ui_locale === "ja" ? "本人情報をサーバーへ登録できませんでした。" : "Could not register this account with the server.";
+  } finally {
+    workspaceConnectionLoading.value = false;
+  }
+}
+
+async function refreshWorkspaceServerStatus(): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.getWorkspaceServerStatus) return;
+  workspaceServerStatus.value = await bridge.getWorkspaceServerStatus();
+}
+
+const workspaceServerStatusDisplay = computed<{ message: string; tone: "ready" | "warning" | "error" } | undefined>(() => {
+  const status = workspaceServerStatus.value;
+  if (!status?.connection) return undefined;
+  if (status.health?.status !== 200) return {
+    tone: "error",
+    message: settings.value.ui_locale === "ja" ? "接続先サーバーに到達できません。" : "The selected server is unreachable."
+  };
+  if (!status.identityAvailable) return {
+    tone: "warning",
+    message: settings.value.ui_locale === "ja" ? "この端末の本人情報が未登録です。秘密鍵を安全に登録してください。" : "This device has no registered identity. Add the private key securely."
+  };
+  if (status.workspace?.status === 200) {
+    const rooms = status.rooms?.body;
+    const roomCount = rooms && typeof rooms === "object" && Array.isArray((rooms as { rooms?: unknown }).rooms)
+      ? (rooms as { rooms: unknown[] }).rooms.length
+      : undefined;
+    return {
+      tone: "ready",
+      message: settings.value.ui_locale === "ja"
+        ? `接続済み${roomCount === undefined ? "" : `：${roomCount} Room`}`
+        : `Connected${roomCount === undefined ? "" : `: ${roomCount} Rooms`}`
+    };
+  }
+  return {
+    tone: "warning",
+    message: settings.value.ui_locale === "ja" ? "本人情報の登録または権限の確認が必要です。" : "Account registration or access confirmation is required."
+  };
+});
+
+function workspaceConnectionBridge(): NonNullable<Window["samuraiDesktop"]> | undefined {
+  const bridge = typeof window === "undefined" ? undefined : window.samuraiDesktop;
+  if (!bridge?.listWorkspaceConnections || !bridge.upsertWorkspaceConnection || !bridge.selectWorkspaceConnection) return undefined;
+  return bridge as NonNullable<Window["samuraiDesktop"]>;
+}
+
 async function reviewWorkSummary(block: WorkSummaryBlock) {
   const artifact = block.artifacts[0] ?? artifacts.value.find((item) => block.changes.some((change) => change.change.resource_ref.id === item.id));
   if (artifact) {
@@ -1887,6 +2002,15 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
         :capture-modes="captureModes"
         :external-provider-roles="externalProviderRoles"
         :patch-settings="patchSettings"
+        :workspace-connection-available="workspaceConnectionAvailable"
+        :workspace-connection-loading="workspaceConnectionLoading"
+        :workspace-connection-error="workspaceConnectionError"
+        :workspace-server-status="workspaceServerStatusDisplay"
+        :active-workspace-connection-id="workspaceConnectionState.activeConnectionId"
+        :workspace-connections="workspaceConnectionState.connections"
+        :select-workspace-connection="selectWorkspaceConnection"
+        :save-workspace-connection="saveWorkspaceConnection"
+        :register-workspace-server-account="registerWorkspaceServerAccount"
         :locale-display-name="localeDisplayName"
         :capture-mode-label="captureModeLabel"
         :external-provider-role-label="externalProviderRoleLabel"

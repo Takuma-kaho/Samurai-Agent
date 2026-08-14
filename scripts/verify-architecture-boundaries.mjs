@@ -8,6 +8,9 @@ import ts from "typescript";
 const root = process.env.SAMURAI_REPO_ROOT ? path.resolve(process.env.SAMURAI_REPO_ROOT) : process.cwd();
 const storeMutationVerbs = new Set(["save", "update", "delete", "set", "upsert", "archive", "apply", "create", "claim", "revoke", "rotate", "repair", "restore", "reindex", "prune", "expire", "requeue", "release", "mark", "ack", "fail", "patch"]);
 const runtimeMutationVerbs = new Set(["save", "create", "patch", "delete", "archive", "restore", "apply", "run", "reindex", "approve", "deny", "reject", "rotate", "revoke", "expire", "repair", "recreate", "sync", "dispatch", "prepare", "handle"]);
+const workspaceServerStoreMutationVerbs = new Set(["register", "accept", "put"]);
+const workspaceServerFileMutationVerbs = new Set(["write"]);
+const workspaceServerBundleMutationVerbs = new Set(["import", "stage", "put", "complete", "begin", "record", "rollback"]);
 const allowedRuntimeEntrances = new Set([
   "runDomainCommand", "runDomainQuery", "runCollectionManageCompatibility", "runSurfaceOperation",
   "runBackendToolBridgeCall", "runDueAutomationJobs", "syncBackendStream", "runGeneratedSurfaceAction"
@@ -32,6 +35,11 @@ for (const server of serverFiles) {
   const ast = parse(server, serverSource);
   inspectMutationCallsWithAliases(ast, server, "store", storeMutationVerbs, "server_route_direct_store_mutation");
   inspectMutationCallsWithAliases(ast, server, "runtime", runtimeMutationVerbs, "server_direct_runtime_mutation_bypasses_command_bus", allowedRuntimeEntrances);
+  if (server === "apps/server/src/workspace-server/http-server.ts") {
+    inspectMutationCallsWithAliases(ast, server, "store", workspaceServerStoreMutationVerbs, "workspace_server_http_direct_store_mutation");
+    inspectMutationCallsWithAliases(ast, server, "files", workspaceServerFileMutationVerbs, "workspace_server_http_direct_file_mutation");
+    inspectMutationCallsWithAliases(ast, server, "bundles", workspaceServerBundleMutationVerbs, "workspace_server_http_direct_bundle_mutation");
+  }
 }
 
 for (const file of sourceFiles("packages/learning/src")) {
@@ -58,7 +66,7 @@ if (issues.length) {
   process.exit(1);
 }
 
-const result = { status: "passed", server_direct_store_mutations: 0, server_runtime_mutation_bypasses: 0, adapter_direct_store_mutations: 0, adapter_store_dependencies: 0, learning_ui_dependencies: 0, renderer_store_dependencies: 0 };
+const result = { status: "passed", server_direct_store_mutations: 0, workspace_server_http_direct_mutations: 0, server_runtime_mutation_bypasses: 0, adapter_direct_store_mutations: 0, adapter_store_dependencies: 0, learning_ui_dependencies: 0, renderer_store_dependencies: 0 };
 if (process.env.SAMURAI_EVIDENCE_MODE === "deferred") {
   process.stdout.write(`${JSON.stringify(result)}\n`);
   process.exit(0);
@@ -81,6 +89,7 @@ writeFileSync(path.join(evidenceDir, "A07.json"), `${JSON.stringify({
   commit_sha: commitSha, worktree_clean: worktreeClean, source_sha256: sourceHash, source_files: evidenceSources, started_at: now, completed_at: now,
   assertions: [
     { name: "Server route direct Store mutations", actual: 0, expected: 0 },
+    { name: "Workspace Server HTTP direct persistence mutations", actual: 0, expected: 0 },
     { name: "Server Runtime mutations bypassing Domain Command Bus", actual: 0, expected: 0 },
     { name: "Surface and Provider Adapter direct Store mutations", actual: 0, expected: 0 },
     { name: "Surface and Provider Adapter Store dependencies", actual: 0, expected: 0 },

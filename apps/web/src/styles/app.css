@@ -1812,6 +1812,199 @@ button {
   padding: 0 10px;
 }
 
+.workspace-connection-settings {
+  display: grid;
+  gap: 12px;
+}
+
+.workspace-connection-note,
+.workspace-connection-empty,
+.workspace-connection-error {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.workspace-connection-status {
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  padding-left: 8px;
+}
+
+.workspace-connection-status.is-ready {
+  border-color: var(--success, #3d8b62);
+  color: var(--success, #3d8b62);
+}
+
+.workspace-connection-status.is-warning {
+  border-color: var(--warning, #b87a1d);
+  color: var(--warning, #b87a1d);
+}
+
+.workspace-connection-status.is-error {
+  border-color: var(--danger, #bd4a3a);
+  color: var(--danger, #bd4a3a);
+}
+
+.workspace-connection-list {
+  border-bottom: 1px solid var(--line-soft);
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+}
+
+.workspace-connection-row {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink);
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  padding: 10px 2px;
+  text-align: left;
+}
+
+.workspace-connection-row:last-child {
+  border-bottom: 0;
+}
+
+.workspace-connection-row:hover:not(:disabled) .workspace-connection-copy strong,
+.workspace-connection-row.is-active .workspace-connection-copy strong {
+  color: var(--accent);
+}
+
+.workspace-connection-mark {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  display: inline-flex;
+  height: 22px;
+  justify-content: center;
+  width: 22px;
+}
+
+.workspace-connection-row.is-active .workspace-connection-mark {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+
+.workspace-connection-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspace-connection-copy strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.workspace-connection-copy small,
+.workspace-connection-copy em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-connection-active {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 3px 7px;
+}
+
+.workspace-connection-form {
+  display: grid;
+  gap: 9px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.workspace-connection-form label {
+  align-items: stretch;
+  display: grid;
+  gap: 5px;
+  grid-template-columns: 1fr;
+}
+
+.workspace-connection-form label span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.workspace-connection-form input,
+.workspace-connection-form textarea {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  font: inherit;
+  min-height: 35px;
+  min-width: 0;
+  padding: 0 9px;
+}
+
+.workspace-connection-form textarea {
+  padding: 8px 9px;
+  resize: vertical;
+}
+
+.workspace-connection-error {
+  color: var(--danger, #bd4a3a);
+  grid-column: 1 / -1;
+}
+
+.workspace-connection-add {
+  align-items: center;
+  background: var(--ink);
+  border: 0;
+  border-radius: var(--radius-ui);
+  color: var(--bg);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 6px;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 12px;
+  width: fit-content;
+}
+
+.workspace-connection-register {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ui);
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  min-height: 36px;
+  padding: 0 12px;
+  width: fit-content;
+}
+
+.workspace-connection-add:disabled,
+.workspace-connection-register:disabled,
+.workspace-connection-row:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .inline-card-actions button:first-child {
   background: var(--ink);
   border-color: var(--ink);
@@ -3917,6 +4110,19 @@ button {
 
   .settings-group label {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-connection-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace-connection-row {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .workspace-connection-active {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .collection-table-toolbar,

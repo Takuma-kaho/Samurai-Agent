@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: samurai
+      POSTGRES_USER: samurai_owner
+      POSTGRES_PASSWORD: ${SAMURAI_POSTGRES_OWNER_PASSWORD:?set in .env}
+      SAMURAI_DATABASE_RUNTIME_PASSWORD: ${SAMURAI_DATABASE_RUNTIME_PASSWORD:?set in .env}
+    volumes:
+      - samurai-postgres:/var/lib/postgresql/data
+      - ./initdb/00-create-runtime-role.sh:/docker-entrypoint-initdb.d/00-create-runtime-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U samurai_owner -d samurai"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: docker/self-host/Dockerfile
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SAMURAI_DATABASE_RUNTIME_ROLE: samurai_app
+      # This is intentionally available only to this short-lived migration
+      # container.  The long-running Server service below never receives it.
+      SAMURAI_DATABASE_ADMIN_URL: postgresql://samurai_owner:${SAMURAI_POSTGRES_OWNER_PASSWORD:?set in .env}@postgres:5432/samurai
+    command: ["pnpm", "--filter", "@samurai-agent/server", "run", "workspace-server:admin", "--", "migrate"]
+
+  server:
+    build:
+      context: ../..
+      dockerfile: docker/self-host/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "4317"
+      SAMURAI_BIND_ADDRESS: "0.0.0.0"
+      # Docker port publishing controls host exposure; this permits the
+      # container listener without weakening direct-host defaults.
+      SAMURAI_SERVER_CONTAINER_NETWORK: "1"
+      # Keep the direct Docker port loopback-only by default.  Set this to 1
+      # only behind TLS/reverse proxy and set SAMURAI_CORS_ORIGINS explicitly.
+      SAMURAI_SERVER_PUBLIC: ${SAMURAI_SERVER_PUBLIC:-0}
+      SAMURAI_PUBLIC_BASE_URL: ${SAMURAI_PUBLIC_BASE_URL:-}
+      SAMURAI_SERVER_MODE: self_host
+      SAMURAI_SELF_HOST_WORKSPACE_ID: ${SAMURAI_SELF_HOST_WORKSPACE_ID:?set in .env}
+      SAMURAI_SELF_HOST_BOOTSTRAP_MODE: ${SAMURAI_SELF_HOST_BOOTSTRAP_MODE:-create}
+      SAMURAI_WORKSPACE_STORAGE_ROOT: /var/lib/samurai
+      SAMURAI_DATABASE_RUNTIME_ROLE: samurai_app
+      SAMURAI_INVITATION_TOKEN_SECRET: ${SAMURAI_INVITATION_TOKEN_SECRET:?set in .env}
+      # Use URL-safe passwords in .env because they are embedded in these URLs.
+      SAMURAI_DATABASE_URL: postgresql://samurai_app:${SAMURAI_DATABASE_RUNTIME_PASSWORD:?set in .env}@postgres:5432/samurai
+      SAMURAI_INITIAL_ADMIN_ID: ${SAMURAI_INITIAL_ADMIN_ID:?set in .env}
+      SAMURAI_INITIAL_ADMIN_PUBLIC_KEY: ${SAMURAI_INITIAL_ADMIN_PUBLIC_KEY:?set in .env}
+      SAMURAI_INITIAL_ADMIN_DISPLAY_NAME: ${SAMURAI_INITIAL_ADMIN_DISPLAY_NAME:-Owner}
+      SAMURAI_SERVER_ADMIN_ACCOUNT_ID: ${SAMURAI_INITIAL_ADMIN_ID:?set in .env}
+      SAMURAI_CORS_ORIGINS: ${SAMURAI_CORS_ORIGINS:-}
+    ports:
+      - "${SAMURAI_SERVER_BIND_ADDRESS:-127.0.0.1}:${SAMURAI_SERVER_PORT:-4317}:4317"
+    volumes:
+      - samurai-workspace:/var/lib/samurai
+      # Set this to a host path outside the Docker volume used by the running
+      # Workspace.  Operators may mount a separate disk or backup target.
+      - ${SAMURAI_BACKUP_DIR:?set an external backup directory in .env}:/backups
+
+volumes:
+  samurai-postgres:
+  samurai-workspace:

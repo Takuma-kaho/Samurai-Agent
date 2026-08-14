@@ -11,6 +11,10 @@
     "desktop:build": "pnpm --filter @samurai-agent/desktop run build",
     "desktop:verify": "node scripts/verify-desktop-architecture.mjs",
     "desktop:audit": "node scripts/verify-desktop-architecture.mjs --score",
+    "server:02:account": "node scripts/create-server-account-identity.mjs",
+    "server:02:dev": "pnpm --filter @samurai-agent/server run workspace-server",
+    "server:02:migrate": "pnpm --filter @samurai-agent/server run workspace-server:admin -- migrate",
+    "server:02:verify": "node scripts/verify-server-02.mjs",
     "dev:parallel": "pnpm --parallel --filter @samurai-agent/server --filter @samurai-agent/web run dev",
     "doctor": "node scripts/doctor.mjs",
     "backend:release:verify": "node scripts/verify-backend-release-readiness.mjs",
@@ -112,7 +116,7 @@
     "overrides": {
       "brace-expansion@^5.0.0": "5.0.8",
       "fast-uri": "3.1.5",
-      "nanoid": "3.3.17",
+      "nanoid": "3.3.18",
       "postcss": "8.5.18",
       "socket.io-parser": "4.2.7",
       "undici": "7.29.0"

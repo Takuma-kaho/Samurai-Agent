@@ -277,10 +277,47 @@ export class ApiError extends Error {
   }
 }
 
+export interface DesktopWorkspaceConnection {
+  id: string;
+  label: string;
+  serverUrl: string;
+  workspaceId: string;
+  accountId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceConnectionState {
+  activeConnectionId?: string;
+  connections: DesktopWorkspaceConnection[];
+}
+
+export interface DesktopWorkspaceServerStatus {
+  connection?: DesktopWorkspaceConnection;
+  identityAvailable: boolean;
+  health?: { status: number; body: unknown };
+  workspace?: { status: number; body: unknown };
+  rooms?: { status: number; body: unknown };
+}
+
 declare global {
   interface Window {
     samuraiDesktop?: {
       apiBaseUrl?: string;
+      workspaceServerUrl?: string;
+      workspaceId?: string;
+      accountId?: string;
+      listWorkspaceConnections?: () => Promise<DesktopWorkspaceConnectionState>;
+      upsertWorkspaceConnection?: (input: {
+        label: string;
+        serverUrl: string;
+        workspaceId: string;
+        accountId: string;
+        privateKey?: string;
+      }) => Promise<DesktopWorkspaceConnectionState>;
+      selectWorkspaceConnection?: (connectionId: string) => Promise<DesktopWorkspaceConnectionState>;
+      registerWorkspaceServerAccount?: (displayName?: string) => Promise<unknown>;
+      getWorkspaceServerStatus?: () => Promise<DesktopWorkspaceServerStatus>;
     };
   }
 }

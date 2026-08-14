@@ -7,6 +7,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
+    "workspace-server": "tsx src/workspace-server-entry.ts",
+    "workspace-server:admin": "tsx src/workspace-server-admin-cli.ts",
+    "workspace-server:cli": "tsx src/workspace-server-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -20,6 +23,7 @@
     "@samurai-agent/room-permissions": "workspace:*",
     "@samurai-agent/runtime": "workspace:*",
     "@samurai-agent/ui-protocol": "workspace:*",
+    "@samurai-agent/workspace-server": "workspace:*",
     "@samurai-agent/workspace-store": "workspace:*",
     "cors": "^2.8.6",
     "express": "^5.2.1",

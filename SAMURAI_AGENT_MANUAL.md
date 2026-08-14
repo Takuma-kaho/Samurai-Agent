@@ -150,7 +150,15 @@ Principalは、WorkspaceやRoomにアクセスした主体を表す安定した�
 
 External Appは、勝手に権限を持つ主体ではない。人間またはAgentの権限と、接続設定の範囲内で動作する。
 
-### 4.2 Agent
+### 4.2 Account
+
+Accountは、人間が複数のHosted・Self-host Workspaceで再利用できる本人識別子である。公開鍵から決まるため、Serverごとに別名を先取りできない。
+
+- Accountは本人確認だけを担当する
+- Owner・Admin・Member・GuestはWorkspaceとRoomで別に決める
+- Self-hostにも公開鍵とAccount情報を登録するため、運営サービスが停止しても直接ログインできる
+
+### 4.3 Agent
 
 Agentは、名前、役割、利用可能なRoom、参照できるKnowledgeを持つ参加者である。
 
@@ -417,6 +425,14 @@ Native Appが担当しないもの。
 - 他社アプリにはない特別なKnowledge領域を持つこと
 - Workspace内で自律的なチーム活動を常時行うこと
 
+### 11.3 接続先の切り替え
+
+Native Appは、`サーバーURL＋Workspace ID＋Account`を接続先として保存し、Hosted、自宅、会社などを切り替えられる。
+
+- private keyは接続先一覧やWorkspace Bundleへ保存しない
+- 一覧にはOSの安全な保存先を指す参照だけを持てる
+- 接続先を変えても、SessionとWorkspaceの所有境界は混ぜない
+
 ---
 
 ## 12. 保存とバックアップ
@@ -486,6 +502,7 @@ Chat、Session、App Agent、SurfaceはNative Appの状態である。Workspace 
 - Artifact、Collection、Generated Surface
 - Gateway、Automation、Sandboxの基盤
 - Chat APIとSession単位のRuntime経路
+- `Workspace Server 02`のPostgreSQL Server、RLS、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成
 
 Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで決め、SessionなしでArtifact・Collectionの主要保存とGenerated Surfaceの作成・改訂・Actionを実行できる。
 
@@ -497,7 +514,9 @@ Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで�
 - Formal ingressのQuery、Domain Operation、Activity Ingestは共通Resolverで現在のRoom権限を再評価する。既存Chat／Session経路は互換経路のまま分離する
 - AutomationはRoom／Authorityを保存し、実行直前に再認可する。旧Jobは`rebind_required`で止め、SessionなしExecutorがないkindは安全停止する
 
-本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Core09のReference Adapterは内部契約の検証用であり、製品用の接続Protocolではない。
+既存SQLite Core APIとChat／Session経路は互換機能として残る。一方、Workspace Server 02の通常保存経路はPostgreSQLであり、SQLiteは旧Workspaceをread-onlyでBundle v3へ移す時だけ使う。既存Chat APIをServer 02へ暗黙に接続していない。
+
+実PostgreSQLでのRLS拒否は、Hosted用とSelf-host用の接続先を指定した`server:02:verify`で確認する。本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Core09のReference Adapterは内部契約の検証用であり、製品用の接続Protocolではない。
 
 現在の完了レポートはsource差分を含むため、基盤の存在と「検証済み完了」を分けて扱う。
 
