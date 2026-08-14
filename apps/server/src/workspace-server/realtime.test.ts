@@ -1,26 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { emitRoomWorkspaceEvent, roomSocketRoom } from "./realtime";
+import { WorkspaceRealtimeGate } from "./realtime";
 
 describe("Workspace Server realtime isolation", () => {
-  it("emits a Room update only to that Room channel", () => {
-    const calls: Array<{ room: string; event: string; payload: unknown }> = [];
-    const emitter = {
-      to(room: string) {
-        return {
-          emit(event: string, payload: unknown) {
-            calls.push({ room, event, payload });
-          }
-        };
-      }
-    };
-    const update = { workspaceId: "workspace_a", roomId: "room_private" };
+  it("serializes access changes and delivery within one Workspace only", async () => {
+    const gate = new WorkspaceRealtimeGate();
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    let firstStarted!: () => void;
+    let independentCompleted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => { firstStarted = resolve; });
+    const independentCompletedPromise = new Promise<void>((resolve) => { independentCompleted = resolve; });
+    const first = gate.run("workspace_a", async () => {
+      order.push("first:start");
+      firstStarted();
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      order.push("first:end");
+    });
+    const second = gate.run("workspace_a", async () => {
+      order.push("second:start");
+      order.push("second:end");
+    });
+    const independent = gate.run("workspace_b", async () => {
+      order.push("other:start");
+      order.push("other:end");
+      independentCompleted();
+    });
 
-    emitRoomWorkspaceEvent(emitter, update);
-
-    expect(calls).toEqual([{
-      room: roomSocketRoom("workspace_a", "room_private"),
-      event: "workspace:event",
-      payload: update
-    }]);
+    await Promise.all([firstStartedPromise, independentCompletedPromise]);
+    expect(order).toContain("first:start");
+    expect(order).toContain("other:start");
+    expect(order).not.toContain("second:start");
+    releaseFirst?.();
+    await Promise.all([first, second, independent]);
+    expect(order.indexOf("first:end")).toBeLessThan(order.indexOf("second:start"));
+    expect(order).toContain("second:end");
   });
 });

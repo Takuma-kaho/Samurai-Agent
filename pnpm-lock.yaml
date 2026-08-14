@@ -85,6 +85,10 @@ importers:
         version: 3.3.8(typescript@5.9.3)
 
   apps/desktop:
+    dependencies:
+      socket.io-client:
+        specifier: ^4.8.3
+        version: 4.8.3
     devDependencies:
       electron:
         specifier: ^43.1.0

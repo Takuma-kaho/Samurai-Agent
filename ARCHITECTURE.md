@@ -109,7 +109,9 @@ Workspaceは、Room、Principal、Knowledge、Memory、Skill、Activity、Artifa
 
 ### 4.2 Room
 
-Roomは、Workspace内のKnowledgeとアクセス権を分ける境界である。RoomはActivityとResourceの分類キーとして使えるが、Sessionの所有者ではない。
+Roomは、Workspace内のKnowledgeとアクセス権を分ける境界である。RoomはActivityとResourceの分類キーとして使えるが、Sessionの所有者ではない。WorkspaceはRoomとして保存しない。Roomは同じ種類のままWorkspace直下または一つの親Roomの下へ置け、階層数に製品上の上限を設けない。
+
+親子関係は整理と参加可能範囲の制約であり、Knowledge、検索、AI Context、閲覧権限を継承する関係ではない。子Roomの直接メンバーは全親Roomの直接メンバーである必要があり、親Roomの直接メンバーだけでは子Roomを読めない。
 
 ### 4.3 Principal
 
@@ -327,6 +329,8 @@ flowchart LR
 
 System Principalも権限を迂回しない。External Appは、接続できたことだけでRoomの所有者にはならない。
 
+Room階層の更新は、画面だけで判定しない。PostgreSQLの正式関数が、同一Workspaceの親、循環、全親Roomへの直接参加、最後のOwner、版番号、操作IDを確認してから保存する。親Roomからの解除は子孫Roomにも一つの更新として反映し、途中状態を残さない。
+
 ---
 
 ## 9. 永続化とバックアップ
@@ -345,6 +349,9 @@ UI stateや一時的なSurface stateをWorkspace正本へ混ぜない。
 - Self-hostは1 Workspace＝1 Server＝専用PostgreSQL。Serverは設定された1つのWorkspace ID以外を受け付けない
 - Hostedは複数WorkspaceでアプリとPostgreSQLを共有する。すべてのWorkspace所有行に`workspace_id`を持たせる
 - アプリ接続は、所有者ではなくRLSを迂回できないruntime roleで行う。各transactionは`account_id`と`workspace_id`をPostgreSQLへ設定し、RLSが検索、履歴、Job、ファイルmetadataを最終的に絞る
+- Roomには任意の`parent_room_id`を保存する。runtime roleはWorkspace member、Room、Room memberを直接更新できず、作成・移動・直接メンバー変更・招待受諾・RestoreはPostgreSQLの正式関数を通す
+- Room検索と通常のKnowledge一覧はRoom IDを必須にし、親・子・兄弟Roomへ自動拡張しない。Workspace全体検索は別の明示操作としてのみ設計できる
+- RealtimeはRoomごとの直接読取権限を通知直前に再確認して配信する。Room channelに未参加でも、そのRoomを直接読める画面にはツリー再取得用の通知を送れるが、親Roomの参加者へ非公開の子Room名・件数・移動通知を送らず、解除時は対象Roomと子孫Roomの購読を再確認して外す
 - Knowledgeなどの本体は`workspaces/<workspace_id>/files/`の人間が読めるファイルとして残す。DBとファイルは復旧可能なfile transactionで結ぶ
 - 旧`workspace.sqlite`はread-onlyのBundle作成だけに使う。既存Core APIを暗黙にPostgreSQLへ混在させない
 
@@ -354,7 +361,8 @@ Accountは公開鍵から決まる安定IDである。同じ公開鍵をHosted�
 
 Workspace Bundle v3はDB imageではなく、JSON/JSONLの記録と人が読めるファイルからなる移植形式である。
 
-- Room、権限、記録、履歴、Job、版番号、ファイルhashを含む
+- Room、親Room ID、権限、記録、履歴、Job、版番号、ファイルhashを含む
+- Restoreは親Roomの欠落・循環・子Roomメンバーの親Room未参加を有効化前に拒否する。親Room IDがない旧BundleはWorkspace直下として読む
 - private key、password、token、credential形式のJSON値・ファイルは拒否する
 - 移転元はread-onlyにしてBundleを作り、移転先へread-onlyで仮取り込み、件数とfile hashを確認してからactiveにする
 - 失敗時は移転先の新規データを消し、移転元をactiveへ戻せる
@@ -478,11 +486,11 @@ Core06〜Core09の範囲では、次をSessionなしで扱える。
 - secretを持たないExternal App Connection、委任元、Room上限、入口上限の永続化
 - Connector evidenceから現在のRoom権限を再評価するFormal ingress。外部AppのQuery、Domain Operation、Activity Ingestは共通Resolverを通る
 - Room／Authorityを永続化したAutomation。旧Jobは`rebind_required`で停止し、現在は`wiki_reindex`だけをSessionなしで実行する
-- `Workspace Server 02`のPostgreSQL schema、RLS runtime role、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成
+- `Workspace Server 02`のPostgreSQL schema、RLS runtime role、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成。Room階層の作成・移動・親子メンバー制約・Bundle互換を追加した
 
 新しいBackupはArtifact・Collectionの正本を対象にし、Generated Surfaceのbundleは再生成可能な互換データとして除く。旧Surfaceを含むBackupは引き続きRestoreできる。
 
-既存Chat／Session経路とSQLite Core APIは互換機能として残る。`Workspace Server 02`は別のPostgreSQL Server entryであり、既存Chat APIを置換しない。実PostgreSQLのRLS拒否は、接続先を指定した`server:02:verify`でHostedとSelf-hostの両方を確認する。したがって、現在の実装を製品全体の完成と同一視しない。
+既存Chat／Session経路とSQLite Core APIは互換機能として残る。`Workspace Server 02`は別のPostgreSQL Server entryであり、既存Chat APIを置換しない。基礎RLSの確認は`server:02:verify`、Room階層の実PostgreSQL確認は`server:03:verify`で、HostedとSelf-hostの両方を対象にする。したがって、現在の実装を製品全体の完成と同一視しない。
 
 ### 13.2 Coreの移行単位
 

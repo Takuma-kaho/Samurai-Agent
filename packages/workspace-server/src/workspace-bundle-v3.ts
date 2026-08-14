@@ -35,7 +35,9 @@ const portableSchema: Readonly<Record<string, { required: readonly string[]; all
   },
   "rooms.jsonl": {
     required: ["workspace_id", "id", "name", "version", "created_by", "created_at", "updated_at"],
-    allowed: ["workspace_id", "id", "name", "version", "created_by", "created_at", "updated_at"]
+    // parent_room_id is optional so a pre-hierarchy Bundle restores all of
+    // its Rooms directly under the Workspace.
+    allowed: ["workspace_id", "id", "parent_room_id", "name", "version", "created_by", "created_at", "updated_at"]
   },
   "memberships.jsonl": {
     required: ["workspace_id", "account_id", "role", "state", "version", "created_at", "updated_at", "revoked_at"],
@@ -567,7 +569,7 @@ export class WorkspaceBundleV3Service {
     return this.store.database.withReadSnapshot(context, async (sql) => {
       const workspace = await sql.query<Record<string, unknown>>("SELECT id, name, hosting_mode, database_placement, storage_namespace, created_by, version, created_at, updated_at FROM workspaces WHERE id = $1", [context.workspaceId]);
       const accounts = await sql.query<Record<string, unknown>>("SELECT id, public_key, display_name, status, created_at, updated_at FROM samurai_list_workspace_account_identities($1) ORDER BY id", [context.workspaceId]);
-      const rooms = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, name, version, created_by, created_at, updated_at FROM rooms WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const rooms = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, parent_room_id, name, version, created_by, created_at, updated_at FROM rooms WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const memberships = await sql.query<Record<string, unknown>>("SELECT workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM workspace_members WHERE workspace_id = $1 ORDER BY account_id", [context.workspaceId]);
       const roomMemberships = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM room_members WHERE workspace_id = $1 ORDER BY room_id, account_id", [context.workspaceId]);
       const records = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, record_type, id, version, payload, search_text, content_hash, created_by, updated_by, created_at, updated_at FROM workspace_records WHERE workspace_id = $1 ORDER BY record_type, id", [context.workspaceId]);
@@ -844,8 +846,10 @@ async function writeBundleDirectory(input: {
   }
   for (const row of input.snapshot.files) {
     const filePath = String(row.path ?? "");
+    const roomId = String(row.room_id ?? "");
     assertSafeRelativePath(filePath);
-    const read = await input.files.read(input.context, filePath);
+    assertOpaqueId(roomId, "room_id_invalid");
+    const read = await input.files.read(input.context, { roomId, path: filePath });
     const destination = resolveBundlePath(input.directory, `files/${filePath}`);
     await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
     assertCredentialFreeWorkspaceFile(`files/${filePath}`, read.content);
@@ -873,7 +877,7 @@ async function writeBundleDirectory(input: {
       hosting_mode: String(source.hosting_mode) as WorkspaceServerMode,
       database_placement: String(source.database_placement) as "shared" | "dedicated"
     },
-    schema_version: 21,
+    schema_version: 22,
     ...(input.transferId ? { transfer_id: input.transferId } : {}),
     files: hashes,
     record_counts: recordCounts,
@@ -1004,27 +1008,46 @@ async function importSnapshot(sql: WorkspaceSql, input: {
     // let an old source membership revoke or downgrade the person importing.
     if (row.account_id === input.ownerAccountId) continue;
     await sql.query(
-      `INSERT INTO workspace_members(workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at)
-       VALUES ($1, $2, $3, $4, $5, $6::TIMESTAMPTZ, $7::TIMESTAMPTZ, $8::TIMESTAMPTZ)`,
+      "SELECT samurai_import_workspace_member($1, $2, $3, $4, $5, $6::TIMESTAMPTZ, $7::TIMESTAMPTZ, $8::TIMESTAMPTZ)",
       [input.targetWorkspaceId, String(row.account_id), String(row.role), String(row.state), Number(row.version ?? 1), String(row.created_at), String(row.updated_at), row.revoked_at ? String(row.revoked_at) : null]
     );
   }
   const rooms = await readJsonl(path.join(input.sourceDirectory, "rooms.jsonl"));
   for (const row of rooms) {
     await sql.query(
-      `INSERT INTO rooms(workspace_id, id, name, version, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6::TIMESTAMPTZ, $7::TIMESTAMPTZ)`,
-      [input.targetWorkspaceId, String(row.id), String(row.name), Number(row.version), String(row.created_by ?? input.ownerAccountId), String(row.created_at), String(row.updated_at)]
+      "SELECT samurai_import_workspace_room($1, $2, $3, $4, $5, $6, $7::TIMESTAMPTZ, $8::TIMESTAMPTZ)",
+      [
+        input.targetWorkspaceId,
+        String(row.id),
+        row.parent_room_id ? String(row.parent_room_id) : null,
+        String(row.name),
+        Number(row.version),
+        String(row.created_by ?? input.ownerAccountId),
+        String(row.created_at),
+        String(row.updated_at)
+      ]
     );
   }
   const roomMemberships = await readJsonl(path.join(input.sourceDirectory, "room-memberships.jsonl"));
   for (const row of roomMemberships) {
     await sql.query(
-      `INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, created_at, updated_at, revoked_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::TIMESTAMPTZ, $8::TIMESTAMPTZ, $9::TIMESTAMPTZ)`,
-      [input.targetWorkspaceId, String(row.room_id), String(row.account_id), String(row.role), String(row.state), Number(row.version ?? 1), String(row.created_at), String(row.updated_at), row.revoked_at ? String(row.revoked_at) : null]
+      "SELECT samurai_import_workspace_room_member($1, $2, $3, $4, $5, $6, $7::TIMESTAMPTZ, $8::TIMESTAMPTZ, $9::TIMESTAMPTZ)",
+      [
+        input.targetWorkspaceId,
+        String(row.room_id),
+        String(row.account_id),
+        String(row.role),
+        String(row.state),
+        Number(row.version ?? 1),
+        String(row.created_at),
+        String(row.updated_at),
+        row.revoked_at ? String(row.revoked_at) : null
+      ]
     );
   }
+  // Validation happens while the target is still read-only.  Completion calls
+  // the same guard again immediately before activation.
+  await sql.query("SELECT samurai_validate_workspace_room_hierarchy($1)", [input.targetWorkspaceId]);
   for (const [file, table, columns] of [
     ["records.jsonl", "workspace_records", ["room_id", "record_type", "id", "version", "payload", "search_text", "content_hash", "created_by", "updated_by", "created_at", "updated_at"]],
     ["events.jsonl", "workspace_events", ["source_event_id", "room_id", "kind", "record_type", "record_id", "operation_id", "payload", "created_at"]],
@@ -1119,11 +1142,11 @@ async function verifyImportedWorkspace(
   if (!countsMatch) throw new WorkspaceServerError("workspace_import_count_mismatch", 400);
   const files = new WorkspaceFileStore(store);
   const metadata = await store.database.withContext(context, async (sql) => {
-    const result = await sql.query<{ path: string; sha256: string }>("SELECT path, sha256 FROM workspace_files WHERE workspace_id = $1", [context.workspaceId]);
+    const result = await sql.query<{ room_id: string; path: string; sha256: string }>("SELECT room_id, path, sha256 FROM workspace_files WHERE workspace_id = $1", [context.workspaceId]);
     return result.rows;
   });
   for (const file of metadata) {
-    const read = await files.read(context, file.path);
+    const read = await files.read(context, { roomId: file.room_id, path: file.path });
     if (read.file.sha256 !== file.sha256) throw new WorkspaceServerError("workspace_import_file_hash_mismatch", 400);
   }
 }
@@ -1233,6 +1256,7 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
   if (workspace?.id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
   const sourceOwnerAccountId = opaquePortableValue(workspace?.created_by, "workspace_bundle_v3_schema_invalid");
   const accountIds = new Set<string>();
+  const accountStates = new Map<string, "active" | "disabled">();
   for (const account of rowsByFile.get("accounts.jsonl") ?? []) {
     const accountId = opaquePortableValue(account.id, "workspace_bundle_v3_schema_invalid");
     const publicKey = account.public_key;
@@ -1243,20 +1267,31 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
       throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
     }
     accountIds.add(accountId);
+    accountStates.set(accountId, account.status === "disabled" ? "disabled" : "active");
   }
   // A legacy SQLite migration can safely preserve only its configured local
   // owner because old rows have no portable public-key identity. Every other
   // principal must be proven by accounts.jsonl.
   const knownAccountIds = new Set([...accountIds, sourceOwnerAccountId]);
   const memberAccountIds = new Set<string>();
+  const workspaceMembershipStates = new Map<string, "active" | "revoked">();
+  let activeWorkspaceOwnerCount = 0;
   for (const row of rowsByFile.get("memberships.jsonl") ?? []) {
     const accountId = opaquePortableValue(row.account_id, "workspace_bundle_v3_relation_invalid");
-    if (!knownAccountIds.has(accountId) || memberAccountIds.has(accountId)) {
+    if (!knownAccountIds.has(accountId) || memberAccountIds.has(accountId)
+      || (row.state !== "active" && row.state !== "revoked")) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    if (row.state === "active" && accountStates.get(accountId) === "disabled") {
       throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
     }
     memberAccountIds.add(accountId);
+    workspaceMembershipStates.set(accountId, row.state);
+    if (row.state === "active" && row.role === "owner") activeWorkspaceOwnerCount += 1;
   }
+  if (activeWorkspaceOwnerCount === 0) throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
   const roomIds = new Set<string>();
+  const parentRoomIds = new Map<string, string | undefined>();
   for (const row of rowsByFile.get("rooms.jsonl") ?? []) {
     const roomId = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
     const createdBy = opaquePortableValue(row.created_by, "workspace_bundle_v3_relation_invalid");
@@ -1264,8 +1299,35 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
       throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
     }
     roomIds.add(roomId);
+    if (row.parent_room_id !== undefined && row.parent_room_id !== null) {
+      parentRoomIds.set(roomId, opaquePortableValue(row.parent_room_id, "workspace_bundle_v3_relation_invalid"));
+    }
+  }
+  for (const [roomId, parentRoomId] of parentRoomIds) {
+    if (!parentRoomId || parentRoomId === roomId || !roomIds.has(parentRoomId)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+  }
+  // Iterative walk keeps valid, intentionally deep Room trees from consuming
+  // the JavaScript call stack during Restore verification.
+  for (const startingRoomId of roomIds) {
+    const visited = new Set<string>();
+    let roomId: string | undefined = startingRoomId;
+    while (roomId) {
+      if (visited.has(roomId)) throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+      visited.add(roomId);
+      roomId = parentRoomIds.get(roomId);
+    }
+  }
+  const roomMembershipStates = new Map<string, string>();
+  for (const row of rowsByFile.get("room-memberships.jsonl") ?? []) {
+    const roomId = opaquePortableValue(row.room_id, "workspace_bundle_v3_relation_invalid");
+    const accountId = opaquePortableValue(row.account_id, "workspace_bundle_v3_relation_invalid");
+    const key = roomId + "\u0000" + accountId;
+    roomMembershipStates.set(key, String(row.state));
   }
   const roomMembershipKeys = new Set<string>();
+  const activeRoomOwnerCounts = new Map<string, number>();
   for (const row of rowsByFile.get("room-memberships.jsonl") ?? []) {
     const roomId = opaquePortableValue(row.room_id, "workspace_bundle_v3_relation_invalid");
     const accountId = opaquePortableValue(row.account_id, "workspace_bundle_v3_relation_invalid");
@@ -1274,6 +1336,26 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
       throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
     }
     roomMembershipKeys.add(key);
+    if (row.state === "active") {
+      if (workspaceMembershipStates.get(accountId) !== "active" || accountStates.get(accountId) === "disabled") {
+        throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+      }
+      if (row.role === "owner") {
+        activeRoomOwnerCounts.set(roomId, (activeRoomOwnerCounts.get(roomId) ?? 0) + 1);
+      }
+      let ancestorRoomId = parentRoomIds.get(roomId);
+      while (ancestorRoomId) {
+        if (roomMembershipStates.get(ancestorRoomId + "\u0000" + accountId) !== "active") {
+          throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+        }
+        ancestorRoomId = parentRoomIds.get(ancestorRoomId);
+      }
+    }
+  }
+  for (const roomId of roomIds) {
+    if ((activeRoomOwnerCounts.get(roomId) ?? 0) === 0) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
   }
   for (const [file, actorColumns] of [
     ["records.jsonl", ["room_id", "created_by", "updated_by"]],

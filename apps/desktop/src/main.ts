@@ -2,6 +2,7 @@ import { createHash, createPrivateKey, createPublicKey, randomUUID, sign } from 
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { io, type Socket } from "socket.io-client";
 import {
   app,
   BrowserWindow,
@@ -32,6 +33,14 @@ import {
 } from "./workspace-connections.js";
 import { createWorkspaceIdentityStore, type WorkspaceIdentityStore } from "./workspace-identities.js";
 import { createWorkspaceAccountSignaturePayload, workspaceAccountIdFromPublicKey } from "./workspace-request-signing.js";
+import {
+  requiredWorkspaceOpaqueField,
+  workspaceRoomCreateRequest,
+  workspaceRoomMemberPreviewRequest,
+  workspaceRoomMemberRequest,
+  workspaceRoomMovePreviewRequest,
+  workspaceRoomMoveRequest
+} from "./workspace-room-requests.js";
 
 interface HealthState {
   ok: boolean;
@@ -128,6 +137,8 @@ let mainWindowLoadToken = 0;
 let workspaceConnectionRegistry: WorkspaceConnectionRegistry = { version: 1, connections: [] };
 let workspaceConnectionRegistryPath = "";
 let workspaceIdentityStore: WorkspaceIdentityStore | undefined;
+let workspaceRealtimeSocket: Socket | undefined;
+let workspaceRealtimeGeneration = 0;
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -182,6 +193,8 @@ app.on("will-quit", () => {
     clearInterval(clientEventPollTimer);
     clientEventPollTimer = undefined;
   }
+  workspaceRealtimeSocket?.disconnect();
+  workspaceRealtimeSocket = undefined;
 });
 
 async function createMainWindow(): Promise<void> {
@@ -400,19 +413,10 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-connections:list", () => publicWorkspaceConnections());
   ipcMain.handle("samurai:workspace-connections:upsert", async (_event, input: unknown) => {
-    const submission = workspaceConnectionSubmission(input);
-    let candidate = submission.connection;
-    if (submission.privateKey) {
-      const identity = requireWorkspaceIdentityStore();
-      const publicKey = publicKeyFromPrivateKey(submission.privateKey);
-      if (workspaceAccountIdFromPublicKey(publicKey) !== candidate.accountId) throw new Error("workspace_identity_account_mismatch");
-      candidate = {
-        ...candidate,
-        credentialRef: await identity.save(candidate.accountId, submission.privateKey)
-      };
-    }
-    workspaceConnectionRegistry = upsertWorkspaceConnection(workspaceConnectionRegistry, candidate);
+    workspaceConnectionRegistry = upsertWorkspaceConnection(workspaceConnectionRegistry, workspaceConnectionSubmission(input));
     await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+    applyWorkspaceConnection(activeWorkspaceConnection(workspaceConnectionRegistry));
+    void reconnectActiveWorkspaceRealtime();
     return publicWorkspaceConnections();
   });
   ipcMain.handle("samurai:workspace-connections:select", async (_event, connectionId: unknown) => {
@@ -420,6 +424,21 @@ function registerIpcHandlers(): void {
     workspaceConnectionRegistry = selectWorkspaceConnection(workspaceConnectionRegistry, connectionId);
     await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
     applyWorkspaceConnection(activeWorkspaceConnection(workspaceConnectionRegistry));
+    void reconnectActiveWorkspaceRealtime();
+    return publicWorkspaceConnections();
+  });
+  // The renderer never receives, types, or transmits a private key.  A user
+  // may copy an existing key, then explicitly ask Electron Main to import it
+  // into OS-protected storage for the currently selected Account.
+  ipcMain.handle("samurai:workspace-identity:import-active-from-clipboard", async () => {
+    const connection = requireActiveWorkspaceConnection();
+    const privateKey = clipboard.readText().trim();
+    const publicKey = publicKeyFromPrivateKey(privateKey);
+    if (workspaceAccountIdFromPublicKey(publicKey) !== connection.accountId) throw new Error("workspace_identity_account_mismatch");
+    const credentialRef = await requireWorkspaceIdentityStore().save(connection.accountId, privateKey);
+    workspaceConnectionRegistry = upsertWorkspaceConnection(workspaceConnectionRegistry, { ...connection, credentialRef });
+    await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+    void reconnectActiveWorkspaceRealtime();
     return publicWorkspaceConnections();
   });
   ipcMain.handle("samurai:workspace-server:register-active-account", async (_event, displayName: unknown) => {
@@ -439,6 +458,71 @@ function registerIpcHandlers(): void {
     });
     if (result.status < 200 || result.status >= 300) throw new Error(`workspace_account_registration_failed:${result.status}`);
     return result.body;
+  });
+  // These are deliberate, purpose-specific signed operations.  The renderer
+  // never receives a generic signed-request capability or this private key.
+  ipcMain.handle("samurai:workspace-server:rooms:list", async () => {
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: activeWorkspaceRoomsPath(),
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:room-members:list", async (_event, input: unknown) => {
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceRoomsPath()}/${encodeURIComponent(roomId)}/members`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:room:create", async (_event, input: unknown) => {
+    const request = workspaceRoomCreateRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: activeWorkspaceRoomsPath(),
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:room:move-preview", async (_event, input: unknown) => {
+    const request = workspaceRoomMovePreviewRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceRoomsPath()}/${encodeURIComponent(request.roomId)}/parent/preview`,
+      workspaceScoped: true,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:room:move", async (_event, input: unknown) => {
+    const request = workspaceRoomMoveRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "PUT",
+      path: `${activeWorkspaceRoomsPath()}/${encodeURIComponent(request.roomId)}/parent`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:room-member:preview", async (_event, input: unknown) => {
+    const request = workspaceRoomMemberPreviewRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceRoomsPath()}/${encodeURIComponent(request.roomId)}/members/${encodeURIComponent(request.accountId)}/preview`,
+      workspaceScoped: true,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:room-member:set", async (_event, input: unknown) => {
+    const request = workspaceRoomMemberRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "PUT",
+      path: `${activeWorkspaceRoomsPath()}/${encodeURIComponent(request.roomId)}/members/${encodeURIComponent(request.accountId)}`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
   });
   ipcMain.handle("samurai:workspace-server:status", async () => workspaceServerStatus());
   ipcMain.handle("samurai:app:quit", () => {
@@ -483,6 +567,7 @@ async function initializeWorkspaceConnections(): Promise<void> {
     }
   }
   applyWorkspaceConnection(activeWorkspaceConnection(workspaceConnectionRegistry));
+  void reconnectActiveWorkspaceRealtime();
 }
 
 function publicWorkspaceConnections(): {
@@ -495,7 +580,7 @@ function publicWorkspaceConnections(): {
   };
 }
 
-function workspaceConnectionSubmission(value: unknown): { connection: WorkspaceConnectionInput; privateKey?: string } {
+function workspaceConnectionSubmission(value: unknown): WorkspaceConnectionInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("workspace_connection_invalid");
   const input = value as Record<string, unknown>;
   const required = (key: string): string => {
@@ -509,17 +594,12 @@ function workspaceConnectionSubmission(value: unknown): { connection: WorkspaceC
     if (typeof field !== "string") throw new Error("workspace_connection_invalid");
     return field.trim() || undefined;
   };
-  const privateKey = optional("privateKey");
   return {
-    connection: {
     ...(optional("id") ? { id: optional("id") } : {}),
     label: required("label"),
     serverUrl: required("serverUrl"),
     workspaceId: required("workspaceId"),
-    accountId: required("accountId"),
-    ...(optional("credentialRef") ? { credentialRef: optional("credentialRef") } : {})
-    },
-    ...(privateKey ? { privateKey } : {})
+    accountId: required("accountId")
   };
 }
 
@@ -541,6 +621,13 @@ interface WorkspaceServerRequestInput {
   workspaceScoped: boolean;
 }
 
+type WorkspaceRealtimeNotice = {
+  type: "event" | "access_changed" | "access_revoked" | "room_access_changed" | "room_access_revoked";
+  workspaceId: string;
+  roomId?: string;
+  kind?: string;
+};
+
 function requireWorkspaceIdentityStore(): WorkspaceIdentityStore {
   if (!workspaceIdentityStore) throw new Error("workspace_identity_store_unavailable");
   return workspaceIdentityStore;
@@ -553,11 +640,14 @@ function requireActiveWorkspaceConnection(): WorkspaceConnection {
 }
 
 async function requireActiveWorkspacePrivateKey(connection: WorkspaceConnection): Promise<string> {
-  if (!connection.credentialRef?.startsWith("electron-safe-storage://workspace-account/")) {
+  if (connection.credentialRef !== `electron-safe-storage://workspace-account/${connection.accountId}`) {
     throw new Error("workspace_identity_required");
   }
   const privateKey = await requireWorkspaceIdentityStore().load(connection.accountId);
   if (!privateKey) throw new Error("workspace_identity_required");
+  if (workspaceAccountIdFromPublicKey(publicKeyFromPrivateKey(privateKey)) !== connection.accountId) {
+    throw new Error("workspace_identity_account_mismatch");
+  }
   return privateKey;
 }
 
@@ -611,6 +701,152 @@ async function signedWorkspaceServerRequest(
     try { responseBody = JSON.parse(text); } catch { responseBody = { error: "workspace_server_response_invalid" }; }
   }
   return { status: response.status, body: responseBody };
+}
+
+async function activeWorkspaceServerRequest(input: WorkspaceServerRequestInput): Promise<unknown> {
+  const connection = requireActiveWorkspaceConnection();
+  const privateKey = await requireActiveWorkspacePrivateKey(connection);
+  const result = await signedWorkspaceServerRequest(connection, privateKey, input);
+  if (result.status < 200 || result.status >= 300) {
+    const body = result.body;
+    const code = body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
+      ? (body as { error: string }).error
+      : "workspace_server_request_failed";
+    const latestVersion = body && typeof body === "object"
+      && "details" in body
+      && (body as { details?: unknown }).details
+      && typeof (body as { details: { latest_version?: unknown } }).details.latest_version === "number"
+      ? (body as { details: { latest_version: number } }).details.latest_version
+      : undefined;
+    throw new Error(`${code}:${result.status}${latestVersion === undefined ? "" : `:latest_version=${latestVersion}`}`);
+  }
+  return result.body;
+}
+
+/** Main owns Socket.IO authentication and the private key used to sign it. */
+function reconnectActiveWorkspaceRealtime(): void {
+  const generation = ++workspaceRealtimeGeneration;
+  workspaceRealtimeSocket?.disconnect();
+  workspaceRealtimeSocket = undefined;
+  const connection = activeWorkspaceConnection(workspaceConnectionRegistry);
+  if (!connection?.credentialRef) return;
+  void (async () => {
+    let privateKey: string;
+    try {
+      privateKey = await requireActiveWorkspacePrivateKey(connection);
+    } catch {
+      return;
+    }
+    if (generation !== workspaceRealtimeGeneration) return;
+    const socket = io(connection.serverUrl, {
+      autoConnect: false,
+      transports: ["websocket", "polling"],
+      timeout: 10_000,
+      auth: (callback) => {
+        try {
+          callback(workspaceSocketAuth(connection, privateKey));
+        } catch {
+          callback({});
+        }
+      }
+    });
+    workspaceRealtimeSocket = socket;
+    const isCurrent = () => generation === workspaceRealtimeGeneration && workspaceRealtimeSocket === socket;
+    socket.on("connect", () => {
+      if (!isCurrent()) return;
+      void refreshWorkspaceRealtimeRooms(socket, connection, privateKey, isCurrent);
+    });
+    socket.on("workspace:event", (event: unknown) => {
+      if (!isCurrent()) return;
+      forwardWorkspaceRealtimeNotice("event", connection, event);
+      // A tree event can make a new directly-authorized Room subscribable.
+      void refreshWorkspaceRealtimeRooms(socket, connection, privateKey, isCurrent);
+    });
+    socket.on("workspace:access-changed", (event: unknown) => {
+      if (!isCurrent()) return;
+      forwardWorkspaceRealtimeNotice("access_changed", connection, event);
+      void refreshWorkspaceRealtimeRooms(socket, connection, privateKey, isCurrent);
+    });
+    socket.on("workspace:room-access-changed", (event: unknown) => {
+      if (!isCurrent()) return;
+      forwardWorkspaceRealtimeNotice("room_access_changed", connection, event);
+      void refreshWorkspaceRealtimeRooms(socket, connection, privateKey, isCurrent);
+    });
+    socket.on("workspace:room-access-revoked", (event: unknown) => {
+      if (!isCurrent()) return;
+      forwardWorkspaceRealtimeNotice("room_access_revoked", connection, event);
+    });
+    socket.on("workspace:access-revoked", (event: unknown) => {
+      if (!isCurrent()) return;
+      forwardWorkspaceRealtimeNotice("access_revoked", connection, event);
+      socket.disconnect();
+    });
+    socket.connect();
+  })();
+}
+
+function workspaceSocketAuth(connection: WorkspaceConnection, privateKey: string): Record<string, string> {
+  const requestId = `socket_${randomUUID()}`;
+  const timestamp = String(Date.now());
+  const payload = createWorkspaceAccountSignaturePayload({
+    method: "SOCKET",
+    path: "/socket.io",
+    workspaceId: connection.workspaceId,
+    requestId,
+    timestamp,
+    body: {}
+  });
+  return {
+    account_id: connection.accountId,
+    workspace_id: connection.workspaceId,
+    request_id: requestId,
+    timestamp,
+    signature: sign(null, Buffer.from(payload), createPrivateKey(privateKey)).toString("base64url")
+  };
+}
+
+async function refreshWorkspaceRealtimeRooms(
+  socket: Socket,
+  connection: WorkspaceConnection,
+  privateKey: string,
+  isCurrent: () => boolean
+): Promise<void> {
+  try {
+    const response = await signedWorkspaceServerRequest(connection, privateKey, {
+      method: "GET",
+      path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}/rooms`,
+      workspaceScoped: true
+    });
+    if (!isCurrent() || response.status < 200 || response.status >= 300 || !response.body || typeof response.body !== "object") return;
+    const rooms = (response.body as { rooms?: unknown }).rooms;
+    if (!Array.isArray(rooms)) return;
+    for (const room of rooms) {
+      const roomId = room && typeof room === "object" ? (room as { id?: unknown }).id : undefined;
+      if (typeof roomId !== "string" || !isWorkspaceOpaqueId(roomId)) continue;
+      socket.emit("workspace:subscribe-room", { room_id: roomId });
+    }
+  } catch {
+    // Reconnects and the next authorized hierarchy event retry this sync.
+  }
+}
+
+/** Only the small, non-secret event shape crosses the Main-to-renderer IPC boundary. */
+function forwardWorkspaceRealtimeNotice(type: WorkspaceRealtimeNotice["type"], connection: WorkspaceConnection, event: unknown): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !event || typeof event !== "object") return;
+  const value = event as { workspaceId?: unknown; roomId?: unknown; kind?: unknown };
+  if (value.workspaceId !== connection.workspaceId) return;
+  const notice: WorkspaceRealtimeNotice = { type, workspaceId: connection.workspaceId };
+  if (typeof value.roomId === "string" && isWorkspaceOpaqueId(value.roomId)) notice.roomId = value.roomId;
+  if (typeof value.kind === "string" && /^[a-z][a-z0-9._-]{0,80}$/.test(value.kind)) notice.kind = value.kind;
+  mainWindow.webContents.send("samurai:workspace-server:event", notice);
+}
+
+function isWorkspaceOpaqueId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+}
+
+function activeWorkspaceRoomsPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/rooms`;
 }
 
 async function workspaceServerStatus(): Promise<{
@@ -1115,6 +1351,10 @@ async function acceptWorkspaceInvitation(target: Extract<DeepLinkTarget, { kind:
     workspaceConnectionRegistry = selectWorkspaceConnection(proposed, connection.id);
     await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
     applyWorkspaceConnection(connection);
+    // The accepted Workspace becomes active immediately.  Its Room-scoped
+    // realtime connection must follow it rather than remain on the former
+    // Workspace until the Desktop app is restarted.
+    void reconnectActiveWorkspaceRealtime();
     await showWorkspaceInvitationDialog({
       type: "info",
       message: "Workspaceに参加しました。",

@@ -19,6 +19,8 @@ export interface WriteWorkspaceFileResult {
   file: WorkspaceFile;
   event: WorkspaceEvent;
   transactionId: string;
+  /** True only when the durable operation result is returned to a retry. */
+  replayed: boolean;
 }
 
 /**
@@ -48,7 +50,7 @@ export class WorkspaceFileStore {
     try {
       await writeFile(stagedAbsolutePath, input.content, { flag: "wx", mode: 0o600 });
       const sha256 = hashBytes(input.content);
-      const result = await this.workspaceStore.runIdempotent(context, {
+      const result = await this.workspaceStore.runIdempotentResult(context, {
         action: "workspace.file.write",
         input: { roomId: input.roomId, path: relativePath, expectedVersion: input.expectedVersion, sha256 }
       }, async (sql) => {
@@ -64,12 +66,14 @@ export class WorkspaceFileStore {
             latest_version: previousFile?.version ?? null
           });
         }
+        if (previousFile && previousFile.roomId !== input.roomId) {
+          throw new WorkspaceServerError("workspace_file_room_change_forbidden", 409);
+        }
         const saved = await sql.query<FileRow>(
           `INSERT INTO workspace_files(workspace_id, room_id, path, version, sha256, size, created_by, updated_by)
            VALUES ($1, $2, $3, 1, $4, $5, $6, $6)
            ON CONFLICT (workspace_id, path) DO UPDATE SET
-             room_id = EXCLUDED.room_id,
-             version = workspace_files.version + 1,
+           version = workspace_files.version + 1,
              sha256 = EXCLUDED.sha256,
              size = EXCLUDED.size,
              updated_by = EXCLUDED.updated_by,
@@ -102,26 +106,30 @@ export class WorkspaceFileStore {
       // A retry may find an earlier DB commit whose rename was interrupted.
       // Finalize that durable transaction before discarding this retry's
       // unused staging file.
-      await this.finalize(context, result.transactionId);
-      if (result.transactionId !== transactionId) {
+      await this.finalize(context, result.value.transactionId);
+      if (result.value.transactionId !== transactionId) {
         // The same operation was already committed. This new staging file was
         // never referenced by the durable transaction, so remove it.
         await rm(stagedAbsolutePath, { force: true });
       }
-      return result;
+      return { ...result.value, replayed: result.replayed };
     } catch (error) {
       if (!databaseCommitted) await rm(stagedAbsolutePath, { force: true }).catch(() => undefined);
       throw error;
     }
   }
 
-  async read(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, relativePath: string): Promise<{ file: WorkspaceFile; content: Buffer }> {
-    const safePath = assertSafeRelativePath(relativePath);
+  async read(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { roomId: string; path: string }
+  ): Promise<{ file: WorkspaceFile; content: Buffer }> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    const safePath = assertSafeRelativePath(input.path);
     const file = await this.workspaceStore.database.withContext(context, async (sql) => {
       const result = await sql.query<FileRow>(
         `SELECT workspace_id, room_id, path, version, sha256, size, created_at, updated_at
-         FROM workspace_files WHERE workspace_id = $1 AND path = $2`,
-        [context.workspaceId, safePath]
+         FROM workspace_files WHERE workspace_id = $1 AND room_id = $2 AND path = $3`,
+        [context.workspaceId, input.roomId, safePath]
       );
       const row = result.rows[0];
       if (!row) throw new WorkspaceServerError("workspace_file_not_found", 404);

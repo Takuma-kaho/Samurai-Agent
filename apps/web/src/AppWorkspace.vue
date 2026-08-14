@@ -68,6 +68,11 @@ import {
   type WikiDetail,
   type ProviderErrorPayload,
   type DesktopWorkspaceConnectionState,
+  type DesktopRoomMemberPreview,
+  type DesktopRoomMovePreview,
+  type DesktopWorkspaceRoom,
+  type DesktopWorkspaceRoomMembership,
+  type DesktopWorkspaceRealtimeEvent,
   type DesktopWorkspaceServerStatus,
   type SearchResult,
   type SessionDetail,
@@ -153,12 +158,43 @@ const workspaceConnectionState = ref<DesktopWorkspaceConnectionState>({ connecti
 const workspaceConnectionLoading = ref(false);
 const workspaceConnectionError = ref<string | null>(null);
 const workspaceServerStatus = ref<DesktopWorkspaceServerStatus | null>(null);
+const workspaceRooms = ref<DesktopWorkspaceRoom[]>([]);
+const workspaceRoomLoading = ref(false);
+const workspaceRoomError = ref<string | null>(null);
+const selectedWorkspaceRoomId = ref<string | undefined>();
+let stopWorkspaceRealtimeEvents: (() => void) | undefined;
+let workspaceRealtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 const workspaceConnectionAvailable = computed(() => typeof window !== "undefined" && Boolean(
   window.samuraiDesktop?.listWorkspaceConnections
   && window.samuraiDesktop?.upsertWorkspaceConnection
   && window.samuraiDesktop?.selectWorkspaceConnection
   && window.samuraiDesktop?.getWorkspaceServerStatus
 ));
+const workspaceRoomAvailable = computed(() => typeof window !== "undefined" && Boolean(
+  window.samuraiDesktop?.listWorkspaceRooms
+  && window.samuraiDesktop?.listWorkspaceRoomMembers
+  && window.samuraiDesktop?.createWorkspaceRoom
+  && window.samuraiDesktop?.previewWorkspaceRoomMove
+  && window.samuraiDesktop?.moveWorkspaceRoom
+  && window.samuraiDesktop?.previewWorkspaceRoomMember
+  && window.samuraiDesktop?.setWorkspaceRoomMember
+));
+const workspaceRoomWorkspaceVersion = computed(() => {
+  const body = workspaceServerStatus.value?.workspace?.body;
+  if (!body || typeof body !== "object") return undefined;
+  const workspace = (body as { workspace?: unknown }).workspace;
+  if (!workspace || typeof workspace !== "object") return undefined;
+  const version = (workspace as { version?: unknown }).version;
+  return typeof version === "number" && Number.isSafeInteger(version) ? version : undefined;
+});
+const workspaceRoomWorkspaceRole = computed<"owner" | "admin" | "member" | "guest" | undefined>(() => {
+  const body = workspaceServerStatus.value?.workspace?.body;
+  if (!body || typeof body !== "object") return undefined;
+  const workspace = (body as { workspace?: unknown }).workspace;
+  if (!workspace || typeof workspace !== "object") return undefined;
+  const role = (workspace as { role?: unknown }).role;
+  return role === "owner" || role === "admin" || role === "member" || role === "guest" ? role : undefined;
+});
 const sessions = ref<SessionRecord[]>([]);
 const activeSession = ref<SessionRecord | null>(null);
 const messages = ref<MessageRecord[]>([]);
@@ -493,6 +529,7 @@ onMounted(async () => {
   if (storedSettings) {
     settings.value = storedSettings;
   }
+  subscribeWorkspaceRealtimeEvents();
   void loadWorkspaceConnections();
   connectSocket();
   await Promise.all([loadSettings(), loadAgentBackends(), loadSurfaceContract(), loadSessionsWithRetry()]);
@@ -501,6 +538,9 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  stopWorkspaceRealtimeEvents?.();
+  stopWorkspaceRealtimeEvents = undefined;
+  if (workspaceRealtimeRefreshTimer) clearTimeout(workspaceRealtimeRefreshTimer);
   window.removeEventListener("hashchange", desktopDeepLinkHashHandler);
   stopPendingAgentTyping();
   disposeChatScroll();
@@ -1219,6 +1259,26 @@ async function loadWorkspaceConnections(): Promise<void> {
   }
 }
 
+function subscribeWorkspaceRealtimeEvents(): void {
+  const listener = typeof window === "undefined" ? undefined : window.samuraiDesktop?.onWorkspaceServerEvent;
+  if (!listener) return;
+  stopWorkspaceRealtimeEvents = listener((event: DesktopWorkspaceRealtimeEvent | undefined) => {
+    if (!event) return;
+    const currentWorkspaceId = workspaceServerStatus.value?.connection?.workspaceId
+      ?? workspaceConnectionState.value.connections.find((connection) => connection.id === workspaceConnectionState.value.activeConnectionId)?.workspaceId;
+    if (currentWorkspaceId && event.workspaceId !== currentWorkspaceId) return;
+    scheduleWorkspaceRealtimeRefresh();
+  });
+}
+
+function scheduleWorkspaceRealtimeRefresh(): void {
+  if (workspaceRealtimeRefreshTimer) clearTimeout(workspaceRealtimeRefreshTimer);
+  workspaceRealtimeRefreshTimer = setTimeout(() => {
+    workspaceRealtimeRefreshTimer = undefined;
+    void refreshWorkspaceServerStatus();
+  }, 120);
+}
+
 async function selectWorkspaceConnection(connectionId: string): Promise<void> {
   const bridge = workspaceConnectionBridge();
   if (!bridge) return;
@@ -1234,7 +1294,7 @@ async function selectWorkspaceConnection(connectionId: string): Promise<void> {
   }
 }
 
-async function saveWorkspaceConnection(input: { label: string; serverUrl: string; workspaceId: string; accountId: string; privateKey?: string }): Promise<void> {
+async function saveWorkspaceConnection(input: { label: string; serverUrl: string; workspaceId: string; accountId: string }): Promise<void> {
   const bridge = workspaceConnectionBridge();
   if (!bridge) return;
   workspaceConnectionLoading.value = true;
@@ -1245,6 +1305,23 @@ async function saveWorkspaceConnection(input: { label: string; serverUrl: string
   } catch {
     workspaceConnectionError.value = settings.value.ui_locale === "ja" ? "接続先を保存できませんでした。" : "Could not save the Workspace Server connection.";
     throw new Error("workspace_connection_save_failed");
+  } finally {
+    workspaceConnectionLoading.value = false;
+  }
+}
+
+async function importActiveWorkspaceIdentity(): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.importActiveWorkspaceIdentityFromClipboard) return;
+  workspaceConnectionLoading.value = true;
+  workspaceConnectionError.value = null;
+  try {
+    workspaceConnectionState.value = await bridge.importActiveWorkspaceIdentityFromClipboard();
+    await refreshWorkspaceServerStatus();
+  } catch {
+    workspaceConnectionError.value = settings.value.ui_locale === "ja"
+      ? "コピー済みの秘密鍵をこの端末へ登録できませんでした。Account IDと鍵を確認してください。"
+      : "Could not import the copied private key. Check the Account ID and key.";
   } finally {
     workspaceConnectionLoading.value = false;
   }
@@ -1269,6 +1346,115 @@ async function refreshWorkspaceServerStatus(): Promise<void> {
   const bridge = workspaceConnectionBridge();
   if (!bridge?.getWorkspaceServerStatus) return;
   workspaceServerStatus.value = await bridge.getWorkspaceServerStatus();
+  await loadWorkspaceRooms();
+}
+
+async function loadWorkspaceRooms(): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.listWorkspaceRooms) return;
+  workspaceRoomLoading.value = true;
+  workspaceRoomError.value = null;
+  try {
+    const result = await bridge.listWorkspaceRooms();
+    workspaceRooms.value = result.rooms;
+    if (!selectedWorkspaceRoomId.value || !result.rooms.some((room) => room.id === selectedWorkspaceRoomId.value)) {
+      selectedWorkspaceRoomId.value = result.rooms[0]?.id;
+    }
+  } catch {
+    workspaceRooms.value = [];
+    selectedWorkspaceRoomId.value = undefined;
+    workspaceRoomError.value = settings.value.ui_locale === "ja" ? "Roomを読み込めませんでした。" : "Could not load Rooms.";
+  } finally {
+    workspaceRoomLoading.value = false;
+  }
+}
+
+async function selectWorkspaceRoom(roomId: string): Promise<void> {
+  selectedWorkspaceRoomId.value = roomId;
+}
+
+async function createWorkspaceRoom(input: { name: string; parentRoomId?: string; expectedWorkspaceVersion: number; operationId: string }): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.createWorkspaceRoom) throw new Error("workspace_room_operation_unavailable");
+  try {
+    await bridge.createWorkspaceRoom(input);
+    await refreshWorkspaceServerStatus();
+  } catch (error) {
+    await refreshWorkspaceServerStatus().catch(() => undefined);
+    throw workspaceRoomOperationError(error);
+  }
+}
+
+async function previewWorkspaceRoomMove(input: { roomId: string; parentRoomId: string | null }): Promise<DesktopRoomMovePreview> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.previewWorkspaceRoomMove) throw new Error("workspace_room_operation_unavailable");
+  return (await bridge.previewWorkspaceRoomMove(input)).preview;
+}
+
+async function moveWorkspaceRoom(input: {
+  roomId: string;
+  parentRoomId: string | null;
+  expectedRoomVersion: number;
+  expectedWorkspaceVersion: number;
+  operationId: string;
+}): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.moveWorkspaceRoom) throw new Error("workspace_room_operation_unavailable");
+  try {
+    await bridge.moveWorkspaceRoom(input);
+    await refreshWorkspaceServerStatus();
+  } catch (error) {
+    await refreshWorkspaceServerStatus().catch(() => undefined);
+    throw workspaceRoomOperationError(error);
+  }
+}
+
+async function listWorkspaceRoomMembers(roomId: string): Promise<DesktopWorkspaceRoomMembership[]> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.listWorkspaceRoomMembers) throw new Error("workspace_room_operation_unavailable");
+  return (await bridge.listWorkspaceRoomMembers(roomId)).members;
+}
+
+async function previewWorkspaceRoomMember(input: {
+  roomId: string;
+  accountId: string;
+  role: "owner" | "admin" | "member" | "guest";
+  state: "active" | "revoked";
+}): Promise<DesktopRoomMemberPreview> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.previewWorkspaceRoomMember) throw new Error("workspace_room_operation_unavailable");
+  return (await bridge.previewWorkspaceRoomMember(input)).preview;
+}
+
+async function setWorkspaceRoomMember(input: {
+  roomId: string;
+  accountId: string;
+  role: "owner" | "admin" | "member" | "guest";
+  state: "active" | "revoked";
+  expectedVersion: number;
+  operationId: string;
+}): Promise<void> {
+  const bridge = workspaceConnectionBridge();
+  if (!bridge?.setWorkspaceRoomMember) throw new Error("workspace_room_operation_unavailable");
+  try {
+    await bridge.setWorkspaceRoomMember(input);
+    await refreshWorkspaceServerStatus();
+  } catch (error) {
+    await refreshWorkspaceServerStatus().catch(() => undefined);
+    throw workspaceRoomOperationError(error);
+  }
+}
+
+function workspaceRoomOperationError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : "";
+  if (/(?:workspace_update_conflict|workspace_version_conflict|room_version_conflict|room_membership_version_conflict):409/.test(message)) {
+    return new Error(settings.value.ui_locale === "ja"
+      ? "他の変更が先に保存されました。最新状態へ更新したので、条件を確認してもう一度実行してください。"
+      : "Another change was saved first. The latest state was loaded; review the conditions and try again.");
+  }
+  return new Error(settings.value.ui_locale === "ja"
+    ? "この操作は現在の権限またはRoom条件では実行できません。最新状態を確認してください。"
+    : "This operation is not allowed by the current permissions or Room conditions. Review the latest state.");
 }
 
 const workspaceServerStatusDisplay = computed<{ message: string; tone: "ready" | "warning" | "error" } | undefined>(() => {
@@ -1280,7 +1466,7 @@ const workspaceServerStatusDisplay = computed<{ message: string; tone: "ready" |
   };
   if (!status.identityAvailable) return {
     tone: "warning",
-    message: settings.value.ui_locale === "ja" ? "この端末の本人情報が未登録です。秘密鍵を安全に登録してください。" : "This device has no registered identity. Add the private key securely."
+    message: settings.value.ui_locale === "ja" ? "この端末の本人情報が未登録です。秘密鍵をコピーしてから、Desktopの安全な読み込みを使ってください。" : "This device has no registered identity. Copy the private key, then import it through Desktop protected storage."
   };
   if (status.workspace?.status === 200) {
     const rooms = status.rooms?.body;
@@ -1982,6 +2168,20 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
             :artifact-content-url="artifactContentUrl"
             :markdown-preview-html="markdownPreviewHtml"
             :memory-state-label="memoryStateLabel"
+            :workspace-room-available="workspaceRoomAvailable"
+            :workspace-room-loading="workspaceRoomLoading"
+            :workspace-room-error="workspaceRoomError"
+            :workspace-room-workspace-version="workspaceRoomWorkspaceVersion"
+            :workspace-room-workspace-role="workspaceRoomWorkspaceRole"
+            :workspace-rooms="workspaceRooms"
+            :selected-workspace-room-id="selectedWorkspaceRoomId"
+            :select-workspace-room="selectWorkspaceRoom"
+            :create-workspace-room="createWorkspaceRoom"
+            :preview-workspace-room-move="previewWorkspaceRoomMove"
+            :move-workspace-room="moveWorkspaceRoom"
+            :list-workspace-room-members="listWorkspaceRoomMembers"
+            :preview-workspace-room-member="previewWorkspaceRoomMember"
+            :set-workspace-room-member="setWorkspaceRoomMember"
             @close="closeWorkspaceCanvas"
           />
         </div>
@@ -2006,10 +2206,25 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
         :workspace-connection-loading="workspaceConnectionLoading"
         :workspace-connection-error="workspaceConnectionError"
         :workspace-server-status="workspaceServerStatusDisplay"
+        :workspace-room-available="workspaceRoomAvailable"
+        :workspace-room-loading="workspaceRoomLoading"
+        :workspace-room-error="workspaceRoomError"
+        :workspace-room-workspace-version="workspaceRoomWorkspaceVersion"
+        :workspace-room-workspace-role="workspaceRoomWorkspaceRole"
+        :workspace-rooms="workspaceRooms"
+        :selected-workspace-room-id="selectedWorkspaceRoomId"
+        :select-workspace-room="selectWorkspaceRoom"
+        :create-workspace-room="createWorkspaceRoom"
+        :preview-workspace-room-move="previewWorkspaceRoomMove"
+        :move-workspace-room="moveWorkspaceRoom"
+        :list-workspace-room-members="listWorkspaceRoomMembers"
+        :preview-workspace-room-member="previewWorkspaceRoomMember"
+        :set-workspace-room-member="setWorkspaceRoomMember"
         :active-workspace-connection-id="workspaceConnectionState.activeConnectionId"
         :workspace-connections="workspaceConnectionState.connections"
         :select-workspace-connection="selectWorkspaceConnection"
         :save-workspace-connection="saveWorkspaceConnection"
+        :import-workspace-identity="importActiveWorkspaceIdentity"
         :register-workspace-server-account="registerWorkspaceServerAccount"
         :locale-display-name="localeDisplayName"
         :capture-mode-label="captureModeLabel"

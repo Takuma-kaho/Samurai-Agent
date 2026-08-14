@@ -118,12 +118,16 @@ Roomは、Workspace内でKnowledgeを分け、誰が見られるかを決める�
 
 Roomは会話の入れ物ではない。会話や作業は外部アプリのSessionで行われ、Roomはその結果を保管・共有する範囲になる。
 
+Roomは同じ種類のまま、Workspace直下または別のRoomの下に置ける。Workspaceを最上位Roomとして保存せず、製品上の階層数上限も置かない。
+
 ### 3.3 WorkspaceとRoomの関係
 
 ~~~text
 Workspace
 ├─ Workspace-level metadata
 ├─ Room A: 個人の知識
+│  ├─ Room AA: 継続案件
+│  │  └─ Room AAA: 2026年度
 │  ├─ Knowledge
 │  ├─ Activity
 │  └─ Artifact / Collection
@@ -134,6 +138,10 @@ Workspace
 ~~~
 
 Room間のKnowledgeは自動で混ぜない。共有・昇格・コピーは、権限を確認した明示的な操作として扱う。
+
+- 親Roomの検索・AI Contextに子Roomを自動で含めない。子Roomから親Room・兄弟Roomへも同様に広げない。
+- 子Roomの直接メンバーは、すべての親Roomにも直接参加している必要がある。親Roomへの参加だけでは子Roomは見えない。
+- Room移動は親子関係だけを変える。Knowledgeと直接メンバーを勝手に変更せず、移動先の全親Roomへ対象メンバーが参加していなければ拒否する。
 
 ---
 
@@ -384,6 +392,7 @@ Resource action
 - Workspace権限がなければRoomを見られない
 - Room権限がなければ、そのRoomのKnowledgeを読めない
 - Agentは参加しているRoomの許可されたResourceだけを読める
+- 親Roomの権限だけで子Roomを読むことはできない。子Roomの直接メンバーは、全親Roomの直接メンバーでもなければならない
 - System起点の処理も権限を迂回しない
 - 外部アプリは接続主体であり、Workspaceの所有者ではない
 
@@ -502,7 +511,7 @@ Chat、Session、App Agent、SurfaceはNative Appの状態である。Workspace 
 - Artifact、Collection、Generated Surface
 - Gateway、Automation、Sandboxの基盤
 - Chat APIとSession単位のRuntime経路
-- `Workspace Server 02`のPostgreSQL Server、RLS、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成
+- `Workspace Server 02`のPostgreSQL Server、RLS、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成。Roomは同一種類のまま無制限に階層化でき、移動・直接メンバー制約・親子Bundleを扱う
 
 Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで決め、SessionなしでArtifact・Collectionの主要保存とGenerated Surfaceの作成・改訂・Actionを実行できる。
 
@@ -516,7 +525,7 @@ Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで�
 
 既存SQLite Core APIとChat／Session経路は互換機能として残る。一方、Workspace Server 02の通常保存経路はPostgreSQLであり、SQLiteは旧Workspaceをread-onlyでBundle v3へ移す時だけ使う。既存Chat APIをServer 02へ暗黙に接続していない。
 
-実PostgreSQLでのRLS拒否は、Hosted用とSelf-host用の接続先を指定した`server:02:verify`で確認する。本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Core09のReference Adapterは内部契約の検証用であり、製品用の接続Protocolではない。
+Room階層の実PostgreSQL確認は、Hosted用とSelf-host用の接続先を指定した`server:03:verify`で行う。本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Core09のReference Adapterは内部契約の検証用であり、製品用の接続Protocolではない。
 
 現在の完了レポートはsource差分を含むため、基盤の存在と「検証済み完了」を分けて扱う。
 

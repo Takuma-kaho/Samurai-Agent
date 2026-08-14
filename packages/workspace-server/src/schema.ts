@@ -1940,6 +1940,1974 @@ const migrations: readonly WorkspaceServerMigration[] = [
       $$`,
       "REVOKE EXECUTE ON FUNCTION samurai_import_workspace_account_identity(TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC"
     ]
+  },
+  {
+    version: 22,
+    name: "workspace_server_room_hierarchy_and_membership_guards",
+    statements: [
+      // A Workspace remains the top-level owner.  A Room may have one Room
+      // parent, or no parent when it is directly below the Workspace.
+      "ALTER TABLE rooms ADD COLUMN parent_room_id TEXT",
+      "ALTER TABLE rooms ADD CONSTRAINT rooms_parent_room_not_self CHECK (parent_room_id IS NULL OR parent_room_id <> id)",
+      "ALTER TABLE rooms ADD CONSTRAINT rooms_parent_room_same_workspace_fkey FOREIGN KEY (workspace_id, parent_room_id) REFERENCES rooms(workspace_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED",
+      "CREATE INDEX rooms_workspace_parent_created_index ON rooms(workspace_id, parent_room_id, created_at)",
+      // A direct Room row never revives access after the Account has left the
+      // Workspace. Workspace Owner/Admin access remains the existing global
+      // management exception; ordinary parent membership still does not make
+      // a child Room readable.
+      `CREATE OR REPLACE FUNCTION samurai_room_role(target_workspace_id TEXT, target_room_id TEXT)
+      RETURNS TEXT
+      LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_role_name TEXT;
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM workspace_members
+          WHERE workspace_id = target_workspace_id
+            AND account_id = samurai_current_account_id()
+            AND state = 'active'
+        ) THEN
+          RETURN NULL;
+        END IF;
+        workspace_role_name := samurai_workspace_role(target_workspace_id);
+        IF samurai_role_rank(workspace_role_name) >= samurai_role_rank('admin') THEN
+          RETURN workspace_role_name;
+        END IF;
+        RETURN (
+          SELECT role
+          FROM room_members
+          WHERE workspace_id = target_workspace_id
+            AND room_id = target_room_id
+            AND account_id = samurai_current_account_id()
+            AND state = 'active'
+          LIMIT 1
+        );
+      END
+      $$`,
+      `ALTER POLICY room_members_read ON room_members
+       USING (
+         workspace_id = samurai_current_workspace_id()
+         AND samurai_can_room(workspace_id, room_id, 'read')
+         AND (account_id = samurai_current_account_id() OR samurai_can_room(workspace_id, room_id, 'manage'))
+       )`,
+      // Workspace membership changes participate in the same short lock as
+      // Room hierarchy changes. Without this, a concurrent Workspace revoke
+      // could interleave with a child-Room membership update.
+      `CREATE OR REPLACE FUNCTION samurai_set_workspace_member(
+        target_workspace_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_expected_version BIGINT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE existing_member workspace_members%ROWTYPE;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+          RAISE EXCEPTION 'workspace_permission_denied';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest') OR target_state NOT IN ('active', 'revoked') THEN
+          RAISE EXCEPTION 'workspace_membership_invalid';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.owner:' || target_workspace_id, 0));
+        SELECT * INTO existing_member
+        FROM workspace_members
+        WHERE workspace_id = target_workspace_id AND account_id = target_account_id
+        FOR UPDATE;
+        IF COALESCE(existing_member.version, 0) <> target_expected_version THEN
+          RAISE EXCEPTION 'workspace_membership_version_conflict';
+        END IF;
+        IF target_role = 'owner' AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF FOUND AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND (target_role <> 'owner' OR target_state <> 'active') THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+            RAISE EXCEPTION 'workspace_owner_permission_required';
+          END IF;
+          IF (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = target_workspace_id AND role = 'owner' AND state = 'active') <= 1 THEN
+            RAISE EXCEPTION 'workspace_last_owner_cannot_be_revoked';
+          END IF;
+        END IF;
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version, revoked_at, updated_at)
+        VALUES (target_workspace_id, target_account_id, target_role, target_state, 1,
+          CASE WHEN target_state = 'revoked' THEN NOW() ELSE NULL END, NOW())
+        ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+          role = EXCLUDED.role,
+          state = EXCLUDED.state,
+          version = workspace_members.version + 1,
+          revoked_at = EXCLUDED.revoked_at,
+          updated_at = NOW();
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_create_room(
+        target_workspace_id TEXT,
+        new_room_id TEXT,
+        new_room_name TEXT,
+        target_parent_room_id TEXT,
+        target_workspace_version BIGINT
+      ) RETURNS TEXT
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_workspace_version BIGINT;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id() THEN
+          RAISE EXCEPTION 'workspace_permission_denied';
+        END IF;
+        SELECT version INTO current_workspace_version FROM workspaces
+        WHERE id = target_workspace_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_not_found'; END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF current_workspace_version IS DISTINCT FROM target_workspace_version THEN
+          RAISE EXCEPTION 'workspace_version_conflict';
+        END IF;
+        IF target_parent_room_id IS NULL THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'member') THEN
+            RAISE EXCEPTION 'workspace_permission_denied';
+          END IF;
+        ELSE
+          IF NOT EXISTS (
+            SELECT 1 FROM rooms
+            WHERE workspace_id = target_workspace_id AND id = target_parent_room_id
+          ) THEN RAISE EXCEPTION 'room_parent_not_found'; END IF;
+          IF NOT samurai_can_room(target_workspace_id, target_parent_room_id, 'manage') THEN
+            RAISE EXCEPTION 'room_parent_permission_denied';
+          END IF;
+          IF EXISTS (
+            WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+              SELECT id, parent_room_id FROM rooms
+              WHERE workspace_id = target_workspace_id AND id = target_parent_room_id
+              UNION ALL
+              SELECT parent.id, parent.parent_room_id FROM rooms AS parent
+              JOIN ancestors ON ancestors.parent_room_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM ancestors
+            WHERE NOT EXISTS (
+              SELECT 1 FROM room_members
+              WHERE workspace_id = target_workspace_id
+                AND room_id = ancestors.room_id
+                AND account_id = samurai_current_account_id()
+                AND state = 'active'
+            )
+          ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+        END IF;
+        INSERT INTO rooms(workspace_id, id, parent_room_id, name, created_by)
+        VALUES (target_workspace_id, new_room_id, target_parent_room_id, new_room_name, samurai_current_account_id());
+        INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version)
+        VALUES (target_workspace_id, new_room_id, samurai_current_account_id(), 'owner', 'active', 1);
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        RETURN new_room_id;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_move_room(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_parent_room_id TEXT,
+        target_expected_room_version BIGINT,
+        target_expected_workspace_version BIGINT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_workspace_version BIGINT;
+      DECLARE current_room_version BIGINT;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_permission_denied';
+        END IF;
+        SELECT version INTO current_workspace_version FROM workspaces
+        WHERE id = target_workspace_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_not_found'; END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF current_workspace_version IS DISTINCT FROM target_expected_workspace_version THEN
+          RAISE EXCEPTION 'workspace_version_conflict';
+        END IF;
+        SELECT version INTO current_room_version FROM rooms
+        WHERE workspace_id = target_workspace_id AND id = target_room_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'room_not_found'; END IF;
+        IF current_room_version IS DISTINCT FROM target_expected_room_version THEN
+          RAISE EXCEPTION 'room_version_conflict';
+        END IF;
+        IF target_parent_room_id IS NULL THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+            RAISE EXCEPTION 'workspace_admin_permission_required';
+          END IF;
+        ELSE
+          IF target_parent_room_id = target_room_id THEN RAISE EXCEPTION 'room_hierarchy_cycle'; END IF;
+          IF NOT EXISTS (
+            SELECT 1 FROM rooms
+            WHERE workspace_id = target_workspace_id AND id = target_parent_room_id
+          ) THEN RAISE EXCEPTION 'room_parent_not_found'; END IF;
+          IF NOT samurai_can_room(target_workspace_id, target_parent_room_id, 'manage') THEN
+            RAISE EXCEPTION 'room_parent_permission_denied';
+          END IF;
+          IF EXISTS (
+            WITH RECURSIVE descendants(room_id) AS (
+              SELECT target_room_id
+              UNION ALL
+              SELECT room.id FROM rooms AS room
+              JOIN descendants ON room.parent_room_id = descendants.room_id
+              WHERE room.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM descendants WHERE room_id = target_parent_room_id
+          ) THEN RAISE EXCEPTION 'room_hierarchy_cycle'; END IF;
+          IF EXISTS (
+            WITH RECURSIVE descendants(room_id) AS (
+              SELECT target_room_id
+              UNION ALL
+              SELECT room.id FROM rooms AS room
+              JOIN descendants ON room.parent_room_id = descendants.room_id
+              WHERE room.workspace_id = target_workspace_id
+            ),
+            ancestors(room_id, parent_room_id) AS (
+              SELECT id, parent_room_id FROM rooms
+              WHERE workspace_id = target_workspace_id AND id = target_parent_room_id
+              UNION ALL
+              SELECT parent.id, parent.parent_room_id FROM rooms AS parent
+              JOIN ancestors ON ancestors.parent_room_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1
+            FROM room_members AS child_member
+            JOIN descendants ON descendants.room_id = child_member.room_id
+            CROSS JOIN ancestors
+            LEFT JOIN room_members AS parent_member
+              ON parent_member.workspace_id = target_workspace_id
+             AND parent_member.room_id = ancestors.room_id
+             AND parent_member.account_id = child_member.account_id
+             AND parent_member.state = 'active'
+            WHERE child_member.workspace_id = target_workspace_id
+              AND child_member.state = 'active'
+              AND parent_member.account_id IS NULL
+          ) THEN RAISE EXCEPTION 'room_move_parent_membership_required'; END IF;
+        END IF;
+        UPDATE rooms
+        SET parent_room_id = target_parent_room_id, version = version + 1, updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = target_room_id;
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        RETURN (
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT jsonb_build_object(
+            'room_id', target_room_id,
+            'parent_room_id', target_parent_room_id,
+            'affected_room_ids', COALESCE(jsonb_agg(room_id ORDER BY room_id), '[]'::JSONB)
+          )
+          FROM descendants
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_preview_room_move(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_parent_room_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE blocking_account_ids TEXT[];
+      DECLARE required_ancestor_room_ids TEXT[];
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_permission_denied';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM rooms WHERE workspace_id = target_workspace_id AND id = target_room_id) THEN
+          RAISE EXCEPTION 'room_not_found';
+        END IF;
+        IF target_parent_room_id IS NULL THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+            RAISE EXCEPTION 'workspace_admin_permission_required';
+          END IF;
+          RETURN jsonb_build_object('allowed', true, 'blocking_account_ids', '[]'::JSONB, 'required_ancestor_room_ids', '[]'::JSONB);
+        END IF;
+        IF target_parent_room_id = target_room_id THEN
+          RETURN jsonb_build_object('allowed', false, 'reason', 'room_hierarchy_cycle', 'blocking_account_ids', '[]'::JSONB, 'required_ancestor_room_ids', '[]'::JSONB);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM rooms WHERE workspace_id = target_workspace_id AND id = target_parent_room_id) THEN
+          RAISE EXCEPTION 'room_parent_not_found';
+        END IF;
+        IF NOT samurai_can_room(target_workspace_id, target_parent_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_parent_permission_denied';
+        END IF;
+        IF EXISTS (
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT 1 FROM descendants WHERE room_id = target_parent_room_id
+        ) THEN
+          RETURN jsonb_build_object('allowed', false, 'reason', 'room_hierarchy_cycle', 'blocking_account_ids', '[]'::JSONB, 'required_ancestor_room_ids', '[]'::JSONB);
+        END IF;
+        WITH RECURSIVE descendants(room_id) AS (
+          SELECT target_room_id
+          UNION ALL
+          SELECT room.id FROM rooms AS room
+          JOIN descendants ON room.parent_room_id = descendants.room_id
+          WHERE room.workspace_id = target_workspace_id
+        ),
+        ancestors(room_id, parent_room_id) AS (
+          SELECT id, parent_room_id FROM rooms
+          WHERE workspace_id = target_workspace_id AND id = target_parent_room_id
+          UNION ALL
+          SELECT parent.id, parent.parent_room_id FROM rooms AS parent
+          JOIN ancestors ON ancestors.parent_room_id = parent.id
+          WHERE parent.workspace_id = target_workspace_id
+        ),
+        missing AS (
+          SELECT DISTINCT child_member.account_id
+          FROM room_members AS child_member
+          JOIN descendants ON descendants.room_id = child_member.room_id
+          CROSS JOIN ancestors
+          LEFT JOIN room_members AS parent_member
+            ON parent_member.workspace_id = target_workspace_id
+           AND parent_member.room_id = ancestors.room_id
+           AND parent_member.account_id = child_member.account_id
+           AND parent_member.state = 'active'
+          WHERE child_member.workspace_id = target_workspace_id
+            AND child_member.state = 'active'
+            AND parent_member.account_id IS NULL
+        )
+        SELECT
+          COALESCE((SELECT array_agg(account_id ORDER BY account_id) FROM missing), ARRAY[]::TEXT[]),
+          COALESCE((SELECT array_agg(room_id ORDER BY room_id) FROM ancestors), ARRAY[]::TEXT[])
+        INTO blocking_account_ids, required_ancestor_room_ids;
+        RETURN jsonb_build_object(
+          'allowed', cardinality(blocking_account_ids) = 0,
+          'reason', CASE WHEN cardinality(blocking_account_ids) = 0 THEN NULL ELSE 'room_move_parent_membership_required' END,
+          'blocking_account_ids', to_jsonb(blocking_account_ids),
+          'required_ancestor_room_ids', to_jsonb(required_ancestor_room_ids)
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_set_room_member_with_impact(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_expected_version BIGINT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE existing_member room_members%ROWTYPE;
+      DECLARE has_existing BOOLEAN;
+      DECLARE affected_room_ids TEXT[];
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_permission_denied';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF NOT EXISTS (SELECT 1 FROM rooms WHERE workspace_id = target_workspace_id AND id = target_room_id) THEN
+          RAISE EXCEPTION 'room_not_found';
+        END IF;
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest') OR target_state NOT IN ('active', 'revoked') THEN
+          RAISE EXCEPTION 'room_membership_invalid';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM workspace_members
+          WHERE workspace_id = target_workspace_id AND account_id = target_account_id AND state = 'active'
+        ) THEN RAISE EXCEPTION 'workspace_membership_required'; END IF;
+        SELECT * INTO existing_member FROM room_members
+        WHERE workspace_id = target_workspace_id AND room_id = target_room_id AND account_id = target_account_id
+        FOR UPDATE;
+        has_existing := FOUND;
+        IF COALESCE(existing_member.version, 0) <> target_expected_version THEN
+          RAISE EXCEPTION 'room_membership_version_conflict';
+        END IF;
+        IF target_role = 'owner' AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF has_existing AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND (target_role <> 'owner' OR target_state <> 'active')
+          AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        -- A role demotion is not a removal cascade, but it still cannot leave
+        -- the directly changed Room without an Owner.
+        IF has_existing AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND target_state = 'active' AND target_role <> 'owner'
+          AND NOT EXISTS (
+            SELECT 1 FROM room_members AS another_owner
+            WHERE another_owner.workspace_id = target_workspace_id
+              AND another_owner.room_id = target_room_id
+              AND another_owner.account_id <> target_account_id
+              AND another_owner.role = 'owner'
+              AND another_owner.state = 'active'
+          ) THEN RAISE EXCEPTION 'room_last_owner_cannot_be_removed'; END IF;
+        IF target_state = 'active' AND EXISTS (
+          WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+            SELECT parent.id, parent.parent_room_id
+            FROM rooms AS room
+            JOIN rooms AS parent
+              ON parent.workspace_id = room.workspace_id AND parent.id = room.parent_room_id
+            WHERE room.workspace_id = target_workspace_id AND room.id = target_room_id
+            UNION ALL
+            SELECT parent.id, parent.parent_room_id
+            FROM rooms AS parent
+            JOIN ancestors ON ancestors.parent_room_id = parent.id
+            WHERE parent.workspace_id = target_workspace_id
+          )
+          SELECT 1 FROM ancestors
+          WHERE NOT EXISTS (
+            SELECT 1 FROM room_members
+            WHERE workspace_id = target_workspace_id
+              AND room_id = ancestors.room_id
+              AND account_id = target_account_id
+              AND state = 'active'
+          )
+        ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+        IF target_state = 'revoked' THEN
+          IF EXISTS (
+            WITH RECURSIVE descendants(room_id) AS (
+              SELECT target_room_id
+              UNION ALL
+              SELECT room.id FROM rooms AS room
+              JOIN descendants ON room.parent_room_id = descendants.room_id
+              WHERE room.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM room_members AS member
+            JOIN descendants ON descendants.room_id = member.room_id
+            WHERE member.workspace_id = target_workspace_id
+              AND member.account_id = target_account_id
+              AND member.state = 'active'
+              AND member.role = 'owner'
+          ) AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+            RAISE EXCEPTION 'workspace_owner_permission_required';
+          END IF;
+          IF EXISTS (
+            WITH RECURSIVE descendants(room_id) AS (
+              SELECT target_room_id
+              UNION ALL
+              SELECT room.id FROM rooms AS room
+              JOIN descendants ON room.parent_room_id = descendants.room_id
+              WHERE room.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM room_members AS member
+            JOIN descendants ON descendants.room_id = member.room_id
+            WHERE member.workspace_id = target_workspace_id
+              AND member.account_id = target_account_id
+              AND member.state = 'active'
+              AND member.role = 'owner'
+              AND NOT EXISTS (
+                SELECT 1 FROM room_members AS another_owner
+                WHERE another_owner.workspace_id = member.workspace_id
+                  AND another_owner.room_id = member.room_id
+                  AND another_owner.account_id <> target_account_id
+                  AND another_owner.role = 'owner'
+                  AND another_owner.state = 'active'
+              )
+          ) THEN RAISE EXCEPTION 'room_last_owner_cannot_be_removed'; END IF;
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT COALESCE(array_agg(member.room_id ORDER BY member.room_id), ARRAY[target_room_id])
+          INTO affected_room_ids
+          FROM room_members AS member
+          JOIN descendants ON descendants.room_id = member.room_id
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active';
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          UPDATE room_members AS member
+          SET role = CASE WHEN member.room_id = target_room_id THEN target_role ELSE member.role END,
+              state = 'revoked',
+              version = member.version + 1,
+              revoked_at = NOW(),
+              updated_at = NOW()
+          FROM descendants
+          WHERE member.workspace_id = target_workspace_id
+            AND member.room_id = descendants.room_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active';
+          IF NOT has_existing THEN
+            INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, revoked_at, updated_at)
+            VALUES (target_workspace_id, target_room_id, target_account_id, target_role, 'revoked', 1, NOW(), NOW());
+          ELSIF existing_member.state = 'revoked' THEN
+            UPDATE room_members
+            SET role = target_role, state = 'revoked', version = version + 1, revoked_at = NOW(), updated_at = NOW()
+            WHERE workspace_id = target_workspace_id AND room_id = target_room_id AND account_id = target_account_id;
+          END IF;
+        ELSE
+          INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, revoked_at, updated_at)
+          VALUES (target_workspace_id, target_room_id, target_account_id, target_role, 'active', 1, NULL, NOW())
+          ON CONFLICT (workspace_id, room_id, account_id) DO UPDATE SET
+            role = EXCLUDED.role, state = 'active', version = room_members.version + 1,
+            revoked_at = NULL, updated_at = NOW();
+          affected_room_ids := ARRAY[target_room_id];
+        END IF;
+        RETURN jsonb_build_object('affected_room_ids', to_jsonb(affected_room_ids));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_preview_room_member_change(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE affected_room_ids TEXT[];
+      DECLARE blocking_owner_room_ids TEXT[];
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_permission_denied';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM rooms
+          WHERE workspace_id = target_workspace_id AND id = target_room_id
+        ) THEN RAISE EXCEPTION 'room_not_found'; END IF;
+        IF target_state <> 'revoked' THEN
+          RETURN jsonb_build_object('affected_room_ids', to_jsonb(ARRAY[target_room_id]), 'blocking_owner_room_ids', '[]'::JSONB);
+        END IF;
+        WITH RECURSIVE descendants(room_id) AS (
+          SELECT target_room_id
+          UNION ALL
+          SELECT room.id FROM rooms AS room
+          JOIN descendants ON room.parent_room_id = descendants.room_id
+          WHERE room.workspace_id = target_workspace_id
+        ),
+        active_rows AS (
+          SELECT member.room_id, member.role FROM room_members AS member
+          JOIN descendants ON descendants.room_id = member.room_id
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active'
+        )
+        SELECT
+          COALESCE((SELECT array_agg(room_id ORDER BY room_id) FROM active_rows), ARRAY[target_room_id]),
+          COALESCE((
+            SELECT array_agg(room_id ORDER BY room_id)
+            FROM active_rows AS active_owner
+            WHERE active_owner.role = 'owner'
+              AND NOT EXISTS (
+                SELECT 1 FROM room_members AS another_owner
+                WHERE another_owner.workspace_id = target_workspace_id
+                  AND another_owner.room_id = active_owner.room_id
+                  AND another_owner.account_id <> target_account_id
+                  AND another_owner.role = 'owner'
+                  AND another_owner.state = 'active'
+              )
+          ), ARRAY[]::TEXT[])
+        INTO affected_room_ids, blocking_owner_room_ids;
+        RETURN jsonb_build_object(
+          'affected_room_ids', to_jsonb(affected_room_ids),
+          'blocking_owner_room_ids', to_jsonb(blocking_owner_room_ids)
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_import_workspace_room(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_parent_room_id TEXT,
+        target_name TEXT,
+        target_version BIGINT,
+        target_created_by TEXT,
+        target_created_at TIMESTAMPTZ,
+        target_updated_at TIMESTAMPTZ
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        INSERT INTO rooms(workspace_id, id, parent_room_id, name, version, created_by, created_at, updated_at)
+        VALUES (target_workspace_id, target_room_id, target_parent_room_id, target_name, target_version, target_created_by, target_created_at, target_updated_at);
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_import_workspace_room_member(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_version BIGINT,
+        target_created_at TIMESTAMPTZ,
+        target_updated_at TIMESTAMPTZ,
+        target_revoked_at TIMESTAMPTZ
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, created_at, updated_at, revoked_at)
+        VALUES (target_workspace_id, target_room_id, target_account_id, target_role, target_state, target_version, target_created_at, target_updated_at, target_revoked_at);
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_validate_workspace_room_hierarchy(
+        target_workspace_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        IF EXISTS (
+          WITH RECURSIVE walk(room_id, parent_room_id, path, cycle) AS (
+            SELECT id, parent_room_id, ARRAY[id], false FROM rooms
+            WHERE workspace_id = target_workspace_id
+            UNION ALL
+            SELECT parent.id, parent.parent_room_id, walk.path || parent.id, parent.id = ANY(walk.path)
+            FROM rooms AS parent
+            JOIN walk ON parent.id = walk.parent_room_id
+            WHERE parent.workspace_id = target_workspace_id AND NOT walk.cycle
+          )
+          SELECT 1 FROM walk WHERE cycle
+        ) THEN RAISE EXCEPTION 'room_bundle_hierarchy_cycle'; END IF;
+        IF EXISTS (
+          WITH RECURSIVE ancestry(descendant_room_id, ancestor_room_id) AS (
+            SELECT id, parent_room_id FROM rooms
+            WHERE workspace_id = target_workspace_id AND parent_room_id IS NOT NULL
+            UNION ALL
+            SELECT ancestry.descendant_room_id, parent.parent_room_id
+            FROM ancestry
+            JOIN rooms AS parent
+              ON parent.workspace_id = target_workspace_id AND parent.id = ancestry.ancestor_room_id
+            WHERE parent.parent_room_id IS NOT NULL
+          )
+          SELECT 1
+          FROM room_members AS child_member
+          JOIN ancestry ON ancestry.descendant_room_id = child_member.room_id
+          LEFT JOIN room_members AS parent_member
+            ON parent_member.workspace_id = target_workspace_id
+           AND parent_member.room_id = ancestry.ancestor_room_id
+           AND parent_member.account_id = child_member.account_id
+           AND parent_member.state = 'active'
+          WHERE child_member.workspace_id = target_workspace_id
+            AND child_member.state = 'active'
+            AND parent_member.account_id IS NULL
+        ) THEN RAISE EXCEPTION 'room_bundle_parent_membership_invalid'; END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_accept_invitation(target_workspace_id TEXT, supplied_token_hash TEXT)
+      RETURNS TABLE(workspace_role TEXT, room_id TEXT, room_role TEXT, invitation_version BIGINT)
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE invitation workspace_invitations%ROWTYPE;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL THEN
+          RAISE EXCEPTION 'workspace_invitation_invalid';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        SELECT * INTO invitation
+        FROM workspace_invitations
+        WHERE workspace_id = target_workspace_id
+          AND token_hash = supplied_token_hash
+          AND revoked_at IS NULL
+          AND accepted_at IS NULL
+          AND expires_at > NOW()
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_invitation_invalid'; END IF;
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version, updated_at)
+        VALUES (target_workspace_id, samurai_current_account_id(), invitation.workspace_role, 'active', 1, NOW())
+        ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+          role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(workspace_members.role) THEN EXCLUDED.role ELSE workspace_members.role END,
+          state = 'active', revoked_at = NULL, version = workspace_members.version + 1, updated_at = NOW();
+        IF invitation.room_id IS NOT NULL THEN
+          IF NOT EXISTS (
+            SELECT 1 FROM rooms WHERE workspace_id = target_workspace_id AND id = invitation.room_id
+          ) THEN RAISE EXCEPTION 'room_not_found'; END IF;
+          IF EXISTS (
+            WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+              SELECT parent.id, parent.parent_room_id
+              FROM rooms AS room
+              JOIN rooms AS parent
+                ON parent.workspace_id = room.workspace_id AND parent.id = room.parent_room_id
+              WHERE room.workspace_id = target_workspace_id AND room.id = invitation.room_id
+              UNION ALL
+              SELECT parent.id, parent.parent_room_id
+              FROM rooms AS parent
+              JOIN ancestors ON ancestors.parent_room_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM ancestors
+            WHERE NOT EXISTS (
+              SELECT 1 FROM room_members
+              WHERE workspace_id = target_workspace_id
+                AND room_id = ancestors.room_id
+                AND account_id = samurai_current_account_id()
+                AND state = 'active'
+            )
+          ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+          INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, updated_at)
+          VALUES (target_workspace_id, invitation.room_id, samurai_current_account_id(), COALESCE(invitation.room_role, invitation.workspace_role), 'active', 1, NOW())
+          ON CONFLICT (workspace_id, room_id, account_id) DO UPDATE SET
+            role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(room_members.role) THEN EXCLUDED.role ELSE room_members.role END,
+            state = 'active', revoked_at = NULL, version = room_members.version + 1, updated_at = NOW();
+        END IF;
+        UPDATE workspace_invitations
+        SET accepted_by = samurai_current_account_id(), accepted_at = NOW(), version = version + 1
+        WHERE workspace_id = target_workspace_id AND id = invitation.id
+        RETURNING version INTO invitation_version;
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        RETURN QUERY SELECT invitation.workspace_role, invitation.room_id, invitation.room_role, invitation_version;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_complete_workspace_import(
+        target_workspace_id TEXT,
+        import_session_id TEXT,
+        target_manifest_hash TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_context_value('samurai.import_id') IS DISTINCT FROM import_session_id
+          OR NOT samurai_is_import_session(target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        PERFORM samurai_validate_workspace_room_hierarchy(target_workspace_id);
+        IF NOT EXISTS (
+          SELECT 1 FROM workspace_members
+          WHERE workspace_id = target_workspace_id AND role = 'owner' AND state = 'active'
+        ) THEN RAISE EXCEPTION 'workspace_import_owner_missing'; END IF;
+        UPDATE workspace_import_sessions
+        SET state = 'completed', manifest_hash = target_manifest_hash, updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = import_session_id AND state = 'writing';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_import_session_invalid'; END IF;
+        UPDATE workspaces SET state = 'active', version = version + 1, updated_at = NOW()
+        WHERE id = target_workspace_id AND state = 'read_only';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_import_target_invalid'; END IF;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_create_room(TEXT, TEXT, TEXT, TEXT, BIGINT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_move_room(TEXT, TEXT, TEXT, BIGINT, BIGINT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_preview_room_move(TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_set_room_member_with_impact(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_preview_room_member_change(TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_import_workspace_room(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_import_workspace_room_member(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_validate_workspace_room_hierarchy(TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_set_room_member(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT) FROM PUBLIC"
+    ]
+  },
+  {
+    version: 23,
+    name: "workspace_server_room_hierarchy_privacy_and_realtime_integrity",
+    statements: [
+      // Disabled Accounts must lose the same RLS-derived Workspace and Room
+      // access as a revoked membership.  Without this join, an old active
+      // membership row would keep a disabled identity readable.
+      `CREATE OR REPLACE FUNCTION samurai_workspace_role(target_workspace_id TEXT)
+      RETURNS TEXT
+      LANGUAGE SQL STABLE SECURITY DEFINER SET search_path = public AS $$
+        SELECT member.role
+        FROM workspace_members AS member
+        JOIN accounts AS account
+          ON account.id = member.account_id AND account.status = 'active'
+        WHERE member.workspace_id = target_workspace_id
+          AND member.account_id = samurai_current_account_id()
+          AND member.state = 'active'
+        LIMIT 1
+      $$`,
+      // A Workspace Owner/Admin may manage every existing Room, but a made-up
+      // Room id must never look manageable merely because the caller is an
+      // administrator. This also makes hidden and missing Room ids follow one
+      // externally observable failure path for ordinary members.
+      `CREATE OR REPLACE FUNCTION samurai_room_role(target_workspace_id TEXT, target_room_id TEXT)
+      RETURNS TEXT
+      LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_role_name TEXT;
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM workspace_members AS member
+          JOIN accounts AS account
+            ON account.id = member.account_id AND account.status = 'active'
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = samurai_current_account_id()
+            AND member.state = 'active'
+        ) OR NOT EXISTS (
+          SELECT 1 FROM rooms
+          WHERE workspace_id = target_workspace_id AND id = target_room_id
+        ) THEN
+          RETURN NULL;
+        END IF;
+        workspace_role_name := samurai_workspace_role(target_workspace_id);
+        IF samurai_role_rank(workspace_role_name) >= samurai_role_rank('admin') THEN
+          RETURN workspace_role_name;
+        END IF;
+        RETURN (
+          SELECT role
+          FROM room_members
+          WHERE workspace_id = target_workspace_id
+            AND room_id = target_room_id
+            AND account_id = samurai_current_account_id()
+            AND state = 'active'
+          LIMIT 1
+        );
+      END
+      $$`,
+      // This is the single validation source for preview and mutation. The
+      // mutation calls it again under the hierarchy lock, so a successful
+      // preview is useful UI guidance but never an authorization grant.
+      `CREATE OR REPLACE FUNCTION samurai_room_member_change_impact(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE existing_member room_members%ROWTYPE;
+      DECLARE has_existing BOOLEAN;
+      DECLARE blocking_owner_room_ids TEXT[];
+      DECLARE affected_room_ids TEXT[];
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_not_available';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest')
+          OR target_state NOT IN ('active', 'revoked') THEN
+          RAISE EXCEPTION 'room_membership_invalid';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM accounts WHERE id = target_account_id
+        ) THEN RAISE EXCEPTION 'workspace_account_not_active'; END IF;
+        IF target_state = 'active' AND NOT EXISTS (
+          SELECT 1 FROM accounts
+          WHERE id = target_account_id AND status = 'active'
+        ) THEN RAISE EXCEPTION 'workspace_account_not_active'; END IF;
+        IF target_state = 'active' AND NOT EXISTS (
+          SELECT 1 FROM workspace_members
+          WHERE workspace_id = target_workspace_id
+            AND account_id = target_account_id
+            AND state = 'active'
+        ) THEN RAISE EXCEPTION 'workspace_membership_required'; END IF;
+        SELECT * INTO existing_member
+        FROM room_members
+        WHERE workspace_id = target_workspace_id
+          AND room_id = target_room_id
+          AND account_id = target_account_id;
+        has_existing := FOUND;
+        IF target_role = 'owner'
+          AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF has_existing AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND (target_role <> 'owner' OR target_state <> 'active')
+          AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF target_state = 'active' AND EXISTS (
+          WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+            SELECT parent.id, parent.parent_room_id
+            FROM rooms AS room
+            JOIN rooms AS parent
+              ON parent.workspace_id = room.workspace_id AND parent.id = room.parent_room_id
+            WHERE room.workspace_id = target_workspace_id AND room.id = target_room_id
+            UNION ALL
+            SELECT parent.id, parent.parent_room_id
+            FROM rooms AS parent
+            JOIN ancestors ON ancestors.parent_room_id = parent.id
+            WHERE parent.workspace_id = target_workspace_id
+          )
+          SELECT 1 FROM ancestors
+          WHERE NOT EXISTS (
+            SELECT 1 FROM room_members
+            WHERE workspace_id = target_workspace_id
+              AND room_id = ancestors.room_id
+              AND account_id = target_account_id
+              AND state = 'active'
+          )
+        ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+        IF target_state = 'revoked' AND EXISTS (
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT 1 FROM room_members AS member
+          JOIN descendants ON descendants.room_id = member.room_id
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active'
+            AND member.role = 'owner'
+        ) AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF target_state = 'revoked' THEN
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT COALESCE(array_agg(member.room_id ORDER BY member.room_id), ARRAY[]::TEXT[])
+          INTO blocking_owner_room_ids
+          FROM room_members AS member
+          JOIN descendants ON descendants.room_id = member.room_id
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active'
+            AND member.role = 'owner'
+            AND NOT EXISTS (
+              SELECT 1 FROM room_members AS another_owner
+              WHERE another_owner.workspace_id = member.workspace_id
+                AND another_owner.room_id = member.room_id
+                AND another_owner.account_id <> target_account_id
+                AND another_owner.role = 'owner'
+                AND another_owner.state = 'active'
+            );
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT COALESCE(array_agg(member.room_id ORDER BY member.room_id), ARRAY[target_room_id])
+          INTO affected_room_ids
+          FROM room_members AS member
+          JOIN descendants ON descendants.room_id = member.room_id
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active';
+        ELSIF has_existing AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND target_role <> 'owner'
+          AND NOT EXISTS (
+            SELECT 1 FROM room_members AS another_owner
+            WHERE another_owner.workspace_id = target_workspace_id
+              AND another_owner.room_id = target_room_id
+              AND another_owner.account_id <> target_account_id
+              AND another_owner.role = 'owner'
+              AND another_owner.state = 'active'
+          ) THEN
+          blocking_owner_room_ids := ARRAY[target_room_id];
+          affected_room_ids := ARRAY[target_room_id];
+        ELSE
+          blocking_owner_room_ids := ARRAY[]::TEXT[];
+          affected_room_ids := ARRAY[target_room_id];
+        END IF;
+        RETURN jsonb_build_object(
+          'allowed', cardinality(blocking_owner_room_ids) = 0,
+          'reason', CASE WHEN cardinality(blocking_owner_room_ids) = 0 THEN NULL ELSE 'room_last_owner_cannot_be_removed' END,
+          'affected_room_ids', to_jsonb(affected_room_ids),
+          'blocking_owner_room_ids', to_jsonb(blocking_owner_room_ids)
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_preview_room_member_change(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE impact JSONB;
+      DECLARE affected_room_ids TEXT[];
+      DECLARE blocking_owner_room_ids TEXT[];
+      DECLARE visible_affected_room_ids TEXT[];
+      DECLARE visible_blocking_owner_room_ids TEXT[];
+      BEGIN
+        impact := samurai_room_member_change_impact(
+          target_workspace_id, target_room_id, target_account_id, target_role, target_state
+        );
+        SELECT COALESCE(array_agg(value), ARRAY[]::TEXT[])
+        INTO affected_room_ids
+        FROM jsonb_array_elements_text(impact->'affected_room_ids') AS item(value);
+        SELECT COALESCE(array_agg(value), ARRAY[]::TEXT[])
+        INTO blocking_owner_room_ids
+        FROM jsonb_array_elements_text(impact->'blocking_owner_room_ids') AS item(value);
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+        INTO visible_affected_room_ids
+        FROM rooms
+        WHERE workspace_id = target_workspace_id
+          AND id = ANY(affected_room_ids)
+          AND samurai_can_room(target_workspace_id, id, 'manage');
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+        INTO visible_blocking_owner_room_ids
+        FROM rooms
+        WHERE workspace_id = target_workspace_id
+          AND id = ANY(blocking_owner_room_ids)
+          AND samurai_can_room(target_workspace_id, id, 'manage');
+        RETURN jsonb_build_object(
+          'allowed', COALESCE((impact->>'allowed')::BOOLEAN, false),
+          'reason', impact->'reason',
+          'affected_room_ids', to_jsonb(visible_affected_room_ids),
+          'blocking_owner_room_ids', to_jsonb(visible_blocking_owner_room_ids)
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_set_room_member_with_impact(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE existing_member room_members%ROWTYPE;
+      DECLARE impact JSONB;
+      DECLARE affected_room_ids TEXT[];
+      DECLARE affected_room_id TEXT;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        impact := samurai_room_member_change_impact(
+          target_workspace_id, target_room_id, target_account_id, target_role, target_state
+        );
+        IF COALESCE((impact->>'allowed')::BOOLEAN, false) IS NOT TRUE THEN
+          RAISE EXCEPTION 'room_last_owner_cannot_be_removed';
+        END IF;
+        SELECT * INTO existing_member
+        FROM room_members
+        WHERE workspace_id = target_workspace_id
+          AND room_id = target_room_id
+          AND account_id = target_account_id
+        FOR UPDATE;
+        IF COALESCE(existing_member.version, 0) <> target_expected_version THEN
+          RAISE EXCEPTION 'room_membership_version_conflict';
+        END IF;
+        SELECT COALESCE(array_agg(value), ARRAY[target_room_id])
+        INTO affected_room_ids
+        FROM jsonb_array_elements_text(impact->'affected_room_ids') AS item(value);
+        IF target_state = 'revoked' THEN
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          UPDATE room_members AS member
+          SET role = CASE WHEN member.room_id = target_room_id THEN target_role ELSE member.role END,
+              state = 'revoked',
+              version = member.version + 1,
+              revoked_at = NOW(),
+              updated_at = NOW()
+          FROM descendants
+          WHERE member.workspace_id = target_workspace_id
+            AND member.room_id = descendants.room_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active';
+          IF NOT FOUND THEN
+            INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, revoked_at, updated_at)
+            VALUES (target_workspace_id, target_room_id, target_account_id, target_role, 'revoked', 1, NOW(), NOW())
+            ON CONFLICT (workspace_id, room_id, account_id) DO UPDATE SET
+              role = EXCLUDED.role,
+              state = 'revoked',
+              version = room_members.version + 1,
+              revoked_at = NOW(),
+              updated_at = NOW();
+          END IF;
+        ELSE
+          INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, revoked_at, updated_at)
+          VALUES (target_workspace_id, target_room_id, target_account_id, target_role, 'active', 1, NULL, NOW())
+          ON CONFLICT (workspace_id, room_id, account_id) DO UPDATE SET
+            role = EXCLUDED.role,
+            state = 'active',
+            version = room_members.version + 1,
+            revoked_at = NULL,
+            updated_at = NOW();
+        END IF;
+        FOREACH affected_room_id IN ARRAY affected_room_ids LOOP
+          INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
+          VALUES (
+            target_workspace_id,
+            affected_room_id,
+            'room.member.changed',
+            target_operation_id,
+            jsonb_build_object('changed_room_id', target_room_id)
+          );
+        END LOOP;
+        RETURN jsonb_build_object('affected_room_ids', to_jsonb(affected_room_ids));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_create_room(
+        target_workspace_id TEXT,
+        new_room_id TEXT,
+        new_room_name TEXT,
+        target_parent_room_id TEXT,
+        target_workspace_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_workspace_version BIGINT;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id() THEN
+          RAISE EXCEPTION 'workspace_permission_denied';
+        END IF;
+        SELECT version INTO current_workspace_version
+        FROM workspaces WHERE id = target_workspace_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_not_found'; END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF current_workspace_version IS DISTINCT FROM target_workspace_version THEN
+          RAISE EXCEPTION 'workspace_version_conflict';
+        END IF;
+        IF target_parent_room_id IS NULL THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'member') THEN
+            RAISE EXCEPTION 'workspace_permission_denied';
+          END IF;
+        ELSE
+          IF NOT samurai_can_room(target_workspace_id, target_parent_room_id, 'manage') THEN
+            RAISE EXCEPTION 'room_parent_not_available';
+          END IF;
+          IF EXISTS (
+            WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+              SELECT id, parent_room_id FROM rooms
+              WHERE workspace_id = target_workspace_id AND id = target_parent_room_id
+              UNION ALL
+              SELECT parent.id, parent.parent_room_id FROM rooms AS parent
+              JOIN ancestors ON ancestors.parent_room_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM ancestors
+            WHERE NOT EXISTS (
+              SELECT 1 FROM room_members
+              WHERE workspace_id = target_workspace_id
+                AND room_id = ancestors.room_id
+                AND account_id = samurai_current_account_id()
+                AND state = 'active'
+            )
+          ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+        END IF;
+        INSERT INTO rooms(workspace_id, id, parent_room_id, name, created_by)
+        VALUES (target_workspace_id, new_room_id, target_parent_room_id, new_room_name, samurai_current_account_id());
+        INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version)
+        VALUES (target_workspace_id, new_room_id, samurai_current_account_id(), 'owner', 'active', 1);
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
+        VALUES (target_workspace_id, new_room_id, 'room.created', target_operation_id, jsonb_build_object('changed_room_id', new_room_id));
+        RETURN jsonb_build_object('room_id', new_room_id);
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_move_room(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_parent_room_id TEXT,
+        target_expected_room_version BIGINT,
+        target_expected_workspace_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_workspace_version BIGINT;
+      DECLARE current_room_version BIGINT;
+      DECLARE affected_room_ids TEXT[];
+      DECLARE affected_room_id TEXT;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_not_available';
+        END IF;
+        SELECT version INTO current_workspace_version
+        FROM workspaces WHERE id = target_workspace_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_not_found'; END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF current_workspace_version IS DISTINCT FROM target_expected_workspace_version THEN
+          RAISE EXCEPTION 'workspace_version_conflict';
+        END IF;
+        SELECT version INTO current_room_version
+        FROM rooms
+        WHERE workspace_id = target_workspace_id AND id = target_room_id
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'room_not_available'; END IF;
+        IF current_room_version IS DISTINCT FROM target_expected_room_version THEN
+          RAISE EXCEPTION 'room_version_conflict';
+        END IF;
+        IF target_parent_room_id IS NULL THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+            RAISE EXCEPTION 'workspace_admin_permission_required';
+          END IF;
+        ELSE
+          IF target_parent_room_id = target_room_id THEN RAISE EXCEPTION 'room_hierarchy_cycle'; END IF;
+          IF NOT samurai_can_room(target_workspace_id, target_parent_room_id, 'manage') THEN
+            RAISE EXCEPTION 'room_parent_not_available';
+          END IF;
+          IF EXISTS (
+            WITH RECURSIVE descendants(room_id) AS (
+              SELECT target_room_id
+              UNION ALL
+              SELECT room.id FROM rooms AS room
+              JOIN descendants ON room.parent_room_id = descendants.room_id
+              WHERE room.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM descendants WHERE room_id = target_parent_room_id
+          ) THEN RAISE EXCEPTION 'room_hierarchy_cycle'; END IF;
+          IF EXISTS (
+            WITH RECURSIVE descendants(room_id) AS (
+              SELECT target_room_id
+              UNION ALL
+              SELECT room.id FROM rooms AS room
+              JOIN descendants ON room.parent_room_id = descendants.room_id
+              WHERE room.workspace_id = target_workspace_id
+            ),
+            ancestors(room_id, parent_room_id) AS (
+              SELECT id, parent_room_id FROM rooms
+              WHERE workspace_id = target_workspace_id AND id = target_parent_room_id
+              UNION ALL
+              SELECT parent.id, parent.parent_room_id FROM rooms AS parent
+              JOIN ancestors ON ancestors.parent_room_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1
+            FROM room_members AS child_member
+            JOIN descendants ON descendants.room_id = child_member.room_id
+            CROSS JOIN ancestors
+            LEFT JOIN room_members AS parent_member
+              ON parent_member.workspace_id = target_workspace_id
+             AND parent_member.room_id = ancestors.room_id
+             AND parent_member.account_id = child_member.account_id
+             AND parent_member.state = 'active'
+            WHERE child_member.workspace_id = target_workspace_id
+              AND child_member.state = 'active'
+              AND parent_member.account_id IS NULL
+          ) THEN RAISE EXCEPTION 'room_move_parent_membership_required'; END IF;
+        END IF;
+        WITH RECURSIVE descendants(room_id) AS (
+          SELECT target_room_id
+          UNION ALL
+          SELECT room.id FROM rooms AS room
+          JOIN descendants ON room.parent_room_id = descendants.room_id
+          WHERE room.workspace_id = target_workspace_id
+        )
+        SELECT COALESCE(array_agg(room_id ORDER BY room_id), ARRAY[target_room_id])
+        INTO affected_room_ids FROM descendants;
+        UPDATE rooms
+        SET parent_room_id = target_parent_room_id, version = version + 1, updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = target_room_id;
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        FOREACH affected_room_id IN ARRAY affected_room_ids LOOP
+          INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
+          VALUES (
+            target_workspace_id,
+            affected_room_id,
+            'room.moved',
+            target_operation_id,
+            jsonb_build_object('changed_room_id', target_room_id)
+          );
+        END LOOP;
+        RETURN jsonb_build_object(
+          'room_id', target_room_id,
+          'parent_room_id', target_parent_room_id,
+          'affected_room_ids', to_jsonb(affected_room_ids)
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_preview_room_move(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_parent_room_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE raw_blocking_account_ids TEXT[];
+      DECLARE visible_blocking_account_ids TEXT[];
+      DECLARE required_ancestor_room_ids TEXT[];
+      DECLARE visible_required_ancestor_room_ids TEXT[];
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_not_available';
+        END IF;
+        IF target_parent_room_id IS NULL THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+            RAISE EXCEPTION 'workspace_admin_permission_required';
+          END IF;
+          RETURN jsonb_build_object('allowed', true, 'blocking_account_ids', '[]'::JSONB, 'required_ancestor_room_ids', '[]'::JSONB);
+        END IF;
+        IF target_parent_room_id = target_room_id THEN
+          RETURN jsonb_build_object('allowed', false, 'reason', 'room_hierarchy_cycle', 'blocking_account_ids', '[]'::JSONB, 'required_ancestor_room_ids', '[]'::JSONB);
+        END IF;
+        IF NOT samurai_can_room(target_workspace_id, target_parent_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_parent_not_available';
+        END IF;
+        IF EXISTS (
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT 1 FROM descendants WHERE room_id = target_parent_room_id
+        ) THEN
+          RETURN jsonb_build_object('allowed', false, 'reason', 'room_hierarchy_cycle', 'blocking_account_ids', '[]'::JSONB, 'required_ancestor_room_ids', '[]'::JSONB);
+        END IF;
+        WITH RECURSIVE descendants(room_id) AS (
+          SELECT target_room_id
+          UNION ALL
+          SELECT room.id FROM rooms AS room
+          JOIN descendants ON room.parent_room_id = descendants.room_id
+          WHERE room.workspace_id = target_workspace_id
+        ),
+        ancestors(room_id, parent_room_id) AS (
+          SELECT id, parent_room_id FROM rooms
+          WHERE workspace_id = target_workspace_id AND id = target_parent_room_id
+          UNION ALL
+          SELECT parent.id, parent.parent_room_id FROM rooms AS parent
+          JOIN ancestors ON ancestors.parent_room_id = parent.id
+          WHERE parent.workspace_id = target_workspace_id
+        ),
+        missing AS (
+          SELECT DISTINCT child_member.room_id, child_member.account_id
+          FROM room_members AS child_member
+          JOIN descendants ON descendants.room_id = child_member.room_id
+          CROSS JOIN ancestors
+          LEFT JOIN room_members AS parent_member
+            ON parent_member.workspace_id = target_workspace_id
+           AND parent_member.room_id = ancestors.room_id
+           AND parent_member.account_id = child_member.account_id
+           AND parent_member.state = 'active'
+          WHERE child_member.workspace_id = target_workspace_id
+            AND child_member.state = 'active'
+            AND parent_member.account_id IS NULL
+        )
+        SELECT
+          COALESCE((SELECT array_agg(DISTINCT account_id ORDER BY account_id) FROM missing), ARRAY[]::TEXT[]),
+          COALESCE((SELECT array_agg(room_id ORDER BY room_id) FROM ancestors), ARRAY[]::TEXT[]),
+          COALESCE((
+            SELECT array_agg(DISTINCT account_id ORDER BY account_id)
+            FROM missing
+            WHERE samurai_can_room(target_workspace_id, room_id, 'manage')
+          ), ARRAY[]::TEXT[])
+        INTO raw_blocking_account_ids, required_ancestor_room_ids, visible_blocking_account_ids;
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+        INTO visible_required_ancestor_room_ids
+        FROM rooms
+        WHERE workspace_id = target_workspace_id
+          AND id = ANY(required_ancestor_room_ids)
+          AND samurai_can_room(target_workspace_id, id, 'manage');
+        RETURN jsonb_build_object(
+          'allowed', cardinality(raw_blocking_account_ids) = 0,
+          'reason', CASE WHEN cardinality(raw_blocking_account_ids) = 0 THEN NULL ELSE 'room_move_parent_membership_required' END,
+          'blocking_account_ids', to_jsonb(visible_blocking_account_ids),
+          'required_ancestor_room_ids', to_jsonb(visible_required_ancestor_room_ids)
+        );
+      END
+      $$`,
+      // Workspace revocation is also a Room membership revocation. Keeping
+      // stale direct Room rows would otherwise let access silently reappear
+      // when the Workspace membership is made active again later.
+      `CREATE OR REPLACE FUNCTION samurai_set_workspace_member(
+        target_workspace_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE existing_member workspace_members%ROWTYPE;
+      DECLARE affected_room_ids TEXT[];
+      DECLARE affected_room_id TEXT;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+          RAISE EXCEPTION 'workspace_permission_denied';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest')
+          OR target_state NOT IN ('active', 'revoked') THEN
+          RAISE EXCEPTION 'workspace_membership_invalid';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM accounts WHERE id = target_account_id
+        ) THEN RAISE EXCEPTION 'workspace_account_not_active'; END IF;
+        IF target_state = 'active' AND NOT EXISTS (
+          SELECT 1 FROM accounts
+          WHERE id = target_account_id AND status = 'active'
+        ) THEN RAISE EXCEPTION 'workspace_account_not_active'; END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.owner:' || target_workspace_id, 0));
+        SELECT * INTO existing_member
+        FROM workspace_members
+        WHERE workspace_id = target_workspace_id AND account_id = target_account_id
+        FOR UPDATE;
+        IF COALESCE(existing_member.version, 0) <> target_expected_version THEN
+          RAISE EXCEPTION 'workspace_membership_version_conflict';
+        END IF;
+        IF target_role = 'owner' AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF FOUND AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND (target_role <> 'owner' OR target_state <> 'active') THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+            RAISE EXCEPTION 'workspace_owner_permission_required';
+          END IF;
+          IF (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = target_workspace_id AND role = 'owner' AND state = 'active') <= 1 THEN
+            RAISE EXCEPTION 'workspace_last_owner_cannot_be_revoked';
+          END IF;
+        END IF;
+        IF target_state = 'revoked' AND EXISTS (
+          SELECT 1
+          FROM room_members AS member
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active'
+            AND member.role = 'owner'
+            AND NOT EXISTS (
+              SELECT 1 FROM room_members AS another_owner
+              WHERE another_owner.workspace_id = member.workspace_id
+                AND another_owner.room_id = member.room_id
+                AND another_owner.account_id <> target_account_id
+                AND another_owner.role = 'owner'
+                AND another_owner.state = 'active'
+            )
+        ) THEN RAISE EXCEPTION 'room_last_owner_cannot_be_removed'; END IF;
+        IF target_state = 'revoked' THEN
+          SELECT COALESCE(array_agg(room_id ORDER BY room_id), ARRAY[]::TEXT[])
+          INTO affected_room_ids
+          FROM room_members
+          WHERE workspace_id = target_workspace_id
+            AND account_id = target_account_id
+            AND state = 'active';
+          UPDATE room_members
+          SET state = 'revoked', version = version + 1, revoked_at = NOW(), updated_at = NOW()
+          WHERE workspace_id = target_workspace_id
+            AND account_id = target_account_id
+            AND state = 'active';
+        ELSE
+          affected_room_ids := ARRAY[]::TEXT[];
+        END IF;
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version, revoked_at, updated_at)
+        VALUES (target_workspace_id, target_account_id, target_role, target_state, 1,
+          CASE WHEN target_state = 'revoked' THEN NOW() ELSE NULL END, NOW())
+        ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+          role = EXCLUDED.role,
+          state = EXCLUDED.state,
+          version = workspace_members.version + 1,
+          revoked_at = EXCLUDED.revoked_at,
+          updated_at = NOW();
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        FOREACH affected_room_id IN ARRAY affected_room_ids LOOP
+          INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
+          VALUES (
+            target_workspace_id,
+            affected_room_id,
+            'room.member.changed',
+            target_operation_id,
+            jsonb_build_object('changed_room_id', affected_room_id)
+          );
+        END LOOP;
+        RETURN jsonb_build_object('affected_room_ids', to_jsonb(affected_room_ids));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_validate_workspace_room_hierarchy(
+        target_workspace_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        IF EXISTS (
+          WITH RECURSIVE walk(room_id, parent_room_id, path, cycle) AS (
+            SELECT id, parent_room_id, ARRAY[id], false FROM rooms
+            WHERE workspace_id = target_workspace_id
+            UNION ALL
+            SELECT parent.id, parent.parent_room_id, walk.path || parent.id, parent.id = ANY(walk.path)
+            FROM rooms AS parent
+            JOIN walk ON parent.id = walk.parent_room_id
+            WHERE parent.workspace_id = target_workspace_id AND NOT walk.cycle
+          )
+          SELECT 1 FROM walk WHERE cycle
+        ) THEN RAISE EXCEPTION 'room_bundle_hierarchy_cycle'; END IF;
+        IF EXISTS (
+          SELECT 1 FROM room_members AS member
+          LEFT JOIN workspace_members AS workspace_member
+            ON workspace_member.workspace_id = member.workspace_id
+           AND workspace_member.account_id = member.account_id
+           AND workspace_member.state = 'active'
+          LEFT JOIN accounts AS account
+            ON account.id = member.account_id AND account.status = 'active'
+          WHERE member.workspace_id = target_workspace_id
+            AND member.state = 'active'
+            AND (workspace_member.account_id IS NULL OR account.id IS NULL)
+        ) THEN RAISE EXCEPTION 'room_bundle_workspace_membership_invalid'; END IF;
+        IF EXISTS (
+          WITH RECURSIVE ancestry(descendant_room_id, ancestor_room_id) AS (
+            SELECT id, parent_room_id FROM rooms
+            WHERE workspace_id = target_workspace_id AND parent_room_id IS NOT NULL
+            UNION ALL
+            SELECT ancestry.descendant_room_id, parent.parent_room_id
+            FROM ancestry
+            JOIN rooms AS parent
+              ON parent.workspace_id = target_workspace_id AND parent.id = ancestry.ancestor_room_id
+            WHERE parent.parent_room_id IS NOT NULL
+          )
+          SELECT 1
+          FROM room_members AS child_member
+          JOIN ancestry ON ancestry.descendant_room_id = child_member.room_id
+          LEFT JOIN room_members AS parent_member
+            ON parent_member.workspace_id = target_workspace_id
+           AND parent_member.room_id = ancestry.ancestor_room_id
+           AND parent_member.account_id = child_member.account_id
+           AND parent_member.state = 'active'
+          WHERE child_member.workspace_id = target_workspace_id
+            AND child_member.state = 'active'
+            AND parent_member.account_id IS NULL
+        ) THEN RAISE EXCEPTION 'room_bundle_parent_membership_invalid'; END IF;
+        IF EXISTS (
+          SELECT 1 FROM rooms AS room
+          WHERE room.workspace_id = target_workspace_id
+            AND NOT EXISTS (
+              SELECT 1 FROM room_members AS member
+              JOIN workspace_members AS workspace_member
+                ON workspace_member.workspace_id = member.workspace_id
+               AND workspace_member.account_id = member.account_id
+               AND workspace_member.state = 'active'
+              JOIN accounts AS account
+                ON account.id = member.account_id AND account.status = 'active'
+              WHERE member.workspace_id = room.workspace_id
+                AND member.room_id = room.id
+                AND member.role = 'owner'
+                AND member.state = 'active'
+            )
+        ) THEN RAISE EXCEPTION 'room_bundle_owner_missing'; END IF;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_room_member_change_impact(TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_create_room(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_move_room(TEXT, TEXT, TEXT, BIGINT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_set_workspace_member(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_set_room_member_with_impact(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    version: 24,
+    name: "workspace_server_room_hierarchy_invitation_and_import_guards",
+    statements: [
+      // Import is the only non-interactive path allowed to materialize a
+      // Workspace membership. Keep it behind the same short-lived import
+      // capability as Rooms and Room memberships; the runtime role has no
+      // direct INSERT/UPDATE/DELETE permission on membership tables.
+      `CREATE OR REPLACE FUNCTION samurai_import_workspace_member(
+        target_workspace_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_version BIGINT,
+        target_created_at TIMESTAMPTZ,
+        target_updated_at TIMESTAMPTZ,
+        target_revoked_at TIMESTAMPTZ
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest')
+          OR target_state NOT IN ('active', 'revoked')
+          OR target_version IS NULL OR target_version < 1 THEN
+          RAISE EXCEPTION 'workspace_import_membership_invalid';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = target_account_id) THEN
+          RAISE EXCEPTION 'workspace_import_identity_missing';
+        END IF;
+        IF target_state = 'active' AND NOT EXISTS (
+          SELECT 1 FROM accounts WHERE id = target_account_id AND status = 'active'
+        ) THEN RAISE EXCEPTION 'workspace_import_membership_invalid'; END IF;
+        INSERT INTO workspace_members(
+          workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at
+        ) VALUES (
+          target_workspace_id, target_account_id, target_role, target_state, target_version,
+          target_created_at, target_updated_at, target_revoked_at
+        );
+      END
+      $$`,
+      // An invitation is also a membership-change path. It must not revive a
+      // disabled Account, skip any parent Room membership, or bypass durable
+      // Room-member events. The request operation id ties that event to the
+      // same externally retried acceptance command.
+      `CREATE OR REPLACE FUNCTION samurai_accept_invitation(
+        target_workspace_id TEXT,
+        supplied_token_hash TEXT,
+        target_operation_id TEXT
+      ) RETURNS TABLE(workspace_role TEXT, room_id TEXT, room_role TEXT, invitation_version BIGINT)
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE invitation workspace_invitations%ROWTYPE;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL
+          OR target_operation_id IS NULL OR btrim(target_operation_id) = ''
+          OR NOT EXISTS (
+            SELECT 1 FROM accounts
+            WHERE id = samurai_current_account_id() AND status = 'active'
+          ) THEN
+          RAISE EXCEPTION 'workspace_invitation_invalid';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        SELECT * INTO invitation
+        FROM workspace_invitations
+        WHERE workspace_id = target_workspace_id
+          AND token_hash = supplied_token_hash
+          AND revoked_at IS NULL
+          AND accepted_at IS NULL
+          AND expires_at > NOW()
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_invitation_invalid'; END IF;
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version, updated_at)
+        VALUES (target_workspace_id, samurai_current_account_id(), invitation.workspace_role, 'active', 1, NOW())
+        ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+          role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(workspace_members.role) THEN EXCLUDED.role ELSE workspace_members.role END,
+          state = 'active', revoked_at = NULL, version = workspace_members.version + 1, updated_at = NOW();
+        IF invitation.room_id IS NOT NULL THEN
+          IF NOT EXISTS (
+            SELECT 1 FROM rooms WHERE workspace_id = target_workspace_id AND id = invitation.room_id
+          ) THEN RAISE EXCEPTION 'room_not_available'; END IF;
+          IF EXISTS (
+            WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+              SELECT parent.id, parent.parent_room_id
+              FROM rooms AS room
+              JOIN rooms AS parent
+                ON parent.workspace_id = room.workspace_id AND parent.id = room.parent_room_id
+              WHERE room.workspace_id = target_workspace_id AND room.id = invitation.room_id
+              UNION ALL
+              SELECT parent.id, parent.parent_room_id
+              FROM rooms AS parent
+              JOIN ancestors ON ancestors.parent_room_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM ancestors
+            WHERE NOT EXISTS (
+              SELECT 1 FROM room_members
+              WHERE workspace_id = target_workspace_id
+                AND room_id = ancestors.room_id
+                AND account_id = samurai_current_account_id()
+                AND state = 'active'
+            )
+          ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+          INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, updated_at)
+          VALUES (target_workspace_id, invitation.room_id, samurai_current_account_id(), COALESCE(invitation.room_role, invitation.workspace_role), 'active', 1, NOW())
+          ON CONFLICT (workspace_id, room_id, account_id) DO UPDATE SET
+            role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(room_members.role) THEN EXCLUDED.role ELSE room_members.role END,
+            state = 'active', revoked_at = NULL, version = room_members.version + 1, updated_at = NOW();
+          INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
+          VALUES (
+            target_workspace_id, invitation.room_id, 'room.member.changed', target_operation_id,
+            jsonb_build_object('changed_room_id', invitation.room_id)
+          );
+        END IF;
+        UPDATE workspace_invitations
+        SET accepted_by = samurai_current_account_id(), accepted_at = NOW(), version = version + 1
+        WHERE workspace_id = target_workspace_id AND id = invitation.id
+        RETURNING version INTO invitation_version;
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        RETURN QUERY SELECT invitation.workspace_role, invitation.room_id, invitation.room_role, invitation_version;
+      END
+      $$`,
+      // The old two-argument function cannot carry the operation id needed
+      // for a replay-safe Room event. Fail closed instead of retaining a
+      // compatibility path that silently bypasses the new guarantees.
+      `CREATE OR REPLACE FUNCTION samurai_accept_invitation(target_workspace_id TEXT, supplied_token_hash TEXT)
+      RETURNS TABLE(workspace_role TEXT, room_id TEXT, room_role TEXT, invitation_version BIGINT)
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        RAISE EXCEPTION 'workspace_invitation_operation_id_required';
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_import_workspace_member(TEXT, TEXT, TEXT, TEXT, BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_accept_invitation(TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_accept_invitation(TEXT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    version: 25,
+    name: "workspace_server_room_hierarchy_reactivation_does_not_restore_room_access",
+    statements: [
+      // Server 02 data can contain a historical direct Room row after its
+      // Workspace membership was revoked. It was not readable while the
+      // Workspace row was revoked, but simply reactivating that Workspace
+      // row must never make the old Room access reappear.
+      `CREATE OR REPLACE FUNCTION samurai_clear_stale_room_memberships_on_workspace_activation(
+        target_workspace_id TEXT,
+        target_account_id TEXT
+      ) RETURNS TEXT[]
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE affected_room_ids TEXT[];
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT EXISTS (
+            SELECT 1 FROM accounts
+            WHERE id = target_account_id AND status = 'active'
+          ) THEN
+          RAISE EXCEPTION 'workspace_membership_invalid';
+        END IF;
+        // A legacy stale owner cannot be silently discarded if it would leave
+        // a Room without any effective direct Owner. An existing Workspace
+        // Owner/Admin can first appoint another direct Room Owner, then retry.
+        IF EXISTS (
+          SELECT 1
+          FROM room_members AS member
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.role = 'owner'
+            AND member.state = 'active'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM room_members AS another_owner
+              JOIN workspace_members AS workspace_member
+                ON workspace_member.workspace_id = another_owner.workspace_id
+               AND workspace_member.account_id = another_owner.account_id
+               AND workspace_member.state = 'active'
+              JOIN accounts AS account
+                ON account.id = another_owner.account_id
+               AND account.status = 'active'
+              WHERE another_owner.workspace_id = member.workspace_id
+                AND another_owner.room_id = member.room_id
+                AND another_owner.account_id <> target_account_id
+                AND another_owner.role = 'owner'
+                AND another_owner.state = 'active'
+            )
+        ) THEN
+          RAISE EXCEPTION 'room_last_owner_cannot_be_removed';
+        END IF;
+        WITH changed AS (
+          UPDATE room_members
+          SET state = 'revoked', version = version + 1, revoked_at = NOW(), updated_at = NOW()
+          WHERE workspace_id = target_workspace_id
+            AND account_id = target_account_id
+            AND state = 'active'
+          RETURNING room_id
+        )
+        SELECT COALESCE(array_agg(room_id ORDER BY room_id), ARRAY[]::TEXT[])
+        INTO affected_room_ids
+        FROM changed;
+        RETURN affected_room_ids;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_set_workspace_member(
+        target_workspace_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE existing_member workspace_members%ROWTYPE;
+      DECLARE has_existing_member BOOLEAN;
+      DECLARE affected_room_ids TEXT[];
+      DECLARE affected_room_id TEXT;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+          RAISE EXCEPTION 'workspace_permission_denied';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest')
+          OR target_state NOT IN ('active', 'revoked') THEN
+          RAISE EXCEPTION 'workspace_membership_invalid';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = target_account_id) THEN
+          RAISE EXCEPTION 'workspace_account_not_active';
+        END IF;
+        IF target_state = 'active' AND NOT EXISTS (
+          SELECT 1 FROM accounts WHERE id = target_account_id AND status = 'active'
+        ) THEN
+          RAISE EXCEPTION 'workspace_account_not_active';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.owner:' || target_workspace_id, 0));
+        SELECT * INTO existing_member
+        FROM workspace_members
+        WHERE workspace_id = target_workspace_id AND account_id = target_account_id
+        FOR UPDATE;
+        has_existing_member := FOUND;
+        IF COALESCE(existing_member.version, 0) <> target_expected_version THEN
+          RAISE EXCEPTION 'workspace_membership_version_conflict';
+        END IF;
+        IF target_role = 'owner' AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF has_existing_member AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND (target_role <> 'owner' OR target_state <> 'active') THEN
+          IF NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+            RAISE EXCEPTION 'workspace_owner_permission_required';
+          END IF;
+          IF (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = target_workspace_id AND role = 'owner' AND state = 'active') <= 1 THEN
+            RAISE EXCEPTION 'workspace_last_owner_cannot_be_revoked';
+          END IF;
+        END IF;
+        IF target_state = 'revoked' AND EXISTS (
+          SELECT 1
+          FROM room_members AS member
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active'
+            AND member.role = 'owner'
+            AND NOT EXISTS (
+              SELECT 1 FROM room_members AS another_owner
+              WHERE another_owner.workspace_id = member.workspace_id
+                AND another_owner.room_id = member.room_id
+                AND another_owner.account_id <> target_account_id
+                AND another_owner.role = 'owner'
+                AND another_owner.state = 'active'
+            )
+        ) THEN RAISE EXCEPTION 'room_last_owner_cannot_be_removed'; END IF;
+        IF target_state = 'active' AND (NOT has_existing_member OR existing_member.state <> 'active') THEN
+          affected_room_ids := samurai_clear_stale_room_memberships_on_workspace_activation(
+            target_workspace_id, target_account_id
+          );
+        ELSIF target_state = 'revoked' THEN
+          SELECT COALESCE(array_agg(room_id ORDER BY room_id), ARRAY[]::TEXT[])
+          INTO affected_room_ids
+          FROM room_members
+          WHERE workspace_id = target_workspace_id
+            AND account_id = target_account_id
+            AND state = 'active';
+          UPDATE room_members
+          SET state = 'revoked', version = version + 1, revoked_at = NOW(), updated_at = NOW()
+          WHERE workspace_id = target_workspace_id
+            AND account_id = target_account_id
+            AND state = 'active';
+        ELSE
+          affected_room_ids := ARRAY[]::TEXT[];
+        END IF;
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version, revoked_at, updated_at)
+        VALUES (target_workspace_id, target_account_id, target_role, target_state, 1,
+          CASE WHEN target_state = 'revoked' THEN NOW() ELSE NULL END, NOW())
+        ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+          role = EXCLUDED.role,
+          state = EXCLUDED.state,
+          version = workspace_members.version + 1,
+          revoked_at = EXCLUDED.revoked_at,
+          updated_at = NOW();
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        FOREACH affected_room_id IN ARRAY affected_room_ids LOOP
+          INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
+          VALUES (
+            target_workspace_id,
+            affected_room_id,
+            'room.member.changed',
+            target_operation_id,
+            jsonb_build_object('changed_room_id', affected_room_id)
+          );
+        END LOOP;
+        RETURN jsonb_build_object('affected_room_ids', to_jsonb(affected_room_ids));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_accept_invitation(
+        target_workspace_id TEXT,
+        supplied_token_hash TEXT,
+        target_operation_id TEXT
+      ) RETURNS TABLE(workspace_role TEXT, room_id TEXT, room_role TEXT, invitation_version BIGINT)
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE invitation workspace_invitations%ROWTYPE;
+      DECLARE existing_workspace_member workspace_members%ROWTYPE;
+      DECLARE has_existing_workspace_member BOOLEAN;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL
+          OR target_operation_id IS NULL OR btrim(target_operation_id) = ''
+          OR NOT EXISTS (
+            SELECT 1 FROM accounts
+            WHERE id = samurai_current_account_id() AND status = 'active'
+          ) THEN
+          RAISE EXCEPTION 'workspace_invitation_invalid';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        SELECT * INTO invitation
+        FROM workspace_invitations
+        WHERE workspace_id = target_workspace_id
+          AND token_hash = supplied_token_hash
+          AND revoked_at IS NULL
+          AND accepted_at IS NULL
+          AND expires_at > NOW()
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_invitation_invalid'; END IF;
+        SELECT * INTO existing_workspace_member
+        FROM workspace_members
+        WHERE workspace_id = target_workspace_id
+          AND account_id = samurai_current_account_id()
+        FOR UPDATE;
+        has_existing_workspace_member := FOUND;
+        IF NOT has_existing_workspace_member OR existing_workspace_member.state <> 'active' THEN
+          PERFORM samurai_clear_stale_room_memberships_on_workspace_activation(
+            target_workspace_id, samurai_current_account_id()
+          );
+        END IF;
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version, updated_at)
+        VALUES (target_workspace_id, samurai_current_account_id(), invitation.workspace_role, 'active', 1, NOW())
+        ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+          role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(workspace_members.role) THEN EXCLUDED.role ELSE workspace_members.role END,
+          state = 'active', revoked_at = NULL, version = workspace_members.version + 1, updated_at = NOW();
+        IF invitation.room_id IS NOT NULL THEN
+          IF NOT EXISTS (
+            SELECT 1 FROM rooms WHERE workspace_id = target_workspace_id AND id = invitation.room_id
+          ) THEN RAISE EXCEPTION 'room_not_available'; END IF;
+          IF EXISTS (
+            WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+              SELECT parent.id, parent.parent_room_id
+              FROM rooms AS room
+              JOIN rooms AS parent
+                ON parent.workspace_id = room.workspace_id AND parent.id = room.parent_room_id
+              WHERE room.workspace_id = target_workspace_id AND room.id = invitation.room_id
+              UNION ALL
+              SELECT parent.id, parent.parent_room_id
+              FROM rooms AS parent
+              JOIN ancestors ON ancestors.parent_room_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM ancestors
+            WHERE NOT EXISTS (
+              SELECT 1 FROM room_members
+              WHERE workspace_id = target_workspace_id
+                AND room_id = ancestors.room_id
+                AND account_id = samurai_current_account_id()
+                AND state = 'active'
+            )
+          ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+          INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, updated_at)
+          VALUES (target_workspace_id, invitation.room_id, samurai_current_account_id(), COALESCE(invitation.room_role, invitation.workspace_role), 'active', 1, NOW())
+          ON CONFLICT (workspace_id, room_id, account_id) DO UPDATE SET
+            role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(room_members.role) THEN EXCLUDED.role ELSE room_members.role END,
+            state = 'active', revoked_at = NULL, version = room_members.version + 1, updated_at = NOW();
+          INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
+          VALUES (
+            target_workspace_id, invitation.room_id, 'room.member.changed', target_operation_id,
+            jsonb_build_object('changed_room_id', invitation.room_id)
+          );
+        END IF;
+        UPDATE workspace_invitations
+        SET accepted_by = samurai_current_account_id(), accepted_at = NOW(), version = version + 1
+        WHERE workspace_id = target_workspace_id AND id = invitation.id
+        RETURNING version INTO invitation_version;
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        RETURN QUERY SELECT invitation.workspace_role, invitation.room_id, invitation.room_role, invitation_version;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_clear_stale_room_memberships_on_workspace_activation(TEXT, TEXT) FROM PUBLIC"
+    ]
   }
 ];
 
@@ -2020,6 +3988,12 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "workspace_import_sessions",
     "workspace_audit_entries"
   ];
+  // Runtime code may read Room rows through RLS, but hierarchy and direct
+  // membership mutations are deliberately restricted to the guarded SQL
+  // functions in migrations 22 and 23. Import functions are SECURITY DEFINER and
+  // retain the same short-lived import-session check.
+  const roomMutationTables = ["workspace_members", "rooms", "room_members"];
+  const writableTables = tables.filter((table) => !roomMutationTables.includes(table));
   const functions = [
     "samurai_context_value(TEXT)",
     "samurai_current_account_id()",
@@ -2038,15 +4012,22 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_start_workspace_import(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT)",
     "samurai_complete_workspace_import(TEXT, TEXT, TEXT)",
     "samurai_abort_workspace_import(TEXT, TEXT)",
-    "samurai_create_room(TEXT, TEXT, TEXT, BIGINT)",
-    "samurai_set_workspace_member(TEXT, TEXT, TEXT, TEXT, BIGINT)",
-    "samurai_set_room_member(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT)",
-    "samurai_accept_invitation(TEXT, TEXT)",
+    "samurai_create_room(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
+    "samurai_move_room(TEXT, TEXT, TEXT, BIGINT, BIGINT, TEXT)",
+    "samurai_preview_room_move(TEXT, TEXT, TEXT)",
+    "samurai_set_workspace_member(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
+    "samurai_set_room_member_with_impact(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
+    "samurai_preview_room_member_change(TEXT, TEXT, TEXT, TEXT, TEXT)",
+    "samurai_accept_invitation(TEXT, TEXT, TEXT)",
     "samurai_revoke_invitation(TEXT, TEXT, BIGINT)",
     "samurai_append_workspace_audit(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, JSONB)",
     "samurai_create_workspace_invitation(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, BIGINT)",
     "samurai_list_workspace_account_identities(TEXT)",
     "samurai_import_workspace_account_identity(TEXT, TEXT, TEXT, TEXT, TEXT)",
+    "samurai_import_workspace_member(TEXT, TEXT, TEXT, TEXT, BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ)",
+    "samurai_import_workspace_room(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ)",
+    "samurai_import_workspace_room_member(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ)",
+    "samurai_validate_workspace_room_hierarchy(TEXT)",
     "samurai_import_workspace_audit(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, JSONB, TIMESTAMPTZ)",
     "samurai_finalize_workspace_file_transaction(TEXT, TEXT)",
     "samurai_begin_workspace_transfer(TEXT, TEXT)",
@@ -2059,16 +4040,25 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "similarity(TEXT, TEXT)"
   ];
   const legacyFunctions = [
+    "samurai_create_room(TEXT, TEXT, TEXT, BIGINT)",
     "samurai_create_room(TEXT, TEXT, TEXT)",
+    "samurai_create_room(TEXT, TEXT, TEXT, TEXT, BIGINT)",
+    "samurai_move_room(TEXT, TEXT, TEXT, BIGINT, BIGINT)",
+    "samurai_set_workspace_member(TEXT, TEXT, TEXT, TEXT, BIGINT)",
+    "samurai_set_room_member_with_impact(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT)",
     "samurai_set_workspace_member(TEXT, TEXT, TEXT, TEXT)",
-    "samurai_set_room_member(TEXT, TEXT, TEXT, TEXT, TEXT)"
+    "samurai_set_room_member(TEXT, TEXT, TEXT, TEXT, TEXT)",
+    "samurai_set_room_member(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT)",
+    "samurai_accept_invitation(TEXT, TEXT)"
   ];
   await sql.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
   // The long-running process checks migration status at boot, but only the
   // short-lived admin command may alter the migration ledger.
   await sql.query(`GRANT SELECT ON TABLE samurai_server_schema_migrations TO ${role}`);
   await sql.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE samurai_server_schema_migrations FROM ${role}`);
-  await sql.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${tables.join(", ")} TO ${role}`);
+  await sql.query(`GRANT SELECT ON TABLE ${tables.join(", ")} TO ${role}`);
+  await sql.query(`GRANT INSERT, UPDATE, DELETE ON TABLE ${writableTables.join(", ")} TO ${role}`);
+  await sql.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE ${roomMutationTables.join(", ")} FROM ${role}`);
   await sql.query(`GRANT USAGE ON SEQUENCE workspace_events_id_seq TO ${role}`);
   await sql.query(`GRANT EXECUTE ON FUNCTION ${functions.join(", ")} TO ${role}`);
   for (const legacyFunction of legacyFunctions) {

@@ -28,7 +28,7 @@ Samuraiの中心を「単一Agent」「Chatアプリ」「AIチーム」と表�
 | --- | --- |
 | Workspace | 人間のKnowledgeを保管する正本 |
 | Workspace Server | Workspaceを提供するPostgreSQLベースのServer |
-| Room | Knowledge、共有、閲覧権限を分ける境界 |
+| Room | Knowledge、共有、閲覧権限を分ける境界。Workspaceの下で同じRoomを階層化できる |
 | Account | 公開鍵に結び付いた、Server間で再利用できる本人識別子 |
 | Native App | SamuraiのChat、Session、Surfaceを提供する外部アプリ |
 | External App | Codex、Claude Codeなど、Workspaceを利用する外部アプリ |
@@ -62,7 +62,7 @@ AccountはRoom権限そのものではない。公開鍵で本人を確認する
 
 ### Room
 
-「チャットルーム」「AIチームの活動場所」と説明しない。「Knowledgeとアクセス範囲を分ける場所」と説明する。
+「チャットルーム」「AIチームの活動場所」と説明しない。「Knowledgeとアクセス範囲を分ける場所」と説明する。RoomはWorkspace直下または別Roomの下に置けるが、親子間でKnowledgeや閲覧権限を自動共有しない。
 
 ### Session
 

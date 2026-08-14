@@ -148,7 +148,17 @@ export async function createWorkspaceBundleV3FromLegacySqlite(input: CreateBundl
     // destination, so only the verified target owner is made active. Other
     // people must be invited after import with a cryptographic identity.
     const memberships = mergeLegacyMemberships(input.workspaceId, input.ownerAccountId, now);
-    const roomMemberships = mergeLegacyRoomMemberships(input.workspaceId, input.ownerAccountId, roomId, now);
+    // A legacy SQLite export cannot prove any old member identity.  The
+    // verified target owner therefore becomes the direct owner of every
+    // imported Room.  This preserves the data while satisfying the current
+    // invariant that every Room has an active owner; it does not recreate or
+    // grant access to any unverified legacy person.
+    const roomMemberships = mergeLegacyRoomMemberships(
+      input.workspaceId,
+      input.ownerAccountId,
+      rooms.map((room) => String(room.id)),
+      now
+    );
     const omittedWorkspaceMemberships = legacy.memberships.filter((member) => member.accountId !== input.ownerAccountId).length;
     const omittedRoomMemberships = legacy.roomMemberships.filter(
       (member) => member.accountId !== input.ownerAccountId || member.roomId !== roomId
@@ -209,7 +219,7 @@ export async function createWorkspaceBundleV3FromLegacySqlite(input: CreateBundl
       workspace_id: input.workspaceId,
       exported_at: now,
       source: { hosting_mode: "self_host", database_placement: "dedicated" },
-      schema_version: 21,
+      schema_version: 22,
       files: fileHashes,
       record_counts: recordCounts,
       integrity_hash: hashText(canonicalJson({ files: fileHashes, record_counts: recordCounts }))
@@ -432,11 +442,12 @@ function legacyAudit(source: Record<string, unknown>, workspaceId: string, owner
 
 function mergeLegacyRooms(workspaceId: string, defaultRoomId: string, now: string, legacyRooms: LegacyRoom[], ownerAccountId: string): Array<Record<string, unknown>> {
   const rooms = new Map<string, Record<string, unknown>>();
-  rooms.set(defaultRoomId, { workspace_id: workspaceId, id: defaultRoomId, name: "Imported legacy data", version: 1, created_by: ownerAccountId, created_at: now, updated_at: now });
+  rooms.set(defaultRoomId, { workspace_id: workspaceId, id: defaultRoomId, parent_room_id: null, name: "Imported legacy data", version: 1, created_by: ownerAccountId, created_at: now, updated_at: now });
   for (const room of legacyRooms) {
     rooms.set(room.id, {
       workspace_id: workspaceId,
       id: room.id,
+      parent_room_id: null,
       name: room.name,
       version: room.version,
       created_by: ownerAccountId,
@@ -457,7 +468,7 @@ function ensureReferencedRooms(
   const known = new Set(rooms.map((room) => String(room.id)));
   for (const id of referencedRoomIds) {
     if (known.has(id)) continue;
-    rooms.push({ workspace_id: workspaceId, id, name: `Imported room ${id}`, version: 1, created_by: ownerAccountId, created_at: now, updated_at: now });
+    rooms.push({ workspace_id: workspaceId, id, parent_room_id: null, name: `Imported room ${id}`, version: 1, created_by: ownerAccountId, created_at: now, updated_at: now });
     known.add(id);
   }
   return rooms;
@@ -479,12 +490,12 @@ function mergeLegacyMemberships(workspaceId: string, ownerAccountId: string, now
 function mergeLegacyRoomMemberships(
   workspaceId: string,
   ownerAccountId: string,
-  defaultRoomId: string,
+  roomIds: readonly string[],
   now: string
 ): Array<Record<string, unknown>> {
-  return [{
+  return roomIds.map((roomId) => ({
     workspace_id: workspaceId,
-    room_id: defaultRoomId,
+    room_id: roomId,
     account_id: ownerAccountId,
     role: "owner",
     state: "active",
@@ -492,7 +503,7 @@ function mergeLegacyRoomMemberships(
     created_at: now,
     updated_at: now,
     revoked_at: null
-  }];
+  }));
 }
 
 function legacyResourceId(value: unknown, table: string, index: number): string {

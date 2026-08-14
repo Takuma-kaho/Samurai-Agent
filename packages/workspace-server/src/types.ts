@@ -61,10 +61,60 @@ export interface WorkspaceSummary {
 export interface WorkspaceRoom {
   id: string;
   workspaceId: string;
+  /** Undefined means this Room is directly under the Workspace. */
+  parentRoomId?: string;
   name: string;
   version: number;
+  /** Current caller capability; it does not grant access to any other Room. */
+  canManage?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface WorkspaceRoomCreateResult {
+  room: WorkspaceRoom;
+  /** True only when this operation id returned its durable original result. */
+  replayed: boolean;
+}
+
+/** A Room membership change can revoke the same Account from descendant Rooms. */
+export interface WorkspaceRoomMemberChangeResult {
+  member: WorkspaceRoomMembership;
+  /** Only Rooms the caller may manage. Never use this as an authorization source. */
+  affectedRoomIds: string[];
+  /** Server-internal channels that need a subscription recheck after commit. */
+  revalidationRoomIds: string[];
+  replayed: boolean;
+}
+
+export interface WorkspaceRoomMoveResult {
+  room: WorkspaceRoom;
+  /** Only Rooms the caller may manage whose visible path changed. */
+  affectedRoomIds: string[];
+  /** Server-internal channels that need a post-commit event. */
+  revalidationRoomIds: string[];
+  replayed: boolean;
+}
+
+export interface WorkspaceRoomMovePreview {
+  allowed: boolean;
+  reason?: string;
+  blockingAccountIds: string[];
+  requiredAncestorRoomIds: string[];
+}
+
+export interface WorkspaceRoomMemberChangePreview {
+  allowed: boolean;
+  reason?: string;
+  affectedRoomIds: string[];
+  blockingOwnerRoomIds: string[];
+}
+
+export interface WorkspaceMembershipChangeResult {
+  member: WorkspaceMembership;
+  /** Server-internal Room channels affected by Workspace revocation. */
+  revalidationRoomIds: string[];
+  replayed: boolean;
 }
 
 export interface WorkspaceRecord {

@@ -123,7 +123,8 @@ describe("legacy SQLite migration", () => {
         .find((record) => record.record_type === "migration_report");
 
       expect(memberships.map((member) => member.account_id)).toEqual(["account_owner"]);
-      expect(roomMemberships.map((member) => member.account_id)).toEqual(["account_owner"]);
+      expect([...new Set(roomMemberships.map((member) => member.account_id))]).toEqual(["account_owner"]);
+      expect(roomMemberships).toHaveLength(2);
       expect(report?.payload).toMatchObject({
         omitted_unverified_workspace_memberships: 1,
         omitted_unverified_room_memberships: 1
