@@ -5,11 +5,15 @@ import { Server as SocketServer } from "socket.io";
 import {
   WorkspaceServerError,
   WorkspaceServerStore,
+  WorkspaceLearningRunner,
   assertOpaqueId,
   loadWorkspaceServerConfig,
   readWorkspaceBundleV3Transport,
   resolveRequestWorkspaceId,
   verifyAccountSignature,
+  type WorkspaceLearningScope,
+  type WorkspaceKnowledgeReviewPort,
+  type WorkspaceLearningSettings,
   type WorkspaceRequestContext,
   type WorkspaceServerConfig
 } from "@samurai-agent/workspace-server";
@@ -28,9 +32,19 @@ export interface WorkspaceServerHttp {
   close(): Promise<void>;
 }
 
-export async function createWorkspaceServerHttp(config = loadWorkspaceServerConfig()): Promise<WorkspaceServerHttp> {
+/** The host may register narrow review cassettes. No provider client or
+ * credential is constructed here, so the Server never gains an implicit
+ * external-Agent connection. */
+export interface WorkspaceServerHttpOptions {
+  reviewPorts?: readonly WorkspaceKnowledgeReviewPort[];
+}
+
+export async function createWorkspaceServerHttp(
+  config = loadWorkspaceServerConfig(),
+  options: WorkspaceServerHttpOptions = {}
+): Promise<WorkspaceServerHttp> {
   const core = await createWorkspaceServerCore(config);
-  const { store, files, bundles, commands } = core;
+  const { store, files, bundles, commands, learning } = core;
   const app = express();
   const httpServer = createServer(app);
   const corsOrigins = config.corsOrigins;
@@ -47,6 +61,13 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
   app.use(express.json({ limit: "36mb" }));
   const io = new SocketServer(httpServer, { cors: { origin: corsOrigins.length > 0 ? [...corsOrigins] : false, credentials: false } });
   const realtimeGate = new WorkspaceRealtimeGate();
+  const learningRunner = new WorkspaceLearningRunner(learning, options.reviewPorts ?? [], {
+    onSettled: async ({ context, job }) => {
+      await realtimeGate.run(context.workspaceId, async () => {
+        await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: job.roomId, kind: "learning.job.updated" });
+      });
+    }
+  });
 
   const authenticate = accountAuthenticator(store);
   const authenticateWorkspace = workspaceAuthenticator(store, config);
@@ -308,6 +329,279 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
     res.status(204).end();
   }));
 
+  // Formal Activity ingress for the productized learning loop.  The Room is
+  // an explicit request field; Session/source data cannot choose it.
+  app.post("/api/workspaces/:workspaceId/learning/activities", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.ingestActivity(context, {
+        ...(optionalStringField(body, "activity_id") ? { id: optionalStringField(body, "activity_id") } : {}),
+        roomId: stringField(body, "room_id"),
+        groupKey: stringField(body, "group_key"),
+        sourceKind: stringField(body, "source_kind"),
+        ...(optionalStringField(body, "source_id") ? { sourceId: optionalStringField(body, "source_id") } : {}),
+        ...(optionalStringField(body, "correction_of_activity_id") ? { correctionOfActivityId: optionalStringField(body, "correction_of_activity_id") } : {}),
+        instructionSummary: stringField(body, "instruction_summary"),
+        ...(optionalStringField(body, "result_summary") ? { resultSummary: optionalStringField(body, "result_summary") } : {}),
+        outcome: learningOutcomeField(body, "outcome"),
+        verificationState: learningVerificationField(body, "verification_state"),
+        failureState: learningFailureField(body, "failure_state"),
+        ...(body.explicit_remember === undefined ? {} : { explicitRemember: booleanField(body, "explicit_remember") }),
+        ...(body.finalized_resource === undefined ? {} : { finalizedResource: booleanField(body, "finalized_resource") }),
+        ...(body.reusable_completion === undefined ? {} : { reusableCompletion: booleanField(body, "reusable_completion") }),
+        ...(body.payload === undefined ? {} : { payload: learningPayloadField(body, "payload") })
+      });
+      if (!saved.replayed) {
+        await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: saved.activity.roomId, kind: "learning.activity.ingested" });
+        if (saved.job) learningRunner.schedule(context, { roomId: saved.activity.roomId });
+      }
+      return saved;
+    });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
+  app.get("/api/workspaces/:workspaceId/learning/activities", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_learning_room_id_required", 400);
+    const activities = await learning.listActivities(workspaceContext(req), {
+      roomId,
+      ...(queryString(req, "group_key") ? { groupKey: queryString(req, "group_key") } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    });
+    res.json({ activities });
+  }));
+
+  app.post("/api/workspaces/:workspaceId/learning/activities/:activityId/resource-uses", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.recordResourceUse(context, {
+        ...(optionalStringField(body, "resource_use_id") ? { id: optionalStringField(body, "resource_use_id") } : {}),
+        resourceId: stringField(body, "resource_id"),
+        resourceVersion: numberField(body, "resource_version"),
+        activityId: pathParam(req, "activityId"),
+        outcome: learningResourceUseOutcome(body, "outcome"),
+        summary: stringField(body, "summary")
+      });
+      if (!saved.replayed) {
+        await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: saved.roomId, kind: "learning.resource.used" });
+        if (saved.job) learningRunner.schedule(context, { roomId: saved.roomId });
+      }
+      return saved;
+    });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/learning/resources", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.putResource(context, {
+        scope: learningScopeField(body),
+        kind: learningResourceKind(stringField(body, "kind")),
+        ...(body.is_absolute_rule === undefined ? {} : { isAbsoluteRule: booleanField(body, "is_absolute_rule") }),
+        title: stringField(body, "title"),
+        content: stringField(body, "content"),
+        ...(body.payload === undefined ? {} : { payload: learningPayloadField(body, "payload") }),
+        reason: stringField(body, "reason"),
+        ...(body.expected_version === undefined ? {} : { expectedVersion: numberField(body, "expected_version") })
+      });
+      if (!saved.replayed) await emitLearningResourceEvent(io, store, context.workspaceId, saved.resource, "learning.resource.created");
+      return saved;
+    });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
+  app.get("/api/workspaces/:workspaceId/learning/resources", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const scope = learningScopeQuery(req);
+    const kind = queryString(req, "kind");
+    const resources = await learning.listResources(workspaceContext(req), {
+      scope,
+      ...(kind ? { kind: learningResourceKind(kind) } : {}),
+      ...(queryString(req, "include_archived") === "true" ? { includeArchived: true } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    });
+    res.json({ resources });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/learning/resources/:resourceId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = workspaceContext(req);
+    const resourceId = pathParam(req, "resourceId");
+    const [resource, versions, evidence] = await Promise.all([
+      learning.getResource(context, resourceId),
+      learning.listResourceVersions(context, resourceId),
+      learning.listEvidence(context, resourceId)
+    ]);
+    res.json({ resource, versions, evidence });
+  }));
+
+  app.put("/api/workspaces/:workspaceId/learning/resources/:resourceId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.putResource(context, {
+        id: pathParam(req, "resourceId"),
+        scope: learningScopeField(body),
+        kind: learningResourceKind(stringField(body, "kind")),
+        ...(body.is_absolute_rule === undefined ? {} : { isAbsoluteRule: booleanField(body, "is_absolute_rule") }),
+        title: stringField(body, "title"),
+        content: stringField(body, "content"),
+        ...(body.payload === undefined ? {} : { payload: learningPayloadField(body, "payload") }),
+        reason: stringField(body, "reason"),
+        ...(body.expected_version === undefined ? {} : { expectedVersion: numberField(body, "expected_version") })
+      });
+      if (!saved.replayed) await emitLearningResourceEvent(io, store, context.workspaceId, saved.resource, "learning.resource.updated");
+      return saved;
+    });
+    res.json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/learning/resources/:resourceId/fixed", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.setResourceFixed(context, {
+        resourceId: pathParam(req, "resourceId"), fixed: booleanField(body, "fixed"),
+        expectedVersion: numberField(body, "expected_version"), reason: stringField(body, "reason")
+      });
+      if (!saved.replayed) await emitLearningResourceEvent(io, store, context.workspaceId, saved.resource, "learning.resource.updated");
+      return saved;
+    });
+    res.json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/learning/resources/:resourceId/archive", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.archiveResource(context, {
+        resourceId: pathParam(req, "resourceId"), archived: booleanField(body, "archived"),
+        expectedVersion: numberField(body, "expected_version"), reason: stringField(body, "reason")
+      });
+      if (!saved.replayed) await emitLearningResourceEvent(io, store, context.workspaceId, saved.resource, "learning.resource.updated");
+      return saved;
+    });
+    res.json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/learning/resources/:resourceId/copy", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.copyResource(context, {
+        resourceId: pathParam(req, "resourceId"), targetScope: learningTargetScopeField(body),
+        ...(optionalStringField(body, "target_resource_id") ? { id: optionalStringField(body, "target_resource_id") } : {}),
+        expectedVersion: numberField(body, "expected_version"), reason: stringField(body, "reason")
+      });
+      if (!saved.replayed) await emitLearningResourceEvent(io, store, context.workspaceId, saved.resource, "learning.resource.copied");
+      return saved;
+    });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/learning/resources/:resourceId/move", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    // Moving preserves an archived source projection. Notify both Room views,
+    // while keeping the source Room identifier out of the target-room event.
+    const source = await learning.getResource(workspaceContext(req), pathParam(req, "resourceId"));
+    const sourceRoomId = source.scope.kind === "room" ? source.scope.roomId : undefined;
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.moveResource(context, {
+        resourceId: pathParam(req, "resourceId"), targetRoomId: stringField(body, "target_room_id"),
+        ...(optionalStringField(body, "target_resource_id") ? { targetResourceId: optionalStringField(body, "target_resource_id") } : {}),
+        expectedVersion: numberField(body, "expected_version"), reason: stringField(body, "reason")
+      });
+      if (!saved.replayed) {
+        if (sourceRoomId) {
+          await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: sourceRoomId, kind: "learning.resource.moved" });
+        }
+        await emitLearningResourceEvent(io, store, context.workspaceId, saved.resource, "learning.resource.moved");
+      }
+      return saved;
+    });
+    res.json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/learning/resources/:resourceId/promote", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const saved = await learning.promoteResource(context, {
+        resourceId: pathParam(req, "resourceId"),
+        ...(optionalStringField(body, "target_resource_id") ? { id: optionalStringField(body, "target_resource_id") } : {}),
+        expectedVersion: numberField(body, "expected_version"), reason: stringField(body, "reason")
+      });
+      if (!saved.replayed) await emitLearningResourceEvent(io, store, context.workspaceId, saved.resource, "learning.resource.promoted");
+      return saved;
+    });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
+  app.get("/api/workspaces/:workspaceId/learning/search", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    const query = queryString(req, "q");
+    if (!roomId || !query) throw new WorkspaceServerError("workspace_learning_search_input_required", 400);
+    res.json({ resources: await learning.searchKnowledge(workspaceContext(req), { roomId, query, ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {}) }) });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/learning/settings", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_learning_room_id_required", 400);
+    const layers = await learning.getSettingsLayers(workspaceContext(req), roomId);
+    res.json({
+      settings: publicLearningSettings(layers.effective),
+      ...(layers.workspace ? { workspace_settings: publicLearningSettings(layers.workspace) } : {}),
+      ...(layers.room ? { room_settings: publicLearningSettings(layers.room) } : {})
+    });
+  }));
+
+  app.put("/api/workspaces/:workspaceId/learning/settings", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => {
+      const scope = learningScopeField(body);
+      const saved = await learning.updateSettings(context, {
+        scope,
+        ...(body.enabled === undefined ? {} : { enabled: booleanField(body, "enabled") }),
+        ...(optionalStringField(body, "engine_id") ? { engineId: optionalStringField(body, "engine_id") } : {}),
+        ...(optionalStringField(body, "model") ? { model: optionalStringField(body, "model") } : {}),
+        ...(optionalStringField(body, "secret_ref") ? { secretRef: optionalStringField(body, "secret_ref") } : {}),
+        ...(body.currency_limit === undefined ? {} : { currencyLimit: nonnegativeNumberField(body, "currency_limit") }),
+        ...(body.token_limit === undefined ? {} : { tokenLimit: nonnegativeNumberField(body, "token_limit") }),
+        ...(body.clear_engine_id === undefined ? {} : { clearEngineId: booleanField(body, "clear_engine_id") }),
+        ...(body.clear_model === undefined ? {} : { clearModel: booleanField(body, "clear_model") }),
+        ...(body.clear_secret_ref === undefined ? {} : { clearSecretRef: booleanField(body, "clear_secret_ref") }),
+        ...(body.clear_currency_limit === undefined ? {} : { clearCurrencyLimit: booleanField(body, "clear_currency_limit") }),
+        ...(body.clear_token_limit === undefined ? {} : { clearTokenLimit: booleanField(body, "clear_token_limit") }),
+        ...(body.remove_override === undefined ? {} : { removeOverride: booleanField(body, "remove_override") }),
+        ...(body.expected_version === undefined ? {} : { expectedVersion: numberField(body, "expected_version") })
+      });
+      if (!saved.replayed) {
+        if (scope.kind === "room") {
+          await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: scope.roomId!, kind: "learning.settings.updated" });
+          learningRunner.schedule(context, { roomId: scope.roomId });
+        } else {
+          await emitAuthorizedWorkspaceEvent(io, store, { workspaceId: context.workspaceId, kind: "learning.settings.updated" });
+          learningRunner.schedule(context);
+        }
+      }
+      return saved;
+    });
+    res.json({ settings: publicLearningSettings(result.settings), replayed: result.replayed });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/learning/jobs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_learning_room_id_required", 400);
+    res.json({ jobs: await learning.listJobs(workspaceContext(req), { roomId, ...(queryString(req, "status") ? { status: learningJobStatus(queryString(req, "status")!) } : {}), ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {}) }) });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/learning/jobs/:jobId/attempts", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json({ attempts: await learning.listJobAttempts(workspaceContext(req), pathParam(req, "jobId")) });
+  }));
+
   app.get("/api/workspaces/:workspaceId/records", authenticateWorkspace, asyncRoute(async (req, res) => {
     const roomId = queryString(req, "room_id");
     if (!roomId) throw new WorkspaceServerError("workspace_records_room_id_required", 400);
@@ -560,6 +854,7 @@ export async function createWorkspaceServerHttp(config = loadWorkspaceServerConf
     io,
     config,
     async close(): Promise<void> {
+      await learningRunner.close();
       await new Promise<void>((resolve) => io.close(() => resolve()));
       if (httpServer.listening) {
         await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
@@ -665,6 +960,41 @@ function authenticated(req: Request): NonNullable<AuthenticatedRequest["samurai"
   const value = (req as AuthenticatedRequest).samurai;
   if (!value) throw new WorkspaceServerError("account_authentication_required", 401);
   return value;
+}
+
+async function emitLearningResourceEvent(
+  io: SocketServer,
+  store: WorkspaceServerStore,
+  workspaceId: string,
+  resource: { scope: WorkspaceLearningScope },
+  kind: string
+): Promise<void> {
+  if (resource.scope.kind === "room") {
+    await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId, roomId: resource.scope.roomId!, kind });
+    return;
+  }
+  await emitAuthorizedWorkspaceEvent(io, store, { workspaceId, kind });
+}
+
+/** Workspace-wide events contain no Room identity. Every recipient is still
+ * checked at delivery time so a stale socket cannot observe post-revocation
+ * configuration or Workspace-scoped Knowledge changes. */
+async function emitAuthorizedWorkspaceEvent(
+  io: SocketServer,
+  store: WorkspaceServerStore,
+  event: { workspaceId: string; kind?: string }
+): Promise<void> {
+  for (const socket of io.sockets.sockets.values()) {
+    const identity = socket.data.samurai as { workspaceId?: string; accountId?: string } | undefined;
+    if (identity?.workspaceId !== event.workspaceId || !identity.accountId) continue;
+    try {
+      await store.getWorkspace({ workspaceId: event.workspaceId, accountId: identity.accountId });
+      socket.emit("workspace:event", event);
+    } catch {
+      socket.emit("workspace:access-revoked", { workspaceId: event.workspaceId });
+      socket.disconnect(true);
+    }
+  }
 }
 
 /**
@@ -883,6 +1213,91 @@ function numberField(body: Record<string, unknown>, key: string): number {
   const value = body[key];
   if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new WorkspaceServerError(`${key}_invalid`, 400);
   return value;
+}
+
+function booleanField(body: Record<string, unknown>, key: string): boolean {
+  const value = body[key];
+  if (typeof value !== "boolean") throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value;
+}
+
+function nonnegativeNumberField(body: Record<string, unknown>, key: string): number {
+  const value = body[key];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value;
+}
+
+function learningPayloadField(body: Record<string, unknown>, key: string): Record<string, unknown> {
+  const value = objectField(body, key);
+  const text = JSON.stringify(value);
+  if (text.length > 200_000 || /(?:-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----|\bsk-[A-Za-z0-9]{20,}\b|\bghp_[A-Za-z0-9]{30,}\b|\bAKIA[A-Z0-9]{16}\b)/.test(text)) {
+    throw new WorkspaceServerError("workspace_learning_secret_content_forbidden", 400);
+  }
+  return value;
+}
+
+function learningScopeField(body: Record<string, unknown>): WorkspaceLearningScope {
+  const kind = stringField(body, "scope_kind");
+  if (kind === "workspace") return { kind };
+  if (kind === "room") return { kind, roomId: stringField(body, "room_id") };
+  throw new WorkspaceServerError("scope_kind_invalid", 400);
+}
+
+function learningTargetScopeField(body: Record<string, unknown>): WorkspaceLearningScope {
+  const kind = stringField(body, "target_scope_kind");
+  if (kind === "workspace") return { kind };
+  if (kind === "room") return { kind, roomId: stringField(body, "target_room_id") };
+  throw new WorkspaceServerError("target_scope_kind_invalid", 400);
+}
+
+function learningScopeQuery(req: Request): WorkspaceLearningScope {
+  const kind = queryString(req, "scope_kind");
+  if (kind === "workspace") return { kind };
+  if (kind === "room") {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("workspace_learning_room_id_required", 400);
+    return { kind, roomId };
+  }
+  throw new WorkspaceServerError("scope_kind_required", 400);
+}
+
+function learningResourceKind(value: string): "knowledge" | "memory" | "skill" | "workspace_rule" {
+  if (value === "knowledge" || value === "memory" || value === "skill" || value === "workspace_rule") return value;
+  throw new WorkspaceServerError("workspace_learning_resource_kind_invalid", 400);
+}
+
+function learningOutcomeField(body: Record<string, unknown>, key: string): "completed" | "failed" | "cancelled" | "outcome_unknown" {
+  const value = stringField(body, key);
+  if (value === "completed" || value === "failed" || value === "cancelled" || value === "outcome_unknown") return value;
+  throw new WorkspaceServerError(`${key}_invalid`, 400);
+}
+
+function learningResourceUseOutcome(body: Record<string, unknown>, key: string): "confirmed_success" | "confirmed_failure" | "unknown" {
+  const value = stringField(body, key);
+  if (value === "confirmed_success" || value === "confirmed_failure" || value === "unknown") return value;
+  throw new WorkspaceServerError(`${key}_invalid`, 400);
+}
+
+function learningVerificationField(body: Record<string, unknown>, key: string): "confirmed" | "failed" | "not_run" | "unknown" {
+  const value = stringField(body, key);
+  if (value === "confirmed" || value === "failed" || value === "not_run" || value === "unknown") return value;
+  throw new WorkspaceServerError(`${key}_invalid`, 400);
+}
+
+function learningFailureField(body: Record<string, unknown>, key: string): "none" | "resolved" | "unresolved" {
+  const value = stringField(body, key);
+  if (value === "none" || value === "resolved" || value === "unresolved") return value;
+  throw new WorkspaceServerError(`${key}_invalid`, 400);
+}
+
+function learningJobStatus(value: string): "queued" | "running" | "completed" | "failed" | "blocked" {
+  if (value === "queued" || value === "running" || value === "completed" || value === "failed" || value === "blocked") return value;
+  throw new WorkspaceServerError("status_invalid", 400);
+}
+
+function publicLearningSettings(settings: WorkspaceLearningSettings): Omit<WorkspaceLearningSettings, "secretRef"> {
+  const { secretRef: _secretRef, ...publicSettings } = settings;
+  return publicSettings;
 }
 
 function roleField(body: Record<string, unknown>, key: string): "owner" | "admin" | "member" | "guest" {

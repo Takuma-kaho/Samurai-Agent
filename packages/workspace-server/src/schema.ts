@@ -3908,6 +3908,660 @@ const migrations: readonly WorkspaceServerMigration[] = [
       $$`,
       "REVOKE EXECUTE ON FUNCTION samurai_clear_stale_room_memberships_on_workspace_activation(TEXT, TEXT) FROM PUBLIC"
     ]
+  },
+  {
+    version: 26,
+    name: "workspace_server_knowledge_learning_loop",
+    statements: [
+      // Knowledge is intentionally separate from the generic record table.
+      // This makes scope, history, evidence, and the AI write boundary
+      // enforceable instead of relying on convention in a JSON payload.
+      `CREATE TABLE workspace_learning_activities (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        room_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        group_key TEXT NOT NULL,
+        principal_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        source_kind TEXT NOT NULL,
+        source_id TEXT,
+        correction_of_activity_id TEXT,
+        instruction_summary TEXT NOT NULL CHECK (btrim(instruction_summary) <> ''),
+        result_summary TEXT,
+        outcome TEXT NOT NULL CHECK (outcome IN ('completed', 'failed', 'cancelled', 'outcome_unknown')),
+        verification_state TEXT NOT NULL CHECK (verification_state IN ('confirmed', 'failed', 'not_run', 'unknown')),
+        failure_state TEXT NOT NULL CHECK (failure_state IN ('none', 'resolved', 'unresolved')),
+        explicit_remember BOOLEAN NOT NULL DEFAULT FALSE,
+        payload JSONB NOT NULL DEFAULT '{}'::JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        finalized_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id),
+        FOREIGN KEY (workspace_id, room_id) REFERENCES rooms(workspace_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, correction_of_activity_id)
+          REFERENCES workspace_learning_activities(workspace_id, id) ON DELETE RESTRICT
+          DEFERRABLE INITIALLY DEFERRED
+      )`,
+      "CREATE INDEX workspace_learning_activities_group_index ON workspace_learning_activities(workspace_id, room_id, group_key, finalized_at DESC)",
+      "CREATE INDEX workspace_learning_activities_correction_index ON workspace_learning_activities(workspace_id, correction_of_activity_id) WHERE correction_of_activity_id IS NOT NULL",
+      `CREATE TABLE workspace_learning_resources (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('workspace', 'room')),
+        room_id TEXT,
+        resource_kind TEXT NOT NULL CHECK (resource_kind IN ('knowledge', 'memory', 'skill', 'workspace_rule')),
+        state TEXT NOT NULL CHECK (state IN ('active', 'archived', 'conflict')) DEFAULT 'active',
+        is_absolute_rule BOOLEAN NOT NULL DEFAULT FALSE,
+        ai_update_locked BOOLEAN NOT NULL DEFAULT FALSE,
+        title TEXT NOT NULL CHECK (btrim(title) <> ''),
+        content TEXT NOT NULL CHECK (btrim(content) <> ''),
+        payload JSONB NOT NULL DEFAULT '{}'::JSONB,
+        version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        updated_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        archived_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id),
+        CHECK ((scope_kind = 'workspace' AND room_id IS NULL) OR (scope_kind = 'room' AND room_id IS NOT NULL)),
+        CHECK ((resource_kind = 'workspace_rule') = is_absolute_rule),
+        CHECK (resource_kind <> 'workspace_rule' OR scope_kind = 'workspace'),
+        FOREIGN KEY (workspace_id, room_id) REFERENCES rooms(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      "CREATE INDEX workspace_learning_resources_scope_index ON workspace_learning_resources(workspace_id, scope_kind, room_id, state, updated_at DESC)",
+      "CREATE INDEX workspace_learning_resources_search_index ON workspace_learning_resources USING GIN ((title || ' ' || content) gin_trgm_ops)",
+      `CREATE TABLE workspace_learning_resource_versions (
+        workspace_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        version BIGINT NOT NULL CHECK (version > 0),
+        change_kind TEXT NOT NULL CHECK (change_kind IN ('created', 'updated', 'evidence_appended', 'conflict_recorded', 'archived', 'restored', 'copied', 'moved', 'promoted', 'fixed', 'unfixed')),
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('workspace', 'room')),
+        room_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('active', 'archived', 'conflict')),
+        ai_update_locked BOOLEAN NOT NULL DEFAULT FALSE,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        payload JSONB NOT NULL DEFAULT '{}'::JSONB,
+        content_hash TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (btrim(reason) <> ''),
+        actor_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id),
+        UNIQUE (workspace_id, resource_id, version),
+        CHECK ((scope_kind = 'workspace' AND room_id IS NULL) OR (scope_kind = 'room' AND room_id IS NOT NULL)),
+        FOREIGN KEY (workspace_id, resource_id) REFERENCES workspace_learning_resources(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      "CREATE INDEX workspace_learning_versions_resource_index ON workspace_learning_resource_versions(workspace_id, resource_id, version DESC)",
+      `CREATE TABLE workspace_learning_evidence (
+        workspace_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        resource_version BIGINT NOT NULL CHECK (resource_version > 0),
+        activity_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('activity', 'human_correction', 'explicit_remember', 'use_outcome')),
+        summary TEXT NOT NULL CHECK (btrim(summary) <> ''),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id),
+        UNIQUE (workspace_id, resource_id, resource_version, activity_id, kind),
+        FOREIGN KEY (workspace_id, resource_id) REFERENCES workspace_learning_resources(workspace_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, resource_id, resource_version)
+          REFERENCES workspace_learning_resource_versions(workspace_id, resource_id, version) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, activity_id) REFERENCES workspace_learning_activities(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      "CREATE INDEX workspace_learning_evidence_resource_index ON workspace_learning_evidence(workspace_id, resource_id, resource_version)",
+      `CREATE TABLE workspace_learning_resource_links (
+        workspace_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        from_resource_id TEXT NOT NULL,
+        to_resource_id TEXT NOT NULL,
+        relation TEXT NOT NULL CHECK (relation IN ('conflicts', 'copied_from', 'moved_from', 'promoted_from', 'derived_from')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id),
+        UNIQUE (workspace_id, from_resource_id, to_resource_id, relation),
+        CHECK (from_resource_id <> to_resource_id),
+        FOREIGN KEY (workspace_id, from_resource_id) REFERENCES workspace_learning_resources(workspace_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, to_resource_id) REFERENCES workspace_learning_resources(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      `CREATE TABLE workspace_learning_settings (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('workspace', 'room')),
+        room_id TEXT,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        engine_id TEXT,
+        model TEXT,
+        secret_ref TEXT,
+        currency_limit NUMERIC,
+        token_limit BIGINT,
+        currency_used NUMERIC NOT NULL DEFAULT 0 CHECK (currency_used >= 0),
+        tokens_used BIGINT NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
+        version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
+        updated_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id),
+        CHECK ((scope_kind = 'workspace' AND room_id IS NULL) OR (scope_kind = 'room' AND room_id IS NOT NULL)),
+        CHECK ((scope_kind = 'workspace' AND id = 'workspace') OR (scope_kind = 'room' AND id = ('room:' || room_id))),
+        CHECK (currency_limit IS NULL OR currency_limit >= 0),
+        CHECK (token_limit IS NULL OR token_limit >= 0),
+        FOREIGN KEY (workspace_id, room_id) REFERENCES rooms(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      `CREATE UNIQUE INDEX workspace_learning_workspace_settings_singleton
+       ON workspace_learning_settings(workspace_id) WHERE scope_kind = 'workspace'`,
+      `CREATE UNIQUE INDEX workspace_learning_room_settings_singleton
+       ON workspace_learning_settings(workspace_id, room_id) WHERE scope_kind = 'room'`,
+      `CREATE TABLE workspace_learning_jobs (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        room_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('review', 'curator')),
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'blocked')),
+        priority TEXT NOT NULL CHECK (priority IN ('normal', 'high')) DEFAULT 'normal',
+        group_key TEXT NOT NULL,
+        high_watermark_activity_id TEXT NOT NULL,
+        next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        max_attempts INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts > 0),
+        lease_owner TEXT,
+        lease_expires_at TIMESTAMPTZ,
+        heartbeat_at TIMESTAMPTZ,
+        blocked_reason TEXT,
+        engine_id TEXT,
+        model TEXT,
+        created_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        updated_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        PRIMARY KEY (workspace_id, id),
+        FOREIGN KEY (workspace_id, room_id) REFERENCES rooms(workspace_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, high_watermark_activity_id) REFERENCES workspace_learning_activities(workspace_id, id) ON DELETE RESTRICT,
+        CHECK ((status = 'running') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL AND heartbeat_at IS NOT NULL)),
+        CHECK ((status <> 'blocked') OR blocked_reason IS NOT NULL)
+      )`,
+      "CREATE INDEX workspace_learning_jobs_due_index ON workspace_learning_jobs(workspace_id, room_id, status, next_run_at, priority)",
+      `CREATE UNIQUE INDEX workspace_learning_queued_group_index
+       ON workspace_learning_jobs(workspace_id, room_id, kind, group_key) WHERE status = 'queued'`,
+      `CREATE TABLE workspace_learning_job_attempts (
+        workspace_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
+        worker_id TEXT NOT NULL,
+        engine_id TEXT,
+        model TEXT,
+        status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'blocked')),
+        input_hash TEXT NOT NULL,
+        output_hash TEXT,
+        output JSONB,
+        error_code TEXT,
+        currency_used NUMERIC NOT NULL DEFAULT 0 CHECK (currency_used >= 0),
+        tokens_used BIGINT NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        PRIMARY KEY (workspace_id, id),
+        UNIQUE (workspace_id, job_id, attempt_no),
+        FOREIGN KEY (workspace_id, job_id) REFERENCES workspace_learning_jobs(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      "CREATE INDEX workspace_learning_attempts_job_index ON workspace_learning_job_attempts(workspace_id, job_id, attempt_no DESC)",
+      `CREATE TABLE workspace_learning_resource_uses (
+        workspace_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        resource_version BIGINT NOT NULL CHECK (resource_version > 0),
+        activity_id TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('confirmed_success', 'confirmed_failure', 'unknown')),
+        summary TEXT NOT NULL CHECK (btrim(summary) <> ''),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id),
+        UNIQUE (workspace_id, resource_id, resource_version, activity_id),
+        FOREIGN KEY (workspace_id, resource_id) REFERENCES workspace_learning_resources(workspace_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, resource_id, resource_version)
+          REFERENCES workspace_learning_resource_versions(workspace_id, resource_id, version) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, activity_id) REFERENCES workspace_learning_activities(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      "ALTER TABLE workspace_learning_activities ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_learning_resources ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_learning_resource_versions ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_learning_evidence ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_learning_resource_links ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_learning_settings ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_learning_jobs ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_learning_job_attempts ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_learning_resource_uses ENABLE ROW LEVEL SECURITY",
+      `CREATE POLICY workspace_learning_activities_read ON workspace_learning_activities FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'read')
+      )`,
+      `CREATE POLICY workspace_learning_activities_insert ON workspace_learning_activities FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR (
+            principal_account_id = samurai_current_account_id()
+            AND samurai_can_room(workspace_id, room_id, 'execute')
+            AND samurai_workspace_is_writable(workspace_id)
+          )
+        )
+      )`,
+      `CREATE POLICY workspace_learning_resources_read ON workspace_learning_resources FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'guest'))
+          OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+        )
+      )`,
+      `CREATE POLICY workspace_learning_resources_insert ON workspace_learning_resources FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id)
+         OR (samurai_workspace_is_writable(workspace_id) AND (
+           (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+           OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'edit'))
+         ))
+       ))`,
+      `CREATE POLICY workspace_learning_resources_update ON workspace_learning_resources FOR UPDATE
+       USING (workspace_id = samurai_current_workspace_id() AND (
+         (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+         OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'edit'))
+       ))
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id)
+         OR (samurai_workspace_is_writable(workspace_id) AND (
+           (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+           OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'edit'))
+         ))
+       ))`,
+      `CREATE POLICY workspace_learning_versions_read ON workspace_learning_resource_versions FOR SELECT
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_resources resource
+         WHERE resource.workspace_id = workspace_learning_resource_versions.workspace_id
+           AND resource.id = workspace_learning_resource_versions.resource_id
+           AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+             OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read')))
+       ))
+      `,
+      `CREATE POLICY workspace_learning_versions_insert ON workspace_learning_resource_versions FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND EXISTS (
+           SELECT 1 FROM workspace_learning_resources resource
+           WHERE resource.workspace_id = workspace_learning_resource_versions.workspace_id
+             AND resource.id = workspace_learning_resource_versions.resource_id
+             AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+               OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit')))
+         ))
+       ))`,
+      `CREATE POLICY workspace_learning_evidence_read ON workspace_learning_evidence FOR SELECT
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_resources resource
+         WHERE resource.workspace_id = workspace_learning_evidence.workspace_id
+           AND resource.id = workspace_learning_evidence.resource_id
+           AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+             OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read')))
+       ))
+      `,
+      `CREATE POLICY workspace_learning_evidence_insert ON workspace_learning_evidence FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND EXISTS (
+           SELECT 1 FROM workspace_learning_resources resource
+           WHERE resource.workspace_id = workspace_learning_evidence.workspace_id
+             AND resource.id = workspace_learning_evidence.resource_id
+             AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+               OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit')))
+         ))
+       ))`,
+      `CREATE POLICY workspace_learning_links_read ON workspace_learning_resource_links FOR SELECT
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_resources source
+         JOIN workspace_learning_resources target
+           ON target.workspace_id = source.workspace_id AND target.id = workspace_learning_resource_links.to_resource_id
+         WHERE source.workspace_id = workspace_learning_resource_links.workspace_id
+           AND source.id = workspace_learning_resource_links.from_resource_id
+           AND ((source.scope_kind = 'workspace' AND samurai_can_workspace(source.workspace_id, 'guest'))
+             OR (source.scope_kind = 'room' AND source.room_id IS NOT NULL AND samurai_can_room(source.workspace_id, source.room_id, 'read')))
+           AND ((target.scope_kind = 'workspace' AND samurai_can_workspace(target.workspace_id, 'guest'))
+             OR (target.scope_kind = 'room' AND target.room_id IS NOT NULL AND samurai_can_room(target.workspace_id, target.room_id, 'read')))
+       ))
+      `,
+      `CREATE POLICY workspace_learning_links_insert ON workspace_learning_resource_links FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND EXISTS (
+           SELECT 1 FROM workspace_learning_resources source
+           JOIN workspace_learning_resources target
+             ON target.workspace_id = source.workspace_id AND target.id = workspace_learning_resource_links.to_resource_id
+           WHERE source.workspace_id = workspace_learning_resource_links.workspace_id
+             AND source.id = workspace_learning_resource_links.from_resource_id
+             AND ((source.scope_kind = 'workspace' AND samurai_can_workspace(source.workspace_id, 'admin'))
+               OR (source.scope_kind = 'room' AND source.room_id IS NOT NULL AND samurai_can_room(source.workspace_id, source.room_id, 'edit')))
+             AND ((target.scope_kind = 'workspace' AND samurai_can_workspace(target.workspace_id, 'admin'))
+               OR (target.scope_kind = 'room' AND target.room_id IS NOT NULL AND samurai_can_room(target.workspace_id, target.room_id, 'edit')))
+         ))
+       ))`,
+      `CREATE POLICY workspace_learning_settings_read ON workspace_learning_settings FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'guest'))
+          OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+        )
+      )`,
+      `CREATE POLICY workspace_learning_settings_write ON workspace_learning_settings FOR ALL
+       USING (workspace_id = samurai_current_workspace_id() AND (
+         (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+         OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'manage'))
+       ))
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND (
+           (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+           OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'manage'))
+         ))
+       ))`,
+      `CREATE POLICY workspace_learning_jobs_read ON workspace_learning_jobs FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'read')
+      )`,
+      `CREATE POLICY workspace_learning_jobs_write ON workspace_learning_jobs FOR ALL
+       USING (workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute'))
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_can_room(workspace_id, room_id, 'execute') AND samurai_workspace_is_writable(workspace_id))
+       ))`,
+      `CREATE POLICY workspace_learning_attempts_access ON workspace_learning_job_attempts FOR ALL
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_jobs job
+         WHERE job.workspace_id = workspace_learning_job_attempts.workspace_id
+           AND job.id = workspace_learning_job_attempts.job_id
+           AND samurai_can_room(job.workspace_id, job.room_id, 'read')
+       ))
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR EXISTS (
+           SELECT 1 FROM workspace_learning_jobs job
+           WHERE job.workspace_id = workspace_learning_job_attempts.workspace_id
+             AND job.id = workspace_learning_job_attempts.job_id
+             AND samurai_can_room(job.workspace_id, job.room_id, 'execute')
+         )
+       ))`,
+      `CREATE POLICY workspace_learning_resource_uses_read ON workspace_learning_resource_uses FOR SELECT
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_resources resource
+         WHERE resource.workspace_id = workspace_learning_resource_uses.workspace_id
+           AND resource.id = workspace_learning_resource_uses.resource_id
+           AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+             OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read')))
+       ))
+      `,
+      `CREATE POLICY workspace_learning_resource_uses_insert ON workspace_learning_resource_uses FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND EXISTS (
+           SELECT 1 FROM workspace_learning_resources resource
+           WHERE resource.workspace_id = workspace_learning_resource_uses.workspace_id
+             AND resource.id = workspace_learning_resource_uses.resource_id
+             AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+               OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit')))
+         ))
+       ))`
+    ]
+  },
+  {
+    version: 27,
+    name: "workspace_server_learning_integrity_hardening",
+    statements: [
+      // Preserve automatic Knowledge provenance and make its provisional
+      // state explicit. Existing v26 rows remain valid without backfill.
+      "ALTER TABLE workspace_learning_resources DROP CONSTRAINT workspace_learning_resources_state_check",
+      "ALTER TABLE workspace_learning_resources ADD COLUMN confidence NUMERIC, ADD COLUMN source_job_id TEXT, ADD COLUMN source_attempt_id TEXT",
+      "ALTER TABLE workspace_learning_resources ADD CONSTRAINT workspace_learning_resources_state_check CHECK (state IN ('active', 'provisional', 'archived', 'conflict'))",
+      "ALTER TABLE workspace_learning_resources ADD CONSTRAINT workspace_learning_resources_confidence_check CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1))",
+      "ALTER TABLE workspace_learning_resources ADD CONSTRAINT workspace_learning_resources_source_pair_check CHECK ((source_job_id IS NULL) = (source_attempt_id IS NULL))",
+      "ALTER TABLE workspace_learning_resources ADD CONSTRAINT workspace_learning_resources_provisional_source_check CHECK (state <> 'provisional' OR (confidence IS NOT NULL AND source_job_id IS NOT NULL AND source_attempt_id IS NOT NULL))",
+      "ALTER TABLE workspace_learning_resources ADD CONSTRAINT workspace_learning_resources_source_job_fkey FOREIGN KEY (workspace_id, source_job_id) REFERENCES workspace_learning_jobs(workspace_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+      "ALTER TABLE workspace_learning_resources ADD CONSTRAINT workspace_learning_resources_source_attempt_fkey FOREIGN KEY (workspace_id, source_attempt_id) REFERENCES workspace_learning_job_attempts(workspace_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+      "ALTER TABLE workspace_learning_resource_versions DROP CONSTRAINT workspace_learning_resource_versions_state_check",
+      "ALTER TABLE workspace_learning_resource_versions ADD COLUMN confidence NUMERIC, ADD COLUMN source_job_id TEXT, ADD COLUMN source_attempt_id TEXT",
+      "ALTER TABLE workspace_learning_resource_versions ADD CONSTRAINT workspace_learning_resource_versions_state_check CHECK (state IN ('active', 'provisional', 'archived', 'conflict'))",
+      "ALTER TABLE workspace_learning_resource_versions ADD CONSTRAINT workspace_learning_resource_versions_confidence_check CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1))",
+      "ALTER TABLE workspace_learning_resource_versions ADD CONSTRAINT workspace_learning_resource_versions_source_pair_check CHECK ((source_job_id IS NULL) = (source_attempt_id IS NULL))",
+      "ALTER TABLE workspace_learning_resource_versions ADD CONSTRAINT workspace_learning_resource_versions_provisional_source_check CHECK (state <> 'provisional' OR (confidence IS NOT NULL AND source_job_id IS NOT NULL AND source_attempt_id IS NOT NULL))",
+      "ALTER TABLE workspace_learning_resource_versions ADD CONSTRAINT workspace_learning_resource_versions_source_job_fkey FOREIGN KEY (workspace_id, source_job_id) REFERENCES workspace_learning_jobs(workspace_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+      "ALTER TABLE workspace_learning_resource_versions ADD CONSTRAINT workspace_learning_resource_versions_source_attempt_fkey FOREIGN KEY (workspace_id, source_attempt_id) REFERENCES workspace_learning_job_attempts(workspace_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+      "CREATE UNIQUE INDEX workspace_learning_attempt_id_job_unique ON workspace_learning_job_attempts(workspace_id, id, job_id)",
+      "ALTER TABLE workspace_learning_resources ADD CONSTRAINT workspace_learning_resources_source_attempt_job_fkey FOREIGN KEY (workspace_id, source_attempt_id, source_job_id) REFERENCES workspace_learning_job_attempts(workspace_id, id, job_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+      "ALTER TABLE workspace_learning_resource_versions ADD CONSTRAINT workspace_learning_resource_versions_source_attempt_job_fkey FOREIGN KEY (workspace_id, source_attempt_id, source_job_id) REFERENCES workspace_learning_job_attempts(workspace_id, id, job_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+      // Direct human edits are evidence without inventing a Room Activity for
+      // Workspace-scoped Knowledge.
+      "ALTER TABLE workspace_learning_evidence ALTER COLUMN activity_id DROP NOT NULL",
+      "ALTER TABLE workspace_learning_evidence DROP CONSTRAINT workspace_learning_evidence_kind_check",
+      "ALTER TABLE workspace_learning_evidence ADD CONSTRAINT workspace_learning_evidence_kind_check CHECK (kind IN ('activity', 'human_correction', 'explicit_remember', 'use_outcome', 'human_edit'))",
+      "ALTER TABLE workspace_learning_evidence ADD CONSTRAINT workspace_learning_evidence_activity_shape_check CHECK ((kind = 'human_edit') = (activity_id IS NULL))",
+      // A later confirmation supersedes an unknown observation; neither row
+      // is overwritten. Drop the former single-row uniqueness dynamically so
+      // upgrades also work if PostgreSQL chose a different constraint name.
+      `DO $$ DECLARE constraint_name TEXT; BEGIN
+         SELECT conname INTO constraint_name FROM pg_constraint
+         WHERE conrelid = 'workspace_learning_resource_uses'::regclass
+           AND contype = 'u' AND pg_get_constraintdef(oid) LIKE '%(workspace_id, resource_id, resource_version, activity_id)%';
+         IF constraint_name IS NOT NULL THEN EXECUTE format('ALTER TABLE workspace_learning_resource_uses DROP CONSTRAINT %I', constraint_name); END IF;
+       END $$`,
+      "ALTER TABLE workspace_learning_resource_uses ADD COLUMN supersedes_use_id TEXT",
+      "ALTER TABLE workspace_learning_resource_uses ADD CONSTRAINT workspace_learning_resource_uses_supersedes_fkey FOREIGN KEY (workspace_id, supersedes_use_id) REFERENCES workspace_learning_resource_uses(workspace_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+      "CREATE UNIQUE INDEX workspace_learning_resource_use_initial_unique ON workspace_learning_resource_uses(workspace_id, resource_id, resource_version, activity_id) WHERE supersedes_use_id IS NULL",
+      "CREATE UNIQUE INDEX workspace_learning_resource_use_correction_unique ON workspace_learning_resource_uses(workspace_id, supersedes_use_id) WHERE supersedes_use_id IS NOT NULL",
+      // Reserve the declared maximum before invoking a cassette. This avoids
+      // two concurrent workers both spending the same remaining budget.
+      "ALTER TABLE workspace_learning_settings ADD COLUMN currency_reserved NUMERIC NOT NULL DEFAULT 0 CHECK (currency_reserved >= 0), ADD COLUMN tokens_reserved BIGINT NOT NULL DEFAULT 0 CHECK (tokens_reserved >= 0)",
+      "ALTER TABLE workspace_learning_job_attempts ADD COLUMN reserved_currency NUMERIC NOT NULL DEFAULT 0 CHECK (reserved_currency >= 0), ADD COLUMN reserved_tokens BIGINT NOT NULL DEFAULT 0 CHECK (reserved_tokens >= 0)",
+      // A Room executor may settle an already-configured review, but must not
+      // receive general Settings write access. Keep this one accounting update
+      // atomic with the same Room/Workspace/RLS boundary as the Job itself.
+      `CREATE OR REPLACE FUNCTION samurai_adjust_workspace_learning_usage(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        reserved_currency_delta NUMERIC,
+        reserved_tokens_delta BIGINT,
+        used_currency_delta NUMERIC,
+        used_tokens_delta BIGINT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE setting_row workspace_learning_settings%ROWTYPE;
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_workspace_is_writable(target_workspace_id)
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'execute') THEN
+          RAISE EXCEPTION 'workspace_learning_usage_permission_denied';
+        END IF;
+        IF reserved_currency_delta IS NULL OR reserved_tokens_delta IS NULL
+          OR used_currency_delta IS NULL OR used_tokens_delta IS NULL
+          OR used_currency_delta < 0 OR used_tokens_delta < 0 THEN
+          RAISE EXCEPTION 'workspace_learning_usage_delta_invalid';
+        END IF;
+        FOR setting_row IN
+          SELECT * FROM workspace_learning_settings
+          WHERE workspace_id = target_workspace_id
+            AND (scope_kind = 'workspace' OR (scope_kind = 'room' AND room_id = target_room_id))
+          ORDER BY CASE scope_kind WHEN 'workspace' THEN 0 ELSE 1 END
+          FOR UPDATE
+        LOOP
+          IF setting_row.currency_reserved + reserved_currency_delta < 0
+            OR setting_row.tokens_reserved + reserved_tokens_delta < 0 THEN
+            RAISE EXCEPTION 'workspace_learning_reservation_underflow';
+          END IF;
+          IF setting_row.currency_limit IS NOT NULL
+            AND setting_row.currency_used + used_currency_delta + setting_row.currency_reserved + reserved_currency_delta > setting_row.currency_limit THEN
+            RAISE EXCEPTION 'workspace_learning_currency_budget_exhausted';
+          END IF;
+          IF setting_row.token_limit IS NOT NULL
+            AND setting_row.tokens_used + used_tokens_delta + setting_row.tokens_reserved + reserved_tokens_delta > setting_row.token_limit THEN
+            RAISE EXCEPTION 'workspace_learning_token_budget_exhausted';
+          END IF;
+          UPDATE workspace_learning_settings
+          SET currency_reserved = currency_reserved + reserved_currency_delta,
+              tokens_reserved = tokens_reserved + reserved_tokens_delta,
+              currency_used = currency_used + used_currency_delta,
+              tokens_used = tokens_used + used_tokens_delta,
+              version = version + 1,
+              updated_at = NOW()
+          WHERE workspace_id = target_workspace_id AND id = setting_row.id;
+        END LOOP;
+      END
+      $$`,
+      "REVOKE ALL ON FUNCTION samurai_adjust_workspace_learning_usage(TEXT, TEXT, NUMERIC, BIGINT, NUMERIC, BIGINT) FROM PUBLIC",
+      `CREATE OR REPLACE FUNCTION samurai_lock_workspace_learning_settings(
+        target_workspace_id TEXT,
+        target_room_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_workspace_is_writable(target_workspace_id)
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'execute') THEN
+          RAISE EXCEPTION 'workspace_learning_settings_lock_permission_denied';
+        END IF;
+        PERFORM id FROM workspace_learning_settings
+        WHERE workspace_id = target_workspace_id
+          AND (scope_kind = 'workspace' OR (scope_kind = 'room' AND room_id = target_room_id))
+        ORDER BY CASE scope_kind WHEN 'workspace' THEN 0 ELSE 1 END
+        FOR UPDATE;
+      END
+      $$`,
+      "REVOKE ALL ON FUNCTION samurai_lock_workspace_learning_settings(TEXT, TEXT) FROM PUBLIC",
+      // Evidence and use rows may only reveal an Activity when the caller can
+      // read that Activity's Room. A Workspace-scoped Resource alone is not
+      // enough to disclose private Room evidence.
+      "DROP POLICY workspace_learning_evidence_read ON workspace_learning_evidence",
+      "DROP POLICY workspace_learning_evidence_insert ON workspace_learning_evidence",
+      `CREATE POLICY workspace_learning_evidence_read ON workspace_learning_evidence FOR SELECT
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_resources resource
+         WHERE resource.workspace_id = workspace_learning_evidence.workspace_id AND resource.id = workspace_learning_evidence.resource_id
+           AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+             OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read')))
+           AND (workspace_learning_evidence.activity_id IS NULL OR EXISTS (
+             SELECT 1 FROM workspace_learning_activities activity
+             WHERE activity.workspace_id = workspace_learning_evidence.workspace_id AND activity.id = workspace_learning_evidence.activity_id
+               AND samurai_can_room(activity.workspace_id, activity.room_id, 'read')
+               AND (resource.scope_kind = 'workspace' OR resource.room_id = activity.room_id)
+           ))
+       ))`,
+      `CREATE POLICY workspace_learning_evidence_insert ON workspace_learning_evidence FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND EXISTS (
+           SELECT 1 FROM workspace_learning_resources resource
+           WHERE resource.workspace_id = workspace_learning_evidence.workspace_id AND resource.id = workspace_learning_evidence.resource_id
+             AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+               OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit')))
+             AND ((workspace_learning_evidence.kind = 'human_edit' AND workspace_learning_evidence.activity_id IS NULL) OR EXISTS (
+               SELECT 1 FROM workspace_learning_activities activity
+               WHERE activity.workspace_id = workspace_learning_evidence.workspace_id AND activity.id = workspace_learning_evidence.activity_id
+                 AND samurai_can_room(activity.workspace_id, activity.room_id, 'execute')
+                 AND (resource.scope_kind = 'workspace' OR resource.room_id = activity.room_id)
+             ))
+         ))
+       ))`,
+      "DROP POLICY workspace_learning_resource_uses_read ON workspace_learning_resource_uses",
+      "DROP POLICY workspace_learning_resource_uses_insert ON workspace_learning_resource_uses",
+      `CREATE POLICY workspace_learning_resource_uses_read ON workspace_learning_resource_uses FOR SELECT
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_resources resource
+         JOIN workspace_learning_activities activity ON activity.workspace_id = workspace_learning_resource_uses.workspace_id AND activity.id = workspace_learning_resource_uses.activity_id
+         WHERE resource.workspace_id = workspace_learning_resource_uses.workspace_id AND resource.id = workspace_learning_resource_uses.resource_id
+           AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+             OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read')))
+           AND samurai_can_room(activity.workspace_id, activity.room_id, 'read')
+           AND (resource.scope_kind = 'workspace' OR resource.room_id = activity.room_id)
+       ))`,
+      `CREATE POLICY workspace_learning_resource_uses_insert ON workspace_learning_resource_uses FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND EXISTS (
+           SELECT 1 FROM workspace_learning_resources resource
+           JOIN workspace_learning_activities activity ON activity.workspace_id = workspace_learning_resource_uses.workspace_id AND activity.id = workspace_learning_resource_uses.activity_id
+           WHERE resource.workspace_id = workspace_learning_resource_uses.workspace_id AND resource.id = workspace_learning_resource_uses.resource_id
+             AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+               OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit')))
+             AND samurai_can_room(activity.workspace_id, activity.room_id, 'execute')
+             AND (resource.scope_kind = 'workspace' OR resource.room_id = activity.room_id)
+         ))
+       ))`,
+      // Settings are mutable configuration, but a Room override can be
+      // intentionally removed only while the Workspace is writable. Do not
+      // let the broad v26 FOR ALL policy make a read-only Workspace mutable.
+      "DROP POLICY workspace_learning_settings_write ON workspace_learning_settings",
+      `CREATE POLICY workspace_learning_settings_insert ON workspace_learning_settings FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND (
+           (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+           OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'manage'))
+         ))
+       ))`,
+      `CREATE POLICY workspace_learning_settings_update ON workspace_learning_settings FOR UPDATE
+       USING (workspace_id = samurai_current_workspace_id() AND samurai_workspace_is_writable(workspace_id) AND (
+         (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+         OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'manage'))
+       ))
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND (
+           (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+           OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'manage'))
+         ))
+       ))`,
+      `CREATE POLICY workspace_learning_settings_delete ON workspace_learning_settings FOR DELETE
+       USING (workspace_id = samurai_current_workspace_id() AND samurai_workspace_is_writable(workspace_id) AND (
+         (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+         OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'manage'))
+       ))`,
+      // Jobs and attempts are append/update state machines. Runtime callers
+      // never delete their history.
+      "DROP POLICY workspace_learning_jobs_write ON workspace_learning_jobs",
+      `CREATE POLICY workspace_learning_jobs_insert ON workspace_learning_jobs FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND samurai_can_room(workspace_id, room_id, 'execute'))))`,
+      `CREATE POLICY workspace_learning_jobs_update ON workspace_learning_jobs FOR UPDATE
+       USING (workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute'))
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR (samurai_workspace_is_writable(workspace_id) AND samurai_can_room(workspace_id, room_id, 'execute'))))`,
+      "DROP POLICY workspace_learning_attempts_access ON workspace_learning_job_attempts",
+      `CREATE POLICY workspace_learning_attempts_read ON workspace_learning_job_attempts FOR SELECT
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_jobs job WHERE job.workspace_id = workspace_learning_job_attempts.workspace_id AND job.id = workspace_learning_job_attempts.job_id AND samurai_can_room(job.workspace_id, job.room_id, 'read')
+       ))`,
+      `CREATE POLICY workspace_learning_attempts_insert ON workspace_learning_job_attempts FOR INSERT
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR EXISTS (
+         SELECT 1 FROM workspace_learning_jobs job WHERE job.workspace_id = workspace_learning_job_attempts.workspace_id AND job.id = workspace_learning_job_attempts.job_id AND samurai_workspace_is_writable(job.workspace_id) AND samurai_can_room(job.workspace_id, job.room_id, 'execute')
+       )))`,
+      `CREATE POLICY workspace_learning_attempts_update ON workspace_learning_job_attempts FOR UPDATE
+       USING (workspace_id = samurai_current_workspace_id() AND EXISTS (
+         SELECT 1 FROM workspace_learning_jobs job WHERE job.workspace_id = workspace_learning_job_attempts.workspace_id AND job.id = workspace_learning_job_attempts.job_id AND samurai_can_room(job.workspace_id, job.room_id, 'execute')
+       ))
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR EXISTS (
+         SELECT 1 FROM workspace_learning_jobs job WHERE job.workspace_id = workspace_learning_job_attempts.workspace_id AND job.id = workspace_learning_job_attempts.job_id AND samurai_workspace_is_writable(job.workspace_id) AND samurai_can_room(job.workspace_id, job.room_id, 'execute')
+       )))`,
+      // Import abort must delete the new dependent tables before Rooms.
+      `CREATE OR REPLACE FUNCTION samurai_abort_workspace_import(
+        target_workspace_id TEXT,
+        import_session_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        DELETE FROM workspace_learning_resource_uses WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_learning_resource_links WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_learning_evidence WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_learning_resource_versions WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_learning_resources WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_learning_job_attempts WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_learning_jobs WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_learning_activities WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_learning_settings WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_audit_entries WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_bundles WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_transfers WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_invitations WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_jobs WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_events WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_operations WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_file_transactions WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_files WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_records WHERE workspace_id = target_workspace_id;
+        DELETE FROM room_members WHERE workspace_id = target_workspace_id;
+        DELETE FROM rooms WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_members WHERE workspace_id = target_workspace_id;
+        DELETE FROM workspace_import_sessions WHERE workspace_id = target_workspace_id AND id = import_session_id;
+        DELETE FROM workspaces WHERE id = target_workspace_id AND state = 'read_only';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_import_target_invalid'; END IF;
+      END
+      $$`
+    ]
   }
 ];
 
@@ -3986,7 +4640,16 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "workspace_bundles",
     "account_operations",
     "workspace_import_sessions",
-    "workspace_audit_entries"
+    "workspace_audit_entries",
+    "workspace_learning_activities",
+    "workspace_learning_resources",
+    "workspace_learning_resource_versions",
+    "workspace_learning_evidence",
+    "workspace_learning_resource_links",
+    "workspace_learning_settings",
+    "workspace_learning_jobs",
+    "workspace_learning_job_attempts",
+    "workspace_learning_resource_uses"
   ];
   // Runtime code may read Room rows through RLS, but hierarchy and direct
   // membership mutations are deliberately restricted to the guarded SQL
@@ -4008,6 +4671,8 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_workspace_is_writable(TEXT)",
     "samurai_assert_workspace_writable(TEXT)",
     "samurai_is_import_session(TEXT)",
+    "samurai_adjust_workspace_learning_usage(TEXT, TEXT, NUMERIC, BIGINT, NUMERIC, BIGINT)",
+    "samurai_lock_workspace_learning_settings(TEXT, TEXT)",
     "samurai_create_workspace(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT)",
     "samurai_start_workspace_import(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT)",
     "samurai_complete_workspace_import(TEXT, TEXT, TEXT)",
@@ -4058,6 +4723,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
   await sql.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE samurai_server_schema_migrations FROM ${role}`);
   await sql.query(`GRANT SELECT ON TABLE ${tables.join(", ")} TO ${role}`);
   await sql.query(`GRANT INSERT, UPDATE, DELETE ON TABLE ${writableTables.join(", ")} TO ${role}`);
+  await sql.query(`REVOKE DELETE ON TABLE workspace_learning_activities, workspace_learning_resource_versions, workspace_learning_evidence, workspace_learning_resource_links, workspace_learning_jobs, workspace_learning_job_attempts, workspace_learning_resource_uses FROM ${role}`);
   await sql.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE ${roomMutationTables.join(", ")} FROM ${role}`);
   await sql.query(`GRANT USAGE ON SEQUENCE workspace_events_id_seq TO ${role}`);
   await sql.query(`GRANT EXECUTE ON FUNCTION ${functions.join(", ")} TO ${role}`);

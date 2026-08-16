@@ -3,10 +3,13 @@ import {
   PostgresWorkspaceDatabase,
   WorkspaceBundleV3Service,
   WorkspaceFileStore,
+  WorkspaceLearningService,
+  WorkspaceLearningWorker,
   WorkspaceServerCommandService,
   WorkspaceServerError,
   WorkspaceServerStore,
   loadWorkspaceServerConfig,
+  type WorkspaceKnowledgeReviewPort,
   type WorkspaceServerConfig
 } from "@samurai-agent/workspace-server";
 
@@ -17,6 +20,10 @@ export interface WorkspaceServerCore {
   files: WorkspaceFileStore;
   bundles: WorkspaceBundleV3Service;
   commands: WorkspaceServerCommandService;
+  learning: WorkspaceLearningService;
+  /** The host process chooses a Backend cassette; this Core never passes DB or
+   * file capabilities to it. */
+  createLearningWorker(reviewPort: WorkspaceKnowledgeReviewPort): WorkspaceLearningWorker;
   close(): Promise<void>;
 }
 
@@ -68,6 +75,7 @@ export async function createWorkspaceServerCore(config = loadWorkspaceServerConf
     }
     const bundles = new WorkspaceBundleV3Service(store);
     const commands = new WorkspaceServerCommandService({ store, files, bundles });
+    const learning = new WorkspaceLearningService(store);
     return {
       config,
       database,
@@ -75,6 +83,8 @@ export async function createWorkspaceServerCore(config = loadWorkspaceServerConf
       files,
       bundles,
       commands,
+      learning,
+      createLearningWorker: (reviewPort) => new WorkspaceLearningWorker(learning, reviewPort),
       close: () => database.close()
     };
   } catch (error) {

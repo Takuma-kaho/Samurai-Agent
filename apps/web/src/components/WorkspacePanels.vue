@@ -19,6 +19,7 @@ import ManagementSurfaces from "./ManagementSurfaces.vue";
 import type { AutomationJobRecord, WikiFrontmatter } from "@samurai-agent/core-schemas";
 import type { LocaleKey } from "@samurai-agent/localization";
 import WorkspaceConnectionSettings, { type NativeWorkspaceConnection } from "./WorkspaceConnectionSettings.vue";
+import WorkspaceLearningPanel from "./WorkspaceLearningPanel.vue";
 import WorkspaceRoomTree from "./WorkspaceRoomTree.vue";
 import type {
   DesktopRoomMemberPreview,
@@ -220,6 +221,12 @@ const emit = defineEmits<{ "update:searchQuery": [value: string] }>();
         :list-members="props.listWorkspaceRoomMembers"
         :preview-member="props.previewWorkspaceRoomMember"
         :set-member="props.setWorkspaceRoomMember"
+      />
+    </div>
+    <div v-if="props.workspaceRoomAvailable" class="settings-group lit-surface workspace-connection-group">
+      <WorkspaceLearningPanel
+        :available="props.workspaceRoomAvailable"
+        :selected-room-id="props.selectedWorkspaceRoomId"
       />
     </div>
   </section>

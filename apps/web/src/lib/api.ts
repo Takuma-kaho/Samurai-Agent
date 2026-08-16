@@ -324,6 +324,70 @@ export interface DesktopWorkspaceRoomMembership {
   revokedAt?: string;
 }
 
+export interface DesktopWorkspaceLearningScope {
+  kind: "workspace" | "room";
+  roomId?: string;
+}
+
+export interface DesktopWorkspaceLearningResource {
+  workspaceId: string;
+  id: string;
+  scope: DesktopWorkspaceLearningScope;
+  kind: "knowledge" | "memory" | "skill" | "workspace_rule";
+  state: "active" | "provisional" | "archived" | "conflict";
+  isAbsoluteRule: boolean;
+  aiUpdateLocked: boolean;
+  confidence?: number;
+  sourceJobId?: string;
+  sourceAttemptId?: string;
+  title: string;
+  content: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceLearningResourceVersion {
+  resourceId: string;
+  version: number;
+  changeKind: "created" | "updated" | "evidence_appended" | "conflict_recorded" | "archived" | "restored" | "copied" | "moved" | "promoted" | "fixed" | "unfixed";
+  state: DesktopWorkspaceLearningResource["state"];
+  aiUpdateLocked: boolean;
+  confidence?: number;
+  sourceJobId?: string;
+  sourceAttemptId?: string;
+  title: string;
+  content: string;
+  reason: string;
+  createdAt: string;
+}
+
+export interface DesktopWorkspaceLearningEvidence {
+  resourceId: string;
+  resourceVersion: number;
+  activityId?: string;
+  kind: "activity" | "human_correction" | "explicit_remember" | "use_outcome" | "human_edit";
+  summary: string;
+  createdAt: string;
+}
+
+export interface DesktopWorkspaceLearningSettings {
+  workspaceId: string;
+  id: string;
+  scope: DesktopWorkspaceLearningScope;
+  enabled: boolean;
+  engineId?: string;
+  model?: string;
+  currencyLimit?: number;
+  tokenLimit?: number;
+  currencyUsed: number;
+  tokensUsed: number;
+  currencyReserved: number;
+  tokensReserved: number;
+  version: number;
+  updatedAt: string;
+}
+
 export interface DesktopRoomMovePreview {
   allowed: boolean;
   reason?: string;
@@ -396,6 +460,60 @@ declare global {
         expectedVersion: number;
         operationId: string;
       }) => Promise<{ member: DesktopWorkspaceRoomMembership; affected_room_ids: string[]; replayed?: boolean }>;
+      listWorkspaceLearningResources?: (input: { scopeKind: "workspace" | "room"; roomId?: string; includeArchived?: boolean }) => Promise<{ resources: DesktopWorkspaceLearningResource[] }>;
+      createWorkspaceLearningResource?: (input: {
+        scopeKind: "workspace" | "room";
+        roomId?: string;
+        kind: DesktopWorkspaceLearningResource["kind"];
+        isAbsoluteRule?: boolean;
+        title: string;
+        content: string;
+        reason: string;
+        operationId: string;
+      }) => Promise<{ resource: DesktopWorkspaceLearningResource; replayed?: boolean }>;
+      getWorkspaceLearningResource?: (input: { resourceId: string }) => Promise<{
+        resource: DesktopWorkspaceLearningResource;
+        versions: DesktopWorkspaceLearningResourceVersion[];
+        evidence: DesktopWorkspaceLearningEvidence[];
+      }>;
+      updateWorkspaceLearningResource?: (input: {
+        resourceId: string;
+        scopeKind: "workspace" | "room";
+        roomId?: string;
+        kind: DesktopWorkspaceLearningResource["kind"];
+        isAbsoluteRule?: boolean;
+        title: string;
+        content: string;
+        reason: string;
+        expectedVersion: number;
+        operationId: string;
+      }) => Promise<{ resource: DesktopWorkspaceLearningResource; replayed?: boolean }>;
+      setWorkspaceLearningResourceFixed?: (input: { resourceId: string; fixed: boolean; expectedVersion: number; reason: string; operationId: string }) => Promise<{ resource: DesktopWorkspaceLearningResource; replayed?: boolean }>;
+      archiveWorkspaceLearningResource?: (input: { resourceId: string; archived: boolean; expectedVersion: number; reason: string; operationId: string }) => Promise<{ resource: DesktopWorkspaceLearningResource; replayed?: boolean }>;
+      getWorkspaceLearningSettings?: (roomId: string) => Promise<{
+        settings: DesktopWorkspaceLearningSettings;
+        workspace_settings?: DesktopWorkspaceLearningSettings;
+        room_settings?: DesktopWorkspaceLearningSettings;
+      }>;
+      updateWorkspaceLearningSettings?: (input: {
+        scopeKind: "workspace" | "room";
+        roomId?: string;
+        enabled?: boolean;
+        engineId?: string;
+        model?: string;
+        secretRef?: string;
+        currencyLimit?: number;
+        tokenLimit?: number;
+        clearEngineId?: boolean;
+        clearModel?: boolean;
+        clearSecretRef?: boolean;
+        clearCurrencyLimit?: boolean;
+        clearTokenLimit?: boolean;
+        removeOverride?: boolean;
+        expectedVersion?: number;
+        operationId: string;
+      }) => Promise<{ settings: DesktopWorkspaceLearningSettings; replayed?: boolean }>;
+      searchWorkspaceKnowledge?: (input: { roomId: string; query: string; limit?: number }) => Promise<{ resources: DesktopWorkspaceLearningResource[] }>;
       onWorkspaceServerEvent?: (listener: (event: DesktopWorkspaceRealtimeEvent | undefined) => void) => () => void;
     };
   }

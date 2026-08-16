@@ -7,5 +7,7 @@ export * from "./sqlite-migration";
 export * from "./types";
 export * from "./workspace-bundle-v3";
 export * from "./workspace-files";
+export * from "./workspace-learning-policy";
+export * from "./workspace-learning";
 export * from "./workspace-server-commands";
 export * from "./workspace-server-store";

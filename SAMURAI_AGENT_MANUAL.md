@@ -512,6 +512,7 @@ Chat、Session、App Agent、SurfaceはNative Appの状態である。Workspace 
 - Gateway、Automation、Sandboxの基盤
 - Chat APIとSession単位のRuntime経路
 - `Workspace Server 02`のPostgreSQL Server、RLS、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成。Roomは同一種類のまま無制限に階層化でき、移動・直接メンバー制約・親子Bundleを扱う
+- `Workspace Server 04`のKnowledge学習ループ。確認済みActivityと人が明示した訂正・Rememberだけを同じRoomでレビューし、根拠・確からしさ・Job／Attempt・Versionを持つ暫定Knowledgeとして保存する。利用結果、上限予約、設定変更、Restore、Room権限を記録する
 
 Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで決め、SessionなしでArtifact・Collectionの主要保存とGenerated Surfaceの作成・改訂・Actionを実行できる。
 
@@ -525,7 +526,7 @@ Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで�
 
 既存SQLite Core APIとChat／Session経路は互換機能として残る。一方、Workspace Server 02の通常保存経路はPostgreSQLであり、SQLiteは旧Workspaceをread-onlyでBundle v3へ移す時だけ使う。既存Chat APIをServer 02へ暗黙に接続していない。
 
-Room階層の実PostgreSQL確認は、Hosted用とSelf-host用の接続先を指定した`server:03:verify`で行う。本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Core09のReference Adapterは内部契約の検証用であり、製品用の接続Protocolではない。
+Room階層の実PostgreSQL確認は、Hosted用とSelf-host用の接続先を指定した`server:03:verify`で行う。学習ループの同様の確認は`server:04:verify`で行う。本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Server 04は外部AI接続を内蔵せず、Hostが登録する狭いBackend cassetteだけを実行できる。
 
 現在の完了レポートはsource差分を含むため、基盤の存在と「検証済み完了」を分けて扱う。
 
@@ -544,9 +545,11 @@ Core01〜05の基盤は残す。Core06以降でSessionをWorkspaceの必須親�
 
 ### 15.3 Core07の現在の停止地点
 
+ここから15.5は**Core07〜09当時の移行停止点**であり、現在のServer 04の学習実装を否定する記述ではない。
+
 Core07で追加するのは、Activity History、Resource利用履歴、限定したWorkspace Job、交換可能なProcessor境界までである。
 
-- Activity保存後に学習Jobを自動起動しない。
+- Activity保存後に学習Jobを自動起動しない（Core07当時）。
 
 ### 15.4 Core08の現在の停止地点
 
@@ -565,7 +568,7 @@ Core08は、Artifact・Collection・Generated SurfaceのSession必須依存を�
 Core09は、External AppとAutomationの共通入口をSessionから分離する範囲までを扱う。
 
 - ConnectionはConnector evidence、委任元、Room上限、入口上限の積集合で判定し、PairingをRoom権限へ変換しない
-- Query、Domain Operation、Activity Ingestは共通Resolverを通る。Activity保存からJob、Memory、Knowledge、Skillを自動作成しない
+- Query、Domain Operation、Activity Ingestは共通Resolverを通る。Activity保存からJob、Memory、Knowledge、Skillを自動作成しない（Core09当時。Server 04では確認済みActivityから同じRoomの暫定Knowledge review Jobだけを自動化する）
 - Automationは実行直前の権限失効を`blocked`として残し、Retryと混同しない。`wiki_reindex`以外の既存kindはSessionなしExecutorが確定するまで安全停止する
 - Connection metadataとAutomation provenanceはBackup／Restoreするが、Token、Cookie、OAuth secret、App Session全文は保存しない
 - 本番MCP／Plugin／OAuth／HTTP、任意Job API、Realtime、Memory／Skill方式、UIは後続で決める
