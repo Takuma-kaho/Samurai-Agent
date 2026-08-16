@@ -135,6 +135,90 @@ describe("Workspace Bundle v3 credential boundary", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("accepts a complete, credential-free learning history and binds every evidence row", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        learning: {
+          "learning-activities.jsonl": [{
+            workspace_id: workspaceId, room_id: "room_root", id: "activity_one", group_key: "group_one",
+            principal_account_id: accountId, source_kind: "test", source_id: null, correction_of_activity_id: null,
+            instruction_summary: "Deploy", result_summary: "Passed", outcome: "completed", verification_state: "confirmed",
+            failure_state: "none", explicit_remember: false, payload: {}, created_at: timestamp, finalized_at: timestamp
+          }],
+          "learning-resources.jsonl": [{
+            workspace_id: workspaceId, id: "resource_one", scope_kind: "room", room_id: "room_root",
+            resource_kind: "knowledge", state: "active", is_absolute_rule: false, ai_update_locked: false,
+            title: "Deploy procedure", content: "Run the verified deployment", payload: {}, version: 1,
+            created_by: accountId, updated_by: accountId, archived_at: null, created_at: timestamp, updated_at: timestamp
+          }],
+          "learning-resource-versions.jsonl": [{
+            workspace_id: workspaceId, id: "version_one", resource_id: "resource_one", version: 1,
+            change_kind: "created", scope_kind: "room", room_id: "room_root", state: "active", ai_update_locked: false,
+            title: "Deploy procedure", content: "Run the verified deployment", payload: {},
+            content_hash: hash(canonicalJson({ title: "Deploy procedure", content: "Run the verified deployment", payload: {} })),
+            reason: "Initial evidence", actor_account_id: accountId, created_at: timestamp
+          }],
+          "learning-evidence.jsonl": [{
+            workspace_id: workspaceId, id: "evidence_one", resource_id: "resource_one", resource_version: 1,
+            activity_id: "activity_one", kind: "activity", summary: "Deploy", created_at: timestamp
+          }],
+          "learning-settings.jsonl": [{
+            workspace_id: workspaceId, id: "workspace", scope_kind: "workspace", room_id: null, enabled: true,
+            engine_id: "engine_local", model: "model_one", currency_limit: 10, token_limit: 1000,
+            currency_used: 0, tokens_used: 0, version: 1, updated_by: accountId, updated_at: timestamp
+          }],
+          "learning-jobs.jsonl": [{
+            workspace_id: workspaceId, room_id: "room_root", id: "job_one", kind: "review", status: "completed",
+            priority: "normal", group_key: "group_one", high_watermark_activity_id: "activity_one", next_run_at: timestamp,
+            attempt_count: 1, max_attempts: 5, lease_owner: null, lease_expires_at: null, heartbeat_at: null,
+            blocked_reason: null, engine_id: "engine_local", model: "model_one", created_by: accountId,
+            updated_by: accountId, created_at: timestamp, updated_at: timestamp, completed_at: timestamp
+          }],
+          "learning-job-attempts.jsonl": [{
+            workspace_id: workspaceId, id: "attempt_one", job_id: "job_one", attempt_no: 1, worker_id: "worker_one",
+            engine_id: "engine_local", model: "model_one", status: "completed", input_hash: "b".repeat(64),
+            output_hash: "c".repeat(64), output: {}, error_code: null, currency_used: 1, tokens_used: 10,
+            started_at: timestamp, completed_at: timestamp
+          }],
+          "learning-resource-uses.jsonl": [{
+            workspace_id: workspaceId, id: "use_one", resource_id: "resource_one", resource_version: 1,
+            activity_id: "activity_one", outcome: "confirmed_success", summary: "Worked", created_at: timestamp
+          }]
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV3(root)).resolves.toMatchObject({
+        manifest: { record_counts: { learning_resources: 1, learning_jobs: 1 } }
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a learning settings row whose id cannot be updated through its declared scope", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        learning: {
+          "learning-settings.jsonl": [{
+            workspace_id: workspaceId, id: "arbitrary_settings_id", scope_kind: "workspace", room_id: null,
+            enabled: true, engine_id: null, model: null, currency_limit: null, token_limit: null,
+            currency_used: 0, tokens_used: 0, version: 1, updated_by: accountId, updated_at: timestamp
+          }]
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV3(root)).rejects.toThrow("workspace_bundle_v3_relation_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 const workspaceId = "workspace_bundle_test";
@@ -170,7 +254,12 @@ function roomMembership(roomId: string): Record<string, unknown> {
 
 async function writeHierarchyBundle(
   root: string,
-  input: { schemaVersion?: number; rooms: Record<string, unknown>[]; roomMemberships: Record<string, unknown>[] }
+  input: {
+    schemaVersion?: number;
+    rooms: Record<string, unknown>[];
+    roomMemberships: Record<string, unknown>[];
+    learning?: Partial<Record<LearningFile, Record<string, unknown>[]>>;
+  }
 ): Promise<void> {
   const files = new Map<string, string>([
     ["workspace.json", canonicalJson({
@@ -205,6 +294,9 @@ async function writeHierarchyBundle(
     ["audits.jsonl", ""],
     ["files.jsonl", ""]
   ]);
+  if (input.learning) {
+    for (const file of learningFiles) files.set(file, jsonLines(input.learning[file] ?? []));
+  }
   const recordCounts = {
     rooms: input.rooms.length,
     memberships: 1,
@@ -215,7 +307,8 @@ async function writeHierarchyBundle(
     operations: 0,
     invitations: 0,
     audits: 0,
-    files: 0
+    files: 0,
+    ...(input.learning ? Object.fromEntries(learningFiles.map((file) => [learningCountName(file), input.learning?.[file]?.length ?? 0])) : {})
   };
   const hashes = Object.fromEntries([...files.entries()].map(([name, content]) => [name, hash(content)]).sort(([left], [right]) => left.localeCompare(right)));
   for (const [name, content] of files) await writeFile(path.join(root, name), content, "utf8");
@@ -224,11 +317,29 @@ async function writeHierarchyBundle(
     workspace_id: workspaceId,
     exported_at: timestamp,
     source: { hosting_mode: "self_host", database_placement: "dedicated" },
-    schema_version: input.schemaVersion ?? 22,
+    schema_version: input.schemaVersion ?? (input.learning ? 27 : 22),
     files: hashes,
     record_counts: recordCounts,
     integrity_hash: hash(canonicalJson({ files: hashes, record_counts: recordCounts }))
   }), "utf8");
+}
+
+const learningFiles = [
+  "learning-activities.jsonl",
+  "learning-resources.jsonl",
+  "learning-resource-versions.jsonl",
+  "learning-evidence.jsonl",
+  "learning-resource-links.jsonl",
+  "learning-settings.jsonl",
+  "learning-jobs.jsonl",
+  "learning-job-attempts.jsonl",
+  "learning-resource-uses.jsonl"
+] as const;
+
+type LearningFile = (typeof learningFiles)[number];
+
+function learningCountName(file: LearningFile): string {
+  return file.replace(".jsonl", "").replaceAll("-", "_");
 }
 
 function jsonLines(rows: Record<string, unknown>[]): string {

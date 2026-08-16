@@ -194,6 +194,217 @@ export interface WorkspaceAuditEntry {
   createdAt: string;
 }
 
+/** Knowledge has an explicit Workspace or Room scope.  A Workspace is never
+ * represented by a synthetic root Room. */
+export const workspaceLearningScopeKinds = ["workspace", "room"] as const;
+export type WorkspaceLearningScopeKind = (typeof workspaceLearningScopeKinds)[number];
+
+export const workspaceLearningResourceKinds = ["knowledge", "memory", "skill", "workspace_rule"] as const;
+export type WorkspaceLearningResourceKind = (typeof workspaceLearningResourceKinds)[number];
+
+export const workspaceLearningResourceStates = ["active", "provisional", "archived", "conflict"] as const;
+export type WorkspaceLearningResourceState = (typeof workspaceLearningResourceStates)[number];
+
+export const workspaceLearningActivityOutcomes = ["completed", "failed", "cancelled", "outcome_unknown"] as const;
+export type WorkspaceLearningActivityOutcome = (typeof workspaceLearningActivityOutcomes)[number];
+
+export const workspaceLearningVerificationStates = ["confirmed", "failed", "not_run", "unknown"] as const;
+export type WorkspaceLearningVerificationState = (typeof workspaceLearningVerificationStates)[number];
+
+export const workspaceLearningFailureStates = ["none", "resolved", "unresolved"] as const;
+export type WorkspaceLearningFailureState = (typeof workspaceLearningFailureStates)[number];
+
+export const workspaceLearningJobStatuses = ["queued", "running", "completed", "failed", "blocked"] as const;
+export type WorkspaceLearningJobStatus = (typeof workspaceLearningJobStatuses)[number];
+
+export const workspaceLearningJobPriorities = ["normal", "high"] as const;
+export type WorkspaceLearningJobPriority = (typeof workspaceLearningJobPriorities)[number];
+
+export const workspaceLearningChangeKinds = [
+  "created", "updated", "evidence_appended", "conflict_recorded", "archived", "restored", "copied", "moved", "promoted", "fixed", "unfixed"
+] as const;
+export type WorkspaceLearningChangeKind = (typeof workspaceLearningChangeKinds)[number];
+
+export interface WorkspaceLearningScope {
+  kind: WorkspaceLearningScopeKind;
+  /** Required only for Room-scoped data. */
+  roomId?: string;
+}
+
+/** Immutable, finalized work evidence. Session identifiers belong in provenance
+ * payload only and are not a parent or authorization source. */
+export interface WorkspaceLearningActivity {
+  workspaceId: string;
+  roomId: string;
+  id: string;
+  groupKey: string;
+  principalAccountId: string;
+  sourceKind: string;
+  sourceId?: string;
+  correctionOfActivityId?: string;
+  instructionSummary: string;
+  resultSummary?: string;
+  outcome: WorkspaceLearningActivityOutcome;
+  verificationState: WorkspaceLearningVerificationState;
+  failureState: WorkspaceLearningFailureState;
+  explicitRemember: boolean;
+  payload: WorkspaceRecordPayload;
+  createdAt: string;
+  finalizedAt: string;
+}
+
+/** Current projection of a versioned reusable resource. */
+export interface WorkspaceLearningResource {
+  workspaceId: string;
+  id: string;
+  scope: WorkspaceLearningScope;
+  kind: WorkspaceLearningResourceKind;
+  state: WorkspaceLearningResourceState;
+  /** Workspace rules with this flag are injected before all other Knowledge. */
+  isAbsoluteRule: boolean;
+  /** Human-only explicit fixed state. A normal human edit does not set this. */
+  aiUpdateLocked: boolean;
+  /** AI-created Room Knowledge remains visibly provisional until later use or
+   * an explicit human action establishes stronger confidence. */
+  confidence?: number;
+  /** The narrow review Job/Attempt that created the automatic projection. */
+  sourceJobId?: string;
+  sourceAttemptId?: string;
+  title: string;
+  content: string;
+  payload: WorkspaceRecordPayload;
+  version: number;
+  createdBy: string;
+  updatedBy: string;
+  archivedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Append-only revision metadata and body for a reusable resource. */
+export interface WorkspaceLearningResourceVersion {
+  workspaceId: string;
+  id: string;
+  resourceId: string;
+  version: number;
+  changeKind: WorkspaceLearningChangeKind;
+  scope: WorkspaceLearningScope;
+  state: WorkspaceLearningResourceState;
+  aiUpdateLocked: boolean;
+  confidence?: number;
+  sourceJobId?: string;
+  sourceAttemptId?: string;
+  title: string;
+  content: string;
+  payload: WorkspaceRecordPayload;
+  contentHash: string;
+  reason: string;
+  actorAccountId: string;
+  createdAt: string;
+}
+
+export interface WorkspaceLearningEvidence {
+  workspaceId: string;
+  id: string;
+  resourceId: string;
+  resourceVersion: number;
+  /** Human direct edits have no synthetic Room Activity. */
+  activityId?: string;
+  kind: "activity" | "human_correction" | "explicit_remember" | "use_outcome" | "human_edit";
+  summary: string;
+  createdAt: string;
+}
+
+/** A later, confirmed outcome of Knowledge use. It is evidence for a future
+ * review, not permission for a model to edit the resource directly. */
+export interface WorkspaceLearningResourceUse {
+  workspaceId: string;
+  id: string;
+  resourceId: string;
+  resourceVersion: number;
+  activityId: string;
+  outcome: "confirmed_success" | "confirmed_failure" | "unknown";
+  /** An unknown outcome is never overwritten. Its later confirmation is a
+   * second, append-only row pointing back to the original observation. */
+  supersedesUseId?: string;
+  summary: string;
+  createdAt: string;
+}
+
+export interface WorkspaceLearningResourceLink {
+  workspaceId: string;
+  id: string;
+  fromResourceId: string;
+  toResourceId: string;
+  relation: "conflicts" | "copied_from" | "moved_from" | "promoted_from" | "derived_from";
+  createdAt: string;
+}
+
+export interface WorkspaceLearningJob {
+  workspaceId: string;
+  roomId: string;
+  id: string;
+  kind: "review" | "curator";
+  status: WorkspaceLearningJobStatus;
+  priority: WorkspaceLearningJobPriority;
+  groupKey: string;
+  highWatermarkActivityId: string;
+  nextRunAt: string;
+  attemptCount: number;
+  maxAttempts: number;
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  heartbeatAt?: string;
+  blockedReason?: string;
+  engineId?: string;
+  model?: string;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface WorkspaceLearningJobAttempt {
+  workspaceId: string;
+  id: string;
+  jobId: string;
+  attemptNo: number;
+  workerId: string;
+  engineId?: string;
+  model?: string;
+  status: "running" | "completed" | "failed" | "blocked";
+  inputHash: string;
+  outputHash?: string;
+  output?: WorkspaceRecordPayload;
+  errorCode?: string;
+  usage: { currency?: number; tokens?: number };
+  reservation: { currency: number; tokens: number };
+  startedAt: string;
+  completedAt?: string;
+}
+
+/** Workspace defaults or an explicit Room override. Secret material never
+ * appears here; `secretRef` is opaque operator-owned configuration only. */
+export interface WorkspaceLearningSettings {
+  workspaceId: string;
+  id: string;
+  scope: WorkspaceLearningScope;
+  enabled: boolean;
+  engineId?: string;
+  model?: string;
+  secretRef?: string;
+  currencyLimit?: number;
+  tokenLimit?: number;
+  currencyUsed: number;
+  tokensUsed: number;
+  currencyReserved: number;
+  tokensReserved: number;
+  version: number;
+  updatedBy: string;
+  updatedAt: string;
+}
+
 export interface WorkspaceBundleV3Manifest {
   format_version: 3;
   workspace_id: string;

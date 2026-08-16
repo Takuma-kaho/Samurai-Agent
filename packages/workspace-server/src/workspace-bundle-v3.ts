@@ -11,7 +11,21 @@ import { WorkspaceServerStore } from "./workspace-server-store";
 
 const manifestFile = "manifest.json";
 const workspaceFile = "workspace.json";
-const jsonlFiles = ["accounts.jsonl", "rooms.jsonl", "memberships.jsonl", "room-memberships.jsonl", "records.jsonl", "events.jsonl", "jobs.jsonl", "operations.jsonl", "invitations.jsonl", "audits.jsonl", "files.jsonl"] as const;
+const coreJsonlFiles = ["accounts.jsonl", "rooms.jsonl", "memberships.jsonl", "room-memberships.jsonl", "records.jsonl", "events.jsonl", "jobs.jsonl", "operations.jsonl", "invitations.jsonl", "audits.jsonl", "files.jsonl"] as const;
+// Bundle v3 remains backward compatible: a Bundle exported before the
+// learning loop simply has empty rows for these optional files on import.
+const learningJsonlFiles = [
+  "learning-activities.jsonl",
+  "learning-resources.jsonl",
+  "learning-resource-versions.jsonl",
+  "learning-evidence.jsonl",
+  "learning-resource-links.jsonl",
+  "learning-settings.jsonl",
+  "learning-jobs.jsonl",
+  "learning-job-attempts.jsonl",
+  "learning-resource-uses.jsonl"
+] as const;
+const jsonlFiles = [...coreJsonlFiles, ...learningJsonlFiles] as const;
 const credentialFilePath = /(?:^|\/)(?:\.env(?:\..*)?|[^/]*(?:credential|secret|token|private[_-]?key|id_rsa)[^/]*|[^/]+\.(?:pem|key|p12|pfx))$/i;
 const credentialText = /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----|(?:^|[\n{,])\s*["']?(?:password|passphrase|secret|private[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|credential|api[_-]?key)["']?\s*[:=]|(?:^|[^A-Za-z0-9])(?:sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})(?:$|[^A-Za-z0-9])/i;
 const credentialFieldNames = new Set([
@@ -71,6 +85,44 @@ const portableSchema: Readonly<Record<string, { required: readonly string[]; all
   "files.jsonl": {
     required: ["workspace_id", "room_id", "path", "version", "sha256", "size", "created_by", "updated_by", "created_at", "updated_at"],
     allowed: ["workspace_id", "room_id", "path", "version", "sha256", "size", "created_by", "updated_by", "created_at", "updated_at"]
+  },
+  "learning-activities.jsonl": {
+    required: ["workspace_id", "room_id", "id", "group_key", "principal_account_id", "source_kind", "source_id", "correction_of_activity_id", "instruction_summary", "result_summary", "outcome", "verification_state", "failure_state", "explicit_remember", "payload", "created_at", "finalized_at"],
+    allowed: ["workspace_id", "room_id", "id", "group_key", "principal_account_id", "source_kind", "source_id", "correction_of_activity_id", "instruction_summary", "result_summary", "outcome", "verification_state", "failure_state", "explicit_remember", "payload", "created_at", "finalized_at"]
+  },
+  "learning-resources.jsonl": {
+    required: ["workspace_id", "id", "scope_kind", "room_id", "resource_kind", "state", "is_absolute_rule", "ai_update_locked", "title", "content", "payload", "version", "created_by", "updated_by", "archived_at", "created_at", "updated_at"],
+    allowed: ["workspace_id", "id", "scope_kind", "room_id", "resource_kind", "state", "is_absolute_rule", "ai_update_locked", "confidence", "source_job_id", "source_attempt_id", "title", "content", "payload", "version", "created_by", "updated_by", "archived_at", "created_at", "updated_at"]
+  },
+  "learning-resource-versions.jsonl": {
+    required: ["workspace_id", "id", "resource_id", "version", "change_kind", "scope_kind", "room_id", "state", "ai_update_locked", "title", "content", "payload", "content_hash", "reason", "actor_account_id", "created_at"],
+    allowed: ["workspace_id", "id", "resource_id", "version", "change_kind", "scope_kind", "room_id", "state", "ai_update_locked", "confidence", "source_job_id", "source_attempt_id", "title", "content", "payload", "content_hash", "reason", "actor_account_id", "created_at"]
+  },
+  "learning-evidence.jsonl": {
+    required: ["workspace_id", "id", "resource_id", "resource_version", "activity_id", "kind", "summary", "created_at"],
+    allowed: ["workspace_id", "id", "resource_id", "resource_version", "activity_id", "kind", "summary", "created_at"]
+  },
+  "learning-resource-links.jsonl": {
+    required: ["workspace_id", "id", "from_resource_id", "to_resource_id", "relation", "created_at"],
+    allowed: ["workspace_id", "id", "from_resource_id", "to_resource_id", "relation", "created_at"]
+  },
+  "learning-settings.jsonl": {
+    // SecretRef is intentionally not portable. The target operator chooses a
+    // local engine secret after restore.
+    required: ["workspace_id", "id", "scope_kind", "room_id", "enabled", "engine_id", "model", "currency_limit", "token_limit", "currency_used", "tokens_used", "version", "updated_by", "updated_at"],
+    allowed: ["workspace_id", "id", "scope_kind", "room_id", "enabled", "engine_id", "model", "currency_limit", "token_limit", "currency_used", "tokens_used", "currency_reserved", "tokens_reserved", "version", "updated_by", "updated_at"]
+  },
+  "learning-jobs.jsonl": {
+    required: ["workspace_id", "room_id", "id", "kind", "status", "priority", "group_key", "high_watermark_activity_id", "next_run_at", "attempt_count", "max_attempts", "lease_owner", "lease_expires_at", "heartbeat_at", "blocked_reason", "engine_id", "model", "created_by", "updated_by", "created_at", "updated_at", "completed_at"],
+    allowed: ["workspace_id", "room_id", "id", "kind", "status", "priority", "group_key", "high_watermark_activity_id", "next_run_at", "attempt_count", "max_attempts", "lease_owner", "lease_expires_at", "heartbeat_at", "blocked_reason", "engine_id", "model", "created_by", "updated_by", "created_at", "updated_at", "completed_at"]
+  },
+  "learning-job-attempts.jsonl": {
+    required: ["workspace_id", "id", "job_id", "attempt_no", "worker_id", "engine_id", "model", "status", "input_hash", "output_hash", "output", "error_code", "currency_used", "tokens_used", "started_at", "completed_at"],
+    allowed: ["workspace_id", "id", "job_id", "attempt_no", "worker_id", "engine_id", "model", "status", "input_hash", "output_hash", "output", "error_code", "currency_used", "tokens_used", "reserved_currency", "reserved_tokens", "started_at", "completed_at"]
+  },
+  "learning-resource-uses.jsonl": {
+    required: ["workspace_id", "id", "resource_id", "resource_version", "activity_id", "outcome", "summary", "created_at"],
+    allowed: ["workspace_id", "id", "resource_id", "resource_version", "activity_id", "outcome", "supersedes_use_id", "summary", "created_at"]
   }
 };
 
@@ -536,6 +588,8 @@ export class WorkspaceBundleV3Service {
           canonicalJson(source.manifest.record_counts)
         ]);
       });
+      // The import transaction committed; later verification/completion may
+      // fail and must use the guarded database abort path.
       importSessionStarted = true;
       await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
       await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
@@ -553,12 +607,20 @@ export class WorkspaceBundleV3Service {
         ...(source.manifest.transfer_id ? { receipt: transferReceipt(source.manifest, input.targetWorkspaceId) } : {})
       };
     } catch (error) {
+      let abortFailed = false;
       if (importSessionStarted) {
-        await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
+        try {
+          await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
           await sql.query("SELECT samurai_abort_workspace_import($1, $2)", [input.targetWorkspaceId, importId]);
-        }).catch(() => undefined);
+          });
+        } catch {
+          abortFailed = true;
+        }
       }
-      if (finalRootCreated) await rm(finalRoot, { recursive: true, force: true }).catch(() => undefined);
+      // Do not remove the files if database cleanup failed: keeping them is
+      // the only recoverable evidence for a partially imported Workspace.
+      if (!abortFailed && finalRootCreated) await rm(finalRoot, { recursive: true, force: true }).catch(() => undefined);
+      if (abortFailed) throw new WorkspaceServerError("workspace_import_abort_failed", 500);
       throw error;
     } finally {
       await rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -581,6 +643,16 @@ export class WorkspaceBundleV3Service {
       const invitations = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, room_id, workspace_role, room_role, created_by, expires_at, revoked_at, accepted_by, accepted_at, version, created_at FROM workspace_invitations WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const audits = await sql.query<Record<string, unknown>>("SELECT id AS source_audit_id, workspace_id, room_id, actor_account_id, action, outcome, operation_id, subject_kind, subject_id, before_version, after_version, details, created_at FROM workspace_audit_entries WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const files = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, path, version, sha256, size, created_by, updated_by, created_at, updated_at FROM workspace_files WHERE workspace_id = $1 ORDER BY path", [context.workspaceId]);
+      const learningActivities = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, id, group_key, principal_account_id, source_kind, source_id, correction_of_activity_id, instruction_summary, result_summary, outcome, verification_state, failure_state, explicit_remember, payload, created_at, finalized_at FROM workspace_learning_activities WHERE workspace_id = $1 ORDER BY finalized_at, id", [context.workspaceId]);
+      const learningResources = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, scope_kind, room_id, resource_kind, state, is_absolute_rule, ai_update_locked, confidence, source_job_id, source_attempt_id, title, content, payload, version, created_by, updated_by, archived_at, created_at, updated_at FROM workspace_learning_resources WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const learningResourceVersions = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, resource_id, version, change_kind, scope_kind, room_id, state, ai_update_locked, confidence, source_job_id, source_attempt_id, title, content, payload, content_hash, reason, actor_account_id, created_at FROM workspace_learning_resource_versions WHERE workspace_id = $1 ORDER BY resource_id, version", [context.workspaceId]);
+      const learningEvidence = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, resource_id, resource_version, activity_id, kind, summary, created_at FROM workspace_learning_evidence WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const learningResourceLinks = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, from_resource_id, to_resource_id, relation, created_at FROM workspace_learning_resource_links WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      // SecretRef is deliberately omitted from portable data.
+      const learningSettings = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, scope_kind, room_id, enabled, engine_id, model, currency_limit, token_limit, currency_used, tokens_used, currency_reserved, tokens_reserved, version, updated_by, updated_at FROM workspace_learning_settings WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const learningJobs = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, id, kind, status, priority, group_key, high_watermark_activity_id, next_run_at, attempt_count, max_attempts, lease_owner, lease_expires_at, heartbeat_at, blocked_reason, engine_id, model, created_by, updated_by, created_at, updated_at, completed_at FROM workspace_learning_jobs WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const learningJobAttempts = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, job_id, attempt_no, worker_id, engine_id, model, status, input_hash, output_hash, output, error_code, currency_used, tokens_used, reserved_currency, reserved_tokens, started_at, completed_at FROM workspace_learning_job_attempts WHERE workspace_id = $1 ORDER BY job_id, attempt_no", [context.workspaceId]);
+      const learningResourceUses = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, resource_id, resource_version, activity_id, outcome, supersedes_use_id, summary, created_at FROM workspace_learning_resource_uses WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const workspaceRow = workspace.rows[0];
       if (!workspaceRow) throw new WorkspaceServerError("workspace_not_found", 404);
       return {
@@ -595,7 +667,16 @@ export class WorkspaceBundleV3Service {
         operations: operations.rows,
         invitations: invitations.rows,
         audits: audits.rows,
-        files: files.rows
+        files: files.rows,
+        learningActivities: learningActivities.rows,
+        learningResources: learningResources.rows,
+        learningResourceVersions: learningResourceVersions.rows,
+        learningEvidence: learningEvidence.rows,
+        learningResourceLinks: learningResourceLinks.rows,
+        learningSettings: learningSettings.rows,
+        learningJobs: learningJobs.rows,
+        learningJobAttempts: learningJobAttempts.rows,
+        learningResourceUses: learningResourceUses.rows
       };
     });
   }
@@ -815,6 +896,15 @@ interface WorkspaceSnapshot {
   invitations: Record<string, unknown>[];
   audits: Record<string, unknown>[];
   files: Record<string, unknown>[];
+  learningActivities: Record<string, unknown>[];
+  learningResources: Record<string, unknown>[];
+  learningResourceVersions: Record<string, unknown>[];
+  learningEvidence: Record<string, unknown>[];
+  learningResourceLinks: Record<string, unknown>[];
+  learningSettings: Record<string, unknown>[];
+  learningJobs: Record<string, unknown>[];
+  learningJobAttempts: Record<string, unknown>[];
+  learningResourceUses: Record<string, unknown>[];
 }
 
 async function writeBundleDirectory(input: {
@@ -838,7 +928,16 @@ async function writeBundleDirectory(input: {
     ["operations.jsonl", input.snapshot.operations],
     ["invitations.jsonl", input.snapshot.invitations],
     ["audits.jsonl", input.snapshot.audits],
-    ["files.jsonl", input.snapshot.files]
+    ["files.jsonl", input.snapshot.files],
+    ["learning-activities.jsonl", input.snapshot.learningActivities],
+    ["learning-resources.jsonl", input.snapshot.learningResources],
+    ["learning-resource-versions.jsonl", input.snapshot.learningResourceVersions],
+    ["learning-evidence.jsonl", input.snapshot.learningEvidence],
+    ["learning-resource-links.jsonl", input.snapshot.learningResourceLinks],
+    ["learning-settings.jsonl", input.snapshot.learningSettings],
+    ["learning-jobs.jsonl", input.snapshot.learningJobs],
+    ["learning-job-attempts.jsonl", input.snapshot.learningJobAttempts],
+    ["learning-resource-uses.jsonl", input.snapshot.learningResourceUses]
   ];
   for (const [file, payload] of dataFiles) {
     const contents = Array.isArray(payload) ? payload.map((row) => canonicalJson(row)).join("\n") + (payload.length > 0 ? "\n" : "") : canonicalJson(payload);
@@ -866,7 +965,16 @@ async function writeBundleDirectory(input: {
     operations: input.snapshot.operations.length,
     invitations: input.snapshot.invitations.length,
     audits: input.snapshot.audits.length,
-    files: input.snapshot.files.length
+    files: input.snapshot.files.length,
+    learning_activities: input.snapshot.learningActivities.length,
+    learning_resources: input.snapshot.learningResources.length,
+    learning_resource_versions: input.snapshot.learningResourceVersions.length,
+    learning_evidence: input.snapshot.learningEvidence.length,
+    learning_resource_links: input.snapshot.learningResourceLinks.length,
+    learning_settings: input.snapshot.learningSettings.length,
+    learning_jobs: input.snapshot.learningJobs.length,
+    learning_job_attempts: input.snapshot.learningJobAttempts.length,
+    learning_resource_uses: input.snapshot.learningResourceUses.length
   };
   const source = input.snapshot.workspace;
   const manifest: WorkspaceBundleV3Manifest = {
@@ -877,7 +985,7 @@ async function writeBundleDirectory(input: {
       hosting_mode: String(source.hosting_mode) as WorkspaceServerMode,
       database_placement: String(source.database_placement) as "shared" | "dedicated"
     },
-    schema_version: 22,
+    schema_version: 26,
     ...(input.transferId ? { transfer_id: input.transferId } : {}),
     files: hashes,
     record_counts: recordCounts,
@@ -904,7 +1012,7 @@ export async function verifyWorkspaceBundleV3(directory: string): Promise<{ dire
   if (manifest.integrity_hash !== hashText(canonicalJson({ files: manifest.files, record_counts: manifest.record_counts }))) {
     throw new WorkspaceServerError("workspace_bundle_v3_integrity_hash_mismatch", 400);
   }
-  const expected = new Set([workspaceFile, ...jsonlFiles]);
+  const expected = new Set([workspaceFile, ...coreJsonlFiles]);
   for (const file of Object.keys(actual)) {
     if (file !== workspaceFile && !jsonlFiles.includes(file as (typeof jsonlFiles)[number]) && !file.startsWith("files/")) {
       throw new WorkspaceServerError("workspace_bundle_v3_unexpected_file", 400);
@@ -914,7 +1022,9 @@ export async function verifyWorkspaceBundleV3(directory: string): Promise<{ dire
   if (expected.size > 0) throw new WorkspaceServerError("workspace_bundle_v3_required_file_missing", 400);
   const rowsByFile = new Map<string, Record<string, unknown>[]>();
   for (const file of [workspaceFile, ...jsonlFiles]) {
-    const rows = await assertPortableJsonFile(path.join(root, file), file);
+    const rows = learningJsonlFiles.includes(file as (typeof learningJsonlFiles)[number]) && !actual[file]
+      ? []
+      : await assertPortableJsonFile(path.join(root, file), file);
     rowsByFile.set(file, rows);
   }
   assertPortableBundleRelations(manifest, rowsByFile);
@@ -1062,6 +1172,97 @@ async function importSnapshot(sql: WorkspaceSql, input: {
       await sql.query(`INSERT INTO ${table}(${sqlColumns}) VALUES ($1, ${placeholders})`, [input.targetWorkspaceId, ...values]);
     }
   }
+  // Learning data is part of the Workspace's portable history.  It is kept
+  // separate from generic records so Restore cannot accidentally turn a
+  // historical note into executable state.  A running job has no portable
+  // process lease, so it is deliberately returned to the queue.
+  for (const [file, table, columns] of [
+    ["learning-activities.jsonl", "workspace_learning_activities", ["room_id", "id", "group_key", "principal_account_id", "source_kind", "source_id", "correction_of_activity_id", "instruction_summary", "result_summary", "outcome", "verification_state", "failure_state", "explicit_remember", "payload", "created_at", "finalized_at"]],
+    ["learning-resources.jsonl", "workspace_learning_resources", ["id", "scope_kind", "room_id", "resource_kind", "state", "is_absolute_rule", "ai_update_locked", "confidence", "source_job_id", "source_attempt_id", "title", "content", "payload", "version", "created_by", "updated_by", "archived_at", "created_at", "updated_at"]],
+    ["learning-resource-versions.jsonl", "workspace_learning_resource_versions", ["id", "resource_id", "version", "change_kind", "scope_kind", "room_id", "state", "ai_update_locked", "confidence", "source_job_id", "source_attempt_id", "title", "content", "payload", "content_hash", "reason", "actor_account_id", "created_at"]],
+    ["learning-evidence.jsonl", "workspace_learning_evidence", ["id", "resource_id", "resource_version", "activity_id", "kind", "summary", "created_at"]],
+    ["learning-resource-links.jsonl", "workspace_learning_resource_links", ["id", "from_resource_id", "to_resource_id", "relation", "created_at"]],
+    // secret_ref is intentionally not present in portable data.
+    ["learning-settings.jsonl", "workspace_learning_settings", ["id", "scope_kind", "room_id", "enabled", "engine_id", "model", "currency_limit", "token_limit", "currency_used", "tokens_used", "version", "updated_by", "updated_at"]],
+    ["learning-resource-uses.jsonl", "workspace_learning_resource_uses", ["id", "resource_id", "resource_version", "activity_id", "outcome", "supersedes_use_id", "summary", "created_at"]]
+  ] as const) {
+    const rows = await readOptionalJsonl(path.join(input.sourceDirectory, file));
+    for (const row of rows) {
+      const placeholders = columns.map((_, index) => `$${index + 2}`).join(", ");
+      const values = columns.map((column) => jsonColumnValue(row[column]));
+      const sqlColumns = ["workspace_id", ...columns].join(", ");
+      await sql.query(`INSERT INTO ${table}(${sqlColumns}) VALUES ($1, ${placeholders})`, [input.targetWorkspaceId, ...values]);
+    }
+  }
+  for (const row of await readOptionalJsonl(path.join(input.sourceDirectory, "learning-jobs.jsonl"))) {
+    const wasRunning = row.status === "running";
+    await sql.query(
+      `INSERT INTO workspace_learning_jobs(
+         workspace_id, room_id, id, kind, status, priority, group_key,
+         high_watermark_activity_id, next_run_at, attempt_count, max_attempts,
+         lease_owner, lease_expires_at, heartbeat_at, blocked_reason, engine_id,
+         model, created_by, updated_by, created_at, updated_at, completed_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9::TIMESTAMPTZ, $10, $11,
+         NULL, NULL, NULL, $12, $13, $14, $15, $16, $17::TIMESTAMPTZ,
+         $18::TIMESTAMPTZ, $19::TIMESTAMPTZ
+       )`,
+      [
+        input.targetWorkspaceId,
+        String(row.room_id),
+        String(row.id),
+        String(row.kind),
+        wasRunning ? "queued" : String(row.status),
+        String(row.priority),
+        String(row.group_key),
+        String(row.high_watermark_activity_id),
+        wasRunning ? new Date().toISOString() : String(row.next_run_at),
+        Number(row.attempt_count),
+        Number(row.max_attempts),
+        wasRunning ? null : (row.blocked_reason === null || row.blocked_reason === undefined ? null : String(row.blocked_reason)),
+        row.engine_id === null || row.engine_id === undefined ? null : String(row.engine_id),
+        row.model === null || row.model === undefined ? null : String(row.model),
+        String(row.created_by),
+        String(row.updated_by),
+        String(row.created_at),
+        String(row.updated_at),
+        wasRunning ? null : (row.completed_at === null || row.completed_at === undefined ? null : String(row.completed_at))
+      ]
+    );
+  }
+  for (const row of await readOptionalJsonl(path.join(input.sourceDirectory, "learning-job-attempts.jsonl"))) {
+    const wasRunning = row.status === "running";
+    await sql.query(
+      `INSERT INTO workspace_learning_job_attempts(
+         workspace_id, id, job_id, attempt_no, worker_id, engine_id, model,
+         status, input_hash, output_hash, output, error_code, currency_used,
+         tokens_used, reserved_currency, reserved_tokens, started_at, completed_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::JSONB, $12, $13,
+         $14, $15, $16, $17::TIMESTAMPTZ, $18::TIMESTAMPTZ
+       )`,
+      [
+        input.targetWorkspaceId,
+        String(row.id),
+        String(row.job_id),
+        Number(row.attempt_no),
+        String(row.worker_id),
+        row.engine_id === null || row.engine_id === undefined ? null : String(row.engine_id),
+        row.model === null || row.model === undefined ? null : String(row.model),
+        wasRunning ? "failed" : String(row.status),
+        String(row.input_hash),
+        row.output_hash === null || row.output_hash === undefined ? null : String(row.output_hash),
+        jsonColumnValue(row.output),
+        wasRunning ? "workspace_learning_restore_interrupted" : (row.error_code === null || row.error_code === undefined ? null : String(row.error_code)),
+        Number(row.currency_used),
+        Number(row.tokens_used),
+        wasRunning ? 0 : Number(row.reserved_currency ?? 0),
+        wasRunning ? 0 : Number(row.reserved_tokens ?? 0),
+        String(row.started_at),
+        wasRunning ? new Date().toISOString() : (row.completed_at === null || row.completed_at === undefined ? null : String(row.completed_at))
+      ]
+    );
+  }
   // Invite tokens are intentionally excluded from Bundle v3. Historical rows
   // survive, but an unaccepted source invitation is revoked on import because
   // it cannot be safely replayed under the target server's signing secret.
@@ -1123,9 +1324,13 @@ async function verifyImportedWorkspace(
   const counts = await store.database.withContext(context, async (sql) => {
     const rows = await Promise.all([
       count(sql, "rooms", context.workspaceId), count(sql, "workspace_members", context.workspaceId), count(sql, "room_members", context.workspaceId), count(sql, "workspace_records", context.workspaceId), count(sql, "workspace_events", context.workspaceId),
-      count(sql, "workspace_jobs", context.workspaceId), count(sql, "workspace_operations", context.workspaceId), count(sql, "workspace_invitations", context.workspaceId), count(sql, "workspace_audit_entries", context.workspaceId), count(sql, "workspace_files", context.workspaceId)
+      count(sql, "workspace_jobs", context.workspaceId), count(sql, "workspace_operations", context.workspaceId), count(sql, "workspace_invitations", context.workspaceId), count(sql, "workspace_audit_entries", context.workspaceId), count(sql, "workspace_files", context.workspaceId),
+      count(sql, "workspace_learning_activities", context.workspaceId), count(sql, "workspace_learning_resources", context.workspaceId), count(sql, "workspace_learning_resource_versions", context.workspaceId), count(sql, "workspace_learning_evidence", context.workspaceId), count(sql, "workspace_learning_resource_links", context.workspaceId), count(sql, "workspace_learning_settings", context.workspaceId), count(sql, "workspace_learning_jobs", context.workspaceId), count(sql, "workspace_learning_job_attempts", context.workspaceId), count(sql, "workspace_learning_resource_uses", context.workspaceId)
     ]);
-    return { rooms: rows[0], memberships: rows[1], room_memberships: rows[2], records: rows[3], events: rows[4], jobs: rows[5], operations: rows[6], invitations: rows[7], audits: rows[8], files: rows[9] };
+    return {
+      rooms: rows[0], memberships: rows[1], room_memberships: rows[2], records: rows[3], events: rows[4], jobs: rows[5], operations: rows[6], invitations: rows[7], audits: rows[8], files: rows[9],
+      learning_activities: rows[10], learning_resources: rows[11], learning_resource_versions: rows[12], learning_evidence: rows[13], learning_resource_links: rows[14], learning_settings: rows[15], learning_jobs: rows[16], learning_job_attempts: rows[17], learning_resource_uses: rows[18]
+    };
   });
   // The importer is guaranteed an active Owner membership on the target. If
   // they were not a member in the source, that adds exactly one local row.
@@ -1391,7 +1596,185 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
       throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
     }
   }
-  const counts: Record<string, number> = {
+  const learningActivities = new Map<string, Record<string, unknown>>();
+  for (const row of rowsByFile.get("learning-activities.jsonl") ?? []) {
+    const activityId = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const roomId = opaquePortableValue(row.room_id, "workspace_bundle_v3_relation_invalid");
+    const principalAccountId = opaquePortableValue(row.principal_account_id, "workspace_bundle_v3_relation_invalid");
+    if (learningActivities.has(activityId) || !roomIds.has(roomId) || !knownAccountIds.has(principalAccountId)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    learningActivities.set(activityId, row);
+  }
+  for (const row of learningActivities.values()) {
+    if (row.correction_of_activity_id !== null && row.correction_of_activity_id !== undefined) {
+      const correctionId = opaquePortableValue(row.correction_of_activity_id, "workspace_bundle_v3_relation_invalid");
+      const original = learningActivities.get(correctionId);
+      if (!original || original.room_id !== row.room_id) throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+  }
+  const assertLearningScope = (scopeKind: unknown, roomId: unknown): void => {
+    if (scopeKind === "workspace") {
+      if (roomId !== null) throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+      return;
+    }
+    if (scopeKind !== "room" || typeof roomId !== "string" || !roomIds.has(opaquePortableValue(roomId, "workspace_bundle_v3_relation_invalid"))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+  };
+  const learningResources = new Map<string, Record<string, unknown>>();
+  for (const row of rowsByFile.get("learning-resources.jsonl") ?? []) {
+    const resourceId = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const createdBy = opaquePortableValue(row.created_by, "workspace_bundle_v3_relation_invalid");
+    const updatedBy = opaquePortableValue(row.updated_by, "workspace_bundle_v3_relation_invalid");
+    assertLearningScope(row.scope_kind, row.room_id);
+    if (learningResources.has(resourceId) || !knownAccountIds.has(createdBy) || !knownAccountIds.has(updatedBy)
+      || !["knowledge", "memory", "skill", "workspace_rule"].includes(String(row.resource_kind))
+      || !["active", "provisional", "archived", "conflict"].includes(String(row.state))
+      || (row.resource_kind === "workspace_rule") !== (row.is_absolute_rule === true)
+      || (row.resource_kind === "workspace_rule" && row.scope_kind !== "workspace")
+      || (row.confidence !== undefined && row.confidence !== null && (!Number.isFinite(Number(row.confidence)) || Number(row.confidence) < 0 || Number(row.confidence) > 1))
+      || (row.state === "provisional" && (typeof row.source_job_id !== "string" || typeof row.source_attempt_id !== "string" || row.confidence === null || row.confidence === undefined))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    learningResources.set(resourceId, row);
+  }
+  const learningResourceVersions = new Map<string, Record<string, unknown>>();
+  for (const row of rowsByFile.get("learning-resource-versions.jsonl") ?? []) {
+    const resourceId = opaquePortableValue(row.resource_id, "workspace_bundle_v3_relation_invalid");
+    const actorAccountId = opaquePortableValue(row.actor_account_id, "workspace_bundle_v3_relation_invalid");
+    const version = Number(row.version);
+    const versionKey = `${resourceId}\u0000${version}`;
+    const resource = learningResources.get(resourceId);
+    const expectedContentHash = typeof row.title === "string" && typeof row.content === "string" && row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+      ? hashText(canonicalJson({ title: row.title, content: row.content, payload: row.payload }))
+      : undefined;
+    assertLearningScope(row.scope_kind, row.room_id);
+    if (!resource || !knownAccountIds.has(actorAccountId) || !Number.isSafeInteger(version) || version < 1 || learningResourceVersions.has(versionKey)
+      || row.scope_kind !== resource.scope_kind || row.room_id !== resource.room_id
+      || !["active", "provisional", "archived", "conflict"].includes(String(row.state))
+      || (row.confidence !== undefined && row.confidence !== null && (!Number.isFinite(Number(row.confidence)) || Number(row.confidence) < 0 || Number(row.confidence) > 1))
+      || (row.state === "provisional" && (typeof row.source_job_id !== "string" || typeof row.source_attempt_id !== "string" || row.confidence === null || row.confidence === undefined))
+      || row.content_hash !== expectedContentHash) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    learningResourceVersions.set(versionKey, row);
+  }
+  for (const [resourceId, resource] of learningResources) {
+    const currentVersion = Number(resource.version);
+    const current = learningResourceVersions.get(`${resourceId}\u0000${currentVersion}`);
+    if (!Number.isSafeInteger(currentVersion) || currentVersion < 1 || !current
+      || current.scope_kind !== resource.scope_kind || current.room_id !== resource.room_id
+      || current.state !== resource.state || current.ai_update_locked !== resource.ai_update_locked
+      || Number(current.confidence ?? -1) !== Number(resource.confidence ?? -1)
+      || (current.source_job_id ?? null) !== (resource.source_job_id ?? null)
+      || (current.source_attempt_id ?? null) !== (resource.source_attempt_id ?? null)
+      || current.title !== resource.title || current.content !== resource.content
+      || canonicalJson(current.payload) !== canonicalJson(resource.payload)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    for (let version = 1; version <= currentVersion; version += 1) {
+      if (!learningResourceVersions.has(`${resourceId}\u0000${version}`)) {
+        throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+      }
+    }
+  }
+  for (const row of rowsByFile.get("learning-evidence.jsonl") ?? []) {
+    const resourceId = opaquePortableValue(row.resource_id, "workspace_bundle_v3_relation_invalid");
+    const resource = learningResources.get(resourceId);
+    const version = Number(row.resource_version);
+    const humanEdit = row.kind === "human_edit";
+    const activityId = row.activity_id === null || row.activity_id === undefined ? undefined : opaquePortableValue(row.activity_id, "workspace_bundle_v3_relation_invalid");
+    const activity = activityId ? learningActivities.get(activityId) : undefined;
+    if (!resource || !learningResourceVersions.has(`${resourceId}\u0000${version}`)
+      || (humanEdit !== !activityId)
+      || (!humanEdit && (!activity || (resource.scope_kind === "room" && resource.room_id !== activity.room_id)))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+  }
+  for (const row of rowsByFile.get("learning-resource-links.jsonl") ?? []) {
+    const fromResourceId = opaquePortableValue(row.from_resource_id, "workspace_bundle_v3_relation_invalid");
+    const toResourceId = opaquePortableValue(row.to_resource_id, "workspace_bundle_v3_relation_invalid");
+    if (!learningResources.has(fromResourceId) || !learningResources.has(toResourceId) || fromResourceId === toResourceId
+      || !["conflicts", "copied_from", "moved_from", "promoted_from", "derived_from"].includes(String(row.relation))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+  }
+  const learningSettings = new Set<string>();
+  for (const row of rowsByFile.get("learning-settings.jsonl") ?? []) {
+    const settingsId = learningSettingsIdValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const updatedBy = opaquePortableValue(row.updated_by, "workspace_bundle_v3_relation_invalid");
+    const roomId = row.scope_kind === "room" ? opaquePortableValue(row.room_id, "workspace_bundle_v3_relation_invalid") : undefined;
+    const scopeKey = row.scope_kind === "workspace" ? "workspace" : `room:${roomId}`;
+    assertLearningScope(row.scope_kind, row.room_id);
+    if (learningSettings.has(scopeKey) || !knownAccountIds.has(updatedBy) || !settingsId
+      || settingsId !== scopeKey || typeof row.enabled !== "boolean" || Number(row.currency_used) < 0 || Number(row.tokens_used) < 0) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    learningSettings.add(scopeKey);
+  }
+  const learningJobs = new Map<string, Record<string, unknown>>();
+  for (const row of rowsByFile.get("learning-jobs.jsonl") ?? []) {
+    const jobId = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const roomId = opaquePortableValue(row.room_id, "workspace_bundle_v3_relation_invalid");
+    const activityId = opaquePortableValue(row.high_watermark_activity_id, "workspace_bundle_v3_relation_invalid");
+    const createdBy = opaquePortableValue(row.created_by, "workspace_bundle_v3_relation_invalid");
+    const updatedBy = opaquePortableValue(row.updated_by, "workspace_bundle_v3_relation_invalid");
+    const isRunning = row.status === "running";
+    const hasLease = typeof row.lease_owner === "string" && typeof row.lease_expires_at === "string" && typeof row.heartbeat_at === "string";
+    if (learningJobs.has(jobId) || !roomIds.has(roomId) || !knownAccountIds.has(createdBy) || !knownAccountIds.has(updatedBy)
+      || !learningActivities.has(activityId) || learningActivities.get(activityId)?.room_id !== roomId
+      || !["review", "curator"].includes(String(row.kind)) || !["queued", "running", "completed", "failed", "blocked"].includes(String(row.status))
+      || !["normal", "high"].includes(String(row.priority)) || isRunning !== hasLease
+      || (row.status === "blocked" && typeof row.blocked_reason !== "string")) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    learningJobs.set(jobId, row);
+  }
+  const learningAttempts = new Map<string, Record<string, unknown>>();
+  for (const row of rowsByFile.get("learning-job-attempts.jsonl") ?? []) {
+    const attemptId = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const jobId = opaquePortableValue(row.job_id, "workspace_bundle_v3_relation_invalid");
+    if (learningAttempts.has(attemptId) || !learningJobs.has(jobId) || !["running", "completed", "failed", "blocked"].includes(String(row.status))
+      || Number(row.reserved_currency ?? 0) < 0 || Number(row.reserved_tokens ?? 0) < 0) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    learningAttempts.set(attemptId, row);
+  }
+  for (const row of [...learningResources.values(), ...learningResourceVersions.values()]) {
+    const sourceJobId = row.source_job_id === null || row.source_job_id === undefined ? undefined : opaquePortableValue(row.source_job_id, "workspace_bundle_v3_relation_invalid");
+    const sourceAttemptId = row.source_attempt_id === null || row.source_attempt_id === undefined ? undefined : opaquePortableValue(row.source_attempt_id, "workspace_bundle_v3_relation_invalid");
+    if ((sourceJobId === undefined) !== (sourceAttemptId === undefined)
+      || (sourceJobId && (!learningJobs.has(sourceJobId) || !learningAttempts.has(sourceAttemptId!) || learningAttempts.get(sourceAttemptId!)?.job_id !== sourceJobId))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+  }
+  const learningUses = new Map<string, Record<string, unknown>>();
+  for (const row of rowsByFile.get("learning-resource-uses.jsonl") ?? []) {
+    const useId = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const resourceId = opaquePortableValue(row.resource_id, "workspace_bundle_v3_relation_invalid");
+    const activityId = opaquePortableValue(row.activity_id, "workspace_bundle_v3_relation_invalid");
+    const resource = learningResources.get(resourceId);
+    const activity = learningActivities.get(activityId);
+    const version = Number(row.resource_version);
+    if (learningUses.has(useId) || !resource || !activity || !learningResourceVersions.has(`${resourceId}\u0000${version}`)
+      || (resource.scope_kind === "room" && resource.room_id !== activity.room_id)
+      || !["confirmed_success", "confirmed_failure", "unknown"].includes(String(row.outcome))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    learningUses.set(useId, row);
+  }
+  const correctedUseIds = new Set<string>();
+  for (const row of learningUses.values()) {
+    if (row.supersedes_use_id === null || row.supersedes_use_id === undefined) continue;
+    const supersedesUseId = opaquePortableValue(row.supersedes_use_id, "workspace_bundle_v3_relation_invalid");
+    const prior = learningUses.get(supersedesUseId);
+    if (correctedUseIds.has(supersedesUseId) || !prior || prior.outcome !== "unknown" || prior.resource_id !== row.resource_id || prior.resource_version !== row.resource_version || prior.activity_id !== row.activity_id || row.outcome === "unknown") {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    correctedUseIds.add(supersedesUseId);
+  }
+  const allCounts: Record<string, number> = {
     rooms: rowsByFile.get("rooms.jsonl")?.length ?? 0,
     memberships: rowsByFile.get("memberships.jsonl")?.length ?? 0,
     room_memberships: rowsByFile.get("room-memberships.jsonl")?.length ?? 0,
@@ -1401,13 +1784,30 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     operations: rowsByFile.get("operations.jsonl")?.length ?? 0,
     invitations: rowsByFile.get("invitations.jsonl")?.length ?? 0,
     audits: rowsByFile.get("audits.jsonl")?.length ?? 0,
-    files: rowsByFile.get("files.jsonl")?.length ?? 0
+    files: rowsByFile.get("files.jsonl")?.length ?? 0,
+    learning_activities: rowsByFile.get("learning-activities.jsonl")?.length ?? 0,
+    learning_resources: rowsByFile.get("learning-resources.jsonl")?.length ?? 0,
+    learning_resource_versions: rowsByFile.get("learning-resource-versions.jsonl")?.length ?? 0,
+    learning_evidence: rowsByFile.get("learning-evidence.jsonl")?.length ?? 0,
+    learning_resource_links: rowsByFile.get("learning-resource-links.jsonl")?.length ?? 0,
+    learning_settings: rowsByFile.get("learning-settings.jsonl")?.length ?? 0,
+    learning_jobs: rowsByFile.get("learning-jobs.jsonl")?.length ?? 0,
+    learning_job_attempts: rowsByFile.get("learning-job-attempts.jsonl")?.length ?? 0,
+    learning_resource_uses: rowsByFile.get("learning-resource-uses.jsonl")?.length ?? 0
   };
+  const requiredCountNames = ["rooms", "memberships", "room_memberships", "records", "events", "jobs", "operations", "invitations", "audits", "files"];
+  const learningCountNames = ["learning_activities", "learning_resources", "learning_resource_versions", "learning_evidence", "learning_resource_links", "learning_settings", "learning_jobs", "learning_job_attempts", "learning_resource_uses"];
+  if (requiredCountNames.some((name) => !(name in manifest.record_counts))
+    || learningCountNames.some((name) => (allCounts[name] ?? 0) > 0 && !(name in manifest.record_counts))
+    || Object.entries(manifest.record_counts).some(([name, value]) => !(name in allCounts) || !Number.isSafeInteger(value) || value < 0)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_record_count_mismatch", 400);
+  }
+  const counts = Object.fromEntries(Object.keys(manifest.record_counts).map((name) => [name, allCounts[name]]));
   if (canonicalJson(counts) !== canonicalJson(manifest.record_counts)) {
     throw new WorkspaceServerError("workspace_bundle_v3_record_count_mismatch", 400);
   }
-  if (counts.operations !== 0) throw new WorkspaceServerError("workspace_bundle_v3_operations_not_portable", 400);
-  for (const file of ["rooms.jsonl", "memberships.jsonl", "room-memberships.jsonl", "records.jsonl", "events.jsonl", "jobs.jsonl", "invitations.jsonl", "audits.jsonl", "files.jsonl"] as const) {
+  if (allCounts.operations !== 0) throw new WorkspaceServerError("workspace_bundle_v3_operations_not_portable", 400);
+  for (const file of ["rooms.jsonl", "memberships.jsonl", "room-memberships.jsonl", "records.jsonl", "events.jsonl", "jobs.jsonl", "invitations.jsonl", "audits.jsonl", "files.jsonl", ...learningJsonlFiles] as const) {
     for (const row of rowsByFile.get(file) ?? []) {
       if (row.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
     }
@@ -1432,6 +1832,16 @@ function opaquePortableValue(value: unknown, code: string): string {
   return assertOpaqueId(value, code);
 }
 
+/** Settings rows are keyed by their scope. A Room id itself is opaque (up to
+ * 128 characters), so its readable `room:` key can be five characters longer
+ * than a generic opaque id without becoming an arbitrary identifier. */
+function learningSettingsIdValue(value: unknown, code: string): string {
+  if (value === "workspace") return value;
+  if (typeof value !== "string" || !value.startsWith("room:")) throw new WorkspaceServerError(code, 400);
+  assertOpaqueId(value.slice("room:".length), code);
+  return value;
+}
+
 async function readJsonl(file: string): Promise<Record<string, unknown>[]> {
   const text = await readFile(file, "utf8");
   return text.split("\n").filter(Boolean).map((line) => {
@@ -1439,6 +1849,15 @@ async function readJsonl(file: string): Promise<Record<string, unknown>[]> {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new WorkspaceServerError("workspace_bundle_v3_jsonl_invalid", 400);
     return parsed as Record<string, unknown>;
   });
+}
+
+async function readOptionalJsonl(file: string): Promise<Record<string, unknown>[]> {
+  try {
+    return await readJsonl(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
 }
 
 async function readJsonObject(file: string): Promise<Record<string, unknown>> {

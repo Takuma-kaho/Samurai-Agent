@@ -487,10 +487,11 @@ Core06〜Core09の範囲では、次をSessionなしで扱える。
 - Connector evidenceから現在のRoom権限を再評価するFormal ingress。外部AppのQuery、Domain Operation、Activity Ingestは共通Resolverを通る
 - Room／Authorityを永続化したAutomation。旧Jobは`rebind_required`で停止し、現在は`wiki_reindex`だけをSessionなしで実行する
 - `Workspace Server 02`のPostgreSQL schema、RLS runtime role、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成。Room階層の作成・移動・親子メンバー制約・Bundle互換を追加した
+- `Workspace Server 04`のKnowledge review Job。確認済みActivityと人が明示した訂正・Rememberだけを同じRoomの狭いsnapshotで扱い、根拠・確度・作成元Job／Attempt・Version付きの暫定Knowledgeを保存する。結果は設定・入力hash・上限予約を再確認してから適用する
 
 新しいBackupはArtifact・Collectionの正本を対象にし、Generated Surfaceのbundleは再生成可能な互換データとして除く。旧Surfaceを含むBackupは引き続きRestoreできる。
 
-既存Chat／Session経路とSQLite Core APIは互換機能として残る。`Workspace Server 02`は別のPostgreSQL Server entryであり、既存Chat APIを置換しない。基礎RLSの確認は`server:02:verify`、Room階層の実PostgreSQL確認は`server:03:verify`で、HostedとSelf-hostの両方を対象にする。したがって、現在の実装を製品全体の完成と同一視しない。
+既存Chat／Session経路とSQLite Core APIは互換機能として残る。`Workspace Server 02`は別のPostgreSQL Server entryであり、既存Chat APIを置換しない。基礎RLSの確認は`server:02:verify`、Room階層の実PostgreSQL確認は`server:03:verify`、学習ループは`server:04:verify`で、HostedとSelf-hostの両方を対象にする。Server 04は外部AI接続を内蔵せず、Hostが明示登録した狭いBackend cassetteだけを呼べる。したがって、現在の実装を製品全体の完成と同一視しない。
 
 ### 13.2 Coreの移行単位
 
@@ -517,10 +518,12 @@ Core06〜Core09の範囲では、次をSessionなしで扱える。
 
 ### 13.4 Core07の移行停止地点
 
+ここから13.6は**Core07〜09当時の移行停止点**であり、現在のServer 04の学習実装を否定する記述ではない。
+
 Core07は、`ActivityRecord`、`ResourceUsageRecord`、`WorkspaceJob`、`ActivityProcessorPort`を追加する移行単位である。
 
 - Activityの確定は事実の保存であり、学習結果の採用ではない。
-- `activity_processing` Jobは明示enqueueでのみ実行し、Activity保存から自動作成しない。
+- `activity_processing` Jobは明示enqueueでのみ実行し、Activity保存から自動作成しない（Core07当時）。
 - Processorは読み取り専用の構造化結果を返し、Workspace StoreやMemory・Knowledge・Skillを直接変更しない。
 - MCP/API/Pluginのtransportと本番学習ProcessorはCore09以降で接続する。
 
@@ -529,7 +532,7 @@ Core07は、`ActivityRecord`、`ResourceUsageRecord`、`WorkspaceJob`、`Activit
 Core08は、Artifact・Collectionの保存とGenerated Surfaceの操作をSessionの必須親から外す移行単位である。
 
 - Artifact・CollectionのRoom境界は`resource_access_boundaries`を正本にし、SessionRefから逆算しない。
-- 保存ごとにDomain Operation、Workspace Change、Activity、ResourceUsageを接続するが、Activity保存からJobや学習は自動起動しない。
+- 保存ごとにDomain Operation、Workspace Change、Activity、ResourceUsageを接続するが、Activity保存からJobや学習は自動起動しない（Core08当時）。
 - Surfaceは表示契約と派生bundleであり、DOM、開閉、pin表示、分割比率、表示順をWorkspace正本へ保存しない。
 - Native AppのSession付き操作は互換Adapterとして残す。Core08からGateway、Automation、外部公開APIは追加しない。
 
@@ -541,7 +544,7 @@ Core09は、外部AppとAutomationがSessionを作らずにWorkspace Coreを使�
 - Formal ingressはQuery、Domain Operation、Activity Ingestの3入口だけで、すべて同じResolverと現在のRoom権限を使う。Queryは外部経路では書き込みをしない。
 - Gateway Pairingはtransport admissionのままにし、既存Chat／Session dispatchをFormal ingressから呼ばない。
 - Automationは実行直前にAuthorityを再評価する。認可失効は`blocked`として記録し、Retry budgetを消費しない。SessionなしExecutorがないkindは安全停止する。
-- 本番Transport、外部Credential管理UX、任意Workspace Job API、自動Memory／Knowledge／Skill化、Room realtimeはCore09に含めない。
+- 本番Transport、外部Credential管理UX、任意Workspace Job API、自動Memory／Knowledge／Skill化、Room realtimeはCore09に含めない。Server 04では確認済みActivityから同じRoomの暫定Knowledge reviewだけを追加し、外部TransportやMemory／Skillの自動確定は追加しない。
 
 ---
 

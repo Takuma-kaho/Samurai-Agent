@@ -41,6 +41,15 @@ import {
   workspaceRoomMovePreviewRequest,
   workspaceRoomMoveRequest
 } from "./workspace-room-requests.js";
+import {
+  workspaceLearningResourceIdRequest,
+  workspaceLearningResourceCreateRequest,
+  workspaceLearningResourceListRequest,
+  workspaceLearningResourceStateRequest,
+  workspaceLearningResourceUpdateRequest,
+  workspaceLearningSearchRequest,
+  workspaceLearningSettingsRequest
+} from "./workspace-learning-requests.js";
 
 interface HealthState {
   ok: boolean;
@@ -524,6 +533,93 @@ function registerIpcHandlers(): void {
       body: request.body
     });
   });
+  ipcMain.handle("samurai:workspace-server:learning:resources:list", async (_event, input: unknown) => {
+    const scope = workspaceLearningResourceListRequest(input);
+    const query = new URLSearchParams({ scope_kind: scope.scopeKind });
+    if (scope.scopeKind === "room") query.set("room_id", scope.roomId);
+    if (scope.includeArchived) query.set("include_archived", "true");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceLearningPath()}/resources?${query.toString()}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:learning:resource:get", async (_event, input: unknown) => {
+    const resourceId = workspaceLearningResourceIdRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceLearningPath()}/resources/${encodeURIComponent(resourceId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:learning:resource:create", async (_event, input: unknown) => {
+    const request = workspaceLearningResourceCreateRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceLearningPath()}/resources`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:learning:resource:update", async (_event, input: unknown) => {
+    const request = workspaceLearningResourceUpdateRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "PUT",
+      path: `${activeWorkspaceLearningPath()}/resources/${encodeURIComponent(request.resourceId)}`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:learning:resource:fixed", async (_event, input: unknown) => {
+    const request = workspaceLearningResourceStateRequest(input, "fixed");
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceLearningPath()}/resources/${encodeURIComponent(request.resourceId)}/fixed`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:learning:resource:archive", async (_event, input: unknown) => {
+    const request = workspaceLearningResourceStateRequest(input, "archive");
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceLearningPath()}/resources/${encodeURIComponent(request.resourceId)}/archive`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:learning:settings:get", async (_event, input: unknown) => {
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceLearningPath()}/settings?room_id=${encodeURIComponent(roomId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:learning:settings:put", async (_event, input: unknown) => {
+    const request = workspaceLearningSettingsRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "PUT",
+      path: `${activeWorkspaceLearningPath()}/settings`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:learning:search", async (_event, input: unknown) => {
+    const request = workspaceLearningSearchRequest(input);
+    const query = new URLSearchParams({ room_id: request.roomId, q: request.query });
+    if (request.limit !== undefined) query.set("limit", String(request.limit));
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceLearningPath()}/search?${query.toString()}`,
+      workspaceScoped: true
+    });
+  });
   ipcMain.handle("samurai:workspace-server:status", async () => workspaceServerStatus());
   ipcMain.handle("samurai:app:quit", () => {
     isQuitting = true;
@@ -847,6 +943,10 @@ function isWorkspaceOpaqueId(value: string): boolean {
 
 function activeWorkspaceRoomsPath(): string {
   return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/rooms`;
+}
+
+function activeWorkspaceLearningPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/learning`;
 }
 
 async function workspaceServerStatus(): Promise<{
