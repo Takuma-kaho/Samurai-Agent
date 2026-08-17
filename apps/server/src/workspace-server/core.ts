@@ -2,6 +2,12 @@ import { mkdir } from "node:fs/promises";
 import {
   PostgresWorkspaceDatabase,
   WorkspaceBundleV3Service,
+  WorkspaceBundleV4Service,
+  WorkspaceCompletionCuratorService,
+  WorkspaceCompletionJobService,
+  WorkspaceCompletionMaintenanceService,
+  WorkspaceCompletionMigrationService,
+  WorkspaceCompletionService,
   WorkspaceFileStore,
   WorkspaceLearningService,
   WorkspaceLearningWorker,
@@ -9,6 +15,7 @@ import {
   WorkspaceServerError,
   WorkspaceServerStore,
   loadWorkspaceServerConfig,
+  type WorkspaceCompletionAttestationPort,
   type WorkspaceKnowledgeReviewPort,
   type WorkspaceServerConfig
 } from "@samurai-agent/workspace-server";
@@ -19,15 +26,29 @@ export interface WorkspaceServerCore {
   store: WorkspaceServerStore;
   files: WorkspaceFileStore;
   bundles: WorkspaceBundleV3Service;
+  completionBundles: WorkspaceBundleV4Service;
   commands: WorkspaceServerCommandService;
   learning: WorkspaceLearningService;
+  completion: WorkspaceCompletionService;
+  completionJobs: WorkspaceCompletionJobService;
+  curator: WorkspaceCompletionCuratorService;
+  maintenance: WorkspaceCompletionMaintenanceService;
+  completionMigrations: WorkspaceCompletionMigrationService;
   /** The host process chooses a Backend cassette; this Core never passes DB or
    * file capabilities to it. */
   createLearningWorker(reviewPort: WorkspaceKnowledgeReviewPort): WorkspaceLearningWorker;
   close(): Promise<void>;
 }
 
-export async function createWorkspaceServerCore(config = loadWorkspaceServerConfig()): Promise<WorkspaceServerCore> {
+export interface WorkspaceServerCoreOptions {
+  /** A process-owned verification cassette, never transport configuration. */
+  attestationPort?: WorkspaceCompletionAttestationPort;
+}
+
+export async function createWorkspaceServerCore(
+  config = loadWorkspaceServerConfig(),
+  options: WorkspaceServerCoreOptions = {}
+): Promise<WorkspaceServerCore> {
   const database = new PostgresWorkspaceDatabase({
     databaseUrl: config.databaseUrl,
     runtimeRole: config.databaseRuntimeRole
@@ -74,16 +95,32 @@ export async function createWorkspaceServerCore(config = loadWorkspaceServerConf
       }
     }
     const bundles = new WorkspaceBundleV3Service(store);
-    const commands = new WorkspaceServerCommandService({ store, files, bundles });
+    const completion = new WorkspaceCompletionService(store, undefined, options.attestationPort);
+    const completionBundles = new WorkspaceBundleV4Service(store);
+    if (config.mode === "self_host" && config.selfHostWorkspaceId && config.initialAdminId) {
+      const recovery = await completion.recoverFileBatches({ workspaceId: config.selfHostWorkspaceId, accountId: config.initialAdminId });
+      if (recovery.failed.length > 0) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 503);
+    }
     const learning = new WorkspaceLearningService(store);
+    const completionJobs = new WorkspaceCompletionJobService(completion);
+    const curator = new WorkspaceCompletionCuratorService(completion);
+    const maintenance = new WorkspaceCompletionMaintenanceService(completion, completionJobs, curator);
+    const completionMigrations = new WorkspaceCompletionMigrationService(completion);
+    const commands = new WorkspaceServerCommandService({ store, files, bundles, completion, completionMigrations, maintenance });
     return {
       config,
       database,
       store,
       files,
       bundles,
+      completionBundles,
       commands,
       learning,
+      completion,
+      completionJobs,
+      curator,
+      maintenance,
+      completionMigrations,
       createLearningWorker: (reviewPort) => new WorkspaceLearningWorker(learning, reviewPort),
       close: () => database.close()
     };

@@ -137,10 +137,24 @@ export interface ExportWorkspaceBundleResult {
   manifest: WorkspaceBundleV3Manifest;
 }
 
+/** A v4 Bundle embeds this portable data without creating a separate public
+ * v3 ledger row. Filtering happens while the snapshot is projected, before
+ * hashes are calculated; callers must never rewrite a completed manifest. */
+export interface WritePortableWorkspaceBundleSnapshotInput {
+  destination: string;
+  includeLegacyLearning?: boolean;
+  excludeMembershipAccountIds?: readonly string[];
+}
+
 export interface ImportWorkspaceBundleInput {
   sourceDirectory: string;
   targetWorkspaceId: string;
   targetWorkspaceName?: string;
+  /** A newer Bundle format can add rows while the v3 target is still
+   * read-only and its short-lived import capability is active.  The callback
+   * runs only after the verified v3 snapshot is present, and before the
+   * Workspace becomes active; a failure takes the normal abort path. */
+  beforeActivate?: (context: WorkspaceRequestContext & { importId: string }) => Promise<void>;
 }
 
 export interface StageWorkspaceBundleInput {
@@ -212,6 +226,27 @@ export class WorkspaceBundleV3Service {
       return { id: bundleId, directory: destination, manifest: generated.manifest };
     } catch (error) {
       if (createdStaging) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async writePortableSnapshot(
+    context: WorkspaceRequestContext,
+    input: WritePortableWorkspaceBundleSnapshotInput
+  ): Promise<{ directory: string; manifest: WorkspaceBundleV3Manifest }> {
+    await assertWorkspaceOwner(this.store, context);
+    const destination = path.resolve(input.destination);
+    if (await pathExists(destination)) throw new WorkspaceServerError("workspace_bundle_destination_exists", 409);
+    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    await mkdir(destination, { recursive: false, mode: 0o700 });
+    try {
+      const written = await this.writeStableBundleDirectory(context, destination, undefined, {
+        includeLegacyLearning: input.includeLegacyLearning !== false,
+        excludeMembershipAccountIds: input.excludeMembershipAccountIds ?? []
+      });
+      return { directory: destination, manifest: written.manifest };
+    } catch (error) {
+      await rm(destination, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     }
   }
@@ -591,6 +626,7 @@ export class WorkspaceBundleV3Service {
       // The import transaction committed; later verification/completion may
       // fail and must use the guarded database abort path.
       importSessionStarted = true;
+      if (input.beforeActivate) await input.beforeActivate({ ...targetContext, importId });
       await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
       await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
         await sql.query("SELECT samurai_complete_workspace_import($1, $2, $3)", [input.targetWorkspaceId, importId, source.manifest.integrity_hash]);
@@ -627,7 +663,10 @@ export class WorkspaceBundleV3Service {
     }
   }
 
-  private async readSnapshot(context: WorkspaceRequestContext): Promise<WorkspaceSnapshot> {
+  private async readSnapshot(
+    context: WorkspaceRequestContext,
+    options: { includeLegacyLearning?: boolean; excludeMembershipAccountIds?: readonly string[] } = {}
+  ): Promise<WorkspaceSnapshot> {
     return this.store.database.withReadSnapshot(context, async (sql) => {
       const workspace = await sql.query<Record<string, unknown>>("SELECT id, name, hosting_mode, database_placement, storage_namespace, created_by, version, created_at, updated_at FROM workspaces WHERE id = $1", [context.workspaceId]);
       const accounts = await sql.query<Record<string, unknown>>("SELECT id, public_key, display_name, status, created_at, updated_at FROM samurai_list_workspace_account_identities($1) ORDER BY id", [context.workspaceId]);
@@ -655,12 +694,14 @@ export class WorkspaceBundleV3Service {
       const learningResourceUses = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, resource_id, resource_version, activity_id, outcome, supersedes_use_id, summary, created_at FROM workspace_learning_resource_uses WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const workspaceRow = workspace.rows[0];
       if (!workspaceRow) throw new WorkspaceServerError("workspace_not_found", 404);
+      const excludedMemberships = new Set(options.excludeMembershipAccountIds ?? []);
+      const includeLegacyLearning = options.includeLegacyLearning !== false;
       return {
         workspace: workspaceRow,
         accounts: accounts.rows,
         rooms: rooms.rows,
-        memberships: memberships.rows,
-        roomMemberships: roomMemberships.rows,
+        memberships: memberships.rows.filter((row) => !excludedMemberships.has(String(row.account_id ?? ""))),
+        roomMemberships: roomMemberships.rows.filter((row) => !excludedMemberships.has(String(row.account_id ?? ""))),
         records: records.rows,
         events: events.rows,
         jobs: jobs.rows,
@@ -668,15 +709,15 @@ export class WorkspaceBundleV3Service {
         invitations: invitations.rows,
         audits: audits.rows,
         files: files.rows,
-        learningActivities: learningActivities.rows,
-        learningResources: learningResources.rows,
-        learningResourceVersions: learningResourceVersions.rows,
-        learningEvidence: learningEvidence.rows,
-        learningResourceLinks: learningResourceLinks.rows,
-        learningSettings: learningSettings.rows,
-        learningJobs: learningJobs.rows,
-        learningJobAttempts: learningJobAttempts.rows,
-        learningResourceUses: learningResourceUses.rows
+        learningActivities: includeLegacyLearning ? learningActivities.rows : [],
+        learningResources: includeLegacyLearning ? learningResources.rows : [],
+        learningResourceVersions: includeLegacyLearning ? learningResourceVersions.rows : [],
+        learningEvidence: includeLegacyLearning ? learningEvidence.rows : [],
+        learningResourceLinks: includeLegacyLearning ? learningResourceLinks.rows : [],
+        learningSettings: includeLegacyLearning ? learningSettings.rows : [],
+        learningJobs: includeLegacyLearning ? learningJobs.rows : [],
+        learningJobAttempts: includeLegacyLearning ? learningJobAttempts.rows : [],
+        learningResourceUses: includeLegacyLearning ? learningResourceUses.rows : []
       };
     });
   }
@@ -689,10 +730,11 @@ export class WorkspaceBundleV3Service {
   private async writeStableBundleDirectory(
     context: WorkspaceRequestContext,
     directory: string,
-    transferId?: string
+    transferId?: string,
+    projection: { includeLegacyLearning?: boolean; excludeMembershipAccountIds?: readonly string[] } = {}
   ): Promise<{ manifest: WorkspaceBundleV3Manifest }> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const snapshot = await this.readSnapshot(context);
+      const snapshot = await this.readSnapshot(context, projection);
       try {
         const written = await writeBundleDirectory({
           directory,
@@ -703,7 +745,7 @@ export class WorkspaceBundleV3Service {
           context,
           ...(transferId ? { transferId } : {})
         });
-        const current = await this.readSnapshot(context);
+        const current = await this.readSnapshot(context, projection);
         if (snapshotFingerprint(snapshot) === snapshotFingerprint(current)) return written;
       } catch (error) {
         if (!isTransientBundleSnapshotError(error)) throw error;

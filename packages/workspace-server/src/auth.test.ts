@@ -4,6 +4,9 @@ import {
   accountIdFromPublicKey,
   canonicalJson,
   createAccountSignaturePayload,
+  createVerifiedWorkspaceHumanCaller,
+  isTrustedWorkspaceCaller,
+  isTrustedWorkspaceCallerForAccount,
   verifyAccountSignature
 } from "./auth";
 
@@ -45,5 +48,38 @@ describe("Workspace Account signatures", () => {
       publicKey: publicKeyPem,
       payload
     })).toThrow("account_id_public_key_mismatch");
+  });
+
+  it("only marks a freshly verified request as a trusted human caller", () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
+    const accountId = accountIdFromPublicKey(publicKeyPem);
+    const timestamp = String(Date.now());
+    const payload = {
+      method: "POST",
+      path: "/api/workspaces/workspace_a/completion/policies",
+      workspaceId: "workspace_a",
+      operationId: "operation_a",
+      requestId: "request_c",
+      timestamp,
+      body: { title: "Policy" }
+    };
+    const signature = sign(null, Buffer.from(createAccountSignaturePayload(payload)), privateKey).toString("base64url");
+    const caller = createVerifiedWorkspaceHumanCaller({
+      signed: { accountId, requestId: "request_c", timestamp, signature },
+      publicKey: publicKeyPem,
+      payload,
+      operationId: "operation_a"
+    });
+    expect(isTrustedWorkspaceCaller(caller)).toBe(true);
+    expect(isTrustedWorkspaceCallerForAccount(caller, accountId)).toBe(true);
+    expect(isTrustedWorkspaceCallerForAccount(caller, "account_other")).toBe(false);
+    expect(isTrustedWorkspaceCaller({ ...caller })).toBe(false);
+    expect(() => createVerifiedWorkspaceHumanCaller({
+      signed: { accountId, requestId: "request_c", timestamp, signature },
+      publicKey: publicKeyPem,
+      payload,
+      operationId: "another_operation"
+    })).toThrow("account_signature_payload_mismatch");
   });
 });

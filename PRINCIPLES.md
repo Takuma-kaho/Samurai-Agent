@@ -30,7 +30,7 @@
         ↓
 Knowledge Hostが根拠を整理する
         ↓
-Roomの知識・Memory・Skill・Artifactが育つ
+RoomのKnowledge・Skill・Artifactが育つ
         ↓
 次のアプリ作業で再利用される
 ~~~
@@ -44,7 +44,7 @@ Samuraiは、特定のAIモデル、単一のAgent、または新しいチャッ
 ### 2.1 Workspaceが知識の正本
 
 - Workspaceは人間が所有する永続的な知識の箱である。
-- Knowledge、Memory、Skill、Artifact、Collection、Activity Historyを保管する。
+- Knowledge、Skill、Policy、PROFILE／SOUL、Artifact、Collection、Activity Historyを保管する。
 - 外部アプリ、Agent、Backendを交換しても知識はWorkspaceに残る。
 - Backup・Export・RestoreはWorkspace単位で考える。
 
@@ -72,7 +72,7 @@ Samuraiは、特定のAIモデル、単一のAgent、または新しいチャッ
 
 ### 2.5 Knowledge Hostは整理役
 
-Knowledge Hostは、Workspaceに届いた情報を整理し、Memory・Knowledge・Skillの学習ループを動かす。
+Knowledge Hostは、Workspaceに届いた情報を整理し、Knowledge・Skillの学習ループを動かす。
 
 - Activityを要約・分類し、根拠を残す。
 - 同じRoom内へ、根拠付きの暫定知識を自動保存できる。
@@ -103,14 +103,23 @@ Agent Backend cassette
 - KnowledgeはActivityから選別された再利用物であり、Activityと同一視しない。
 - すべてのKnowledge変更は、根拠と変更履歴を追えるようにする。
 
-### 2.8 Artifact・Collection・Surfaceを分ける
+### 2.8 Knowledge、Skill、Policy、Episodeを混ぜない
+
+- Knowledgeは`fact`、`decision`、`explanation`、`experience_rule`の四種類に分ける。
+- Skillは`SKILL.md`と補助ファイルを含むpackage全体を一つのVersionとして扱う再利用手順である。Copy、Move、Restoreは全pathとhashを一つの処理として確認する。
+- Policyは、Serverが認証済みrequestから作ったHuman callerの署名でだけ有効化する操作制約である。AI、外部接続、maintenanceは変更依頼を残せても有効化しない。
+- Activityの`verification_outcome`は呼出元の申告として残せても、昇格根拠にはしない。対象Versionと本文hashを確認したAttestationだけを機械検証として扱う。
+- Episodeは関連するActivityをまとめる作業単位である。SessionはEpisodeの必須親ではなく、任意の出所参照にとどめる。
+- PROFILE／SOULは人間が明示操作で更新するWorkspace文書であり、学習・Curator・移行から自動更新しない。
+
+### 2.9 Artifact・Collection・Surfaceを分ける
 
 - Artifactは文書、コード、表、画像、PDFなどの成果物である。
 - Collectionは、顧客、案件、タスクなどの構造化された知識である。
 - Surfaceは、Native Appが必要な時だけ表示する一時的な操作・閲覧面である。
 - SurfaceをWorkspaceの正本にしない。
 
-### 2.9 中立な共通基盤
+### 2.10 中立な共通基盤
 
 - Native AppをWorkspace側で特別扱いしない。
 - Claude Code、Codex、他社アプリ、Native Appは、同じ権限とActivity入口を利用する。
@@ -158,7 +167,7 @@ flowchart LR
   Core["Workspace Core"]
   Host["Knowledge Host"]
   Cassette["Backend cassette"]
-  Knowledge["Room Knowledge・Memory・Skill"]
+  Knowledge["Room Knowledge・Skill・Policy"]
   Surface["Native App Surface"]
 
   Apps --> Gateway

@@ -1,0 +1,1092 @@
+import { generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import type { Server as HttpServer } from "node:http";
+import os from "node:os";
+import path from "node:path";
+import {
+  accountIdFromPublicKey,
+  createAccountSignaturePayload,
+  createInternalWorkspaceConnectionCaller,
+  createInternalWorkspaceMaintenanceCaller,
+  createVerifiedWorkspaceHumanCaller,
+  PostgresWorkspaceAdminDatabase,
+  PostgresWorkspaceDatabase,
+  renderWorkspaceCompletionDocument,
+  verifyWorkspaceBundleV4,
+  WorkspaceBundleV3Service,
+  WorkspaceBundleV4Service,
+  WorkspaceCompletionCuratorService,
+  WorkspaceCompletionJobService,
+  WorkspaceCompletionMaintenanceService,
+  WorkspaceCompletionMigrationService,
+  WorkspaceCompletionService,
+  WorkspaceLearningService,
+  WorkspaceServerStore
+} from "../packages/workspace-server/src/index.ts";
+import { createWorkspaceServerHttp } from "../apps/server/src/workspace-server/http-server.ts";
+
+interface ProbeTarget {
+  label: "hosted" | "self_host";
+  databaseUrl: string;
+  adminDatabaseUrl: string;
+  runtimeRole: string;
+}
+
+interface ProbeAccount {
+  id: string;
+  publicKey: string;
+  privateKey: KeyObject;
+}
+
+const targets: ProbeTarget[] = [
+  targetFromEnvironment("HOSTED", "hosted"),
+  targetFromEnvironment("SELF_HOST", "self_host")
+];
+
+if (process.env.SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE !== "yes") {
+  throw new Error("server04_completion_probe_destructive_confirmation_required");
+}
+
+const probeFailures: string[] = [];
+for (const target of targets) {
+  try {
+    await runProbe(target);
+  } catch (error) {
+    probeFailures.push(`${target.label}:${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+if (probeFailures.length > 0) throw new Error(`server04_completion_targets_failed:${probeFailures.join(";")}`);
+
+function targetFromEnvironment(prefix: "HOSTED" | "SELF_HOST", label: ProbeTarget["label"]): ProbeTarget {
+  const databaseUrl = process.env[`SAMURAI_SERVER_VERIFY_${prefix}_DATABASE_URL`];
+  const adminDatabaseUrl = process.env[`SAMURAI_SERVER_VERIFY_${prefix}_DATABASE_ADMIN_URL`];
+  const runtimeRole = process.env[`SAMURAI_SERVER_VERIFY_${prefix}_DATABASE_RUNTIME_ROLE`];
+  if (!databaseUrl || !adminDatabaseUrl || !runtimeRole) throw new Error(`server04_completion_probe_${label}_configuration_missing`);
+  return { label, databaseUrl, adminDatabaseUrl, runtimeRole };
+}
+
+async function runProbe(target: ProbeTarget): Promise<void> {
+  const suffix = randomUUID().replaceAll("-", "");
+  const workspaceId = `workspace_completion04_${target.label}_${suffix}`;
+  const restoredWorkspaceId = `workspace_completion04_restore_${suffix}`;
+  const v3ImportedWorkspaceId = `workspace_completion04_v3_${suffix}`;
+  const v3RestoredWorkspaceId = `workspace_completion04_v3_restore_${suffix}`;
+  const root = await mkdtemp(path.join(os.tmpdir(), "samurai-completion04-"));
+  const owner = accountIdentity();
+  const otherRoomMember = accountIdentity();
+  const maintenanceAccount = accountIdentity();
+  const accounts = [owner, otherRoomMember, maintenanceAccount];
+  const database = new PostgresWorkspaceDatabase({ databaseUrl: target.databaseUrl, runtimeRole: target.runtimeRole });
+  const adminDatabase = new PostgresWorkspaceAdminDatabase({ databaseAdminUrl: target.adminDatabaseUrl, runtimeRole: target.runtimeRole });
+  try {
+    await adminDatabase.migrate();
+    await database.assertReady();
+    const store = new WorkspaceServerStore({
+      database,
+      mode: target.label,
+      ...(target.label === "self_host" ? { selfHostWorkspaceId: workspaceId, selfHostInitialAdminId: owner.id } : {}),
+      storageRoot: root,
+      invitationTokenSecret: "x".repeat(32)
+    });
+    for (const account of accounts) {
+      await store.registerAccount({ id: account.id, publicKey: account.publicKey, displayName: account.id });
+    }
+    const created = await store.createWorkspace({
+      id: workspaceId,
+      name: "Completion probe",
+      ownerAccountId: owner.id,
+      operationId: operationId("create"),
+      hostingMode: target.label,
+      databasePlacement: target.label === "hosted" ? "shared" : "dedicated"
+    });
+    const ownerContext = (label: string) => humanContext(workspaceId, owner, label);
+    const rootRoom = created.defaultRoom;
+    await store.setWorkspaceMember(ownerContext("other-workspace-member"), {
+      accountId: otherRoomMember.id, role: "member", state: "active", expectedVersion: 0
+    });
+    const privateRoom = (await store.createRoom(ownerContext("private-room"), {
+      name: "Other Room", expectedWorkspaceVersion: (await store.getWorkspace({ workspaceId, accountId: owner.id })).version
+    })).room;
+    await store.setRoomMember(ownerContext("other-room-member"), {
+      roomId: privateRoom.id, accountId: otherRoomMember.id, role: "member", state: "active", expectedVersion: 0
+    });
+
+    const completion = new WorkspaceCompletionService(store);
+    const jobs = new WorkspaceCompletionJobService(completion);
+    const knowledgeId = `completion_knowledge_${suffix.slice(0, 24)}`;
+    const knowledge = await completion.createResource(ownerContext("knowledge"), {
+      id: knowledgeId,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "knowledge",
+      knowledgeKind: "decision",
+      title: "File backed decision",
+      content: "Keep the durable body in the Workspace file tree.",
+      metadata: { source: "probe" },
+      reason: "Human authored decision"
+    });
+    const body = await completion.getResourceBody({ workspaceId, accountId: owner.id }, knowledge.resource.id);
+    let expectedKnowledgeContent = body.content;
+    assert(body.content === "Keep the durable body in the Workspace file tree.", "server04_completion_file_body_missing");
+    const physical = await completion.files.inspectPhysicalFile(workspaceId, body.version.filePath);
+    assert(physical.sha256 === body.version.contentHash, "server04_completion_file_hash_mismatch");
+    await expectCode("workspace_completion_resource_not_found", async () => {
+      await completion.getResource({ workspaceId, accountId: otherRoomMember.id }, knowledge.resource.id);
+    });
+    if (target.label === "hosted") {
+      await expectCode("workspace_completion_physical_import_self_host_required", async () => {
+        await completion.preparePhysicalResourceEdit(ownerContext("physical-hosted-reject"), knowledge.resource.id);
+      });
+    } else {
+      await completion.preparePhysicalResourceEdit(ownerContext("physical-prepare"), knowledge.resource.id);
+      await writeFile(
+        path.join(root, "workspaces", workspaceId, "files", body.version.filePath),
+        renderWorkspaceCompletionDocument({
+          id: knowledge.resource.id,
+          title: "File backed decision",
+          resourceKind: "knowledge",
+          metadata: body.version.metadata,
+          body: "Imported from a Self-host physical file edit."
+        })
+      );
+      const detected = await completion.inspectPhysicalResourceEdit({ workspaceId, accountId: owner.id }, knowledge.resource.id);
+      assert(detected.changed, "server04_completion_physical_edit_not_detected");
+      const physicalImported = await completion.importPhysicalResourceEdit(ownerContext("physical-import"), {
+        resourceId: knowledge.resource.id,
+        expectedVersion: knowledge.resource.version,
+        reason: "Self-host owner imported a local file edit"
+      });
+      assert(physicalImported.resource.version === 2, "server04_completion_physical_import_version_missing");
+      const importedBody = await completion.getResourceBody({ workspaceId, accountId: owner.id }, knowledge.resource.id);
+      const originalBody = await completion.getResourceBody({ workspaceId, accountId: owner.id }, knowledge.resource.id, 1);
+      assert(importedBody.content === "Imported from a Self-host physical file edit.", "server04_completion_physical_import_body_missing");
+      assert(originalBody.content === "Keep the durable body in the Workspace file tree.", "server04_completion_physical_import_history_missing");
+      assert((await completion.listEvidence({ workspaceId, accountId: owner.id }, knowledge.resource.id)).some((evidence) => evidence.kind === "physical_file_import"), "server04_completion_physical_import_evidence_missing");
+      expectedKnowledgeContent = importedBody.content;
+    }
+
+    const skill = await completion.createResource(ownerContext("skill"), {
+      id: `completion_skill_${suffix.slice(0, 24)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "skill",
+      title: "Probe skill",
+      content: "# SKILL\n\nRun the checked procedure.",
+      metadata: {
+        when: "when the probe runs",
+        inputs: "a Workspace",
+        preconditions: "Room access",
+        completion: "the procedure is checked",
+        failure: "stop and preserve evidence",
+        steps: ["read", "apply", "verify"],
+        knowledge_ids: [knowledge.resource.id]
+      },
+      supportFiles: [
+        { path: "references/checklist.md", content: Buffer.from("# Checklist\n", "utf8") },
+        { path: "scripts/nested/verify.bin", content: Buffer.from([0, 255, 1, 2, 3]) },
+        { path: "templates/card.txt", content: Buffer.from("template", "utf8") }
+      ],
+      reason: "Human authored Skill"
+    });
+    const skillFiles = await completion.listSkillFiles({ workspaceId, accountId: owner.id }, skill.resource.id);
+    assert(skillFiles.length === 3 && skillFiles.some((file) => file.relativePath === "scripts/nested/verify.bin"), "server04_completion_skill_package_missing");
+    const copiedSkill = await completion.copyResource(ownerContext("skill-copy"), {
+      resourceId: skill.resource.id,
+      targetScope: { kind: "room", roomId: privateRoom.id },
+      targetResourceId: `completion_skill_copy_${suffix.slice(0, 20)}`,
+      expectedVersion: skill.resource.version,
+      reason: "Copy the whole Skill package."
+    });
+    const copiedFiles = await completion.listSkillFiles({ workspaceId, accountId: owner.id }, copiedSkill.resource.id);
+    const copiedBinary = await completion.getSkillFile({ workspaceId, accountId: owner.id }, copiedSkill.resource.id, "scripts/nested/verify.bin");
+    assert(copiedFiles.length === 3 && Buffer.compare(copiedBinary.content, Buffer.from([0, 255, 1, 2, 3])) === 0, "server04_completion_skill_copy_package_incomplete");
+    const collisionId = `completion_skill_move_collision_${suffix.slice(0, 16)}`;
+    await completion.createResource(ownerContext("skill-move-collision"), {
+      id: collisionId,
+      scope: { kind: "room", roomId: privateRoom.id },
+      kind: "knowledge",
+      knowledgeKind: "fact",
+      title: "Move collision guard",
+      content: "This target forces a move transaction to fail safely.",
+      metadata: {},
+      reason: "Failure recovery probe."
+    });
+    await expectCode("workspace_completion_version_conflict", async () => {
+      await completion.moveResource(ownerContext("skill-move-collision"), {
+        resourceId: skill.resource.id,
+        targetRoomId: privateRoom.id,
+        targetResourceId: collisionId,
+        expectedVersion: skill.resource.version,
+        reason: "This move must not archive the source."
+      });
+    });
+    const sourceAfterFailedMove = await completion.getResource({ workspaceId, accountId: owner.id }, skill.resource.id);
+    assert(sourceAfterFailedMove.resource.lifecycleState !== "archived", "server04_completion_skill_failed_move_archived_source");
+    const movedSkill = await completion.moveResource(ownerContext("skill-move"), {
+      resourceId: skill.resource.id,
+      targetRoomId: privateRoom.id,
+      targetResourceId: `completion_skill_move_${suffix.slice(0, 20)}`,
+      expectedVersion: skill.resource.version,
+      reason: "Move the whole Skill package."
+    });
+    const movedFiles = await completion.listSkillFiles({ workspaceId, accountId: owner.id }, movedSkill.resource.id);
+    const movedBinary = await completion.getSkillFile({ workspaceId, accountId: owner.id }, movedSkill.resource.id, "scripts/nested/verify.bin");
+    const archivedSource = await completion.getResource({ workspaceId, accountId: owner.id }, skill.resource.id);
+    assert(movedFiles.length === 3 && Buffer.compare(movedBinary.content, Buffer.from([0, 255, 1, 2, 3])) === 0 && archivedSource.resource.lifecycleState === "archived", "server04_completion_skill_move_package_incomplete");
+
+    const profile = await completion.writeWorkspaceDocument(ownerContext("profile"), {
+      kind: "profile", content: "The owner prefers evidence-backed changes.", expectedVersion: 0
+    });
+    assert(profile.version === 1, "server04_completion_profile_version_missing");
+    const soul = await completion.writeWorkspaceDocument(ownerContext("soul"), {
+      kind: "soul", content: "Protect Room boundaries and preserve evidence.", expectedVersion: 0
+    });
+    assert(soul.version === 1, "server04_completion_soul_version_missing");
+    const workspaceKnowledge = await completion.createResource(ownerContext("workspace-knowledge"), {
+      id: `completion_workspace_knowledge_${suffix.slice(0, 20)}`,
+      scope: { kind: "workspace" },
+      kind: "knowledge",
+      knowledgeKind: "decision",
+      title: "Workspace-wide decision",
+      content: "Every Workspace member may read this decision regardless of Room membership.",
+      metadata: { scope: "workspace" },
+      reason: "Workspace owner shared this decision."
+    });
+    const sharedBody = await completion.getResourceBody({ workspaceId, accountId: otherRoomMember.id }, workspaceKnowledge.resource.id);
+    assert(sharedBody.content.includes("Every Workspace member"), "server04_completion_workspace_common_resource_hidden");
+    const otherProfile = await completion.getWorkspaceDocument({ workspaceId, accountId: otherRoomMember.id }, "profile");
+    const otherSoul = await completion.getWorkspaceDocument({ workspaceId, accountId: otherRoomMember.id }, "soul");
+    assert(otherProfile.content.includes("evidence-backed") && otherSoul.content.includes("Room boundaries"), "server04_completion_workspace_documents_hidden");
+    const otherVisible = await completion.listResourcesPage({ workspaceId, accountId: otherRoomMember.id }, { roomId: privateRoom.id, limit: 50 });
+    assert(otherVisible.items.some((resource) => resource.id === workspaceKnowledge.resource.id) && !otherVisible.items.some((resource) => resource.id === knowledge.resource.id), "server04_completion_batch_scope_visibility_mismatch");
+    const appliedPolicy = await verifyHttpPolicyIngress({
+      target,
+      storageRoot: root,
+      workspaceId,
+      owner,
+      roomId: rootRoom.id,
+      completion,
+      suffix
+    });
+    assert(appliedPolicy.resource.kind === "policy", "server04_completion_policy_not_saved");
+    const startup = await completion.getStartupContext({ workspaceId, accountId: owner.id }, { roomId: rootRoom.id, operation: "resource.create" });
+    assert(startup.profile?.includes("evidence-backed"), "server04_completion_profile_not_loaded");
+
+    const activity = await completion.ingestActivity(ownerContext("activity"), {
+      roomId: rootRoom.id,
+      sourceApp: "probe",
+      sourceId: "run_one",
+      instructionSummary: "Perform the checked procedure",
+      resultSummary: "The procedure succeeded",
+      verificationOutcome: "confirmed",
+      failureState: "none",
+      outcome: "completed",
+      explicitRemember: true
+    });
+    assert(activity.eligible && activity.job?.status === "queued", "server04_completion_activity_review_missing");
+    const snapshot = await completion.createReviewSnapshot({ workspaceId, accountId: owner.id }, activity.episode.id);
+    const reviewed = await completion.applyReviewResult(ownerContext("review"), {
+      snapshot,
+      result: {
+        reviewer: "probe",
+        summary: "Record an evidence-backed provisional result.",
+        candidates: [{
+          kind: "knowledge",
+          resourceKind: "knowledge",
+          knowledgeKind: "experience_rule",
+          title: "Verified probe procedure",
+          content: "Use the file-backed procedure after a confirmed Activity.",
+          metadata: { source: "review" },
+          evidenceActivityIds: [activity.activity.id],
+          reason: "Confirmed result"
+        }]
+      }
+    });
+    assert(reviewed.resources.length === 1 && reviewed.resources[0]?.evidenceState === "provisional", "server04_completion_review_not_provisional");
+
+    // A Review must retain every Activity through the advertised high
+    // watermark, rather than silently keeping the first 100.  Updating a
+    // snapshot Resource after that read must reject the whole application.
+    const longReviewKey = `review_101_${suffix.slice(0, 20)}`;
+    let longReviewEpisodeId: string | undefined;
+    let longReviewFinalJobId: string | undefined;
+    for (let index = 0; index < 101; index += 1) {
+      const item = await completion.ingestActivity(ownerContext(`review-101-${index}`), {
+        roomId: rootRoom.id,
+        sourceApp: "probe",
+        sourceId: `review-101-${index}`,
+        externalEpisodeKey: longReviewKey,
+        instructionSummary: `Review all activity ${index}.`,
+        resultSummary: "This is a cursor-pagination verification record.",
+        verificationOutcome: "not_run",
+        failureState: "none",
+        outcome: "completed",
+        // Each record intentionally qualifies for a Review Job so the final
+        // high-watermark Job can prove the cap blocks rather than truncates.
+        explicitRemember: true
+      });
+      longReviewEpisodeId = item.episode.id;
+      longReviewFinalJobId = item.job?.id;
+    }
+    if (!longReviewEpisodeId || !longReviewFinalJobId) throw new Error("server04_completion_review_101_episode_missing");
+    const longReviewSnapshot = await completion.createReviewSnapshot({ workspaceId, accountId: owner.id }, longReviewEpisodeId);
+    assert(longReviewSnapshot.activityCount === 101 && longReviewSnapshot.activities.length === 101, "server04_completion_review_101_truncated");
+    const exactWatermarkSnapshot = await completion.createReviewSnapshot({ workspaceId, accountId: owner.id }, longReviewEpisodeId, {
+      highWatermarkActivityId: longReviewSnapshot.highWatermarkActivityId
+    });
+    assert(exactWatermarkSnapshot.digest === longReviewSnapshot.digest && exactWatermarkSnapshot.activityCount === 101, "server04_completion_review_high_watermark_mismatch");
+    const workspaceKnowledgeBeforeStaleReview = await completion.getResource({ workspaceId, accountId: owner.id }, workspaceKnowledge.resource.id);
+    await completion.updateResource(ownerContext("review-stale-human-update"), workspaceKnowledge.resource.id, {
+      scope: { kind: "workspace" },
+      kind: "knowledge",
+      knowledgeKind: "decision",
+      title: workspaceKnowledgeBeforeStaleReview.resource.title,
+      content: "A human changed this Workspace decision after the Review snapshot.",
+      metadata: { scope: "workspace", changed_after_review_snapshot: true },
+      reason: "Protect the newer human Workspace decision.",
+      expectedVersion: workspaceKnowledgeBeforeStaleReview.resource.version
+    });
+    await expectCode("workspace_completion_review_stale_input", async () => {
+      await completion.applyReviewResult(ownerContext("review-stale-apply"), {
+        snapshot: longReviewSnapshot,
+        result: { reviewer: "probe", summary: "This old Review must not apply.", candidates: [] }
+      });
+    });
+    const workspaceKnowledgeAfterStaleReview = await completion.getResource({ workspaceId, accountId: owner.id }, workspaceKnowledge.resource.id);
+    assert(workspaceKnowledgeAfterStaleReview.resource.version === workspaceKnowledgeBeforeStaleReview.resource.version + 1, "server04_completion_review_stale_human_edit_lost");
+
+    // An explicit snapshot cap must block the selected Job rather than give
+    // an incomplete Episode to a Review Port. Mark unrelated queued jobs
+    // complete only to make this public worker claim deterministic.
+    await completion.updateConfiguration(ownerContext("review-snapshot-cap"), {
+      scope: { kind: "room", roomId: rootRoom.id },
+      expectedVersion: 0,
+      values: { reviewSnapshotMaxItems: 100 }
+    });
+    await adminDatabase.withAdmin(async (sql) => {
+      await sql.query(
+        `UPDATE workspace_completion_jobs
+         SET status = 'completed', completed_at = NOW(), updated_at = NOW()
+         WHERE workspace_id = $1 AND kind = 'review' AND status = 'queued' AND id <> $2`,
+        [workspaceId, longReviewFinalJobId]
+      );
+    });
+    const cappedReview = await jobs.runOneReview(ownerContext("review-snapshot-cap-run"), {
+      workerId: `completion_review_cap_${suffix.slice(0, 18)}`,
+      port: { review: async () => { throw new Error("server04_completion_review_port_must_not_receive_partial_snapshot"); } }
+    });
+    assert(cappedReview.status === "blocked" && cappedReview.jobId === longReviewFinalJobId, "server04_completion_review_snapshot_cap_not_blocked");
+    const blockedReview = (await jobs.listJobs({ workspaceId, accountId: owner.id }, { roomId: rootRoom.id, status: "blocked" }))
+      .find((job) => job.id === longReviewFinalJobId);
+    assert(Boolean(blockedReview?.blockedReason?.includes("workspace_completion_review_snapshot_limit_exceeded")), "server04_completion_review_snapshot_cap_reason_missing");
+
+    const attestedFact = await completion.proposeResourceVersion(ownerContext("attestation-fact"), {
+      id: `completion_attestation_fact_${suffix.slice(0, 20)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "knowledge",
+      knowledgeKind: "fact",
+      title: "Attestation-bound fact",
+      content: "Only a matching Port result may confirm this Fact.",
+      metadata: { source: "attestation-probe" },
+      reason: "Review proposed this Fact.",
+      evidenceEpisodeId: activity.episode.id,
+      evidenceActivityIds: [activity.activity.id]
+    });
+    assert(attestedFact.resource.evidenceState === "provisional", "server04_completion_self_claim_promoted_fact");
+    const attestedFactBody = await completion.getResourceBody({ workspaceId, accountId: owner.id }, attestedFact.resource.id);
+    const attestationRequest = (sourceRef: string) => ({
+      workspaceId,
+      scope: { kind: "room" as const, roomId: rootRoom.id },
+      target: { resourceId: attestedFact.resource.id, resourceVersion: attestedFactBody.version.version },
+      sourceRef,
+      sourceVersion: "source-v1",
+      expectedContentHash: attestedFactBody.version.contentHash,
+      items: { verified_item_count: 1 }
+    });
+    const notRun = await completion.applyAttestation(ownerContext("attestation-not-run"), { request: attestationRequest("probe://not-run") });
+    assert(notRun.attestation.outcome === "not_run", "server04_completion_attestation_unconfigured_not_run_missing");
+    const mismatched = await new WorkspaceCompletionService(store, undefined, {
+      attest: async () => ({
+        outcome: "confirmed" as const,
+        attestorId: "probe-attestor",
+        sourceVersion: "wrong-source-version",
+        observedContentHash: "f".repeat(64),
+        attestedAt: new Date().toISOString(),
+        failureReasons: []
+      })
+    }).applyAttestation(ownerContext("attestation-mismatch"), { request: attestationRequest("probe://mismatch") });
+    assert(mismatched.attestation.outcome === "failed", "server04_completion_attestation_mismatch_confirmed");
+    const confirmed = await new WorkspaceCompletionService(store, undefined, {
+      attest: async (request) => ({
+        outcome: "confirmed" as const,
+        attestorId: "probe-attestor",
+        sourceVersion: request.sourceVersion,
+        observedContentHash: request.expectedContentHash,
+        attestedAt: new Date().toISOString(),
+        failureReasons: []
+      })
+    }).applyAttestation(ownerContext("attestation-confirmed"), { request: attestationRequest("probe://confirmed") });
+    assert(confirmed.attestation.outcome === "confirmed", "server04_completion_attestation_confirmed_missing");
+    const confirmedFact = await completion.getResource({ workspaceId, accountId: owner.id }, attestedFact.resource.id);
+    assert(confirmedFact.resource.evidenceState === "confirmed" && confirmedFact.resource.currentConfirmedVersion === attestedFactBody.version.version, "server04_completion_attestation_fact_not_confirmed");
+    await expectCode("workspace_completion_machine_attestation_required", async () => {
+      await store.database.withContext(ownerContext("forged-machine-attestation"), async (sql) => {
+        await sql.query(
+          `INSERT INTO workspace_completion_evidence(workspace_id, id, resource_id, resource_version, kind, attestation_id, summary)
+           VALUES ($1, $2, $3, $4, 'machine_attestation', $5, 'forged')`,
+          [workspaceId, `completion_evidence_forged_${suffix.slice(0, 16)}`, attestedFact.resource.id, attestedFactBody.version.version, `completion_attestation_forged_${suffix.slice(0, 16)}`]
+        );
+      });
+    });
+    await expectCode("workspace_completion_secret_content_forbidden", async () => {
+      await completion.recordJobRawOutput(ownerContext("secret-raw"), {
+        jobId: "completion_job_probe", attemptId: "completion_attempt_probe", direction: "request", content: "api_key=sk-abcdefghijklmnopqrstuvwxyz1234567890"
+      });
+    });
+
+    const firstPage = await completion.listResourcesPage({ workspaceId, accountId: owner.id }, { roomId: rootRoom.id, limit: 1 });
+    assert(firstPage.items.length === 1 && firstPage.nextCursor, "server04_completion_pagination_missing");
+    const secondPage = await completion.listResourcesPage({ workspaceId, accountId: owner.id }, { roomId: rootRoom.id, limit: 10, cursor: firstPage.nextCursor });
+    assert(secondPage.items.length >= 2, "server04_completion_pagination_cursor_missing");
+
+    const curator = new WorkspaceCompletionCuratorService(completion);
+    const maintenance = new WorkspaceCompletionMaintenanceService(completion, jobs, curator);
+
+    // Curator plans carry the exact target/related versions and hashes. A
+    // human edit while a semantic cassette is running makes the entire plan
+    // stale; it must not leave even a single new Link behind.
+    const curatorFirst = await completion.proposeResourceVersion(ownerContext("curator-first"), {
+      id: `completion_curator_first_${suffix.slice(0, 18)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "knowledge",
+      knowledgeKind: "fact",
+      title: "Curator first candidate",
+      content: "First AI candidate for a stale-plan probe.",
+      metadata: { statement: "First candidate", subject: "curator probe", evidence: "test fixture" },
+      reason: "Curator stale input probe."
+    });
+    const curatorSecond = await completion.proposeResourceVersion(ownerContext("curator-second"), {
+      id: `completion_curator_second_${suffix.slice(0, 18)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "knowledge",
+      knowledgeKind: "fact",
+      title: "Curator second candidate",
+      content: "Second AI candidate for a stale-plan probe.",
+      metadata: { statement: "Second candidate", subject: "curator probe", evidence: "test fixture" },
+      reason: "Curator stale input probe."
+    });
+    const seededCurator = await curator.runLight(ownerContext("curator-seed"), { roomId: rootRoom.id });
+    assert(seededCurator.status === "seeded", "server04_completion_curator_seed_missing");
+    await curator.setSemanticEnabled(ownerContext("curator-semantic-enable"), { roomId: rootRoom.id, enabled: true });
+    await adminDatabase.withAdmin(async (sql) => {
+      await sql.query(
+        "UPDATE workspace_completion_activities SET created_at = NOW() - INTERVAL '3 hours', finalized_at = NOW() - INTERVAL '3 hours' WHERE workspace_id = $1 AND room_id = $2",
+        [workspaceId, rootRoom.id]
+      );
+    });
+    await expectCode("workspace_completion_curator_stale_input", async () => {
+      await curator.runSemantic(ownerContext("curator-semantic-stale"), {
+        roomId: rootRoom.id,
+        port: {
+          review: async () => {
+            await completion.updateResource(ownerContext("curator-human-edit"), curatorFirst.resource.id, {
+              scope: { kind: "room", roomId: rootRoom.id },
+              kind: "knowledge",
+              knowledgeKind: "fact",
+              title: "Human changed curator candidate",
+              content: "A human edit must make the in-flight Curator plan stale.",
+              metadata: { statement: "Human edit", subject: "curator probe", evidence: "test fixture" },
+              reason: "Human edit while the semantic plan was in flight.",
+              expectedVersion: curatorFirst.resource.version
+            });
+            return {
+              links: [{
+                fromResourceId: curatorFirst.resource.id,
+                toResourceId: curatorSecond.resource.id,
+                relation: "derived_from",
+                reason: "This old semantic result must not be saved."
+              }]
+            };
+          }
+        }
+      });
+    });
+    const staleCuratorLink = await store.database.withContext({ workspaceId, accountId: owner.id }, async (sql) => {
+      const result = await sql.query<{ count: number | string }>(
+        "SELECT COUNT(*) AS count FROM workspace_completion_resource_links WHERE workspace_id = $1 AND from_resource_id = $2 AND to_resource_id = $3",
+        [workspaceId, curatorFirst.resource.id, curatorSecond.resource.id]
+      );
+      return Number(result.rows[0]?.count ?? 0);
+    });
+    const humanChangedCuratorResource = await completion.getResource({ workspaceId, accountId: owner.id }, curatorFirst.resource.id);
+    assert(staleCuratorLink === 0 && humanChangedCuratorResource.resource.version === curatorFirst.resource.version + 1, "server04_completion_curator_stale_plan_partially_applied");
+
+    const duplicateFirst = await completion.proposeResourceVersion(ownerContext("curator-duplicate-first"), {
+      id: `completion_curator_duplicate_first_${suffix.slice(0, 14)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "knowledge",
+      knowledgeKind: "fact",
+      title: "Duplicate AI candidate",
+      content: "Exactly duplicated AI body for rollback protection.",
+      metadata: { statement: "Duplicate", subject: "curator probe", evidence: "test fixture" },
+      reason: "Curator rollback probe."
+    });
+    const duplicateSecond = await completion.proposeResourceVersion(ownerContext("curator-duplicate-second"), {
+      id: `completion_curator_duplicate_second_${suffix.slice(0, 14)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "knowledge",
+      knowledgeKind: "fact",
+      title: "Duplicate AI candidate",
+      content: "Exactly duplicated AI body for rollback protection.",
+      metadata: { statement: "Duplicate", subject: "curator probe", evidence: "test fixture" },
+      reason: "Curator rollback probe."
+    });
+    await adminDatabase.withAdmin(async (sql) => {
+      await sql.query(
+        "UPDATE workspace_completion_curator_state SET last_light_run_at = NOW() - INTERVAL '2 days', updated_at = NOW() WHERE workspace_id = $1 AND room_id = $2",
+        [workspaceId, rootRoom.id]
+      );
+    });
+    const appliedLight = await curator.runLight(ownerContext("curator-light-apply"), { roomId: rootRoom.id });
+    const duplicateAction = appliedLight.actions.find((action) => action.kind === "archive_exact_duplicate"
+      && (action.resourceId === duplicateFirst.resource.id || action.resourceId === duplicateSecond.resource.id));
+    assert(appliedLight.status === "applied" && appliedLight.snapshotId && duplicateAction, "server04_completion_curator_duplicate_plan_missing");
+    const archivedDuplicate = await completion.getResource({ workspaceId, accountId: owner.id }, duplicateAction.resourceId);
+    assert(archivedDuplicate.resource.lifecycleState === "archived", "server04_completion_curator_duplicate_not_archived");
+    await completion.setResourceFixed(ownerContext("curator-rollback-human-fixed"), {
+      resourceId: archivedDuplicate.resource.id,
+      fixed: true,
+      expectedVersion: archivedDuplicate.resource.version,
+      reason: "A human fixed this Resource after the Curator snapshot."
+    });
+    await expectCode("workspace_completion_curator_stale_input", async () => {
+      await curator.rollbackSnapshot(ownerContext("curator-rollback-stale"), {
+        roomId: rootRoom.id,
+        snapshotId: appliedLight.snapshotId!
+      });
+    });
+    const protectedAfterRollback = await completion.getResource({ workspaceId, accountId: owner.id }, archivedDuplicate.resource.id);
+    assert(protectedAfterRollback.resource.lifecycleState === "archived" && protectedAfterRollback.resource.aiProtection === "fixed", "server04_completion_curator_rollback_overwrote_human_edit");
+
+    await maintenance.configureIdentity(ownerContext("maintenance-configure"), { accountId: maintenanceAccount.id });
+    const maintenanceResult = await maintenance.runTick({
+      workspaceId,
+      accountId: maintenanceAccount.id,
+      operationId: operationId("maintenance-tick")
+    }, { workerId: "completion_maintenance_worker", maxRuns: 10 });
+    assert(maintenanceResult.queuedCuratorJobs >= 1, "server04_completion_maintenance_curator_not_queued");
+
+    // Starting a dedicated Run flips the Workspace to read-only before any
+    // source snapshot. A normal Server write is therefore an explicit deny,
+    // while only the matching Run capability may move it to rollback.
+    const pausedMigrationContext = ownerContext("migration-read-only-start");
+    const pausedMigrationRunId = `completion_migration_pause_${suffix.slice(0, 24)}`;
+    await store.database.withContext(pausedMigrationContext, async (sql) => {
+      const started = await sql.query<{ state: string }>(
+        "SELECT samurai_begin_completion_migration_run($1, $2, $3) AS state",
+        [workspaceId, pausedMigrationRunId, pausedMigrationContext.operationId]
+      );
+      assert(started.rows[0]?.state === "preparing", "server04_completion_migration_pause_not_started");
+      const audit = await sql.query<{ exists: boolean }>(
+        `SELECT EXISTS(
+           SELECT 1 FROM workspace_audit_entries
+           WHERE workspace_id = $1 AND action = 'workspace.completion.migration.begin'
+             AND subject_kind = 'completion_migration_run' AND subject_id = $2
+         ) AS exists`,
+        [workspaceId, pausedMigrationRunId]
+      );
+      assert(audit.rows[0]?.exists === true, "server04_completion_migration_start_audit_missing");
+    });
+    await expectCode("workspace_completion_policy_denied", async () => {
+      await completion.createResource(ownerContext("migration-normal-write-rejected"), {
+        id: `completion_write_during_migration_${suffix.slice(0, 16)}`,
+        scope: { kind: "room", roomId: rootRoom.id },
+        kind: "knowledge",
+        knowledgeKind: "fact",
+        title: "Normal write during migration",
+        content: "This must not be written while the source is frozen.",
+        metadata: { statement: "blocked", subject: "migration", evidence: "probe" },
+        reason: "Read-only migration probe."
+      });
+    });
+    const pausedBackfillContext = {
+      ...pausedMigrationContext,
+      migrationRunId: pausedMigrationRunId,
+      migrationOperation: "completion_backfill" as const
+    };
+    await store.database.withContext(pausedBackfillContext, async (sql) => {
+      await sql.query(
+        "SELECT samurai_transition_completion_migration_run($1, $2, 'rolling_back', '{}'::JSONB, $3, NULL, NULL)",
+        [workspaceId, pausedMigrationRunId, "a".repeat(64)]
+      );
+    });
+    await store.database.withContext({ ...pausedBackfillContext, migrationOperation: "completion_rollback" as const }, async (sql) => {
+      await sql.query(
+        "SELECT samurai_transition_completion_migration_run($1, $2, 'rolled_back', '{}'::JSONB, $3, NULL, NULL)",
+        [workspaceId, pausedMigrationRunId, "a".repeat(64)]
+      );
+    });
+    const migrationPauseRecovered = await store.getWorkspace({ workspaceId, accountId: owner.id });
+    assert(migrationPauseRecovered.state === "active", "server04_completion_migration_rollback_did_not_restore_active");
+
+    // The old tables are read once, copied to file-backed Completion data,
+    // verified against physical bodies, and never written by the migration.
+    const legacy = new WorkspaceLearningService(store);
+    const legacyResource = await legacy.putResource(ownerContext("legacy-resource"), {
+      id: `legacy_knowledge_${suffix.slice(0, 24)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "knowledge",
+      title: "Legacy knowledge",
+      content: "This old row must become a file-backed Completion Resource.",
+      payload: { knowledge_kind: "fact" },
+      reason: "Legacy probe"
+    });
+    const migration = new WorkspaceCompletionMigrationService(completion);
+    const migrated = await migration.migrateLegacy(ownerContext("legacy-migrate"));
+    assert(Boolean(migrated.verificationHash) && migrated.receiptId, "server04_completion_migration_not_verified");
+    const migratedBody = await completion.getResourceBody({ workspaceId, accountId: owner.id }, legacyResource.resource.id);
+    assert(migratedBody.content === "This old row must become a file-backed Completion Resource.", "server04_completion_migration_body_missing");
+
+    const bundleDirectory = path.join(root, "source.bundle.v4");
+    const bundles = new WorkspaceBundleV4Service(store);
+    // Simulate only the old, provable error: an embedded base-v3 export left
+    // a ledger row at a staging path. The pure snapshot has no DB side
+    // effect, so its hash is exactly the one the following v4 export embeds.
+    const previewBaseDirectory = path.join(root, "preview-base-v3");
+    const previewBase = await new WorkspaceBundleV3Service(store).writePortableSnapshot(ownerContext("bundle-v4-preview"), {
+      destination: previewBaseDirectory,
+      includeLegacyLearning: false,
+      excludeMembershipAccountIds: [maintenanceAccount.id]
+    });
+    await rm(previewBaseDirectory, { recursive: true, force: true });
+    const legacyBundleId = `bundle_legacy_v3_${suffix.slice(0, 24)}`;
+    await adminDatabase.withAdmin(async (sql) => {
+      await sql.query(
+        `INSERT INTO workspace_bundles(workspace_id, id, format_version, path, sha256, record_counts, created_by)
+         VALUES ($1, $2, 3, $3, $4, $5::JSONB, $6)`,
+        [workspaceId, legacyBundleId, path.join(root, ".source.bundle.v4.staging-obsolete", "base-v3"), previewBase.manifest.integrity_hash, JSON.stringify(previewBase.manifest.record_counts), owner.id]
+      );
+    });
+    const bundleExportContext = ownerContext("bundle-export");
+    const exported = await bundles.export(bundleExportContext, { destination: bundleDirectory });
+    assert(exported.manifest.format_version === 4, "server04_completion_bundle_v4_missing");
+    await verifyWorkspaceBundleV4(bundleDirectory);
+    const retriedExport = await bundles.export(bundleExportContext, { destination: bundleDirectory });
+    assert(retriedExport.manifest.integrity_hash === exported.manifest.integrity_hash, "server04_completion_bundle_v4_retry_changed_bundle");
+    const v4Ledger = await store.database.withContext({ workspaceId, accountId: owner.id }, async (sql) => {
+      const rows = await sql.query<{ format_version: number | string; path: string; sha256: string }>(
+        "SELECT format_version, path, sha256 FROM workspace_bundles WHERE workspace_id = $1 AND format_version = 4 ORDER BY created_at ASC",
+        [workspaceId]
+      );
+      const embedded = await sql.query<{ exists: boolean }>(
+        "SELECT EXISTS(SELECT 1 FROM workspace_bundles WHERE workspace_id = $1 AND path LIKE '%.staging-%/base-v3%') AS exists",
+        [workspaceId]
+      );
+      return { rows: rows.rows, embedded: embedded.rows[0]?.exists === true };
+    });
+    assert(v4Ledger.rows.length === 1 && v4Ledger.rows[0]?.path === bundleDirectory && v4Ledger.rows[0]?.sha256 === exported.manifest.integrity_hash && !v4Ledger.embedded, "server04_completion_bundle_v4_ledger_mismatch");
+    const repairedLedger = await store.database.withContext({ workspaceId, accountId: owner.id }, async (sql) => sql.query<{ id: string; format_version: number | string }>(
+      "SELECT id, format_version FROM workspace_bundles WHERE workspace_id = $1 AND id = $2",
+      [workspaceId, legacyBundleId]
+    ));
+    assert(repairedLedger.rows[0]?.id === legacyBundleId && Number(repairedLedger.rows[0]?.format_version) === 4, "server04_completion_bundle_v4_legacy_ledger_not_repaired");
+    const restoreStore = target.label === "self_host"
+      ? new WorkspaceServerStore({
+        database,
+        mode: "self_host",
+        selfHostWorkspaceId: restoredWorkspaceId,
+        selfHostInitialAdminId: owner.id,
+        storageRoot: root,
+        invitationTokenSecret: "x".repeat(32)
+      })
+      : store;
+    const imported = await new WorkspaceBundleV4Service(restoreStore).importNew({ accountId: owner.id, operationId: operationId("bundle-import") }, {
+      sourceDirectory: bundleDirectory,
+      targetWorkspaceId: restoredWorkspaceId,
+      targetWorkspaceName: "Restored completion probe"
+    });
+    const restoredCompletion = new WorkspaceCompletionService(restoreStore);
+    const restoredBody = await restoredCompletion.getResourceBody({ workspaceId: imported.workspaceId, accountId: owner.id }, knowledge.resource.id);
+    assert(restoredBody.content === expectedKnowledgeContent, "server04_completion_bundle_v4_roundtrip_failed");
+    const restoredSkillFiles = await restoredCompletion.listSkillFiles({ workspaceId: imported.workspaceId, accountId: owner.id }, movedSkill.resource.id);
+    const restoredSkillBinary = await restoredCompletion.getSkillFile({ workspaceId: imported.workspaceId, accountId: owner.id }, movedSkill.resource.id, "scripts/nested/verify.bin");
+    assert(restoredSkillFiles.length === 3 && Buffer.compare(restoredSkillBinary.content, Buffer.from([0, 255, 1, 2, 3])) === 0, "server04_completion_bundle_v4_skill_package_roundtrip_failed");
+    const restoredMaintenance = await restoreStore.database.withContext({ workspaceId: imported.workspaceId, accountId: owner.id }, async (sql) => {
+      const [marker, memberships] = await Promise.all([
+        sql.query<{ exists: boolean }>("SELECT EXISTS(SELECT 1 FROM workspace_completion_maintenance_identities WHERE workspace_id = $1) AS exists", [imported.workspaceId]),
+        sql.query<{ exists: boolean }>(
+          `SELECT EXISTS(
+             SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND account_id = $2
+             UNION ALL
+             SELECT 1 FROM room_members WHERE workspace_id = $1 AND account_id = $2
+           ) AS exists`,
+          [imported.workspaceId, maintenanceAccount.id]
+        )
+      ]);
+      return { marker: marker.rows[0]?.exists === true, memberships: memberships.rows[0]?.exists === true };
+    });
+    assert(!restoredMaintenance.marker && !restoredMaintenance.memberships, "server04_completion_bundle_v4_maintenance_membership_restored");
+
+    // Compatibility is not merely "the v3 reader accepts a manifest". A
+    // legacy portable Workspace is first restored through its old path, then
+    // migrated to the file-backed Completion model, exported as v4, and
+    // restored again without losing the old body.
+    const v3Directory = path.join(root, "legacy.bundle.v3");
+    await new WorkspaceBundleV3Service(store).export(ownerContext("v3-export"), { destination: v3Directory });
+    const v3Store = target.label === "self_host"
+      ? new WorkspaceServerStore({
+        database,
+        mode: "self_host",
+        selfHostWorkspaceId: v3ImportedWorkspaceId,
+        selfHostInitialAdminId: owner.id,
+        storageRoot: path.join(root, "v3-import-store"),
+        invitationTokenSecret: "x".repeat(32)
+      })
+      : store;
+    const v3Imported = await new WorkspaceBundleV3Service(v3Store).importNew({ accountId: owner.id, operationId: operationId("v3-import") }, {
+      sourceDirectory: v3Directory,
+      targetWorkspaceId: v3ImportedWorkspaceId,
+      targetWorkspaceName: "V3 compatibility completion probe"
+    });
+    const v3Completion = new WorkspaceCompletionService(v3Store);
+    const v3Migrated = await new WorkspaceCompletionMigrationService(v3Completion).migrateLegacy(
+      humanContext(v3Imported.workspaceId, owner, "v3-completion-migrate")
+    );
+    assert(Boolean(v3Migrated.verificationHash), "server04_completion_v3_migration_not_verified");
+    const v3BundleDirectory = path.join(root, "v3-to-v4.bundle.v4");
+    await new WorkspaceBundleV4Service(v3Store).export({
+      workspaceId: v3Imported.workspaceId,
+      accountId: owner.id,
+      operationId: operationId("v3-v4-export")
+    }, { destination: v3BundleDirectory });
+    const v3RestoreStore = target.label === "self_host"
+      ? new WorkspaceServerStore({
+        database,
+        mode: "self_host",
+        selfHostWorkspaceId: v3RestoredWorkspaceId,
+        selfHostInitialAdminId: owner.id,
+        storageRoot: path.join(root, "v3-v4-restore-store"),
+        invitationTokenSecret: "x".repeat(32)
+      })
+      : store;
+    const v3Restored = await new WorkspaceBundleV4Service(v3RestoreStore).importNew({ accountId: owner.id, operationId: operationId("v3-v4-restore") }, {
+      sourceDirectory: v3BundleDirectory,
+      targetWorkspaceId: v3RestoredWorkspaceId,
+      targetWorkspaceName: "V3 to V4 restored completion probe"
+    });
+    const v3RestoredLegacy = await new WorkspaceCompletionService(v3RestoreStore).getResourceBody({
+      workspaceId: v3Restored.workspaceId,
+      accountId: owner.id
+    }, legacyResource.resource.id);
+    assert(v3RestoredLegacy.content === "This old row must become a file-backed Completion Resource.", "server04_completion_v3_to_v4_roundtrip_failed");
+    console.log(`[Server04 completion] ${target.label}: file body, RLS, review, scheduler, migration, v3-to-v4, and Bundle v4 probes passed`);
+  } finally {
+    await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId, v3ImportedWorkspaceId, v3RestoredWorkspaceId], accounts.map((account) => account.id));
+    await database.close();
+    await adminDatabase.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function verifyHttpPolicyIngress(input: {
+  target: ProbeTarget;
+  storageRoot: string;
+  workspaceId: string;
+  owner: ProbeAccount;
+  roomId: string;
+  completion: WorkspaceCompletionService;
+  suffix: string;
+}): Promise<{ resource: { kind: string } }> {
+  const config = {
+    mode: input.target.label,
+    databaseUrl: input.target.databaseUrl,
+    databaseRuntimeRole: input.target.runtimeRole,
+    invitationTokenSecret: "x".repeat(32),
+    storageRoot: input.storageRoot,
+    selfHostBootstrapMode: "empty" as const,
+    initialAdminDisplayName: input.owner.id,
+    ...(input.target.label === "self_host" ? {
+      selfHostWorkspaceId: input.workspaceId,
+      initialAdminId: input.owner.id,
+      initialAdminPublicKey: input.owner.publicKey
+    } : {}),
+    port: 0,
+    bindAddress: "127.0.0.1",
+    corsOrigins: [],
+    publicNetwork: false
+  };
+  const server = await createWorkspaceServerHttp(config);
+  try {
+    const port = await listenLoopback(server.httpServer);
+    const route = `/api/workspaces/${input.workspaceId}/completion/policies`;
+    const policyId = `completion_policy_http_${input.suffix.slice(0, 24)}`;
+    const body = {
+      policy_id: policyId,
+      scope_kind: "room",
+      room_id: input.roomId,
+      title: "HTTP verified policy",
+      content: "Only a verified request may enable this policy.",
+      rules: [{
+        id: "deny_connection_probe",
+        operation: "resource.create",
+        effect: "deny",
+        connectionId: "connection_probe",
+        conditions: { caller_kind: "connection" }
+      }],
+      reason: "A signed human request reviewed this policy.",
+      // These are deliberately ignored input fields. They must never become
+      // the caller type, target Connection, or approval signature.
+      caller_kind: "connection",
+      connection_id: "connection_body_forgery",
+      human_signature: "arbitrary-body-text"
+    };
+    const applied = await signedJsonRequest({ port, account: input.owner, workspaceId: input.workspaceId, path: route, body });
+    assert(applied.response.status === 201, `server04_completion_http_policy_status_${applied.response.status}`);
+    const saved = await applied.response.json() as { resource?: { kind?: string } };
+    assert(saved.resource?.kind === "policy", "server04_completion_http_policy_not_saved");
+    const approval = await input.completion.store.database.withContext({ workspaceId: input.workspaceId, accountId: input.owner.id }, async (sql) => {
+      const result = await sql.query<{ signature: string; canonical_payload_hash: string }>(
+        `SELECT approval.signature, approval.canonical_payload_hash
+         FROM workspace_completion_policy_approvals approval
+         WHERE approval.workspace_id = $1 AND approval.resource_id = $2`,
+        [input.workspaceId, policyId]
+      );
+      return result.rows[0];
+    });
+    assert(approval?.signature === applied.signature, "server04_completion_http_policy_signature_not_preserved");
+    assert(approval.signature !== body.human_signature && /^[a-f0-9]{64}$/.test(approval.canonical_payload_hash), "server04_completion_http_policy_body_signature_trusted");
+
+    const forged = await signedJsonRequest({
+      port,
+      account: input.owner,
+      workspaceId: input.workspaceId,
+      path: route,
+      body: { ...body, policy_id: `${policyId}_forged` },
+      signatureOverride: "forged"
+    });
+    assert(forged.response.status === 401, "server04_completion_forged_http_signature_accepted");
+
+    const unverifiedOperation = operationId("unverified-policy");
+    await expectCode("workspace_completion_policy_verified_human_required", async () => {
+      await input.completion.applyPolicy({
+        workspaceId: input.workspaceId,
+        accountId: input.owner.id,
+        operationId: unverifiedOperation,
+        caller: {
+          kind: "human",
+          principalAccountId: input.owner.id,
+          requestId: `request_${randomUUID().replaceAll("-", "")}`,
+          operationId: unverifiedOperation,
+          timestamp: String(Date.now()),
+          canonicalPayloadHash: "0".repeat(64),
+          signature: "forged"
+        }
+      }, {
+        id: `completion_policy_unverified_${input.suffix.slice(0, 16)}`,
+        scope: { kind: "room", roomId: input.roomId },
+        title: "Forged policy",
+        content: "Must not save.",
+        rules: [],
+        reason: "This is an attack probe.",
+        expectedVersion: 0
+      });
+    });
+
+    const fakeConnectionOperation = operationId("fake-connection");
+    const fakeConnectionContext = {
+      workspaceId: input.workspaceId,
+      accountId: input.owner.id,
+      operationId: fakeConnectionOperation,
+      caller: {
+        kind: "connection" as const,
+        principalAccountId: input.owner.id,
+        connectionId: "connection_probe",
+        requestId: `request_${randomUUID().replaceAll("-", "")}`,
+        operationId: fakeConnectionOperation,
+        timestamp: String(Date.now())
+      }
+    };
+    await input.completion.createResource(fakeConnectionContext, {
+      id: `completion_fake_connection_${input.suffix.slice(0, 20)}`,
+      scope: { kind: "room", roomId: input.roomId },
+      kind: "knowledge",
+      knowledgeKind: "fact",
+      title: "Untrusted caller is not a Connection",
+      content: "The body cannot select Connection policy.",
+      metadata: {},
+      reason: "Ingress forgery probe"
+    });
+
+    const connectionOperation = operationId("trusted-connection");
+    await expectCode("workspace_completion_policy_denied", async () => {
+      await input.completion.createResource({
+        workspaceId: input.workspaceId,
+        accountId: input.owner.id,
+        operationId: connectionOperation,
+        caller: createInternalWorkspaceConnectionCaller({
+          principalAccountId: input.owner.id,
+          connectionId: "connection_probe",
+          requestId: `request_${randomUUID().replaceAll("-", "")}`,
+          operationId: connectionOperation,
+          timestamp: String(Date.now())
+        })
+      }, {
+        id: `completion_trusted_connection_${input.suffix.slice(0, 16)}`,
+        scope: { kind: "room", roomId: input.roomId },
+        kind: "knowledge",
+        knowledgeKind: "fact",
+        title: "Trusted Connection denied",
+        content: "This must be rejected by the approved connection policy.",
+        metadata: {},
+        reason: "Connection policy probe"
+      });
+    });
+
+    const maintenanceOperation = operationId("maintenance-policy");
+    await expectCode("workspace_completion_policy_verified_human_required", async () => {
+      await input.completion.applyPolicy({
+        workspaceId: input.workspaceId,
+        accountId: input.owner.id,
+        operationId: maintenanceOperation,
+        caller: createInternalWorkspaceMaintenanceCaller({ principalAccountId: input.owner.id, operationId: maintenanceOperation })
+      }, {
+        id: `completion_policy_maintenance_${input.suffix.slice(0, 16)}`,
+        scope: { kind: "room", roomId: input.roomId },
+        title: "Maintenance policy",
+        content: "Must not save.",
+        rules: [],
+        reason: "Maintenance cannot approve Policy.",
+        expectedVersion: 0
+      });
+    });
+    return { resource: { kind: saved.resource.kind } };
+  } finally {
+    await server.close();
+  }
+}
+
+async function signedJsonRequest(input: {
+  port: number;
+  account: ProbeAccount;
+  workspaceId: string;
+  path: string;
+  body: Record<string, unknown>;
+  signatureOverride?: string;
+}): Promise<{ response: Response; signature: string }> {
+  const requestId = `request_${randomUUID().replaceAll("-", "")}`;
+  const timestamp = String(Date.now());
+  const operation = operationId("http-policy");
+  const payload = {
+    method: "POST",
+    path: input.path,
+    workspaceId: input.workspaceId,
+    operationId: operation,
+    requestId,
+    timestamp,
+    body: input.body
+  };
+  const signature = sign(null, Buffer.from(createAccountSignaturePayload(payload)), input.account.privateKey).toString("base64url");
+  const response = await fetch(`http://127.0.0.1:${input.port}${input.path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-samurai-account-id": input.account.id,
+      "x-samurai-workspace-id": input.workspaceId,
+      "x-samurai-operation-id": operation,
+      "x-samurai-request-id": requestId,
+      "x-samurai-timestamp": timestamp,
+      "x-samurai-signature": input.signatureOverride ?? signature
+    },
+    body: JSON.stringify(input.body)
+  });
+  return { response, signature };
+}
+
+async function listenLoopback(server: HttpServer): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server04_completion_http_address_missing");
+  return address.port;
+}
+
+async function cleanup(adminDatabase: PostgresWorkspaceAdminDatabase, workspaceIds: string[], accountIds: string[]): Promise<void> {
+  await adminDatabase.withAdmin(async (sql) => {
+    const tables = [
+      "workspace_completion_redactions", "workspace_completion_job_raw_outputs", "workspace_completion_search_projection",
+      "workspace_completion_skill_files", "workspace_completion_policy_change_requests", "workspace_completion_policy_rules",
+      "workspace_completion_policy_approvals", "workspace_completion_evaluations", "workspace_completion_uses",
+      "workspace_completion_resource_links", "workspace_completion_evidence", "workspace_completion_attestations",
+      "workspace_completion_curator_snapshots", "workspace_completion_curator_state", "workspace_completion_resource_versions",
+      "workspace_completion_resources", "workspace_completion_episode_activities", "workspace_completion_job_attempts",
+      "workspace_completion_jobs", "workspace_completion_episodes", "workspace_completion_activities", "workspace_completion_configurations",
+      "workspace_completion_workspace_documents", "workspace_completion_file_batch_entries", "workspace_completion_file_batches",
+      "workspace_completion_migration_receipts", "workspace_completion_migration_runs", "workspace_completion_maintenance_identities",
+      "workspace_learning_resource_uses", "workspace_learning_resource_links", "workspace_learning_evidence",
+      "workspace_learning_resource_versions", "workspace_learning_resources", "workspace_learning_job_attempts", "workspace_learning_jobs",
+      "workspace_learning_activities", "workspace_learning_settings",
+      "workspace_audit_entries", "workspace_bundles", "workspace_transfers", "workspace_invitations", "workspace_jobs", "workspace_events",
+      "workspace_operations", "workspace_file_transactions", "workspace_files", "workspace_records", "room_members", "rooms",
+      "workspace_members", "workspace_import_sessions", "workspaces"
+    ];
+    for (const workspaceId of workspaceIds) {
+      for (const table of tables) await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]).catch(() => undefined);
+    }
+    await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]).catch(() => undefined);
+    await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]).catch(() => undefined);
+  }).catch(() => undefined);
+}
+
+function accountIdentity(): ProbeAccount {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
+  return { id: accountIdFromPublicKey(publicKeyPem), publicKey: publicKeyPem, privateKey };
+}
+
+function humanContext(workspaceId: string, account: ProbeAccount, label: string) {
+  const operation = operationId(label);
+  const requestId = `request_${randomUUID().replaceAll("-", "")}`;
+  const timestamp = String(Date.now());
+  const payload = {
+    method: "INTERNAL",
+    path: "/server04-live-probe",
+    workspaceId,
+    operationId: operation,
+    requestId,
+    timestamp,
+    body: { label }
+  };
+  const signature = sign(null, Buffer.from(createAccountSignaturePayload(payload)), account.privateKey).toString("base64url");
+  return {
+    workspaceId,
+    accountId: account.id,
+    operationId: operation,
+    caller: createVerifiedWorkspaceHumanCaller({
+      signed: { accountId: account.id, requestId, timestamp, signature },
+      publicKey: account.publicKey,
+      payload,
+      operationId: operation
+    })
+  };
+}
+
+function operationId(label: string): string {
+  return `completion04_${label}_${randomUUID().replaceAll("-", "")}`;
+}
+
+async function expectCode(code: string, action: () => Promise<unknown>): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    if (error instanceof Error && error.message.includes(code)) return;
+    throw error;
+  }
+  throw new Error(`server04_completion_expected_${code}`);
+}
+
+function assert(value: unknown, code: string): asserts value {
+  if (!value) throw new Error(code);
+}

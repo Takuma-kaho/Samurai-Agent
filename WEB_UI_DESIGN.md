@@ -72,7 +72,7 @@ Chat-firstは、Workspace Core全体の原則ではない。Native Appの表示�
 | Chat Active | 会話と実行状態を表示する通常画面 |
 | With Artifact | 会話から成果物のpreviewを表示する状態 |
 | Workspace Peek | ArtifactやKnowledgeを右側で見る状態 |
-| Context Drawer | Activity、Memory候補、Skill候補、Run状態を見る補助面 |
+| Context Drawer | Activity、Knowledge候補、Skill候補、Run状態を見る補助面 |
 
 空のChatは、初回送信または実アクションまでSessionとして保存しない。
 
@@ -97,7 +97,7 @@ Chat-firstは、Workspace Core全体の原則ではない。Native Appの表示�
 - Session list
 - Settings
 
-Memory、Skill、Run History、Backend設定を常設メニューに並べすぎない。検索、専用画面、Context Drawerから到達する。
+Knowledge、Skill、Run History、Backend設定を常設メニューに並べすぎない。検索、専用画面、Context Drawerから到達する。
 
 ### 4.2 Chat
 
@@ -118,6 +118,8 @@ Memory、Skill、Run History、Backend設定を常設メニューに並べすぎ
 - mobileでは1カラムに落とす
 - Workspace Server接続がある時は、閲覧権限のあるRoomだけを平坦な一覧からツリーとして投影する。親Roomにいるだけでは見えない子Roomの名前・件数・通知を補完表示しない
 - Room作成、子Room作成、移動、メンバー変更は明示操作にする。初期の移動はドラッグ＆ドロップにせず、移動先と影響するメンバーを確認してから実行する
+- Workspaceが移行中のread-onlyなら、書込みを成功表示せず、明示的に読取専用として表示する
+- Policyの有効化に任意文字列の署名入力欄を置かず、認証済みの人間操作であることだけを確認表示する
 
 Workspace PeekはWorkspaceデータの投影であり、Workspaceの保存単位ではない。
 
@@ -126,7 +128,7 @@ Workspace PeekはWorkspaceデータの投影であり、Workspaceの保存単位
 置いてよいもの。
 
 - Activityの要約
-- Memory / Knowledge / Skill候補
+- Knowledge / Skill候補
 - Backend Event
 - Tool log
 - 要確認状態

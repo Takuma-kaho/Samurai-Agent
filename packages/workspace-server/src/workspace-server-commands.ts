@@ -1,17 +1,25 @@
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { assertOpaqueId } from "./config";
+import { WorkspaceServerError } from "./errors";
 import {
   WorkspaceBundleV3Service,
   writeWorkspaceBundleV3Transport
 } from "./workspace-bundle-v3";
 import { WorkspaceFileStore } from "./workspace-files";
+import { WorkspaceCompletionService } from "./workspace-completion-service";
+import { WorkspaceCompletionMigrationService } from "./workspace-completion-migration";
+import { WorkspaceCompletionMaintenanceService } from "./workspace-completion-maintenance";
 import { WorkspaceServerStore } from "./workspace-server-store";
 
 export interface WorkspaceServerCommandDependencies {
   store: WorkspaceServerStore;
   files: WorkspaceFileStore;
   bundles: WorkspaceBundleV3Service;
+  /** Optional while old callers migrate; the running Core always supplies it. */
+  completion?: WorkspaceCompletionService;
+  completionMigrations?: WorkspaceCompletionMigrationService;
+  maintenance?: WorkspaceCompletionMaintenanceService;
 }
 
 export interface ImportWorkspaceBundleTransportInput {
@@ -31,11 +39,17 @@ export class WorkspaceServerCommandService {
   private readonly store: WorkspaceServerStore;
   private readonly files: WorkspaceFileStore;
   private readonly bundles: WorkspaceBundleV3Service;
+  private readonly completion?: WorkspaceCompletionService;
+  private readonly completionMigrations?: WorkspaceCompletionMigrationService;
+  private readonly maintenance?: WorkspaceCompletionMaintenanceService;
 
   constructor(dependencies: WorkspaceServerCommandDependencies) {
     this.store = dependencies.store;
     this.files = dependencies.files;
     this.bundles = dependencies.bundles;
+    this.completion = dependencies.completion;
+    this.completionMigrations = dependencies.completionMigrations;
+    this.maintenance = dependencies.maintenance;
   }
 
   registerAccount(input: Parameters<WorkspaceServerStore["registerAccount"]>[0]) {
@@ -171,6 +185,158 @@ export class WorkspaceServerCommandService {
     input: Parameters<WorkspaceFileStore["write"]>[1]
   ) {
     return this.files.write(context, input);
+  }
+
+  ingestCompletionActivity(
+    context: Parameters<WorkspaceCompletionService["ingestActivity"]>[0],
+    input: Parameters<WorkspaceCompletionService["ingestActivity"]>[1]
+  ) {
+    return this.requireCompletion().ingestActivity(context, input);
+  }
+
+  createCompletionEpisode(
+    context: Parameters<WorkspaceCompletionService["createEpisode"]>[0],
+    input: Parameters<WorkspaceCompletionService["createEpisode"]>[1]
+  ) {
+    return this.requireCompletion().createEpisode(context, input);
+  }
+
+  createCompletionResource(
+    context: Parameters<WorkspaceCompletionService["createResource"]>[0],
+    input: Parameters<WorkspaceCompletionService["createResource"]>[1]
+  ) {
+    return this.requireCompletion().createResource(context, input);
+  }
+
+  updateCompletionResource(
+    context: Parameters<WorkspaceCompletionService["updateResource"]>[0],
+    resourceId: Parameters<WorkspaceCompletionService["updateResource"]>[1],
+    input: Parameters<WorkspaceCompletionService["updateResource"]>[2]
+  ) {
+    return this.requireCompletion().updateResource(context, resourceId, input);
+  }
+
+  setCompletionResourceFixed(
+    context: Parameters<WorkspaceCompletionService["setResourceFixed"]>[0],
+    input: Parameters<WorkspaceCompletionService["setResourceFixed"]>[1]
+  ) {
+    return this.requireCompletion().setResourceFixed(context, input);
+  }
+
+  setCompletionResourceArchived(
+    context: Parameters<WorkspaceCompletionService["setResourceArchived"]>[0],
+    input: Parameters<WorkspaceCompletionService["setResourceArchived"]>[1]
+  ) {
+    return this.requireCompletion().setResourceArchived(context, input);
+  }
+
+  redactCompletionResource(
+    context: Parameters<WorkspaceCompletionService["redactResource"]>[0],
+    input: Parameters<WorkspaceCompletionService["redactResource"]>[1]
+  ) {
+    return this.requireCompletion().redactResource(context, input);
+  }
+
+  redactCompletionRawJobOutput(
+    context: Parameters<WorkspaceCompletionService["redactRawJobOutput"]>[0],
+    input: Parameters<WorkspaceCompletionService["redactRawJobOutput"]>[1]
+  ) {
+    return this.requireCompletion().redactRawJobOutput(context, input);
+  }
+
+  promoteCompletionCandidate(
+    context: Parameters<WorkspaceCompletionService["promoteCandidate"]>[0],
+    input: Parameters<WorkspaceCompletionService["promoteCandidate"]>[1]
+  ) {
+    return this.requireCompletion().promoteCandidate(context, input);
+  }
+
+  copyCompletionResource(
+    context: Parameters<WorkspaceCompletionService["copyResource"]>[0],
+    input: Parameters<WorkspaceCompletionService["copyResource"]>[1]
+  ) {
+    return this.requireCompletion().copyResource(context, input);
+  }
+
+  promoteCompletionResourceToWorkspace(
+    context: Parameters<WorkspaceCompletionService["promoteToWorkspace"]>[0],
+    input: Parameters<WorkspaceCompletionService["promoteToWorkspace"]>[1]
+  ) {
+    return this.requireCompletion().promoteToWorkspace(context, input);
+  }
+
+  moveCompletionResource(
+    context: Parameters<WorkspaceCompletionService["moveResource"]>[0],
+    input: Parameters<WorkspaceCompletionService["moveResource"]>[1]
+  ) {
+    return this.requireCompletion().moveResource(context, input);
+  }
+
+  applyCompletionPolicy(
+    context: Parameters<WorkspaceCompletionService["applyPolicy"]>[0],
+    input: Parameters<WorkspaceCompletionService["applyPolicy"]>[1]
+  ) {
+    return this.requireCompletion().applyPolicy(context, input);
+  }
+
+  requestCompletionPolicyChange(
+    context: Parameters<WorkspaceCompletionService["requestPolicyChange"]>[0],
+    input: Parameters<WorkspaceCompletionService["requestPolicyChange"]>[1]
+  ) {
+    return this.requireCompletion().requestPolicyChange(context, input);
+  }
+
+  recordCompletionUse(
+    context: Parameters<WorkspaceCompletionService["recordUse"]>[0],
+    input: Parameters<WorkspaceCompletionService["recordUse"]>[1]
+  ) {
+    return this.requireCompletion().recordUse(context, input);
+  }
+
+  recordCompletionEvaluation(
+    context: Parameters<WorkspaceCompletionService["recordEvaluation"]>[0],
+    input: Parameters<WorkspaceCompletionService["recordEvaluation"]>[1]
+  ) {
+    return this.requireCompletion().recordEvaluation(context, input);
+  }
+
+  updateCompletionConfiguration(
+    context: Parameters<WorkspaceCompletionService["updateConfiguration"]>[0],
+    input: Parameters<WorkspaceCompletionService["updateConfiguration"]>[1]
+  ) {
+    return this.requireCompletion().updateConfiguration(context, input);
+  }
+
+  migrateCompletionLegacy(
+    context: Parameters<WorkspaceCompletionMigrationService["migrateLegacy"]>[0],
+    input: Parameters<WorkspaceCompletionMigrationService["migrateLegacy"]>[1]
+  ) {
+    if (!this.completionMigrations) throw new WorkspaceServerError("workspace_completion_migration_service_unavailable", 503);
+    return this.completionMigrations.migrateLegacy(context, input);
+  }
+
+  configureCompletionMaintenanceIdentity(
+    context: Parameters<WorkspaceCompletionMaintenanceService["configureIdentity"]>[0],
+    input: Parameters<WorkspaceCompletionMaintenanceService["configureIdentity"]>[1]
+  ) {
+    return this.requireMaintenance().configureIdentity(context, input);
+  }
+
+  writeCompletionWorkspaceDocument(
+    context: Parameters<WorkspaceCompletionService["writeWorkspaceDocument"]>[0],
+    input: Parameters<WorkspaceCompletionService["writeWorkspaceDocument"]>[1]
+  ) {
+    return this.requireCompletion().writeWorkspaceDocument(context, input);
+  }
+
+  private requireCompletion(): WorkspaceCompletionService {
+    if (!this.completion) throw new WorkspaceServerError("workspace_completion_service_unavailable", 503);
+    return this.completion;
+  }
+
+  private requireMaintenance(): WorkspaceCompletionMaintenanceService {
+    if (!this.maintenance) throw new WorkspaceServerError("workspace_completion_maintenance_unavailable", 503);
+    return this.maintenance;
   }
 
   beginTransfer(context: Parameters<WorkspaceBundleV3Service["beginTransfer"]>[0]) {

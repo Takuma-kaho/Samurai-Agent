@@ -1,8 +1,18 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { assertOpaqueId } from "./config";
 import { WorkspaceServerError } from "./errors";
+import type {
+  WorkspaceCaller,
+  WorkspaceConnectionCaller,
+  WorkspaceHumanCaller,
+  WorkspaceMaintenanceCaller
+} from "./types";
 
 const maxSignatureAgeMs = 5 * 60 * 1000;
+/** A Context caller is trusted only when this module minted the exact object.
+ * This prevents a JSON body (or a structural TypeScript cast) from becoming a
+ * human, Connection, or maintenance identity before PostgreSQL sees it. */
+const trustedWorkspaceCallers = new WeakSet<object>();
 
 export interface SignedAccountRequest {
   accountId: string;
@@ -69,6 +79,72 @@ export function verifyAccountSignature(input: {
   }
   const valid = verify(null, Buffer.from(createAccountSignaturePayload(input.payload)), key, signature);
   if (!valid) throw new WorkspaceServerError("account_signature_invalid", 401);
+}
+
+/**
+ * Re-verifies the canonical request immediately before it becomes a trusted
+ * internal caller. HTTP ingress uses this after resolving the Workspace and
+ * operation ID; services never accept an equivalent object from their input.
+ */
+export function createVerifiedWorkspaceHumanCaller(input: {
+  signed: SignedAccountRequest;
+  publicKey: string;
+  payload: AccountSignaturePayload;
+  operationId: string;
+}): WorkspaceHumanCaller {
+  assertOpaqueId(input.operationId, "workspace_operation_id_invalid");
+  if (input.payload.operationId !== input.operationId) {
+    throw new WorkspaceServerError("account_signature_payload_mismatch", 401);
+  }
+  verifyAccountSignature({ signed: input.signed, publicKey: input.publicKey, payload: input.payload });
+  const caller: WorkspaceHumanCaller = {
+    kind: "human",
+    principalAccountId: input.signed.accountId,
+    requestId: input.signed.requestId,
+    operationId: input.operationId,
+    timestamp: input.signed.timestamp,
+    canonicalPayloadHash: createHash("sha256").update(canonicalJson(input.payload)).digest("hex"),
+    signature: input.signed.signature
+  };
+  trustedWorkspaceCallers.add(caller);
+  return caller;
+}
+
+/** Connection Hosts run inside the Server process and must deliberately mint
+ * their Context. No HTTP parser invokes this function. */
+export function createInternalWorkspaceConnectionCaller(input: Omit<WorkspaceConnectionCaller, "kind">): WorkspaceConnectionCaller {
+  assertOpaqueId(input.principalAccountId, "account_id_invalid");
+  assertOpaqueId(input.connectionId, "workspace_connection_id_invalid");
+  assertOpaqueId(input.requestId, "request_id_invalid");
+  assertOpaqueId(input.operationId, "workspace_operation_id_invalid");
+  if (!Number.isFinite(Number(input.timestamp))) throw new WorkspaceServerError("workspace_connection_timestamp_invalid", 400);
+  const caller: WorkspaceConnectionCaller = { kind: "connection", ...input };
+  trustedWorkspaceCallers.add(caller);
+  return caller;
+}
+
+/** The scheduler uses a deployment-local maintenance Account. It has no HTTP
+ * construction path and never becomes a human approval. */
+export function createInternalWorkspaceMaintenanceCaller(input: Omit<WorkspaceMaintenanceCaller, "kind">): WorkspaceMaintenanceCaller {
+  assertOpaqueId(input.principalAccountId, "account_id_invalid");
+  assertOpaqueId(input.operationId, "workspace_operation_id_invalid");
+  const caller: WorkspaceMaintenanceCaller = { kind: "maintenance", ...input };
+  trustedWorkspaceCallers.add(caller);
+  return caller;
+}
+
+export function isTrustedWorkspaceCaller(value: WorkspaceCaller | undefined): value is WorkspaceCaller {
+  return Boolean(value && trustedWorkspaceCallers.has(value));
+}
+
+/** A trusted caller is meaningful only for the Account in the same database
+ * Context. This prevents an internal caller object from being accidentally
+ * paired with another Account when a Context is assembled. */
+export function isTrustedWorkspaceCallerForAccount(
+  value: WorkspaceCaller | undefined,
+  accountId: string
+): value is WorkspaceCaller {
+  return isTrustedWorkspaceCaller(value) && value.principalAccountId === accountId;
 }
 
 /** A portable Account is bound to its public key, not to a server-local name. */
