@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -91,5 +91,49 @@ describe("Workspace Server PostgreSQL schema", () => {
       expect(schema).toContain(`CREATE POLICY ${stem}_insert ON ${table} FOR INSERT`);
       expect(schema).not.toContain(`CREATE POLICY ${stem}_access ON ${table} FOR ALL`);
     }
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_resource_file_policy_episode");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_batch_visibility_append_only");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_profile_soul_file_metadata");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_skill_package_files");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_retention_and_redaction");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_maintenance_identity");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_legacy_migration_rollback");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_scope_caller_attestation_hardening");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_migration_run_write_boundary");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_migration_run_phase_capability");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_migration_run_start_audit");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_final_ledger");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_legacy_staging_ledger_repair");
+    for (const table of [
+      "workspace_completion_configurations", "workspace_completion_activities", "workspace_completion_episodes",
+      "workspace_completion_episode_activities", "workspace_completion_resources", "workspace_completion_resource_versions", "workspace_completion_skill_files",
+      "workspace_completion_evidence", "workspace_completion_resource_links", "workspace_completion_policy_rules",
+      "workspace_completion_policy_change_requests", "workspace_completion_uses", "workspace_completion_evaluations",
+      "workspace_completion_jobs", "workspace_completion_job_attempts", "workspace_completion_curator_state",
+      "workspace_completion_curator_snapshots", "workspace_completion_file_batches", "workspace_completion_file_batch_entries",
+      "workspace_completion_search_projection", "workspace_completion_migration_receipts", "workspace_completion_workspace_documents",
+      "workspace_completion_job_raw_outputs", "workspace_completion_redactions", "workspace_completion_maintenance_identities",
+      "workspace_completion_migration_runs", "workspace_completion_policy_approvals", "workspace_completion_attestations"
+    ]) {
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("resource_kind IN ('knowledge', 'skill', 'policy')");
+    expect(schema).toContain("knowledge_kind IN ('fact', 'decision', 'explanation', 'experience_rule')");
+    expect(schema).toContain("UNIQUE NULLS NOT DISTINCT (workspace_id, room_id, external_episode_key)");
+    expect(schema).toContain("samurai_reject_legacy_learning_kinds");
+    expect(schema).toContain("workspace_completion_versions_immutable");
+    expect(schema).toContain("workspace_completion_evidence_activity_required");
+    expect(schema).toContain("semantic_enabled BOOLEAN NOT NULL DEFAULT FALSE");
+    expect(schema).toContain("file_batch_id TEXT NOT NULL");
+    expect(schema).toContain("samurai_is_completion_maintenance_identity");
+    expect(schema).toContain("samurai_rollback_completion_legacy_migration");
+    expect(schema).toContain("scope_kind IN ('workspace', 'room')");
+    expect(schema).toContain("COUNT(DISTINCT scope_key) > 1");
+    expect(schema).toContain("room_id = reference.scope_room_id");
+    expect(schema).toContain("samurai_begin_completion_migration_run");
+    expect(schema).toContain("workspace_completion_migration_run_capability_invalid");
+    expect(schema).toContain("samurai_record_workspace_bundle_v4");
+    expect(schema).toContain("samurai_repair_workspace_bundle_v4_legacy_ledger");
+    expect(schema).toContain("samurai_guard_completion_machine_attestation");
   });
 });

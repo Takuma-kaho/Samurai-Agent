@@ -7,7 +7,6 @@ import type {
   WorkspaceAccount,
   WorkspaceAuditEntry,
   WorkspaceEvent,
-  WorkspaceFile,
   WorkspaceInvitation,
   WorkspaceJob,
   WorkspaceMembershipRole,
@@ -934,9 +933,14 @@ export class WorkspaceServerStore {
     return this.database.withContext(context, async (sql) => this.selectRoomMember(sql, context.workspaceId, roomId, accountId));
   }
 
-  async listAuditEntries(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { afterId?: number; limit?: number } = {}): Promise<WorkspaceAuditEntry[]> {
+  async listAuditEntries(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { afterId?: number; limit?: number; subjectKind?: string; subjectId?: string } = {}
+  ): Promise<WorkspaceAuditEntry[]> {
     const afterId = input.afterId ?? 0;
     if (!Number.isSafeInteger(afterId) || afterId < 0) throw new WorkspaceServerError("workspace_audit_cursor_invalid", 400);
+    if (input.subjectKind !== undefined && (!input.subjectKind.trim() || input.subjectKind.length > 128)) throw new WorkspaceServerError("workspace_audit_subject_invalid", 400);
+    if (input.subjectId !== undefined && (!input.subjectId.trim() || input.subjectId.length > 256)) throw new WorkspaceServerError("workspace_audit_subject_invalid", 400);
     const limit = boundedLimit(input.limit);
     return this.database.withContext(context, async (sql) => {
       const result = await sql.query<AuditRow>(
@@ -944,8 +948,10 @@ export class WorkspaceServerStore {
                 before_version, after_version, details, created_at
          FROM workspace_audit_entries
          WHERE workspace_id = $1 AND id > $2
-         ORDER BY id ASC LIMIT $3`,
-        [context.workspaceId, afterId, limit]
+           AND ($3::TEXT IS NULL OR subject_kind = $3)
+           AND ($4::TEXT IS NULL OR subject_id = $4)
+         ORDER BY id ASC LIMIT $5`,
+        [context.workspaceId, afterId, input.subjectKind ?? null, input.subjectId ?? null, limit]
       );
       return result.rows.map(auditFromRow);
     });
@@ -1553,8 +1559,4 @@ function invitationToken(secret: string, context: Pick<WorkspaceRequestContext, 
 
 function operationScopedId(kind: string, scope: string, operationId: string): string {
   return `${kind}_${createHash("sha256").update(`${kind}|${scope}|${operationId}`).digest("hex").slice(0, 40)}`;
-}
-
-function storageNamespace(workspaceId: string): string {
-  return `workspaces/${workspaceId}`;
 }

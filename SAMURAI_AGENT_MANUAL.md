@@ -31,7 +31,7 @@ Samuraiは普段のアプリを置き換えず、活動のうち再利用でき�
         ↓
 Knowledge HostがRoomの範囲で整理する
         ↓
-Knowledge・Memory・Skill・Artifactが育つ
+Knowledge・Skill・Artifactが育つ
         ↓
 次のアプリ作業で再利用する
 ~~~
@@ -44,7 +44,7 @@ Samuraiの中心はChatや単一のAgentではない。人間が所有し、育�
 - 外部アプリの経験を受け取り、整理する学習ループ
 - Room単位の共有・閲覧権限
 - 交換可能なAgent Backend cassette
-- Artifact、Collection、Memory、Skillを保管する正本
+- Knowledge、Skill、Policy、PROFILE／SOUL、Artifact、Collectionを保管する正本
 - 必要な時だけ表示されるNative AppのChatとSurface
 
 ### 1.2 作らないもの
@@ -97,7 +97,7 @@ Workspaceは、個人またはチームが所有するKnowledgeの保管単位�
 保存するもの。
 
 - Roomと権限
-- Knowledge、Memory、Skill
+- Knowledge、Skill、Policy、PROFILE／SOUL
 - Activity HistoryとWorkspace Change
 - ArtifactとCollection
 - Backend実行結果と参照情報
@@ -128,11 +128,11 @@ Workspace
 ├─ Room A: 個人の知識
 │  ├─ Room AA: 継続案件
 │  │  └─ Room AAA: 2026年度
-│  ├─ Knowledge
+│  ├─ Knowledge / Skill / Policy
 │  ├─ Activity
 │  └─ Artifact / Collection
 └─ Room B: プロジェクトの知識
-   ├─ Knowledge
+   ├─ Knowledge / Skill / Policy
    ├─ Activity
    └─ Artifact / Collection
 ~~~
@@ -221,15 +221,17 @@ Activity Historyは、外部アプリの作業からKnowledge Hostが扱える�
 | 種類 | 役割 | 正本 |
 | --- | --- | --- |
 | Activity History | 作業の構造化された証拠 | Workspace |
-| Knowledge | 再利用できる知識 | Workspace / Room |
-| Memory | すぐ使う短い個人理解 | Workspace / Room |
-| Skill | 再利用する作業手順 | Workspace / Room |
+| Episode | 関連するActivityをまとめる作業単位 | Workspace / Room |
+| Knowledge | `fact`、`decision`、`explanation`、`experience_rule`に分ける再利用知識 | Workspace / Room |
+| Skill | `SKILL.md`と補助ファイルを一つのVersionとして扱う再利用手順 | Workspace / Room |
+| Policy | 認証済みHuman requestの署名でだけ有効化する操作制約 | Workspace / Room |
+| PROFILE / SOUL | 人間が明示更新するWorkspace文書 | Workspace |
 | Artifact | 文書、コード、表、画像などの成果物 | Workspace |
 | Collection | 構造化された業務データ | Workspace / Room |
 | Surface | 必要時だけ表示する画面 | App側の一時投影 |
 | Session | 会話・作業の履歴 | 利用アプリ |
 
-Activityは材料、Knowledgeは選別された結果である。履歴を残しただけでKnowledgeになったとは扱わない。
+Activityは材料、Episodeは関連する材料のまとまり、Knowledgeは選別された結果である。履歴を残しただけでKnowledgeになったとは扱わない。呼出元の「検証済み」申告だけも、確定Knowledgeの根拠にはならない。Policy、PROFILE／SOULは学習結果として自動更新しない。
 
 ---
 
@@ -243,7 +245,7 @@ flowchart LR
   R["分類・要約・出所付与"]
   C["Room内の暫定Knowledge"]
   U["利用・検証"]
-  P["再利用できるKnowledge / Memory / Skill"]
+  P["再利用できるKnowledge / Skill"]
 
   A --> R
   R --> C
@@ -279,7 +281,7 @@ Hostが自動で行わないこと。
 3. 類似Knowledgeと照合する
 4. Room内の暫定Knowledgeを作る
 5. 利用・検証の結果を記録する
-6. 必要ならMemoryやSkillへ整理する
+6. 必要ならSkillとして整理する
 7. 変更履歴と根拠を残す
 
 ---
@@ -319,7 +321,7 @@ Workspace Jobは、AIが行う非同期・長時間処理の単位である。
 
 - Backend実行
 - Knowledge整理
-- Memory・Skillの学習
+- Skillの学習
 - Curator処理
 - Generative処理
 
@@ -367,7 +369,7 @@ Surfaceは、Chatの返答に必要な時だけ現れる表示・操作面であ
 
 - Artifact preview
 - Collection editor
-- Memory review
+- Knowledge / Skill review
 - Run status
 - Knowledge view
 
@@ -451,11 +453,13 @@ Native Appは、`サーバーURL＋Workspace ID＋Account`を接続先として�
 Workspace Backupには、Workspaceが所有する次の情報を含める。
 
 - Room、Principal、権限
-- Knowledge、Memory、Skill
+- Knowledge、Skill、Policy、PROFILE／SOUL
 - Activity History
 - Artifact、Collection
 - Workspace Change、Backend結果、参照情報
 - Workspaceファイルと検索用状態
+
+通常のExportはBundle v4を使い、Knowledge・Skillの本文ファイル、hash、Version、Evidence、Job履歴を一緒に検証してRestoreする。Skillは補助ファイルを含むpackage全体を照合する。Bundle v3は旧形式のImport互換として残す。raw model output、maintenance marker、maintenanceのWorkspace／Room権限はBundleへ含めず、Restore先のOwnerがmaintenance identityを新しく設定する。台帳には完成後のv4 pathとhashだけを残す。旧staging/base-v3台帳は、最終manifestのbase-v3 hashで証明できる場合だけ修復する。
 
 ### 12.2 App Session Backup
 
@@ -507,12 +511,12 @@ Chat、Session、App Agent、SurfaceはNative Appの状態である。Workspace 
 - sessions、backend runs、workspace changesの保存
 - Agent Backendの契約とClaude Code / Codex系の実装
 - Room権限とHuman / Agent / System Principal
-- Memory、Knowledge Wiki、Skill、Learningの基盤
+- 旧Memory・Knowledge Wiki・Skill・Learningの互換基盤
 - Artifact、Collection、Generated Surface
 - Gateway、Automation、Sandboxの基盤
 - Chat APIとSession単位のRuntime経路
 - `Workspace Server 02`のPostgreSQL Server、RLS、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成。Roomは同一種類のまま無制限に階層化でき、移動・直接メンバー制約・親子Bundleを扱う
-- `Workspace Server 04`のKnowledge学習ループ。確認済みActivityと人が明示した訂正・Rememberだけを同じRoomでレビューし、根拠・確からしさ・Job／Attempt・Versionを持つ暫定Knowledgeとして保存する。利用結果、上限予約、設定変更、Restore、Room権限を記録する
+- `Workspace Server 04`の拡張実装。Knowledge／Skill／Policyを分け、本文は人が読めるファイル、DBはhash・Version・Evidence・Jobを持つ。Activity／Episode、review・evaluation・Curator Job、保持・伏字化、旧学習データ移行、Bundle v4を扱う。Self-hostのOwnerは、旧版を退避してからKnowledge／Skillの物理ファイル編集を取り込めるが、Hostedでは物理保存領域を開かず、Policyの直接編集による適用もできない
 
 Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで決め、SessionなしでArtifact・Collectionの主要保存とGenerated Surfaceの作成・改訂・Actionを実行できる。
 
@@ -526,7 +530,7 @@ Core06〜09の移行済み範囲では、Room・PrincipalをTrusted Contextで�
 
 既存SQLite Core APIとChat／Session経路は互換機能として残る。一方、Workspace Server 02の通常保存経路はPostgreSQLであり、SQLiteは旧Workspaceをread-onlyでBundle v3へ移す時だけ使う。既存Chat APIをServer 02へ暗黙に接続していない。
 
-Room階層の実PostgreSQL確認は、Hosted用とSelf-host用の接続先を指定した`server:03:verify`で行う。学習ループの同様の確認は`server:04:verify`で行う。本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Server 04は外部AI接続を内蔵せず、Hostが登録する狭いBackend cassetteだけを実行できる。
+Room階層の実PostgreSQL確認は、Hosted用とSelf-host用の接続先を指定した`server:03:verify`で行う。Server 04の実DBを含む確認は`server:04:complete:verify`で行い、HostedとSelf-hostの両方が通った時だけ検証済みとする。DBを起動できない場合は失敗として記録し、静的検証だけで完了扱いしない。本番HTTP／MCP／Plugin／OAuth、具体的外部チャネル、Native AppのChat／Session UI、Credential管理UXは後続範囲である。Server 04は外部AI接続を内蔵せず、Hostが登録する狭いBackend cassetteだけを実行できる。
 
 現在の完了レポートはsource差分を含むため、基盤の存在と「検証済み完了」を分けて扱う。
 

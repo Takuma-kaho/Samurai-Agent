@@ -15,11 +15,54 @@ export type WorkspaceTransferState = (typeof workspaceTransferStates)[number];
 
 export type WorkspaceRecordPayload = Record<string, unknown>;
 
+/**
+ * Request provenance is created by the authenticated Server boundary.  It is
+ * deliberately not a transport payload: callers cannot turn themselves into
+ * a human, a Connection, or the maintenance identity by posting JSON.
+ */
+export const workspaceCallerKinds = ["human", "connection", "maintenance"] as const;
+export type WorkspaceCallerKind = (typeof workspaceCallerKinds)[number];
+
+export interface WorkspaceHumanCaller {
+  kind: "human";
+  principalAccountId: string;
+  requestId: string;
+  operationId: string;
+  timestamp: string;
+  canonicalPayloadHash: string;
+  signature: string;
+}
+
+export interface WorkspaceConnectionCaller {
+  kind: "connection";
+  principalAccountId: string;
+  connectionId: string;
+  requestId: string;
+  operationId: string;
+  timestamp: string;
+}
+
+export interface WorkspaceMaintenanceCaller {
+  kind: "maintenance";
+  principalAccountId: string;
+  operationId: string;
+}
+
+export type WorkspaceCaller = WorkspaceHumanCaller | WorkspaceConnectionCaller | WorkspaceMaintenanceCaller;
+
 export interface WorkspaceRequestContext {
   workspaceId: string;
   accountId: string;
   /** A caller-provided identifier that lets retries return the original result. */
   operationId: string;
+  /** Present only when a trusted ingress or the scheduler constructed it. */
+  caller?: WorkspaceCaller;
+  /** Present only while the Server-owned completion migration run is active.
+   * It is never parsed from an HTTP request body or header. */
+  migrationRunId?: string;
+  /** Internal-only completion migration capability. HTTP input never maps to
+   * this field; PostgreSQL checks it together with the Run ID and owner. */
+  migrationOperation?: "completion_backfill" | "completion_rollback";
 }
 
 export interface WorkspaceMembership {

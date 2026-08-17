@@ -1,6 +1,8 @@
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
+import { isTrustedWorkspaceCallerForAccount } from "./auth";
 import { WorkspaceServerError } from "./errors";
 import { applyWorkspaceServerMigrations, workspaceServerMigrationStatus } from "./schema";
+import type { WorkspaceCaller } from "./types";
 
 export interface WorkspaceDatabaseContext {
   accountId: string;
@@ -8,6 +10,12 @@ export interface WorkspaceDatabaseContext {
   bootstrap?: boolean;
   /** A short-lived, account-bound import capability created by PostgreSQL. */
   importId?: string;
+  /** Trusted Server-side provenance, copied into transaction-local settings
+   * for RLS functions. It is not a client-provided transport field. */
+  caller?: WorkspaceCaller;
+  /** Server-owned completion migration capability. */
+  migrationRunId?: string;
+  migrationOperation?: "completion_backfill" | "completion_rollback";
 }
 
 export interface WorkspaceSql {
@@ -229,8 +237,16 @@ export class PostgresWorkspaceAdminDatabase {
 }
 
 async function setTenantContext(client: PoolClient, context: WorkspaceDatabaseContext): Promise<void> {
+  const caller = isTrustedWorkspaceCallerForAccount(context.caller, context.accountId) ? context.caller : undefined;
   await client.query("SELECT set_config('samurai.account_id', $1, true)", [context.accountId]);
   await client.query("SELECT set_config('samurai.workspace_id', $1, true)", [context.workspaceId ?? ""]);
   await client.query("SELECT set_config('samurai.bootstrap', $1, true)", [context.bootstrap ? "1" : ""]);
   await client.query("SELECT set_config('samurai.import_id', $1, true)", [context.importId ?? ""]);
+  await client.query("SELECT set_config('samurai.caller_kind', $1, true)", [caller?.kind ?? ""]);
+  await client.query("SELECT set_config('samurai.caller_principal_id', $1, true)", [caller?.principalAccountId ?? ""]);
+  await client.query("SELECT set_config('samurai.caller_connection_id', $1, true)", [caller?.kind === "connection" ? caller.connectionId : ""]);
+  await client.query("SELECT set_config('samurai.caller_request_id', $1, true)", [caller?.kind === "human" || caller?.kind === "connection" ? caller.requestId : ""]);
+  await client.query("SELECT set_config('samurai.caller_operation_id', $1, true)", [caller?.operationId ?? ""]);
+  await client.query("SELECT set_config('samurai.completion_migration_run_id', $1, true)", [context.migrationRunId ?? ""]);
+  await client.query("SELECT set_config('samurai.completion_migration_operation', $1, true)", [context.migrationOperation ?? ""]);
 }

@@ -34,11 +34,15 @@ Samuraiの中心を「単一Agent」「Chatアプリ」「AIチーム」と表�
 | External App | Codex、Claude Codeなど、Workspaceを利用する外部アプリ |
 | Session | アプリ側の会話・作業単位 |
 | Activity History | 指示、結果、変更、検証、出所をまとめた構造化証拠 |
-| Knowledge Host | Activityを整理し、Knowledgeを育てるバックエンド役 |
+| Episode | 関連するActivityをまとめる作業単位 |
+| Knowledge Host | Activityを整理し、Knowledge・Skillを育てるバックエンド役 |
 | Agent | 継続する役割と権限を持つ参加者 |
 | Agent Backend | Agentが作業を実行する交換可能なBackend cassette |
-| Memory | 再利用する短い個人・Roomの理解 |
-| Skill | 再利用する作業手順 |
+| Knowledge | `fact`、`decision`、`explanation`、`experience_rule`に分ける再利用知識 |
+| Skill | `SKILL.md`を入口に必要な補助ファイルを読む再利用手順 |
+| Policy | 認証済みの人間操作でだけ有効化する操作制約 |
+| PROFILE / SOUL | 人間が明示更新するWorkspace文書 |
+| Curator | 根拠を保ったまま整理候補を出すバックグラウンド処理 |
 | Artifact | 文書、コード、表、画像などの成果物 |
 | Collection | 顧客、案件、タスクなどの構造化データ |
 | Surface | 必要な時だけ表示する操作・閲覧面 |
@@ -67,6 +71,18 @@ AccountはRoom権限そのものではない。公開鍵で本人を確認する
 ### Session
 
 Workspaceの構成要素ではなく、Native AppやExternal Appが持つ会話・作業履歴として説明する。
+
+### Episode
+
+Sessionと同一視しない。関連するActivityのまとまりとして説明し、Sessionは必要なら出所参照として残す。
+
+### Policy
+
+Knowledgeの検索結果やAIの学習候補ではない。「認証済みの人間操作でだけ有効化する操作制約」と説明する。AIや外部接続が任意の署名文字列で有効化できるものとは説明しない。
+
+### PROFILE / SOUL
+
+AIが自動で書き換えるものとは呼ばない。「人間が明示操作で更新するWorkspace文書」と説明する。
 
 ### Chat-first
 
@@ -130,6 +146,7 @@ Nostr、Relay、署名Eventは、将来のGateway接続候補として説明す�
 公開面を変更する前に確認する。
 
 - WorkspaceがKnowledgeの正本になっているか
+- Memoryを現行のKnowledge種類やUI機能名として出していないか
 - Roomを会話場所として説明していないか
 - SessionをWorkspaceの必須要素として説明していないか
 - Chat-firstの範囲がNative Appに限定されているか

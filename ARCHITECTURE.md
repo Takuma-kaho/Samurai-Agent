@@ -105,7 +105,7 @@ flowchart TB
 
 ### 4.1 Workspace
 
-Workspaceは、Room、Principal、Knowledge、Memory、Skill、Activity、Artifact、Collectionを所有する。
+Workspaceは、Room、Principal、Knowledge、Skill、Policy、PROFILE／SOUL、Activity、Artifact、Collectionを所有する。
 
 ### 4.2 Room
 
@@ -180,7 +180,7 @@ BackendRunは、WorkspaceJobまたはActivityの処理結果として作られ�
 
 ### 4.8 KnowledgeChange
 
-KnowledgeChangeは、Knowledge、Memory、Skill、Artifact、Collectionに対する変更記録である。
+KnowledgeChangeは、Knowledge、Skill、Policy、PROFILE／SOUL、Artifact、Collectionに対する変更記録である。
 
 - 変更したPrincipal
 - 変更理由
@@ -287,13 +287,13 @@ flowchart LR
   Draft["同じRoomの暫定Knowledge"]
   Use["利用と検証"]
   Promote["明示操作または十分な根拠"]
-  Memory["Memory / Knowledge / Skill"]
+  Reuse["Knowledge / Skill"]
 
   Activity --> Review
   Review --> Draft
   Draft --> Use
   Use --> Promote
-  Promote --> Memory
+  Promote --> Reuse
 ~~~
 
 標準自動処理。
@@ -302,7 +302,7 @@ flowchart LR
 - 根拠と出所の付与
 - 同じRoom内の暫定Knowledge作成
 - 利用記録と検証結果の記録
-- Memory / Knowledge / Skill候補の整理
+- Knowledge / Skill候補の整理
 
 人間の確認が必要な処理。
 
@@ -313,6 +313,17 @@ flowchart LR
 - 機密情報の採用
 
 暫定Knowledgeは、確度、根拠、作成元Job、Versionを持つ。自動保存しても、確定済みの通常Knowledgeとは区別する。
+
+### 7.1 Resourceの責務
+
+- Knowledgeは`fact`、`decision`、`explanation`、`experience_rule`に分ける。
+- Skillは`SKILL.md`と`references/`、`scripts/`、`templates/`、`examples/`、その他許可された補助ファイルを一つのVersionとして扱う。Copy、Move、Restoreはpackage全体のpath、size、hashを一つのsnapshotとして確認する。
+- Policyは、Serverが認証済みrequestから作るHuman callerの署名で有効化する操作制約である。request bodyや任意headerのcaller種別、connection ID、署名文字列は信頼しない。AI、connection、maintenanceは変更依頼を残せても有効化できない。
+- Attestation PortはHostから差し替える検証境界である。Activityの自己申告ではなく、対象Versionと本文hashが一致した追記専用Attestation Recordだけを`machine_verified`の根拠にする。
+- file batch自身がWorkspace scopeまたはRoom scopeを持つ。Workspace scopeはWorkspace member、Room scopeはそのRoomの直接読取権限だけで判定し、batch entryは親batchの範囲を継承する。
+- Review Jobは記録済みhigh watermarkまでの全対象をsnapshot digestへ入れる。上限を超える場合は不完全な入力を渡さずJobを`blocked`にする。Curatorも期待Version／hashを持ち、権限、Policy、stale確認と保存は同じtransactionで行い、古い計画は部分適用しない。
+- PROFILE／SOULは人間だけが明示更新できるWorkspace文書で、学習・Curator・移行は更新しない。
+- Episodeは関連するActivityをまとめる作業単位であり、Sessionは任意の出所参照にとどめる。
 
 ---
 
@@ -352,20 +363,25 @@ UI stateや一時的なSurface stateをWorkspace正本へ混ぜない。
 - Roomには任意の`parent_room_id`を保存する。runtime roleはWorkspace member、Room、Room memberを直接更新できず、作成・移動・直接メンバー変更・招待受諾・RestoreはPostgreSQLの正式関数を通す
 - Room検索と通常のKnowledge一覧はRoom IDを必須にし、親・子・兄弟Roomへ自動拡張しない。Workspace全体検索は別の明示操作としてのみ設計できる
 - RealtimeはRoomごとの直接読取権限を通知直前に再確認して配信する。Room channelに未参加でも、そのRoomを直接読める画面にはツリー再取得用の通知を送れるが、親Roomの参加者へ非公開の子Room名・件数・移動通知を送らず、解除時は対象Roomと子孫Roomの購読を再確認して外す
-- Knowledgeなどの本体は`workspaces/<workspace_id>/files/`の人間が読めるファイルとして残す。DBとファイルは復旧可能なfile transactionで結ぶ
+- Knowledge・Skill・Policyの本文は`workspaces/<workspace_id>/files/`の人間が読めるファイルを正本にする。DBはfile hash、Version、Evidence、検索投影、Job状態を持ち、DBとファイルは復旧可能なfile transactionで結ぶ
+- Sessionなしの定期Jobは、Ownerとは別のdeployment-localなmaintenance identityで実行する。identityは一つのWorkspaceにだけ結び、通常HTTP／Socketの利用やBundle移送を許可しない
+- Completion移行は専用Migration Runで開始する。Owner確認、Run作成、Workspaceのread-only化、開始Audit、snapshot取得を同じ開始処理で行い、通常HTTP、Job、外部接続の書込みを拒否する。停止時はRunの状態からresumeまたはrollbackしてからactiveへ戻す
 - 旧`workspace.sqlite`はread-onlyのBundle作成だけに使う。既存Core APIを暗黙にPostgreSQLへ混在させない
 
 Accountは公開鍵から決まる安定IDである。同じ公開鍵をHostedとSelf-hostへ登録できるが、Room権限は各Workspaceで独立して判定する。
 
-### 9.2 Workspace Bundle v3と移転
+### 9.2 Workspace Bundle v4と移転
 
-Workspace Bundle v3はDB imageではなく、JSON/JSONLの記録と人が読めるファイルからなる移植形式である。
+Workspace Bundle v4はDB imageではなく、v3 Core記録とCompletion拡張のJSON/JSONL、人が読める本文ファイルからなる移植形式である。新規Exportはv4を使い、v3はImport互換として残す。
 
-- Room、親Room ID、権限、記録、履歴、Job、版番号、ファイルhashを含む
+- Room、親Room ID、権限、Activity／Episode、Resource、Evidence、Job、版番号、file hashを含む
 - Restoreは親Roomの欠落・循環・子Roomメンバーの親Room未参加を有効化前に拒否する。親Room IDがない旧BundleはWorkspace直下として読む
 - private key、password、token、credential形式のJSON値・ファイルは拒否する
+- raw model outputとmaintenance identityは含めない。Job／Attemptには結果hashとエラー情報だけを残す
 - 移転元はread-onlyにしてBundleを作り、移転先へread-onlyで仮取り込み、件数とfile hashを確認してからactiveにする
 - 失敗時は移転先の新規データを消し、移転元をactiveへ戻せる
+- v4の内部base-v3はportable snapshotだけで、v3 Bundle台帳を作らない。外側のv4 stagingを最終pathへrenameして再検証した後にだけ、最終path、hash、record countsをv4台帳へ記録する。旧実装のstaging/base-v3台帳は、同じbase-v3 hashを最終manifestで証明できる場合だけ最終v4記録へ修復する
+- maintenance markerとmaintenanceのWorkspace／Room membershipはExportしない。Restore先のOwnerがdeployment-localなmaintenance identityを新しく設定する
 
 ### 9.3 Workspace Backup
 
@@ -373,7 +389,7 @@ Workspace Backupに含めるもの。
 
 - Workspace metadata
 - Room、Principal、Permission
-- Knowledge、Memory、Skill
+- Knowledge、Skill、Policy、PROFILE／SOUL
 - Activity History、KnowledgeChange
 - Artifact、Collection
 - BackendRun、WorkspaceJobの必要な履歴
@@ -474,7 +490,7 @@ Backend Port → Backend cassette implementation
 
 ### 13.1 現状
 
-現行コードには、Workspace Store、Room permission、Agent Backend、Memory・Skill・Learning、Artifact、Collection、Generated Surface、Gatewayの基盤がある。
+現行コードには、Workspace Store、Room permission、Agent Backend、旧Memory・Skill・Learningの互換基盤、Artifact、Collection、Generated Surface、Gatewayの基盤がある。
 
 Core06〜Core09の範囲では、次をSessionなしで扱える。
 
@@ -487,11 +503,11 @@ Core06〜Core09の範囲では、次をSessionなしで扱える。
 - Connector evidenceから現在のRoom権限を再評価するFormal ingress。外部AppのQuery、Domain Operation、Activity Ingestは共通Resolverを通る
 - Room／Authorityを永続化したAutomation。旧Jobは`rebind_required`で停止し、現在は`wiki_reindex`だけをSessionなしで実行する
 - `Workspace Server 02`のPostgreSQL schema、RLS runtime role、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成。Room階層の作成・移動・親子メンバー制約・Bundle互換を追加した
-- `Workspace Server 04`のKnowledge review Job。確認済みActivityと人が明示した訂正・Rememberだけを同じRoomの狭いsnapshotで扱い、根拠・確度・作成元Job／Attempt・Version付きの暫定Knowledgeを保存する。結果は設定・入力hash・上限予約を再確認してから適用する
+- `Workspace Server 04`のCompletion拡張。Knowledge／Skill／Policyの分離、ファイル本文とDB metadataの整合、Activity／Episode、review・evaluation・Curator Job、保持・伏字化、旧学習データ移行、Bundle v4をsource上で扱う。Self-hostのOwnerだけは、先に旧版を退避してからKnowledge／Skillの物理ファイル編集を`physical_file_import`として取り込める。Hostedの物理保存領域は公開せず、Policyは物理編集から適用できない
 
 新しいBackupはArtifact・Collectionの正本を対象にし、Generated Surfaceのbundleは再生成可能な互換データとして除く。旧Surfaceを含むBackupは引き続きRestoreできる。
 
-既存Chat／Session経路とSQLite Core APIは互換機能として残る。`Workspace Server 02`は別のPostgreSQL Server entryであり、既存Chat APIを置換しない。基礎RLSの確認は`server:02:verify`、Room階層の実PostgreSQL確認は`server:03:verify`、学習ループは`server:04:verify`で、HostedとSelf-hostの両方を対象にする。Server 04は外部AI接続を内蔵せず、Hostが明示登録した狭いBackend cassetteだけを呼べる。したがって、現在の実装を製品全体の完成と同一視しない。
+既存Chat／Session経路とSQLite Core APIは互換機能として残る。`Workspace Server 02`は別のPostgreSQL Server entryであり、既存Chat APIを置換しない。基礎RLSの確認は`server:02:verify`、Room階層の実PostgreSQL確認は`server:03:verify`、Server 04の実DBを含む確認は`server:04:complete:verify`で、HostedとSelf-hostの両方を対象にする。DBを起動できない場合は失敗として記録し、source上の実装だけで完了扱いしない。Server 04は外部AI接続を内蔵せず、Hostが明示登録した狭いBackend cassetteだけを呼べる。したがって、現在の実装を製品全体の完成と同一視しない。
 
 ### 13.2 Coreの移行単位
 
