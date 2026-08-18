@@ -32,8 +32,8 @@ importers:
         specifier: ^0.28.17
         version: 0.28.17
       lucide-vue-next:
-        specifier: ^0.468.0
-        version: 0.468.0(vue@3.5.38(typescript@5.9.3))
+        specifier: ^1.0.0
+        version: 1.0.0(vue@3.5.38(typescript@5.9.3))
       socket.io:
         specifier: ^4.8.3
         version: 4.8.3
@@ -161,8 +161,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/ui-protocol
       lucide-vue-next:
-        specifier: ^0.468.0
-        version: 0.468.0(vue@3.5.38(typescript@5.9.3))
+        specifier: ^1.0.0
+        version: 1.0.0(vue@3.5.38(typescript@5.9.3))
       socket.io-client:
         specifier: ^4.8.3
         version: 4.8.3
@@ -1375,8 +1375,8 @@ packages:
     resolution: {integrity: sha512-nbD8lB9EB3wNdMhOCdx5Li8DxnLbvKByylRLcJ1h+4SkrowVeECAyZlyiKMThF7xFdRz0jSQ2MoJr+wXux2y0Q==}
     engines: {node: '>=20.0.0'}
 
-  lucide-vue-next@0.468.0:
-    resolution: {integrity: sha512-quV/6T8YB1XK0VOEnebg3Byd8Rsan5/m95cvjnuHV4vcS3qEnLAybkrSh0hk3ppavx+V7R1PjNW+mGDvcBdz4A==}
+  lucide-vue-next@1.0.0:
+    resolution: {integrity: sha512-V6SPvx1IHTj/UY+FrIYWV5faISsPSb8BnWSFDxAtezWKvWc9ZZ40PDrdu1/Qb5vg4lHWr1hs1BAMGVGm6V1Xdg==}
     deprecated: Package deprecated. Please use @lucide/vue instead.
     peerDependencies:
       vue: '>=3.0.1'
@@ -2782,7 +2782,7 @@ snapshots:
 
   kysely@0.28.17: {}
 
-  lucide-vue-next@0.468.0(vue@3.5.38(typescript@5.9.3)):
+  lucide-vue-next@1.0.0(vue@3.5.38(typescript@5.9.3)):
     dependencies:
       vue: 3.5.38(typescript@5.9.3)
 
