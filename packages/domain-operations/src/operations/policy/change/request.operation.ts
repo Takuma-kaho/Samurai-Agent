@@ -1,6 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
-import { humanChangeRequestInputSchema, humanChangeRequestOutputSchema, type HumanChangeRequestOutput, type HumanChangeRequestPorts } from "../../human-change-request.js";
+import { type HumanChangeRequestOutput, type HumanChangeRequestPorts } from "../../human-change-request.js";
+import { humanChangeRequestInputSchema, humanChangeRequestOutputSchema } from "../../../value-objects/human-change-request.js";
 
 const Input = humanChangeRequestInputSchema;
 const Output = humanChangeRequestOutputSchema;

@@ -220,7 +220,7 @@ const resourceRedactionOutput = {
 };
 const workspaceContextOutput = {
   workspace: { id: "handler-matrix-workspace", name: "Handler Workspace", rules: ["Keep Room data separate."], updated_at: now },
-  room: { id: "room_fixture", name: "Fixture Room", purpose: "Fixture purpose", work_goal: "Fixture goal", updated_at: now }
+  room: { id: "room_fixture", name: "Fixture Room", purpose: "Fixture purpose", work_goal: "Fixture goal", permissions: ["room.read"], prohibited: ["room.write:denied"], updated_at: now }
 };
 const settingsOutput = {
   ui_locale: "en" as const, output_locale: "ja" as const, memory_capture_mode: "manual" as const,

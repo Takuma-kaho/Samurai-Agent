@@ -207,8 +207,8 @@
     "required_endpoints": 334,
     "reviewed_endpoints": 334,
     "unreviewed_endpoints": 0,
-    "required_schema_nodes": 938,
-    "reviewed_schema_nodes": 938,
+    "required_schema_nodes": 937,
+    "reviewed_schema_nodes": 937,
     "unreviewed_schema_nodes": 0
   },
   "global_payload_limits": {
@@ -25025,33 +25025,6 @@
         "type": "object"
       }
     },
-    "sha256:7c03c290b505f76c7ebe6b7427078f505449c87f3d7fba17dd8e71431e8fbfb7": {
-      "structural_hash": "7c03c290b505f76c7ebe6b7427078f505449c87f3d7fba17dd8e71431e8fbfb7",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "file.list",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "limit": {
-            "$schema_ref": "sha256:dfbe8dfe1b8e5376c20829a23164315d079eeda63d4aa5cb00df645601a457b0"
-          },
-          "offset": {
-            "$schema_ref": "sha256:ac1088e19492ce69cd31ea96099e3fa301539ba0a1430ecd2d66285c4499c51e"
-          },
-          "path": {
-            "$schema_ref": "sha256:f7be3125a2038a14d7cd75b5ae3a7eeefaaf39698437bbbabfa6eb0163390469"
-          }
-        },
-        "required": [
-          "path"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:546ffad02051fd073a4323721fc66c277357a9dee04a2fba1efcc7ee1f3d352f": {
       "structural_hash": "546ffad02051fd073a4323721fc66c277357a9dee04a2fba1efcc7ee1f3d352f",
       "review": "reviewed",
@@ -25496,20 +25469,6 @@
         "type": "object"
       }
     },
-    "sha256:dfbe8dfe1b8e5376c20829a23164315d079eeda63d4aa5cb00df645601a457b0": {
-      "structural_hash": "dfbe8dfe1b8e5376c20829a23164315d079eeda63d4aa5cb00df645601a457b0",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "file.list",
-        "endpoint": "input",
-        "path": "$[\"limit\"]"
-      },
-      "schema": {
-        "maximum": 200,
-        "minimum": 1,
-        "type": "integer"
-      }
-    },
     "sha256:e70f5fc28fc0ac97a174c355cab02a408ad8fe6ef7f489a8e471042156a324f9": {
       "structural_hash": "e70f5fc28fc0ac97a174c355cab02a408ad8fe6ef7f489a8e471042156a324f9",
       "review": "reviewed",
@@ -25928,41 +25887,6 @@
         "type": "object"
       }
     },
-    "sha256:2a0289a40c954ca9f8936394e94c284e516e51e6a7d79021c2aced2a3bdf17c8": {
-      "structural_hash": "2a0289a40c954ca9f8936394e94c284e516e51e6a7d79021c2aced2a3bdf17c8",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "workspace.context.get",
-        "endpoint": "output",
-        "path": "$[\"room\"]"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "name": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "purpose": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "updated_at": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "work_goal": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "updated_at"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:822654b0864171f699bda588e93c22e29a354651468c18ed87a325af0663e7d9": {
       "structural_hash": "822654b0864171f699bda588e93c22e29a354651468c18ed87a325af0663e7d9",
       "review": "reviewed",
@@ -26031,31 +25955,6 @@
         },
         "maxItems": 200,
         "type": "array"
-      }
-    },
-    "sha256:ed5998e73344abc0ea7f2134b8acf3ab9f5cec65e548f93d245074f0c9bdf606": {
-      "structural_hash": "ed5998e73344abc0ea7f2134b8acf3ab9f5cec65e548f93d245074f0c9bdf606",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "workspace.context.get",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "room": {
-            "$schema_ref": "sha256:2a0289a40c954ca9f8936394e94c284e516e51e6a7d79021c2aced2a3bdf17c8"
-          },
-          "workspace": {
-            "$schema_ref": "sha256:88c329eee04825789323222f40cf2eabf8310da824ceb3a21bd160b6a3747d8c"
-          }
-        },
-        "required": [
-          "workspace",
-          "room"
-        ],
-        "type": "object"
       }
     },
     "sha256:0f03f7743030111dea07fbc529fdd80441b90f2eb31f882eb66c0be668b1a168": {
@@ -26568,6 +26467,90 @@
           "resource",
           "operation",
           "activity"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:81d98b1263dff93f1cd13bea4c179e156435e35dbac042f6c023ed0d370aac3c": {
+      "structural_hash": "81d98b1263dff93f1cd13bea4c179e156435e35dbac042f6c023ed0d370aac3c",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.context.get",
+        "endpoint": "output",
+        "path": "$[\"room\"][\"permissions\"]"
+      },
+      "schema": {
+        "items": {
+          "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+        },
+        "maxItems": 20,
+        "type": "array"
+      }
+    },
+    "sha256:4e37ab58b54aa83b7f29859695de4d88cd1d7c39c5710fb62d13e4568015ca89": {
+      "structural_hash": "4e37ab58b54aa83b7f29859695de4d88cd1d7c39c5710fb62d13e4568015ca89",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.context.get",
+        "endpoint": "output",
+        "path": "$[\"room\"]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "name": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "permissions": {
+            "$schema_ref": "sha256:81d98b1263dff93f1cd13bea4c179e156435e35dbac042f6c023ed0d370aac3c"
+          },
+          "prohibited": {
+            "$schema_ref": "sha256:81d98b1263dff93f1cd13bea4c179e156435e35dbac042f6c023ed0d370aac3c"
+          },
+          "purpose": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "work_goal": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "permissions",
+          "prohibited",
+          "updated_at"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:ff8ce2ca498d61b45828f4e1aacf31516b87878751b55b7bd55d65b588922820": {
+      "structural_hash": "ff8ce2ca498d61b45828f4e1aacf31516b87878751b55b7bd55d65b588922820",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.context.get",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "room": {
+            "$schema_ref": "sha256:4e37ab58b54aa83b7f29859695de4d88cd1d7c39c5710fb62d13e4568015ca89"
+          },
+          "workspace": {
+            "$schema_ref": "sha256:88c329eee04825789323222f40cf2eabf8310da824ceb3a21bd160b6a3747d8c"
+          }
+        },
+        "required": [
+          "workspace",
+          "room"
         ],
         "type": "object"
       }
@@ -27511,7 +27494,7 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:7c03c290b505f76c7ebe6b7427078f505449c87f3d7fba17dd8e71431e8fbfb7"
+        "root_schema": "sha256:dab89aad529c852a115036bcabe87bbfb3a96b195bf5fb691eac6d09008f189e"
       },
       "output": {
         "review": "reviewed",
@@ -29147,7 +29130,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:ed5998e73344abc0ea7f2134b8acf3ab9f5cec65e548f93d245074f0c9bdf606"
+        "root_schema": "sha256:ff8ce2ca498d61b45828f4e1aacf31516b87878751b55b7bd55d65b588922820"
       }
     },
     {

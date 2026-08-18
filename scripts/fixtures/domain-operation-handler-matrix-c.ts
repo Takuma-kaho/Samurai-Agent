@@ -1046,8 +1046,8 @@ async function runWikiCases(): Promise<void> {
     await runCase(id, caseFor(id, caseId), (fixture) => ({
       getWikiPage: async (wikiId: unknown) => { fixture.record("getWikiPage", [wikiId]); return storedWiki; },
       runWikiMutation: runWikiMutationFixture(fixture),
-      setWikiPageState: async (wikiId: unknown, nextState: unknown) => {
-        fixture.record("setWikiPageState", [wikiId, nextState]);
+      setWikiPageState: async (wikiId: unknown, nextState: unknown, expectedResourceVersion?: unknown) => {
+        fixture.record("setWikiPageState", expectedResourceVersion === undefined ? [wikiId, nextState] : [wikiId, nextState, expectedResourceVersion]);
         return { ...storedWiki, state };
       },
       createWikiRollback: async (value: unknown, refs: unknown, before: unknown, after: unknown) => { fixture.record("createWikiRollback", [value, refs, before, after]); return rollbackPoint; },

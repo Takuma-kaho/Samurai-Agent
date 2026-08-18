@@ -4,9 +4,7 @@ import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapabil
 import { fileReadValueSchema } from "../../value-objects/file.js";
 
 const Input = z.object({
-  "path": z.string().trim().min(1).max(4096),
-  "limit": z.number().int().min(1).max(200).optional(),
-  "offset": z.number().int().min(0).max(10_000).default(0)
+  "path": z.string().trim().min(1).max(4096)
 }).strict();
 const Output = fileReadValueSchema;
 
@@ -14,7 +12,7 @@ export type FileListInput = z.infer<typeof Input>;
 export type FileListOutput = z.infer<typeof Output>;
 
 export interface FileListPorts extends DomainQueryPorts {
-  listWorkspaceFiles: ReadCapability<(input: { path: string; limit?: number; offset?: number }) => Promise<FileListOutput> | FileListOutput>;
+  listWorkspaceFiles: ReadCapability<(input: Pick<FileListInput, "path">) => Promise<FileListOutput> | FileListOutput>;
 }
 
 const fileList = defineQuery<FileListPorts>()({
@@ -64,11 +62,7 @@ const fileList = defineQuery<FileListPorts>()({
       execute: async function handleFileList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         return {
           ok: true,
-          value: Output.parse(await ports.listWorkspaceFiles({
-            path: input.path,
-            ...(input.limit !== undefined ? { limit: input.limit } : {}),
-            offset: input.offset ?? 0
-          }))
+          value: Output.parse(await ports.listWorkspaceFiles({ path: input.path }))
         };
       }
     };

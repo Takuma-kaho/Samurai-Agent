@@ -77,7 +77,7 @@ export const handlerExpectations = {
   },
   "file.list": {
     input: { path: "workspace" },
-    calls: [{ method: "listWorkspaceFiles", args: [{ path: "workspace", offset: 0 }] }]
+    calls: [{ method: "listWorkspaceFiles", args: [{ path: "workspace" }] }]
   },
   "file.inspect": {
     input: { path: "workspace/notes.txt" },

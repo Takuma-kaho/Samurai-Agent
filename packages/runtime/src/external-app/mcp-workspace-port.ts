@@ -361,7 +361,7 @@ export class RuntimeMcpWorkspacePort implements McpWorkspacePort {
       return { item: resourceEnvelope(target, items[0] as Record<string, unknown>, { resourceId: activityId, version: activityId, updatedAt: stringValue(items[0]?.occurred_at) }) };
     }
     if (operation === "artifact.list") {
-      const result = await runQuery("file.list", { path: stringValue(args.path) ?? "artifacts", limit: page.fetchLimit, offset: page.offset });
+      const result = await runQuery("file.list", { path: stringValue(args.path) ?? "artifacts" });
       return pagedItems(await enrichArtifactList(target, result.result, ingress, control), page);
     }
     if (operation === "artifact.read") {

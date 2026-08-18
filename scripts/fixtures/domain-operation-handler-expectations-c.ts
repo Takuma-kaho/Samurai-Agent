@@ -362,13 +362,13 @@ export const cHandlerExpectations = {
   "skill.patch": {
     requiredBranches: ["patch:all-fields"],
     cases: [{
-      id: "all-public-fields", input: { skill_id: "skill_fixture", title: "Updated Skill", description: "Updated description", tags: ["updated"], content: "# Updated\nBody" }, branches: ["patch:all-fields"], calls: [
+      id: "all-public-fields", input: { skill_id: "skill_fixture", title: "Updated Skill", description: "Updated description", tags: ["updated"], content: "# Updated\nBody", pinned: true, expected_resource_version: 1 }, branches: ["patch:all-fields"], calls: [
         { method: "getSkillForMutation", args: ["skill_fixture"] },
         { method: "readSkillMarkdown", args: ["skill_fixture"] },
         { method: "skillMutationContract", args: ["skill.patch"] },
         { method: "skillResourceRef", args: [storedSkillFixture] },
         { method: "runSkillMutation", args: [{ trustedContext: trustedContextFixture, operationName: "skill.patch", inputSummary: "Edit Skill: Fixture Skill", proposedEffects: ["Fixture effect for skill.patch"], targetResourceRefs: [{ kind: "skill", id: "skill_fixture", uri: "skills/skill_fixture.md", label: "Fixture Skill" }], execute: "$function" }] },
-        { method: "patchSkillRecord", args: [{ id: "skill_fixture", title: "Updated Skill", description: "Updated description", tags: ["updated"], content: "# Updated\nBody" }] },
+        { method: "patchSkillRecord", args: [{ id: "skill_fixture", title: "Updated Skill", description: "Updated description", tags: ["updated"], content: "# Updated\nBody", pinned: true, expected_resource_version: 1 }] },
         { method: "skillResourceRef", args: [patchedSkillFixture] },
         { method: "createSkillRollback", args: [fixtureOperation, [{ kind: "skill", id: "skill_fixture", uri: "skills/skill_fixture.md", label: "Updated Skill" }], { skill: storedSkillFixture, markdown: "# Old skill body" }, { skill: patchedSkillFixture }] }
       ]
@@ -414,16 +414,21 @@ export const cHandlerExpectations = {
   },
   "wiki.archive": {
     requiredBranches: ["state:archived"],
-    cases: [{ id: "archived", input: { wiki_id: "wiki_fixture" }, branches: ["state:archived"], calls: wikiStateCalls("wiki.archive", "archived", "Archived wiki page", "Archive a wiki page without deleting its markdown.") }]
+    cases: [{ id: "archived", input: { wiki_id: "wiki_fixture", expected_resource_version: 1 }, branches: ["state:archived"], calls: [
+      { method: "getWikiPage", args: ["wiki_fixture"] },
+      { method: "runWikiMutation", args: [{ trustedContext: trustedContextFixture, operationName: "wiki.archive", inputSummary: "Archived wiki page: Fixture Wiki", proposedEffects: ["Archive a wiki page without deleting its markdown."], targetResourceRefs: [wikiRefFixture], execute: "$function" }] },
+      { method: "setWikiPageState", args: ["wiki_fixture", "archived", 1] },
+      { method: "createWikiRollback", args: [fixtureOperation, [wikiRefFixture], { wiki: storedWikiFixture }, { wiki: { ...storedWikiFixture, state: "archived" } }] }
+    ] }]
   },
   "wiki.patch": {
     requiredBranches: ["patch:all-fields"],
     cases: [{
-      id: "all-public-fields", input: { wiki_id: "wiki_fixture", title: "Updated Wiki", content: "Updated wiki content", tags: ["updated"], content_locale: "en", source_refs: [resourceRef], provenance }, branches: ["patch:all-fields"], calls: [
+      id: "all-public-fields", input: { wiki_id: "wiki_fixture", title: "Updated Wiki", content: "Updated wiki content", tags: ["updated"], content_locale: "en", source_refs: [resourceRef], provenance, pinned: true, expected_resource_version: 1 }, branches: ["patch:all-fields"], calls: [
         { method: "getWikiPage", args: ["wiki_fixture"] },
         { method: "readWikiContent", args: ["wiki_fixture"] },
         { method: "runWikiMutation", args: [{ trustedContext: trustedContextFixture, operationName: "wiki.patch", inputSummary: "Patch wiki page: Fixture Wiki", proposedEffects: ["Edit wiki page frontmatter or markdown content."], targetResourceRefs: [wikiRefFixture], execute: "$function" }] },
-        { method: "updateWikiPage", args: [{ id: "wiki_fixture", title: "Updated Wiki", content: "Updated wiki content", tags: ["updated"], content_locale: "en", source_refs: [resourceRef], provenance }] },
+        { method: "updateWikiPage", args: [{ id: "wiki_fixture", title: "Updated Wiki", content: "Updated wiki content", tags: ["updated"], content_locale: "en", source_refs: [resourceRef], provenance, pinned: true, expected_resource_version: 1 }] },
         { method: "createWikiRollback", args: [fixtureOperation, [{ kind: "wiki", id: "wiki_fixture", uri: "wiki/fixture-wiki.md", label: "Updated Wiki" }], { wiki: storedWikiFixture, content: "Old wiki content" }, { wiki: patchedWikiFixture, content: "Updated wiki content" }] }
       ]
     }]
