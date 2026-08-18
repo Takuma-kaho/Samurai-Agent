@@ -4485,7 +4485,7 @@ export class AgentRuntime {
     // Workspace startup Context names its target Room in the public Query DTO
     // so the contract is self-describing. The handler separately requires it
     // to equal the already-authorized trusted Room; it never becomes authority.
-    assertNoTrustedContextPayloadFields(payload, query.id === "workspace.context.get" ? ["room_id"] : []);
+    assertNoTrustedContextPayloadFields(payload, query.id === runtimeOperationIds.workspaceContextGet ? ["room_id"] : []);
     const inputIssue = validateDomainQueryInput(query, payload);
     if (inputIssue) {
       throw new RuntimeRequestError("validation", `domain_query_input_invalid:${query.id}:${inputIssue.path}:${inputIssue.message}`);
@@ -5067,7 +5067,7 @@ export class AgentRuntime {
       payload,
       operationId === runtimeOperationIds.externalAppConnectionCreate
         ? ["app_id", "connector_id"]
-        : operationId === "workspace.context.get"
+        : operationId === runtimeOperationIds.workspaceContextGet
           ? ["room_id"]
           : []
     );
