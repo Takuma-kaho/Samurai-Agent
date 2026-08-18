@@ -13,7 +13,7 @@ const automationJobReauthorize = defineCommand<AutomationJobReauthorizePorts>()(
   ...{
     kind: "command", id: "automation.job.reauthorize", version: "1.0", availability: "active",
     title: "Reauthorize automation job", description: "Recheck the stored Automation authority after an authorization block without replacing it.",
-    sources: ["runtime_api", "provider_tool_call", "surface_operation", "external_app"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition",
+    sources: ["runtime_api", "provider_tool_call", "surface_operation"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition",
     render: ["status_timeline"], resourceKinds: ["automation_job"], proposedEffects: ["Recheck stored Automation authority and leave the Job disabled."], outputResourceKind: "automation_job", uiDisplayCategory: "automation",
     provenance: [{ source: "samurai", commit_sha: "core09", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Authorization recovery is explicit and never changes the persisted authority." }]
   },

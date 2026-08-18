@@ -8,21 +8,29 @@ type WikiStateOperation = "wiki.accept" | "wiki.archive" | "wiki.reject";
 
 export interface WikiStateTransitionPorts {
   getWikiPage(id: string): Promise<StoredWiki | undefined>;
-  setWikiPageState(id: string, state: WikiFrontmatter["state"]): Promise<StoredWiki | undefined>;
+  setWikiPageState(id: string, state: WikiFrontmatter["state"], expectedResourceVersion?: number): Promise<StoredWiki | undefined>;
+  mapWikiWriteError(error: unknown): Error;
   wikiPageNotFoundError(id: string): Error;
   createWikiRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   runWikiMutation(input: { trustedContext: TrustedDomainContext; operationName: WikiStateOperation; proposedEffects: string[]; inputSummary: string; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: StoredWiki; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: StoredWiki; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
 export async function executeWikiStateTransition(ports: WikiStateTransitionPorts, input: {
-  context: TrustedDomainContext; id: string; state: WikiFrontmatter["state"]; operationName: WikiStateOperation; proposedEffect: string; summaryPrefix: string;
+  context: TrustedDomainContext; id: string; state: WikiFrontmatter["state"]; expectedResourceVersion?: number; operationName: WikiStateOperation; proposedEffect: string; summaryPrefix: string;
 }) {
   const current = await ports.getWikiPage(input.id);
   if (!current) throw ports.wikiPageNotFoundError(input.id);
   const currentRef = wikiRef(current);
   return ports.runWikiMutation({ trustedContext: input.context, operationName: input.operationName, inputSummary: `${input.summaryPrefix}: ${current.title}`,
     proposedEffects: [input.proposedEffect], targetResourceRefs: [currentRef], execute: async (operation) => {
-    const saved = await ports.setWikiPageState(input.id, input.state);
+    let saved;
+    try {
+      saved = input.expectedResourceVersion === undefined
+        ? await ports.setWikiPageState(input.id, input.state)
+        : await ports.setWikiPageState(input.id, input.state, input.expectedResourceVersion);
+    } catch (error) {
+      throw ports.mapWikiWriteError(error);
+    }
     if (!saved) throw ports.wikiPageNotFoundError(input.id);
     const ref = wikiRef(saved);
     const rollbackPoint = await ports.createWikiRollback(operation, [ref], { wiki: wikiJsonRecord(current) }, { wiki: wikiJsonRecord(saved) });

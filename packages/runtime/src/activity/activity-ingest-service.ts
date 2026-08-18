@@ -34,6 +34,7 @@ interface ActivityStore {
     activity: ActivityRecord;
     resourceUsage: ResourceUsageRecord[];
     finalization: Omit<ActivityFinalization, "activityId">;
+    signal?: AbortSignal;
   }): Promise<ActivityRecord>;
 }
 
@@ -63,6 +64,7 @@ export class ActivityIngestService implements ActivityIngestPort {
   }
 
   async ingestFinalizedActivity(input: Parameters<ActivityIngestPort["ingestFinalizedActivity"]>[0]): Promise<ActivityRecord> {
+    throwIfAborted(input.signal);
     const context = await this.assertContext(input.context, "execute");
     await this.assertCorrectionScope(input.correctionOfActivityId, context);
     await this.assertOperationScopes([
@@ -92,6 +94,7 @@ export class ActivityIngestService implements ActivityIngestPort {
         });
       }
     }
+    throwIfAborted(input.signal);
     const now = this.clock();
     const activity = this.buildRecordingActivity({
       context,
@@ -117,7 +120,8 @@ export class ActivityIngestService implements ActivityIngestPort {
         ...(input.backendRunId ? { backendRunId: input.backendRunId } : {}),
         ...(input.domainOperationIds ? { domainOperationIds: [...new Set(input.domainOperationIds)] } : {}),
         now
-      }
+      },
+      ...(input.signal ? { signal: input.signal } : {})
     });
   }
 
@@ -243,6 +247,10 @@ export class ActivityIngestService implements ActivityIngestPort {
       }
     }
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("external_app_ingress_aborted");
 }
 
 function isExternalContext(context: TrustedWorkspaceContext): boolean {

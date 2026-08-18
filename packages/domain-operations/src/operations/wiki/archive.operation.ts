@@ -4,7 +4,10 @@ import { defineCommand, type DomainResult, type TrustedDomainContext } from "../
 import { wikiWriteValueSchema } from "../../value-objects/wiki.js";
 import { executeWikiStateTransition, type WikiStateTransitionPorts } from "./state-transition.js";
 
-const Input = z.object({ "wiki_id": z.string().trim().min(1) }).strict();
+const Input = z.object({
+  "wiki_id": z.string().trim().min(1),
+  "expected_resource_version": z.number().int().positive().optional()
+}).strict();
 const Output = wikiWriteValueSchema;
 
 export interface WikiArchivePorts extends WikiStateTransitionPorts {}
@@ -18,7 +21,8 @@ const wikiArchive = defineCommand<WikiArchivePorts>()({
   "title": "Archive Knowledge Wiki page",
   "description": "Archive a Knowledge Wiki page without deleting its markdown.",
   "sources": [
-    "runtime_api"
+    "runtime_api",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",
@@ -49,7 +53,15 @@ const wikiArchive = defineCommand<WikiArchivePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiArchive(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: await executeWikiStateTransition(ports, { context, id: input.wiki_id, state: "archived", operationName: "wiki.archive", proposedEffect: "Archive a wiki page without deleting its markdown.", summaryPrefix: "Archived wiki page" }) };
+        return { ok: true, value: await executeWikiStateTransition(ports, {
+          context,
+          id: input.wiki_id,
+          state: "archived",
+          expectedResourceVersion: input.expected_resource_version,
+          operationName: "wiki.archive",
+          proposedEffect: "Archive a wiki page without deleting its markdown.",
+          summaryPrefix: "Archived wiki page"
+        }) };
       }
     };
   }

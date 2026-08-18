@@ -650,7 +650,8 @@ export const resourceUsageStages = ["referenced", "read", "applied", "modified",
 export const workspaceJobKinds = ["activity_processing"] as const;
 export const workspaceJobStatuses = ["queued", "running", "completed", "failed", "cancelled"] as const;
 export const workspaceJobAttemptStatuses = ["running", "completed", "failed", "cancelled"] as const;
-export const activityVerificationStatuses = ["passed", "failed", "inconclusive"] as const;
+/** `not_run` is a fact reported by an external Client, not a failed check. */
+export const activityVerificationStatuses = ["passed", "failed", "inconclusive", "not_run"] as const;
 export const core07ErrorCodes = [
   "activity_context_room_required",
   "activity_context_mismatch",
@@ -4038,6 +4039,11 @@ export const ActivityInboxItemSchema = z.object({
 export type ActivityInboxItem = z.infer<typeof ActivityInboxItemSchema>;
 
 export interface SettingsRecord {
+  /** Human-owned Workspace label. When unset, callers must display the
+   * durable Workspace ID rather than inventing a label. */
+  workspace_name?: string;
+  /** Human/team rules explicitly saved for Workspace-wide context. */
+  workspace_rules?: string[];
   ui_locale: SupportedLocale;
   output_locale: SupportedLocale;
   memory_capture_mode: CaptureMode;
@@ -4198,6 +4204,7 @@ function createRandomId(): string {
 }
 
 export const defaultSettings = (): SettingsRecord => ({
+  workspace_rules: [],
   ui_locale: "ja",
   output_locale: "ja",
   memory_capture_mode: "auto",

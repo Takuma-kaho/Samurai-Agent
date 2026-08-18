@@ -22,7 +22,7 @@ export interface LearningSnapshotPruneInput {
 
 type StoredMemory = MemoryFrontmatter & { file_path: string };
 type StoredWiki = WikiFrontmatter & { file_path: string };
-interface StoredSkill { id: string; title: string; description: string; tags: string[]; allowed_scopes: SkillFrontmatter["allowed_scopes"]; required_capabilities: string[]; owner_pinned: boolean; state: SkillState; file_path: string; frontmatter: SkillFrontmatter }
+interface StoredSkill { id: string; title: string; description: string; tags: string[]; allowed_scopes: SkillFrontmatter["allowed_scopes"]; required_capabilities: string[]; owner_pinned: boolean; state: SkillState; file_path: string; resource_version: number; frontmatter: SkillFrontmatter }
 interface SkillPackage { id: string; title: string; description: string; markdown: string; support_files: Array<{ path: string; content: string }> }
 interface ConsolidationResult { primary_skill_id: string; markdown: string; support_files: Array<{ path: string; content: string }>; archive_skill_ids: string[] }
 type CuratorReason = "replacement" | "refutation" | "environment_changed" | "user_request" | "restore" | "archive";

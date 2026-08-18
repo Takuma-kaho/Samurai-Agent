@@ -1,17 +1,20 @@
 import { z } from "zod";
 import { defineQuery, TrustedDomainContextError, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
 
-const Input = z.object({ query: z.string().max(10_000).default(""), limit: z.number().int().min(1).max(8).default(5) }).strict();
+const Input = z.object({ query: z.string().max(10_000).default(""), limit: z.number().int().min(1).max(200).default(5), offset: z.number().int().min(0).max(10_000).default(0) }).strict();
 const SearchResult = z.object({
   id: z.string(),
   topic: z.string(),
   state: z.enum(["session", "provisional", "active", "sensitive", "topic"]),
-  file_path: z.string()
+  file_path: z.string(),
+  pinned: z.boolean().optional(),
+  version: z.string().min(1).optional(),
+  updated_at: z.string().datetime().optional()
 }).strict();
-const Output = z.array(SearchResult).max(8);
+const Output = z.array(SearchResult).max(200);
 
 export interface MemorySearchPorts extends DomainQueryPorts {
-  searchMemory: ReadCapability<(context: TrustedDomainContext, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
+  searchMemory: ReadCapability<(context: TrustedDomainContext, query: string, limit: number, offset: number) => Promise<z.infer<typeof Output>>>;
 }
 
 const memorySearch = defineQuery<MemorySearchPorts>()({
@@ -20,7 +23,7 @@ const memorySearch = defineQuery<MemorySearchPorts>()({
   availability: "active",
   title: "Search memory",
   description: "Search active memory.",
-  sources: ["provider_tool_call", "runtime_api"],
+  sources: ["provider_tool_call", "runtime_api", "external_app"],
   render: ["memory"],
   resourceKinds: ["memory"],
   proposedEffects: ["Read memory without changing Workspace state."],
@@ -33,8 +36,7 @@ const memorySearch = defineQuery<MemorySearchPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleMemorySearch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        if (!context.runId) throw new TrustedDomainContextError("memory.search", "runId");
-        return { ok: true, value: Output.parse(await ports.searchMemory(context, input.query, input.limit)) };
+        return { ok: true, value: Output.parse(await ports.searchMemory(context, input.query, input.limit, input.offset)) };
       }
     };
   }

@@ -81,7 +81,7 @@ export interface SkillIndexEntry {
   file_path?: string;
 }
 
-export type SkillWithFilePath = SkillIndexEntry & { file_path: string };
+export type SkillWithFilePath = SkillIndexEntry & { file_path: string; resource_version: number };
 
 export interface SkillSupportFile {
   skill_id: string;
@@ -97,8 +97,11 @@ export interface SkillSupportFileRef {
   file_path: string;
 }
 
-export type WikiWithFilePath = WikiFrontmatter & { file_path: string };
-export type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string };
+export type WikiWithFilePath = WikiFrontmatter & { file_path: string; resource_version: number };
+/** Existing Domain result types intentionally omit persistence metadata; the
+ * Store always supplies this after migration 020, while callers that only
+ * hold a Domain value may legitimately not have it. */
+export type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string; resource_version?: number };
 export type CollectionRecordWithFilePath = Omit<CollectionRecord, "version"> & { version: number; file_path: string };
 
 export interface CollectionResolvedRef {

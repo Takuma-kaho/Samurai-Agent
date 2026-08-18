@@ -35,3 +35,4 @@ export * from "./activity/workspace-job-worker";
 export * from "./external-app/external-app-context-resolver";
 export * from "./external-app/external-app-ingress";
 export * from "./external-app/reference-adapter";
+export * from "./external-app/mcp-workspace-port";

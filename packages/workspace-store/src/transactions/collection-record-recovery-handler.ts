@@ -1,4 +1,4 @@
-import { readFile, rename, rm } from "node:fs/promises";
+import { mkdir, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { Kysely, type Transaction } from "kysely";
 import type { CollectionPatch, CollectionRecord } from "@samurai-agent/core-schemas";
@@ -10,7 +10,7 @@ type StoredRecord = Omit<CollectionRecord, "version"> & { version: number; file_
 
 /** Owns Collection record SQLite writes and recovery; the coordinator stays resource-neutral. */
 export class CollectionRecordRecoveryHandler implements WorkspaceFileTransactionRecoveryHandler {
-  readonly kinds = ["collection_record_patch", "collection_record_repair"] as const;
+  readonly kinds = ["collection_record_patch", "collection_record_repair", "collection_record_delete"] as const;
 
   constructor(private readonly db: Kysely<WorkspaceDb>, private readonly rootDir: string) {}
 
@@ -51,6 +51,17 @@ export class CollectionRecordRecoveryHandler implements WorkspaceFileTransaction
   async recover(row: WorkspaceFileTransactionsTable): Promise<"completed" | "rolled_back"> {
     const targetPath = path.join(this.rootDir, row.target_path);
     const stagedPath = path.join(this.rootDir, row.staged_path);
+    if (row.kind === "collection_record_delete") {
+      if (row.status === "db_committed") {
+        await rm(stagedPath, { force: true });
+        return "completed";
+      }
+      if (await exists(stagedPath)) {
+        await mkdir(path.dirname(targetPath), { recursive: true });
+        await rename(stagedPath, targetPath);
+      }
+      return "rolled_back";
+    }
     const target = await readFile(targetPath, "utf8").then((value) => JSON.parse(value) as StoredRecord).catch(() => undefined);
     const after = JSON.parse(row.after_json) as StoredRecord;
     const action = workspaceFileRecoveryAction({ status: row.status, stagedExists: await exists(stagedPath), targetVersion: target?.version, afterVersion: after.version });

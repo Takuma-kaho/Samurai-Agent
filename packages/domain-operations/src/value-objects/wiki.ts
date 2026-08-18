@@ -2,7 +2,10 @@ import { WikiFrontmatterSchema } from "@samurai-agent/core-schemas";
 import { z } from "zod";
 import { runtimeWriteValueSchema } from "./runtime-write.js";
 
-export const storedWikiSchema = WikiFrontmatterSchema.extend({ file_path: z.string().min(1) }).strict();
+export const storedWikiSchema = WikiFrontmatterSchema.extend({
+  file_path: z.string().min(1),
+  resource_version: z.number().int().positive().optional()
+}).strict();
 export const wikiWriteValueSchema = runtimeWriteValueSchema(storedWikiSchema);
 const wikiReindexResourceSchema = z.object({
   active: z.number().int().nonnegative(),

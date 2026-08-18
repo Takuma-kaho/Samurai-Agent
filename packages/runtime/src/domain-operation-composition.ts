@@ -29,6 +29,11 @@ import { createWikiDomainServicePorts } from "./domain-operation-ports/wiki-doma
 import { createSearchDomainServicePorts } from "./domain-operation-ports/search-domain-service-ports.js";
 import { createRoomAgentDomainServicePorts } from "./domain-operation-ports/room-agent-domain-service-ports.js";
 import { createActivityHistoryDomainServicePorts } from "./domain-operation-ports/activity-history-domain-service-ports.js";
+import { createResourceVersionDomainServicePorts } from "./domain-operation-ports/resource-version-domain-service-ports.js";
+import { createWorkspaceContextDomainServicePorts } from "./domain-operation-ports/workspace-context-domain-service-ports.js";
+import { createHumanChangeRequestDomainServicePorts } from "./domain-operation-ports/human-change-request-domain-service-ports.js";
+import { createResourceTransferDomainServicePorts } from "./domain-operation-ports/resource-transfer-domain-service-ports.js";
+import { createResourceRedactionDomainServicePorts } from "./domain-operation-ports/resource-redaction-domain-service-ports.js";
 
 export type { RuntimeDomainServices } from "./domain-operation-services.js";
 
@@ -62,7 +67,12 @@ export function createDomainOperationPorts(services: RuntimeDomainServices): Dom
     ...createWikiDomainServicePorts(services),
     ...createSearchDomainServicePorts(services),
     ...createRoomAgentDomainServicePorts(services),
-    ...createActivityHistoryDomainServicePorts(services)
+    ...createActivityHistoryDomainServicePorts(services),
+    ...createResourceVersionDomainServicePorts(services),
+    ...createWorkspaceContextDomainServicePorts(services),
+    ...createHumanChangeRequestDomainServicePorts(services),
+    ...createResourceTransferDomainServicePorts(services),
+    ...createResourceRedactionDomainServicePorts(services)
   };
   const missingQueryPorts = domainQueryIds.filter((id) => !(id in ports));
   if (missingQueryPorts.length > 0) throw new Error(`domain_query_ports_incomplete:${missingQueryPorts.join(",")}`);

@@ -9,6 +9,8 @@ const Input = z.object({
   "content": z.string() .optional(),
   "content_locale": SupportedLocaleSchema.optional(),
   "provenance": ProvenanceSchema.optional(),
+  "pinned": z.boolean().optional(),
+  "expected_resource_version": z.number().int().positive().optional(),
   "source_refs": z.array(ResourceRefSchema.strict()).optional(),
   "tags": z.array(z.string().trim().min(1)).optional(),
   "title": z.string().trim().min(1).optional(),
@@ -21,7 +23,8 @@ type OutputValue = z.infer<typeof Output>;
 export interface WikiPatchPorts {
   getWikiPage(id: string): Promise<OutputValue["resource"] | undefined>;
   readWikiContent(id: string): Promise<string | undefined>;
-  updateWikiPage(input: { id: string; title?: string; content?: string; tags?: string[]; content_locale?: InputValue["content_locale"]; source_refs?: WikiFrontmatter["source_refs"]; provenance?: WikiFrontmatter["provenance"] }): Promise<OutputValue["resource"] | undefined>;
+  updateWikiPage(input: { id: string; title?: string; content?: string; tags?: string[]; content_locale?: InputValue["content_locale"]; source_refs?: WikiFrontmatter["source_refs"]; provenance?: WikiFrontmatter["provenance"]; pinned?: boolean; expected_resource_version?: number }): Promise<OutputValue["resource"] | undefined>;
+  mapWikiWriteError(error: unknown): Error;
   wikiPageNotFoundError(id: string): Error;
   createWikiRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   runWikiMutation(input: { trustedContext: TrustedDomainContext; operationName: "wiki.patch"; proposedEffects: string[]; inputSummary: string; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: OutputValue["resource"]; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<OutputValue>;
@@ -36,7 +39,8 @@ const wikiPatch = defineCommand<WikiPatchPorts>()({
   "title": "Patch Knowledge Wiki page",
   "description": "Edit Knowledge Wiki frontmatter or markdown content.",
   "sources": [
-    "runtime_api"
+    "runtime_api",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",
@@ -70,11 +74,16 @@ const wikiPatch = defineCommand<WikiPatchPorts>()({
         const current = await ports.getWikiPage(input.wiki_id);
         if (!current) throw ports.wikiPageNotFoundError(input.wiki_id);
         const beforeContent = await ports.readWikiContent(input.wiki_id);
-        const update = { id: input.wiki_id, title: input.title, content: input.content, tags: input.tags, content_locale: input.content_locale, source_refs: input.source_refs, provenance: input.provenance };
+        const update = { id: input.wiki_id, title: input.title, content: input.content, tags: input.tags, content_locale: input.content_locale, source_refs: input.source_refs, provenance: input.provenance, pinned: input.pinned, expected_resource_version: input.expected_resource_version };
         const currentRef: ResourceRef = { kind: "wiki", id: current.id, uri: current.file_path, label: current.title };
         const value = await ports.runWikiMutation({ trustedContext: context, operationName: "wiki.patch", inputSummary: `Patch wiki page: ${current.title}`,
           proposedEffects: ["Edit wiki page frontmatter or markdown content."], targetResourceRefs: [currentRef], execute: async (operation) => {
-          const saved = await ports.updateWikiPage(update);
+          let saved;
+          try {
+            saved = await ports.updateWikiPage(update);
+          } catch (error) {
+            throw ports.mapWikiWriteError(error);
+          }
           if (!saved) throw ports.wikiPageNotFoundError(input.wiki_id);
           const ref: ResourceRef = { kind: "wiki", id: saved.id, uri: saved.file_path, label: saved.title };
           const rollbackPoint = await ports.createWikiRollback(operation, [ref], { wiki: wikiJsonRecord(current), content: beforeContent ?? "" }, { wiki: wikiJsonRecord(saved), content: input.content ?? beforeContent ?? "" });

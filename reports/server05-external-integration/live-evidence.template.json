@@ -1,0 +1,28 @@
+{
+  "entries": [
+    {
+      "result": "pass",
+      "client": "codex",
+      "os": "darwin",
+      "deployment": "hosted",
+      "target_version": "<client-and-server-version>",
+      "source_hash": "<copied-from-current-report.json>",
+      "executed_at": "2026-08-17T00:00:00.000Z",
+      "login_session": "samurai",
+      "flows": [
+        "oauth",
+        "mcp",
+        "project_room_binding",
+        "context_snapshot",
+        "read",
+        "write",
+        "activity_ingest",
+        "approval",
+        "approval_ui",
+        "capture"
+      ],
+      "evidence_ref": "reports/server05-external-integration/codex-darwin-hosted.md",
+      "evidence_sha256": "<sha256-of-that-evidence-file>"
+    }
+  ]
+}

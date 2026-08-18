@@ -4,6 +4,7 @@ export { WorkspaceSimulatedCrashError } from "./transactions/workspace-file-tran
 export { ensureWorkspaceLayout } from "./kernel/workspace-paths";
 export { renderFrontmatter } from "./repositories/workspace-file-codecs";
 export { CollectionRecordVersionConflictError } from "./repositories/collection-errors";
+export { ManagedResourceScopeTransferError, ManagedResourceVersionConflictError } from "./repositories/managed-resource-errors";
 export type {
   AgentWorkspacePermissionRecord,
   ResourceAccessBoundaryRecord,
@@ -23,6 +24,7 @@ import { ActivityHistoryRepository } from "./repositories/activity-history-repos
 import { ArtifactRepository } from "./repositories/artifact-repository";
 import { AutomationRepository } from "./repositories/automation-repository";
 import { ExternalAppConnectionRepository } from "./repositories/external-app-connection-repository";
+import { ExternalIntegrationRepository } from "./repositories/external-integration-repository";
 import { ClientEventQueueRepository } from "./repositories/client-event-queue-repository";
 import { CollectionRepository } from "./repositories/collection-repository";
 import { DurableWorkRepository } from "./repositories/durable-work-repository";
@@ -58,6 +60,7 @@ interface WorkspaceComposition {
   collections: CollectionRepository;
   automation: AutomationRepository;
   externalAppConnections: ExternalAppConnectionRepository;
+  externalIntegration: ExternalIntegrationRepository;
   gateway: GatewayRepository;
   metadata: WorkspaceMetadataRepository;
   roomAgent: RoomAgentRepository;
@@ -198,10 +201,21 @@ export class WorkspaceStore {
     const memory = new MemoryRepository(db, this.rootDir, {
       listMessages: (sessionId) => session.listMessages(sessionId)
     });
-    const wiki = new KnowledgeWikiRepository(db, this.rootDir);
-    const skills = new SkillRepository(db, this.rootDir);
+    const wiki = new KnowledgeWikiRepository(
+      db,
+      this.rootDir,
+      this.kernel.fileTransactions,
+      this.kernel.wikiRecoveryHandler
+    );
+    const skills = new SkillRepository(
+      db,
+      this.rootDir,
+      this.kernel.fileTransactions,
+      this.kernel.skillRecoveryHandler
+    );
     const automation = new AutomationRepository(db);
     const externalAppConnections = new ExternalAppConnectionRepository(db);
+    const externalIntegration = new ExternalIntegrationRepository(db);
     const gateway = new GatewayRepository(db);
     const metadata = new WorkspaceMetadataRepository(db);
     const roomAgent = new RoomAgentRepository(db);
@@ -214,6 +228,7 @@ export class WorkspaceStore {
       this.rootDir,
       this.kernel.fileTransactions,
       this.kernel.collectionRecordRecoveryHandler,
+      this.kernel.collectionSchemaRecoveryHandler,
       { listAutomationJobs: (input) => automation.listAutomationJobs(input) }
     );
     const managedResources = new ManagedResourceSynchronizer(memory, wiki, skills, collections);
@@ -288,6 +303,7 @@ export class WorkspaceStore {
       collections,
       automation,
       externalAppConnections,
+      externalIntegration,
       gateway,
       metadata,
       roomAgent,
@@ -308,7 +324,7 @@ export class WorkspaceStore {
   /** Keep every legacy entry point explicit; no Proxy or string dispatch is used. */
   private bindCompatibilityApi(): void {
     const facade = this as WorkspaceStore;
-    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, externalAppConnections, gateway, metadata, roomAgent, roomPermissions, accessHistory, activityHistory, workspaceJobs, queries, bundles, restore, maintenance } = this.composition;
+    const { session, clientEvents, durableWork, artifacts, surfaces, memory, wiki, skills, learning, collections, automation, externalAppConnections, externalIntegration, gateway, metadata, roomAgent, roomPermissions, accessHistory, activityHistory, workspaceJobs, queries, bundles, restore, maintenance } = this.composition;
 
     facade.migrate = this.kernel.migrate.bind(this.kernel);
     facade.listSchemaMigrations = this.kernel.listSchemaMigrations.bind(this.kernel);
@@ -510,6 +526,8 @@ export class WorkspaceStore {
     facade.getWiki = wiki.getWiki.bind(wiki);
     facade.readWikiContent = wiki.readWikiContent.bind(wiki);
     facade.readWikiMarkdown = wiki.readWikiMarkdown.bind(wiki);
+    facade.copyWikiPage = wiki.copyWikiPage.bind(wiki);
+    facade.moveWikiPage = wiki.moveWikiPage.bind(wiki);
     facade.updateWikiPage = wiki.updateWikiPage.bind(wiki);
     facade.patchWikiLearningMetadata = wiki.patchWikiLearningMetadata.bind(wiki);
     facade.restoreWikiVersionMarkdown = wiki.restoreWikiVersionMarkdown.bind(wiki);
@@ -533,6 +551,8 @@ export class WorkspaceStore {
     facade.getSkillOptimizationLock = skills.getSkillOptimizationLock.bind(skills);
     facade.releaseSkillOptimizationLock = skills.releaseSkillOptimizationLock.bind(skills);
     facade.saveSkillMarkdown = skills.saveSkillMarkdown.bind(skills);
+    facade.copySkill = skills.copySkill.bind(skills);
+    facade.moveSkill = skills.moveSkill.bind(skills);
     facade.listSkills = skills.listSkills.bind(skills);
     facade.listSkillIndexReadModel = skills.listSkillIndexReadModel.bind(skills);
     facade.getSkill = skills.getSkill.bind(skills);
@@ -624,6 +644,7 @@ export class WorkspaceStore {
     facade.getExternalAppConnectionByConnector = externalAppConnections.getExternalAppConnectionByConnector.bind(externalAppConnections);
     facade.listExternalAppConnections = externalAppConnections.listExternalAppConnections.bind(externalAppConnections);
     facade.revokeExternalAppConnection = externalAppConnections.revokeExternalAppConnection.bind(externalAppConnections);
+    facade.externalIntegration = externalIntegration;
 
     facade.saveExternalSend = gateway.saveExternalSend.bind(gateway);
     facade.getExternalSend = gateway.getExternalSend.bind(gateway);
@@ -669,6 +690,9 @@ export class WorkspaceStore {
 
     facade.getSettings = metadata.getSettings.bind(metadata);
     facade.patchSettings = metadata.patchSettings.bind(metadata);
+    facade.getWorkspaceContext = metadata.getWorkspaceContext.bind(metadata);
+    facade.getRoomContext = metadata.getRoomContext.bind(metadata);
+    facade.patchRoomContext = metadata.patchRoomContext.bind(metadata);
     facade.savePluginState = metadata.savePluginState.bind(metadata);
     facade.listPluginStates = metadata.listPluginStates.bind(metadata);
     facade.saveResourceTranslation = metadata.saveResourceTranslation.bind(metadata);
@@ -918,6 +942,8 @@ export interface WorkspaceStore {
   getWiki: KnowledgeWikiRepository["getWiki"];
   readWikiContent: KnowledgeWikiRepository["readWikiContent"];
   readWikiMarkdown: KnowledgeWikiRepository["readWikiMarkdown"];
+  copyWikiPage: KnowledgeWikiRepository["copyWikiPage"];
+  moveWikiPage: KnowledgeWikiRepository["moveWikiPage"];
   updateWikiPage: KnowledgeWikiRepository["updateWikiPage"];
   patchWikiLearningMetadata: KnowledgeWikiRepository["patchWikiLearningMetadata"];
   restoreWikiVersionMarkdown: KnowledgeWikiRepository["restoreWikiVersionMarkdown"];
@@ -941,6 +967,8 @@ export interface WorkspaceStore {
   getSkillOptimizationLock: SkillRepository["getSkillOptimizationLock"];
   releaseSkillOptimizationLock: SkillRepository["releaseSkillOptimizationLock"];
   saveSkillMarkdown: SkillRepository["saveSkillMarkdown"];
+  copySkill: SkillRepository["copySkill"];
+  moveSkill: SkillRepository["moveSkill"];
   listSkills: SkillRepository["listSkills"];
   listSkillIndexReadModel: SkillRepository["listSkillIndexReadModel"];
   getSkill: SkillRepository["getSkill"];
@@ -1032,6 +1060,7 @@ export interface WorkspaceStore {
   getExternalAppConnectionByConnector: ExternalAppConnectionRepository["getExternalAppConnectionByConnector"];
   listExternalAppConnections: ExternalAppConnectionRepository["listExternalAppConnections"];
   revokeExternalAppConnection: ExternalAppConnectionRepository["revokeExternalAppConnection"];
+  externalIntegration: ExternalIntegrationRepository;
 
   saveExternalSend: GatewayRepository["saveExternalSend"];
   getExternalSend: GatewayRepository["getExternalSend"];
@@ -1077,6 +1106,9 @@ export interface WorkspaceStore {
 
   getSettings: WorkspaceMetadataRepository["getSettings"];
   patchSettings: WorkspaceMetadataRepository["patchSettings"];
+  getWorkspaceContext: WorkspaceMetadataRepository["getWorkspaceContext"];
+  getRoomContext: WorkspaceMetadataRepository["getRoomContext"];
+  patchRoomContext: WorkspaceMetadataRepository["patchRoomContext"];
   savePluginState: WorkspaceMetadataRepository["savePluginState"];
   listPluginStates: WorkspaceMetadataRepository["listPluginStates"];
   saveResourceTranslation: WorkspaceMetadataRepository["saveResourceTranslation"];

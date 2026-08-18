@@ -7,6 +7,7 @@ import { collectionRecordWriteValueSchema } from "../../../value-objects/collect
 
 const Input = z.object({
   "collection_id": z.string().trim().min(1).max(256),
+  "expected_version": z.number().int().positive().optional(),
   "record_id": z.string().trim().min(1).max(256),
   "view_id": z.string().trim().min(1).max(256).optional()
 }).strict();
@@ -16,7 +17,8 @@ export interface CollectionRecordDeletePorts {
   getCollectionSchemaForMutation(id: string): Promise<z.infer<typeof storedCollectionSchema> | undefined>;
   collectionDeleteAllowed(schema: CollectionSchema, viewId?: string): boolean;
   getCollectionRecord(collectionId: string, recordId: string): Promise<z.infer<typeof storedCollectionRecordSchema> | undefined>;
-  deleteCollectionRecord(collectionId: string, recordId: string): Promise<z.infer<typeof Output>["resource"]>;
+  deleteCollectionRecord(collectionId: string, recordId: string, expectedVersion?: number): Promise<z.infer<typeof Output>["resource"]>;
+  mapCollectionPatchError(error: unknown): Error;
   collectionRecordRef(record: z.infer<typeof Output>["resource"]): ResourceRef;
   collectionMutationError(code: "forbidden" | "not_found", message: string): Error;
   createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, z.infer<typeof domainJsonValueSchema>>, after: Record<string, z.infer<typeof domainJsonValueSchema>>): Promise<RollbackPoint>;
@@ -34,7 +36,8 @@ const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
   "sources": [
     "surface_operation",
     "runtime_api",
-    "generated_surface"
+    "generated_surface",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",
@@ -79,7 +82,12 @@ const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
           trustedContext: context, inputSummary: `Delete collection record: ${input.collection_id}/${input.record_id}`, operationName: "collection.record.delete",
           proposedEffects: ["Delete a collection record file and SQLite index row."],
           execute: async (operation) => {
-            const deleted = await ports.deleteCollectionRecord(input.collection_id, input.record_id);
+            let deleted;
+            try {
+              deleted = await ports.deleteCollectionRecord(input.collection_id, input.record_id, input.expected_version);
+            } catch (error) {
+              throw ports.mapCollectionPatchError(error);
+            }
             const ref = ports.collectionRecordRef(deleted);
             const rollbackPoint = await ports.createCollectionRollback(operation, [ref], { record: domainJsonValueSchema.parse(record) }, {});
             return { resource: deleted, ref, rollbackPoint, summary: `Deleted collection record ${deleted.collection_id}/${deleted.id}.` };

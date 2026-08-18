@@ -8,6 +8,7 @@ const Input = z.object({
   "artifact_id": z.string().trim().min(1),
   "base_revision_id": z.string().trim().min(1).optional(),
   "change_summary": z.string().trim().min(1).optional(),
+  "expected_revision": z.number().int().positive().optional(),
   "revision_id": z.string().trim().min(1)
 }).strict();
 const Output = artifactRevisionWriteValueSchema;
@@ -17,7 +18,7 @@ export interface ArtifactRestoreRevisionPorts {
   getArtifact(id: string): Promise<ArtifactRecord | undefined>;
   getArtifactRevision(id: string): Promise<ArtifactRevisionRecord | undefined>;
   readArtifactRevisionContent(id: string): Promise<Uint8Array | undefined>;
-  createArtifactRevision(input: { artifactId: string; content: Uint8Array; baseRevisionId?: string; editorSource: "restore"; changeSummary: string; provenance: Record<string, JsonValue> }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
+  createArtifactRevision(input: { artifactId: string; content: Uint8Array; baseRevisionId?: string; expectedRevision?: number; editorSource: "restore"; changeSummary: string; provenance: Record<string, JsonValue> }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   artifactRevisionNotFoundError(): Error; artifactRevisionContentNotFoundError(): Error;
   runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
@@ -34,7 +35,8 @@ const artifactRestoreRevision = defineCommand<ArtifactRestoreRevisionPorts>()({
   "sources": [
     "runtime_api",
     "provider_tool_call",
-    "surface_operation"
+    "surface_operation",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",
@@ -73,7 +75,7 @@ const artifactRestoreRevision = defineCommand<ArtifactRestoreRevisionPorts>()({
         const content = await ports.readArtifactRevisionContent(input.revision_id);
         if (!content) throw ports.artifactRevisionContentNotFoundError();
         const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Restore artifact revision: ${artifact.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref, sourceRevision.file_ref], execute: async (operation) => {
-          const created = await ports.createArtifactRevision({ artifactId: input.artifact_id, content, baseRevisionId: input.base_revision_id ?? currentRevisionId(artifact), editorSource: "restore", changeSummary: input.change_summary ?? `Restored revision ${sourceRevision.revision}.`, provenance: { restored_from_revision_id: sourceRevision.id } });
+          const created = await ports.createArtifactRevision({ artifactId: input.artifact_id, content, baseRevisionId: input.base_revision_id ?? currentRevisionId(artifact), expectedRevision: input.expected_revision, editorSource: "restore", changeSummary: input.change_summary ?? `Restored revision ${sourceRevision.revision}.`, provenance: { restored_from_revision_id: sourceRevision.id } });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonRecord(artifact) }, { artifact: jsonRecord(created.artifact) });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Restored revision ${sourceRevision.revision} of ${artifact.title}.`, extra: { revision: created.revision } };
         }});

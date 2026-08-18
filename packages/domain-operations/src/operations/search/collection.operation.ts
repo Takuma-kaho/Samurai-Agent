@@ -1,22 +1,24 @@
 import { z } from "zod";
 import { domainJsonValueSchema, defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../definition/index.js";
 
-const Input = z.object({ collection_id: z.string().trim().max(256).optional(), query: z.string().max(10_000).default(""), limit: z.number().int().min(1).max(8).default(5) }).strict();
+const Input = z.object({ collection_id: z.string().trim().max(256).optional(), query: z.string().max(10_000).default(""), limit: z.number().int().min(1).max(200).default(5), offset: z.number().int().min(0).max(10_000).default(0) }).strict();
 const SearchResult = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("collection_schema"), id: z.string(), file_path: z.string() }).strict(),
+  z.object({ kind: z.literal("collection_schema"), id: z.string(), file_path: z.string(), version: z.number().int().positive(), updated_at: z.string().datetime().optional() }).strict(),
   z.object({
     kind: z.literal("collection_record"),
     collection_id: z.string(),
     id: z.string(),
     file_path: z.string(),
+    version: z.number().int().positive(),
+    updated_at: z.string().datetime(),
     summary: z.string(),
     data: z.record(domainJsonValueSchema)
   }).strict()
 ]);
-const Output = z.array(SearchResult).max(8);
+const Output = z.array(SearchResult).max(200);
 
 export interface CollectionSearchPorts extends DomainQueryPorts {
-  searchCollections: ReadCapability<(context: TrustedDomainContext, collectionId: string | undefined, query: string, limit: number) => Promise<z.infer<typeof Output>>>;
+  searchCollections: ReadCapability<(context: TrustedDomainContext, collectionId: string | undefined, query: string, limit: number, offset: number) => Promise<z.infer<typeof Output>>>;
 }
 
 const collectionSearch = defineQuery<CollectionSearchPorts>()({
@@ -25,7 +27,7 @@ const collectionSearch = defineQuery<CollectionSearchPorts>()({
   availability: "active",
   title: "Search collections",
   description: "Search local Collection records.",
-  sources: ["provider_tool_call", "runtime_api"],
+  sources: ["provider_tool_call", "runtime_api", "external_app"],
   render: ["collection"],
   resourceKinds: ["collection_schema", "collection_record"],
   proposedEffects: ["Read Collections without changing Workspace state."],
@@ -38,7 +40,7 @@ const collectionSearch = defineQuery<CollectionSearchPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCollectionSearch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await ports.searchCollections(context, input.collection_id, input.query, input.limit)) };
+        return { ok: true, value: Output.parse(await ports.searchCollections(context, input.collection_id, input.query, input.limit, input.offset ?? 0)) };
       }
     };
   }

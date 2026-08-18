@@ -29,6 +29,11 @@ import type { WikiDomainService } from "./commands/services/wiki-domain-service.
 import type { SearchDomainService } from "./commands/services/search-domain-service.js";
 import type { RoomAgentDomainService } from "./commands/services/room-agent-domain-service.js";
 import type { ActivityHistoryDomainService } from "./commands/services/activity-history-domain-service.js";
+import type { ResourceVersionDomainService } from "./commands/services/resource-version-domain-service.js";
+import type { WorkspaceContextDomainService } from "./commands/services/workspace-context-domain-service.js";
+import type { HumanChangeRequestDomainService } from "./commands/services/human-change-request-domain-service.js";
+import type { ResourceTransferDomainService } from "./commands/services/resource-transfer-domain-service.js";
+import type { ResourceRedactionDomainService } from "./commands/services/resource-redaction-domain-service.js";
 
 type RuntimeSkill = {
   id: string;
@@ -74,4 +79,9 @@ export interface RuntimeDomainServices {
   searchDomainService: SearchDomainService;
   roomAgentDomainService: RoomAgentDomainService;
   activityHistoryDomainService: ActivityHistoryDomainService;
+  resourceVersionDomainService: ResourceVersionDomainService;
+  workspaceContextDomainService: WorkspaceContextDomainService;
+  humanChangeRequestDomainService: HumanChangeRequestDomainService;
+  resourceTransferDomainService: ResourceTransferDomainService;
+  resourceRedactionDomainService: ResourceRedactionDomainService;
 }

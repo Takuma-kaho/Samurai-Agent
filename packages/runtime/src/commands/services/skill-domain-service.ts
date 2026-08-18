@@ -42,7 +42,7 @@ import { z } from "zod";
 
 type SkillApplyAction = Exclude<CuratorLifecycleAction, "review">;
 
-interface StoredSkill {
+export interface StoredSkill {
   id: string;
   title: string;
   description: string;
@@ -53,6 +53,7 @@ interface StoredSkill {
   owner_pinned: boolean;
   frontmatter: SkillFrontmatter;
   file_path: string;
+  resource_version?: number;
 }
 
 interface SkillWriteResult<T> {
@@ -105,16 +106,30 @@ export interface SkillOptimizationPort<TSkill extends OptimizationSkill> {
 export interface SkillMutationPort {
   getSkill(id: string): Promise<StoredSkill | undefined>;
   readMarkdown(id: string): Promise<string | undefined>;
-  patchSkill(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string }): Promise<StoredSkill | undefined>;
+  patchSkill(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string; pinned?: boolean; usage_scope?: SkillFrontmatter["usage_scope"]; expected_resource_version?: number }): Promise<StoredSkill | undefined>;
+  copySkill(input: {
+    source_id: string;
+    target_id: string;
+    target_usage_scope: NonNullable<SkillFrontmatter["usage_scope"]>;
+    expected_source_resource_version: number;
+    target_boundary?: { sourceRoomId: string; ownerParticipantId: string; creatorParticipantId?: string; resourceCreatedAt?: string };
+  }): Promise<StoredSkill | undefined>;
+  moveSkill(input: {
+    id: string;
+    source_room_id: string;
+    target_room_id: string;
+    expected_resource_version: number;
+  }): Promise<StoredSkill | undefined>;
   updateState(id: string, state: SkillFrontmatter["state"]): Promise<StoredSkill | undefined>;
   saveMarkdown(input: { state: "candidate" | "project"; skillId: string; markdown: string }): Promise<StoredSkill>;
   listSupportFiles(id: string): Promise<Array<{ path: string; file_path: string; content: string }>>;
   writeSupportFile(input: { skillId: string; path: string; content: string }): Promise<{ path: string; file_path: string; content: string }>;
   ensureSession(): Promise<SessionRecord>;
   createEnvelope(content: string): MessageEnvelope;
-  runMutation<T>(input: { session?: SessionRecord; envelope?: MessageEnvelope; trustedContext?: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary?: string; targetResourceRefs?: ResourceRef[]; boundaryResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<SkillWriteResult<T>>;
+  runMutation<T>(input: { session?: SessionRecord; envelope?: MessageEnvelope; trustedContext?: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary?: string; targetResourceRefs?: ResourceRef[]; boundaryResourceRefs?: ResourceRef[]; resultResourceBoundaryMode?: "managed_by_operation"; skipPostMutationTargetBoundaryCheck?: boolean; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<SkillWriteResult<T>>;
   createRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   requestError(code: "not_found", message: string): Error;
+  mapWriteError(error: unknown): Error;
   contract(id: "skill.patch" | "skill.candidate.create" | "skill.project.save" | "skill.support_file.save"): { id: string; proposed_effects: string[] };
 }
 
@@ -186,10 +201,13 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
   skillMutationContract(id: "skill.patch" | "skill.candidate.create" | "skill.project.save" | "skill.support_file.save") { return this.dependencies.mutation.contract(id); }
   skillResourceRef(skill: StoredSkill) { return skillRef(skill); }
   createSkillRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.mutation.createRollback(operation, refs, before, after); }
-  runSkillMutation<T>(input: { session?: SessionRecord; envelope?: MessageEnvelope; trustedContext?: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary?: string; targetResourceRefs?: ResourceRef[]; boundaryResourceRefs?: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }) { return this.dependencies.mutation.runMutation<T>(input); }
+  runSkillMutation<T>(input: { session?: SessionRecord; envelope?: MessageEnvelope; trustedContext?: TrustedDomainContext; operationName: string; proposedEffects: string[]; inputSummary?: string; targetResourceRefs?: ResourceRef[]; boundaryResourceRefs?: ResourceRef[]; resultResourceBoundaryMode?: "managed_by_operation"; skipPostMutationTargetBoundaryCheck?: boolean; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }) { return this.dependencies.mutation.runMutation<T>(input); }
   skillMutationNotFound(message: string) { return this.dependencies.mutation.requestError("not_found", message); }
   skillMutationConflict(message: string) { return this.dependencies.conflictError(message); }
-  patchSkillRecord(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string }) { return this.dependencies.mutation.patchSkill(input); }
+  mapSkillWriteError(error: unknown) { return this.dependencies.mutation.mapWriteError(error); }
+  patchSkillRecord(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string; pinned?: boolean; usage_scope?: SkillFrontmatter["usage_scope"]; expected_resource_version?: number }) { return this.dependencies.mutation.patchSkill(input); }
+  copySkill(input: Parameters<SkillMutationPort["copySkill"]>[0]) { return this.dependencies.mutation.copySkill(input); }
+  moveSkill(input: Parameters<SkillMutationPort["moveSkill"]>[0]) { return this.dependencies.mutation.moveSkill(input); }
 
   applyLifecycle(input: SkillLifecycleRequest) { return this.applyLifecycleInput(input); }
 

@@ -18,7 +18,8 @@ const Output = z.object({
     required_capabilities: z.array(z.string()),
     owner_pinned: z.boolean(),
     frontmatter: SkillFrontmatterSchema,
-    file_path: z.string().min(1)
+    file_path: z.string().min(1),
+    resource_version: z.number().int().positive().optional()
   }).strict(),
   content: z.string(),
   file_refs: z.array(z.object({ path: z.string().min(1), file_path: z.string().min(1) }).strict()),

@@ -30,7 +30,8 @@ const skillCandidateCreate = defineCommand<SkillCandidateCreatePorts>()({
   "description": "Create a reusable Skill candidate from a reflection or backend pattern.",
   "sources": [
     "runtime_api",
-    "scheduled_context"
+    "scheduled_context",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",

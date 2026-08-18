@@ -69,13 +69,16 @@ export class ExternalAppIngress {
     target: RequestedWorkspaceTarget;
     query_id: string;
     payload?: unknown;
+    signal?: AbortSignal;
   }): Promise<DomainQueryRuntimeResult> {
+    throwIfAborted(input.signal);
     const resolved = await this.dependencies.resolver.resolve({ evidence: input.evidence, target: input.target, ingressClass: "query" });
+    throwIfAborted(input.signal);
     return this.dependencies.runtime.runDomainQuery({
       query_id: input.query_id,
       ...(input.payload === undefined ? {} : { payload: input.payload }),
       input_source: "external_app"
-    }, resolved.trustedContext);
+    }, { ...resolved.trustedContext, ...(input.signal ? { signal: input.signal } : {}) });
   }
 
   async domainOperation(input: {
@@ -83,8 +86,11 @@ export class ExternalAppIngress {
     target: RequestedWorkspaceTarget;
     command_id: string;
     payload?: unknown;
+    signal?: AbortSignal;
   }): Promise<DomainCommandRuntimeResult> {
+    throwIfAborted(input.signal);
     const resolved = await this.dependencies.resolver.resolve({ evidence: input.evidence, target: input.target, ingressClass: "domain_operation" });
+    throwIfAborted(input.signal);
     const key = resolved.trustedContext.idempotencyKey;
     if (!key) throw new ExternalAppContextError("external_app_requested_room_invalid", "external_app_idempotency_key_required");
     return this.dependencies.runtime.runDomainCommand({
@@ -92,7 +98,7 @@ export class ExternalAppIngress {
       ...(input.payload === undefined ? {} : { payload: input.payload }),
       input_source: "external_app",
       idempotency_key: key
-    }, resolved.trustedContext);
+    }, { ...resolved.trustedContext, ...(input.signal ? { signal: input.signal } : {}) });
   }
 
   async activityIngest(input: {
@@ -107,13 +113,17 @@ export class ExternalAppIngress {
     domain_operation_ids?: string[];
     correction_of_activity_id?: string;
     resource_usage?: ExternalActivityResourceUsage[];
+    signal?: AbortSignal;
   }): Promise<ActivityRecord> {
-    const publicInput = ExternalActivityIngestSchema.parse(input);
+    const { signal, ...publicFields } = input;
+    const publicInput = ExternalActivityIngestSchema.parse(publicFields);
+    throwIfAborted(signal);
     const resolved = await this.dependencies.resolver.resolve({
       evidence: publicInput.evidence as ConnectorEvidence,
       target: publicInput.target as RequestedWorkspaceTarget,
       ingressClass: "activity_ingest"
     });
+    throwIfAborted(signal);
     return this.dependencies.activityIngest.ingestFinalizedActivity({
       context: resolved.workspaceContext,
       idempotencyKey: publicInput.idempotency_key,
@@ -133,9 +143,14 @@ export class ExternalAppIngress {
           ...(usage.content_hash ? { content_hash: usage.content_hash } : {}),
           usage_scope: { kind: "room" as const, room_id: resolved.workspaceContext.room_id! }
         }))
-      } : {})
+      } : {}),
+      ...(signal ? { signal } : {})
     });
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("external_app_ingress_aborted");
 }
 
 export const externalAppIngressClasses: readonly ExternalAppIngressClass[] = ["query", "domain_operation", "activity_ingest"];

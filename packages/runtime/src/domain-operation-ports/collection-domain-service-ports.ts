@@ -28,7 +28,8 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       getCollectionSchemaForMutation: (id) => services.collectionDomainService.getCollectionSchemaForMutation(id),
       collectionDeleteAllowed: (schema, viewId) => services.collectionDomainService.collectionDeleteAllowed(schema, viewId),
       getCollectionRecord: (collectionId, recordId) => services.collectionDomainService.getCollectionRecord(collectionId, recordId),
-      deleteCollectionRecord: (collectionId, recordId) => services.collectionDomainService.deleteCollectionRecord(collectionId, recordId),
+      deleteCollectionRecord: (collectionId, recordId, expectedVersion) => services.collectionDomainService.deleteCollectionRecord(collectionId, recordId, expectedVersion),
+      mapCollectionPatchError: (error) => services.collectionDomainService.mapCollectionPatchError(error),
       collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
       collectionMutationError: (code, message) => services.collectionDomainService.collectionMutationError(code, message),
       createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
@@ -42,7 +43,7 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
     "collection.schema.save": {
       getCollectionSchemaForMutation: (id) => services.collectionDomainService.getCollectionSchemaForMutation(id),
       saveCollectionSchema: (schema) => services.collectionDomainService.saveCollectionSchema(schema),
-      updateCollectionSchema: (schema) => services.collectionDomainService.updateCollectionSchema(schema),
+      updateCollectionSchema: (schema, expectedResourceVersion) => services.collectionDomainService.updateCollectionSchema(schema, expectedResourceVersion),
       collectionSchemaRef: (schema) => services.collectionDomainService.collectionSchemaRef(schema),
       createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
       collectionMutationContract: (id) => services.collectionDomainService.collectionMutationContract(id),

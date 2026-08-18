@@ -139,6 +139,8 @@ import { WorkspaceStore, type SessionTranscriptExport } from "@samurai-agent/wor
 import { collectionRecordResourceId, localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { registerBackendEventRoutes } from "./routes/backend-events";
 import { startAutomationScheduler, type AutomationScheduler } from "./workers/automation-scheduler";
+import { createExternalIntegrationRuntime, type CreateExternalIntegrationRuntimeOptions, type ExternalIntegrationRuntime } from "./external-integration";
+import type { ExternalIntegrationHttpRequest } from "@samurai-agent/external-integration";
 
 const defaultPort = 4317;
 const defaultWorkspaceHealthReadinessTimeoutMs = 2_000;
@@ -163,6 +165,7 @@ export interface CreateApiServerOptions {
   ownerToken?: string;
   corsOrigins?: string[];
   productionLogger?: (message: string, metadata: Record<string, unknown>) => void;
+  externalIntegration?: CreateExternalIntegrationRuntimeOptions | false;
 }
 
 export interface ApiServer {
@@ -178,6 +181,7 @@ export interface ApiServer {
   pluginEntrypointLoad: PluginEntrypointLoadResult;
   shutdown: ApiServerShutdownState;
   scheduler?: AutomationScheduler;
+  externalIntegration?: ExternalIntegrationRuntime;
 }
 
 export interface ApiServerShutdownState {
@@ -470,6 +474,16 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     productionLogger
   } });
   await runtime.startup();
+  const externalIntegrationOptions = options.externalIntegration === false
+    ? undefined
+    : options.externalIntegration ?? {
+      publicBaseUrl: process.env.SAMURAI_EXTERNAL_INTEGRATION_BASE_URL ?? `http://127.0.0.1:${process.env.PORT ?? defaultPort}`,
+      trustedProxy: process.env.SAMURAI_EXTERNAL_INTEGRATION_TRUST_PROXY === "1",
+      ownerTokenManager
+    };
+  const externalIntegration = externalIntegrationOptions
+    ? await createExternalIntegrationRuntime(store, runtime, externalIntegrationOptions)
+    : undefined;
   const scheduler = options.automationScheduler === false ? undefined : startAutomationScheduler(runtime);
   const lifecycle: ApiServerLifecycleState = {
     started_at: nowIso(),
@@ -526,6 +540,36 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       }
     }
   }));
+  app.use(express.urlencoded({ extended: false, limit: "2mb" }));
+
+  if (externalIntegration) {
+    app.use(async (req, res, next) => {
+      if (!isExternalIntegrationPath(req.path)) {
+        next();
+        return;
+      }
+      const requestSignal = createExternalIntegrationRequestSignal(req, res);
+      try {
+        const headers: Record<string, string | undefined> = {};
+        for (const [key, value] of Object.entries(req.headers)) headers[key] = Array.isArray(value) ? value[0] : value;
+        const input: ExternalIntegrationHttpRequest = {
+          method: req.method,
+          url: req.originalUrl,
+          headers,
+          body: req.body,
+          remoteAddress: req.socket.remoteAddress,
+          signal: requestSignal.signal
+        };
+        const response = await externalIntegration.handler(input);
+        for (const [key, value] of Object.entries(response.headers)) res.setHeader(key, value);
+        res.status(response.status).send(response.body);
+      } catch (error) {
+        next(error);
+      } finally {
+        requestSignal.cleanup();
+      }
+    });
+  }
 
   app.post("/api/security/owner-token/rotate",(req,res)=>{if(!ownerTokenManager){res.status(409).json({error:"owner_token_not_configured"});return}const nextToken=typeof req.body?.token==="string"?req.body.token:"";try{ownerTokenManager.rotate(nextToken);res.json({rotated:true})}catch(error){res.status(400).json({error:error instanceof Error?error.message:"owner_token_rotation_failed"})}});
 
@@ -4266,14 +4310,20 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     pluginRegistry,
     pluginCatalogIssues: pluginCatalog.issues,
     pluginEntrypointLoad,
-    ...(scheduler ? { scheduler } : {})
+    ...(scheduler ? { scheduler } : {}),
+    ...(externalIntegration ? { externalIntegration } : {})
   };
 }
 
 export async function startServer(port?: number): Promise<ApiServer> {
   loadServerEnv();
   const resolvedPort = port ?? Number(process.env.PORT ?? defaultPort);
-  const server = await createApiServer();
+  const server = await createApiServer({
+    externalIntegration: {
+      publicBaseUrl: process.env.SAMURAI_EXTERNAL_INTEGRATION_BASE_URL ?? `http://127.0.0.1:${resolvedPort}`,
+      trustedProxy: process.env.SAMURAI_EXTERNAL_INTEGRATION_TRUST_PROXY === "1"
+    }
+  });
   try {
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => {
@@ -4339,6 +4389,42 @@ async function awaitBeforeDeadline(task: Promise<unknown>, deadlineAt: number): 
   });
 }
 
+function isExternalIntegrationPath(pathname: string): boolean {
+  return pathname === "/mcp"
+    || pathname === "/approval"
+    || pathname.startsWith("/approval/")
+    || pathname === "/connector/activity"
+    || pathname === "/connector/capture"
+    || pathname === "/capture/policy"
+    || pathname === "/capture/export"
+    || pathname === "/capture/delete"
+    || pathname === "/connectors"
+    || pathname.startsWith("/connectors/")
+    || pathname.startsWith("/oauth/")
+    || pathname === "/.well-known/oauth-authorization-server"
+    || pathname === "/.well-known/oauth-protected-resource";
+}
+
+/** Express does not expose a portable request AbortSignal. Bridge the socket
+ * lifecycle to the external-integration boundary so a disconnected Client
+ * can stop before a write, or receive an explicit unknown outcome after the
+ * write boundary has been crossed. */
+function createExternalIntegrationRequestSignal(req: Request, res: Response): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const abortIfOpen = () => {
+    if (!res.writableEnded && !res.writableFinished) controller.abort();
+  };
+  req.once("aborted", abortIfOpen);
+  res.once("close", abortIfOpen);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      req.off("aborted", abortIfOpen);
+      res.off("close", abortIfOpen);
+    }
+  };
+}
+
 export function closeApiServer(server: ApiServer): Promise<void> {
   const existing = apiServerClosePromises.get(server);
   if (existing) {
@@ -4386,6 +4472,7 @@ export function closeApiServer(server: ApiServer): Promise<void> {
         safeToCloseStore = false;
       }
     }
+    server.externalIntegration?.close();
     if (!(await waitForActiveRequestsToDrain(shutdown, deadlineAt))) {
       errors.push(new Error("api_server_active_requests_shutdown_timeout"));
       safeToCloseStore = false;

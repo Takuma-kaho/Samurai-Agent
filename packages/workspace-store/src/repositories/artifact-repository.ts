@@ -80,64 +80,91 @@ export class ArtifactRepository {
     producerRunId?: string;
     extension?: string;
     baseRevisionId?: string;
+    /** The observed immutable revision number. External callers supply this
+     * alongside `baseRevisionId`; it is rechecked in the write transaction. */
+    expectedRevision?: number;
     editorSource?: ArtifactRevisionRecord["editor_source"];
     changeSummary?: string;
     provenance?: Record<string, JsonValue>;
   }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }> {
-    const artifact = await this.getArtifact(input.artifactId);
-    if (!artifact) throw new Error(`artifact_not_found:${input.artifactId}`);
-    const revisions = await this.listArtifactRevisions(artifact.id);
-    const currentRevisionId = revisions.at(-1)?.id;
-    if (input.baseRevisionId && input.baseRevisionId !== currentRevisionId) throw new Error(`artifact_revision_conflict:${currentRevisionId ?? "none"}`);
-    const revisionNumber = (revisions.at(-1)?.revision ?? 0) + 1;
-    const extension = safeArtifactExtension((input.extension ?? path.extname(artifact.file_ref.uri).slice(1)) || "bin");
     const content = Buffer.from(input.content);
     const contentHash = createHash("sha256").update(content).digest("hex");
     const revisionId = createId("artifact_revision");
-    const revisionPath = path.join("artifacts", artifact.id, "revisions", `${revisionNumber}.${extension}`);
-    const blobPath = path.join("artifacts", ".blobs", `${contentHash}.${extension}`);
-    await mkdir(path.join(this.rootDir, path.dirname(revisionPath)), { recursive: true });
-    await mkdir(path.join(this.rootDir, path.dirname(blobPath)), { recursive: true });
-    if (!await pathExists(path.join(this.rootDir, blobPath))) {
-      await writeFile(path.join(this.rootDir, blobPath), content, { flag: "wx" }).catch(async (error) => {
-        if (!await pathExists(path.join(this.rootDir, blobPath))) throw error;
-      });
-    }
-    await writeFile(path.join(this.rootDir, revisionPath), content, { flag: "wx" });
-    const now = nowIso();
-    const revision: ArtifactRevisionRecord = {
-      id: revisionId,
-      artifact_id: artifact.id,
-      revision: revisionNumber,
-      parent_revision_id: revisions.at(-1)?.id,
-      producer_run_id: input.producerRunId,
-      base_revision_id: input.baseRevisionId,
-      editor_source: input.editorSource,
-      change_summary: input.changeSummary,
-      provenance: input.provenance ?? {},
-      source_ref: artifact.file_ref,
-      file_ref: { kind: "artifact_revision", id: revisionId, uri: revisionPath, label: `${artifact.title} r${revisionNumber}` },
-      blob_ref: { kind: "artifact_blob", id: contentHash, uri: blobPath, label: contentHash },
-      content_hash: contentHash,
-      content_bytes: content.byteLength,
-      created_at: now
-    };
-    const nextArtifact: ArtifactRecord = {
-      ...artifact,
-      file_ref: revision.file_ref,
-      metadata: { ...artifact.metadata, current_revision_id: revision.id, current_revision: revision.revision, content_hash: revision.content_hash },
-      updated_at: now
-    };
+    let createdRevisionPath: string | undefined;
     try {
-      await this.db.transaction().execute(async (transaction) => {
+      return await this.db.transaction().execute(async (transaction) => {
+        // Read the current pointer only inside this transaction.  The prior
+        // implementation read it before the transaction, allowing a stale
+        // Client to create a competing revision after another save completed.
+        const artifactRow = await transaction.selectFrom("artifacts").selectAll().where("id", "=", input.artifactId).executeTakeFirst();
+        if (!artifactRow) throw new Error(`artifact_not_found:${input.artifactId}`);
+        const artifact = artifactFromRow(artifactRow);
+        const currentRow = await transaction.selectFrom("artifact_revisions")
+          .selectAll()
+          .where("artifact_id", "=", artifact.id)
+          .orderBy("revision", "desc")
+          .executeTakeFirst();
+        const current = currentRow ? parse<ArtifactRevisionRecord>(currentRow.revision_json) : undefined;
+        if (input.baseRevisionId && input.baseRevisionId !== current?.id) {
+          throw new Error(`artifact_revision_conflict:${current?.id ?? "none"}`);
+        }
+        if (input.expectedRevision !== undefined && input.expectedRevision !== current?.revision) {
+          throw new Error(`artifact_revision_conflict:${current?.id ?? "none"}`);
+        }
+
+        const revisionNumber = (current?.revision ?? 0) + 1;
+        const extension = safeArtifactExtension((input.extension ?? path.extname(artifact.file_ref.uri).slice(1)) || "bin");
+        // The immutable ID makes the staged filesystem path unique even when
+        // two writers race.  The DB CAS below remains the authority on which
+        // revision becomes current.
+        const revisionPath = path.join("artifacts", artifact.id, "revisions", `${revisionNumber}-${revisionId}.${extension}`);
+        const blobPath = path.join("artifacts", ".blobs", `${contentHash}.${extension}`);
+        await mkdir(path.join(this.rootDir, path.dirname(revisionPath)), { recursive: true });
+        await mkdir(path.join(this.rootDir, path.dirname(blobPath)), { recursive: true });
+        if (!await pathExists(path.join(this.rootDir, blobPath))) {
+          await writeFile(path.join(this.rootDir, blobPath), content, { flag: "wx" }).catch(async (error) => {
+            if (!await pathExists(path.join(this.rootDir, blobPath))) throw error;
+          });
+        }
+        await writeFile(path.join(this.rootDir, revisionPath), content, { flag: "wx" });
+        createdRevisionPath = revisionPath;
+        const now = nowIso();
+        const revision: ArtifactRevisionRecord = {
+          id: revisionId,
+          artifact_id: artifact.id,
+          revision: revisionNumber,
+          parent_revision_id: current?.id,
+          producer_run_id: input.producerRunId,
+          base_revision_id: input.baseRevisionId,
+          editor_source: input.editorSource,
+          change_summary: input.changeSummary,
+          provenance: input.provenance ?? {},
+          source_ref: artifact.file_ref,
+          file_ref: { kind: "artifact_revision", id: revisionId, uri: revisionPath, label: `${artifact.title} r${revisionNumber}` },
+          blob_ref: { kind: "artifact_blob", id: contentHash, uri: blobPath, label: contentHash },
+          content_hash: contentHash,
+          content_bytes: content.byteLength,
+          created_at: now
+        };
+        const nextArtifact: ArtifactRecord = {
+          ...artifact,
+          file_ref: revision.file_ref,
+          metadata: { ...artifact.metadata, current_revision_id: revision.id, current_revision: revision.revision, content_hash: revision.content_hash },
+          updated_at: now
+        };
         await transaction.insertInto("artifact_revisions").values(artifactRevisionToRow(revision)).execute();
-        await transaction.updateTable("artifacts").set({ file_ref_json: stringify(nextArtifact.file_ref), metadata_json: stringify(nextArtifact.metadata), updated_at: now }).where("id", "=", artifact.id).execute();
+        const update = await transaction.updateTable("artifacts")
+          .set({ file_ref_json: stringify(nextArtifact.file_ref), metadata_json: stringify(nextArtifact.metadata), updated_at: now })
+          .where("id", "=", artifact.id)
+          .where("updated_at", "=", artifact.updated_at)
+          .executeTakeFirst();
+        if (Number(update.numUpdatedRows ?? 0) !== 1) throw new Error(`artifact_revision_conflict:${current?.id ?? "none"}`);
+        return { artifact: nextArtifact, revision };
       });
     } catch (error) {
-      await rm(path.join(this.rootDir, revisionPath), { force: true });
+      if (createdRevisionPath) await rm(path.join(this.rootDir, createdRevisionPath), { force: true });
       throw error;
     }
-    return { artifact: nextArtifact, revision };
   }
 
   async listArtifactRevisions(artifactId: string): Promise<ArtifactRevisionRecord[]> {

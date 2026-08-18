@@ -63,7 +63,7 @@ register({ scope: "workspace_control" },
   "gateway.concurrency_lock.expire", "gateway.mcp_config.save", "gateway.pairing_policy.save",
   "gateway.pairing.approve", "gateway.pairing.expire", "gateway.pairing.reject", "gateway.pairing.revoke", "gateway.pairing.rotate",
   "gateway.routing_policy.save", "gateway.sandbox.delete", "gateway.sandbox.recreate", "gateway.sandbox.sync", "gateway.state.repair",
-  "collection.reindex", "plugin.status.set", "session.search.reindex", "settings.patch", "wiki.reindex", "workspace.backup.create", "workspace.backup.restore", "workspace.repair"
+  "collection.reindex", "plugin.status.set", "resource.promote", "session.search.reindex", "settings.patch", "wiki.reindex", "workspace.backup.create", "workspace.backup.restore", "workspace.repair"
 );
 
 // These paths can touch data that predates a formal Room boundary.  They are
@@ -81,8 +81,14 @@ register({ scope: "room_content", action: "edit", target: {
   resourceRefField: "source_ref",
   allowedKinds: ["artifact", "memory", "wiki", "skill", "collection_record"]
 } }, "resource.translation.save", "resource.translation_job.save");
-register({ scope: "room_content", action: "execute" }, "artifact.export_pdf", "browser.download_to_workspace", "browser.extract", "browser.interact", "browser.navigate", "browser.screenshot", "chat.turn.run", "evaluation.run", "external.send", "external.send.dispatch", "external.send.prepare", "image.generate", "learning.background_review.apply", "mcp.call", "presentation.plan", "reflection.run", "reflection.suggestion.apply", "sandbox.exec", "session.create", "skill.optimization.cancel", "skill.optimization.promote", "skill.optimization.reject", "skill.optimization.rollback", "skill.optimization.start", "work_item.follow_up", "work_item.steer");
-register({ scope: "room_content", action: "read" }, "activity.history.list", "collection.schema.docs", "collection.search", "file.list", "memory.search", "session.search", "skill.search", "wiki.search");
+register({ scope: "room_content", action: "execute" }, "artifact.export_pdf", "browser.download_to_workspace", "browser.extract", "browser.interact", "browser.navigate", "browser.screenshot", "chat.turn.run", "evaluation.run", "external.send", "external.send.dispatch", "external.send.prepare", "image.generate", "learning.background_review.apply", "mcp.call", "presentation.plan", "policy.change.request", "profile.change.request", "reflection.run", "reflection.suggestion.apply", "sandbox.exec", "session.create", "skill.optimization.cancel", "skill.optimization.promote", "skill.optimization.reject", "skill.optimization.rollback", "skill.optimization.start", "soul.change.request", "work_item.follow_up", "work_item.steer");
+// `resource.version.get` validates the exact resource through its own narrow
+// Room-authorized read service after this room-level admission.  Its dynamic
+// resource kind cannot be inferred safely from an operation name.
+// workspace.context.get checks that its requested Room equals the trusted
+// target before loading human-owned metadata; it must not infer a Room from a
+// caller-controlled Workspace field.
+register({ scope: "room_content", action: "read" }, "activity.history.list", "collection.schema.docs", "collection.search", "file.list", "memory.search", "resource.version.get", "session.search", "skill.search", "wiki.search", "workspace.context.get");
 register({ scope: "room_content", action: "edit", target: { kind: "artifact", idField: "artifact_id" } }, "artifact.repair", "artifact.restore_revision", "artifact.revise", "graph.patch", "image.edit");
 register({ scope: "room_content", action: "edit", target: [
   { kind: "collection_schema", idField: "collection_id" },
@@ -104,6 +110,7 @@ register({ scope: "room_content", action: "edit", target: { kind: "generated_sur
 register({ scope: "room_content", action: "read", target: { kind: "generated_surface", idField: "surface_id" } }, "generated_surface.state");
 register({ scope: "room_content", action: "edit", target: { kind: "memory", idField: "memory_id" } }, "memory.archive");
 register({ scope: "room_content", action: "edit", target: { kindField: "resource_kind", idField: "resource_id", allowedKinds: ["memory", "wiki", "skill"] } }, "learning.resource.usage.record", "learning.resource.version.restore", "learning.resource.version.update");
+register({ scope: "room_content", action: "edit", target: { kindField: "resource_kind", idField: "resource_id", allowedKinds: ["memory", "wiki", "skill"] } }, "resource.copy", "resource.move", "resource.redact");
 register({ scope: "room_content", action: "edit" }, "skill.candidate.create");
 register({ scope: "room_content", action: "edit", target: { kind: "skill", idField: "candidate_id" } }, "skill.project.save");
 register({ scope: "room_content", action: "edit", target: { kind: "skill", idField: "skill_id" } }, "skill.lifecycle.apply", "skill.patch", "skill.support_file.save", "skill.usage.record");

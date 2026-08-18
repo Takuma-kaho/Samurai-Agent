@@ -111,6 +111,9 @@ importers:
       '@samurai-agent/domain-operations':
         specifier: workspace:*
         version: link:../../packages/domain-operations
+      '@samurai-agent/external-integration':
+        specifier: workspace:*
+        version: link:../../packages/external-integration
       '@samurai-agent/gateway':
         specifier: workspace:*
         version: link:../../packages/gateway
@@ -249,6 +252,25 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
 
+  packages/external-integration:
+    dependencies:
+      '@samurai-agent/core-schemas':
+        specifier: workspace:*
+        version: link:../core-schemas
+      ajv:
+        specifier: 8.17.1
+        version: 8.17.1
+      semver:
+        specifier: 7.8.4
+        version: 7.8.4
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/semver':
+        specifier: 7.7.1
+        version: 7.7.1
+
   packages/gateway:
     dependencies:
       '@samurai-agent/core-schemas':
@@ -307,6 +329,9 @@ importers:
       '@samurai-agent/domain-operations':
         specifier: workspace:*
         version: link:../domain-operations
+      '@samurai-agent/external-integration':
+        specifier: workspace:*
+        version: link:../external-integration
       '@samurai-agent/gateway':
         specifier: workspace:*
         version: link:../gateway
@@ -380,6 +405,9 @@ importers:
       '@samurai-agent/core-schemas':
         specifier: workspace:*
         version: link:../core-schemas
+      '@samurai-agent/external-integration':
+        specifier: workspace:*
+        version: link:../external-integration
       '@samurai-agent/room-permissions':
         specifier: workspace:*
         version: link:../room-permissions
@@ -918,6 +946,9 @@ packages:
 
   '@types/range-parser@1.2.7':
     resolution: {integrity: sha512-hKormJbkJqzQGhziax5PItDUTMAM9uE2XXQmM37dyd4hVM+5aVl7oVxMVUiVQn2oCQFN/LKCZdvSM0pFRqbSmQ==}
+
+  '@types/semver@7.7.1':
+    resolution: {integrity: sha512-FmgJfu+MOcQ370SD0ev7EI8TlCAfKYU+B4m5T3yXc1CiRN94g/SZPtsCkk506aUDtlMnFZvasDwHHUcZUEaYuA==}
 
   '@types/send@1.2.1':
     resolution: {integrity: sha512-arsCikDvlU99zl1g69TcAB3mzZPpxgw0UQnaHeC1Nwb015xp8bknZv5rIfri9xTOcMuaVgvabfIRA7PSZVuZIQ==}
@@ -2197,6 +2228,8 @@ snapshots:
   '@types/qs@6.15.1': {}
 
   '@types/range-parser@1.2.7': {}
+
+  '@types/semver@7.7.1': {}
 
   '@types/send@1.2.1':
     dependencies:

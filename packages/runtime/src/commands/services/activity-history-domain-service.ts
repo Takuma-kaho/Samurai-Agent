@@ -8,6 +8,12 @@ export class ActivityHistoryDomainService {
     private readonly workspaceContext: (context: TrustedDomainContext) => TrustedWorkspaceContext
   ) {}
 
+  async get(input: { context: TrustedDomainContext; activityId: string }): Promise<ActivityRecord> {
+    const item = await this.query.getActivity({ context: this.workspaceContext(input.context), activityId: input.activityId });
+    if (!item) throw new Error(`activity_not_found:${input.activityId}`);
+    return item;
+  }
+
   list(input: {
     context: TrustedDomainContext;
     request: {
@@ -18,6 +24,7 @@ export class ActivityHistoryDomainService {
       created_after?: string;
       created_before?: string;
       limit?: number;
+      offset?: number;
     };
   }): Promise<ActivityRecord[]> {
     return this.query.listActivities({
@@ -28,7 +35,7 @@ export class ActivityHistoryDomainService {
       ...(input.request.status ? { status: input.request.status } : {}),
       ...(input.request.created_after ? { createdAfter: input.request.created_after } : {}),
       ...(input.request.created_before ? { createdBefore: input.request.created_before } : {}),
-      ...(input.request.limit ? { limit: input.request.limit } : {})
-    });
+      ...(input.request.limit ? { limit: input.request.limit + (input.request.offset ?? 0) } : {})
+    }).then((items) => input.request.offset ? items.slice(input.request.offset, input.request.offset + (input.request.limit ?? items.length)) : items);
   }
 }

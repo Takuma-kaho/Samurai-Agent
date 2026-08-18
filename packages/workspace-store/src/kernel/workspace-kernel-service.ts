@@ -1,6 +1,9 @@
 import { sql, type Kysely } from "kysely";
 import { workspaceMigrations } from "../migrations";
 import { CollectionRecordRecoveryHandler } from "../transactions/collection-record-recovery-handler";
+import { CollectionSchemaRecoveryHandler } from "../transactions/collection-schema-recovery-handler";
+import { WikiRecoveryHandler } from "../transactions/wiki-recovery-handler";
+import { SkillRecoveryHandler } from "../transactions/skill-recovery-handler";
 import {
   WorkspaceFileTransactionCoordinator,
   type WorkspaceFileTransactionFailureInjector
@@ -20,6 +23,9 @@ import { SessionSearchIndex } from "./session-search-index";
 export class WorkspaceKernelService {
   private dbConnection: Kysely<WorkspaceDb>;
   private collectionRecovery: CollectionRecordRecoveryHandler;
+  private collectionSchemaRecovery: CollectionSchemaRecoveryHandler;
+  private wikiRecovery: WikiRecoveryHandler;
+  private skillRecovery: SkillRecoveryHandler;
   private transactions: WorkspaceFileTransactionCoordinator;
   private search: SessionSearchIndex;
 
@@ -34,11 +40,14 @@ export class WorkspaceKernelService {
     this.database = new WorkspaceDatabase(this.paths);
     this.dbConnection = this.database.open();
     this.collectionRecovery = new CollectionRecordRecoveryHandler(this.dbConnection, rootDir);
+    this.collectionSchemaRecovery = new CollectionSchemaRecoveryHandler(this.dbConnection, rootDir);
+    this.wikiRecovery = new WikiRecoveryHandler(this.dbConnection, rootDir);
+    this.skillRecovery = new SkillRecoveryHandler(this.dbConnection, rootDir);
     this.transactions = new WorkspaceFileTransactionCoordinator(
       this.dbConnection,
       rootDir,
       fileTransactionFailureInjector,
-      [this.collectionRecovery]
+      [this.collectionRecovery, this.collectionSchemaRecovery, this.wikiRecovery, this.skillRecovery]
     );
     this.search = new SessionSearchIndex(this.dbConnection);
   }
@@ -57,6 +66,18 @@ export class WorkspaceKernelService {
 
   get collectionRecordRecoveryHandler(): CollectionRecordRecoveryHandler {
     return this.collectionRecovery;
+  }
+
+  get collectionSchemaRecoveryHandler(): CollectionSchemaRecoveryHandler {
+    return this.collectionSchemaRecovery;
+  }
+
+  get wikiRecoveryHandler(): WikiRecoveryHandler {
+    return this.wikiRecovery;
+  }
+
+  get skillRecoveryHandler(): SkillRecoveryHandler {
+    return this.skillRecovery;
   }
 
   get sessionSearchIndex(): SessionSearchIndex {
@@ -139,11 +160,14 @@ export class WorkspaceKernelService {
   async reopen(): Promise<void> {
     this.dbConnection = await this.database.reopen();
     this.collectionRecovery = new CollectionRecordRecoveryHandler(this.dbConnection, this.rootDir);
+    this.collectionSchemaRecovery = new CollectionSchemaRecoveryHandler(this.dbConnection, this.rootDir);
+    this.wikiRecovery = new WikiRecoveryHandler(this.dbConnection, this.rootDir);
+    this.skillRecovery = new SkillRecoveryHandler(this.dbConnection, this.rootDir);
     this.transactions = new WorkspaceFileTransactionCoordinator(
       this.dbConnection,
       this.rootDir,
       this.fileTransactionFailureInjector,
-      [this.collectionRecovery]
+      [this.collectionRecovery, this.collectionSchemaRecovery, this.wikiRecovery, this.skillRecovery]
     );
     this.search = new SessionSearchIndex(this.dbConnection);
   }

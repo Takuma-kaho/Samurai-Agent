@@ -182,18 +182,33 @@
         "operation": "Core09 external ingress and sessionless automation",
         "field": "Connection scope, Activity evidence, and Automation authority",
         "reason": "External App Connections narrow the delegated principal's current Room authority, formal ingress is sessionless, and Automation records current authority provenance instead of a Session-based execution grant."
+      },
+      {
+        "operation": "policy.change.request, profile.change.request, soul.change.request",
+        "field": "human-only change request",
+        "reason": "External clients may record a reviewed request as Activity evidence, but cannot directly change policy, profile, or soul data."
+      },
+      {
+        "operation": "resource.copy, resource.move, resource.promote",
+        "field": "explicit Resource transfer",
+        "reason": "Knowledge and Skill transfer requires a source Version, current Room authorization, an explicitly authorized target Room when applicable, and formal Operation and Activity evidence."
+      },
+      {
+        "operation": "resource.redact",
+        "field": "known-secret-only redaction",
+        "reason": "Redaction accepts no caller-provided secret text or matching rule, requires the current Resource Version and Room authorization, and deliberately creates no rollback payload that could retain the removed secret."
       }
     ]
   },
   "review": {
-    "required_operations": 158,
-    "reviewed_operations": 158,
+    "required_operations": 167,
+    "reviewed_operations": 167,
     "unreviewed_operations": 0,
-    "required_endpoints": 316,
-    "reviewed_endpoints": 316,
+    "required_endpoints": 334,
+    "reviewed_endpoints": 334,
     "unreviewed_endpoints": 0,
-    "required_schema_nodes": 907,
-    "reviewed_schema_nodes": 907,
+    "required_schema_nodes": 938,
+    "reviewed_schema_nodes": 938,
     "unreviewed_schema_nodes": 0
   },
   "global_payload_limits": {
@@ -270,37 +285,6 @@
       },
       "schema": {
         "type": "string"
-      }
-    },
-    "sha256:00cbf503512e929743cce3f3af8f8c708abbd261641f65742978b1eb553882f4": {
-      "structural_hash": "00cbf503512e929743cce3f3af8f8c708abbd261641f65742978b1eb553882f4",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "artifact.restore_revision",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "artifact_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "base_revision_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "change_summary": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "revision_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          }
-        },
-        "required": [
-          "artifact_id",
-          "revision_id"
-        ],
-        "type": "object"
       }
     },
     "sha256:0108958b096c0506a94232eb5611e73a9d5d3f74094c9207af1d20a4b720c6a6": {
@@ -997,22 +981,6 @@
           "read_write"
         ],
         "type": "string"
-      }
-    },
-    "sha256:0eb37dffcd0ebfe0bfa04f23becca45a930644dc9413589b4bf55ed638913797": {
-      "structural_hash": "0eb37dffcd0ebfe0bfa04f23becca45a930644dc9413589b4bf55ed638913797",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "skill.search",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "items": {
-          "$schema_ref": "sha256:5b8097f805b1b9e0b7932234f3331ae066a807e2de3bc3342596c5470e26b001"
-        },
-        "maxItems": 8,
-        "type": "array"
       }
     },
     "sha256:0ee2dd7c4ef0e7437579449b6d38960b5bf649bffeca4290bdb04c10d7547e89": {
@@ -2182,63 +2150,6 @@
         "type": "object"
       }
     },
-    "sha256:08d1726a7b35552e6a408e3034dfb77af21eeb59502ec63b48b2ddb9833ead55": {
-      "structural_hash": "08d1726a7b35552e6a408e3034dfb77af21eeb59502ec63b48b2ddb9833ead55",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "reflection.suggestion.apply",
-        "endpoint": "output",
-        "path": "$.resource.anyOf[2]"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "allowed_scopes": {
-            "$schema_ref": "sha256:03dbd0cab79d1ef5f38e5c4d84e859078a4977010b0597d2c9580bd442d7b0d4"
-          },
-          "description": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "file_path": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "frontmatter": {
-            "$schema_ref": "sha256:1869231bf0426a8b216522b57cef4a754740dbc84e4e097f8e2b84aeebceca67"
-          },
-          "id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "owner_pinned": {
-            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
-          },
-          "required_capabilities": {
-            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
-          },
-          "state": {
-            "$schema_ref": "sha256:8ad5b0cce380381c8b10b6d26c40c8fd8a49e2760ef30eeec4ab804fc5153f38"
-          },
-          "tags": {
-            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
-          },
-          "title": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "description",
-          "tags",
-          "state",
-          "allowed_scopes",
-          "required_capabilities",
-          "owner_pinned",
-          "frontmatter",
-          "file_path"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:1ef2899517206952125b6a49619d1f5c2d1c2f3b226f11a7a4d10e188b2e57b1": {
       "structural_hash": "1ef2899517206952125b6a49619d1f5c2d1c2f3b226f11a7a4d10e188b2e57b1",
       "review": "reviewed",
@@ -2875,39 +2786,6 @@
         "type": "object"
       }
     },
-    "sha256:28d9cfc74ade8f6857835dc75bd083678d57aed22b7400c3181413caf5045f42": {
-      "structural_hash": "28d9cfc74ade8f6857835dc75bd083678d57aed22b7400c3181413caf5045f42",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "wiki.search",
-        "endpoint": "output",
-        "path": "$.items"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "file_path": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "id": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "slug": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "title": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          }
-        },
-        "required": [
-          "id",
-          "slug",
-          "title",
-          "file_path"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:2998ffb25cc59a643c91e8dbb367293cffa1e2003288a7d97bf5742ae8415b86": {
       "structural_hash": "2998ffb25cc59a643c91e8dbb367293cffa1e2003288a7d97bf5742ae8415b86",
       "review": "reviewed",
@@ -2938,46 +2816,6 @@
         "maxLength": 128,
         "minLength": 1,
         "type": "string"
-      }
-    },
-    "sha256:29f5c53c2c1f091e02a92a8b55820f5ede32d03a190b94bf7c782e374bf4f018": {
-      "structural_hash": "29f5c53c2c1f091e02a92a8b55820f5ede32d03a190b94bf7c782e374bf4f018",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "artifact.revise",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "artifact_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "base_revision_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "change_summary": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "content": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "editor_source": {
-            "$schema_ref": "sha256:317582f22acc5974e71f32a61431f35efe9dd9988fb7c763bcd86df4b2c46f9f"
-          },
-          "extension": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "provenance": {
-            "$schema_ref": "sha256:ec4324fcc117393a4c7a680f05147819a72324ee859610c67818f3094ed0eac1"
-          }
-        },
-        "required": [
-          "artifact_id",
-          "content"
-        ],
-        "type": "object"
       }
     },
     "sha256:2a1379ebe9f4b632fbdf3732d4b86b26e9fbf2aa92cf2449dde7bf4dc122060f": {
@@ -3226,30 +3064,6 @@
           "$schema_ref": "sha256:73c0c04b4b53d9590ae8d9430c8f68563b9e2b19c1218a4292b8df27c0334b95"
         },
         "type": "array"
-      }
-    },
-    "sha256:2ec152b4f80b9966c80ca893315a97ab7cb568c9ec3af8475dfef848269bcfdc": {
-      "structural_hash": "2ec152b4f80b9966c80ca893315a97ab7cb568c9ec3af8475dfef848269bcfdc",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.search",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "collection_id": {
-            "$schema_ref": "sha256:f9d1ebbef8c9bb548bd2887a95a35098c42393f6e61fac19578654fcc0951cb1"
-          },
-          "limit": {
-            "$schema_ref": "sha256:328b4a241bec342744f6862fe225e59b9ebc1464b02b36be922fd548ca832ab6"
-          },
-          "query": {
-            "$schema_ref": "sha256:f8ce0f5dd51131a3bbf1b7cb136be1c22ff0241cc6087bfa13f41b31f4a2b4ea"
-          }
-        },
-        "type": "object"
       }
     },
     "sha256:2f5c9cd723f5449024c6622a903160a7608db1fd33b7d547801caf4f795b9f64": {
@@ -3930,39 +3744,6 @@
         "default": "External send request",
         "minLength": 1,
         "type": "string"
-      }
-    },
-    "sha256:3b18f0c223a8a8adb443f659738e0c705b7dc5dae9c802859eace49601921875": {
-      "structural_hash": "3b18f0c223a8a8adb443f659738e0c705b7dc5dae9c802859eace49601921875",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "memory.search",
-        "endpoint": "output",
-        "path": "$.items"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "file_path": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "id": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "state": {
-            "$schema_ref": "sha256:b043a56dd2a8f94a188758d8aeabac749876323f58418ce82f8b5788f7278bab"
-          },
-          "topic": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          }
-        },
-        "required": [
-          "id",
-          "topic",
-          "state",
-          "file_path"
-        ],
-        "type": "object"
       }
     },
     "sha256:3b7a3c465bbaefd2cd39f669f200d6d5863998730f1e19ae9489df222755aa0e": {
@@ -5637,34 +5418,6 @@
         "type": "array"
       }
     },
-    "sha256:49746072121a685e07073f9a45a8aef8e74e81cee1a6b5a56d37778dcf3dbfcc": {
-      "structural_hash": "49746072121a685e07073f9a45a8aef8e74e81cee1a6b5a56d37778dcf3dbfcc",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.record.delete",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "collection_id": {
-            "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
-          },
-          "record_id": {
-            "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
-          },
-          "view_id": {
-            "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
-          }
-        },
-        "required": [
-          "collection_id",
-          "record_id"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:4a8ae3c69e7159666a935f65789e4901d3e1d090f4afc497a8118486e84e395e": {
       "structural_hash": "4a8ae3c69e7159666a935f65789e4901d3e1d090f4afc497a8118486e84e395e",
       "review": "reviewed",
@@ -5851,22 +5604,6 @@
         "type": "string"
       }
     },
-    "sha256:4e33a63c4b8f04607d023dabea4d1433b1232c3bf9265f4bf4b9c539be446eba": {
-      "structural_hash": "4e33a63c4b8f04607d023dabea4d1433b1232c3bf9265f4bf4b9c539be446eba",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.search",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "items": {
-          "$schema_ref": "sha256:a9585b671a0ba36f9b904b67fdf1d71a4c0a184c98e973da3d277835637e64ba"
-        },
-        "maxItems": 8,
-        "type": "array"
-      }
-    },
     "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d": {
       "structural_hash": "4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d",
       "review": "reviewed",
@@ -6011,35 +5748,6 @@
           "provider",
           "source_run_id",
           "width"
-        ],
-        "type": "object"
-      }
-    },
-    "sha256:518ac9f14b7db3c5af79c12a163c7bfee828e39fd727b80b0bcd9d1032d801a4": {
-      "structural_hash": "518ac9f14b7db3c5af79c12a163c7bfee828e39fd727b80b0bcd9d1032d801a4",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.search",
-        "endpoint": "output",
-        "path": "$.items.anyOf.0"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "file_path": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "id": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "kind": {
-            "$schema_ref": "sha256:c28e10cd8bc3b84edc37637b91f8ee94183b95c5ca5e75425555a8d6a74570dc"
-          }
-        },
-        "required": [
-          "kind",
-          "id",
-          "file_path"
         ],
         "type": "object"
       }
@@ -6913,43 +6621,6 @@
         "required": [
           "content",
           "path"
-        ],
-        "type": "object"
-      }
-    },
-    "sha256:5b8097f805b1b9e0b7932234f3331ae066a807e2de3bc3342596c5470e26b001": {
-      "structural_hash": "5b8097f805b1b9e0b7932234f3331ae066a807e2de3bc3342596c5470e26b001",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "skill.search",
-        "endpoint": "output",
-        "path": "$.items"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "file_path": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "id": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "tags": {
-            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
-          },
-          "title": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "description",
-          "tags",
-          "file_path"
         ],
         "type": "object"
       }
@@ -9455,22 +9126,6 @@
         "type": "object"
       }
     },
-    "sha256:883d9528b86615fa1651a1eb785071a240b58e5c1ad5d40f51f89f97e724b399": {
-      "structural_hash": "883d9528b86615fa1651a1eb785071a240b58e5c1ad5d40f51f89f97e724b399",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "memory.search",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "items": {
-          "$schema_ref": "sha256:3b18f0c223a8a8adb443f659738e0c705b7dc5dae9c802859eace49601921875"
-        },
-        "maxItems": 8,
-        "type": "array"
-      }
-    },
     "sha256:88b3182b6455fe4273693d6f146128df3d4e34142d8df5e7c7688d4106e11a3f": {
       "structural_hash": "88b3182b6455fe4273693d6f146128df3d4e34142d8df5e7c7688d4106e11a3f",
       "review": "reviewed",
@@ -11641,25 +11296,6 @@
         "type": "integer"
       }
     },
-    "sha256:a9585b671a0ba36f9b904b67fdf1d71a4c0a184c98e973da3d277835637e64ba": {
-      "structural_hash": "a9585b671a0ba36f9b904b67fdf1d71a4c0a184c98e973da3d277835637e64ba",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.search",
-        "endpoint": "output",
-        "path": "$.items"
-      },
-      "schema": {
-        "anyOf": [
-          {
-            "$schema_ref": "sha256:518ac9f14b7db3c5af79c12a163c7bfee828e39fd727b80b0bcd9d1032d801a4"
-          },
-          {
-            "$schema_ref": "sha256:d94aa13d24cc81c1cb2c7817bf7b33ddfea4269376f64a9ed88a8c156be54305"
-          }
-        ]
-      }
-    },
     "sha256:a9e7edeb234a359d94df876e2efbd70f6f3808b9a75e0256ba3a3268acf99aab": {
       "structural_hash": "a9e7edeb234a359d94df876e2efbd70f6f3808b9a75e0256ba3a3268acf99aab",
       "review": "reviewed",
@@ -11709,43 +11345,6 @@
           "indexes",
           "issues",
           "repair_plan"
-        ],
-        "type": "object"
-      }
-    },
-    "sha256:72c4e477e6f3afe29eba1558ad896e6251a9d5e791829723ffb3577d540546b9": {
-      "structural_hash": "72c4e477e6f3afe29eba1558ad896e6251a9d5e791829723ffb3577d540546b9",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "skill.optimization.promote",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "candidate": {
-            "$schema_ref": "sha256:d7662a116c1b7690bdf64fef9216f64cca1ab4f863109c474d8cf18c89452a90"
-          },
-          "promotion": {
-            "$schema_ref": "sha256:c0ee759e2dee7d742764c8ae05857f2f298032a150bb39f9c9596a2625ce9da4"
-          },
-          "run": {
-            "$schema_ref": "sha256:b11ebde196e14a52bd91ff07d9c97f7aece2670beff983c8e897e38fb1adaf47"
-          },
-          "skill": {
-            "$schema_ref": "sha256:08d1726a7b35552e6a408e3034dfb77af21eeb59502ec63b48b2ddb9833ead55"
-          },
-          "snapshot": {
-            "$schema_ref": "sha256:ed83f61875f0d80bfa178e04540120afd7cfa6feb6fa2ef5b3205f81ccd34960"
-          }
-        },
-        "required": [
-          "run",
-          "skill",
-          "candidate",
-          "snapshot",
-          "promotion"
         ],
         "type": "object"
       }
@@ -12495,28 +12094,6 @@
         },
         "maxItems": 20,
         "type": "array"
-      }
-    },
-    "sha256:75966a767b8a5ffdb18a9c4b9c3eb509b7adc7eedb787776f7e9f3ef973a83b0": {
-      "structural_hash": "75966a767b8a5ffdb18a9c4b9c3eb509b7adc7eedb787776f7e9f3ef973a83b0",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "reflection.suggestion.apply",
-        "endpoint": "output",
-        "path": "$.resource"
-      },
-      "schema": {
-        "anyOf": [
-          {
-            "$schema_ref": "sha256:73c0c04b4b53d9590ae8d9430c8f68563b9e2b19c1218a4292b8df27c0334b95"
-          },
-          {
-            "$schema_ref": "sha256:ffd7ef8a78179473f3e9c9648ba654ebec4948c9f0f372583cbb5d79bfc0ee6e"
-          },
-          {
-            "$schema_ref": "sha256:08d1726a7b35552e6a408e3034dfb77af21eeb59502ec63b48b2ddb9833ead55"
-          }
-        ]
       }
     },
     "sha256:b4bcbaa57615e2e974e7f1da5880253720febbe75b3b87b5a18db3cce4888f04": {
@@ -13275,74 +12852,6 @@
         "type": "string"
       }
     },
-    "sha256:bdb2cd5bc91e672bbcef88326fa50818a100e84caca92426e443f12ecd676731": {
-      "structural_hash": "bdb2cd5bc91e672bbcef88326fa50818a100e84caca92426e443f12ecd676731",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.schema.get",
-        "endpoint": "output",
-        "path": "$[\"schema\"]"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "actions": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "derived_fields": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "descriptions": {
-            "$schema_ref": "sha256:cb25a4f52be583f75e3c01a9352ddceeddb1a46cbfaaf3b9debf1c40c7f82acb"
-          },
-          "embeds": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "fields": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "file_path": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "labels": {
-            "$schema_ref": "sha256:cb25a4f52be583f75e3c01a9352ddceeddb1a46cbfaaf3b9debf1c40c7f82acb"
-          },
-          "permissions": {
-            "$schema_ref": "sha256:fb0a5dd4bf496a192bb14493eec3d524eb801294b6fefa62b88b234979302303"
-          },
-          "refs": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "triggers": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "version": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "views": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          }
-        },
-        "required": [
-          "id",
-          "version",
-          "labels",
-          "descriptions",
-          "fields",
-          "refs",
-          "embeds",
-          "derived_fields",
-          "triggers",
-          "actions",
-          "permissions",
-          "file_path"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:be12acbe0e52efe3347f956ce333f1aaf9dfa88f450a5e71a0c6a0b21eb26de0": {
       "structural_hash": "be12acbe0e52efe3347f956ce333f1aaf9dfa88f450a5e71a0c6a0b21eb26de0",
       "review": "reviewed",
@@ -14005,39 +13514,6 @@
         "type": "string"
       }
     },
-    "sha256:c6e5b4806dc9047f5c59cb8adcc0d75981e3e2247b30ab4554b8859d4d4efc04": {
-      "structural_hash": "c6e5b4806dc9047f5c59cb8adcc0d75981e3e2247b30ab4554b8859d4d4efc04",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "skill.patch",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "content": {
-            "$schema_ref": "sha256:e3202d298ac050ff5735b5c6f8c101dcf2458fa20200bd2179598a1356a9e631"
-          },
-          "description": {
-            "$schema_ref": "sha256:6111cd80ef6bef22cf61f1d3f98e76a1ccefcedd2b066bcce40b1eadb530afa3"
-          },
-          "skill_id": {
-            "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
-          },
-          "tags": {
-            "$schema_ref": "sha256:cdce434d114a23d49897f0a074ace925f257f113f53cf4a49fde2788dc9070af"
-          },
-          "title": {
-            "$schema_ref": "sha256:41b92531f2537d034ad2a4e22bd7e9278ef35fd11dafd90eb44076c29d08786e"
-          }
-        },
-        "required": [
-          "skill_id"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:c6edb3505bcc4ac466b0bbd695f3619393801c2e73c4e66031549ceda947bef7": {
       "structural_hash": "c6edb3505bcc4ac466b0bbd695f3619393801c2e73c4e66031549ceda947bef7",
       "review": "reviewed",
@@ -14611,22 +14087,6 @@
         "type": "object"
       }
     },
-    "sha256:cefd0ad99aaa28677e3f1e8c8f5b7c4aa57b03d0f6651cb9729f9120323f1673": {
-      "structural_hash": "cefd0ad99aaa28677e3f1e8c8f5b7c4aa57b03d0f6651cb9729f9120323f1673",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "wiki.search",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "items": {
-          "$schema_ref": "sha256:28d9cfc74ade8f6857835dc75bd083678d57aed22b7400c3181413caf5045f42"
-        },
-        "maxItems": 8,
-        "type": "array"
-      }
-    },
     "sha256:d045c24d84f27e84863baa887f4e6b771fb8498ce4fb5d36bda50c0de7706e10": {
       "structural_hash": "d045c24d84f27e84863baa887f4e6b771fb8498ce4fb5d36bda50c0de7706e10",
       "review": "reviewed",
@@ -14791,43 +14251,6 @@
         "required": [
           "file_path",
           "message"
-        ],
-        "type": "object"
-      }
-    },
-    "sha256:d3f609f8ae4d2f5a55a308fdd8749db2fa4ba6845590edb33201c3c4e3c9c474": {
-      "structural_hash": "d3f609f8ae4d2f5a55a308fdd8749db2fa4ba6845590edb33201c3c4e3c9c474",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.view.present",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "collection_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "record_count": {
-            "$schema_ref": "sha256:0d3ac1e9e006c0119b57d0512759bd7e261ea0d8cb38951a5183d17cdb4391f0"
-          },
-          "render_spec": {
-            "$schema_ref": "sha256:35811399cf8e642e0fce7bf79ceb67a7417317e86d8699e1fa110ffe54afb2a3"
-          },
-          "schema": {
-            "$schema_ref": "sha256:bdb2cd5bc91e672bbcef88326fa50818a100e84caca92426e443f12ecd676731"
-          },
-          "view_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          }
-        },
-        "required": [
-          "collection_id",
-          "view_id",
-          "schema",
-          "record_count",
-          "render_spec"
         ],
         "type": "object"
       }
@@ -15336,47 +14759,6 @@
         "type": "string"
       }
     },
-    "sha256:d94aa13d24cc81c1cb2c7817bf7b33ddfea4269376f64a9ed88a8c156be54305": {
-      "structural_hash": "d94aa13d24cc81c1cb2c7817bf7b33ddfea4269376f64a9ed88a8c156be54305",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.search",
-        "endpoint": "output",
-        "path": "$.items.anyOf.1"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "collection_id": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "data": {
-            "$schema_ref": "sha256:e7652859ae44778e6140585c4a75446fcc4d4a33f370d3dea913309cbdf7ce68"
-          },
-          "file_path": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "id": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "kind": {
-            "$schema_ref": "sha256:161dbbb4cc523c43dafa1b612649007faf721d1939c320dfd31521ec5fed2b9e"
-          },
-          "summary": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          }
-        },
-        "required": [
-          "kind",
-          "collection_id",
-          "id",
-          "file_path",
-          "summary",
-          "data"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:d965182cf7d71e474d4981e2f684802a76a9e10a640bf993ffba6c6f7452017d": {
       "structural_hash": "d965182cf7d71e474d4981e2f684802a76a9e10a640bf993ffba6c6f7452017d",
       "review": "reviewed",
@@ -15515,35 +14897,6 @@
         "required": [
           "code",
           "message"
-        ],
-        "type": "object"
-      }
-    },
-    "sha256:da5e3ec418079f7c39ee8dd2f4c13f5dcf1a284a722ab72fc75221f27ec5f25c": {
-      "structural_hash": "da5e3ec418079f7c39ee8dd2f4c13f5dcf1a284a722ab72fc75221f27ec5f25c",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.schema.get",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "$schema_ref": "sha256:26c78acefdc8aac405edb737ab4e5b7ce58fdd0b318ea09e1513b9631dd6d1ac"
-          },
-          "collection_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "schema": {
-            "$schema_ref": "sha256:bdb2cd5bc91e672bbcef88326fa50818a100e84caca92426e443f12ecd676731"
-          }
-        },
-        "required": [
-          "action",
-          "collection_id",
-          "schema"
         ],
         "type": "object"
       }
@@ -16085,45 +15438,6 @@
         "type": "object"
       }
     },
-    "sha256:e284a08bda93e629915b9c571de0022b33bd5ed82e378bf0689badeb9b93d115": {
-      "structural_hash": "e284a08bda93e629915b9c571de0022b33bd5ed82e378bf0689badeb9b93d115",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "wiki.patch",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "content": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "content_locale": {
-            "$schema_ref": "sha256:3d61bf66e8226241549883d26cda990b8a1f31a66d44691fcb9132e60a61884d"
-          },
-          "provenance": {
-            "$schema_ref": "sha256:ed2ce7e2f4ea5b12e40449406d5a677f7281fd16775981416db54c7c5074d4ce"
-          },
-          "source_refs": {
-            "$schema_ref": "sha256:24a77e5d2c638cce1d3f8548befaba0bb42020901ac63d33a32fda9d9f30cd77"
-          },
-          "tags": {
-            "$schema_ref": "sha256:8327e0ad0e80c2d0515d6849dec751f71f756f463348314ce49852869e9c6731"
-          },
-          "title": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "wiki_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          }
-        },
-        "required": [
-          "wiki_id"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:e3202d298ac050ff5735b5c6f8c101dcf2458fa20200bd2179598a1356a9e631": {
       "structural_hash": "e3202d298ac050ff5735b5c6f8c101dcf2458fa20200bd2179598a1356a9e631",
       "review": "reviewed",
@@ -16427,70 +15741,6 @@
           "holdout"
         ],
         "type": "string"
-      }
-    },
-    "sha256:e9760b2abd9a66c681a46ce898971486fad23752c64ea26aab8962edc1cae5b1": {
-      "structural_hash": "e9760b2abd9a66c681a46ce898971486fad23752c64ea26aab8962edc1cae5b1",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.schema.save",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "actions": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "derived_fields": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "descriptions": {
-            "$schema_ref": "sha256:cb25a4f52be583f75e3c01a9352ddceeddb1a46cbfaaf3b9debf1c40c7f82acb"
-          },
-          "embeds": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "fields": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "labels": {
-            "$schema_ref": "sha256:cb25a4f52be583f75e3c01a9352ddceeddb1a46cbfaaf3b9debf1c40c7f82acb"
-          },
-          "permissions": {
-            "$schema_ref": "sha256:fb0a5dd4bf496a192bb14493eec3d524eb801294b6fefa62b88b234979302303"
-          },
-          "refs": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "triggers": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          },
-          "version": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "views": {
-            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
-          }
-        },
-        "required": [
-          "id",
-          "version",
-          "labels",
-          "descriptions",
-          "fields",
-          "refs",
-          "embeds",
-          "derived_fields",
-          "triggers",
-          "actions",
-          "permissions"
-        ],
-        "type": "object"
       }
     },
     "sha256:eafded1b49fdbc848ee2630bc5ef5d13e26387a38d56c610474087a39636225d": {
@@ -17091,43 +16341,6 @@
       "schema": {
         "const": "backend_protocol_diagnostic",
         "type": "string"
-      }
-    },
-    "sha256:cc19a7c121de8ed860393cd220fcf3331b62dedbdd6a698d388379ad7dc6103a": {
-      "structural_hash": "cc19a7c121de8ed860393cd220fcf3331b62dedbdd6a698d388379ad7dc6103a",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "skill.view",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "content": {
-            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
-          },
-          "disclosure_level": {
-            "$schema_ref": "sha256:8bc6aea332f819c069b641584fd1176b9e4ceb08904f035d6059ae01e300645b"
-          },
-          "file_refs": {
-            "$schema_ref": "sha256:5ce4bd7d10995726978718851953d12cf7c5d7489b8022c16ac2b3e56cc06b7f"
-          },
-          "skill": {
-            "$schema_ref": "sha256:08d1726a7b35552e6a408e3034dfb77af21eeb59502ec63b48b2ddb9833ead55"
-          },
-          "usage": {
-            "$schema_ref": "sha256:3dc392d61770764cd85823390a65f283b6fcf49719faa49ef553305e7b6895fc"
-          }
-        },
-        "required": [
-          "skill",
-          "content",
-          "file_refs",
-          "disclosure_level",
-          "usage"
-        ],
-        "type": "object"
       }
     },
     "sha256:f321415cc5a65daf13f1dac7eb5676554afb6d41055b5b859aca6c0f9f981a9a": {
@@ -18657,34 +17870,6 @@
         "type": "string"
       }
     },
-    "sha256:de2c990d57b8aee562a1f4c260be45c75b5df2f3c45d8f1c8b54d29447900e5f": {
-      "structural_hash": "de2c990d57b8aee562a1f4c260be45c75b5df2f3c45d8f1c8b54d29447900e5f",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "skill.optimization.rollback",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "promotion": {
-            "$schema_ref": "sha256:c0ee759e2dee7d742764c8ae05857f2f298032a150bb39f9c9596a2625ce9da4"
-          },
-          "skill": {
-            "$schema_ref": "sha256:08d1726a7b35552e6a408e3034dfb77af21eeb59502ec63b48b2ddb9833ead55"
-          },
-          "snapshot": {
-            "$schema_ref": "sha256:ed83f61875f0d80bfa178e04540120afd7cfa6feb6fa2ef5b3205f81ccd34960"
-          }
-        },
-        "required": [
-          "skill",
-          "snapshot"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:e0a7be78758d2d55595a626869eccb54fea1ece1b441c7e78d5dd008dd0980ec": {
       "structural_hash": "e0a7be78758d2d55595a626869eccb54fea1ece1b441c7e78d5dd008dd0980ec",
       "review": "reviewed",
@@ -18883,97 +18068,6 @@
           "applied"
         ],
         "type": "string"
-      }
-    },
-    "sha256:ffd7ef8a78179473f3e9c9648ba654ebec4948c9f0f372583cbb5d79bfc0ee6e": {
-      "structural_hash": "ffd7ef8a78179473f3e9c9648ba654ebec4948c9f0f372583cbb5d79bfc0ee6e",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "reflection.suggestion.apply",
-        "endpoint": "output",
-        "path": "$.resource.anyOf[1]"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "content_hash": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "content_locale": {
-            "$schema_ref": "sha256:3d61bf66e8226241549883d26cda990b8a1f31a66d44691fcb9132e60a61884d"
-          },
-          "created_at": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "evidence_state": {
-            "$schema_ref": "sha256:b6a7e359efa65d4b7143affd6087fb3aa6abfca8323d10c8011598efbeafa631"
-          },
-          "experience_rule": {
-            "$schema_ref": "sha256:4875d783b3858bab2519bc516298010249b8a2ff69c183d439d749f39a9ca5eb"
-          },
-          "file_path": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "knowledge_kind": {
-            "$schema_ref": "sha256:6eadbb92de95c831473d0dcd7fbfa9dc36920dcb0d6974c15ca4c7724d347336"
-          },
-          "origin_activity_context": {
-            "$schema_ref": "sha256:391a739a70dc33aaf017bdae10c0f3cbb3276b3d1dcc9796e38b65b69c295f54"
-          },
-          "pinned": {
-            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
-          },
-          "provenance": {
-            "$schema_ref": "sha256:ed2ce7e2f4ea5b12e40449406d5a677f7281fd16775981416db54c7c5074d4ce"
-          },
-          "slug": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "source_refs": {
-            "$schema_ref": "sha256:24a77e5d2c638cce1d3f8548befaba0bb42020901ac63d33a32fda9d9f30cd77"
-          },
-          "source_run_ids": {
-            "$schema_ref": "sha256:8327e0ad0e80c2d0515d6849dec751f71f756f463348314ce49852869e9c6731"
-          },
-          "state": {
-            "$schema_ref": "sha256:5ad202087a88675d1a2cfd11cc036152507004ce43a3cf452652904cad1f9a25"
-          },
-          "tags": {
-            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
-          },
-          "title": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "updated_at": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "usage_scope": {
-            "$schema_ref": "sha256:19b931796dc2f0634474cd625bcdc80d36294724e6e28a6506392270237b875f"
-          },
-          "usage_state": {
-            "$schema_ref": "sha256:4ba00fcbedbdcd974ec4aeb6df7b3d1afe21d8ba81335721d0a09c7415e0433f"
-          },
-          "version": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          }
-        },
-        "required": [
-          "id",
-          "slug",
-          "title",
-          "state",
-          "content_locale",
-          "tags",
-          "source_refs",
-          "provenance",
-          "created_at",
-          "updated_at",
-          "file_path"
-        ],
-        "type": "object"
       }
     },
     "sha256:a50dbb2296236d8e72695354f0d612cc33ee34bbd70236fb7d01300a1a0416c2": {
@@ -22821,23 +21915,6 @@
         "type": "object"
       }
     },
-    "sha256:03c35447f6969a57a58e954f452da14a9e09a72177862e6707b27fb9d878692a": {
-      "structural_hash": "03c35447f6969a57a58e954f452da14a9e09a72177862e6707b27fb9d878692a",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "activity.history.list",
-        "endpoint": "output",
-        "path": "$.properties.items.items.properties.verification.items.properties.status"
-      },
-      "schema": {
-        "enum": [
-          "passed",
-          "failed",
-          "inconclusive"
-        ],
-        "type": "string"
-      }
-    },
     "sha256:067dbab1d9fd1765f06389c7ae9c2ed881047f8812940afe34a506bd040a644b": {
       "structural_hash": "067dbab1d9fd1765f06389c7ae9c2ed881047f8812940afe34a506bd040a644b",
       "review": "reviewed",
@@ -22984,91 +22061,6 @@
           "outcome_unknown"
         ],
         "type": "string"
-      }
-    },
-    "sha256:1505e61149fd2458c3cf776d8d7be53d4ab16d7fd371d1fa5c4efb851e9f0d32": {
-      "structural_hash": "1505e61149fd2458c3cf776d8d7be53d4ab16d7fd371d1fa5c4efb851e9f0d32",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "activity.history.list",
-        "endpoint": "output",
-        "path": "$.properties.items.items"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "backend_run_id": {
-            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
-          },
-          "correction_of_activity_id": {
-            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
-          },
-          "created_at": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "domain_operation_ids": {
-            "$schema_ref": "sha256:1cc063cf7008dda070b1fe18a557145622e3dd69afdeab8c6829ad780f7d5b76"
-          },
-          "failure": {
-            "$schema_ref": "sha256:9a5ce0d6269d45d0918675f371aa5954346be9c6f374ed77c3deb208c7013250"
-          },
-          "finalized_at": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "id": {
-            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
-          },
-          "idempotency_key": {
-            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
-          },
-          "instruction_summary": {
-            "$schema_ref": "sha256:4ab26f0fb42c607c4313eb0fa1ead4c06124b4fdc6a8feff3c142959a72e2052"
-          },
-          "principal": {
-            "$schema_ref": "sha256:67f2f32016416b02a79eb0a71c98e5aca3ca16ed41d0c0011cdb7d9526ce16ec"
-          },
-          "provenance": {
-            "$schema_ref": "sha256:1e2c8e80efa0b67832cc4624fd9e0ba2ffd1f8f31724f0cfea981cb1d537c3ca"
-          },
-          "result_summary": {
-            "$schema_ref": "sha256:4ab26f0fb42c607c4313eb0fa1ead4c06124b4fdc6a8feff3c142959a72e2052"
-          },
-          "room_id": {
-            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
-          },
-          "session_ref": {
-            "$schema_ref": "sha256:e74f2a47871a37db1cdbbe4aeece9dae93cc0c9c61048bb7b7a8012ed998092f"
-          },
-          "source": {
-            "$schema_ref": "sha256:bda594fe1aea3a254b1b488878c8e8f44110c8fce8788af9f0bafcb92fb785ec"
-          },
-          "status": {
-            "$schema_ref": "sha256:10adbd0bd7facec56cb90737163fd5759de07e92ee05c4f04220b6443397edb6"
-          },
-          "updated_at": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "verification": {
-            "$schema_ref": "sha256:516ee6f61074105a3af1b344828ba782925776fbb2bfedba00958595caca1d77"
-          },
-          "workspace_id": {
-            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
-          }
-        },
-        "required": [
-          "id",
-          "workspace_id",
-          "room_id",
-          "principal",
-          "source",
-          "status",
-          "idempotency_key",
-          "instruction_summary",
-          "provenance",
-          "created_at",
-          "updated_at"
-        ],
-        "type": "object"
       }
     },
     "sha256:1cc063cf7008dda070b1fe18a557145622e3dd69afdeab8c6829ad780f7d5b76": {
@@ -23552,84 +22544,6 @@
         "type": "object"
       }
     },
-    "sha256:516ee6f61074105a3af1b344828ba782925776fbb2bfedba00958595caca1d77": {
-      "structural_hash": "516ee6f61074105a3af1b344828ba782925776fbb2bfedba00958595caca1d77",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "activity.history.list",
-        "endpoint": "output",
-        "path": "$.properties.items.items.properties.verification"
-      },
-      "schema": {
-        "default": [],
-        "items": {
-          "$schema_ref": "sha256:52f226c79f3bcd5e045b1fbf0d0d2d8aa359af90c3f9fe1928378076aa06329d"
-        },
-        "maxItems": 200,
-        "type": "array"
-      }
-    },
-    "sha256:52bda57db72f7d91b40876ccf32b1b5d7b8297a7d69cb44b9d1e98e63971dac1": {
-      "structural_hash": "52bda57db72f7d91b40876ccf32b1b5d7b8297a7d69cb44b9d1e98e63971dac1",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "activity.history.list",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "items": {
-            "$schema_ref": "sha256:73428ba781c5c128902e8d50bbb97e80cfafd1f693e6820e7a51414011dc9bbe"
-          }
-        },
-        "required": [
-          "items"
-        ],
-        "type": "object"
-      }
-    },
-    "sha256:52f226c79f3bcd5e045b1fbf0d0d2d8aa359af90c3f9fe1928378076aa06329d": {
-      "structural_hash": "52f226c79f3bcd5e045b1fbf0d0d2d8aa359af90c3f9fe1928378076aa06329d",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "activity.history.list",
-        "endpoint": "output",
-        "path": "$.properties.items.items.properties.verification.items"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
-          },
-          "kind": {
-            "$schema_ref": "sha256:e1b77e2f7620d7fdbce52fa08b3e483c48ea57e526b76a3bfb2a156223c40231"
-          },
-          "recorded_at": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "source_operation_id": {
-            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
-          },
-          "status": {
-            "$schema_ref": "sha256:03c35447f6969a57a58e954f452da14a9e09a72177862e6707b27fb9d878692a"
-          },
-          "summary": {
-            "$schema_ref": "sha256:4ab26f0fb42c607c4313eb0fa1ead4c06124b4fdc6a8feff3c142959a72e2052"
-          }
-        },
-        "required": [
-          "id",
-          "kind",
-          "status",
-          "summary",
-          "recorded_at"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:5426dd9ecbccf5b4017dd581003deb7790e2867cd3d3581f0a694e027a9e9f50": {
       "structural_hash": "5426dd9ecbccf5b4017dd581003deb7790e2867cd3d3581f0a694e027a9e9f50",
       "review": "reviewed",
@@ -23659,42 +22573,6 @@
           "operation",
           "activity"
         ],
-        "type": "object"
-      }
-    },
-    "sha256:54ce7426b70d5d94c5e60fff2aadeca549e8834b3fb4a0f33723a00bf1d829ac": {
-      "structural_hash": "54ce7426b70d5d94c5e60fff2aadeca549e8834b3fb4a0f33723a00bf1d829ac",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "activity.history.list",
-        "endpoint": "input",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "created_after": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "created_before": {
-            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
-          },
-          "limit": {
-            "$schema_ref": "sha256:db9a4dffc13343988a3efc7f846faa82c67ad503159f300f6a032a0348cfb506"
-          },
-          "principal_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "source_id": {
-            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
-          },
-          "source_kind": {
-            "$schema_ref": "sha256:080ce141d3b2264bea06627864f1962ceb51d1797821991490ae42ce346f5e51"
-          },
-          "status": {
-            "$schema_ref": "sha256:10adbd0bd7facec56cb90737163fd5759de07e92ee05c4f04220b6443397edb6"
-          }
-        },
         "type": "object"
       }
     },
@@ -24119,21 +22997,6 @@
         "type": "object"
       }
     },
-    "sha256:73428ba781c5c128902e8d50bbb97e80cfafd1f693e6820e7a51414011dc9bbe": {
-      "structural_hash": "73428ba781c5c128902e8d50bbb97e80cfafd1f693e6820e7a51414011dc9bbe",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "activity.history.list",
-        "endpoint": "output",
-        "path": "$.properties.items"
-      },
-      "schema": {
-        "items": {
-          "$schema_ref": "sha256:1505e61149fd2458c3cf776d8d7be53d4ab16d7fd371d1fa5c4efb851e9f0d32"
-        },
-        "type": "array"
-      }
-    },
     "sha256:789ff82f66c0f9db61779674c2b92fdbc4ce5bb14aa06f6b87ffe6e9f1f3149b": {
       "structural_hash": "789ff82f66c0f9db61779674c2b92fdbc4ce5bb14aa06f6b87ffe6e9f1f3149b",
       "review": "reviewed",
@@ -24227,38 +23090,6 @@
           "activity",
           "automationRun",
           "memoryReviewTrace"
-        ],
-        "type": "object"
-      }
-    },
-    "sha256:819080ed83f7978ff2cf2db3a8f08cdfbedfaeedfc1b9d093ef1ae33f091c218": {
-      "structural_hash": "819080ed83f7978ff2cf2db3a8f08cdfbedfaeedfc1b9d093ef1ae33f091c218",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "skill.candidate.create",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "activity": {
-            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
-          },
-          "operation": {
-            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
-          },
-          "resource": {
-            "$schema_ref": "sha256:08d1726a7b35552e6a408e3034dfb77af21eeb59502ec63b48b2ddb9833ead55"
-          },
-          "rollbackPoint": {
-            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
-          }
-        },
-        "required": [
-          "resource",
-          "operation",
-          "activity"
         ],
         "type": "object"
       }
@@ -25050,38 +23881,6 @@
         "type": "object"
       }
     },
-    "sha256:c23a2da20551d808916a085757ae4ffea378b650091110aaee45f360bb0d410d": {
-      "structural_hash": "c23a2da20551d808916a085757ae4ffea378b650091110aaee45f360bb0d410d",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "wiki.accept",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "activity": {
-            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
-          },
-          "operation": {
-            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
-          },
-          "resource": {
-            "$schema_ref": "sha256:ffd7ef8a78179473f3e9c9648ba654ebec4948c9f0f372583cbb5d79bfc0ee6e"
-          },
-          "rollbackPoint": {
-            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
-          }
-        },
-        "required": [
-          "resource",
-          "operation",
-          "activity"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:c2cfb85c63adceac6d28a3bf3d420eb7c7c033fe824ee287b7b4c8b8028792e2": {
       "structural_hash": "c2cfb85c63adceac6d28a3bf3d420eb7c7c033fe824ee287b7b4c8b8028792e2",
       "review": "reviewed",
@@ -25252,38 +24051,6 @@
           "$schema_ref": "sha256:c14872b8653ded4314a66bc44ce291a7bfd4b983a2b9acc612383ef8d480b8a5"
         },
         "type": "array"
-      }
-    },
-    "sha256:cebb4da0d9f71d728eaea39f4c8065a06021e4cf361cc5684f4d724e793a78e8": {
-      "structural_hash": "cebb4da0d9f71d728eaea39f4c8065a06021e4cf361cc5684f4d724e793a78e8",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "reflection.suggestion.apply",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "activity": {
-            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
-          },
-          "operation": {
-            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
-          },
-          "resource": {
-            "$schema_ref": "sha256:75966a767b8a5ffdb18a9c4b9c3eb509b7adc7eedb787776f7e9f3ef973a83b0"
-          },
-          "rollbackPoint": {
-            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
-          }
-        },
-        "required": [
-          "resource",
-          "operation",
-          "activity"
-        ],
-        "type": "object"
       }
     },
     "sha256:cedbaa9e780f32d5ab53a49be682d53b8127bdc14966349134832993f35b9b97": {
@@ -25499,38 +24266,6 @@
         "type": "object"
       }
     },
-    "sha256:f56370eec479350a109dad2c712d396720cd94a3488ec096ef5256b2e9f7ea2f": {
-      "structural_hash": "f56370eec479350a109dad2c712d396720cd94a3488ec096ef5256b2e9f7ea2f",
-      "review": "reviewed",
-      "first_seen": {
-        "operation": "collection.schema.save",
-        "endpoint": "output",
-        "path": "$"
-      },
-      "schema": {
-        "additionalProperties": false,
-        "properties": {
-          "activity": {
-            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
-          },
-          "operation": {
-            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
-          },
-          "resource": {
-            "$schema_ref": "sha256:bdb2cd5bc91e672bbcef88326fa50818a100e84caca92426e443f12ecd676731"
-          },
-          "rollbackPoint": {
-            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
-          }
-        },
-        "required": [
-          "resource",
-          "operation",
-          "activity"
-        ],
-        "type": "object"
-      }
-    },
     "sha256:f5f4832c3d92926009aac955a35308d3a18572e0edccd628dcbb3f01efb68eed": {
       "structural_hash": "f5f4832c3d92926009aac955a35308d3a18572e0edccd628dcbb3f01efb68eed",
       "review": "reviewed",
@@ -25700,6 +24435,2142 @@
         ],
         "type": "object"
       }
+    },
+    "sha256:4b0698531906f19f484629a4a6fd9280d01f8023809392cc1b186b7633ed9bd8": {
+      "structural_hash": "4b0698531906f19f484629a4a6fd9280d01f8023809392cc1b186b7633ed9bd8",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.version.get",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "resource_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "resource_key": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "resource_kind": {
+            "$schema_ref": "sha256:fdef2e188a926a66a26b6a315daa1cd6a74a785b25117a49c5e005d140992eff"
+          },
+          "version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          }
+        },
+        "required": [
+          "resource_key",
+          "resource_kind",
+          "resource_id",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:fdef2e188a926a66a26b6a315daa1cd6a74a785b25117a49c5e005d140992eff": {
+      "structural_hash": "fdef2e188a926a66a26b6a315daa1cd6a74a785b25117a49c5e005d140992eff",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.version.get",
+        "endpoint": "input",
+        "path": "$[\"resource_kind\"]"
+      },
+      "schema": {
+        "enum": [
+          "artifact",
+          "collection_schema",
+          "collection_record",
+          "wiki",
+          "skill",
+          "memory"
+        ],
+        "type": "string"
+      }
+    },
+    "sha256:19346a079186ad2796da0c74559771a21fd485c43c77b38e0737a33a784921a7": {
+      "structural_hash": "19346a079186ad2796da0c74559771a21fd485c43c77b38e0737a33a784921a7",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "reflection.suggestion.apply",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
+          },
+          "operation": {
+            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
+          },
+          "resource": {
+            "$schema_ref": "sha256:c4f114f22b0e6017981a846b0b4e892db66dae7687eedfc2f9a88d96e3df8ff5"
+          },
+          "rollbackPoint": {
+            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
+          }
+        },
+        "required": [
+          "resource",
+          "operation",
+          "activity"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:c90c4f754c72905d6e2649a7e4dab7553ee0c41f6d1cabe3c7e24ff49392403f": {
+      "structural_hash": "c90c4f754c72905d6e2649a7e4dab7553ee0c41f6d1cabe3c7e24ff49392403f",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.search",
+        "endpoint": "output",
+        "path": "$[]"
+      },
+      "schema": {
+        "anyOf": [
+          {
+            "$schema_ref": "sha256:766d7d033a08d2c4dcfbb8f82b9575e836f0ec1cb4c847dddfd4b245594fdbfa"
+          },
+          {
+            "$schema_ref": "sha256:4026f98a8808804c5ec881ae340403dca6d56c17d3675b72d5fbe3f013dac91a"
+          }
+        ]
+      }
+    },
+    "sha256:3037e6777070fa155e1b63495ca57a301cc91411dd9be0bfe88f1ed4b04d581d": {
+      "structural_hash": "3037e6777070fa155e1b63495ca57a301cc91411dd9be0bfe88f1ed4b04d581d",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.search",
+        "endpoint": "input",
+        "path": "$[\"limit\"]"
+      },
+      "schema": {
+        "default": 5,
+        "maximum": 200,
+        "minimum": 1,
+        "type": "integer"
+      }
+    },
+    "sha256:35ec28c8e75a792184ea648ed4520f868fb5caea249f1b2dc85a89fd306c37eb": {
+      "structural_hash": "35ec28c8e75a792184ea648ed4520f868fb5caea249f1b2dc85a89fd306c37eb",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "activity.history.list",
+        "endpoint": "output",
+        "path": "$[\"items\"][]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "backend_run_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "correction_of_activity_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "created_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "domain_operation_ids": {
+            "$schema_ref": "sha256:1cc063cf7008dda070b1fe18a557145622e3dd69afdeab8c6829ad780f7d5b76"
+          },
+          "failure": {
+            "$schema_ref": "sha256:9a5ce0d6269d45d0918675f371aa5954346be9c6f374ed77c3deb208c7013250"
+          },
+          "finalized_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "idempotency_key": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "instruction_summary": {
+            "$schema_ref": "sha256:4ab26f0fb42c607c4313eb0fa1ead4c06124b4fdc6a8feff3c142959a72e2052"
+          },
+          "principal": {
+            "$schema_ref": "sha256:67f2f32016416b02a79eb0a71c98e5aca3ca16ed41d0c0011cdb7d9526ce16ec"
+          },
+          "provenance": {
+            "$schema_ref": "sha256:1e2c8e80efa0b67832cc4624fd9e0ba2ffd1f8f31724f0cfea981cb1d537c3ca"
+          },
+          "result_summary": {
+            "$schema_ref": "sha256:4ab26f0fb42c607c4313eb0fa1ead4c06124b4fdc6a8feff3c142959a72e2052"
+          },
+          "room_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "session_ref": {
+            "$schema_ref": "sha256:e74f2a47871a37db1cdbbe4aeece9dae93cc0c9c61048bb7b7a8012ed998092f"
+          },
+          "source": {
+            "$schema_ref": "sha256:bda594fe1aea3a254b1b488878c8e8f44110c8fce8788af9f0bafcb92fb785ec"
+          },
+          "status": {
+            "$schema_ref": "sha256:10adbd0bd7facec56cb90737163fd5759de07e92ee05c4f04220b6443397edb6"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "verification": {
+            "$schema_ref": "sha256:94ffd22eb38123c7d2fc36613733ed5a210f79e4c738dd05fa5f50bb06be5046"
+          },
+          "workspace_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "room_id",
+          "principal",
+          "source",
+          "status",
+          "idempotency_key",
+          "instruction_summary",
+          "provenance",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:38f307d82e83ebfe65e11ac738b870c4e69c9c766de5a5ab54b6d55fedd23645": {
+      "structural_hash": "38f307d82e83ebfe65e11ac738b870c4e69c9c766de5a5ab54b6d55fedd23645",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "skill.optimization.promote",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$schema_ref": "sha256:d7662a116c1b7690bdf64fef9216f64cca1ab4f863109c474d8cf18c89452a90"
+          },
+          "promotion": {
+            "$schema_ref": "sha256:c0ee759e2dee7d742764c8ae05857f2f298032a150bb39f9c9596a2625ce9da4"
+          },
+          "run": {
+            "$schema_ref": "sha256:b11ebde196e14a52bd91ff07d9c97f7aece2670beff983c8e897e38fb1adaf47"
+          },
+          "skill": {
+            "$schema_ref": "sha256:3a86bd25d991b5c59c09e13acda2580318d62da71cf958d81de586be2856fdab"
+          },
+          "snapshot": {
+            "$schema_ref": "sha256:ed83f61875f0d80bfa178e04540120afd7cfa6feb6fa2ef5b3205f81ccd34960"
+          }
+        },
+        "required": [
+          "run",
+          "skill",
+          "candidate",
+          "snapshot",
+          "promotion"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:3a86bd25d991b5c59c09e13acda2580318d62da71cf958d81de586be2856fdab": {
+      "structural_hash": "3a86bd25d991b5c59c09e13acda2580318d62da71cf958d81de586be2856fdab",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "skill.project.save",
+        "endpoint": "output",
+        "path": "$[\"resource\"]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_scopes": {
+            "$schema_ref": "sha256:03dbd0cab79d1ef5f38e5c4d84e859078a4977010b0597d2c9580bd442d7b0d4"
+          },
+          "description": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "file_path": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "frontmatter": {
+            "$schema_ref": "sha256:1869231bf0426a8b216522b57cef4a754740dbc84e4e097f8e2b84aeebceca67"
+          },
+          "id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "owner_pinned": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "required_capabilities": {
+            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
+          },
+          "resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "state": {
+            "$schema_ref": "sha256:8ad5b0cce380381c8b10b6d26c40c8fd8a49e2760ef30eeec4ab804fc5153f38"
+          },
+          "tags": {
+            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
+          },
+          "title": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "description",
+          "tags",
+          "state",
+          "allowed_scopes",
+          "required_capabilities",
+          "owner_pinned",
+          "frontmatter",
+          "file_path"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:4026f98a8808804c5ec881ae340403dca6d56c17d3675b72d5fbe3f013dac91a": {
+      "structural_hash": "4026f98a8808804c5ec881ae340403dca6d56c17d3675b72d5fbe3f013dac91a",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.search",
+        "endpoint": "output",
+        "path": "$[].branch[1]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_id": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "data": {
+            "$schema_ref": "sha256:e7652859ae44778e6140585c4a75446fcc4d4a33f370d3dea913309cbdf7ce68"
+          },
+          "file_path": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "id": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "kind": {
+            "$schema_ref": "sha256:161dbbb4cc523c43dafa1b612649007faf721d1939c320dfd31521ec5fed2b9e"
+          },
+          "summary": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          }
+        },
+        "required": [
+          "kind",
+          "collection_id",
+          "id",
+          "file_path",
+          "version",
+          "updated_at",
+          "summary",
+          "data"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:55edf3350ee9a84d066361b7f96c234c95b08351823c5cc8b6970a2656d878e3": {
+      "structural_hash": "55edf3350ee9a84d066361b7f96c234c95b08351823c5cc8b6970a2656d878e3",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "skill.project.save",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
+          },
+          "operation": {
+            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
+          },
+          "resource": {
+            "$schema_ref": "sha256:3a86bd25d991b5c59c09e13acda2580318d62da71cf958d81de586be2856fdab"
+          },
+          "rollbackPoint": {
+            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
+          }
+        },
+        "required": [
+          "resource",
+          "operation",
+          "activity"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:6448046287c91b78844d296e0bbcca71edb2c7f8eeca498827039d026796c98e": {
+      "structural_hash": "6448046287c91b78844d296e0bbcca71edb2c7f8eeca498827039d026796c98e",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.reject",
+        "endpoint": "output",
+        "path": "$[\"resource\"]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_hash": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "content_locale": {
+            "$schema_ref": "sha256:3d61bf66e8226241549883d26cda990b8a1f31a66d44691fcb9132e60a61884d"
+          },
+          "created_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "evidence_state": {
+            "$schema_ref": "sha256:b6a7e359efa65d4b7143affd6087fb3aa6abfca8323d10c8011598efbeafa631"
+          },
+          "experience_rule": {
+            "$schema_ref": "sha256:4875d783b3858bab2519bc516298010249b8a2ff69c183d439d749f39a9ca5eb"
+          },
+          "file_path": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "knowledge_kind": {
+            "$schema_ref": "sha256:6eadbb92de95c831473d0dcd7fbfa9dc36920dcb0d6974c15ca4c7724d347336"
+          },
+          "origin_activity_context": {
+            "$schema_ref": "sha256:391a739a70dc33aaf017bdae10c0f3cbb3276b3d1dcc9796e38b65b69c295f54"
+          },
+          "pinned": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "provenance": {
+            "$schema_ref": "sha256:ed2ce7e2f4ea5b12e40449406d5a677f7281fd16775981416db54c7c5074d4ce"
+          },
+          "resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "slug": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "source_refs": {
+            "$schema_ref": "sha256:24a77e5d2c638cce1d3f8548befaba0bb42020901ac63d33a32fda9d9f30cd77"
+          },
+          "source_run_ids": {
+            "$schema_ref": "sha256:8327e0ad0e80c2d0515d6849dec751f71f756f463348314ce49852869e9c6731"
+          },
+          "state": {
+            "$schema_ref": "sha256:5ad202087a88675d1a2cfd11cc036152507004ce43a3cf452652904cad1f9a25"
+          },
+          "tags": {
+            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
+          },
+          "title": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "usage_scope": {
+            "$schema_ref": "sha256:19b931796dc2f0634474cd625bcdc80d36294724e6e28a6506392270237b875f"
+          },
+          "usage_state": {
+            "$schema_ref": "sha256:4ba00fcbedbdcd974ec4aeb6df7b3d1afe21d8ba81335721d0a09c7415e0433f"
+          },
+          "version": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "state",
+          "content_locale",
+          "tags",
+          "source_refs",
+          "provenance",
+          "created_at",
+          "updated_at",
+          "file_path"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:68251efc38d4eee296fe3a6dd0050e212620a2d5317a0217d695c8c39e569844": {
+      "structural_hash": "68251efc38d4eee296fe3a6dd0050e212620a2d5317a0217d695c8c39e569844",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "artifact.revise",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "base_revision_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "change_summary": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "content": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "editor_source": {
+            "$schema_ref": "sha256:317582f22acc5974e71f32a61431f35efe9dd9988fb7c763bcd86df4b2c46f9f"
+          },
+          "expected_revision": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "extension": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "provenance": {
+            "$schema_ref": "sha256:ec4324fcc117393a4c7a680f05147819a72324ee859610c67818f3094ed0eac1"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:766d7d033a08d2c4dcfbb8f82b9575e836f0ec1cb4c847dddfd4b245594fdbfa": {
+      "structural_hash": "766d7d033a08d2c4dcfbb8f82b9575e836f0ec1cb4c847dddfd4b245594fdbfa",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.search",
+        "endpoint": "output",
+        "path": "$[].branch[0]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "id": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "kind": {
+            "$schema_ref": "sha256:c28e10cd8bc3b84edc37637b91f8ee94183b95c5ca5e75425555a8d6a74570dc"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "file_path",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:76795be6170edf08f2ff8d6f90adccf1a0416f653159512effdef4c3a2d9eb7b": {
+      "structural_hash": "76795be6170edf08f2ff8d6f90adccf1a0416f653159512effdef4c3a2d9eb7b",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "artifact.restore_revision",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "base_revision_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "change_summary": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "expected_revision": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "revision_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "revision_id"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:7c03c290b505f76c7ebe6b7427078f505449c87f3d7fba17dd8e71431e8fbfb7": {
+      "structural_hash": "7c03c290b505f76c7ebe6b7427078f505449c87f3d7fba17dd8e71431e8fbfb7",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "file.list",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "$schema_ref": "sha256:dfbe8dfe1b8e5376c20829a23164315d079eeda63d4aa5cb00df645601a457b0"
+          },
+          "offset": {
+            "$schema_ref": "sha256:ac1088e19492ce69cd31ea96099e3fa301539ba0a1430ecd2d66285c4499c51e"
+          },
+          "path": {
+            "$schema_ref": "sha256:f7be3125a2038a14d7cd75b5ae3a7eeefaaf39698437bbbabfa6eb0163390469"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:546ffad02051fd073a4323721fc66c277357a9dee04a2fba1efcc7ee1f3d352f": {
+      "structural_hash": "546ffad02051fd073a4323721fc66c277357a9dee04a2fba1efcc7ee1f3d352f",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.search",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "items": {
+          "$schema_ref": "sha256:c716619f0d970e21d7d9bd1763377d571d93cb7805292e13fdfaa9d27d7dd950"
+        },
+        "maxItems": 200,
+        "type": "array"
+      }
+    },
+    "sha256:884ff3e799f62ae599495a8cfd6483a368b911bd5413ea317f0e535f0f5030dc": {
+      "structural_hash": "884ff3e799f62ae599495a8cfd6483a368b911bd5413ea317f0e535f0f5030dc",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "activity.history.list",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "created_after": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "created_before": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "limit": {
+            "$schema_ref": "sha256:db9a4dffc13343988a3efc7f846faa82c67ad503159f300f6a032a0348cfb506"
+          },
+          "offset": {
+            "$schema_ref": "sha256:ac1088e19492ce69cd31ea96099e3fa301539ba0a1430ecd2d66285c4499c51e"
+          },
+          "principal_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "source_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "source_kind": {
+            "$schema_ref": "sha256:080ce141d3b2264bea06627864f1962ceb51d1797821991490ae42ce346f5e51"
+          },
+          "status": {
+            "$schema_ref": "sha256:10adbd0bd7facec56cb90737163fd5759de07e92ee05c4f04220b6443397edb6"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "sha256:8d689e80ea878b5948c2d945591daa197b3a9366aeeb1e28d1338361788be2e4": {
+      "structural_hash": "8d689e80ea878b5948c2d945591daa197b3a9366aeeb1e28d1338361788be2e4",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "activity.history.list",
+        "endpoint": "output",
+        "path": "$[\"items\"]"
+      },
+      "schema": {
+        "items": {
+          "$schema_ref": "sha256:35ec28c8e75a792184ea648ed4520f868fb5caea249f1b2dc85a89fd306c37eb"
+        },
+        "type": "array"
+      }
+    },
+    "sha256:94ffd22eb38123c7d2fc36613733ed5a210f79e4c738dd05fa5f50bb06be5046": {
+      "structural_hash": "94ffd22eb38123c7d2fc36613733ed5a210f79e4c738dd05fa5f50bb06be5046",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "activity.history.list",
+        "endpoint": "output",
+        "path": "$[\"items\"][][\"verification\"]"
+      },
+      "schema": {
+        "default": [],
+        "items": {
+          "$schema_ref": "sha256:e70f5fc28fc0ac97a174c355cab02a408ad8fe6ef7f489a8e471042156a324f9"
+        },
+        "maxItems": 200,
+        "type": "array"
+      }
+    },
+    "sha256:0400c8de091c148af8152e9a8c52fe5824617a31c188712b0fd97c970618df6b": {
+      "structural_hash": "0400c8de091c148af8152e9a8c52fe5824617a31c188712b0fd97c970618df6b",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "skill.search",
+        "endpoint": "output",
+        "path": "$[]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "file_path": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "id": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "pinned": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "tags": {
+            "$schema_ref": "sha256:8c6ee09593acf4964f349976bc992d6193dc73e8598a37f5ec0d2fde8660577c"
+          },
+          "title": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "description",
+          "tags",
+          "file_path",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:9c2963bd52227d2c81fcccbe7109903a0670fecfd0f720cbe8f83687529058cf": {
+      "structural_hash": "9c2963bd52227d2c81fcccbe7109903a0670fecfd0f720cbe8f83687529058cf",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.search",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "items": {
+          "$schema_ref": "sha256:c90c4f754c72905d6e2649a7e4dab7553ee0c41f6d1cabe3c7e24ff49392403f"
+        },
+        "maxItems": 200,
+        "type": "array"
+      }
+    },
+    "sha256:ac1088e19492ce69cd31ea96099e3fa301539ba0a1430ecd2d66285c4499c51e": {
+      "structural_hash": "ac1088e19492ce69cd31ea96099e3fa301539ba0a1430ecd2d66285c4499c51e",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.search",
+        "endpoint": "input",
+        "path": "$[\"offset\"]"
+      },
+      "schema": {
+        "default": 0,
+        "maximum": 10000,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "sha256:b3d394dca258656b0830d10cccc5c2bff6c1878e41589d63bd4f063253c75243": {
+      "structural_hash": "b3d394dca258656b0830d10cccc5c2bff6c1878e41589d63bd4f063253c75243",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "activity.history.list",
+        "endpoint": "output",
+        "path": "$[\"items\"][][\"verification\"][][\"status\"]"
+      },
+      "schema": {
+        "enum": [
+          "passed",
+          "failed",
+          "inconclusive",
+          "not_run"
+        ],
+        "type": "string"
+      }
+    },
+    "sha256:b5023aef93d6f740e5f3da2ffe6933df941aefc620d1e39b06bc92a4ec55620b": {
+      "structural_hash": "b5023aef93d6f740e5f3da2ffe6933df941aefc620d1e39b06bc92a4ec55620b",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.reject",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
+          },
+          "operation": {
+            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
+          },
+          "resource": {
+            "$schema_ref": "sha256:6448046287c91b78844d296e0bbcca71edb2c7f8eeca498827039d026796c98e"
+          },
+          "rollbackPoint": {
+            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
+          }
+        },
+        "required": [
+          "resource",
+          "operation",
+          "activity"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:b660de025a2e85838c9c10cd6752e10815411bf1197876bc69f7b61c84bc4db9": {
+      "structural_hash": "b660de025a2e85838c9c10cd6752e10815411bf1197876bc69f7b61c84bc4db9",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "skill.optimization.rollback",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "promotion": {
+            "$schema_ref": "sha256:c0ee759e2dee7d742764c8ae05857f2f298032a150bb39f9c9596a2625ce9da4"
+          },
+          "skill": {
+            "$schema_ref": "sha256:3a86bd25d991b5c59c09e13acda2580318d62da71cf958d81de586be2856fdab"
+          },
+          "snapshot": {
+            "$schema_ref": "sha256:ed83f61875f0d80bfa178e04540120afd7cfa6feb6fa2ef5b3205f81ccd34960"
+          }
+        },
+        "required": [
+          "skill",
+          "snapshot"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:c1c3f2e1b0ab144d6cb2f22a41dc3b601cf31a755c1365681b5a693141617a77": {
+      "structural_hash": "c1c3f2e1b0ab144d6cb2f22a41dc3b601cf31a755c1365681b5a693141617a77",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.search",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_id": {
+            "$schema_ref": "sha256:f9d1ebbef8c9bb548bd2887a95a35098c42393f6e61fac19578654fcc0951cb1"
+          },
+          "limit": {
+            "$schema_ref": "sha256:3037e6777070fa155e1b63495ca57a301cc91411dd9be0bfe88f1ed4b04d581d"
+          },
+          "offset": {
+            "$schema_ref": "sha256:ac1088e19492ce69cd31ea96099e3fa301539ba0a1430ecd2d66285c4499c51e"
+          },
+          "query": {
+            "$schema_ref": "sha256:f8ce0f5dd51131a3bbf1b7cb136be1c22ff0241cc6087bfa13f41b31f4a2b4ea"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "sha256:c4f114f22b0e6017981a846b0b4e892db66dae7687eedfc2f9a88d96e3df8ff5": {
+      "structural_hash": "c4f114f22b0e6017981a846b0b4e892db66dae7687eedfc2f9a88d96e3df8ff5",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "reflection.suggestion.apply",
+        "endpoint": "output",
+        "path": "$[\"resource\"]"
+      },
+      "schema": {
+        "anyOf": [
+          {
+            "$schema_ref": "sha256:73c0c04b4b53d9590ae8d9430c8f68563b9e2b19c1218a4292b8df27c0334b95"
+          },
+          {
+            "$schema_ref": "sha256:6448046287c91b78844d296e0bbcca71edb2c7f8eeca498827039d026796c98e"
+          },
+          {
+            "$schema_ref": "sha256:3a86bd25d991b5c59c09e13acda2580318d62da71cf958d81de586be2856fdab"
+          }
+        ]
+      }
+    },
+    "sha256:cbe966812d77953304b8ad506d5310c8aa14d6bbd0ceffc6e2c246fb78d160dd": {
+      "structural_hash": "cbe966812d77953304b8ad506d5310c8aa14d6bbd0ceffc6e2c246fb78d160dd",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "memory.search",
+        "endpoint": "output",
+        "path": "$[]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "id": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "pinned": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "state": {
+            "$schema_ref": "sha256:b043a56dd2a8f94a188758d8aeabac749876323f58418ce82f8b5788f7278bab"
+          },
+          "topic": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "version": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          }
+        },
+        "required": [
+          "id",
+          "topic",
+          "state",
+          "file_path"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:db9f10624840c5883e996d93e3f7b99e5ef49eb533a7e6160fc7bfa97e0bff69": {
+      "structural_hash": "db9f10624840c5883e996d93e3f7b99e5ef49eb533a7e6160fc7bfa97e0bff69",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.search",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "$schema_ref": "sha256:3037e6777070fa155e1b63495ca57a301cc91411dd9be0bfe88f1ed4b04d581d"
+          },
+          "offset": {
+            "$schema_ref": "sha256:ac1088e19492ce69cd31ea96099e3fa301539ba0a1430ecd2d66285c4499c51e"
+          },
+          "query": {
+            "$schema_ref": "sha256:f8ce0f5dd51131a3bbf1b7cb136be1c22ff0241cc6087bfa13f41b31f4a2b4ea"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "sha256:dcfd4004adf7aef65fbe6db193eedda31688e0f1d85efb13db9783bf39a9c2c0": {
+      "structural_hash": "dcfd4004adf7aef65fbe6db193eedda31688e0f1d85efb13db9783bf39a9c2c0",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "memory.search",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "items": {
+          "$schema_ref": "sha256:cbe966812d77953304b8ad506d5310c8aa14d6bbd0ceffc6e2c246fb78d160dd"
+        },
+        "maxItems": 200,
+        "type": "array"
+      }
+    },
+    "sha256:df21df773683547e4a9f930817aedc5fd3722db24d9f85e52ba0d7460241defc": {
+      "structural_hash": "df21df773683547e4a9f930817aedc5fd3722db24d9f85e52ba0d7460241defc",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.schema.save",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "derived_fields": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "descriptions": {
+            "$schema_ref": "sha256:cb25a4f52be583f75e3c01a9352ddceeddb1a46cbfaaf3b9debf1c40c7f82acb"
+          },
+          "embeds": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "expected_resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "fields": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "labels": {
+            "$schema_ref": "sha256:cb25a4f52be583f75e3c01a9352ddceeddb1a46cbfaaf3b9debf1c40c7f82acb"
+          },
+          "permissions": {
+            "$schema_ref": "sha256:fb0a5dd4bf496a192bb14493eec3d524eb801294b6fefa62b88b234979302303"
+          },
+          "refs": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "triggers": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "version": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "views": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "labels",
+          "descriptions",
+          "fields",
+          "refs",
+          "embeds",
+          "derived_fields",
+          "triggers",
+          "actions",
+          "permissions"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:dfbe8dfe1b8e5376c20829a23164315d079eeda63d4aa5cb00df645601a457b0": {
+      "structural_hash": "dfbe8dfe1b8e5376c20829a23164315d079eeda63d4aa5cb00df645601a457b0",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "file.list",
+        "endpoint": "input",
+        "path": "$[\"limit\"]"
+      },
+      "schema": {
+        "maximum": 200,
+        "minimum": 1,
+        "type": "integer"
+      }
+    },
+    "sha256:e70f5fc28fc0ac97a174c355cab02a408ad8fe6ef7f489a8e471042156a324f9": {
+      "structural_hash": "e70f5fc28fc0ac97a174c355cab02a408ad8fe6ef7f489a8e471042156a324f9",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "activity.history.list",
+        "endpoint": "output",
+        "path": "$[\"items\"][][\"verification\"][]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "kind": {
+            "$schema_ref": "sha256:e1b77e2f7620d7fdbce52fa08b3e483c48ea57e526b76a3bfb2a156223c40231"
+          },
+          "recorded_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "source_operation_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "status": {
+            "$schema_ref": "sha256:b3d394dca258656b0830d10cccc5c2bff6c1878e41589d63bd4f063253c75243"
+          },
+          "summary": {
+            "$schema_ref": "sha256:4ab26f0fb42c607c4313eb0fa1ead4c06124b4fdc6a8feff3c142959a72e2052"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "summary",
+          "recorded_at"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:561b61a64821eaef5d53a29052dba911a597c533f94143b06137338849b939e0": {
+      "structural_hash": "561b61a64821eaef5d53a29052dba911a597c533f94143b06137338849b939e0",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "skill.search",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "items": {
+          "$schema_ref": "sha256:0400c8de091c148af8152e9a8c52fe5824617a31c188712b0fd97c970618df6b"
+        },
+        "maxItems": 200,
+        "type": "array"
+      }
+    },
+    "sha256:f70fc0cac5f96d56eb7511ca9cd9adc10444f8997829cc5f80020a415a9da2a6": {
+      "structural_hash": "f70fc0cac5f96d56eb7511ca9cd9adc10444f8997829cc5f80020a415a9da2a6",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "activity.history.list",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "$schema_ref": "sha256:8d689e80ea878b5948c2d945591daa197b3a9366aeeb1e28d1338361788be2e4"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:c716619f0d970e21d7d9bd1763377d571d93cb7805292e13fdfaa9d27d7dd950": {
+      "structural_hash": "c716619f0d970e21d7d9bd1763377d571d93cb7805292e13fdfaa9d27d7dd950",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.search",
+        "endpoint": "output",
+        "path": "$[]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "id": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "pinned": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "slug": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "title": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "file_path",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:0385d26a6665566368263be09100a7e2f0062bddbaf26b02df7acbbbc5b33106": {
+      "structural_hash": "0385d26a6665566368263be09100a7e2f0062bddbaf26b02df7acbbbc5b33106",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.version.get",
+        "endpoint": "input",
+        "path": "$.branch[0]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "resource_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "resource_kind": {
+            "$schema_ref": "sha256:73927e8c2269bec66ca7f2a6097dd47d002c9c26a028d70941268aacd03cc98c"
+          }
+        },
+        "required": [
+          "resource_kind",
+          "resource_id"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:5a83296e6cd315f86795b40cd555c1ba28af60526e9fef3b31d817aaaa4de2dd": {
+      "structural_hash": "5a83296e6cd315f86795b40cd555c1ba28af60526e9fef3b31d817aaaa4de2dd",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.version.get",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "anyOf": [
+          {
+            "$schema_ref": "sha256:0385d26a6665566368263be09100a7e2f0062bddbaf26b02df7acbbbc5b33106"
+          },
+          {
+            "$schema_ref": "sha256:633298859385b1bd1c66dfb4401651974566b0ede84bb9c8e4b722b377da8993"
+          }
+        ]
+      }
+    },
+    "sha256:633298859385b1bd1c66dfb4401651974566b0ede84bb9c8e4b722b377da8993": {
+      "structural_hash": "633298859385b1bd1c66dfb4401651974566b0ede84bb9c8e4b722b377da8993",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.version.get",
+        "endpoint": "input",
+        "path": "$.branch[1]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "resource_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "resource_kind": {
+            "$schema_ref": "sha256:161dbbb4cc523c43dafa1b612649007faf721d1939c320dfd31521ec5fed2b9e"
+          }
+        },
+        "required": [
+          "resource_kind",
+          "resource_id",
+          "collection_id"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:73927e8c2269bec66ca7f2a6097dd47d002c9c26a028d70941268aacd03cc98c": {
+      "structural_hash": "73927e8c2269bec66ca7f2a6097dd47d002c9c26a028d70941268aacd03cc98c",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.version.get",
+        "endpoint": "input",
+        "path": "$.branch[0][\"resource_kind\"]"
+      },
+      "schema": {
+        "enum": [
+          "artifact",
+          "collection_schema",
+          "wiki",
+          "skill",
+          "memory"
+        ],
+        "type": "string"
+      }
+    },
+    "sha256:24ca63fed063753c7e7f6c3cdf7020d958275eb0fce23141126ac4a577649108": {
+      "structural_hash": "24ca63fed063753c7e7f6c3cdf7020d958275eb0fce23141126ac4a577649108",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.view.present",
+        "endpoint": "output",
+        "path": "$[\"schema\"]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "derived_fields": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "descriptions": {
+            "$schema_ref": "sha256:cb25a4f52be583f75e3c01a9352ddceeddb1a46cbfaaf3b9debf1c40c7f82acb"
+          },
+          "embeds": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "fields": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "file_path": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "labels": {
+            "$schema_ref": "sha256:cb25a4f52be583f75e3c01a9352ddceeddb1a46cbfaaf3b9debf1c40c7f82acb"
+          },
+          "permissions": {
+            "$schema_ref": "sha256:fb0a5dd4bf496a192bb14493eec3d524eb801294b6fefa62b88b234979302303"
+          },
+          "refs": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "triggers": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          },
+          "version": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "views": {
+            "$schema_ref": "sha256:23f0429c06cd73e1668ffa40b94001583d84dadf699539317e13a84d1970da6f"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "labels",
+          "descriptions",
+          "fields",
+          "refs",
+          "embeds",
+          "derived_fields",
+          "triggers",
+          "actions",
+          "permissions",
+          "file_path"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:50b1544ca32131674396dcfdbde1a293ce1baa57526ef3f2c8ce6029ff183f57": {
+      "structural_hash": "50b1544ca32131674396dcfdbde1a293ce1baa57526ef3f2c8ce6029ff183f57",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.view.present",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "record_count": {
+            "$schema_ref": "sha256:0d3ac1e9e006c0119b57d0512759bd7e261ea0d8cb38951a5183d17cdb4391f0"
+          },
+          "render_spec": {
+            "$schema_ref": "sha256:35811399cf8e642e0fce7bf79ceb67a7417317e86d8699e1fa110ffe54afb2a3"
+          },
+          "schema": {
+            "$schema_ref": "sha256:24ca63fed063753c7e7f6c3cdf7020d958275eb0fce23141126ac4a577649108"
+          },
+          "view_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          }
+        },
+        "required": [
+          "collection_id",
+          "view_id",
+          "schema",
+          "record_count",
+          "render_spec"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:5e5d739444b64e4fef6f3f8682217668f4ee1d90bd749c084f6b041ffd524b0d": {
+      "structural_hash": "5e5d739444b64e4fef6f3f8682217668f4ee1d90bd749c084f6b041ffd524b0d",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.schema.save",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
+          },
+          "operation": {
+            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
+          },
+          "resource": {
+            "$schema_ref": "sha256:24ca63fed063753c7e7f6c3cdf7020d958275eb0fce23141126ac4a577649108"
+          },
+          "rollbackPoint": {
+            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
+          }
+        },
+        "required": [
+          "resource",
+          "operation",
+          "activity"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:f05cb0d22843fa92e6a97d8cce63cd298fb6c7436de00f8cbc2215dbc857f03e": {
+      "structural_hash": "f05cb0d22843fa92e6a97d8cce63cd298fb6c7436de00f8cbc2215dbc857f03e",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.schema.get",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$schema_ref": "sha256:26c78acefdc8aac405edb737ab4e5b7ce58fdd0b318ea09e1513b9631dd6d1ac"
+          },
+          "collection_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "schema": {
+            "$schema_ref": "sha256:24ca63fed063753c7e7f6c3cdf7020d958275eb0fce23141126ac4a577649108"
+          }
+        },
+        "required": [
+          "action",
+          "collection_id",
+          "schema"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:c531d1e5bfc9ce9f4a8edc74314cf1ad680f5198e30d1fd78a223d746c8f7c29": {
+      "structural_hash": "c531d1e5bfc9ce9f4a8edc74314cf1ad680f5198e30d1fd78a223d746c8f7c29",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "skill.view",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "disclosure_level": {
+            "$schema_ref": "sha256:8bc6aea332f819c069b641584fd1176b9e4ceb08904f035d6059ae01e300645b"
+          },
+          "file_refs": {
+            "$schema_ref": "sha256:5ce4bd7d10995726978718851953d12cf7c5d7489b8022c16ac2b3e56cc06b7f"
+          },
+          "skill": {
+            "$schema_ref": "sha256:3a86bd25d991b5c59c09e13acda2580318d62da71cf958d81de586be2856fdab"
+          },
+          "usage": {
+            "$schema_ref": "sha256:3dc392d61770764cd85823390a65f283b6fcf49719faa49ef553305e7b6895fc"
+          }
+        },
+        "required": [
+          "skill",
+          "content",
+          "file_refs",
+          "disclosure_level",
+          "usage"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:2a0289a40c954ca9f8936394e94c284e516e51e6a7d79021c2aced2a3bdf17c8": {
+      "structural_hash": "2a0289a40c954ca9f8936394e94c284e516e51e6a7d79021c2aced2a3bdf17c8",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.context.get",
+        "endpoint": "output",
+        "path": "$[\"room\"]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "name": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "purpose": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          },
+          "work_goal": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "updated_at"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:822654b0864171f699bda588e93c22e29a354651468c18ed87a325af0663e7d9": {
+      "structural_hash": "822654b0864171f699bda588e93c22e29a354651468c18ed87a325af0663e7d9",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.context.get",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "room_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          }
+        },
+        "required": [
+          "room_id"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:88c329eee04825789323222f40cf2eabf8310da824ceb3a21bd160b6a3747d8c": {
+      "structural_hash": "88c329eee04825789323222f40cf2eabf8310da824ceb3a21bd160b6a3747d8c",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.context.get",
+        "endpoint": "output",
+        "path": "$[\"workspace\"]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "name": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "rules": {
+            "$schema_ref": "sha256:c0cfca165c6912b8724811519de068f62ea25d18b50c04735d1ffcb9cea10217"
+          },
+          "updated_at": {
+            "$schema_ref": "sha256:4f410cd74c87d8ddd21f20e835e06ed7445481c3aeae3c12085e82c54ea2fb7d"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "rules",
+          "updated_at"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:c0cfca165c6912b8724811519de068f62ea25d18b50c04735d1ffcb9cea10217": {
+      "structural_hash": "c0cfca165c6912b8724811519de068f62ea25d18b50c04735d1ffcb9cea10217",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.context.get",
+        "endpoint": "output",
+        "path": "$[\"workspace\"][\"rules\"]"
+      },
+      "schema": {
+        "items": {
+          "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+        },
+        "maxItems": 200,
+        "type": "array"
+      }
+    },
+    "sha256:ed5998e73344abc0ea7f2134b8acf3ab9f5cec65e548f93d245074f0c9bdf606": {
+      "structural_hash": "ed5998e73344abc0ea7f2134b8acf3ab9f5cec65e548f93d245074f0c9bdf606",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "workspace.context.get",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "room": {
+            "$schema_ref": "sha256:2a0289a40c954ca9f8936394e94c284e516e51e6a7d79021c2aced2a3bdf17c8"
+          },
+          "workspace": {
+            "$schema_ref": "sha256:88c329eee04825789323222f40cf2eabf8310da824ceb3a21bd160b6a3747d8c"
+          }
+        },
+        "required": [
+          "workspace",
+          "room"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:0f03f7743030111dea07fbc529fdd80441b90f2eb31f882eb66c0be668b1a168": {
+      "structural_hash": "0f03f7743030111dea07fbc529fdd80441b90f2eb31f882eb66c0be668b1a168",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.archive",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "wiki_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          }
+        },
+        "required": [
+          "wiki_id"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:2be6b7d9eeb72a8048f52a8bc408a00a72be0e3873e623de45a7c4f686613f44": {
+      "structural_hash": "2be6b7d9eeb72a8048f52a8bc408a00a72be0e3873e623de45a7c4f686613f44",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "collection.record.delete",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_id": {
+            "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
+          },
+          "expected_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "record_id": {
+            "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
+          },
+          "view_id": {
+            "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
+          }
+        },
+        "required": [
+          "collection_id",
+          "record_id"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:00f7d6dcac3c7945348689b3cd9617c4489b2a5a97f588076dfa50bcf052dab0": {
+      "structural_hash": "00f7d6dcac3c7945348689b3cd9617c4489b2a5a97f588076dfa50bcf052dab0",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "wiki.patch",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$schema_ref": "sha256:00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+          },
+          "content_locale": {
+            "$schema_ref": "sha256:3d61bf66e8226241549883d26cda990b8a1f31a66d44691fcb9132e60a61884d"
+          },
+          "expected_resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "pinned": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "provenance": {
+            "$schema_ref": "sha256:ed2ce7e2f4ea5b12e40449406d5a677f7281fd16775981416db54c7c5074d4ce"
+          },
+          "source_refs": {
+            "$schema_ref": "sha256:24a77e5d2c638cce1d3f8548befaba0bb42020901ac63d33a32fda9d9f30cd77"
+          },
+          "tags": {
+            "$schema_ref": "sha256:8327e0ad0e80c2d0515d6849dec751f71f756f463348314ce49852869e9c6731"
+          },
+          "title": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          },
+          "wiki_id": {
+            "$schema_ref": "sha256:9ac136edb99a2063b3091602181c8d2022fdccb5b514991319d58544c2e57e95"
+          }
+        },
+        "required": [
+          "wiki_id"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:cde01e9e1ae438c28b85ded42b417f2a82eb51270e8abd20d03b5399c2c3a96a": {
+      "structural_hash": "cde01e9e1ae438c28b85ded42b417f2a82eb51270e8abd20d03b5399c2c3a96a",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "skill.patch",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$schema_ref": "sha256:e3202d298ac050ff5735b5c6f8c101dcf2458fa20200bd2179598a1356a9e631"
+          },
+          "description": {
+            "$schema_ref": "sha256:6111cd80ef6bef22cf61f1d3f98e76a1ccefcedd2b066bcce40b1eadb530afa3"
+          },
+          "expected_resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "pinned": {
+            "$schema_ref": "sha256:7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+          },
+          "skill_id": {
+            "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
+          },
+          "tags": {
+            "$schema_ref": "sha256:cdce434d114a23d49897f0a074ace925f257f113f53cf4a49fde2788dc9070af"
+          },
+          "title": {
+            "$schema_ref": "sha256:41b92531f2537d034ad2a4e22bd7e9278ef35fd11dafd90eb44076c29d08786e"
+          }
+        },
+        "required": [
+          "skill_id"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:0a758c007bf77fa348dd31fc2b809d2baa9d03c182c5c75905c9388aacc9def7": {
+      "structural_hash": "0a758c007bf77fa348dd31fc2b809d2baa9d03c182c5c75905c9388aacc9def7",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "soul.change.request",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_fields": {
+            "$schema_ref": "sha256:78272e084d9bb246208afa0ee809d35d787d5de385bccc5988a9fa595e41df62"
+          },
+          "proposed_change_summary": {
+            "$schema_ref": "sha256:e5b3001aa5951151d7297b8c3b2dce50f1cb41e951a405cc08111f99a5ab0088"
+          }
+        },
+        "required": [
+          "proposed_change_summary"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:598f634d3f21305fc3b4e58ffab3890cac659f77cf04ddcdf10e300d46c026de": {
+      "structural_hash": "598f634d3f21305fc3b4e58ffab3890cac659f77cf04ddcdf10e300d46c026de",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "soul.change.request",
+        "endpoint": "output",
+        "path": "$[\"affected_fields\"]"
+      },
+      "schema": {
+        "items": {
+          "$schema_ref": "sha256:22ccdeb48f624bafdacfb712e743ec4657e45ec75873bfb84d42d95a29ada24c"
+        },
+        "type": "array"
+      }
+    },
+    "sha256:b05f9f408a6634bb2343b67765b0d20635ad7cebb1318e34476b870f947c7614": {
+      "structural_hash": "b05f9f408a6634bb2343b67765b0d20635ad7cebb1318e34476b870f947c7614",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "soul.change.request",
+        "endpoint": "output",
+        "path": "$[\"status\"]"
+      },
+      "schema": {
+        "const": "requested",
+        "type": "string"
+      }
+    },
+    "sha256:b605b795d86b7f16e36cead142fe7c49dfabc093691210fa098cb16cff7030b7": {
+      "structural_hash": "b605b795d86b7f16e36cead142fe7c49dfabc093691210fa098cb16cff7030b7",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "soul.change.request",
+        "endpoint": "output",
+        "path": "$[\"request_kind\"]"
+      },
+      "schema": {
+        "enum": [
+          "policy",
+          "profile",
+          "soul"
+        ],
+        "type": "string"
+      }
+    },
+    "sha256:c1c8f69b3e5280f4fd48ab3cd7d70116c5ee149b6e10750ea8a4f01679d635e1": {
+      "structural_hash": "c1c8f69b3e5280f4fd48ab3cd7d70116c5ee149b6e10750ea8a4f01679d635e1",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "soul.change.request",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "$schema_ref": "sha256:35ec28c8e75a792184ea648ed4520f868fb5caea249f1b2dc85a89fd306c37eb"
+          },
+          "affected_fields": {
+            "$schema_ref": "sha256:598f634d3f21305fc3b4e58ffab3890cac659f77cf04ddcdf10e300d46c026de"
+          },
+          "proposed_change_summary": {
+            "$schema_ref": "sha256:e5b3001aa5951151d7297b8c3b2dce50f1cb41e951a405cc08111f99a5ab0088"
+          },
+          "request_kind": {
+            "$schema_ref": "sha256:b605b795d86b7f16e36cead142fe7c49dfabc093691210fa098cb16cff7030b7"
+          },
+          "status": {
+            "$schema_ref": "sha256:b05f9f408a6634bb2343b67765b0d20635ad7cebb1318e34476b870f947c7614"
+          }
+        },
+        "required": [
+          "request_kind",
+          "status",
+          "proposed_change_summary",
+          "affected_fields",
+          "activity"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:21654db91176736b1729893223fa5d31a697a6b380bfcd75f2fe3fa90ad3e82a": {
+      "structural_hash": "21654db91176736b1729893223fa5d31a697a6b380bfcd75f2fe3fa90ad3e82a",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.copy",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "reason": {
+            "$schema_ref": "sha256:76f40fe54111097ce499390ca72afd52912de308ffcd1c2686b3b439f0d8eaca"
+          },
+          "resource_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "resource_kind": {
+            "$schema_ref": "sha256:d5fcb393a46daae6cc9f77e9591dbb6548ea2648dabbade02dfd858552f8c35c"
+          },
+          "target_resource_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "target_room_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          }
+        },
+        "required": [
+          "resource_kind",
+          "resource_id",
+          "expected_resource_version",
+          "target_room_id",
+          "reason"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:2af351629bf1bc971ae5887299a20e5643e2b8ad49befc476d30492d27766e4b": {
+      "structural_hash": "2af351629bf1bc971ae5887299a20e5643e2b8ad49befc476d30492d27766e4b",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.promote",
+        "endpoint": "output",
+        "path": "$[\"resource\"]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "resource_kind": {
+            "$schema_ref": "sha256:d5fcb393a46daae6cc9f77e9591dbb6548ea2648dabbade02dfd858552f8c35c"
+          },
+          "resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "source": {
+            "$schema_ref": "sha256:6974fc88e225a19e61aa303ebedc4a5616bb8867c7b46c2661f19fb4ae1c8a63"
+          },
+          "target": {
+            "$schema_ref": "sha256:6974fc88e225a19e61aa303ebedc4a5616bb8867c7b46c2661f19fb4ae1c8a63"
+          }
+        },
+        "required": [
+          "resource_kind",
+          "source",
+          "target",
+          "resource_version"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:960742665e319b4dd1fe472b3340fbea13bc05a01ad0e89c382b0f4323ee6e74": {
+      "structural_hash": "960742665e319b4dd1fe472b3340fbea13bc05a01ad0e89c382b0f4323ee6e74",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.move",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "reason": {
+            "$schema_ref": "sha256:76f40fe54111097ce499390ca72afd52912de308ffcd1c2686b3b439f0d8eaca"
+          },
+          "resource_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "resource_kind": {
+            "$schema_ref": "sha256:d5fcb393a46daae6cc9f77e9591dbb6548ea2648dabbade02dfd858552f8c35c"
+          },
+          "target_room_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          }
+        },
+        "required": [
+          "resource_kind",
+          "resource_id",
+          "expected_resource_version",
+          "target_room_id",
+          "reason"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:c6616ce7ac94e0f31f6b9aad0f9d4bbff129cf5365d6519b811f6168497e8e6d": {
+      "structural_hash": "c6616ce7ac94e0f31f6b9aad0f9d4bbff129cf5365d6519b811f6168497e8e6d",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.promote",
+        "endpoint": "input",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          },
+          "reason": {
+            "$schema_ref": "sha256:76f40fe54111097ce499390ca72afd52912de308ffcd1c2686b3b439f0d8eaca"
+          },
+          "resource_id": {
+            "$schema_ref": "sha256:f5f89a05eb2c77a976de0f9ec54586bc512a1a7f8546cf81b274e06a4c399a87"
+          },
+          "resource_kind": {
+            "$schema_ref": "sha256:d5fcb393a46daae6cc9f77e9591dbb6548ea2648dabbade02dfd858552f8c35c"
+          }
+        },
+        "required": [
+          "resource_kind",
+          "resource_id",
+          "expected_resource_version",
+          "reason"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:d5fcb393a46daae6cc9f77e9591dbb6548ea2648dabbade02dfd858552f8c35c": {
+      "structural_hash": "d5fcb393a46daae6cc9f77e9591dbb6548ea2648dabbade02dfd858552f8c35c",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.promote",
+        "endpoint": "output",
+        "path": "$[\"resource\"][\"resource_kind\"]"
+      },
+      "schema": {
+        "enum": [
+          "wiki",
+          "skill"
+        ],
+        "type": "string"
+      }
+    },
+    "sha256:dc8c3d9844f2f63fee80501f1ad36b321c29502143a758231fa3d665e64cca81": {
+      "structural_hash": "dc8c3d9844f2f63fee80501f1ad36b321c29502143a758231fa3d665e64cca81",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.promote",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
+          },
+          "operation": {
+            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
+          },
+          "resource": {
+            "$schema_ref": "sha256:2af351629bf1bc971ae5887299a20e5643e2b8ad49befc476d30492d27766e4b"
+          },
+          "rollbackPoint": {
+            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
+          }
+        },
+        "required": [
+          "resource",
+          "operation",
+          "activity"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:35716e5b66f118bf91ba7cb7a64c17c6776df375dc33cf783dbdaae82e8ff5af": {
+      "structural_hash": "35716e5b66f118bf91ba7cb7a64c17c6776df375dc33cf783dbdaae82e8ff5af",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.redact",
+        "endpoint": "output",
+        "path": "$[\"resource\"]"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "redacted_resource": {
+            "$schema_ref": "sha256:6974fc88e225a19e61aa303ebedc4a5616bb8867c7b46c2661f19fb4ae1c8a63"
+          },
+          "redaction_mode": {
+            "$schema_ref": "sha256:66327fb3d2fbd5769d61b887b823ae14c6c9da1c91980b253d773f1f5053706e"
+          },
+          "resource_kind": {
+            "$schema_ref": "sha256:d5fcb393a46daae6cc9f77e9591dbb6548ea2648dabbade02dfd858552f8c35c"
+          },
+          "resource_version": {
+            "$schema_ref": "sha256:99ec9034ff69cd5e1fc0f75db663110a41c9005e4124215d42d6105ea2d2d839"
+          }
+        },
+        "required": [
+          "resource_kind",
+          "redacted_resource",
+          "resource_version",
+          "redaction_mode"
+        ],
+        "type": "object"
+      }
+    },
+    "sha256:66327fb3d2fbd5769d61b887b823ae14c6c9da1c91980b253d773f1f5053706e": {
+      "structural_hash": "66327fb3d2fbd5769d61b887b823ae14c6c9da1c91980b253d773f1f5053706e",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.redact",
+        "endpoint": "output",
+        "path": "$[\"resource\"][\"redaction_mode\"]"
+      },
+      "schema": {
+        "const": "known_secret_patterns",
+        "type": "string"
+      }
+    },
+    "sha256:fbde09098427c8e0cd8312354513a58d285e86977e73b8d5422a8d75791f8b6d": {
+      "structural_hash": "fbde09098427c8e0cd8312354513a58d285e86977e73b8d5422a8d75791f8b6d",
+      "review": "reviewed",
+      "first_seen": {
+        "operation": "resource.redact",
+        "endpoint": "output",
+        "path": "$"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "$schema_ref": "sha256:669e726f732fd26b335a64ed8baa4b7774cb6e5676e5720626c08123e47ab56a"
+          },
+          "operation": {
+            "$schema_ref": "sha256:ac9e266f4e70128631df7d1b9f53bc477e786a2af78aa20dfedf45c224b92500"
+          },
+          "resource": {
+            "$schema_ref": "sha256:35716e5b66f118bf91ba7cb7a64c17c6776df375dc33cf783dbdaae82e8ff5af"
+          },
+          "rollbackPoint": {
+            "$schema_ref": "sha256:efdec28a7f977d61b8a38be5651517ca63de295340b178f639a3ce1b30794fea"
+          }
+        },
+        "required": [
+          "resource",
+          "operation",
+          "activity"
+        ],
+        "type": "object"
+      }
     }
   },
   "operations": [
@@ -25712,11 +26583,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:54ce7426b70d5d94c5e60fff2aadeca549e8834b3fb4a0f33723a00bf1d829ac"
+        "root_schema": "sha256:884ff3e799f62ae599495a8cfd6483a368b911bd5413ea317f0e535f0f5030dc"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:52bda57db72f7d91b40876ccf32b1b5d7b8297a7d69cb44b9d1e98e63971dac1"
+        "root_schema": "sha256:f70fc0cac5f96d56eb7511ca9cd9adc10444f8997829cc5f80020a415a9da2a6"
       }
     },
     {
@@ -25872,7 +26743,7 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:00cbf503512e929743cce3f3af8f8c708abbd261641f65742978b1eb553882f4"
+        "root_schema": "sha256:76795be6170edf08f2ff8d6f90adccf1a0416f653159512effdef4c3a2d9eb7b"
       },
       "output": {
         "review": "reviewed",
@@ -25888,7 +26759,7 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:29f5c53c2c1f091e02a92a8b55820f5ede32d03a190b94bf7c782e374bf4f018"
+        "root_schema": "sha256:68251efc38d4eee296fe3a6dd0050e212620a2d5317a0217d695c8c39e569844"
       },
       "output": {
         "review": "reviewed",
@@ -26288,7 +27159,7 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:49746072121a685e07073f9a45a8aef8e74e81cee1a6b5a56d37778dcf3dbfcc"
+        "root_schema": "sha256:2be6b7d9eeb72a8048f52a8bc408a00a72be0e3873e623de45a7c4f686613f44"
       },
       "output": {
         "review": "reviewed",
@@ -26356,7 +27227,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:da5e3ec418079f7c39ee8dd2f4c13f5dcf1a284a722ab72fc75221f27ec5f25c"
+        "root_schema": "sha256:f05cb0d22843fa92e6a97d8cce63cd298fb6c7436de00f8cbc2215dbc857f03e"
       }
     },
     {
@@ -26368,11 +27239,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:e9760b2abd9a66c681a46ce898971486fad23752c64ea26aab8962edc1cae5b1"
+        "root_schema": "sha256:df21df773683547e4a9f930817aedc5fd3722db24d9f85e52ba0d7460241defc"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:f56370eec479350a109dad2c712d396720cd94a3488ec096ef5256b2e9f7ea2f"
+        "root_schema": "sha256:5e5d739444b64e4fef6f3f8682217668f4ee1d90bd749c084f6b041ffd524b0d"
       }
     },
     {
@@ -26384,11 +27255,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:2ec152b4f80b9966c80ca893315a97ab7cb568c9ec3af8475dfef848269bcfdc"
+        "root_schema": "sha256:c1c3f2e1b0ab144d6cb2f22a41dc3b601cf31a755c1365681b5a693141617a77"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:4e33a63c4b8f04607d023dabea4d1433b1232c3bf9265f4bf4b9c539be446eba"
+        "root_schema": "sha256:9c2963bd52227d2c81fcccbe7109903a0670fecfd0f720cbe8f83687529058cf"
       }
     },
     {
@@ -26404,7 +27275,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:d3f609f8ae4d2f5a55a308fdd8749db2fa4ba6845590edb33201c3c4e3c9c474"
+        "root_schema": "sha256:50b1544ca32131674396dcfdbde1a293ce1baa57526ef3f2c8ce6029ff183f57"
       }
     },
     {
@@ -26640,7 +27511,7 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:dab89aad529c852a115036bcabe87bbfb3a96b195bf5fb691eac6d09008f189e"
+        "root_schema": "sha256:7c03c290b505f76c7ebe6b7427078f505449c87f3d7fba17dd8e71431e8fbfb7"
       },
       "output": {
         "review": "reviewed",
@@ -27200,11 +28071,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:5316ef091c087d838de4bb2887ec43ac896e1e9f845c8faa84c623a79d9c6ffe"
+        "root_schema": "sha256:db9f10624840c5883e996d93e3f7b99e5ef49eb533a7e6160fc7bfa97e0bff69"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:883d9528b86615fa1651a1eb785071a240b58e5c1ad5d40f51f89f97e724b399"
+        "root_schema": "sha256:dcfd4004adf7aef65fbe6db193eedda31688e0f1d85efb13db9783bf39a9c2c0"
       }
     },
     {
@@ -27304,6 +28175,22 @@
       }
     },
     {
+      "id": "policy.change.request",
+      "kind": "command",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:0a758c007bf77fa348dd31fc2b809d2baa9d03c182c5c75905c9388aacc9def7"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:c1c8f69b3e5280f4fd48ab3cd7d70116c5ee149b6e10750ea8a4f01679d635e1"
+      }
+    },
+    {
       "id": "presentation.plan",
       "kind": "query",
       "review": {
@@ -27317,6 +28204,22 @@
       "output": {
         "review": "reviewed",
         "root_schema": "sha256:eeaf481530b9d35e4ea94fe1d4faf27468c25a81b856316bac6f86c1485c096f"
+      }
+    },
+    {
+      "id": "profile.change.request",
+      "kind": "command",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:0a758c007bf77fa348dd31fc2b809d2baa9d03c182c5c75905c9388aacc9def7"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:c1c8f69b3e5280f4fd48ab3cd7d70116c5ee149b6e10750ea8a4f01679d635e1"
       }
     },
     {
@@ -27348,7 +28251,71 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:cebb4da0d9f71d728eaea39f4c8065a06021e4cf361cc5684f4d724e793a78e8"
+        "root_schema": "sha256:19346a079186ad2796da0c74559771a21fd485c43c77b38e0737a33a784921a7"
+      }
+    },
+    {
+      "id": "resource.copy",
+      "kind": "command",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:21654db91176736b1729893223fa5d31a697a6b380bfcd75f2fe3fa90ad3e82a"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:dc8c3d9844f2f63fee80501f1ad36b321c29502143a758231fa3d665e64cca81"
+      }
+    },
+    {
+      "id": "resource.move",
+      "kind": "command",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:960742665e319b4dd1fe472b3340fbea13bc05a01ad0e89c382b0f4323ee6e74"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:dc8c3d9844f2f63fee80501f1ad36b321c29502143a758231fa3d665e64cca81"
+      }
+    },
+    {
+      "id": "resource.promote",
+      "kind": "command",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:c6616ce7ac94e0f31f6b9aad0f9d4bbff129cf5365d6519b811f6168497e8e6d"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:dc8c3d9844f2f63fee80501f1ad36b321c29502143a758231fa3d665e64cca81"
+      }
+    },
+    {
+      "id": "resource.redact",
+      "kind": "command",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:c6616ce7ac94e0f31f6b9aad0f9d4bbff129cf5365d6519b811f6168497e8e6d"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:fbde09098427c8e0cd8312354513a58d285e86977e73b8d5422a8d75791f8b6d"
       }
     },
     {
@@ -27381,6 +28348,22 @@
       "output": {
         "review": "reviewed",
         "root_schema": "sha256:b92f8fb39ab3a20957f445c9408687fa6e427d331ff4e6b528d13f0f01aca491"
+      }
+    },
+    {
+      "id": "resource.version.get",
+      "kind": "query",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:5a83296e6cd315f86795b40cd555c1ba28af60526e9fef3b31d817aaaa4de2dd"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:4b0698531906f19f484629a4a6fd9280d01f8023809392cc1b186b7633ed9bd8"
       }
     },
     {
@@ -27748,7 +28731,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:819080ed83f7978ff2cf2db3a8f08cdfbedfaeedfc1b9d093ef1ae33f091c218"
+        "root_schema": "sha256:55edf3350ee9a84d066361b7f96c234c95b08351823c5cc8b6970a2656d878e3"
       }
     },
     {
@@ -27764,7 +28747,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:819080ed83f7978ff2cf2db3a8f08cdfbedfaeedfc1b9d093ef1ae33f091c218"
+        "root_schema": "sha256:55edf3350ee9a84d066361b7f96c234c95b08351823c5cc8b6970a2656d878e3"
       }
     },
     {
@@ -27796,7 +28779,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:72c4e477e6f3afe29eba1558ad896e6251a9d5e791829723ffb3577d540546b9"
+        "root_schema": "sha256:38f307d82e83ebfe65e11ac738b870c4e69c9c766de5a5ab54b6d55fedd23645"
       }
     },
     {
@@ -27828,7 +28811,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:de2c990d57b8aee562a1f4c260be45c75b5df2f3c45d8f1c8b54d29447900e5f"
+        "root_schema": "sha256:b660de025a2e85838c9c10cd6752e10815411bf1197876bc69f7b61c84bc4db9"
       }
     },
     {
@@ -27856,11 +28839,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:c6e5b4806dc9047f5c59cb8adcc0d75981e3e2247b30ab4554b8859d4d4efc04"
+        "root_schema": "sha256:cde01e9e1ae438c28b85ded42b417f2a82eb51270e8abd20d03b5399c2c3a96a"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:819080ed83f7978ff2cf2db3a8f08cdfbedfaeedfc1b9d093ef1ae33f091c218"
+        "root_schema": "sha256:55edf3350ee9a84d066361b7f96c234c95b08351823c5cc8b6970a2656d878e3"
       }
     },
     {
@@ -27876,7 +28859,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:819080ed83f7978ff2cf2db3a8f08cdfbedfaeedfc1b9d093ef1ae33f091c218"
+        "root_schema": "sha256:55edf3350ee9a84d066361b7f96c234c95b08351823c5cc8b6970a2656d878e3"
       }
     },
     {
@@ -27888,11 +28871,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:5316ef091c087d838de4bb2887ec43ac896e1e9f845c8faa84c623a79d9c6ffe"
+        "root_schema": "sha256:db9f10624840c5883e996d93e3f7b99e5ef49eb533a7e6160fc7bfa97e0bff69"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:0eb37dffcd0ebfe0bfa04f23becca45a930644dc9413589b4bf55ed638913797"
+        "root_schema": "sha256:561b61a64821eaef5d53a29052dba911a597c533f94143b06137338849b939e0"
       }
     },
     {
@@ -27940,7 +28923,23 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:cc19a7c121de8ed860393cd220fcf3331b62dedbdd6a698d388379ad7dc6103a"
+        "root_schema": "sha256:c531d1e5bfc9ce9f4a8edc74314cf1ad680f5198e30d1fd78a223d746c8f7c29"
+      }
+    },
+    {
+      "id": "soul.change.request",
+      "kind": "command",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:0a758c007bf77fa348dd31fc2b809d2baa9d03c182c5c75905c9388aacc9def7"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:c1c8f69b3e5280f4fd48ab3cd7d70116c5ee149b6e10750ea8a4f01679d635e1"
       }
     },
     {
@@ -27956,7 +28955,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:c23a2da20551d808916a085757ae4ffea378b650091110aaee45f360bb0d410d"
+        "root_schema": "sha256:b5023aef93d6f740e5f3da2ffe6933df941aefc620d1e39b06bc92a4ec55620b"
       }
     },
     {
@@ -27968,11 +28967,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:656e0fc7534795e699c11f7c06533cb1914462e921ab3fb13ab4382726af4ce0"
+        "root_schema": "sha256:0f03f7743030111dea07fbc529fdd80441b90f2eb31f882eb66c0be668b1a168"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:c23a2da20551d808916a085757ae4ffea378b650091110aaee45f360bb0d410d"
+        "root_schema": "sha256:b5023aef93d6f740e5f3da2ffe6933df941aefc620d1e39b06bc92a4ec55620b"
       }
     },
     {
@@ -27984,11 +28983,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:e284a08bda93e629915b9c571de0022b33bd5ed82e378bf0689badeb9b93d115"
+        "root_schema": "sha256:00f7d6dcac3c7945348689b3cd9617c4489b2a5a97f588076dfa50bcf052dab0"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:c23a2da20551d808916a085757ae4ffea378b650091110aaee45f360bb0d410d"
+        "root_schema": "sha256:b5023aef93d6f740e5f3da2ffe6933df941aefc620d1e39b06bc92a4ec55620b"
       }
     },
     {
@@ -28004,7 +29003,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:c23a2da20551d808916a085757ae4ffea378b650091110aaee45f360bb0d410d"
+        "root_schema": "sha256:b5023aef93d6f740e5f3da2ffe6933df941aefc620d1e39b06bc92a4ec55620b"
       }
     },
     {
@@ -28036,7 +29035,7 @@
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:c23a2da20551d808916a085757ae4ffea378b650091110aaee45f360bb0d410d"
+        "root_schema": "sha256:b5023aef93d6f740e5f3da2ffe6933df941aefc620d1e39b06bc92a4ec55620b"
       }
     },
     {
@@ -28048,11 +29047,11 @@
       },
       "input": {
         "review": "reviewed",
-        "root_schema": "sha256:5316ef091c087d838de4bb2887ec43ac896e1e9f845c8faa84c623a79d9c6ffe"
+        "root_schema": "sha256:db9f10624840c5883e996d93e3f7b99e5ef49eb533a7e6160fc7bfa97e0bff69"
       },
       "output": {
         "review": "reviewed",
-        "root_schema": "sha256:cefd0ad99aaa28677e3f1e8c8f5b7c4aa57b03d0f6651cb9729f9120323f1673"
+        "root_schema": "sha256:546ffad02051fd073a4323721fc66c277357a9dee04a2fba1efcc7ee1f3d352f"
       }
     },
     {
@@ -28133,6 +29132,22 @@
       "output": {
         "review": "reviewed",
         "root_schema": "sha256:445b1943c4a495716a55254ca6ddd2a62ae6f24d07210e35883489d932168136"
+      }
+    },
+    {
+      "id": "workspace.context.get",
+      "kind": "query",
+      "review": {
+        "input": "reviewed",
+        "output": "reviewed"
+      },
+      "input": {
+        "review": "reviewed",
+        "root_schema": "sha256:822654b0864171f699bda588e93c22e29a354651468c18ed87a325af0663e7d9"
+      },
+      "output": {
+        "review": "reviewed",
+        "root_schema": "sha256:ed5998e73344abc0ea7f2134b8acf3ab9f5cec65e548f93d245074f0c9bdf606"
       }
     },
     {

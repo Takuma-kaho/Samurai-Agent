@@ -12,6 +12,7 @@ interface ArtifactDraftInput {
 }
 interface ArtifactRevisionInputPort {
   artifactId: string; content: string | Uint8Array; producerRunId?: string; extension?: string; baseRevisionId?: string;
+  expectedRevision?: number;
   editorSource?: "chat" | "surface" | "provider" | "image_provider" | "restore" | "system"; changeSummary?: string; provenance?: Record<string, JsonValue>;
 }
 interface MutationExecution<TExtra extends Record<string, unknown>> {

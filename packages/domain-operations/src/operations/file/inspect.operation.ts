@@ -26,7 +26,8 @@ const fileInspect = defineQuery<FileInspectPorts>()({
   "sources": [
     "provider_tool_call",
     "runtime_api",
-    "surface_operation"
+    "surface_operation",
+    "external_app"
   ],
   "effect": "read_only",
   "idempotency": "none",

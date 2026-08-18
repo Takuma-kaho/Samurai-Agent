@@ -7,6 +7,7 @@ type Ports = Pick<DomainOperationPorts, "activity.history.list">;
 export function createActivityHistoryDomainServicePorts(services: Pick<RuntimeDomainServices, "activityHistoryDomainService">): Ports {
   return {
     "activity.history.list": readOnlyQueryPort<Ports["activity.history.list"]>({
+      getActivityHistory: (input) => services.activityHistoryDomainService.get(input),
       listActivityHistory: (input) => services.activityHistoryDomainService.list(input)
     })
   };

@@ -56,6 +56,7 @@ export interface ActivityIngestPort {
     correctionOfActivityId?: string;
     provenanceKind?: ActivityRecord["provenance"]["kind"];
     resourceUsage?: Array<Omit<ResourceUsageRecord, "activity_id" | "created_at">>;
+    signal?: AbortSignal;
   }): Promise<ActivityRecord>;
 }
 

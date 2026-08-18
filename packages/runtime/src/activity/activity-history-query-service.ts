@@ -57,7 +57,7 @@ export class ActivityHistoryQueryService {
   }): Promise<ActivityRecord[]> {
     const context = await this.assertReadContext(input.context);
     if (input.limit !== undefined && !Number.isFinite(input.limit)) throw new Error("activity_query_limit_invalid");
-    const limit = input.limit === undefined ? undefined : Math.min(200, Math.max(1, Math.trunc(input.limit)));
+    const limit = input.limit === undefined ? undefined : Math.min(10_200, Math.max(1, Math.trunc(input.limit)));
     if (input.createdAfter) assertIsoDate(input.createdAfter, "activity_query_created_after_invalid");
     if (input.createdBefore) assertIsoDate(input.createdBefore, "activity_query_created_before_invalid");
     return this.store.listActivities({

@@ -37,6 +37,7 @@ export function createSkillDomainServicePorts(services: Pick<RuntimeDomainServic
       getSkillForMutation: (id) => services.skillDomainService.getSkillForMutation(id),
       readSkillMarkdown: (id) => services.skillDomainService.readSkillMarkdown(id),
       patchSkillRecord: (input) => services.skillDomainService.patchSkillRecord(input),
+      mapSkillWriteError: (error) => services.skillDomainService.mapSkillWriteError(error),
       skillMutationContract: (id) => services.skillDomainService.skillMutationContract(id),
       skillResourceRef: (skill) => services.skillDomainService.skillResourceRef(skill),
       createSkillRollback: (operation, refs, before, after) => services.skillDomainService.createSkillRollback(operation, refs, before, after),

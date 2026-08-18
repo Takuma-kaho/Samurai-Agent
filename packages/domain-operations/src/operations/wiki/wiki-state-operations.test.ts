@@ -12,6 +12,7 @@ const page = { id: "wiki_1", slug: "page", title: "Page", state: "proposed" as c
 function ports(setWikiPageState = vi.fn(async (_id: string, state: "active" | "archived" | "rejected") => ({ ...page, state }))) {
   return {
     getWikiPage: async () => page, setWikiPageState,
+    mapWikiWriteError: (error: unknown) => error instanceof Error ? error : new Error(String(error)),
     wikiPageNotFoundError: () => new Error("wiki_not_found"),
     createWikiRollback: async () => ({ id: "rollback_1" }) as never,
     runWikiMutation: async (input: Parameters<WikiStateTransitionPorts["runWikiMutation"]>[0]) => {
@@ -42,5 +43,14 @@ describe("Wiki state operation handlers", () => {
     const handler = wikiAccept.createHandler({ ...ports(setWikiPageState), getWikiPage: async () => undefined });
     await expect(handler.execute(context, { wiki_id: "missing" })).rejects.toThrow("wiki_not_found");
     expect(setWikiPageState).not.toHaveBeenCalled();
+  });
+
+  it("returns a mapped conflict when the version changes during archive", async () => {
+    const handler = wikiArchive.createHandler({
+      ...ports(vi.fn(async () => { throw new Error("wiki_resource_version_conflict:wiki_1:1:2"); })),
+      mapWikiWriteError: () => new Error("wiki_version_conflict")
+    });
+
+    await expect(handler.execute(context, { wiki_id: page.id, expected_resource_version: 1 })).rejects.toThrow("wiki_version_conflict");
   });
 });

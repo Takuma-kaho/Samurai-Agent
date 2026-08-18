@@ -5,7 +5,11 @@ import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDo
 import { storedCollectionSchema } from "../../../value-objects/collection.js";
 import { collectionSchemaWriteValueSchema } from "../../../value-objects/collection.js";
 
-const Input = CollectionSchemaSchema.strict();
+const Input = CollectionSchemaSchema.extend({
+  // Used by External Integration.  It is deliberately separate from the
+  // Collection's user-facing string schema version.
+  expected_resource_version: z.number().int().positive().optional()
+}).strict();
 const Output = collectionSchemaWriteValueSchema;
 
 function toCollectionSchema(input: z.infer<typeof Input>): CollectionSchema {
@@ -28,7 +32,7 @@ function toCollectionSchema(input: z.infer<typeof Input>): CollectionSchema {
 export interface CollectionSchemaSavePorts {
   getCollectionSchemaForMutation(id: string): Promise<z.infer<typeof storedCollectionSchema> | undefined>;
   saveCollectionSchema(schema: CollectionSchema): Promise<z.infer<typeof storedCollectionSchema>>;
-  updateCollectionSchema(schema: CollectionSchema): Promise<z.infer<typeof storedCollectionSchema>>;
+  updateCollectionSchema(schema: CollectionSchema, expectedResourceVersion?: number): Promise<z.infer<typeof storedCollectionSchema>>;
   collectionSchemaRef(schema: z.infer<typeof storedCollectionSchema>): ResourceRef;
   createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, z.infer<typeof domainJsonValueSchema>>, after: Record<string, z.infer<typeof domainJsonValueSchema>>): Promise<RollbackPoint>;
   collectionMutationContract(id: "collection.schema.save"): { id: string; proposed_effects: string[] };
@@ -90,7 +94,7 @@ const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
           trustedContext: context, inputSummary: `Save collection schema: ${schema.id}`, operationName: contract.id, proposedEffects: contract.proposed_effects,
           targetResourceRefs: existing ? [ports.collectionSchemaRef(existing)] : [],
           execute: async (operation) => {
-            const saved = existing ? await ports.updateCollectionSchema(schema) : await ports.saveCollectionSchema(schema);
+            const saved = existing ? await ports.updateCollectionSchema(schema, input.expected_resource_version) : await ports.saveCollectionSchema(schema);
             const ref = ports.collectionSchemaRef(saved);
             const rollbackPoint = await ports.createCollectionRollback(operation, [ref], existing ? { collection_schema: domainJsonValueSchema.parse(existing) } : {}, { collection_schema: domainJsonValueSchema.parse(saved) });
             return { resource: saved, ref, rollbackPoint, summary: `Saved collection schema ${saved.id}.` };

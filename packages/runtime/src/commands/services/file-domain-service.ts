@@ -65,10 +65,12 @@ export class FileDomainService {
     return { resource: { path: workspacePath.relativePath, content: await this.read.readText(workspacePath.absolutePath) } };
   }
 
-  async listFiles(input: { path: string }): Promise<{ resource: FileResource }> {
+  async listFiles(input: { path: string; limit?: number; offset?: number }): Promise<{ resource: FileResource }> {
     const workspacePath = this.read.resolve(input.path);
     const filePaths = await this.read.listAccessibleFilePaths(workspacePath);
-    const entries = (await Promise.all(filePaths.map(async (relativePath): Promise<DirectoryEntry | undefined> => {
+    const offset = Math.min(10_000, Math.max(0, Math.trunc(input.offset ?? 0)));
+    const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 200)));
+    const entries = (await Promise.all(filePaths.slice(offset, offset + limit).map(async (relativePath): Promise<DirectoryEntry | undefined> => {
       try {
         const resolved = this.read.resolve(relativePath);
         const info = await this.read.stat(resolved.absolutePath);
@@ -79,7 +81,13 @@ export class FileDomainService {
         return undefined;
       }
     }))).filter((entry): entry is DirectoryEntry => entry !== undefined);
-    return { resource: { path: workspacePath.relativePath, entries } };
+    return {
+      resource: {
+        path: workspacePath.relativePath,
+        entries,
+        ...(input.limit !== undefined || input.offset !== undefined ? { metadata: { total_entries: filePaths.length } } : {})
+      }
+    };
   }
 
   async inspectFile(input: { path: string }): Promise<{ resource: FileResource }> {
