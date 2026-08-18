@@ -13,7 +13,7 @@ const automationJobManagerResume = defineCommand<AutomationJobManagerResumePorts
   ...{
     kind: "command", id: "automation.job.manager_resume", version: "1.0", availability: "active",
     title: "Resume automation management", description: "Allow a Room manager-stopped Automation job to be enabled separately.",
-    sources: ["runtime_api", "provider_tool_call", "surface_operation", "external_app"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition",
+    sources: ["runtime_api", "provider_tool_call", "surface_operation"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition",
     render: ["status_timeline"], resourceKinds: ["automation_job"], proposedEffects: ["Allow a separately enabled Automation job to run again."], outputResourceKind: "automation_job", uiDisplayCategory: "automation",
     provenance: [{ source: "samurai", commit_sha: "core09", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Resuming management never auto-enables a Job." }]
   },

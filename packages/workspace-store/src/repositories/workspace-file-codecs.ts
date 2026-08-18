@@ -6,7 +6,12 @@ import type { SkillIndexEntry } from "../workspace-store-contracts";
 export function renderFrontmatter(frontmatter: object): string {
   return [
     "---",
-    ...Object.entries(frontmatter).map(([key, value]) => `${key}: ${JSON.stringify(value)}`),
+    // Optional fields may be absent after an indexed record is read back from
+    // SQLite.  Writing `undefined` would create invalid JSON frontmatter and
+    // make the Workspace source unreadable on the next health check.
+    ...Object.entries(frontmatter)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => `${key}: ${JSON.stringify(value)}`),
     "---"
   ].join("\n");
 }

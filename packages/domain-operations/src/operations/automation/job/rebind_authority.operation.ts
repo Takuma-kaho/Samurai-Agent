@@ -13,7 +13,7 @@ const automationJobRebindAuthority = defineCommand<AutomationJobRebindAuthorityP
   ...{
     kind: "command", id: "automation.job.rebind_authority", version: "1.0", availability: "active",
     title: "Rebind automation authority", description: "Bind a legacy job to the current Room authority without enabling it.",
-    sources: ["runtime_api", "external_app"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition",
+    sources: ["runtime_api"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition",
     render: ["status_timeline"], resourceKinds: ["automation_job"],
     proposedEffects: ["Rebind Automation authority without automatically enabling the job."], outputResourceKind: "automation_job", uiDisplayCategory: "automation",
     provenance: [{ source: "samurai", commit_sha: "core09", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Legacy jobs never infer Room or authority from Session or delivery metadata." }]

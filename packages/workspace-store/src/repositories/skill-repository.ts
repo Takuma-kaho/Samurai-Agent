@@ -29,6 +29,9 @@ import { readManagedResourceFiles } from "./managed-resource-file-scan";
 import { skillFromRow, skillToRow, skillUsageFromRow } from "./memory-skill-row-codecs";
 import { usageScopeIndexColumns, withUsageScope, type UsageScopeQueryContext } from "./usage-scope";
 import { parse, stringify } from "./serialization";
+import { ManagedResourceScopeTransferError, ManagedResourceVersionConflictError } from "./managed-resource-errors";
+import { WorkspaceFileTransactionCoordinator } from "../transactions/workspace-file-transaction-coordinator";
+import { type ManagedResourceBoundary, SkillRecoveryHandler } from "../transactions/skill-recovery-handler";
 import {
   assertSkillPathMatchesFrontmatter,
   buildSkillIndexEntry,
@@ -44,7 +47,9 @@ import {
 export class SkillRepository {
   constructor(
     private readonly db: Kysely<WorkspaceDb>,
-    private readonly rootDir: string
+    private readonly rootDir: string,
+    private readonly fileTransactions: WorkspaceFileTransactionCoordinator,
+    private readonly recoveryHandler: SkillRecoveryHandler
   ) {}
 
 async saveSkillOptimizationRun(input: SkillOptimizationRun): Promise<SkillOptimizationRun> {
@@ -240,15 +245,132 @@ async saveSkillMarkdown(input: { state: "candidate" | "project"; skillId: string
         ...usageScopeIndexColumns(frontmatter.usage_scope),
         file_path: relativePath,
         frontmatter_json: stringify(frontmatter),
+        resource_version: 1,
         created_at: now,
         updated_at: now
       })
       .execute();
-    return { ...buildSkillIndexEntry(frontmatter), file_path: relativePath };
+    return { ...buildSkillIndexEntry(frontmatter), file_path: relativePath, resource_version: 1 };
   } catch (error) {
     await unlink(absolutePath).catch(() => undefined);
     throw error;
   }
+}
+
+/** Creates an independent Skill projection after checking the source Version
+ * inside the same SQLite transaction that inserts the new projection. */
+async copySkill(input: {
+  source_id: string;
+  target_id: string;
+  target_usage_scope: NonNullable<SkillFrontmatter["usage_scope"]>;
+  expected_source_resource_version: number;
+  /** A Room copy receives this boundary inside the same SQLite transaction.
+   * Explicit Workspace copies deliberately do not retain a source Room. */
+  target_boundary?: ManagedResourceBoundary;
+}): Promise<SkillWithFilePath | undefined> {
+  const source = await this.getSkill(input.source_id);
+  const raw = await this.readSkillMarkdown(input.source_id);
+  if (!source || raw === undefined) return undefined;
+  const parsed = parseSkillMarkdownLocal(raw);
+  const now = nowIso();
+  const sourceRef = {
+    kind: "skill",
+    id: source.id,
+    uri: source.file_path,
+    version: String(source.resource_version),
+    label: source.title
+  };
+  const state = parsed.frontmatter.state === "pinned" ? "project" as const : parsed.frontmatter.state;
+  const target = withUsageScope(SkillFrontmatterSchema.parse({
+    ...parsed.frontmatter,
+    id: input.target_id,
+    state,
+    owner_pinned: false,
+    pinned: false,
+    usage_scope: input.target_usage_scope,
+    source_refs: [...(parsed.frontmatter.source_refs ?? []), sourceRef],
+    last_reviewed_at: now,
+    created_at: now,
+    updated_at: now,
+    content_hash: stableHash(parsed.content)
+  }));
+  const targetPath = path.join("skills", target.state, `${target.id}.md`);
+  const after: SkillWithFilePath = {
+    ...buildSkillIndexEntry(target),
+    file_path: targetPath,
+    resource_version: 1
+  };
+  const targetBoundary = input.target_boundary
+    ? { ...input.target_boundary, resourceCreatedAt: input.target_boundary.resourceCreatedAt ?? now }
+    : undefined;
+  const stagedPath = `${targetPath}.pending-${randomUUID()}`;
+  await mkdir(path.dirname(path.join(this.rootDir, targetPath)), { recursive: true });
+  try {
+    await this.fileTransactions.execute({
+      kind: "skill_copy",
+      targetPath,
+      stagedPath,
+      beforeJson: JSON.stringify({ source_id: source.id, expected_source_resource_version: input.expected_source_resource_version }),
+      afterJson: JSON.stringify(after),
+      stagedContent: this.renderSkillMarkdown(target, parsed.content),
+      commit: async (transaction) => {
+        if (!await this.recoveryHandler.commitCopy(transaction, {
+          sourceId: source.id,
+          expectedSourceVersion: input.expected_source_resource_version,
+          after,
+          ...(targetBoundary ? { targetBoundary } : {})
+        })) throw new Error("skill_copy_version_conflict");
+      },
+      rollback: (transaction) => this.recoveryHandler.rollbackCopy(transaction, after, targetBoundary)
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "skill_copy_version_conflict") {
+      const latest = await this.getSkill(source.id);
+      throw new ManagedResourceVersionConflictError(
+        "skill",
+        source.id,
+        input.expected_source_resource_version,
+        latest?.resource_version ?? source.resource_version
+      );
+    }
+    throw error;
+  }
+  return after;
+}
+
+/** Relocates a Room-scoped Skill and its persisted Room boundary atomically.
+ * A Skill with share history is rejected instead of silently rewriting the
+ * source of those historic shares. */
+async moveSkill(input: {
+  id: string;
+  source_room_id: string;
+  target_room_id: string;
+  expected_resource_version: number;
+}): Promise<SkillWithFilePath | undefined> {
+  if (input.source_room_id === input.target_room_id) {
+    throw new ManagedResourceScopeTransferError("skill", input.id, "source_scope_invalid");
+  }
+  await this.assertSkillWriteUnlocked(input.id);
+  const current = await this.getSkill(input.id);
+  const raw = await this.readSkillMarkdown(input.id);
+  if (!current || raw === undefined) return undefined;
+  const parsed = parseSkillMarkdownLocal(raw);
+  if (parsed.frontmatter.usage_scope?.kind !== "room" || parsed.frontmatter.usage_scope.room_id !== input.source_room_id) {
+    throw new ManagedResourceScopeTransferError("skill", input.id, "source_scope_invalid");
+  }
+  const next = withUsageScope(SkillFrontmatterSchema.parse({
+    ...parsed.frontmatter,
+    usage_scope: { kind: "room", room_id: input.target_room_id },
+    last_reviewed_at: nowIso()
+  }));
+  return this.writeSkillScopeMove({
+    current,
+    frontmatter: next,
+    content: parsed.content,
+    sourceRoomId: input.source_room_id,
+    targetRoomId: input.target_room_id,
+    expectedResourceVersion: input.expected_resource_version
+  });
 }
 
 async listSkills(options: {
@@ -313,41 +435,35 @@ async readSkillMarkdown(id: string): Promise<string | undefined> {
   return readFile(path.join(this.rootDir, skill.file_path), "utf8");
 }
 
-async patchSkill(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string }): Promise<SkillWithFilePath | undefined> {
+async patchSkill(input: {
+  id: string;
+  title?: string;
+  description?: string;
+  tags?: string[];
+  content?: string;
+  pinned?: boolean;
+  usage_scope?: SkillFrontmatter["usage_scope"];
+  expected_resource_version?: number;
+}): Promise<SkillWithFilePath | undefined> {
   await this.assertSkillWriteUnlocked(input.id);
   const current = await this.getSkill(input.id);
   const raw = await this.readSkillMarkdown(input.id);
   if (!current || !raw) return undefined;
   const parsed = parseSkillMarkdownLocal(raw);
-  const now = nowIso();
   const frontmatter = withUsageScope(SkillFrontmatterSchema.parse({
     ...parsed.frontmatter,
     ...(input.title !== undefined ? { title: input.title } : {}),
     ...(input.description !== undefined ? { description: input.description } : {}),
     ...(input.tags !== undefined ? { tags: input.tags } : {}),
-    last_reviewed_at: now
+    ...(input.pinned === undefined ? {} : {
+      pinned: input.pinned,
+      owner_pinned: input.pinned,
+      ...(input.pinned ? { state: "pinned" as const } : parsed.frontmatter.state === "pinned" ? { state: "active" as const } : {})
+    }),
+    ...(input.usage_scope === undefined ? {} : { usage_scope: input.usage_scope }),
+    last_reviewed_at: nowIso()
   }));
-  const markdown = ["---", JSON.stringify(frontmatter, null, 2), "---", (input.content ?? parsed.content).trim(), ""].join("\n");
-  const absolutePath = path.join(this.rootDir, current.file_path);
-  const temporaryPath = `${absolutePath}.tmp-${randomUUID()}`;
-  await writeFile(temporaryPath, markdown, { flag: "wx" });
-  try {
-    await rename(temporaryPath, absolutePath);
-    await this.db.updateTable("skill_index").set({
-      title: frontmatter.title,
-      description: frontmatter.description,
-      tags_json: stringify(frontmatter.tags),
-      required_capabilities_json: stringify(frontmatter.required_capabilities),
-      ...usageScopeIndexColumns(frontmatter.usage_scope),
-      frontmatter_json: stringify(frontmatter),
-      updated_at: now
-    }).where("id", "=", input.id).execute();
-  } catch (error) {
-    await rm(temporaryPath, { force: true });
-    await writeFile(absolutePath, raw).catch(() => undefined);
-    throw error;
-  }
-  return { ...buildSkillIndexEntry(frontmatter), file_path: current.file_path };
+  return this.writeSkillPatch(current, frontmatter, input.content ?? parsed.content, input.expected_resource_version);
 }
 
 async updateSkillState(id: string, state: SkillFrontmatter["state"]): Promise<SkillWithFilePath | undefined> {
@@ -390,6 +506,7 @@ async updateSkillState(id: string, state: SkillFrontmatter["state"]): Promise<Sk
         ...usageScopeIndexColumns(nextFrontmatter.usage_scope),
         file_path: nextPath,
         frontmatter_json: stringify(nextFrontmatter),
+        resource_version: current.resource_version + 1,
         updated_at: now
       })
       .where("id", "=", id)
@@ -402,7 +519,7 @@ async updateSkillState(id: string, state: SkillFrontmatter["state"]): Promise<Sk
   if (nextAbsolutePath !== previousAbsolutePath) {
     await unlink(previousAbsolutePath).catch(() => undefined);
   }
-  return { ...buildSkillIndexEntry(nextFrontmatter), file_path: nextPath };
+  return { ...buildSkillIndexEntry(nextFrontmatter), file_path: nextPath, resource_version: current.resource_version + 1 };
 }
 
 async replaceSkillContent(id: string, content: string): Promise<SkillWithFilePath | undefined> {
@@ -414,9 +531,10 @@ async replaceSkillContent(id: string, content: string): Promise<SkillWithFilePat
   await this.db.updateTable("skill_index").set({
     frontmatter_json: stringify(frontmatter),
     ...usageScopeIndexColumns(frontmatter.usage_scope),
+    resource_version: skill.resource_version + 1,
     updated_at: frontmatter.last_reviewed_at ?? nowIso()
   }).where("id", "=", id).execute();
-  return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
+  return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path, resource_version: skill.resource_version + 1 };
 }
 
 /** Updates only Core 05 metadata; body and support files remain owned by this Skill repository. */
@@ -444,9 +562,10 @@ async patchSkillLearningMetadata(input: {
     required_capabilities_json: stringify(frontmatter.required_capabilities),
     ...usageScopeIndexColumns(frontmatter.usage_scope),
     frontmatter_json: stringify(frontmatter),
+    resource_version: current.resource_version + 1,
     updated_at: now
   }).where("id", "=", input.id).execute();
-  return { ...buildSkillIndexEntry(frontmatter), file_path: current.file_path };
+  return { ...buildSkillIndexEntry(frontmatter), file_path: current.file_path, resource_version: current.resource_version + 1 };
 }
 
 /** Restores a historical Skill body and metadata as a new current Version. */
@@ -486,6 +605,7 @@ async restoreSkillVersionMarkdown(input: { id: string; markdown: string; version
       ...usageScopeIndexColumns(next.usage_scope),
       file_path: nextPath,
       frontmatter_json: stringify(next),
+      resource_version: current.resource_version + 1,
       updated_at: now
     }).where("id", "=", input.id).execute();
   } catch (error) {
@@ -497,7 +617,7 @@ async restoreSkillVersionMarkdown(input: { id: string; markdown: string; version
     throw error;
   }
   if (nextPath !== previousPath) await unlink(previousAbsolutePath).catch(() => undefined);
-  return { ...buildSkillIndexEntry(next), file_path: nextPath };
+  return { ...buildSkillIndexEntry(next), file_path: nextPath, resource_version: current.resource_version + 1 };
 }
 
 async replaceSkillContentIfUnchanged(input: { id: string; expectedContentHash: string; content: string; lockRunId?: string }): Promise<SkillWithFilePath | undefined> {
@@ -514,9 +634,10 @@ async replaceSkillContentIfUnchanged(input: { id: string; expectedContentHash: s
   await this.db.updateTable("skill_index").set({
     frontmatter_json: stringify(frontmatter),
     ...usageScopeIndexColumns(frontmatter.usage_scope),
+    resource_version: skill.resource_version + 1,
     updated_at: frontmatter.last_reviewed_at ?? nowIso()
   }).where("id", "=", input.id).execute();
-  return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path };
+  return { ...buildSkillIndexEntry(frontmatter), file_path: skill.file_path, resource_version: skill.resource_version + 1 };
 }
 
   /** Rebuilds the derived skill_index from validated Workspace markdown. */
@@ -553,10 +674,12 @@ async replaceSkillContentIfUnchanged(input: { id: string; expectedContentHash: s
           continue;
         }
         const previous = existingRows.find((row) => row.id === frontmatter.id);
-        const next = skillToRow(frontmatter, file.relativePath);
+        const next = skillToRow(frontmatter, file.relativePath, previous?.resource_version ?? 1);
         if (previous && sameSkillIndexContent(previous, next)) {
           next.created_at = previous.created_at;
           next.updated_at = previous.updated_at;
+        } else if (previous) {
+          next.resource_version = previous.resource_version + 1;
         }
         desired.set(frontmatter.id, next);
       } catch (error) {
@@ -632,6 +755,113 @@ async replaceSkillContentIfUnchanged(input: { id: string; expectedContentHash: s
 
 private renderSkillMarkdown(frontmatter: SkillFrontmatter, content: string): string {
   return ["---", JSON.stringify(frontmatter, null, 2), "---", content.trim(), ""].join("\n");
+}
+
+/**
+ * Saves a same-path Skill edit through the file/SQLite transaction journal.
+ * `resource_version` is the CAS token; the frontmatter's semantic `version`
+ * remains a user-facing value and is intentionally not repurposed here.
+ */
+private async writeSkillPatch(
+  current: SkillWithFilePath,
+  frontmatter: SkillFrontmatter,
+  content: string,
+  expectedResourceVersion?: number
+): Promise<SkillWithFilePath> {
+  if (expectedResourceVersion !== undefined && expectedResourceVersion !== current.resource_version) {
+    throw new ManagedResourceVersionConflictError("skill", current.id, expectedResourceVersion, current.resource_version);
+  }
+  const after: SkillWithFilePath = {
+    ...buildSkillIndexEntry(frontmatter),
+    file_path: current.file_path,
+    resource_version: current.resource_version + 1
+  };
+  const stagedPath = `${current.file_path}.pending-${randomUUID()}`;
+  try {
+    await this.fileTransactions.execute({
+      kind: "skill_update",
+      targetPath: current.file_path,
+      stagedPath,
+      beforeJson: JSON.stringify(current),
+      afterJson: JSON.stringify(after),
+      stagedContent: this.renderSkillMarkdown(frontmatter, content),
+      commit: async (transaction) => {
+        if (!await this.recoveryHandler.commitUpdate(transaction, { before: current, after })) {
+          throw new Error("skill_update_version_conflict");
+        }
+      },
+      rollback: (transaction) => this.recoveryHandler.rollbackUpdate(transaction, { before: current, after })
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "skill_update_version_conflict") {
+      const latest = await this.getSkill(current.id);
+      throw new ManagedResourceVersionConflictError(
+        "skill",
+        current.id,
+        expectedResourceVersion ?? current.resource_version,
+        latest?.resource_version ?? current.resource_version
+      );
+    }
+    throw error;
+  }
+  return after;
+}
+
+private async writeSkillScopeMove(input: {
+  current: SkillWithFilePath;
+  frontmatter: SkillFrontmatter;
+  content: string;
+  sourceRoomId: string;
+  targetRoomId: string;
+  expectedResourceVersion: number;
+}): Promise<SkillWithFilePath> {
+  if (input.expectedResourceVersion !== input.current.resource_version) {
+    throw new ManagedResourceVersionConflictError("skill", input.current.id, input.expectedResourceVersion, input.current.resource_version);
+  }
+  const after: SkillWithFilePath = {
+    ...buildSkillIndexEntry(input.frontmatter),
+    file_path: input.current.file_path,
+    resource_version: input.current.resource_version + 1
+  };
+  const stagedPath = `${input.current.file_path}.pending-${randomUUID()}`;
+  try {
+    await this.fileTransactions.execute({
+      kind: "skill_scope_move",
+      targetPath: input.current.file_path,
+      stagedPath,
+      beforeJson: JSON.stringify({ resource: input.current, source_room_id: input.sourceRoomId, target_room_id: input.targetRoomId }),
+      afterJson: JSON.stringify(after),
+      stagedContent: this.renderSkillMarkdown(input.frontmatter, input.content),
+      commit: async (transaction) => {
+        const result = await this.recoveryHandler.commitScopeMove(transaction, {
+          before: input.current,
+          after,
+          sourceRoomId: input.sourceRoomId,
+          targetRoomId: input.targetRoomId
+        });
+        if (result !== "ok") throw new Error(`skill_scope_move_${result}`);
+      },
+      rollback: (transaction) => this.recoveryHandler.rollbackScopeMove(transaction, {
+        before: input.current,
+        after,
+        sourceRoomId: input.sourceRoomId,
+        targetRoomId: input.targetRoomId
+      })
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "skill_scope_move_version_conflict") {
+      const latest = await this.getSkill(input.current.id);
+      throw new ManagedResourceVersionConflictError("skill", input.current.id, input.expectedResourceVersion, latest?.resource_version ?? input.current.resource_version);
+    }
+    if (error instanceof Error && error.message.startsWith("skill_scope_move_")) {
+      const reason = error.message.slice("skill_scope_move_".length);
+      if (reason === "boundary_missing" || reason === "boundary_source_mismatch" || reason === "boundary_has_shares") {
+        throw new ManagedResourceScopeTransferError("skill", input.current.id, reason);
+      }
+    }
+    throw error;
+  }
+  return after;
 }
 
 private async assertSkillWriteUnlocked(skillId: string, ownerRunId?: string): Promise<void> {

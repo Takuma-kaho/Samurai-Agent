@@ -24,7 +24,7 @@ export function memoryToRow(frontmatter: MemoryFrontmatter, filePath: string): M
   };
 }
 
-export function skillToRow(frontmatter: SkillFrontmatter, filePath: string): SkillIndexTable {
+export function skillToRow(frontmatter: SkillFrontmatter, filePath: string, resourceVersion: number): SkillIndexTable {
   const now = nowIso();
   return {
     id: frontmatter.id,
@@ -36,6 +36,7 @@ export function skillToRow(frontmatter: SkillFrontmatter, filePath: string): Ski
     ...usageScopeIndexColumns(frontmatter.usage_scope),
     file_path: filePath,
     frontmatter_json: stringify(frontmatter),
+    resource_version: resourceVersion,
     created_at: now,
     updated_at: frontmatter.last_reviewed_at ?? now
   };
@@ -44,7 +45,8 @@ export function skillToRow(frontmatter: SkillFrontmatter, filePath: string): Ski
 export function skillFromRow(row: SkillIndexTable): SkillWithFilePath {
   return {
     ...buildSkillIndexEntry(withUsageScope(parse(row.frontmatter_json))),
-    file_path: row.file_path
+    file_path: row.file_path,
+    resource_version: row.resource_version
   };
 }
 

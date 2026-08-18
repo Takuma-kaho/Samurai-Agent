@@ -5,7 +5,7 @@ import { parse, stringify } from "./serialization";
 import { usageScopeIndexColumns } from "./usage-scope";
 import { withUsageScope } from "./usage-scope";
 
-export function wikiToRow(frontmatter: WikiFrontmatter, filePath: string): WikiIndexTable {
+export function wikiToRow(frontmatter: WikiFrontmatter, filePath: string, resourceVersion: number): WikiIndexTable {
   return {
     id: frontmatter.id,
     slug: frontmatter.slug,
@@ -18,6 +18,7 @@ export function wikiToRow(frontmatter: WikiFrontmatter, filePath: string): WikiI
     ...usageScopeIndexColumns(frontmatter.usage_scope),
     file_path: filePath,
     frontmatter_json: stringify(frontmatter),
+    resource_version: resourceVersion,
     created_at: frontmatter.created_at,
     updated_at: frontmatter.updated_at
   };
@@ -26,14 +27,16 @@ export function wikiToRow(frontmatter: WikiFrontmatter, filePath: string): WikiI
 export function wikiFromRow(row: WikiIndexTable): WikiWithFilePath {
   return {
     ...withUsageScope(parse<WikiFrontmatter>(row.frontmatter_json)),
-    file_path: row.file_path
+    file_path: row.file_path,
+    resource_version: row.resource_version
   };
 }
 
 export function collectionSchemaFromRow(row: CollectionSchemasTable): CollectionSchemaWithFilePath {
   return {
     ...parse(row.schema_json),
-    file_path: row.file_path
+    file_path: row.file_path,
+    resource_version: row.resource_version
   };
 }
 

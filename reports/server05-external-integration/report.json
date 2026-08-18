@@ -1,0 +1,597 @@
+{
+  "feature": "workspace-server-05-external-integration",
+  "status": "INCOMPLETE",
+  "implementation_pass": true,
+  "integration_pass": true,
+  "live_client_pass": false,
+  "three_os_pass": false,
+  "hosted_self_host_pass": false,
+  "complete": false,
+  "generated_at": "2026-08-17T23:14:55.108Z",
+  "source_hash": "8107f1450f56eaa01d6a44548d4a059f8d6e3ec696435946323256e80284cd9d",
+  "source_file_count": 280,
+  "checks": [
+    {
+      "label": "external integration package Store boundary",
+      "passed": true,
+      "duration_ms": 0,
+      "exit_code": 1,
+      "output_tail": "no forbidden direct dependency"
+    },
+    {
+      "label": "runtime MCP Workspace Store boundary",
+      "passed": true,
+      "duration_ms": 0,
+      "exit_code": 1,
+      "output_tail": "no forbidden direct dependency"
+    },
+    {
+      "label": "external Automation operation boundary",
+      "passed": true,
+      "duration_ms": 0,
+      "exit_code": 1,
+      "output_tail": "no forbidden direct dependency"
+    },
+    {
+      "label": "architecture boundaries",
+      "passed": true,
+      "duration_ms": 472,
+      "exit_code": 0,
+      "output_tail": "{\"status\":\"passed\",\"server_direct_store_mutations\":0,\"workspace_server_http_direct_mutations\":0,\"server_runtime_mutation_bypasses\":0,\"adapter_direct_store_mutations\":0,\"adapter_store_dependencies\":0,\"learning_ui_dependencies\":0,\"renderer_store_dependencies\":0}\n"
+    },
+    {
+      "label": "generated operation catalog",
+      "passed": true,
+      "duration_ms": 304,
+      "exit_code": 0,
+      "output_tail": "verified 167 generated domain operation bindings\n"
+    },
+    {
+      "label": "external integration typecheck",
+      "passed": true,
+      "duration_ms": 1083,
+      "exit_code": 0,
+      "output_tail": "\n> @samurai-agent/external-integration@0.1.0 typecheck /Users/kahotakuma/Developer/Samurai-Agent/packages/external-integration\n> tsc -p tsconfig.json --noEmit\n\n"
+    },
+    {
+      "label": "workspace store typecheck",
+      "passed": true,
+      "duration_ms": 3771,
+      "exit_code": 0,
+      "output_tail": "\n> @samurai-agent/workspace-store@0.1.0 typecheck /Users/kahotakuma/Developer/Samurai-Agent/packages/workspace-store\n> tsc -p tsconfig.json --noEmit\n\n"
+    },
+    {
+      "label": "runtime typecheck",
+      "passed": true,
+      "duration_ms": 6672,
+      "exit_code": 0,
+      "output_tail": "\n> @samurai-agent/runtime@0.1.0 typecheck /Users/kahotakuma/Developer/Samurai-Agent/packages/runtime\n> tsc -p tsconfig.json --noEmit --rootDir ../..\n\n"
+    },
+    {
+      "label": "server typecheck",
+      "passed": true,
+      "duration_ms": 7409,
+      "exit_code": 0,
+      "output_tail": "\n> @samurai-agent/server@0.1.0 typecheck /Users/kahotakuma/Developer/Samurai-Agent/apps/server\n> tsc -p tsconfig.json --noEmit\n\n"
+    },
+    {
+      "label": "external integration contract tests",
+      "passed": true,
+      "duration_ms": 2215,
+      "exit_code": 0,
+      "output_tail": "\n RUN  v4.1.10 /Users/kahotakuma/Developer/Samurai-Agent\n\n\n Test Files  3 passed (3)\n      Tests  37 passed (37)\n   Start at  08:14:47\n   Duration  1.74s (transform 697ms, setup 0ms, import 1.10s, tests 1.09s, environment 0ms)\n\n"
+    },
+    {
+      "label": "MCP formal ingress integration",
+      "passed": true,
+      "duration_ms": 5726,
+      "exit_code": 0,
+      "output_tail": "\n RUN  v4.1.10 /Users/kahotakuma/Developer/Samurai-Agent\n\n\n Test Files  2 passed (2)\n      Tests  49 passed (49)\n   Start at  08:14:49\n   Duration  5.33s (transform 1.85s, setup 0ms, import 3.32s, tests 6.14s, environment 0ms)\n\n"
+    },
+    {
+      "label": "tracked diff whitespace",
+      "passed": true,
+      "duration_ms": 77,
+      "exit_code": 0,
+      "output_tail": ""
+    },
+    {
+      "label": "staged diff whitespace",
+      "passed": true,
+      "duration_ms": 7,
+      "exit_code": 0,
+      "output_tail": ""
+    },
+    {
+      "label": "untracked diff whitespace",
+      "passed": true,
+      "duration_ms": 0,
+      "exit_code": 0,
+      "output_tail": "67 untracked files checked"
+    }
+  ],
+  "evidence_matrix": {
+    "clients": {
+      "codex": false,
+      "claude_code": false,
+      "hermes": false
+    },
+    "operating_systems": {
+      "darwin": false,
+      "win32": false,
+      "linux": false
+    },
+    "deployments": {
+      "hosted": false,
+      "self_host": false
+    },
+    "complete": false
+  },
+  "flow_matrix": {
+    "clients": {
+      "codex": {
+        "oauth": false,
+        "mcp": false,
+        "project_room_binding": false,
+        "context_snapshot": false,
+        "read": false,
+        "write": false,
+        "activity_ingest": false,
+        "approval": false
+      },
+      "claude_code": {
+        "oauth": false,
+        "mcp": false,
+        "project_room_binding": false,
+        "context_snapshot": false,
+        "read": false,
+        "write": false,
+        "activity_ingest": false,
+        "approval": false
+      },
+      "hermes": {
+        "oauth": false,
+        "mcp": false,
+        "project_room_binding": false,
+        "context_snapshot": false,
+        "read": false,
+        "write": false,
+        "activity_ingest": false,
+        "approval": false
+      }
+    },
+    "core_clients": {
+      "codex": false,
+      "claude_code": false,
+      "hermes": false
+    },
+    "capture": false,
+    "approval_ui": false,
+    "complete": false
+  },
+  "evidence_issues": [
+    "live_evidence_file_missing"
+  ],
+  "mutation_coverage": {
+    "capabilities": [
+      {
+        "id": "activity_ingest",
+        "label": "Activity Ingest",
+        "terms": [
+          "samurai.activity.ingest"
+        ],
+        "missing": []
+      },
+      {
+        "id": "artifact",
+        "label": "Artifact create/update/restore",
+        "terms": [
+          "artifact.create",
+          "artifact.revise",
+          "artifact.restore_revision"
+        ],
+        "missing": []
+      },
+      {
+        "id": "collection",
+        "label": "Collection create/update",
+        "terms": [
+          "collection.schema.save",
+          "collection.record.create",
+          "collection.patch.apply"
+        ],
+        "missing": []
+      },
+      {
+        "id": "knowledge",
+        "label": "Knowledge create/update",
+        "terms": [
+          "wiki.proposal.create",
+          "wiki.patch"
+        ],
+        "missing": []
+      },
+      {
+        "id": "skill",
+        "label": "Skill create/update",
+        "terms": [
+          "skill.candidate.create",
+          "skill.patch"
+        ],
+        "missing": []
+      },
+      {
+        "id": "fixed_pinned",
+        "label": "fixed/pinned state change",
+        "terms": [
+          "wiki.patch",
+          "skill.patch"
+        ],
+        "missing": []
+      },
+      {
+        "id": "copy_move_promote",
+        "label": "Resource copy/move/promote",
+        "terms": [
+          "resource.copy",
+          "resource.move",
+          "resource.promote"
+        ],
+        "missing": []
+      },
+      {
+        "id": "archive_delete_restore_redact",
+        "label": "Archive/delete/restore/redact",
+        "terms": [
+          "wiki.archive",
+          "collection.record.delete",
+          "resource.redact"
+        ],
+        "missing": []
+      },
+      {
+        "id": "human_change_request",
+        "label": "Policy/Profile/Soul human change request",
+        "terms": [
+          "policy.change.request",
+          "profile.change.request",
+          "soul.change.request"
+        ],
+        "missing": []
+      },
+      {
+        "id": "room_binding",
+        "label": "Room Binding change",
+        "terms": [
+          "samurai.room.binding.change"
+        ],
+        "missing": []
+      }
+    ],
+    "missing": [],
+    "complete": true
+  },
+  "context_coverage": {
+    "required_queries": [
+      "workspace.context.get",
+      "room.view",
+      "wiki.search",
+      "memory.search"
+    ],
+    "missing_queries": [],
+    "missing_fields": [],
+    "complete": true
+  },
+  "corrections": [
+    {
+      "id": "C01",
+      "correction": "実Clientの登録・導入経路",
+      "evidence": "three_client_oauth_mcp_evidence",
+      "status": "incomplete"
+    },
+    {
+      "id": "C02",
+      "correction": "Adapterを実設定・Hook・Session開始へ接続",
+      "evidence": "three_client_adapter_and_hook_evidence",
+      "status": "incomplete"
+    },
+    {
+      "id": "C03",
+      "correction": "Project参照の保持",
+      "evidence": "transport_session_project_mismatch_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C04",
+      "correction": "OAuth本人をSamurai実ログインSessionで確認",
+      "evidence": "login_session=samurai",
+      "status": "incomplete"
+    },
+    {
+      "id": "C05",
+      "correction": "OAuth承認とCode保存の原子化",
+      "evidence": "oauth_atomic_contract_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C06",
+      "correction": "MCP厳密な入力・結果Schema",
+      "evidence": "ajv_input_output_contract_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C07",
+      "correction": "MCP RuntimeからStore直接参照を除去",
+      "evidence": "formal_ingress_and_static_boundary",
+      "status": "complete"
+    },
+    {
+      "id": "C08",
+      "correction": "保存Transaction内のVersion確認",
+      "evidence": "artifact_collection_atomic_version_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C09",
+      "correction": "Cancel/Timeout後の停止と結果不明",
+      "evidence": "abort_and_outcome_unknown_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C10",
+      "correction": "必須書き込みToolの公開",
+      "evidence": "published_mutation_coverage_and_live_write",
+      "status": "incomplete"
+    },
+    {
+      "id": "C11",
+      "correction": "範囲外Automation操作の除外",
+      "evidence": "automation_external_source_static_boundary",
+      "status": "complete"
+    },
+    {
+      "id": "C12",
+      "correction": "Contextを正本の実データから作成",
+      "evidence": "formal_workspace_context_query_and_live_snapshot",
+      "status": "incomplete"
+    },
+    {
+      "id": "C13",
+      "correction": "Context削減順序",
+      "evidence": "context_priority_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C14",
+      "correction": "Context最終本文Hash",
+      "evidence": "context_hash_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C15",
+      "correction": "標準Room初回適用",
+      "evidence": "binding_default_room_live_evidence",
+      "status": "incomplete"
+    },
+    {
+      "id": "C16",
+      "correction": "承認期限の全状態再確認",
+      "evidence": "approval_expiry_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C17",
+      "correction": "承認再利用の完全比較",
+      "evidence": "approval_canonical_input_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C18",
+      "correction": "承認実行後の状態保存と回復",
+      "evidence": "approval_outcome_unknown_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C19",
+      "correction": "承認画面の拒否・影響表示",
+      "evidence": "approval_browser_evidence",
+      "status": "incomplete"
+    },
+    {
+      "id": "C20",
+      "correction": "Captureを本番Hookから接続",
+      "evidence": "authenticated_hook_capture_evidence",
+      "status": "incomplete"
+    },
+    {
+      "id": "C21",
+      "correction": "JSON・自由文のSecret除去",
+      "evidence": "structured_and_text_redaction_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C22",
+      "correction": "Capture Quotaの原子性",
+      "evidence": "concurrent_capture_quota_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C23",
+      "correction": "Retention削除のAudit",
+      "evidence": "retention_audit_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C24",
+      "correction": "not_runの保存",
+      "evidence": "activity_verification_mapping_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C25",
+      "correction": "ConnectorのWorkspace分離",
+      "evidence": "cross_workspace_connector_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C26",
+      "correction": "SemVer互換性",
+      "evidence": "semver_contract_tests",
+      "status": "complete"
+    },
+    {
+      "id": "C27",
+      "correction": "Unit/Integration/Liveの分離",
+      "evidence": "verifier_report_categories",
+      "status": "complete"
+    },
+    {
+      "id": "C28",
+      "correction": "未完成を非0で終了",
+      "evidence": "incomplete_exit_code_2",
+      "status": "complete"
+    },
+    {
+      "id": "C29",
+      "correction": "全要件をEvidenceから機械判定",
+      "evidence": "17_requirements_and_31_corrections",
+      "status": "complete"
+    },
+    {
+      "id": "C30",
+      "correction": "未追跡を含む差分健全性",
+      "evidence": "tracked_staged_untracked_diff_checks",
+      "status": "complete"
+    },
+    {
+      "id": "C31",
+      "correction": "実Client・3OS・Hosted/Self-host証拠",
+      "evidence": "dated_hashed_live_evidence_matrix",
+      "status": "incomplete"
+    }
+  ],
+  "requirements": [
+    {
+      "number": 1,
+      "requirement": "Codex／Claude Code／Hermes",
+      "evidence": "three_real_client_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 2,
+      "requirement": "Native Appと同じRoom認可",
+      "evidence": "formal_ingress_negative_tests",
+      "status": "complete"
+    },
+    {
+      "number": 3,
+      "requirement": "外部AI→Samuraiのみ",
+      "evidence": "architecture_boundary",
+      "status": "complete"
+    },
+    {
+      "number": 4,
+      "requirement": "macOS／Windows／Linux",
+      "evidence": "three_os_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 5,
+      "requirement": "OAuth",
+      "evidence": "oauth_integration_and_client_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 6,
+      "requirement": "第三者Connector",
+      "evidence": "connector_contract_and_sample_test",
+      "status": "incomplete"
+    },
+    {
+      "number": 7,
+      "requirement": "Project→Room固定",
+      "evidence": "binding_integration_and_client_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 8,
+      "requirement": "開始時Context",
+      "evidence": "snapshot_integration_and_client_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 9,
+      "requirement": "5種類の読み取り",
+      "evidence": "formal_query_integration",
+      "status": "incomplete"
+    },
+    {
+      "number": 10,
+      "requirement": "構造化Activity",
+      "evidence": "hook_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 11,
+      "requirement": "任意全文保存",
+      "evidence": "capture_contract_and_retention",
+      "status": "incomplete"
+    },
+    {
+      "number": 12,
+      "requirement": "書き込み・承認",
+      "evidence": "operation_and_approval_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 13,
+      "requirement": "共有設定と個人Grant",
+      "evidence": "oauth_scope_and_workspace_separation",
+      "status": "incomplete"
+    },
+    {
+      "number": 14,
+      "requirement": "Hosted／Self-host",
+      "evidence": "deployment_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 15,
+      "requirement": "自動連携",
+      "evidence": "reconnect_and_dedupe_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 16,
+      "requirement": "最小UI",
+      "evidence": "oauth_and_approval_browser_evidence",
+      "status": "incomplete"
+    },
+    {
+      "number": 17,
+      "requirement": "完成証明",
+      "evidence": "full_evidence_matrix",
+      "status": "incomplete"
+    }
+  ],
+  "unverified": [
+    "live_client_unverified:codex",
+    "live_client_unverified:claude_code",
+    "live_client_unverified:hermes",
+    "operating_system_unverified:darwin",
+    "operating_system_unverified:win32",
+    "operating_system_unverified:linux",
+    "deployment_unverified:hosted",
+    "deployment_unverified:self_host",
+    "correction_unresolved:C01",
+    "correction_unresolved:C02",
+    "correction_unresolved:C04",
+    "correction_unresolved:C10",
+    "correction_unresolved:C12",
+    "correction_unresolved:C15",
+    "correction_unresolved:C19",
+    "correction_unresolved:C20",
+    "correction_unresolved:C31",
+    "live_evidence_file_missing"
+  ]
+}

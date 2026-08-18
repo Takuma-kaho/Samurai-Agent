@@ -260,6 +260,37 @@ const externalAppConnectionWriteSample = {
   rollbackPoint: sessionlessAutomationJobWriteSample.rollbackPoint,
   activity: sessionlessAutomationJobWriteSample.activity
 };
+const humanChangeRequestActivitySample = {
+  id: "activity-human-change-schema-matrix",
+  workspace_id: "schema-matrix-workspace",
+  room_id: "schema-matrix-room",
+  principal: { kind: "human" as const, participant_id: "human:schema-matrix" },
+  source: { kind: "host" as const },
+  status: "completed" as const,
+  idempotency_key: "human-change-request:schema-matrix",
+  instruction_summary: "Request a human-owned change.",
+  result_summary: "Human review is required before any change is applied.",
+  verification: [{
+    id: "verification-human-change-schema-matrix",
+    kind: "assertion",
+    status: "passed",
+    summary: "The human-owned change request was recorded.",
+    source_operation_id: "policy.change.request",
+    recorded_at: "2026-01-01T00:00:00.000Z"
+  }],
+  domain_operation_ids: ["policy.change.request"],
+  provenance: { kind: "trusted_context" as const, source_id: "schema-matrix", recorded_at: "2026-01-01T00:00:00.000Z" },
+  created_at: "2026-01-01T00:00:00.000Z",
+  updated_at: "2026-01-01T00:00:00.000Z",
+  finalized_at: "2026-01-01T00:00:00.000Z"
+};
+const humanChangeRequestOutputSample = (requestKind: "policy" | "profile" | "soul") => ({
+  request_kind: requestKind,
+  status: "requested" as const,
+  proposed_change_summary: "Request human review of this change.",
+  affected_fields: ["display_name"],
+  activity: humanChangeRequestActivitySample
+});
 const semanticValidSamples = new Map<string, unknown>([
   ["activity.history.list:output", {
     items: [{
@@ -305,7 +336,11 @@ const semanticValidSamples = new Map<string, unknown>([
     "external_app.connection.create",
     "external_app.connection.revoke",
     "external_app.connection.update_scope"
-  ].map((operationId) => [`${operationId}:output`, externalAppConnectionWriteSample] as const)
+  ].map((operationId) => [`${operationId}:output`, externalAppConnectionWriteSample] as const),
+  ...(["policy", "profile", "soul"] as const).map((requestKind) => [
+    `${requestKind}.change.request:output`,
+    humanChangeRequestOutputSample(requestKind)
+  ] as const)
 ]);
 
 await main();
@@ -315,8 +350,8 @@ async function main(): Promise<void> {
   const inputUsage = assertInputFieldUsage();
   const expectedOperations = [...manifest.operations].sort((left, right) => left.id.localeCompare(right.id));
   const expectedById = new Map(expectedOperations.map((operation) => [operation.id, operation]));
-  assert.equal(expectedOperations.length, 158, "schema_manifest_operation_count_mismatch:158");
-  assert.equal(definitions.length, 158, "schema_matrix_definition_count_mismatch:158");
+  assert.equal(expectedOperations.length, 167, "schema_manifest_operation_count_mismatch:167");
+  assert.equal(definitions.length, 167, "schema_matrix_definition_count_mismatch:167");
   assert.deepEqual([...expectedById.keys()], definitions.map((definition) => definition.id), "schema_manifest_definition_id_set_mismatch");
 
   const counters = { input: emptyCounter(), output: emptyCounter() };
@@ -413,18 +448,18 @@ function validateManifest(value: StaticSchemaManifest): void {
   assert.equal(value.review_policy.canonical_reference_key, "$schema_ref", "schema_manifest_catalog_reference_key_invalid");
   assert.equal(value.review_policy.review_unit, "canonical_schema_node", "schema_manifest_review_unit_invalid");
   assert.equal(value.review_policy.recursive_json_value, "global_json_value", "schema_manifest_recursive_json_value_invalid");
-  assert.equal(value.review.required_operations, 158, "schema_manifest_required_operation_count_invalid");
+  assert.equal(value.review.required_operations, 167, "schema_manifest_required_operation_count_invalid");
   assert.equal(value.operations.length, value.review.required_operations, "schema_manifest_operation_count_mismatch");
   const commands = value.operations.filter((operation) => operation.kind === "command").length;
   const queries = value.operations.filter((operation) => operation.kind === "query").length;
-  assert.equal(commands, 132, "schema_manifest_command_count_mismatch");
-  assert.equal(queries, 26, "schema_manifest_query_count_mismatch");
-  assert.equal(value.review.reviewed_operations, 158, "schema_manifest_reviewed_operation_count_mismatch");
+  assert.equal(commands, 139, "schema_manifest_command_count_mismatch");
+  assert.equal(queries, 28, "schema_manifest_query_count_mismatch");
+  assert.equal(value.review.reviewed_operations, 167, "schema_manifest_reviewed_operation_count_mismatch");
   assert.equal(value.review.unreviewed_operations, 0, "schema_manifest_unreviewed_operations");
-  assert.equal(value.review.required_endpoints, 316, "schema_manifest_required_endpoint_count_invalid");
-  assert.equal(value.review.reviewed_endpoints, 316, "schema_manifest_reviewed_endpoint_count_invalid");
+  assert.equal(value.review.required_endpoints, 334, "schema_manifest_required_endpoint_count_invalid");
+  assert.equal(value.review.reviewed_endpoints, 334, "schema_manifest_reviewed_endpoint_count_invalid");
   assert.equal(value.review.unreviewed_endpoints, 0, "schema_manifest_unreviewed_endpoints");
-  assert.equal(value.review.required_schema_nodes, 907, "schema_catalog_required_node_count_invalid");
+  assert.equal(value.review.required_schema_nodes, 937, "schema_catalog_required_node_count_invalid");
   assert.equal(value.review.reviewed_schema_nodes, value.review.required_schema_nodes, "schema_catalog_reviewed_node_count_invalid");
   assert.equal(value.review.unreviewed_schema_nodes, 0, "schema_catalog_unreviewed_nodes");
   assert.equal(value.global_payload_limits.review, "reviewed", "schema_manifest_global_limit_unreviewed");

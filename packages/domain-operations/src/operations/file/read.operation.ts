@@ -25,7 +25,8 @@ const fileRead = defineQuery<FileReadPorts>()({
   "description": "Read a file inside the local workspace.",
   "sources": [
     "provider_tool_call",
-    "runtime_api"
+  "runtime_api",
+  "external_app"
   ],
   "effect": "read_only",
   "idempotency": "none",

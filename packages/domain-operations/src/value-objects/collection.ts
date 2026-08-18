@@ -5,7 +5,12 @@ import { surfaceRenderSpecSchema } from "./surface-render.js";
 import { runtimeWriteValueSchema } from "./runtime-write.js";
 import { chatTurnValueSchema } from "./chat.js";
 
-export const storedCollectionSchema = CollectionSchemaSchema.extend({ file_path: z.string().min(1) }).strict();
+export const storedCollectionSchema = CollectionSchemaSchema.extend({
+  file_path: z.string().min(1),
+  // This is the optimistic-concurrency version maintained by Workspace Store,
+  // distinct from the user-facing Collection schema version string.
+  resource_version: z.number().int().positive().optional()
+}).strict();
 export const storedCollectionRecordSchema = CollectionRecordSchema.extend({ file_path: z.string().min(1) }).strict();
 export const collectionSchemaWriteValueSchema = runtimeWriteValueSchema(storedCollectionSchema);
 export const collectionRecordWriteValueSchema = runtimeWriteValueSchema(storedCollectionRecordSchema);

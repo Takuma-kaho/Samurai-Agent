@@ -21,7 +21,7 @@ interface SearchResult {
   session_id?: string;
 }
 type MemoryWithFilePath = MemoryFrontmatter & { file_path: string };
-type WikiWithFilePath = WikiFrontmatter & { file_path: string };
+type WikiWithFilePath = WikiFrontmatter & { file_path: string; resource_version: number };
 type SkillWithFilePath = {
   id: string;
   title: string;
@@ -33,8 +33,10 @@ type SkillWithFilePath = {
   owner_pinned: boolean;
   frontmatter: SkillFrontmatter;
   file_path: string;
+  resource_version: number;
+  updated_at?: string;
 };
-type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string };
+type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string; resource_version?: number; updated_at?: string };
 type CollectionRecordWithFilePath = Omit<CollectionRecord, "version"> & { version: number; file_path: string };
 
 /** Narrow adapter exposed to Query services; no WorkspaceStore mutation API crosses this boundary. */
@@ -54,12 +56,12 @@ export interface SearchReadStore {
 }
 
 export interface SessionSearchResult { kind: "session" | "message" | "artifact" | "audit"; id: string; title: string; summary: string; session_id?: string }
-export interface MemorySearchResult { id: string; topic: string; state: "session" | "provisional" | "active" | "sensitive" | "topic"; file_path: string }
-export interface WikiSearchResult { id: string; slug: string; title: string; file_path: string }
-export interface SkillSearchResult { id: string; title: string; description: string; tags: string[]; file_path: string }
+export interface MemorySearchResult { id: string; topic: string; state: "session" | "provisional" | "active" | "sensitive" | "topic"; file_path: string; pinned?: boolean; version?: string; updated_at?: string }
+export interface WikiSearchResult { id: string; slug: string; title: string; file_path: string; pinned?: boolean; version: number; updated_at?: string }
+export interface SkillSearchResult { id: string; title: string; description: string; tags: string[]; file_path: string; pinned?: boolean; version: number; updated_at?: string }
 export type CollectionSearchResult =
-  | { kind: "collection_schema"; id: string; file_path: string }
-  | { kind: "collection_record"; collection_id: string; id: string; file_path: string; summary: string; data: Record<string, JsonValue> };
+  | { kind: "collection_schema"; id: string; file_path: string; version: number; updated_at?: string }
+  | { kind: "collection_record"; collection_id: string; id: string; file_path: string; version: number; updated_at: string; summary: string; data: Record<string, JsonValue> };
 
 export function createSearchReadStore(store: SearchReadStore): SearchReadStore {
   return Object.freeze<SearchReadStore>({
@@ -108,9 +110,9 @@ export class SearchDomainService {
     return allowed;
   }
 
-  async searchMemory(context: TrustedDomainContext, query: string, limit: number): Promise<MemorySearchResult[]> {
+  async searchMemory(context: TrustedDomainContext, query: string, limit: number, offset = 0): Promise<MemorySearchResult[]> {
     const access = await this.resolveAccess(context);
-    const candidates = await this.store.searchMemory(query, limit, {
+    const candidates = await this.store.searchMemory(query, pageFetchLimit(limit, offset), {
       includeArchived: false,
       ...(access.activityContext ? { activityContext: access.activityContext } : {}),
       ...await this.resourceCandidateOptions(access, "memory")
@@ -118,32 +120,33 @@ export class SearchDomainService {
     const allowed = await this.filterResources(access, candidates, "memory", (item) => item.id);
     return allowed
       .filter((item): item is typeof item & { state: Exclude<typeof item.state, "archived"> } => item.state !== "archived")
-      .map((item) => ({ id: item.id, topic: item.topic, state: item.state, file_path: item.file_path }));
+      .map((item) => ({ id: item.id, topic: item.topic, state: item.state, file_path: item.file_path, ...(item.pinned !== undefined ? { pinned: item.pinned } : {}), ...(item.version ? { version: item.version } : {}), ...(item.updated_at ? { updated_at: item.updated_at } : {}) }))
+      .slice(offset, offset + limit);
   }
 
-  async searchWiki(context: TrustedDomainContext, query: string, limit: number): Promise<WikiSearchResult[]> {
+  async searchWiki(context: TrustedDomainContext, query: string, limit: number, offset = 0): Promise<WikiSearchResult[]> {
     const access = await this.resolveAccess(context);
-    const candidates = await this.store.searchWiki(query, limit, {
+    const candidates = await this.store.searchWiki(query, pageFetchLimit(limit, offset), {
       activeOnly: true,
       ...(access.activityContext ? { activityContext: access.activityContext } : {}),
       ...await this.resourceCandidateOptions(access, "wiki")
     });
     const allowed = await this.filterResources(access, candidates, "wiki", (item) => item.id);
-    return allowed.map((item) => ({ id: item.id, slug: item.slug, title: item.title, file_path: item.file_path }));
+    return allowed.map((item) => ({ id: item.id, slug: item.slug, title: item.title, file_path: item.file_path, ...(item.pinned !== undefined ? { pinned: item.pinned } : {}), version: item.resource_version, ...(item.updated_at ? { updated_at: item.updated_at } : {}) })).slice(offset, offset + limit);
   }
 
-  async searchSkills(context: TrustedDomainContext, query: string, limit: number): Promise<SkillSearchResult[]> {
+  async searchSkills(context: TrustedDomainContext, query: string, limit: number, offset = 0): Promise<SkillSearchResult[]> {
     const access = await this.resolveAccess(context);
-    const candidates = await this.store.searchSkills(query, limit, {
+    const candidates = await this.store.searchSkills(query, pageFetchLimit(limit, offset), {
       states: ["active", "pinned", "project"],
       ...(access.activityContext ? { activityContext: access.activityContext } : {}),
       ...await this.resourceCandidateOptions(access, "skill")
     });
     const allowed = await this.filterResources(access, candidates, "skill", (item) => item.id);
-    return allowed.map((item) => ({ id: item.id, title: item.title, description: item.description, tags: item.tags, file_path: item.file_path }));
+    return allowed.map((item) => ({ id: item.id, title: item.title, description: item.description, tags: item.tags, file_path: item.file_path, pinned: item.frontmatter.pinned || item.owner_pinned || item.state === "pinned", version: item.resource_version, ...(item.updated_at ? { updated_at: item.updated_at } : item.frontmatter.updated_at ? { updated_at: item.frontmatter.updated_at } : {}) })).slice(offset, offset + limit);
   }
 
-  async searchCollections(context: TrustedDomainContext, collectionId: string | undefined, query: string, limit: number): Promise<CollectionSearchResult[]> {
+  async searchCollections(context: TrustedDomainContext, collectionId: string | undefined, query: string, limit: number, offset = 0): Promise<CollectionSearchResult[]> {
     const access = await this.resolveAccess(context);
     const schemaCandidateAccess = await this.authorization.resourceCandidateAccess(access.principal, access.roomId, "collection_schema");
     const schemas = collectionId
@@ -156,10 +159,14 @@ export class SearchDomainService {
       if (!await this.resourceAllowed(access, "collection_schema", schema.id)) continue;
       const schemaMatches = !normalized || `${schema.id} ${JSON.stringify(schema.labels)} ${JSON.stringify(schema.descriptions)}`.toLowerCase().includes(normalized);
       if (schemaMatches) {
-        results.push({ kind: "collection_schema", id: schema.id, file_path: schema.file_path });
+        const resourceVersion = schema.resource_version;
+        if (typeof resourceVersion !== "number" || !Number.isInteger(resourceVersion) || resourceVersion <= 0) {
+          throw new Error(`collection_schema_resource_version_missing:${schema.id}`);
+        }
+        results.push({ kind: "collection_schema", id: schema.id, file_path: schema.file_path, version: resourceVersion, ...(schema.updated_at ? { updated_at: schema.updated_at } : {}) });
       }
       if (!collectionId) {
-        if (results.length >= limit) break;
+        if (results.length >= offset + limit) break;
         continue;
       }
       const records = await this.store.listCollectionRecords(schema.id, recordCandidateAccess);
@@ -167,12 +174,12 @@ export class SearchDomainService {
         const recordBoundaryId = collectionRecordBoundaryId(record.collection_id, record.id);
         if (!await this.resourceAllowed(access, "collection_record", recordBoundaryId)) continue;
         if (normalized && !JSON.stringify(record.data).toLowerCase().includes(normalized)) continue;
-        results.push({ kind: "collection_record", collection_id: record.collection_id, id: record.id, file_path: record.file_path, summary: JSON.stringify(record.data).slice(0, 180), data: record.data });
-        if (results.length >= limit) break;
+        results.push({ kind: "collection_record", collection_id: record.collection_id, id: record.id, file_path: record.file_path, version: record.version, updated_at: record.updated_at, summary: JSON.stringify(record.data).slice(0, 180), data: record.data });
+        if (results.length >= offset + limit) break;
       }
-      if (results.length >= limit) break;
+      if (results.length >= offset + limit) break;
     }
-    return results.slice(0, limit);
+    return results.slice(offset, offset + limit);
   }
 
   private async resolveAccess(context: TrustedDomainContext): Promise<SearchAccess> {
@@ -288,6 +295,10 @@ export class SearchDomainService {
     );
     return candidateAccess;
   }
+}
+
+function pageFetchLimit(limit: number, offset: number): number {
+  return Math.min(10_200, Math.max(1, Math.trunc(limit) + Math.max(0, Math.trunc(offset))));
 }
 
 export function collectionRecordBoundaryId(collectionId: string, recordId: string): string {

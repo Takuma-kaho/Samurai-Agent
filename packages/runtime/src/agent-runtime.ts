@@ -263,6 +263,8 @@ import { buildMemoryFrontmatter, createRoomTopicMemory, createTopicMemory, retri
 import { builtinSurfaceRendererRegistryEntries, createSurfaceRenderSpec, negotiateSurfaceRenderSpec, type MessageSubmitOperation, type RuntimeEventSink, type SurfaceOperation, type SurfaceOperationDispatchPlan, type SurfaceOperationResultEnvelope, type SurfaceOperationResultKind, type SurfaceRenderKind, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   CollectionRecordVersionConflictError,
+  ManagedResourceScopeTransferError,
+  ManagedResourceVersionConflictError,
   type ArchiveMemoryResult,
   type AutomationRunRecord,
   type CollectionRecordResolution,
@@ -333,6 +335,11 @@ import { RoomResourceCatalog } from "./commands/services/room-resource-catalog";
 import { ActivityIngestService } from "./activity/activity-ingest-service";
 import { ActivityHistoryQueryService } from "./activity/activity-history-query-service";
 import { ActivityHistoryDomainService } from "./commands/services/activity-history-domain-service";
+import { ResourceVersionDomainService } from "./commands/services/resource-version-domain-service";
+import { WorkspaceContextDomainService } from "./commands/services/workspace-context-domain-service";
+import { HumanChangeRequestDomainService } from "./commands/services/human-change-request-domain-service";
+import { ResourceTransferDomainService } from "./commands/services/resource-transfer-domain-service";
+import { ResourceRedactionDomainService } from "./commands/services/resource-redaction-domain-service";
 import { ExternalAppContextResolver } from "./external-app/external-app-context-resolver";
 import { ExternalAppIngress } from "./external-app/external-app-ingress";
 import { ReferenceExternalAppAdapter } from "./external-app/reference-adapter";
@@ -493,6 +500,13 @@ interface RecordedMutationInput<TResource, TExtra extends Record<string, unknown
    * against the current Room before a filesystem or index mutation can run.
    */
   boundaryResourceRefs?: ResourceRef[];
+  /** Used only by an operation that persists its Room boundary in the same
+   * resource transaction, or explicitly creates Workspace-scoped Knowledge. */
+  resultResourceBoundaryMode?: "managed_by_operation";
+  /** A scope move atomically replaces the source Resource's Room boundary.
+   * Its source ref must be checked before the write, but must not be
+   * re-registered against the old Room after that write. */
+  skipPostMutationTargetBoundaryCheck?: boolean;
   /** Core08 Resource writes also leave durable Activity/Change/Usage evidence. */
   core08Evidence?: {
     changeType: WorkspaceChangeRecord["change_type"];
@@ -693,6 +707,9 @@ export interface TrustedDomainRuntimeContext {
   deadlineAt?: number;
   /** Stable key selected by the trusted ingress for retry-safe external work. */
   idempotencyKey?: string;
+  /** The active External App Connection's server-loaded Room allow-list.
+   * Public command input never controls this field. */
+  externalAllowedRoomIds?: readonly string[];
 }
 
 /** Actors that the Runtime can assign without consulting a user payload. */
@@ -1022,6 +1039,11 @@ export class AgentRuntime {
   private readonly roomAuthorizationService: RoomAuthorizationService;
   private readonly activityIngest: ActivityIngestService;
   private readonly activityHistoryDomainService: ActivityHistoryDomainService;
+  private readonly resourceVersionDomainService: ResourceVersionDomainService;
+  private readonly workspaceContextDomainService: WorkspaceContextDomainService;
+  private readonly humanChangeRequestDomainService: HumanChangeRequestDomainService;
+  private readonly resourceTransferDomainService: ResourceTransferDomainService;
+  private readonly resourceRedactionDomainService: ResourceRedactionDomainService;
   private readonly resourceMutationActivity: ResourceMutationActivityService;
   private readonly learningEvidenceAssembler: LearningEvidenceAssembler;
   /** Identity cache only for an already live-checked pre-Core 06 Run. */
@@ -1119,6 +1141,23 @@ export class AgentRuntime {
     this.activityIngest = new ActivityIngestService(this.store, this.roomAuthorizationService);
     this.activityHistoryDomainService = new ActivityHistoryDomainService(
       new ActivityHistoryQueryService(this.store, this.roomAuthorizationService),
+      (context) => this.resourceMutationActivityContext(context)
+    );
+    this.resourceVersionDomainService = new ResourceVersionDomainService({
+      listArtifactRevisions: (artifactId) => this.store.listArtifactRevisions(artifactId),
+      getCollectionSchema: (collectionId) => this.store.getCollectionSchema(collectionId),
+      getCollectionRecord: (collectionId, recordId) => this.store.getCollectionRecord(collectionId, recordId),
+      getWiki: (id) => this.store.getWiki(id),
+      getSkill: (id) => this.store.getSkill(id),
+      getMemory: (id) => this.store.getMemory(id)
+    }, this.roomAuthorizationService);
+    this.workspaceContextDomainService = new WorkspaceContextDomainService({
+      getRoom: (id) => this.store.getRoom(id),
+      getWorkspaceContext: () => this.store.getWorkspaceContext(),
+      getRoomContext: (roomId) => this.store.getRoomContext(roomId)
+    }, this.roomAuthorizationService);
+    this.humanChangeRequestDomainService = new HumanChangeRequestDomainService(
+      this.activityIngest,
       (context) => this.resourceMutationActivityContext(context)
     );
     this.resourceMutationActivity = new ResourceMutationActivityService(this.store, this.activityIngest);
@@ -1632,13 +1671,18 @@ export class AgentRuntime {
         get: (id) => this.store.getWiki(id),
         readContent: (id) => this.store.readWikiContent(id),
         save: (record, content) => this.store.saveWikiPage(record, content),
+        copy: (input) => this.store.copyWikiPage(input),
+        move: (input) => this.store.moveWikiPage(input),
         update: (input) => this.store.updateWikiPage(input),
-        setState: (id, state) => this.store.setWikiState(id, state),
+        setState: (id, state, expectedResourceVersion) => this.store.setWikiState(id, state, expectedResourceVersion),
         reindex: () => this.store.reindexWiki(),
         defaultOutputLocale: async () => (await this.store.getSettings()).output_locale,
         runMutation: (input) => runWebMutation(input),
         createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
-        requestError: (code, message) => new RuntimeRequestError(code, message)
+        requestError: (code, message) => new RuntimeRequestError(code, message),
+        mapWriteError: (error) => error instanceof ManagedResourceVersionConflictError || error instanceof ManagedResourceScopeTransferError
+          ? new RuntimeRequestError("conflict", error.message)
+          : error instanceof Error ? error : new Error(String(error))
       }
     });
     this.automationDomainService = new AutomationDomainService({
@@ -1770,6 +1814,8 @@ export class AgentRuntime {
         getSkill: (id) => this.store.getSkill(id),
         readMarkdown: (id) => this.store.readSkillMarkdown(id),
         patchSkill: (input) => this.store.patchSkill(input),
+        copySkill: (input) => this.store.copySkill(input),
+        moveSkill: (input) => this.store.moveSkill(input),
         updateState: (id, state) => this.store.updateSkillState(id, state),
         saveMarkdown: (input) => this.store.saveSkillMarkdown(input),
         listSupportFiles: (id) => this.store.listSkillSupportFiles(id),
@@ -1779,9 +1825,22 @@ export class AgentRuntime {
         runMutation: (input) => runWebMutation(input),
         createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
         requestError: (code, message) => new RuntimeRequestError(code, message),
+        mapWriteError: (error) => error instanceof ManagedResourceVersionConflictError || error instanceof ManagedResourceScopeTransferError
+          ? new RuntimeRequestError("conflict", error.message)
+          : error instanceof Error ? error : new Error(String(error)),
         contract: (id) => requireDomainCommandEntry(id)
       },
       conflictError: (message) => new RuntimeRequestError("conflict", message)
+    });
+    this.resourceTransferDomainService = new ResourceTransferDomainService({
+      wiki: this.wikiDomainService,
+      skill: this.skillDomainService,
+      roomAuthorization: this.roomAuthorizationService
+    });
+    this.resourceRedactionDomainService = new ResourceRedactionDomainService({
+      wiki: this.wikiDomainService,
+      skill: this.skillDomainService,
+      roomAuthorization: this.roomAuthorizationService
     });
     this.conversationDomainService = new ConversationDomainService({
       createSession: (context, input) => {
@@ -1883,10 +1942,10 @@ export class AgentRuntime {
       mutation: {
         getSchema: (id) => this.store.getCollectionSchema(id),
         saveSchema: (schema) => this.store.saveCollectionSchema(schema),
-        updateSchema: (schema) => this.store.updateCollectionSchema(schema),
+        updateSchema: (schema, expectedResourceVersion) => this.store.updateCollectionSchema(schema, expectedResourceVersion),
         saveRecord: (record) => this.store.saveCollectionRecord(record),
         getRecord: (collectionId, recordId) => this.store.getCollectionRecord(collectionId, recordId),
-        deleteRecord: (collectionId, recordId) => this.store.deleteCollectionRecord(collectionId, recordId),
+        deleteRecord: (collectionId, recordId, expectedVersion) => this.store.deleteCollectionRecord(collectionId, recordId, expectedVersion),
         applyRecordPatch: (input) => this.store.applyCollectionRecordPatch(input),
         mapPatchError: (error) => error instanceof CollectionRecordVersionConflictError
           ? new RuntimeRequestError("conflict", error.message, resourceVersionConflictPayload(error))
@@ -2003,7 +2062,12 @@ export class AgentRuntime {
       wikiDomainService: this.wikiDomainService,
       searchDomainService,
       roomAgentDomainService: this.roomAgentDomainService,
-      activityHistoryDomainService: this.activityHistoryDomainService
+      activityHistoryDomainService: this.activityHistoryDomainService,
+      resourceVersionDomainService: this.resourceVersionDomainService,
+      workspaceContextDomainService: this.workspaceContextDomainService,
+      humanChangeRequestDomainService: this.humanChangeRequestDomainService,
+      resourceTransferDomainService: this.resourceTransferDomainService,
+      resourceRedactionDomainService: this.resourceRedactionDomainService
     }));
     this.externalAssistProviders = normalizeExternalAssistProviders(externalAssistProvider);
     this.contextPreviewAdapter = new WorkspaceContextPreviewAdapter(this.store, {
@@ -4337,9 +4401,9 @@ export class AgentRuntime {
    * credential surface; a real transport must authenticate before it reaches
    * this boundary.
    */
-  createExternalAppIngress(): ExternalAppIngress {
+  createExternalAppIngress(workspaceId = "workspace"): ExternalAppIngress {
     const resolver = new ExternalAppContextResolver({
-      workspaceId: "workspace",
+      workspaceId,
       connections: {
         getExternalAppConnectionByConnector: (input) => this.store.getExternalAppConnectionByConnector(input)
       },
@@ -4353,6 +4417,22 @@ export class AgentRuntime {
       },
       activityIngest: this.activityIngest
     });
+  }
+
+  /** Room authorization adapter for the external-integration HTTP/MCP
+   * boundary. It reuses the same service as Native App and Core09. */
+  externalIntegrationRoomAuthorization(): {
+    assertRoom(principal: { kind: "human" | "agent"; participantId?: string; agentId?: string; requestedByParticipantId?: string }, roomId: string, action: "read" | "edit" | "execute" | "manage_settings"): Promise<void>;
+  } {
+    return {
+      assertRoom: (principal, roomId, action) => this.roomAuthorizationService.assertRoom(
+        principal.kind === "human"
+          ? { kind: "human", participantId: principal.participantId ?? "" }
+          : { kind: "agent", agentId: principal.agentId ?? "", requestedByParticipantId: principal.requestedByParticipantId ?? "" },
+        roomId,
+        action
+      )
+    };
   }
 
   /** Fixture-only proof of the Core09 boundary; this is not a transport protocol. */
@@ -4402,7 +4482,10 @@ export class AgentRuntime {
       throw new RuntimeRequestError("forbidden", `domain_query_source_not_allowed:${query.id}:${inputSource}`);
     }
     const payload = jsonDefinedRecord(input.payload === undefined ? {} : input.payload);
-    assertNoTrustedContextPayloadFields(payload);
+    // Workspace startup Context names its target Room in the public Query DTO
+    // so the contract is self-describing. The handler separately requires it
+    // to equal the already-authorized trusted Room; it never becomes authority.
+    assertNoTrustedContextPayloadFields(payload, query.id === runtimeOperationIds.workspaceContextGet ? ["room_id"] : []);
     const inputIssue = validateDomainQueryInput(query, payload);
     if (inputIssue) {
       throw new RuntimeRequestError("validation", `domain_query_input_invalid:${query.id}:${inputIssue.path}:${inputIssue.message}`);
@@ -4980,8 +5063,15 @@ export class AgentRuntime {
     trusted: TrustedDomainRuntimeContext = {},
     operationId?: string
   ): Promise<TrustedDomainContext> {
-    assertNoTrustedContextPayloadFields(payload, operationId === runtimeOperationIds.externalAppConnectionCreate ? ["app_id", "connector_id"] : []);
-    const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey, roomId: trustedRoomId, sessionRef, source } = trusted;
+    assertNoTrustedContextPayloadFields(
+      payload,
+      operationId === runtimeOperationIds.externalAppConnectionCreate
+        ? ["app_id", "connector_id"]
+        : operationId === runtimeOperationIds.workspaceContextGet
+          ? ["room_id"]
+          : []
+    );
+    const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey, roomId: trustedRoomId, sessionRef, source, externalAllowedRoomIds } = trusted;
     assertTrustedRuntimeContextActive({ signal, deadlineAt });
     const actorIdentity = trustedActorIdentityForSource(inputSource);
     if (trusted.actorIdentity !== undefined && trusted.actorIdentity !== actorIdentity) {
@@ -5044,6 +5134,7 @@ export class AgentRuntime {
       ...(source ? { source } : {}),
       ...(runId ? { runId } : {}),
       ...(envelopeId ? { envelopeId } : {}),
+      ...(inputSource === "external_app" && externalAllowedRoomIds ? { externalAllowedRoomIds: [...new Set(externalAllowedRoomIds)] } : {}),
       ...(surfaceOperation ? { surfaceOperation } : {}),
       ...(signal ? { signal } : {}),
       ...(deadlineAt !== undefined ? { deadlineAt } : {}),
@@ -9206,9 +9297,9 @@ export class AgentRuntime {
       ], trustedContext, undefined);
       const execution = await input.execute(operation, activityScope?.activity);
       await this.ensureRecordedMutationResourceAccessBoundaries([
-        ...(input.targetResourceRefs ?? []),
+        ...(input.skipPostMutationTargetBoundaryCheck ? [] : input.targetResourceRefs ?? []),
         ...(input.boundaryResourceRefs ?? []),
-        execution.ref
+        ...(input.resultResourceBoundaryMode === "managed_by_operation" ? [] : [execution.ref])
       ], trustedContext, execution.resource);
       operation.status = "completed";
       operation.result_ref = execution.ref;

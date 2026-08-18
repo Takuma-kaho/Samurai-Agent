@@ -79,7 +79,12 @@ export class FileDomainService {
         return undefined;
       }
     }))).filter((entry): entry is DirectoryEntry => entry !== undefined);
-    return { resource: { path: workspacePath.relativePath, entries } };
+    return {
+      resource: {
+        path: workspacePath.relativePath,
+        entries
+      }
+    };
   }
 
   async inspectFile(input: { path: string }): Promise<{ resource: FileResource }> {

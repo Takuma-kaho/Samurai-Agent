@@ -73,7 +73,32 @@ describe("workspace store", () => {
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
-    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
+  });
+
+  it("persists human-owned Workspace and Room startup Context", async () => {
+    const store = await createTempStore();
+    const roomId = (await store.getSettings()).default_room_id!;
+    await store.patchSettings({
+      workspace_name: "Context fixture Workspace",
+      workspace_rules: ["Keep each Room separate."]
+    });
+    await store.patchRoomContext({
+      roomId,
+      purpose: "Fixture purpose.",
+      workGoal: "Fixture work goal."
+    });
+
+    await expect(store.getWorkspaceContext()).resolves.toMatchObject({
+      workspace_name: "Context fixture Workspace",
+      rules: ["Keep each Room separate."]
+    });
+    await expect(store.getRoomContext(roomId)).resolves.toMatchObject({
+      room_id: roomId,
+      purpose: "Fixture purpose.",
+      work_goal: "Fixture work goal."
+    });
+    await store.close();
   });
 
   it("persists message presentations for chat cards", async () => {
@@ -1054,6 +1079,117 @@ describe("workspace store", () => {
     });
     expect(run.session_id).toBeUndefined();
     expect(updatedRun.session_id).toBe("session_1");
+  });
+
+  it("uses an atomic resource version when updating a collection schema", async () => {
+    const store = await createTempStore();
+    const original = await store.saveCollectionSchema(collectionSchema("versioned_contacts"));
+    expect(original.resource_version).toBe(1);
+
+    const updated = await store.updateCollectionSchema({ ...collectionSchema("versioned_contacts"), version: "2" }, original.resource_version);
+    expect(updated.resource_version).toBe(2);
+    await expect(
+      store.updateCollectionSchema({ ...collectionSchema("versioned_contacts"), version: "3" }, original.resource_version)
+    ).rejects.toThrow("collection_schema_version_conflict");
+    expect((await store.getCollectionSchema("versioned_contacts"))?.resource_version).toBe(2);
+    await store.close();
+  });
+
+  it("keeps a collection record and its file when a versioned delete conflicts", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    await store.saveCollectionSchema(collectionSchema("versioned_delete"));
+    const record = await store.saveCollectionRecord({
+      id: "record_versioned_delete",
+      collection_id: "versioned_delete",
+      data: { name: "Keep me" },
+      resource_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    const recordPath = path.join(store.rootDir, record.file_path);
+
+    await expect(
+      store.deleteCollectionRecord(record.collection_id, record.id, record.version + 1)
+    ).rejects.toThrow("collection_record_version_conflict");
+    await expect(access(recordPath)).resolves.toBeUndefined();
+    await expect(store.getCollectionRecord(record.collection_id, record.id)).resolves.toMatchObject({
+      id: record.id,
+      version: record.version
+    });
+
+    await expect(
+      store.deleteCollectionRecord(record.collection_id, record.id, record.version)
+    ).resolves.toMatchObject({ id: record.id, version: record.version });
+    await expect(access(recordPath)).rejects.toThrow();
+    await expect(store.getCollectionRecord(record.collection_id, record.id)).resolves.toBeUndefined();
+    await store.close();
+  });
+
+  it("keeps Knowledge and Skill updates atomic with their resource versions", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const wiki = await store.saveWikiPage({
+      id: "wiki_versioned",
+      slug: "versioned-wiki",
+      title: "Versioned Wiki",
+      state: "active",
+      content_locale: "ja",
+      tags: [],
+      source_refs: [],
+      provenance: { kind: "user_authored", summary: "version test", verified: true },
+      created_at: now,
+      updated_at: now
+    }, "# Original");
+    const wikiWrites = await Promise.allSettled([
+      store.updateWikiPage({ id: wiki.id, content: "# First", expected_resource_version: wiki.resource_version }),
+      store.updateWikiPage({ id: wiki.id, title: "Second", expected_resource_version: wiki.resource_version })
+    ]);
+    expect(wikiWrites.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(wikiWrites.filter((result) => result.status === "rejected")[0]?.reason).toMatchObject({
+      name: "ManagedResourceVersionConflictError"
+    });
+    expect((await store.getWiki(wiki.id))?.resource_version).toBe(2);
+
+    const skill = await store.saveSkillMarkdown({
+      state: "candidate",
+      skillId: "skill_versioned",
+      markdown: skillMarkdown({ id: "skill_versioned", state: "candidate" })
+    });
+    const skillWrites = await Promise.allSettled([
+      store.patchSkill({ id: skill.id, content: "# First", expected_resource_version: skill.resource_version }),
+      store.patchSkill({ id: skill.id, title: "Second", expected_resource_version: skill.resource_version })
+    ]);
+    expect(skillWrites.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(skillWrites.filter((result) => result.status === "rejected")[0]?.reason).toMatchObject({
+      name: "ManagedResourceVersionConflictError"
+    });
+    expect((await store.getSkill(skill.id))?.resource_version).toBe(2);
+    await store.close();
+  });
+
+  it("changes explicit Knowledge and Skill pinned state through versioned writes", async () => {
+    const store = await createTempStore();
+    const now = nowIso();
+    const wiki = await store.saveWikiPage({
+      id: "wiki_pinned", slug: "pinned-wiki", title: "Pinned Wiki", state: "active", content_locale: "ja", tags: [], source_refs: [],
+      provenance: { kind: "user_authored", summary: "pinned state", verified: true }, created_at: now, updated_at: now
+    }, "# Pinned");
+    const pinnedWiki = await store.updateWikiPage({ id: wiki.id, pinned: true, expected_resource_version: wiki.resource_version });
+    await expect(store.updateWikiPage({ id: wiki.id, pinned: false, expected_resource_version: wiki.resource_version })).rejects.toThrow("wiki_resource_version_conflict");
+
+    const skill = await store.saveSkillMarkdown({
+      state: "candidate",
+      skillId: "skill_pinned",
+      markdown: skillMarkdown({ id: "skill_pinned", state: "candidate" })
+    });
+    const pinnedSkill = await store.patchSkill({ id: skill.id, pinned: true, expected_resource_version: skill.resource_version });
+    const unpinnedSkill = await store.patchSkill({ id: skill.id, pinned: false, expected_resource_version: pinnedSkill?.resource_version });
+    await store.close();
+
+    expect(pinnedWiki).toMatchObject({ pinned: true, resource_version: 2 });
+    expect(pinnedSkill).toMatchObject({ owner_pinned: true, state: "pinned", resource_version: 2, frontmatter: { pinned: true } });
+    expect(unpinnedSkill).toMatchObject({ owner_pinned: false, state: "active", resource_version: 3, frontmatter: { pinned: false } });
   });
 
   it("rejects unsupported collection view renderers before indexing schema files", async () => {

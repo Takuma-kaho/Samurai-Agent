@@ -30,6 +30,13 @@ import learningResourceVersionUpdate from "../../packages/domain-operations/src/
 import learningSnapshotPrune from "../../packages/domain-operations/src/operations/learning/snapshot/prune.operation";
 import objectiveTransition from "../../packages/domain-operations/src/operations/objective/transition.operation";
 import pluginStatusSet from "../../packages/domain-operations/src/operations/plugin/status/set.operation";
+import policyChangeRequest from "../../packages/domain-operations/src/operations/policy/change/request.operation";
+import profileChangeRequest from "../../packages/domain-operations/src/operations/profile/change/request.operation";
+import resourceCopy from "../../packages/domain-operations/src/operations/resource/copy.operation";
+import resourceMove from "../../packages/domain-operations/src/operations/resource/move.operation";
+import resourcePromote from "../../packages/domain-operations/src/operations/resource/promote.operation";
+import resourceRedact from "../../packages/domain-operations/src/operations/resource/redact.operation";
+import resourceVersionGet from "../../packages/domain-operations/src/operations/resource/version/get.operation";
 import roomCreate from "../../packages/domain-operations/src/operations/room/create.operation";
 import roomAgentPermissionSet from "../../packages/domain-operations/src/operations/room/agent-permission-set.operation";
 import roomAgentRemove from "../../packages/domain-operations/src/operations/room/agent-remove.operation";
@@ -55,6 +62,7 @@ import skillSearch from "../../packages/domain-operations/src/operations/search/
 import collectionSearch from "../../packages/domain-operations/src/operations/search/collection.operation";
 import settingsPatch from "../../packages/domain-operations/src/operations/settings/patch.operation";
 import skillUsageRecord from "../../packages/domain-operations/src/operations/skill/usage/record.operation";
+import soulChangeRequest from "../../packages/domain-operations/src/operations/soul/change/request.operation";
 import workItemFollowUp from "../../packages/domain-operations/src/operations/work_item/follow_up.operation";
 import workItemSteer from "../../packages/domain-operations/src/operations/work_item/steer.operation";
 import workspaceMemberAdd from "../../packages/domain-operations/src/operations/workspace/member-add.operation";
@@ -62,6 +70,7 @@ import workspaceMemberList from "../../packages/domain-operations/src/operations
 import workspaceMemberRemove from "../../packages/domain-operations/src/operations/workspace/member-remove.operation";
 import workspaceMemberRoleChange from "../../packages/domain-operations/src/operations/workspace/member-role-change.operation";
 import workspaceOwnerTransfer from "../../packages/domain-operations/src/operations/workspace/owner-transfer.operation";
+import workspaceContextGet from "../../packages/domain-operations/src/operations/workspace/context/get.operation";
 import { handlerExpectationCount, handlerExpectations, type HandlerCallExpectation } from "./domain-operation-handler-expectations";
 
 const now = "2026-07-17T00:00:00.000Z";
@@ -103,6 +112,30 @@ const gatewayExpiredLocksOutput = {
     metadata: {}
   }]
 };
+const humanChangeActivity = {
+  id: "activity_human_change_fixture",
+  workspace_id: "workspace",
+  room_id: "room_fixture",
+  principal: { kind: "human" as const, participant_id: "human:owner" },
+  source: { kind: "host" as const },
+  status: "completed" as const,
+  idempotency_key: "human-change-request:fixture",
+  instruction_summary: "Request a human change.",
+  result_summary: "Human review is required.",
+  verification: [],
+  domain_operation_ids: [],
+  provenance: { kind: "trusted_context" as const, source_id: "handler-matrix", recorded_at: now },
+  created_at: now,
+  updated_at: now,
+  finalized_at: now
+};
+const humanChangeRequestOutput = (requestKind: "policy" | "profile" | "soul") => ({
+  request_kind: requestKind,
+  status: "requested" as const,
+  proposed_change_summary: handlerExpectations[`${requestKind}.change.request`].input.proposed_change_summary,
+  affected_fields: handlerExpectations[`${requestKind}.change.request`].input.affected_fields,
+  activity: humanChangeActivity
+});
 const roomOutput = { id: "room_fixture", name: "Fixture Room", created_at: now, updated_at: now };
 const agentOutput = { id: "agent_fixture", name: "Fixture Agent", role: "Fixture", instructions: "Handle fixture work.", backend_id: "backend_fixture", enabled: true, created_at: now, updated_at: now };
 const workspaceMemberOutput = { id: "workspace_member_fixture", participant_id: "human:member", role: "member" as const, joined_at: now, created_by_participant_id: "human:owner", updated_at: now };
@@ -114,9 +147,9 @@ const sessionOutput = { id: "session_fixture", session_key: "session_fixture", r
 const sessionSearchOutput = { mode: "fts5" as const, indexed: 1 };
 const searchSessionOutput = [{ kind: "session" as const, id: "session_fixture", title: "Fixture session", summary: "fixture" }];
 const searchMemoryOutput = [{ id: "memory_fixture", topic: "Fixture memory", state: "active" as const, file_path: "memory/fixture.md" }];
-const searchWikiOutput = [{ id: "wiki_fixture", slug: "fixture", title: "Fixture wiki", file_path: "wiki/pages/fixture.md" }];
-const searchSkillOutput = [{ id: "skill_fixture", title: "Fixture skill", description: "Fixture", tags: ["fixture"], file_path: "skills/fixture/SKILL.md" }];
-const searchCollectionOutput = [{ kind: "collection_schema" as const, id: "collection_fixture", file_path: "collections/collection_fixture/schema.json" }];
+const searchWikiOutput = [{ id: "wiki_fixture", slug: "fixture", title: "Fixture wiki", file_path: "wiki/pages/fixture.md", version: 1 }];
+const searchSkillOutput = [{ id: "skill_fixture", title: "Fixture skill", description: "Fixture", tags: ["fixture"], file_path: "skills/fixture/SKILL.md", version: 1 }];
+const searchCollectionOutput = [{ kind: "collection_schema" as const, id: "collection_fixture", file_path: "collections/collection_fixture/schema.json", version: 1 }];
 const learningSnapshotPruneOutput = { retained: 5, removed: ["snapshot_old"] };
 const learningBackgroundReviewApplyOutput = { suggestions: [] };
 const learningResourceUsageOutput = {
@@ -133,6 +166,61 @@ const learningResourceVersionOutput = {
     file_path: "wiki/pages/resource_fixture.md", content_hash: "hash_fixture", change_reason: "Apply the reviewed update.", source_run_ids: ["run_fixture"],
     actor: "fixture", is_current: true, restored_from_version: "1", created_at: now
   }
+};
+const resourceVersionOutput = { resource_key: "wiki:wiki_fixture", resource_kind: "wiki" as const, resource_id: "wiki_fixture", version: 1 };
+const resourceTransferOutput = {
+  resource: {
+    resource_kind: "wiki" as const,
+    source: { kind: "wiki" as const, id: "wiki_transfer_source", uri: "wiki/pages/transfer-source.md", label: "Transfer source", version: "1" },
+    target: { kind: "wiki" as const, id: "wiki_transfer_copy", uri: "wiki/pages/transfer-copy.md", label: "Transfer copy", version: "1" },
+    resource_version: 1
+  },
+  operation: {
+    id: "operation_resource_transfer_fixture",
+    session_id: "session_fixture",
+    capability_id: "resource_transfer",
+    operation: "resource.copy",
+    actor_identity: "owner" as const,
+    instruction_source: "owner_instruction" as const,
+    instruction_authority: "owner",
+    channel: "test",
+    input_hash: "fixture_hash",
+    target_resource_refs: [],
+    proposed_effects: [],
+    status: "completed" as const,
+    created_at: now,
+    updated_at: now
+  },
+  activity: []
+};
+const resourceRedactionOutput = {
+  resource: {
+    resource_kind: "wiki" as const,
+    redacted_resource: { kind: "wiki" as const, id: "wiki_transfer_source", uri: "wiki/pages/transfer-source.md", label: "Transfer source", version: "2" },
+    resource_version: 2,
+    redaction_mode: "known_secret_patterns" as const
+  },
+  operation: {
+    id: "operation_resource_redact_fixture",
+    session_id: "session_fixture",
+    capability_id: "resource_redact",
+    operation: "resource.redact",
+    actor_identity: "owner" as const,
+    instruction_source: "owner_instruction" as const,
+    instruction_authority: "owner",
+    channel: "test",
+    input_hash: "fixture_hash",
+    target_resource_refs: [],
+    proposed_effects: [],
+    status: "completed" as const,
+    created_at: now,
+    updated_at: now
+  },
+  activity: []
+};
+const workspaceContextOutput = {
+  workspace: { id: "handler-matrix-workspace", name: "Handler Workspace", rules: ["Keep Room data separate."], updated_at: now },
+  room: { id: "room_fixture", name: "Fixture Room", purpose: "Fixture purpose", work_goal: "Fixture goal", permissions: ["room.read"], prohibited: ["room.write:denied"], updated_at: now }
 };
 const settingsOutput = {
   ui_locale: "en" as const, output_locale: "ja" as const, memory_capture_mode: "manual" as const,
@@ -359,6 +447,30 @@ await run("learning.resource.version.update", () => learningResourceVersionUpdat
   updateLearningResourceVersion(input) { return record("learning.resource.version.update", "updateLearningResourceVersion", [input], learningResourceVersionOutput); }
 }).execute(context, handlerExpectations["learning.resource.version.update"].input));
 
+await run("resource.version.get", () => resourceVersionGet.createHandler({
+  getResourceVersion(_context, input) { return record("resource.version.get", "getResourceVersion", [_context, input], resourceVersionOutput); }
+}).execute(context, handlerExpectations["resource.version.get"].input));
+
+await run("resource.copy", () => resourceCopy.createHandler({
+  copyResource(_context, input) { return record("resource.copy", "copyResource", [_context, input], resourceTransferOutput); }
+}).execute(context, handlerExpectations["resource.copy"].input));
+
+await run("resource.move", () => resourceMove.createHandler({
+  moveResource(_context, input) { return record("resource.move", "moveResource", [_context, input], resourceTransferOutput); }
+}).execute(context, handlerExpectations["resource.move"].input));
+
+await run("resource.promote", () => resourcePromote.createHandler({
+  promoteResource(_context, input) { return record("resource.promote", "promoteResource", [_context, input], resourceTransferOutput); }
+}).execute(context, handlerExpectations["resource.promote"].input));
+
+await run("resource.redact", () => resourceRedact.createHandler({
+  redactResource(_context, input) { return record("resource.redact", "redactResource", [_context, input], resourceRedactionOutput); }
+}).execute(context, handlerExpectations["resource.redact"].input));
+
+await run("workspace.context.get", () => workspaceContextGet.createHandler({
+  getWorkspaceContext(_context, input) { return record("workspace.context.get", "getWorkspaceContext", [_context, input], workspaceContextOutput); }
+}).execute(context, handlerExpectations["workspace.context.get"].input));
+
 await run("objective.transition", () => objectiveTransition.createHandler({
   transitionObjective(id, action) { return record("objective.transition", "transitionObjective", [id, action], { objective: objectiveOutput, workItems: [workItemOutput], cancelBackendRunIds: ["run_fixture"] }); }
 }).execute(context, handlerExpectations["objective.transition"].input));
@@ -370,6 +482,14 @@ await run("plugin.status.set", () => pluginStatusSet.createHandler({
   pluginNotFoundError() { throw new Error("plugin_not_found"); }
 }).execute(context, handlerExpectations["plugin.status.set"].input));
 
+await run("policy.change.request", () => policyChangeRequest.createHandler({
+  requestHumanChange(_context, input) { return record("policy.change.request", "requestHumanChange", [_context, input], humanChangeRequestOutput("policy")); }
+}).execute(context, handlerExpectations["policy.change.request"].input));
+
+await run("profile.change.request", () => profileChangeRequest.createHandler({
+  requestHumanChange(_context, input) { return record("profile.change.request", "requestHumanChange", [_context, input], humanChangeRequestOutput("profile")); }
+}).execute(context, handlerExpectations["profile.change.request"].input));
+
 await run("settings.patch", () => settingsPatch.createHandler({
   applySettingsPatch(input) { return record("settings.patch", "applySettingsPatch", [input], settingsOutput); }
 }).execute(context, handlerExpectations["settings.patch"].input));
@@ -377,6 +497,10 @@ await run("settings.patch", () => settingsPatch.createHandler({
 await run("skill.usage.record", () => skillUsageRecord.createHandler({
   recordSkillUsage(input) { return record("skill.usage.record", "recordSkillUsage", [input], skillUsageOutput); }
 }).execute(context, handlerExpectations["skill.usage.record"].input));
+
+await run("soul.change.request", () => soulChangeRequest.createHandler({
+  requestHumanChange(_context, input) { return record("soul.change.request", "requestHumanChange", [_context, input], humanChangeRequestOutput("soul")); }
+}).execute(context, handlerExpectations["soul.change.request"].input));
 
 assert.equal(
   skillUsageRecord.input.safeParse({ ...handlerExpectations["skill.usage.record"].input, run_id: "forged-run" }).success,
@@ -425,7 +549,7 @@ await run("skill.search", () => skillSearch.createHandler({
   searchSkills(_context, query, limit) { return record("skill.search", "searchSkills", [_context, query, limit], searchSkillOutput); }
 }).execute(context, handlerExpectations["skill.search"].input));
 await run("collection.search", () => collectionSearch.createHandler({
-  searchCollections(_context, collectionId, query, limit) { return record("collection.search", "searchCollections", [_context, collectionId, query, limit], searchCollectionOutput); }
+  searchCollections(_context, collectionId, query, limit, offset) { return record("collection.search", "searchCollections", [_context, collectionId, query, limit, offset], searchCollectionOutput); }
 }).execute(context, handlerExpectations["collection.search"].input));
 
 await run("work_item.follow_up", () => workItemFollowUp.createHandler({

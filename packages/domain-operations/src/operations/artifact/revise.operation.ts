@@ -10,6 +10,9 @@ const Input = z.object({
   "change_summary": z.string().trim().min(1).optional(),
   "content": z.string().min(1),
   "editor_source": z.enum(["chat", "surface", "provider", "image_provider", "restore", "system"]).optional(),
+  /** Required by the external MCP adapter for existing Artifacts.  Kept
+   * optional here so older internal callers remain compatible. */
+  "expected_revision": z.number().int().positive().optional(),
   "extension": z.string().trim().min(1).optional(),
   "provenance": z.record(domainJsonValueSchema).default({})
 }).strict();
@@ -19,7 +22,7 @@ export interface ArtifactRevisePorts {
   artifactContract(id: "artifact.revise"): { id: string; proposed_effects: string[] };
   getArtifact(id: string): Promise<ArtifactRecord | undefined>; artifactNotFoundError(): Error;
   validateGraphArtifactContent(content: string): void;
-  createArtifactRevision(input: { artifactId: string; content: string; producerRunId?: string; extension?: string; baseRevisionId?: string; editorSource: "chat" | "surface" | "provider" | "image_provider" | "restore" | "system"; changeSummary?: string; provenance: Record<string, JsonValue> }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
+  createArtifactRevision(input: { artifactId: string; content: string; producerRunId?: string; extension?: string; baseRevisionId?: string; expectedRevision?: number; editorSource: "chat" | "surface" | "provider" | "image_provider" | "restore" | "system"; changeSummary?: string; provenance: Record<string, JsonValue> }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
 }
@@ -35,7 +38,8 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
   "sources": [
     "runtime_api",
     "provider_tool_call",
-    "surface_operation"
+    "surface_operation",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",
@@ -73,7 +77,7 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
         const contract = ports.artifactContract("artifact.revise");
         const editorSource = input.editor_source ?? "system";
         const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Revise artifact: ${artifact.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async (operation) => {
-          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: input.content, producerRunId: context.runId, extension: input.extension, baseRevisionId: input.base_revision_id, editorSource, changeSummary: input.change_summary, provenance: input.provenance });
+          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: input.content, producerRunId: context.runId, extension: input.extension, baseRevisionId: input.base_revision_id, expectedRevision: input.expected_revision, editorSource, changeSummary: input.change_summary, provenance: input.provenance });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonRecord(artifact) }, { artifact: jsonRecord(created.artifact) });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Created revision of ${artifact.title}.`, extra: { revision: created.revision } };
         }});

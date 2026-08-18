@@ -13,6 +13,8 @@ export class WorkspaceMetadataRepository {
     if (existing) return;
     await this.db.insertInto("settings").values({
       id: "default",
+      workspace_name: settings.workspace_name?.trim() || null,
+      workspace_rules_json: JSON.stringify(normalizeRules(settings.workspace_rules)),
       ui_locale: settings.ui_locale,
       output_locale: settings.output_locale,
       memory_capture_mode: settings.memory_capture_mode,
@@ -32,6 +34,8 @@ export class WorkspaceMetadataRepository {
   async getSettings(): Promise<SettingsRecord> {
     const row = await this.db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
     return {
+      workspace_name: row.workspace_name ?? undefined,
+      workspace_rules: parseRules(row.workspace_rules_json),
       ui_locale: row.ui_locale as SettingsRecord["ui_locale"],
       output_locale: row.output_locale as SettingsRecord["output_locale"],
       memory_capture_mode: row.memory_capture_mode as SettingsRecord["memory_capture_mode"],
@@ -52,6 +56,8 @@ export class WorkspaceMetadataRepository {
     const current = await this.getSettings();
     const next: SettingsRecord = { ...current, ...patch, updated_at: nowIso() };
     await this.db.updateTable("settings").set({
+      workspace_name: next.workspace_name?.trim() || null,
+      workspace_rules_json: JSON.stringify(normalizeRules(next.workspace_rules)),
       ui_locale: next.ui_locale,
       output_locale: next.output_locale,
       memory_capture_mode: next.memory_capture_mode,
@@ -67,6 +73,48 @@ export class WorkspaceMetadataRepository {
       updated_at: next.updated_at
     }).where("id", "=", "default").execute();
     return next;
+  }
+
+  /** Workspace context is human-owned metadata. It is deliberately separate
+   * from external Connector state and read through the formal Runtime query. */
+  async getWorkspaceContext(): Promise<{ workspace_name?: string; rules: string[]; updated_at: string }> {
+    const settings = await this.getSettings();
+    return {
+      workspace_name: settings.workspace_name,
+      rules: settings.workspace_rules ?? [],
+      updated_at: settings.updated_at
+    };
+  }
+
+  async getRoomContext(roomId: string): Promise<{ room_id: string; purpose?: string; work_goal?: string; updated_at: string } | undefined> {
+    const row = await this.db.selectFrom("room_context_metadata").selectAll().where("room_id", "=", roomId).executeTakeFirst();
+    if (!row) return undefined;
+    return {
+      room_id: row.room_id,
+      purpose: row.purpose?.trim() || undefined,
+      work_goal: row.work_goal?.trim() || undefined,
+      updated_at: row.updated_at
+    };
+  }
+
+  /** Intended for a human-owned settings surface. External Apps only read
+   * these values through workspace.context.get. */
+  async patchRoomContext(input: { roomId: string; purpose?: string; workGoal?: string }): Promise<{ room_id: string; purpose?: string; work_goal?: string; updated_at: string }> {
+    const existing = await this.getRoomContext(input.roomId);
+    const updatedAt = nowIso();
+    const purpose = input.purpose === undefined ? existing?.purpose : input.purpose.trim() || undefined;
+    const workGoal = input.workGoal === undefined ? existing?.work_goal : input.workGoal.trim() || undefined;
+    await this.db.insertInto("room_context_metadata").values({
+      room_id: input.roomId,
+      purpose: purpose ?? null,
+      work_goal: workGoal ?? null,
+      updated_at: updatedAt
+    }).onConflict((conflict) => conflict.column("room_id").doUpdateSet({
+      purpose: purpose ?? null,
+      work_goal: workGoal ?? null,
+      updated_at: updatedAt
+    })).execute();
+    return { room_id: input.roomId, purpose, work_goal: workGoal, updated_at: updatedAt };
   }
 
   async savePluginState(input: { manifestId: string; enabled: boolean; version: string }): Promise<{ manifest_id: string; enabled: boolean; version: string; updated_at: string }> {
@@ -117,5 +165,20 @@ export class WorkspaceMetadataRepository {
     return preferred
       ? { status: preferred.status, text: preferred.translated_text, source: "translation", target_locale: input.targetLocale, translation: preferred }
       : { status: "missing", text: input.fallbackText ?? "", source: "fallback", target_locale: input.targetLocale };
+  }
+}
+
+function normalizeRules(value: string[] | undefined): string[] {
+  return [...new Set((value ?? []).map((rule) => rule.trim()).filter(Boolean))].slice(0, 200);
+}
+
+function parseRules(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? normalizeRules(parsed.filter((rule): rule is string => typeof rule === "string"))
+      : [];
+  } catch {
+    return [];
   }
 }

@@ -116,7 +116,9 @@ export class ActivityHistoryRepository {
     backendRunId?: string;
     domainOperationIds?: string[];
     now: string;
+    signal?: AbortSignal;
   }): Promise<ActivityRecord> {
+    throwIfAborted(input.signal);
     const safeInput = sanitizeFinalization(input);
     const current = await this.getActivity(safeInput.activityId);
     if (!current) throw new Error("activity_not_found");
@@ -131,6 +133,7 @@ export class ActivityHistoryRepository {
     if (safeInput.domainOperationIds) await this.assertDomainOperationScopes(current, safeInput.domainOperationIds);
     assertActivityStatusTransition(current.status, safeInput.status);
     const next = buildFinalActivity(current, safeInput);
+    throwIfAborted(input.signal);
     const updated = await this.db.updateTable("activity_records")
       .set(activityToRow(next))
       .where("id", "=", current.id)
@@ -156,19 +159,25 @@ export class ActivityHistoryRepository {
       domainOperationIds?: string[];
       now: string;
     };
+    signal?: AbortSignal;
   }): Promise<ActivityRecord> {
+    throwIfAborted(input.signal);
     return this.db.transaction().execute(async (transaction) => {
+      throwIfAborted(input.signal);
       const repository = new ActivityHistoryRepository(transaction);
       const requestedActivity = input.finalization.backendRunId
         ? ActivityRecordSchema.parse({ ...input.activity, backend_run_id: input.finalization.backendRunId })
         : input.activity;
       const activity = await repository.createActivity(requestedActivity);
+      throwIfAborted(input.signal);
       if (input.finalization.backendRunId) await repository.assertBackendRunScope(activity, input.finalization.backendRunId);
       for (const usage of input.resourceUsage) {
+        throwIfAborted(input.signal);
         if (usage.activity_id !== input.activity.id && usage.activity_id !== activity.id) throw new Error("resource_usage_activity_mismatch");
         await repository.recordResourceUsage({ ...usage, activity_id: activity.id });
       }
-      return repository.finalizeActivity({ activityId: activity.id, ...input.finalization });
+      throwIfAborted(input.signal);
+      return repository.finalizeActivity({ activityId: activity.id, ...input.finalization, signal: input.signal });
     });
   }
 
@@ -422,4 +431,8 @@ function buildFinalActivity(
     finalized_at: input.now
   };
   return ActivityRecordSchema.parse(next);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("external_app_ingress_aborted");
 }

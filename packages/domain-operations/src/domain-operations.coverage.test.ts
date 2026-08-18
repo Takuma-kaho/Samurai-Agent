@@ -6,7 +6,7 @@ import gatewayMcpConfigSave from "./operations/gateway/mcp_config/save.operation
 import gatewayInboundRoute from "./operations/gateway/inbound/route.operation.js";
 
 describe("Domain Operation strict gate coverage", () => {
-  it("loads and executes the complete 158-operation strict gate", () => {
+  it("loads and executes the complete 167-operation strict gate", () => {
     expect(true).toBe(true);
   });
 
@@ -109,6 +109,10 @@ describe("Domain Operation strict gate coverage", () => {
           if (name === "getReflectionSession") return fixtureSession(String(args[0]));
           if (name === "getReflectionBackendRun") return fixtureBackendRun(String(args[0]), reflectionSessionId);
           if (name === "listCollectionRecords") return { collection_id: "sample", count: 0, items: [], linked_data: {}, schema_fields: {} };
+          if (name === "getActivityHistory") return undefined;
+          if (name === "getResourceVersion") return outputs.get(id);
+          if (name === "getWorkspaceContext") return outputs.get(id);
+          if (name === "copyResource" || name === "moveResource" || name === "promoteResource" || name === "redactResource") return outputs.get(id);
           if (name === "listMemoryForSession") return [{ ...fixtureRecord(id), id: "sample" }];
           if (name === "listReflectionSuggestions") return [{ id: "sample", reflection_run_id: "sample", suggestion_type: reflectionSuggestionType, status: "proposed", title: "fixture", content: "fixture", source_refs: [], confidence: 0.5, created_at: "2026-07-16T00:00:00.000Z", updated_at: "2026-07-16T00:00:00.000Z" }];
           if (name === "getReflectionSuggestion") return { id: "sample", reflection_run_id: "sample", suggestion_type: reflectionSuggestionType, status: "proposed", title: "fixture", content: "fixture", source_refs: [], confidence: 0.5, created_at: "2026-07-16T00:00:00.000Z", updated_at: "2026-07-16T00:00:00.000Z" };
@@ -249,6 +253,7 @@ describe("Domain Operation strict gate coverage", () => {
           if (name.endsWith("TranslationSource")) return { content: "fixture", ref: fixtureRecord(id).resource_ref, source_locale: "en" };
           if (name === "hashTranslationContent") return "fixture-hash";
           if (name === "saveTranslationAutomationJob") return outputs.get(id);
+          if (name === "requestHumanChange") return outputs.get(id);
           if (name.startsWith("read") || name.startsWith("load")) return "fixture";
           if (name === "runScheduledMemoryReview") return (outputs.get(id) as { memoryReviewTrace?: unknown }).memoryReviewTrace;
           if (name === "reindexAutomationWiki") return { active: 1, total: 1 };
@@ -379,8 +384,8 @@ describe("Domain Operation strict gate coverage", () => {
       if (count === 0 && definition.id !== "presentation.plan") throw new Error(`${definition.id} did not call its Port`);
     }
 
-    expect(bindings).toHaveLength(158);
-    expect(portCalls.size).toBe(157);
+    expect(bindings).toHaveLength(167);
+    expect(portCalls.size).toBe(166);
 
     for (const operationId of ["artifact.create", "chat.turn.run"] as const) {
       const binding = bindings.find((candidate) => candidate.definition.id === operationId)!;

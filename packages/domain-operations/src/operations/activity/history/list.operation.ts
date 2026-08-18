@@ -3,17 +3,20 @@ import { z } from "zod";
 import { defineQuery, type DomainQueryPorts, type DomainResult, type ReadCapability, type TrustedDomainContext } from "../../../definition/index.js";
 
 const Input = z.object({
+  activity_id: z.string().trim().min(1).max(512).optional(),
   principal_id: z.string().trim().min(1).optional(),
   source_kind: TrustedWorkspaceSourceSchema.shape.kind.optional(),
   source_id: z.string().trim().min(1).optional(),
   status: ActivityRecordStatusSchema.optional(),
   created_after: z.string().datetime().optional(),
   created_before: z.string().datetime().optional(),
-  limit: z.number().int().positive().max(200).optional()
+  limit: z.number().int().positive().max(200).optional(),
+  offset: z.number().int().min(0).max(10_000).default(0)
 }).strict();
 const Output = z.object({ items: z.array(ActivityRecordSchema) }).strict();
 
 export interface ActivityHistoryListPorts extends DomainQueryPorts {
+  getActivityHistory: ReadCapability<(input: { context: TrustedDomainContext; activityId: string }) => Promise<z.infer<typeof ActivityRecordSchema> | undefined>>;
   listActivityHistory: ReadCapability<(input: { context: TrustedDomainContext; request: z.infer<typeof Input> }) => Promise<z.infer<typeof Output>["items"]>>;
 }
 
@@ -30,6 +33,10 @@ const activityHistoryList = defineQuery<ActivityHistoryListPorts>()({
   input: Input, output: Output,
   createHandler(ports) {
     return { execute: async function handleActivityHistoryList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      if (input.activity_id) {
+        const item = await ports.getActivityHistory({ context, activityId: input.activity_id });
+        return { ok: true, value: { items: item ? [item] : [] } };
+      }
       const request = {
         ...(input.principal_id ? { principal_id: input.principal_id } : {}),
         ...(input.source_kind ? { source_kind: input.source_kind } : {}),
@@ -37,7 +44,8 @@ const activityHistoryList = defineQuery<ActivityHistoryListPorts>()({
         ...(input.status ? { status: input.status } : {}),
         ...(input.created_after ? { created_after: input.created_after } : {}),
         ...(input.created_before ? { created_before: input.created_before } : {}),
-        ...(input.limit ? { limit: input.limit } : {})
+        ...(input.limit ? { limit: input.limit } : {}),
+        offset: input.offset ?? 0
       };
       return { ok: true, value: { items: await ports.listActivityHistory({ context, request }) } };
     } };

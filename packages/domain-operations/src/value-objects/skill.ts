@@ -55,7 +55,8 @@ export const storedSkillSchema = z.object({
   required_capabilities: z.array(z.string()),
   owner_pinned: z.boolean(),
   frontmatter: SkillFrontmatterSchema,
-  file_path: z.string().min(1)
+  file_path: z.string().min(1),
+  resource_version: z.number().int().positive().optional()
 }).strict();
 
 export const skillSupportFileSchema = z.object({

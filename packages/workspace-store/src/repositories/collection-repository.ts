@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createId, nowIso, stableHash, type AutomationJobRecord, type CollectionPatch, type CollectionRecord, type CollectionSchema } from "@samurai-agent/core-schemas";
 import { collectionRecordResourceId, parseCollectionRecordResourceId } from "@samurai-agent/room-permissions";
@@ -17,7 +17,7 @@ import type {
   CollectionTriggerState,
   WorkspaceHealthReport
 } from "../workspace-store-contracts";
-import { CollectionRecordVersionConflictError } from "./collection-errors";
+import { CollectionRecordVersionConflictError, CollectionSchemaVersionConflictError } from "./collection-errors";
 import {
   applyCollectionPatchLocal,
   collectionDefinitionBoolean,
@@ -41,6 +41,7 @@ import {
   collectionSchemaFromRow
 } from "./wiki-collection-row-codecs";
 import { CollectionRecordRecoveryHandler } from "../transactions/collection-record-recovery-handler";
+import { CollectionSchemaRecoveryHandler } from "../transactions/collection-schema-recovery-handler";
 import { WorkspaceFileTransactionCoordinator } from "../transactions/workspace-file-transaction-coordinator";
 import { errorMessage, listCollectionRecordFiles, listCollectionSchemaFiles } from "./workspace-file-codecs";
 
@@ -61,6 +62,7 @@ export class CollectionRepository {
     private readonly rootDir: string,
     private readonly fileTransactions: WorkspaceFileTransactionCoordinator,
     private readonly collectionRecordRecoveryHandler: CollectionRecordRecoveryHandler,
+    private readonly collectionSchemaRecoveryHandler: CollectionSchemaRecoveryHandler,
     private readonly automation: CollectionAutomationPort
   ) {}
 
@@ -78,12 +80,13 @@ async saveCollectionSchema(schemaInput: CollectionSchema): Promise<CollectionSch
       .values({
         id: schema.id,
         version: schema.version,
+        resource_version: 1,
         file_path: relativePath,
         schema_json: stringify(schema),
         updated_at: now
       })
       .execute();
-    return { ...schema, file_path: relativePath };
+    return { ...schema, file_path: relativePath, resource_version: 1 };
   } catch (error) {
     await unlink(absolutePath).catch(() => undefined);
     throw error;
@@ -118,30 +121,45 @@ async listCollectionSchemas(options: CollectionRoomCandidateOptions = {}): Promi
   return rows.map(collectionSchemaFromRow);
 }
 
-async updateCollectionSchema(schemaInput: CollectionSchema): Promise<CollectionSchemaWithFilePath> {
+async updateCollectionSchema(schemaInput: CollectionSchema, expectedResourceVersion?: number): Promise<CollectionSchemaWithFilePath> {
   const existing = await this.getCollectionSchema(schemaInput.id);
-  const relativePath = existing?.file_path ?? path.join("collections", schemaInput.id, "schema.json");
-  const absolutePath = path.join(this.rootDir, relativePath);
-  await mkdir(path.dirname(absolutePath), { recursive: true });
+  if (!existing) return this.saveCollectionSchema(schemaInput);
+  const currentResourceVersion = requiredSchemaResourceVersion(existing);
+  const versionedExisting = { ...existing, resource_version: currentResourceVersion };
+  if (expectedResourceVersion !== undefined && expectedResourceVersion !== currentResourceVersion) {
+    throw new CollectionSchemaVersionConflictError(expectedResourceVersion, versionedExisting);
+  }
   const schema = parseCollectionSchemaLocal(schemaInput);
-  await writeFile(absolutePath, `${JSON.stringify(schema, null, 2)}\n`);
-  await this.db
-    .insertInto("collection_schemas")
-    .values({
-      id: schema.id,
-      version: schema.version,
-      file_path: relativePath,
-      schema_json: stringify(schema),
-      updated_at: nowIso()
-    })
-    .onConflict((oc) => oc.column("id").doUpdateSet({
-      version: schema.version,
-      file_path: relativePath,
-      schema_json: stringify(schema),
-      updated_at: nowIso()
-    }))
-    .execute();
-  return { ...schema, file_path: relativePath };
+  const after: CollectionSchema & { file_path: string; resource_version: number } = {
+    ...schema,
+    file_path: existing.file_path,
+    resource_version: currentResourceVersion + 1
+  };
+  const stagedRelativePath = `${existing.file_path}.pending-${createId("file_transaction")}`;
+  try {
+    await this.fileTransactions.execute({
+      kind: "collection_schema_update",
+      targetPath: existing.file_path,
+      stagedPath: stagedRelativePath,
+      collectionId: schema.id,
+      beforeJson: stringify(versionedExisting),
+      afterJson: stringify(after),
+      stagedContent: `${JSON.stringify(schema, null, 2)}\n`,
+      commit: async (transaction) => {
+        if (!await this.collectionSchemaRecoveryHandler.commitUpdate(transaction, { before: versionedExisting, after })) {
+          throw new Error("collection_schema_update_version_conflict");
+        }
+      },
+      rollback: (transaction) => this.collectionSchemaRecoveryHandler.rollbackUpdate(transaction, { before: versionedExisting, after })
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "collection_schema_update_version_conflict") {
+      const latest = await this.getCollectionSchema(schema.id);
+      throw new CollectionSchemaVersionConflictError(expectedResourceVersion ?? currentResourceVersion, latest ? { ...latest, resource_version: requiredSchemaResourceVersion(latest) } : versionedExisting);
+    }
+    throw error;
+  }
+  return after;
 }
 
 async saveCollectionRecord(recordInput: CollectionRecord): Promise<CollectionRecordWithFilePath> {
@@ -212,17 +230,78 @@ async upsertCollectionRecord(recordInput: CollectionRecord): Promise<CollectionR
   return { ...record, file_path: relativePath };
 }
 
-async deleteCollectionRecord(collectionId: string, recordId: string): Promise<CollectionRecordWithFilePath> {
+async deleteCollectionRecord(
+  collectionId: string,
+  recordId: string,
+  expectedVersion?: number
+): Promise<CollectionRecordWithFilePath> {
   const existing = await this.getCollectionRecord(collectionId, recordId);
   if (!existing) {
     throw new Error("collection_record_not_found");
   }
-  await rm(path.join(this.rootDir, existing.file_path), { force: true });
-  await this.db
-    .deleteFrom("collection_records")
-    .where("collection_id", "=", collectionId)
-    .where("id", "=", recordId)
-    .execute();
+  const requiredVersion = expectedVersion ?? existing.version;
+  if (requiredVersion !== existing.version) {
+    throw new CollectionRecordVersionConflictError(requiredVersion, existing);
+  }
+
+  // A delete cannot use the normal replace-file coordinator.  Keep the old
+  // body in a same-volume staging path until the version-checked DB delete
+  // commits, and journal both halves for recovery after a process crash.
+  const transactionId = createId("file_transaction");
+  const stagedPath = `${existing.file_path}.delete-${transactionId}`;
+  const targetPath = path.join(this.rootDir, existing.file_path);
+  const stagedAbsolutePath = path.join(this.rootDir, stagedPath);
+  const createdAt = nowIso();
+  let staged = false;
+  let databaseCommitted = false;
+  await this.db.insertInto("workspace_file_transactions").values({
+    id: transactionId,
+    kind: "collection_record_delete",
+    status: "planned",
+    target_path: existing.file_path,
+    staged_path: stagedPath,
+    collection_id: collectionId,
+    record_id: recordId,
+    patch_id: null,
+    before_json: stringify(existing),
+    after_json: stringify({ deleted: true, version: existing.version }),
+    created_at: createdAt,
+    updated_at: createdAt
+  }).execute();
+  try {
+    await rename(targetPath, stagedAbsolutePath);
+    staged = true;
+    await this.db.updateTable("workspace_file_transactions")
+      .set({ status: "staged", updated_at: nowIso() })
+      .where("id", "=", transactionId)
+      .execute();
+    const deleted = await this.db.transaction().execute(async (transaction) => {
+      const result = await transaction.deleteFrom("collection_records")
+        .where("collection_id", "=", collectionId)
+        .where("id", "=", recordId)
+        .where("version", "=", requiredVersion)
+        .executeTakeFirst();
+      if (Number(result.numDeletedRows ?? 0) !== 1) return false;
+      await transaction.updateTable("workspace_file_transactions")
+        .set({ status: "db_committed", updated_at: nowIso() })
+        .where("id", "=", transactionId)
+        .execute();
+      return true;
+    });
+    if (!deleted) {
+      const latest = await this.getCollectionRecord(collectionId, recordId);
+      throw new CollectionRecordVersionConflictError(requiredVersion, latest ?? existing);
+    }
+    databaseCommitted = true;
+    await rm(stagedAbsolutePath, { force: true });
+    await this.db.deleteFrom("workspace_file_transactions").where("id", "=", transactionId).execute();
+  } catch (error) {
+    if (!databaseCommitted) {
+      if (staged) await rename(stagedAbsolutePath, targetPath).catch(() => undefined);
+      await this.db.deleteFrom("workspace_file_transactions").where("id", "=", transactionId).execute().catch(() => undefined);
+    }
+    throw error;
+  }
   return existing;
 }
 
@@ -711,13 +790,18 @@ async applyCollectionRecordPatch(input: { collectionId: string; recordId: string
         }
         const previous = existingSchemaRows.find((row) => row.id === schema.id);
         const schemaJson = stringify(schema);
+        const unchanged = Boolean(previous && previous.version === schema.version && previous.file_path === file.relativePath && previous.schema_json === schemaJson);
         schemaDesired.set(schema.id, {
           id: schema.id,
           version: schema.version,
+          // Manual file edits are a real state change too.  Preserve the
+          // current CAS value when indexing is idempotent and advance it when
+          // the durable file differs.
+          resource_version: unchanged ? previous!.resource_version : (previous?.resource_version ?? 0) + 1,
           file_path: file.relativePath,
           schema_json: schemaJson,
-          updated_at: previous && previous.version === schema.version && previous.file_path === file.relativePath && previous.schema_json === schemaJson
-            ? previous.updated_at
+          updated_at: unchanged
+            ? previous!.updated_at
             : nowIso()
         });
         schemas.set(schema.id, schema);
@@ -893,4 +977,11 @@ async applyCollectionRecordPatch(input: { collectionId: string; recordId: string
 
 function sameCollectionIndexRow(left: object, right: object): boolean {
   return stableHash(left) === stableHash(right);
+}
+
+function requiredSchemaResourceVersion(schema: CollectionSchemaWithFilePath): number {
+  if (!Number.isInteger(schema.resource_version) || (schema.resource_version as number) <= 0) {
+    throw new Error(`collection_schema_resource_version_missing:${schema.id}`);
+  }
+  return schema.resource_version as number;
 }

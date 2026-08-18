@@ -7,6 +7,8 @@ import type { SkillPatchMutationPorts } from "./skill-mutation.js";
 const Input = z.object({
   "content": z.string().max(1_000_000).optional(),
   "description": z.string().max(10_000).optional(),
+  "expected_resource_version": z.number().int().positive().optional(),
+  "pinned": z.boolean().optional(),
   "skill_id": z.string().trim().min(1).max(256),
   "tags": z.array(z.string().max(128)).max(100).optional(),
   "title": z.string().max(512).optional()
@@ -25,6 +27,7 @@ const skillPatch = defineCommand<SkillPatchPorts>()({
   "description": "Edit a Skill body and metadata through the Runtime boundary.",
   "sources": [
     "runtime_api",
+    "external_app",
     "provider_tool_call",
     "surface_operation"
   ],
@@ -65,7 +68,12 @@ const skillPatch = defineCommand<SkillPatchPorts>()({
           trustedContext: context, operationName: contract.id, inputSummary: `Edit Skill: ${current.title}`, proposedEffects: contract.proposed_effects,
           targetResourceRefs: [ports.skillResourceRef(current)],
           execute: async (operation) => {
-            const saved = await ports.patchSkillRecord({ id: input.skill_id, title: input.title, description: input.description, tags: input.tags, content: input.content });
+            let saved;
+            try {
+              saved = await ports.patchSkillRecord({ id: input.skill_id, title: input.title, description: input.description, tags: input.tags, content: input.content, pinned: input.pinned, expected_resource_version: input.expected_resource_version });
+            } catch (error) {
+              throw ports.mapSkillWriteError(error);
+            }
             if (!saved) throw ports.skillMutationNotFound("skill_not_found");
             const ref = ports.skillResourceRef(saved);
             const rollbackPoint = await ports.createSkillRollback(operation, [ref], { skill: domainJsonValueSchema.parse(current), markdown: beforeMarkdown ?? "" }, { skill: domainJsonValueSchema.parse(saved) });

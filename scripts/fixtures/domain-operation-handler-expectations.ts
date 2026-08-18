@@ -47,7 +47,8 @@ export const handlerExpectations = {
           status: "completed",
           created_after: "2026-07-01T00:00:00.000Z",
           created_before: "2026-07-31T00:00:00.000Z",
-          limit: 25
+          limit: 25,
+          offset: 0
         }
       }]
     }]
@@ -234,7 +235,7 @@ export const handlerExpectations = {
   "memory.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchMemory", args: [trustedContext, "fixture", 5] }] },
   "wiki.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchWiki", args: [trustedContext, "fixture", 5] }] },
   "skill.search": { input: { query: "fixture", limit: 5 }, calls: [{ method: "searchSkills", args: [trustedContext, "fixture", 5] }] },
-  "collection.search": { input: { collection_id: "collection_fixture", query: "fixture", limit: 5 }, calls: [{ method: "searchCollections", args: [trustedContext, "collection_fixture", "fixture", 5] }] },
+  "collection.search": { input: { collection_id: "collection_fixture", query: "fixture", limit: 5 }, calls: [{ method: "searchCollections", args: [trustedContext, "collection_fixture", "fixture", 5, 0] }] },
   "learning.snapshot.prune": {
     input: { retain: 5 },
     calls: [{ method: "pruneLearningSnapshots", args: [{ retain: 5 }] }]
@@ -255,6 +256,88 @@ export const handlerExpectations = {
     input: { resource_kind: "wiki", resource_id: "resource_fixture", change_reason: "Apply the reviewed update.", content: "Updated fixture content." },
     calls: [{ method: "updateLearningResourceVersion", args: [{ resourceKind: "wiki", resourceId: "resource_fixture", changeReason: "Apply the reviewed update.", content: "Updated fixture content." }] }]
   },
+  "resource.version.get": {
+    input: { resource_kind: "wiki", resource_id: "wiki_fixture" },
+    calls: [{ method: "getResourceVersion", args: [trustedContext, { resource_kind: "wiki", resource_id: "wiki_fixture" }] }]
+  },
+  "resource.copy": {
+    input: {
+      resource_kind: "wiki",
+      resource_id: "wiki_transfer_source",
+      expected_resource_version: 1,
+      target_room_id: "room_target_fixture",
+      target_resource_id: "wiki_transfer_copy",
+      reason: "Create an independent copy for the target Room."
+    },
+    calls: [{
+      method: "copyResource",
+      args: [trustedContext, {
+        resource_kind: "wiki",
+        resource_id: "wiki_transfer_source",
+        expected_resource_version: 1,
+        target_room_id: "room_target_fixture",
+        target_resource_id: "wiki_transfer_copy",
+        reason: "Create an independent copy for the target Room."
+      }]
+    }]
+  },
+  "resource.move": {
+    input: {
+      resource_kind: "wiki",
+      resource_id: "wiki_transfer_source",
+      expected_resource_version: 1,
+      target_room_id: "room_target_fixture",
+      reason: "Move this Resource to the authorized target Room."
+    },
+    calls: [{
+      method: "moveResource",
+      args: [trustedContext, {
+        resource_kind: "wiki",
+        resource_id: "wiki_transfer_source",
+        expected_resource_version: 1,
+        target_room_id: "room_target_fixture",
+        reason: "Move this Resource to the authorized target Room."
+      }]
+    }]
+  },
+  "resource.promote": {
+    input: {
+      resource_kind: "wiki",
+      resource_id: "wiki_transfer_source",
+      expected_resource_version: 1,
+      reason: "Create an explicit Workspace-scoped projection."
+    },
+    calls: [{
+      method: "promoteResource",
+      args: [trustedContext, {
+        resource_kind: "wiki",
+        resource_id: "wiki_transfer_source",
+        expected_resource_version: 1,
+        reason: "Create an explicit Workspace-scoped projection."
+      }]
+    }]
+  },
+  "resource.redact": {
+    input: {
+      resource_kind: "wiki",
+      resource_id: "wiki_transfer_source",
+      expected_resource_version: 1,
+      reason: "Remove detected credentials before reuse."
+    },
+    calls: [{
+      method: "redactResource",
+      args: [trustedContext, {
+        resource_kind: "wiki",
+        resource_id: "wiki_transfer_source",
+        expected_resource_version: 1,
+        reason: "Remove detected credentials before reuse."
+      }]
+    }]
+  },
+  "workspace.context.get": {
+    input: { room_id: "room_fixture" },
+    calls: [{ method: "getWorkspaceContext", args: [trustedContext, { room_id: "room_fixture" }] }]
+  },
   "objective.transition": {
     input: { objective_id: "objective_fixture", action: "pause" },
     calls: [{ method: "transitionObjective", args: ["objective_fixture", "pause"] }]
@@ -267,6 +350,14 @@ export const handlerExpectations = {
       { method: "savePluginState", args: [{ manifestId: "plugin_fixture", enabled: true, version: "1.0.0" }] }
     ]
   },
+  "policy.change.request": {
+    input: { proposed_change_summary: "Clarify the retention rule.", affected_fields: ["retention_days"] },
+    calls: [{ method: "requestHumanChange", args: [trustedContext, { request_kind: "policy", proposed_change_summary: "Clarify the retention rule.", affected_fields: ["retention_days"] }] }]
+  },
+  "profile.change.request": {
+    input: { proposed_change_summary: "Update the public display name.", affected_fields: ["display_name"] },
+    calls: [{ method: "requestHumanChange", args: [trustedContext, { request_kind: "profile", proposed_change_summary: "Update the public display name.", affected_fields: ["display_name"] }] }]
+  },
   "settings.patch": {
     input: { default_agent_id: "agent_fixture", default_room_id: "room_fixture", ui_locale: "en", output_locale: "ja", memory_capture_mode: "manual" },
     calls: [{ method: "applySettingsPatch", args: [{ defaultAgentId: "agent_fixture", defaultRoomId: "room_fixture", uiLocale: "en", outputLocale: "ja", memoryCaptureMode: "manual" }] }]
@@ -274,6 +365,10 @@ export const handlerExpectations = {
   "skill.usage.record": {
     input: { skill_id: "skill_fixture", resource_id: "resource_fixture", content_hash: "hash_fixture", stage: "body_loaded", metadata: { source: "fixture" } },
     calls: [{ method: "recordSkillUsage", args: [{ skillId: "skill_fixture", runId: "run_fixture", resourceId: "resource_fixture", contentHash: "hash_fixture", stage: "body_loaded", metadata: { source: "fixture" } }] }]
+  },
+  "soul.change.request": {
+    input: { proposed_change_summary: "Review the assistant tone guidance.", affected_fields: ["tone"] },
+    calls: [{ method: "requestHumanChange", args: [trustedContext, { request_kind: "soul", proposed_change_summary: "Review the assistant tone guidance.", affected_fields: ["tone"] }] }]
   },
   "curator.restore": {
     input: { snapshot_id: "snapshot_fixture" },

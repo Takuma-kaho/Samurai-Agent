@@ -1,4 +1,5 @@
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { nowIso, stableHash, type WikiFrontmatter } from "@samurai-agent/core-schemas";
 import type { Kysely } from "kysely";
@@ -9,12 +10,17 @@ import { readManagedResourceFiles } from "./managed-resource-file-scan";
 import { errorMessage, listWikiMarkdownFiles, readWorkspaceText, renderFrontmatter, parseWikiMarkdownLocal, stripFrontmatter } from "./workspace-file-codecs";
 import { wikiFromRow, wikiToRow } from "./wiki-collection-row-codecs";
 import { withUsageScope, type UsageScopeQueryContext } from "./usage-scope";
+import { ManagedResourceScopeTransferError, ManagedResourceVersionConflictError } from "./managed-resource-errors";
+import { WorkspaceFileTransactionCoordinator } from "../transactions/workspace-file-transaction-coordinator";
+import { type ManagedResourceBoundary, WikiRecoveryHandler } from "../transactions/wiki-recovery-handler";
 
 /** Filesystem-backed Knowledge Wiki and its rebuildable SQLite index. */
 export class KnowledgeWikiRepository {
   constructor(
     private readonly db: Kysely<WorkspaceDb>,
-    private readonly rootDir: string
+    private readonly rootDir: string,
+    private readonly fileTransactions: WorkspaceFileTransactionCoordinator,
+    private readonly recoveryHandler: WikiRecoveryHandler
   ) {}
 
 async saveWikiPage(frontmatter: WikiFrontmatter, content: string): Promise<WikiWithFilePath> {
@@ -31,13 +37,123 @@ async saveWikiPage(frontmatter: WikiFrontmatter, content: string): Promise<WikiW
     }
     await this.db
       .insertInto("wiki_index")
-      .values(wikiToRow(parsed.frontmatter, relativePath))
+      .values(wikiToRow(parsed.frontmatter, relativePath, 1))
       .execute();
-    return { ...parsed.frontmatter, file_path: relativePath };
+    return { ...parsed.frontmatter, file_path: relativePath, resource_version: 1 };
   } catch (error) {
     await unlink(absolutePath).catch(() => undefined);
     throw error;
   }
+}
+
+/** Creates an independent Wiki projection after checking the source Version
+ * inside the same SQLite transaction that inserts the new projection. */
+async copyWikiPage(input: {
+  source_id: string;
+  target_id: string;
+  target_slug: string;
+  target_usage_scope: NonNullable<WikiFrontmatter["usage_scope"]>;
+  expected_source_resource_version: number;
+  /** A Room copy must receive its new Room boundary in the same SQLite
+   * transaction as the copied index projection. Workspace copies omit it. */
+  target_boundary?: ManagedResourceBoundary;
+}): Promise<WikiWithFilePath | undefined> {
+  const source = await this.getWiki(input.source_id);
+  const content = await this.readWikiContent(input.source_id);
+  if (!source || content === undefined) return undefined;
+  const { file_path: _filePath, resource_version: _resourceVersion, ...sourceFrontmatter } = source;
+  const now = nowIso();
+  const targetPath = path.join("wiki", "pages", `${input.target_slug}.md`);
+  const sourceRef = {
+    kind: "wiki",
+    id: source.id,
+    uri: source.file_path,
+    version: String(source.resource_version),
+    label: source.title
+  };
+  const target = withUsageScope({
+    ...sourceFrontmatter,
+    id: input.target_id,
+    slug: input.target_slug,
+    usage_scope: input.target_usage_scope,
+    source_refs: [...source.source_refs, sourceRef],
+    pinned: false,
+    created_at: now,
+    updated_at: now,
+    content_hash: stableHash(content)
+  });
+  const after: WikiWithFilePath = { ...target, file_path: targetPath, resource_version: 1 };
+  const targetBoundary = input.target_boundary
+    ? { ...input.target_boundary, resourceCreatedAt: input.target_boundary.resourceCreatedAt ?? now }
+    : undefined;
+  const stagedPath = `${targetPath}.pending-${randomUUID()}`;
+  await mkdir(path.dirname(path.join(this.rootDir, targetPath)), { recursive: true });
+  try {
+    await this.fileTransactions.execute({
+      kind: "wiki_copy",
+      targetPath,
+      stagedPath,
+      beforeJson: JSON.stringify({ source_id: source.id, expected_source_resource_version: input.expected_source_resource_version }),
+      afterJson: JSON.stringify(after),
+      stagedContent: `${renderFrontmatter(target)}\n${content.trim()}\n`,
+      commit: async (transaction) => {
+        if (!await this.recoveryHandler.commitCopy(transaction, {
+          sourceId: source.id,
+          expectedSourceVersion: input.expected_source_resource_version,
+          after,
+          ...(targetBoundary ? { targetBoundary } : {})
+        })) throw new Error("wiki_copy_version_conflict");
+      },
+      rollback: (transaction) => this.recoveryHandler.rollbackCopy(transaction, after, targetBoundary)
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "wiki_copy_version_conflict") {
+      const latest = await this.getWiki(source.id);
+      throw new ManagedResourceVersionConflictError(
+        "wiki",
+        source.id,
+        input.expected_source_resource_version,
+        latest?.resource_version ?? source.resource_version
+      );
+    }
+    throw error;
+  }
+  return after;
+}
+
+/** Moves a Room-scoped Knowledge Wiki without silently changing any historic
+ * Room share. The Wiki index CAS and the source Room boundary move together
+ * in one file/SQLite transaction. */
+async moveWikiPage(input: {
+  id: string;
+  source_room_id: string;
+  target_room_id: string;
+  expected_resource_version: number;
+}): Promise<WikiWithFilePath | undefined> {
+  if (input.source_room_id === input.target_room_id) {
+    throw new ManagedResourceScopeTransferError("wiki", input.id, "source_scope_invalid");
+  }
+  const current = await this.getWiki(input.id);
+  const content = await this.readWikiContent(input.id);
+  if (!current || content === undefined) return undefined;
+  if (current.usage_scope?.kind !== "room" || current.usage_scope.room_id !== input.source_room_id) {
+    throw new ManagedResourceScopeTransferError("wiki", input.id, "source_scope_invalid");
+  }
+  const { file_path: filePath, resource_version: _resourceVersion, ...frontmatter } = current;
+  const next = withUsageScope({
+    ...frontmatter,
+    usage_scope: { kind: "room", room_id: input.target_room_id },
+    updated_at: nowIso()
+  });
+  return this.writeWikiScopeMove({
+    current,
+    frontmatter: next,
+    filePath,
+    content,
+    sourceRoomId: input.source_room_id,
+    targetRoomId: input.target_room_id,
+    expectedResourceVersion: input.expected_resource_version
+  });
 }
 
 async listWiki(options: {
@@ -189,7 +305,7 @@ async restoreWikiVersionMarkdown(input: { id: string; markdown: string; version:
     await writeFile(nextAbsolutePath, nextMarkdown, { flag: "wx" });
   }
   try {
-    await this.db.updateTable("wiki_index").set(wikiToRow(next, nextPath)).where("id", "=", input.id).execute();
+    await this.db.updateTable("wiki_index").set(wikiToRow(next, nextPath, current.resource_version + 1)).where("id", "=", input.id).execute();
   } catch (error) {
     if (nextPath === previousPath) {
       await writeFile(previousAbsolutePath, previousMarkdown).catch(() => undefined);
@@ -199,7 +315,7 @@ async restoreWikiVersionMarkdown(input: { id: string; markdown: string; version:
     throw error;
   }
   if (nextPath !== previousPath) await unlink(previousAbsolutePath).catch(() => undefined);
-  return { ...next, file_path: nextPath };
+  return { ...next, file_path: nextPath, resource_version: current.resource_version + 1 };
 }
 
 async updateWikiPage(input: {
@@ -210,6 +326,9 @@ async updateWikiPage(input: {
   content_locale?: WikiFrontmatter["content_locale"];
   source_refs?: WikiFrontmatter["source_refs"];
   provenance?: WikiFrontmatter["provenance"];
+  usage_scope?: WikiFrontmatter["usage_scope"];
+  pinned?: boolean;
+  expected_resource_version?: number;
 }): Promise<WikiWithFilePath | undefined> {
   const current = await this.getWiki(input.id);
   if (!current) {
@@ -219,7 +338,7 @@ async updateWikiPage(input: {
   if (content === undefined) {
     return undefined;
   }
-  const { file_path: filePath, ...currentFrontmatter } = current;
+  const { file_path: filePath, resource_version: _resourceVersion, ...currentFrontmatter } = current;
   const next = withUsageScope({
     ...currentFrontmatter,
     title: input.title ?? current.title,
@@ -227,10 +346,11 @@ async updateWikiPage(input: {
     content_locale: input.content_locale ?? current.content_locale,
     source_refs: input.source_refs ?? current.source_refs,
     provenance: input.provenance ?? current.provenance,
+    usage_scope: input.usage_scope ?? current.usage_scope,
+    pinned: input.pinned ?? current.pinned,
     updated_at: nowIso()
   });
-  await this.writeWikiPage(next, filePath, content);
-  return { ...next, file_path: filePath };
+  return this.writeWikiPage(next, filePath, content, input.expected_resource_version);
 }
 
 /** Updates only the Core 05 metadata carried by a Workspace-authoritative Knowledge Wiki file. */
@@ -241,13 +361,16 @@ async patchWikiLearningMetadata(input: {
   const current = await this.getWiki(input.id);
   const content = await this.readWikiContent(input.id);
   if (!current || content === undefined) return undefined;
-  const { file_path: filePath, ...frontmatter } = current;
+  const { file_path: filePath, resource_version: _resourceVersion, ...frontmatter } = current;
   const next = withUsageScope({ ...frontmatter, ...input.metadata, updated_at: nowIso() });
-  await this.writeWikiPage(next, filePath, content);
-  return { ...next, file_path: filePath };
+  return this.writeWikiPage(next, filePath, content);
 }
 
-async setWikiState(id: string, state: WikiFrontmatter["state"]): Promise<WikiWithFilePath | undefined> {
+async setWikiState(
+  id: string,
+  state: WikiFrontmatter["state"],
+  expectedResourceVersion?: number
+): Promise<WikiWithFilePath | undefined> {
   const current = await this.getWiki(id);
   if (!current) {
     return undefined;
@@ -256,14 +379,13 @@ async setWikiState(id: string, state: WikiFrontmatter["state"]): Promise<WikiWit
   if (content === undefined) {
     return undefined;
   }
-  const { file_path: filePath, ...currentFrontmatter } = current;
+  const { file_path: filePath, resource_version: _resourceVersion, ...currentFrontmatter } = current;
   const next = withUsageScope({
     ...currentFrontmatter,
     state,
     updated_at: nowIso()
   });
-  await this.writeWikiPage(next, filePath, content);
-  return { ...next, file_path: filePath };
+  return this.writeWikiPage(next, filePath, content, expectedResourceVersion);
 }
 
   /** Rebuilds the derived wiki_index from validated Workspace markdown. */
@@ -302,7 +424,10 @@ async setWikiState(id: string, state: WikiFrontmatter["state"]): Promise<WikiWit
           errors.push({ file_path: file.relativePath, message: `duplicate wiki id: ${frontmatter.id}` });
           continue;
         }
-        desired.set(frontmatter.id, wikiToRow(frontmatter, file.relativePath));
+        const previous = existingRows.find((row) => row.id === frontmatter.id);
+        const next = wikiToRow(frontmatter, file.relativePath, previous?.resource_version ?? 1);
+        if (previous && !sameWikiIndexContent(previous, next)) next.resource_version = previous.resource_version + 1;
+        desired.set(frontmatter.id, next);
       } catch (error) {
         skipped += 1;
         errors.push({ file_path: file.relativePath, message: errorMessage(error) });
@@ -388,18 +513,114 @@ async setWikiState(id: string, state: WikiFrontmatter["state"]): Promise<WikiWit
 
 
 
-  private async writeWikiPage(frontmatter: WikiFrontmatter, filePath: string, content: string): Promise<void> {
+  private async writeWikiPage(
+    frontmatter: WikiFrontmatter,
+    filePath: string,
+    content: string,
+    expectedResourceVersion?: number
+  ): Promise<WikiWithFilePath> {
     const scopedFrontmatter = withUsageScope(frontmatter);
-    const absolutePath = path.join(this.rootDir, filePath);
-    await writeFile(absolutePath, `${renderFrontmatter(scopedFrontmatter)}\n${content.trim()}\n`);
-    await this.db
-      .updateTable("wiki_index")
-      .set(wikiToRow(scopedFrontmatter, filePath))
-      .where("id", "=", scopedFrontmatter.id)
-      .execute();
+    const current = await this.getWiki(scopedFrontmatter.id);
+    if (!current) throw new Error(`wiki_not_found:${scopedFrontmatter.id}`);
+    if (expectedResourceVersion !== undefined && expectedResourceVersion !== current.resource_version) {
+      throw new ManagedResourceVersionConflictError("wiki", current.id, expectedResourceVersion, current.resource_version);
+    }
+    const after: WikiWithFilePath = {
+      ...scopedFrontmatter,
+      file_path: filePath,
+      resource_version: current.resource_version + 1
+    };
+    const stagedPath = `${filePath}.pending-${randomUUID()}`;
+    try {
+      await this.fileTransactions.execute({
+        kind: "wiki_update",
+        targetPath: filePath,
+        stagedPath,
+        beforeJson: JSON.stringify(current),
+        afterJson: JSON.stringify(after),
+        stagedContent: `${renderFrontmatter(scopedFrontmatter)}\n${content.trim()}\n`,
+        commit: async (transaction) => {
+          if (!await this.recoveryHandler.commitUpdate(transaction, { before: current, after })) {
+            throw new Error("wiki_update_version_conflict");
+          }
+        },
+        rollback: (transaction) => this.recoveryHandler.rollbackUpdate(transaction, { before: current, after })
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "wiki_update_version_conflict") {
+        const latest = await this.getWiki(scopedFrontmatter.id);
+        throw new ManagedResourceVersionConflictError("wiki", scopedFrontmatter.id, expectedResourceVersion ?? current.resource_version, latest?.resource_version ?? current.resource_version);
+      }
+      throw error;
+    }
+    return after;
+  }
+
+  private async writeWikiScopeMove(input: {
+    current: WikiWithFilePath;
+    frontmatter: WikiFrontmatter;
+    filePath: string;
+    content: string;
+    sourceRoomId: string;
+    targetRoomId: string;
+    expectedResourceVersion: number;
+  }): Promise<WikiWithFilePath> {
+    if (input.expectedResourceVersion !== input.current.resource_version) {
+      throw new ManagedResourceVersionConflictError("wiki", input.current.id, input.expectedResourceVersion, input.current.resource_version);
+    }
+    const after: WikiWithFilePath = {
+      ...input.frontmatter,
+      file_path: input.filePath,
+      resource_version: input.current.resource_version + 1
+    };
+    const stagedPath = `${input.filePath}.pending-${randomUUID()}`;
+    try {
+      await this.fileTransactions.execute({
+        kind: "wiki_scope_move",
+        targetPath: input.filePath,
+        stagedPath,
+        beforeJson: JSON.stringify({ resource: input.current, source_room_id: input.sourceRoomId, target_room_id: input.targetRoomId }),
+        afterJson: JSON.stringify(after),
+        stagedContent: `${renderFrontmatter(input.frontmatter)}\n${input.content.trim()}\n`,
+        commit: async (transaction) => {
+          const result = await this.recoveryHandler.commitScopeMove(transaction, {
+            before: input.current,
+            after,
+            sourceRoomId: input.sourceRoomId,
+            targetRoomId: input.targetRoomId
+          });
+          if (result !== "ok") throw new Error(`wiki_scope_move_${result}`);
+        },
+        rollback: (transaction) => this.recoveryHandler.rollbackScopeMove(transaction, {
+          before: input.current,
+          after,
+          sourceRoomId: input.sourceRoomId,
+          targetRoomId: input.targetRoomId
+        })
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "wiki_scope_move_version_conflict") {
+        const latest = await this.getWiki(input.current.id);
+        throw new ManagedResourceVersionConflictError("wiki", input.current.id, input.expectedResourceVersion, latest?.resource_version ?? input.current.resource_version);
+      }
+      if (error instanceof Error && error.message.startsWith("wiki_scope_move_")) {
+        const reason = error.message.slice("wiki_scope_move_".length);
+        if (reason === "boundary_missing" || reason === "boundary_source_mismatch" || reason === "boundary_has_shares") {
+          throw new ManagedResourceScopeTransferError("wiki", input.current.id, reason);
+        }
+      }
+      throw error;
+    }
+    return after;
   }
 }
 
 function sameWikiIndexRow(left: WikiIndexTable, right: WikiIndexTable): boolean {
   return stableHash(left) === stableHash(right);
+}
+
+function sameWikiIndexContent(left: WikiIndexTable, right: WikiIndexTable): boolean {
+  const { resource_version: _leftVersion, ...leftContent } = left;
+  const { resource_version: _rightVersion, ...rightContent } = right;
+  return stableHash(leftContent) === stableHash(rightContent);
 }

@@ -33,7 +33,8 @@ const wikiProposalCreate = defineCommand<WikiProposalCreatePorts>()({
   "description": "Create a proposed Knowledge Wiki page with provenance.",
   "sources": [
     "runtime_api",
-    "scheduled_context"
+    "scheduled_context",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",

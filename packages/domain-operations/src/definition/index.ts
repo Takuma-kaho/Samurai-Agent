@@ -104,6 +104,9 @@ export interface TrustedDomainContext {
   runId?: string;
   /** Server-selected input envelope; never populated from a command payload. */
   envelopeId?: string;
+  /** Server-owned Room list from the active External App Connection. It is
+   * absent for every other ingress and is never supplied by a Tool payload. */
+  externalAllowedRoomIds?: readonly string[];
   /** Server-validated Surface operation identity; never populated from a command payload. */
   surfaceOperation?: {
     id: string;

@@ -32,5 +32,6 @@ export interface SkillCandidateMutationPorts extends SkillMutationWorkflowPorts 
 export interface SkillPatchMutationPorts extends SkillMutationWorkflowPorts {
   getSkillForMutation(id: string): Promise<StoredSkill | undefined>;
   readSkillMarkdown(id: string): Promise<string | undefined>;
-  patchSkillRecord(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string }): Promise<StoredSkill | undefined>;
+  patchSkillRecord(input: { id: string; title?: string; description?: string; tags?: string[]; content?: string; pinned?: boolean; expected_resource_version?: number }): Promise<StoredSkill | undefined>;
+  mapSkillWriteError(error: unknown): Error;
 }

@@ -16,7 +16,7 @@ const automationJobManagerStop = defineCommand<AutomationJobManagerStopPorts>()(
   ...{
     kind: "command", id: "automation.job.manager_stop", version: "1.0", availability: "active",
     title: "Stop automation by Room manager", description: "Stop future Automation executions without cancelling an in-flight executor.",
-    sources: ["runtime_api", "provider_tool_call", "surface_operation", "external_app"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition",
+    sources: ["runtime_api", "provider_tool_call", "surface_operation"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition",
     render: ["status_timeline"], resourceKinds: ["automation_job"], proposedEffects: ["Stop future executions of an Automation job."], outputResourceKind: "automation_job", uiDisplayCategory: "automation",
     provenance: [{ source: "samurai", commit_sha: "core09", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Room managers control scheduling without becoming the stored execution authority." }]
   },

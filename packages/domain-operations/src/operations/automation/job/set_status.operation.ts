@@ -23,8 +23,7 @@ const automationJobSetStatus = defineCommand<AutomationJobSetStatusPorts>()({
   "sources": [
     "runtime_api",
     "provider_tool_call",
-    "surface_operation",
-    "external_app"
+    "surface_operation"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",

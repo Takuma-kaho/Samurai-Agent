@@ -62,10 +62,10 @@ export type CollectionMutationEvidenceKind = "resource_change" | "derived_repair
 export interface CollectionMutationPort {
   getSchema(id: string): Promise<StoredCollectionSchema | undefined>;
   saveSchema(schema: CollectionSchema): Promise<StoredCollectionSchema>;
-  updateSchema(schema: CollectionSchema): Promise<StoredCollectionSchema>;
+  updateSchema(schema: CollectionSchema, expectedResourceVersion?: number): Promise<StoredCollectionSchema>;
   saveRecord(record: CollectionRecord): Promise<StoredCollectionRecord>;
   getRecord(collectionId: string, recordId: string): Promise<StoredCollectionRecord | undefined>;
-  deleteRecord(collectionId: string, recordId: string): Promise<StoredCollectionRecord>;
+  deleteRecord(collectionId: string, recordId: string, expectedVersion?: number): Promise<StoredCollectionRecord>;
   applyRecordPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<{
     before: StoredCollectionRecord; after: StoredCollectionRecord;
   }>;
@@ -105,7 +105,7 @@ export class CollectionDomainService {
   reindexCollectionStore() { return this.dependencies.mutation.reindex(); }
   getCollectionSchemaForMutation(id: string) { return this.dependencies.mutation.getSchema(id); }
   saveCollectionSchema(schema: CollectionSchema) { return this.dependencies.mutation.saveSchema(schema); }
-  updateCollectionSchema(schema: CollectionSchema) { return this.dependencies.mutation.updateSchema(schema); }
+  updateCollectionSchema(schema: CollectionSchema, expectedResourceVersion?: number) { return this.dependencies.mutation.updateSchema(schema, expectedResourceVersion); }
   collectionSchemaRef(schema: StoredCollectionSchema) { return collectionSchemaRef(schema); }
   createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>) { return this.dependencies.mutation.createRollback(operation, refs, before, after); }
   saveCollectionRecord(record: CollectionRecord) { return this.dependencies.mutation.saveRecord(record); }
@@ -115,7 +115,9 @@ export class CollectionDomainService {
   mapCollectionPatchError(error: unknown) { return this.dependencies.mutation.mapPatchError(error); }
   collectionDeleteAllowed(schema: CollectionSchema, viewId?: string) { return collectionDeleteAllowed(schema, viewId); }
   getCollectionRecord(collectionId: string, recordId: string) { return this.dependencies.mutation.getRecord(collectionId, recordId); }
-  deleteCollectionRecord(collectionId: string, recordId: string) { return this.dependencies.mutation.deleteRecord(collectionId, recordId); }
+  deleteCollectionRecord(collectionId: string, recordId: string, expectedVersion?: number) {
+    return this.dependencies.mutation.deleteRecord(collectionId, recordId, expectedVersion);
+  }
   collectionMutationError(code: "forbidden" | "not_found", message: string) { return this.dependencies.requestError(code, message); }
 
   async runAction(input: CollectionActionRunInput): Promise<CollectionWriteResult<CollectionActionResource> & { before?: StoredCollectionRecord }> {

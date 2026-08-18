@@ -25,7 +25,8 @@ const fileList = defineQuery<FileListPorts>()({
   "description": "List files inside the local workspace.",
   "sources": [
     "provider_tool_call",
-    "runtime_api"
+  "runtime_api",
+  "external_app"
   ],
   "effect": "read_only",
   "idempotency": "none",
@@ -59,7 +60,10 @@ const fileList = defineQuery<FileListPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleFileList(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await ports.listWorkspaceFiles({ path: input.path })) };
+        return {
+          ok: true,
+          value: Output.parse(await ports.listWorkspaceFiles({ path: input.path }))
+        };
       }
     };
   }

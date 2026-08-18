@@ -39,6 +39,15 @@ try {
     created_at: fixtureCreatedAt,
     updated_at: fixtureCreatedAt
   });
+  await store.patchSettings({
+    workspace_name: "Query purity Workspace",
+    workspace_rules: ["Keep Workspace content in its authorized Room."]
+  });
+  await store.patchRoomContext({
+    roomId: room.id,
+    purpose: "Verify read-only formal Queries.",
+    workGoal: "Keep Context separate from external client input."
+  });
   const agent = await store.createAgent({
     id: "query-purity-agent",
     name: "Query purity Agent",
@@ -194,6 +203,8 @@ try {
     { queryId: "generated_surface.export", payload: { surface_id: surfaceId } },
     { queryId: "collection.schema.docs", payload: {} },
     { queryId: "collection.schema.get", payload: { collection_id: "query-purity" } },
+    { queryId: "resource.version.get", payload: { resource_kind: "collection_schema", resource_id: "query-purity" } },
+    { queryId: "workspace.context.get", payload: { room_id: room.id } },
     { queryId: "collection.records.list", payload: { collection_id: "query-purity" } },
     { queryId: "collection.search", payload: { collection_id: "query-purity", query: "", limit: 5 }, trusted: { sessionId: session.id } },
     { queryId: "memory.search", payload: { query: "", limit: 5 }, trusted: { runId } },
