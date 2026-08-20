@@ -1,21 +1,21 @@
 # Samurai Agent
 
-Samurai Agent is a local-first personal AI assistant with chat-first interaction, on-demand UI, and a durable workspace-backed core.
+Samurai Agent is a provider-neutral AI-native Knowledge Workspace. It keeps
+knowledge, evidence, and reusable procedures under user control while Codex,
+Claude Code, Cursor, the Native App, and other clients perform the work.
 
-The backend treats the workspace filesystem as the durable source of truth for
-Artifacts, Memory, Knowledge Wiki pages, Skills, and support files. SQLite is
-used for indexes, history, status, audit records, rollback points, and runtime
-diagnostics.
+Human-readable files are the source of truth for Knowledge, Skills, Policy,
+PROFILE, and SOUL bodies. The active database manages identity, Room access,
+versions, evidence, activity, jobs, audit, and search projections.
 
 ## What Is In Scope
 
-- Chat-first local agent runtime with text, Artifact, and on-demand UI responses
-- Agent Backend cassette selection
-- Memory, Knowledge Wiki, Skill, and Skill support-file retrieval
-- Context preview for reusable workspace context
-- Gateway pairing, inbound-message routing, webhook, Slack, Telegram, LINE, and Email inbound adapters
-- Policy, audit, activity inbox, rollback point creation, and rollback restore
-- Local file, browser fallback, collection, automation, and external-send draft operations
+- Workspace and Room-scoped Knowledge, Skill, Artifact, and Collection storage
+- Activity, evidence, version, learning, and recovery foundations
+- External client ingress through MCP, API, adapters, and Gateway boundaries
+- Exchangeable Agent Backend cassettes
+- Native App Chat, Session, teaching, and on-demand Workspace surfaces
+- Backup, Export, Restore, authorization, audit, and automation foundations
 
 Large GUI redesign work is intentionally separate from this backend foundation.
 
@@ -194,11 +194,11 @@ Vitest results as authoritative.
 
 ## Project Docs
 
-- `PRINCIPLES.md`: design principles and decision criteria
-- `ARCHITECTURE.md`: backend architecture specification
-- `PUBLIC_NAMING.md`: public naming rules
-- `WEB_UI_DESIGN.md`: UI direction
+- `PRODUCT.md`: product definition, concepts, and public language
+- `ARCHITECTURE.md`: technical boundaries and verification invariants
+- `WEB_UI_DESIGN.md`: supporting Native App UI guidance
 - `plans/`: implementation plans and reviews
+- `reports/`: point-in-time verification evidence
 
 ## Workspace Data
 

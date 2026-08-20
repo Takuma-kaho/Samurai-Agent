@@ -5,7 +5,7 @@
 - 対象: Core分類2「Host・Runtime」。
 - 状態: 実装前の設計・実装・完了判定計画。**この文書を作成した時点では未完了**。
 - 基準日: 2026-07-20。
-- 上位正本: [`PRINCIPLES.md`](../PRINCIPLES.md) → [`SAMURAI_AGENT_MANUAL.md`](../SAMURAI_AGENT_MANUAL.md) → [`ARCHITECTURE.md`](../ARCHITECTURE.md) → [`PUBLIC_NAMING.md`](../PUBLIC_NAMING.md) → [`WEB_UI_DESIGN.md`](../WEB_UI_DESIGN.md) → 本計画。
+- 現在の上位正本: [`PRODUCT.md`](../PRODUCT.md) → [`ARCHITECTURE.md`](../ARCHITECTURE.md) → 本計画。旧文書名は当時の履歴として読む。
 - 完了判定: 必須Hard Gateがすべて合格し、実装範囲台帳に未確認がなく、独立設計監査で重大問題がない時だけ完了。Release hardeningは分けて扱う。
 - 非対象: Core 03〜08の機能自体の作り直し。Core 03の終了根拠契約、Core 04の一括保存契約など、Core 02成立に必須の境界変更だけを対象にする。Core 05〜08の具体機能変更は別計画へ分ける。
 

@@ -1,34 +1,27 @@
-# Samurai Agent Target Architecture
+# Samurai Agent Architecture
 
-## 0. 文書の役割
+## 0. この文書の役割
 
-この文書は、Samurai Agentの完成形を実装境界として定義する正本である。
+この文書は、Samurai Agentの構造、責務境界、データ所有、接続、検証不変条件を定義する**技術正本**である。
 
-対象は次のとおり。
-
-- Workspace Coreの責務
-- Native Appと外部アプリの境界
-- HostとBackend cassetteの実行経路
-- Domain Operation、Activity、Workspace Jobの関係
-- Room、Principal、Session参照、Knowledgeの保存境界
-- Artifact、Collection、Surface、Gateway、Backup
-
-これは「実装がすべて完了した」という意味の版番号ではない。完成形と現状の差分は末尾で分けて記載する。
+製品の目的、概念、公開用語は`PRODUCT.md`を正本とする。UI資料、計画、進捗台帳、完了レポートは補助資料であり、この文書の完成形と現在の実装状況を混ぜない。
 
 ---
 
-## 1. 設計不変条件
+## 1. 技術不変条件
 
-1. WorkspaceがKnowledgeの正本である。
-2. RoomはKnowledgeとアクセス権の境界である。
-3. Sessionはアプリ側の会話単位であり、Workspaceの必須親ではない。
+1. WorkspaceがKnowledgeと作業証拠の正本である。
+2. RoomがKnowledgeと認可の境界である。
+3. Sessionはアプリ側の任意参照であり、Workspace Resourceの必須親ではない。
 4. Native Appと外部アプリは同じWorkspace Coreを使う。
-5. Hostから見た実行部は一つのBackend cassette境界に統一する。
-6. Activity Historyは構造化証拠、Knowledgeは再利用物である。
-7. Hostの自動学習は同じRoom内の根拠付き暫定Knowledgeに限定する。
-8. Workspace JobはAI処理・学習・長時間処理に限定する。
-9. Surfaceは表示投影であり、Workspaceの正本ではない。
-10. Gatewayは接続境界であり、権限を迂回する書き込み口ではない。
+5. Gateway、MCP、AdapterはDomain Operation、Activity Ingest、Queryを迂回しない。
+6. BackendはWorkspace Storeへ直接アクセスしない。
+7. Activityは証拠、KnowledgeとSkillは再利用物として分ける。
+8. 自動学習は同じRoomの根拠付き処理に限定する。
+9. 本文ファイルとDatabaseを二重正本にしない。
+10. Surface、Session、Agent CacheをWorkspace Knowledgeの正本にしない。
+11. 未認証、権限失効、古いVersion、不完全な証拠は安全側で拒否する。
+12. Source、契約テスト、実環境確認、完成判定を別々に扱う。
 
 ---
 
@@ -36,99 +29,114 @@
 
 ~~~mermaid
 flowchart TB
-  subgraph Apps["Application Layer"]
+  subgraph Apps["Client Layer"]
     Native["Samurai Native App"]
-    External["Codex / Claude Code / Other Apps"]
+    External["Codex / Claude Code / Cursor / CLI"]
   end
 
-  subgraph Boundary["Ingress Boundary"]
+  subgraph Connect["Connection Layer"]
+    OAuth["OAuth / Pairing / Credential Adapter"]
+    MCP["MCP / API / Plugin / Hook"]
     Gateway["Gateway"]
-    ActivityIngest["Activity Ingest"]
-    DomainIngress["Domain Operation Ingress"]
+  end
+
+  subgraph Ingress["Formal Ingress"]
+    Query["Query"]
+    Operation["Domain Operation"]
+    Activity["Activity Ingest"]
   end
 
   subgraph Core["Workspace Core"]
-    Policy["Principal / Room Permission"]
+    Auth["Principal / Room Authorization"]
     Store["Workspace Store"]
-    History["Activity History"]
-    Jobs["Workspace Job"]
+    History["Activity / Evidence / Audit"]
     Host["Knowledge Host"]
+    Jobs["Workspace Job"]
   end
 
   subgraph Execution["Execution Boundary"]
-    Cassette["Agent Backend cassette"]
-    Claude["Claude Code Backend"]
-    Codex["Codex Backend"]
-    NativeBackend["Samurai Native Backend"]
+    Port["Agent Backend Port"]
+    Backends["Codex / Claude Code / Native Backend"]
   end
 
-  Native --> Gateway
-  External --> Gateway
-  Gateway --> ActivityIngest
-  Gateway --> DomainIngress
-  ActivityIngest --> Policy
-  DomainIngress --> Policy
-  Policy --> Store
-  Policy --> History
+  Native --> MCP
+  External --> MCP
+  MCP --> OAuth
+  OAuth --> Gateway
+  Gateway --> Query
+  Gateway --> Operation
+  Gateway --> Activity
+  Query --> Auth
+  Operation --> Auth
+  Activity --> Auth
+  Auth --> Store
+  Auth --> History
   Store --> Host
   History --> Host
   Host --> Jobs
-  Host --> Cassette
-  Cassette --> Claude
-  Cassette --> Codex
-  Cassette --> NativeBackend
+  Host --> Port
+  Port --> Backends
   Jobs --> Store
   Host --> Store
 ~~~
 
-依存方向は、ApplicationからGateway、GatewayからCore、CoreからBackend Portへ向かう。BackendやSurfaceがWorkspaceの正本を直接所有しない。
+依存はClientからConnection、Formal Ingress、Workspace Core、Backend Portへ向かう。逆方向の直接参照を作らない。
 
 ---
 
-## 3. レイヤーと責務
+## 3. レイヤーの責務
 
-| レイヤー | 主な責務 | 持たない責務 |
+| レイヤー | 持つ責務 | 持たない責務 |
 | --- | --- | --- |
-| Native App | Chat、Session、App Agent、Surface | Workspace正本の独占 |
-| External App Adapter | 外部アプリの入力・結果をActivityへ変換 | Room権限の迂回 |
-| Gateway | 認証、接続、入口、配信 | Knowledgeの直接編集 |
-| Domain Operation | 明示された保存・変更・権限操作 | AIの長時間処理 |
-| Activity Ingest | 外部実行結果の正規化 | Knowledgeの無条件確定 |
-| Workspace Core | 正本、権限、履歴、成果物、検索 | UI状態の所有 |
-| Knowledge Host | Context構築、整理、学習、Backend接続 | App Sessionの所有 |
-| Backend cassette | 実行とBackend Eventの返却 | Workspace Knowledgeの正本 |
-| Surface | Coreデータの一時的な表示・操作 | 永続状態の正本 |
+| Native App | Knowledge管理、教え込み、Chat、Session、Surface | Workspace正本の独占 |
+| External App Adapter | 外部入力・結果の変換 | Room権限の決定 |
+| OAuth / Pairing | Connectionの本人性とCredential参照 | Workspace権限の付与 |
+| Gateway | 接続、再送、配信、Formal Ingressへの振り分け | Workspaceへの直接書込み |
+| Query | 認可済みの読取り | 副作用、学習起動 |
+| Domain Operation | 明示的な保存・変更・権限操作 | AI長時間処理 |
+| Activity Ingest | 外部実行証拠の正規化と保存 | 通常Knowledgeの即時確定 |
+| Workspace Core | 正本、認可、履歴、検索、成果物 | UI状態、App Session所有 |
+| Knowledge Host | Context構築、整理、学習、Backend調整 | Client Session所有 |
+| Workspace Job | AI処理、学習、Curator、長時間処理 | 単純なCRUD、通常Query |
+| Backend Port | 交換可能な実行契約 | Knowledgeの正本 |
+| Surface | Coreデータの表示・操作 | 永続Resourceの所有 |
 
 ---
 
-## 4. 中核データモデル
+## 4. データ所有
 
-### 4.1 Workspace
+### 4.1 WorkspaceとRoom
 
-Workspaceは、Room、Principal、Knowledge、Skill、Policy、PROFILE／SOUL、Activity、Artifact、Collectionを所有する。
+WorkspaceはRoom、Principal、Knowledge、Skill、Policy、PROFILE／SOUL、Activity、Episode、Artifact、Collectionを所有する。
 
-### 4.2 Room
+Roomは同じ種類のままWorkspace直下または別Roomの下へ置ける。親子関係は整理と参加可能範囲の制約だけを表し、Knowledge、検索、AI Context、権限を継承しない。
 
-Roomは、Workspace内のKnowledgeとアクセス権を分ける境界である。RoomはActivityとResourceの分類キーとして使えるが、Sessionの所有者ではない。WorkspaceはRoomとして保存しない。Roomは同じ種類のままWorkspace直下または一つの親Roomの下へ置け、階層数に製品上の上限を設けない。
+Room操作は次を原子的に検証する。
 
-親子関係は整理と参加可能範囲の制約であり、Knowledge、検索、AI Context、閲覧権限を継承する関係ではない。子Roomの直接メンバーは全親Roomの直接メンバーである必要があり、親Roomの直接メンバーだけでは子Roomを読めない。
+- 同じWorkspaceの親であること
+- 循環がないこと
+- 子Roomの直接メンバーが全親Roomへ直接参加していること
+- 最後のOwnerを失わないこと
+- 期待VersionとOperation IDが一致すること
 
-### 4.3 Principal
+### 4.2 PrincipalとConnection
 
-Principalは、誰が操作したかを表す安定した識別子である。
+Principalは操作主体を表す。
 
 - Human
 - Agent
 - External App
-- System
+- System / Maintenance
 
-外部アプリは、接続設定と委任されたHuman / Agent権限の範囲で動く。
+Accountは、人間が複数のHosted・Self-host Serverで再利用できる安定した本人識別子である。Accountは権限そのものではなく、WorkspaceとRoomのRoleは各Workspaceで別に評価する。private keyをWorkspaceやBundleへ保存しない。
 
-### 4.4 SessionRef
+Connectionは接続元、委任元、許可Room上限、入口上限、失効状態を持つ。Connectionが存在するだけではRoom membershipを得ない。認可は毎回、現在のWorkspace membership、Room membership、Agent permissionとの積集合で評価する。
 
-SessionRefは、アプリ側SessionをWorkspaceから参照するための任意情報である。
+Maintenance identityは一つのDeploymentとWorkspaceにだけ結び、通常Client利用やBundle移送を許可しない。
 
-含められる情報。
+### 4.3 SessionRef
+
+SessionRefは外部Sessionへの任意参照である。
 
 - app_id
 - session_id
@@ -136,440 +144,341 @@ SessionRefは、アプリ側SessionをWorkspaceから参照するための任意
 - message_id
 - resume_urlまたは外部参照キー
 
-SessionRefを削除しても、Activity、Knowledge、Artifactの正本が壊れない設計にする。
+SessionRefを削除しても、Activity、Knowledge、Artifact、権限の正本が壊れないことを必須とする。
 
-### 4.5 ActivityRecord
+### 4.4 Activity、Episode、Knowledge
 
-ActivityRecordは、外部作業の構造化された証拠である。
+Activityは最低限、次を持つ。
 
-最低限の意味。
-
-- workspace_id
-- room_id
-- actor principal
-- source app / connector
-- instruction summary
-- final result summary
+- workspace_id、room_id
+- actor、source app、connector、Backend
+- instruction summary、final result summary
 - changed resources
 - verification outcome
-- failure / correction summary
-- provenance
-- optional SessionRef
+- failure、correction、provenance
+- 任意のSessionRef
 
-会話全文や内部思考は必須フィールドにしない。
+Episodeは関連するActivityをまとめる。Knowledgeは`fact`、`decision`、`explanation`、`experience_rule`に分ける。
 
-### 4.6 WorkspaceJob
+呼出元の`verification_outcome`は自己申告として残せるが、機械検証の根拠にはしない。対象Versionと本文hashが一致する追記専用Attestationだけを`machine_verified`として扱う。
 
-WorkspaceJobは、AIが非同期で行う処理の実行単位である。
+### 4.5 Skill、Policy、PROFILE／SOUL
 
-許可する種類。
+- Skillは`SKILL.md`と補助ファイルを一つのVersionとして扱う。Copy、Move、Restoreはpackage全体のpath、size、hashを検証する。
+- Policyは、Serverが認証済みHuman requestから作ったCaller Contextでだけ有効化する。任意header、connection ID、署名文字列、AI、Maintenanceは有効化できない。
+- PROFILE／SOULは人間の明示操作でだけ更新する。学習、Curator、Migrationは更新しない。
 
-- backend execution
-- activity organization
-- memory / knowledge / skill learning
-- curator
-- generative processing
+### 4.6 Artifact、Collection、Surface
 
-単純な保存、削除、権限変更、検索はDomain OperationまたはQueryとして扱う。
+- ArtifactはRevisionと出所を持つ成果物である。
+- CollectionはSchemaとRecordを持つ構造化データである。
+- SurfaceはArtifact、Collection、Knowledge、Activityを表示・操作する再生成可能な投影である。
 
-### 4.7 BackendRun
+SurfaceのDOM、開閉、表示順、split比率をWorkspace正本へ保存しない。
 
-BackendRunは、Backend cassetteによる一回の実行結果である。
+### 4.7 Agent Cache
 
-BackendRunは、WorkspaceJobまたはActivityの処理結果として作られる。Sessionを必須の親にしない。SessionRefはあれば保持するが、実行の同一性や権限の根拠にはしない。
+Agent固有の短期メモ、生成Context、Cache、Session状態は派生データである。
 
-### 4.8 KnowledgeChange
-
-KnowledgeChangeは、Knowledge、Skill、Policy、PROFILE／SOUL、Artifact、Collectionに対する変更記録である。
-
-- 変更したPrincipal
-- 変更理由
-- 根拠Activity
-- 変更前後のVersion
-- Room
-- 自動作成か明示操作か
-
-を追跡できるようにする。
+- 参照元のRoomとKnowledge Versionを記録する
+- 権限失効後は再利用しない
+- Export対象のKnowledge正本にしない
+- CacheからWorkspace Knowledgeを無条件に更新しない
 
 ---
 
-## 5. 入口と操作の境界
+## 5. Formal Ingress
 
-### 5.1 Domain Operation
+### 5.1 Query
 
-Domain Operationは、人間やアプリが明確に指定した変更を処理する。
+Queryは認可済みResourceを読む。副作用を持たず、Session、Activity、Job、Knowledge Changeを自動作成しない。
+
+通常のKnowledge検索はRoom IDを必須にし、親、子、兄弟Roomへ自動拡張しない。Workspace全体検索は別の明示操作として扱う。
+
+### 5.2 Domain Operation
+
+Domain Operationは、人間やClientが明確に指定した変更を扱う。
 
 例。
 
-- Knowledgeを保存する
-- Artifactを作成・修正する
-- Collectionを更新する
-- Room権限を変更する
-- Backupを作成・復元する
+- Knowledge、Artifact、Collectionの保存・修正
+- Room、Member、Permissionの変更
+- Knowledgeの共有、Copy、Move、固定
+- Backup、Export、Restore
+- 明示的な教え込み
 
-Domain Operationは、入力、権限、冪等性、永続化を一つの契約として扱う。
+入力検証、認可、冪等性、永続化、Auditを一つの契約として扱う。
 
-### 5.2 Activity Ingest
+### 5.3 Activity Ingest
 
-Activity Ingestは、外部アプリから届いた実行結果をWorkspaceの共通形へ変換する。
+Activity Ingestは次の順で処理する。
 
-処理順。
-
-1. 接続元とPrincipalを確認する
+1. ConnectionとPrincipalを確認する
 2. WorkspaceとRoomを解決する
-3. Backend固有Eventを正規化する
-4. 構造化証拠を作る
-5. Activity Historyへ保存する
-6. 必要ならHostの整理Jobを起動する
+3. Client固有Eventを共通形式へ正規化する
+4. Activity、Evidence、Resource参照を作る
+5. 一つの永続化境界で保存する
+6. 条件を満たす場合だけKnowledge HostのReview Jobを起動する
 
-Activity Ingestは、受信した内容を通常Knowledgeとして即確定しない。
-
-### 5.3 Query
-
-Queryは、Workspace、Room、Activity、Knowledge、Artifact、Collectionを読む。
-
-Queryは副作用を持たない。読み取り時にSessionを作成したり、Knowledgeを自動変更したりしない。
+不完全なCaptureは成功扱いせず、再試行可能な状態と不足Evidenceを記録する。
 
 ---
 
-## 6. HostとBackend cassette
-
-### 6.1 Hostの実行経路
+## 6. HostとBackend
 
 ~~~mermaid
 sequenceDiagram
-  participant App as 外部アプリ / Native App
+  participant App as Native / External App
   participant G as Gateway
-  participant H as Knowledge Host
-  participant B as Backend cassette
+  participant I as Formal Ingress
   participant W as Workspace Core
+  participant H as Knowledge Host
+  participant B as Backend Port
 
-  App->>G: Activityまたは明示操作
-  G->>H: 認証済みContext
-  H->>W: Room / Knowledge / Permissionを読む
+  App->>G: Query / Operation / Activity
+  G->>I: 認証済みConnection Context
+  I->>W: Room認可と保存・読取り
+  W-->>H: Knowledge・Activity・Evidence
   H->>B: 共通Backend入力
-  B-->>H: 正規化前のBackend Event
-  H->>W: Activity / BackendRun / KnowledgeChange
-  W-->>G: 結果と参照
-  G-->>App: 状態またはSurface用データ
+  B-->>H: Backend Event・結果
+  H->>W: BackendRun・Activity・Change
+  W-->>App: 結果・参照・再利用可能Context
 ~~~
 
-Backendの種類が変わっても、Hostの入力とWorkspaceへの戻し方は変えない。
+Backend Portは次を共通契約として扱う。
 
-### 6.2 Backend cassetteの契約
+- 実行要求と認可済みContext
+- Event stream
+- 成功、失敗、中断、要確認の終端
+- Artifact、変更、Tool結果の参照
+- 任意のBackend Session情報
 
-Backend cassetteは、最低限次を扱う。
-
-- 実行要求
-- Backend Eventのストリーム
-- 成功・失敗・中断・要確認の終端
-- 生成されたArtifactや変更の参照
-- Backend固有のSession情報（任意）
-
-Claude Code、Codex、Samurai Native Backendは、同じcassette契約の実装である。
-
-### 6.3 Hostがしないこと
-
-- Native AppのSession一覧を作る
-- App Agentを外部から直接呼び出す
-- Roomをまたいで権限を拡大する
-- Backendの確認ポリシーを勝手に置き換える
-- 根拠のないKnowledgeを確定する
+BackendがWorkspace Store、Database、本文ファイルを直接操作することを禁止する。
 
 ---
 
-## 7. 学習ループ
+## 7. Knowledge学習ループ
 
-~~~mermaid
-flowchart LR
-  Activity["ActivityRecord"]
-  Review["整理・抽出・照合"]
-  Draft["同じRoomの暫定Knowledge"]
-  Use["利用と検証"]
-  Promote["明示操作または十分な根拠"]
-  Reuse["Knowledge / Skill"]
+### 7.1 Review
 
-  Activity --> Review
-  Review --> Draft
-  Draft --> Use
-  Use --> Promote
-  Promote --> Reuse
-~~~
+重要Activityは、同じRoomのReview Jobへ渡せる。Review Jobは記録済みhigh watermarkまでの対象をsnapshot digestへ含める。入力上限を超えた場合は一部だけを処理せず`blocked`にする。
 
-標準自動処理。
+Review結果はEvidence、Confidence、Job、Attempt、Version付き`provisional`として保存する。
 
-- Activityの要約と分類
-- 根拠と出所の付与
-- 同じRoom内の暫定Knowledge作成
-- 利用記録と検証結果の記録
-- Knowledge / Skill候補の整理
+### 7.2 UseとEvaluation
 
-人間の確認が必要な処理。
+KnowledgeやSkillを外部Agentへ渡す時は、利用したResource IDとVersionを記録する。結果が戻ったら、成功、失敗、訂正、機械検証、再利用結果をEvaluationとして接続する。
 
-- Workspace全体への昇格
-- Roomをまたぐ共有
-- 既存Knowledgeの削除・統合
-- 権限変更
-- 機密情報の採用
+複数Knowledgeを同時利用した場合、結果との相関だけで個別Knowledgeの因果効果を確定しない。
 
-暫定Knowledgeは、確度、根拠、作成元Job、Versionを持つ。自動保存しても、確定済みの通常Knowledgeとは区別する。
+### 7.3 更新、昇格、Conflict
 
-### 7.1 Resourceの責務
+- 非`fixed`Resourceは、同じRoomの新しい根拠に基づきVersion更新できる。
+- 人間が編集したことだけでは自動更新禁止にしない。
+- `fixed`はAI、Review、Curatorから更新しない。
+- 矛盾は既存Versionを削除せずConflictとして残す。
+- Workspace全体への昇格、Room間共有、削除・統合、権限変更、機密情報の採用は明示操作にする。
 
-- Knowledgeは`fact`、`decision`、`explanation`、`experience_rule`に分ける。
-- Skillは`SKILL.md`と`references/`、`scripts/`、`templates/`、`examples/`、その他許可された補助ファイルを一つのVersionとして扱う。Copy、Move、Restoreはpackage全体のpath、size、hashを一つのsnapshotとして確認する。
-- Policyは、Serverが認証済みrequestから作るHuman callerの署名で有効化する操作制約である。request bodyや任意headerのcaller種別、connection ID、署名文字列は信頼しない。AI、connection、maintenanceは変更依頼を残せても有効化できない。
-- Attestation PortはHostから差し替える検証境界である。Activityの自己申告ではなく、対象Versionと本文hashが一致した追記専用Attestation Recordだけを`machine_verified`の根拠にする。
-- file batch自身がWorkspace scopeまたはRoom scopeを持つ。Workspace scopeはWorkspace member、Room scopeはそのRoomの直接読取権限だけで判定し、batch entryは親batchの範囲を継承する。
-- Review Jobは記録済みhigh watermarkまでの全対象をsnapshot digestへ入れる。上限を超える場合は不完全な入力を渡さずJobを`blocked`にする。Curatorも期待Version／hashを持ち、権限、Policy、stale確認と保存は同じtransactionで行い、古い計画は部分適用しない。
-- PROFILE／SOULは人間だけが明示更新できるWorkspace文書で、学習・Curator・移行は更新しない。
-- Episodeは関連するActivityをまとめる作業単位であり、Sessionは任意の出所参照にとどめる。
+Curatorは期待Versionとhashを持ち、権限、Policy、stale確認、保存を同じTransactionで処理する。古い計画を部分適用しない。
+
+### 7.4 再試行
+
+JobはAttempt、使用設定Version、失敗理由、次回実行条件を記録する。未解決失敗、権限失効、入力不足を通常成功やKnowledge昇格へ変換しない。
 
 ---
 
-## 8. 権限の評価順
+## 8. 認可の評価順
 
-すべてのRead / Write / Executeで次を確認する。
+すべてのRead、Write、Executeで次を確認する。
 
-1. 接続元が認証されているか
-2. Principalが有効か
-3. Workspace membershipがあるか
-4. Room membershipまたはAgent permissionがあるか
-5. 対象Resourceに対する操作権限があるか
-6. Activityの出所と委任元が記録されているか
+1. 接続元が認証されている
+2. ConnectionとPrincipalが有効である
+3. Workspace membershipがある
+4. Room membershipまたはAgent permissionがある
+5. ConnectionのRoom上限と入口上限に含まれる
+6. Resource actionが許可されている
+7. 期待Version、冪等Key、委任元が一致する
+8. ActivityとAuditへ出所を記録できる
 
-System Principalも権限を迂回しない。External Appは、接続できたことだけでRoomの所有者にはならない。
+System、Maintenance、Native Appも認可を迂回しない。
 
-Room階層の更新は、画面だけで判定しない。PostgreSQLの正式関数が、同一Workspaceの親、循環、全親Roomへの直接参加、最後のOwner、版番号、操作IDを確認してから保存する。親Roomからの解除は子孫Roomにも一つの更新として反映し、途中状態を残さない。
+Realtimeは通知直前にRoomの直接読取権限を再確認する。非公開の子Room名、件数、更新通知を親Room参加者へ漏らさない。権限失効時は購読を外す。
 
 ---
 
-## 9. 永続化とバックアップ
+## 9. 永続化
 
-### 9.1 Workspace StoreとWorkspace Server
+### 9.1 本文ファイルとDatabase
 
-既存CoreのWorkspace Storeは、互換・旧データ読取のためファイルとSQLiteを使う。
+Knowledge、Skill、Policy、PROFILE／SOULの本文は、人間が読めるファイルを正本とする。Databaseは次を管理する。
 
-- ファイル：人間が直接読めるKnowledgeやArtifact
-- SQLite：整合性、検索、履歴、Queue、Index
+- Resource identity
+- Workspace、Room、権限
+- Version、hash、Evidence
+- Activity、Episode、Use、Evaluation
+- Job、Attempt、Audit
+- 検索投影
 
-UI stateや一時的なSurface stateをWorkspace正本へ混ぜない。
+本文更新は、ファイルとDatabase metadataを復旧可能なFile Transactionで結ぶ。途中失敗で片方だけを成功させない。
 
-通常の複数端末・共有運用は、`Workspace Server 02`のPostgreSQL経路を使う。
+### 9.2 運用モード
 
-- Self-hostは1 Workspace＝1 Server＝専用PostgreSQL。Serverは設定された1つのWorkspace ID以外を受け付けない
-- Hostedは複数WorkspaceでアプリとPostgreSQLを共有する。すべてのWorkspace所有行に`workspace_id`を持たせる
-- アプリ接続は、所有者ではなくRLSを迂回できないruntime roleで行う。各transactionは`account_id`と`workspace_id`をPostgreSQLへ設定し、RLSが検索、履歴、Job、ファイルmetadataを最終的に絞る
-- Roomには任意の`parent_room_id`を保存する。runtime roleはWorkspace member、Room、Room memberを直接更新できず、作成・移動・直接メンバー変更・招待受諾・RestoreはPostgreSQLの正式関数を通す
-- Room検索と通常のKnowledge一覧はRoom IDを必須にし、親・子・兄弟Roomへ自動拡張しない。Workspace全体検索は別の明示操作としてのみ設計できる
-- RealtimeはRoomごとの直接読取権限を通知直前に再確認して配信する。Room channelに未参加でも、そのRoomを直接読める画面にはツリー再取得用の通知を送れるが、親Roomの参加者へ非公開の子Room名・件数・移動通知を送らず、解除時は対象Roomと子孫Roomの購読を再確認して外す
-- Knowledge・Skill・Policyの本文は`workspaces/<workspace_id>/files/`の人間が読めるファイルを正本にする。DBはfile hash、Version、Evidence、検索投影、Job状態を持ち、DBとファイルは復旧可能なfile transactionで結ぶ
-- Sessionなしの定期Jobは、Ownerとは別のdeployment-localなmaintenance identityで実行する。identityは一つのWorkspaceにだけ結び、通常HTTP／Socketの利用やBundle移送を許可しない
-- Completion移行は専用Migration Runで開始する。Owner確認、Run作成、Workspaceのread-only化、開始Audit、snapshot取得を同じ開始処理で行い、通常HTTP、Job、外部接続の書込みを拒否する。停止時はRunの状態からresumeまたはrollbackしてからactiveへ戻す
-- 旧`workspace.sqlite`はread-onlyのBundle作成だけに使う。既存Core APIを暗黙にPostgreSQLへ混在させない
+一つのWorkspaceをSQLiteとPostgreSQLの同時書込みで運用しない。
 
-Accountは公開鍵から決まる安定IDである。同じ公開鍵をHostedとSelf-hostへ登録できるが、Room権限は各Workspaceで独立して判定する。
+- 共有、Hosted、Self-host ServerはPostgreSQLと本文ファイルを使う。
+- 旧local SQLite Workspaceは互換読取りと移行元として扱う。
+- 移行は移行元をread-onlyにし、snapshot、件数、hashを確認してから移行先を有効化する。
+- 失敗時は移行先を破棄し、移行元を復帰できるようにする。
 
-### 9.2 Workspace Bundle v4と移転
+### 9.3 Bundle
 
-Workspace Bundle v4はDB imageではなく、v3 Core記録とCompletion拡張のJSON/JSONL、人が読める本文ファイルからなる移植形式である。新規Exportはv4を使い、v3はImport互換として残す。
+Workspace BundleはDatabase imageではなく、Portable Recordと人間が読める本文ファイルで構成する。
 
-- Room、親Room ID、権限、Activity／Episode、Resource、Evidence、Job、版番号、file hashを含む
-- Restoreは親Roomの欠落・循環・子Roomメンバーの親Room未参加を有効化前に拒否する。親Room IDがない旧BundleはWorkspace直下として読む
-- private key、password、token、credential形式のJSON値・ファイルは拒否する
-- raw model outputとmaintenance identityは含めない。Job／Attemptには結果hashとエラー情報だけを残す
-- 移転元はread-onlyにしてBundleを作り、移転先へread-onlyで仮取り込み、件数とfile hashを確認してからactiveにする
-- 失敗時は移転先の新規データを消し、移転元をactiveへ戻せる
-- v4の内部base-v3はportable snapshotだけで、v3 Bundle台帳を作らない。外側のv4 stagingを最終pathへrenameして再検証した後にだけ、最終path、hash、record countsをv4台帳へ記録する。旧実装のstaging/base-v3台帳は、同じbase-v3 hashを最終manifestで証明できる場合だけ最終v4記録へ修復する
-- maintenance markerとmaintenanceのWorkspace／Room membershipはExportしない。Restore先のOwnerがdeployment-localなmaintenance identityを新しく設定する
+含めるもの。
 
-### 9.3 Workspace Backup
-
-Workspace Backupに含めるもの。
-
-- Workspace metadata
-- Room、Principal、Permission
+- Room、親Room、Principal、Permission
 - Knowledge、Skill、Policy、PROFILE／SOUL
-- Activity History、KnowledgeChange
+- Activity、Episode、Evidence、Version
 - Artifact、Collection
-- BackendRun、WorkspaceJobの必要な履歴
-- Workspace fileとindex
+- 必要なJob、Attempt、Audit、file hash
 
-### 9.4 App Session Backup
+含めないもの。
 
-App Session Backupは、Native Appまたは外部アプリが所有する。
+- private key、password、token、credential
+- raw model output
+- maintenance identityと権限
+- Session全文とUI状態
 
-- 会話全文
-- UIの表示状態
+RestoreはRoom循環、親Room欠落、Member制約、Secret混入、file hash不一致を有効化前に拒否する。
+
+---
+
+## 10. 外部接続
+
+### 10.1 双方向契約
+
+外部接続は次の両方向を閉じる。
+
+~~~text
+Workspace → Context / Knowledge / Skill → External Agent
+External Agent → Result / Change / Failure / Verification → Activity Ingest
+~~~
+
+取得だけ、またはActivity保存だけで完成扱いしない。利用したKnowledge Versionと返却結果を関連付け、次回の再利用まで確認する。
+
+### 10.2 MCP、API、Plugin、Hook
+
+Transport固有処理はAdapter内へ閉じる。すべてのTransportは同じFormal Ingressへ変換する。
+
+- Queryは読取りだけ
+- 明示変更はDomain Operation
+- 実行結果はActivity Ingest
+- Backend実行要求はHostとBackend Port
+
+MCPやAdapterがWorkspace Store、SQLite、PostgreSQL、本文ファイルを直接参照しない。
+
+### 10.3 Credential
+
+WorkspaceにはCredential本体を保存しない。ConnectionはOSやDeploymentの安全な保存先への参照、Credential種別、失効状態だけを持つ。
+
+OAuthはstate、PKCE、redirect target、Account、Workspace、Connectionを結び、再利用や別Workspaceへの差替えを拒否する。
+
+### 10.4 冪等性と再送
+
+同じ冪等Keyと同じ入力hashは既存結果を返す。同じKeyで異なる入力hashはConflictとして拒否する。Timeoutや応答喪失時に同じ変更を二重適用しない。
+
+---
+
+## 11. Native App境界
+
+Native Appは次を所有する。
+
+- ChatとSession
 - App Agentの会話状態
-- 再開に必要なアプリ固有情報
+- UIの開閉、Navigation、split比率
+- Surfaceの表示状態
+- App Session Backup
 
-WorkspaceにはSessionRefを保存できるが、Native App専用のバックアップ領域は設けない。
+Workspaceは次を所有する。
 
----
+- Knowledge、Skill、Policy、PROFILE／SOUL
+- Activity、Episode、Evidence、Audit
+- Artifact、Collection
+- Room、Principal、Permission
 
-## 10. Artifact・Collection・Surface
-
-### 10.1 Artifact
-
-ArtifactはWorkspaceが所有する成果物である。Revision、出所、作成したActivity、関連するRoomを追跡できるようにする。
-
-### 10.2 Collection
-
-CollectionはWorkspaceが所有する構造化データである。Native Appの会話から作る場合でも、保存後は外部アプリに依存しない。
-
-### 10.3 Surface
-
-SurfaceはNative AppがWorkspaceのデータを表示・操作する一時的な面である。
-
-- Chat message
-- Artifact preview
-- Collection editor
-- Knowledge view
-- Context drawer
-
-Surfaceは再生成できる。SurfaceのDOM、レイアウト、表示順をWorkspace正本に保存しない。
+Native Appは正式なGatewayとFormal Ingressを使う。公式Clientであることを理由に、特別なKnowledge領域や直接Database経路を持たない。
 
 ---
 
-## 11. Gatewayと外部接続
-
-Gatewayは、外部アプリ、CLI、Automation、将来のチャネルからの接続境界である。
-
-責務。
-
-- 認証・接続状態・Pairingの確認
-- 入力元とPrincipalの記録
-- Activity IngestまたはDomain Operationへの振り分け
-- Backend Eventの返却
-- 冪等性と再送の境界
-
-Gatewayがしないこと。
-
-- Workspaceファイルへの直接書き込み
-- Room権限の省略
-- Native Appだけの優先処理
-- SessionをWorkspaceの必須親にすること
-
-Nostr、署名Event、Relayは将来の接続候補として調査できるが、Coreの必須契約には含めない。
-
-Computeの方式は別決定とし、Gatewayの責務へ混ぜない。
-
----
-
-## 12. 依存方向のルール
+## 12. 依存ルール
 
 許可する依存。
 
 ~~~text
 Native App / External App
         ↓
-Gateway / Application Adapter
+Connection Adapter / Gateway
         ↓
-Domain Operation / Activity Ingest
+Query / Domain Operation / Activity Ingest
         ↓
-Workspace Core / Permission / Store
+Authorization / Workspace Core / Store
         ↓
-Knowledge Host
+Knowledge Host / Workspace Job
         ↓
-Backend Port → Backend cassette implementation
+Backend Port → Backend implementation
 ~~~
 
-避ける依存。
+禁止する依存。
 
-- BackendがWorkspace Storeを直接呼ぶ
-- SurfaceがDBを直接更新する
-- GatewayがDomain Operationを迂回する
-- SessionがRoomやKnowledgeの所有者になる
-- Workspace Jobがすべての処理を代行する
-- Activityを受けただけで通常Knowledgeを無条件に更新する
-
----
-
-## 13. 現状実装と移行
-
-### 13.1 現状
-
-現行コードには、Workspace Store、Room permission、Agent Backend、旧Memory・Skill・Learningの互換基盤、Artifact、Collection、Generated Surface、Gatewayの基盤がある。
-
-Core06〜Core09の範囲では、次をSessionなしで扱える。
-
-- Room・PrincipalをTrusted Contextで決めるDomain Operation
-- Artifactの作成、改訂、復元、修復、PDF出力
-- CollectionのSchema、Record、Patch、Deleteと、既存Workspace Executionを使うAI指示Action
-- Generated Surfaceの作成・改訂・Action。SurfaceのRoomは`resource_access_boundaries`で決め、SessionRefは任意の出所だけとして残す
-- Activity、Workspace Change、ResourceUsageによる変更証跡
-- secretを持たないExternal App Connection、委任元、Room上限、入口上限の永続化
-- Connector evidenceから現在のRoom権限を再評価するFormal ingress。外部AppのQuery、Domain Operation、Activity Ingestは共通Resolverを通る
-- Room／Authorityを永続化したAutomation。旧Jobは`rebind_required`で停止し、現在は`wiki_reindex`だけをSessionなしで実行する
-- `Workspace Server 02`のPostgreSQL schema、RLS runtime role、署名Account、Room scoped Socket.IO、version／operation ID、Bundle v3、read-only SQLite migration、Self-host Docker構成。Room階層の作成・移動・親子メンバー制約・Bundle互換を追加した
-- `Workspace Server 04`のCompletion拡張。Knowledge／Skill／Policyの分離、ファイル本文とDB metadataの整合、Activity／Episode、review・evaluation・Curator Job、保持・伏字化、旧学習データ移行、Bundle v4をsource上で扱う。Self-hostのOwnerだけは、先に旧版を退避してからKnowledge／Skillの物理ファイル編集を`physical_file_import`として取り込める。Hostedの物理保存領域は公開せず、Policyは物理編集から適用できない
-
-新しいBackupはArtifact・Collectionの正本を対象にし、Generated Surfaceのbundleは再生成可能な互換データとして除く。旧Surfaceを含むBackupは引き続きRestoreできる。
-
-既存Chat／Session経路とSQLite Core APIは互換機能として残る。`Workspace Server 02`は別のPostgreSQL Server entryであり、既存Chat APIを置換しない。基礎RLSの確認は`server:02:verify`、Room階層の実PostgreSQL確認は`server:03:verify`、Server 04の実DBを含む確認は`server:04:complete:verify`で、HostedとSelf-hostの両方を対象にする。DBを起動できない場合は失敗として記録し、source上の実装だけで完了扱いしない。Server 04は外部AI接続を内蔵せず、Hostが明示登録した狭いBackend cassetteだけを呼べる。したがって、現在の実装を製品全体の完成と同一視しない。
-
-### 13.2 Coreの移行単位
-
-| Core | 実装テーマ |
-| --- | --- |
-| Core01〜05 | 契約、Host、Backend、Workspace、Memory・Skillの基盤を維持 |
-| Core06 | Room・Principal・PermissionとSession依存の境界を組み替える |
-| Core07 | 共通Activity、Activity History、限定Workspace Jobを追加する |
-| Core08 | Artifact・Collection・SurfaceからSession必須依存を外す |
-| Core09 | Gateway・Automation・外部アプリ接続を整理する |
-| Native App | Core外でChat、Session、App Agent、Surfaceを提供する |
-
-### 13.3 検証の扱い
-
-完了レポートにsource差分や証拠不足がある場合、実装の存在を「完了」と書かない。
-
-- 基盤あり
-- 実行経路あり
-- 契約テスト済み
-- 実Backendで確認済み
-- 完了判定済み
-
-を分けて記録する。
-
-### 13.4 Core07の移行停止地点
-
-ここから13.6は**Core07〜09当時の移行停止点**であり、現在のServer 04の学習実装を否定する記述ではない。
-
-Core07は、`ActivityRecord`、`ResourceUsageRecord`、`WorkspaceJob`、`ActivityProcessorPort`を追加する移行単位である。
-
-- Activityの確定は事実の保存であり、学習結果の採用ではない。
-- `activity_processing` Jobは明示enqueueでのみ実行し、Activity保存から自動作成しない（Core07当時）。
-- Processorは読み取り専用の構造化結果を返し、Workspace StoreやMemory・Knowledge・Skillを直接変更しない。
-- MCP/API/Pluginのtransportと本番学習ProcessorはCore09以降で接続する。
-
-### 13.5 Core08の移行停止地点
-
-Core08は、Artifact・Collectionの保存とGenerated Surfaceの操作をSessionの必須親から外す移行単位である。
-
-- Artifact・CollectionのRoom境界は`resource_access_boundaries`を正本にし、SessionRefから逆算しない。
-- 保存ごとにDomain Operation、Workspace Change、Activity、ResourceUsageを接続するが、Activity保存からJobや学習は自動起動しない（Core08当時）。
-- Surfaceは表示契約と派生bundleであり、DOM、開閉、pin表示、分割比率、表示順をWorkspace正本へ保存しない。
-- Native AppのSession付き操作は互換Adapterとして残す。Core08からGateway、Automation、外部公開APIは追加しない。
-
-### 13.6 Core09の移行停止地点
-
-Core09は、外部AppとAutomationがSessionを作らずにWorkspace Coreを使うための認証・認可境界を追加する移行単位である。
-
-- ConnectionはConnector evidence、委任元、Room上限、入口上限を持つが、Room membershipや個別Operation ACLを追加しない。CredentialはWorkspaceへ保存しない。
-- Formal ingressはQuery、Domain Operation、Activity Ingestの3入口だけで、すべて同じResolverと現在のRoom権限を使う。Queryは外部経路では書き込みをしない。
-- Gateway Pairingはtransport admissionのままにし、既存Chat／Session dispatchをFormal ingressから呼ばない。
-- Automationは実行直前にAuthorityを再評価する。認可失効は`blocked`として記録し、Retry budgetを消費しない。SessionなしExecutorがないkindは安全停止する。
-- 本番Transport、外部Credential管理UX、任意Workspace Job API、自動Memory／Knowledge／Skill化、Room realtimeはCore09に含めない。Server 04では確認済みActivityから同じRoomの暫定Knowledge reviewだけを追加し、外部TransportやMemory／Skillの自動確定は追加しない。
+- ClientやAdapterからStoreへの直接書込み
+- BackendからStore、Database、本文ファイルへの直接アクセス
+- SurfaceからDatabaseへの直接更新
+- Queryによる保存、学習、Session作成
+- SessionをRoom、Activity、Knowledge、Artifactの所有者にする
+- Agent CacheをKnowledge正本としてExportする
+- Activity受信だけで通常Knowledgeを無条件に確定する
+- 片方の永続化だけを成功させるBest-effort更新
 
 ---
 
-## 14. 参照元
+## 13. 検証不変条件
 
-- MulmoClaude型Host：Host、Artifact、Collection、Rendererの考え方
-- Hermes Agent：Memory、Skill、Reflection、改善ループ
-- Buzz：Room、参加者、共有境界の考え方
-- Type.com：Knowledge、Skill、Integrationの持ち込み体験
-- Claude Code / Codex：交換可能なBackend cassetteの候補
+### 13.1 成功経路
 
-参照元の固有実装をそのまま正本へ持ち込まない。公開面の命名は PUBLIC_NAMING.md に従う。
+- 外部Clientが許可RoomのKnowledgeを取得できる
+- 利用したVersionと実行結果をActivityへ接続できる
+- 人間の訂正を含む新Versionを別Clientが再利用できる
+- Export・Restore後も本文、hash、Version、Evidence、権限が一致する
+
+### 13.2 失敗経路
+
+- 未参加Room、親Roomだけの参加、失効Connectionを拒否する
+- 改ざんされたCaller、OAuth state、PKCE、Credential参照を拒否する
+- 同じ冪等Keyの異なる入力を拒否する
+- 古いVersion、stale Curator、部分snapshotを拒否する
+- 未解決失敗、推測、欠落EvidenceをKnowledgeへ昇格しない
+- `fixed`Resource、Policy、PROFILE／SOULをAIが更新できない
+- Migration中の通常書込みと、Secretを含むBundleを拒否する
+- File Transaction失敗時に本文とDatabaseの片方だけを残さない
+- 権限失効後のRealtime配信とAgent Cache再利用を止める
+
+### 13.3 完成判定
+
+次を別々に記録する。
+
+1. Source実装あり
+2. Static / Type / Focused Test成功
+3. 実Database確認
+4. 実Client確認
+5. 対象OS確認
+6. Hosted / Self-host確認
+7. 事故注入、復旧、移転確認
+8. 未検証項目ゼロの完成判定
+
+現在状態と証拠は`reports/`と`plans/`の台帳で管理する。この正本へ一時的な進捗や完了主張を書かない。
+
+---
+
+## 14. 参照OSSの扱い
+
+Hermes Agent、Buzz、OpenClaw、Claude Code、Codexなどは比較・設計根拠として参照できる。ただし、参照元の名称、構造、機能をSamuraiの公開契約や実装済み事実へ直接持ち込まない。

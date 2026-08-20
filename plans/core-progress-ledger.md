@@ -8,7 +8,7 @@
 
 - Core-01〜Core-09の進捗、残課題、検証結果を1か所で管理する。
 - 今後はCoreを1つずつ進め、着手・実装・検証・完了判定のたびにこの文書を更新する。
-- この文書は進捗台帳であり、設計の正本は [PRINCIPLES.md](../PRINCIPLES.md)、[SAMURAI_AGENT_MANUAL.md](../SAMURAI_AGENT_MANUAL.md)、[ARCHITECTURE.md](../ARCHITECTURE.md)、[PUBLIC_NAMING.md](../PUBLIC_NAMING.md)、[WEB_UI_DESIGN.md](../WEB_UI_DESIGN.md) とする。
+- この文書は進捗台帳であり、設計の正本は[PRODUCT.md](../PRODUCT.md)と[ARCHITECTURE.md](../ARCHITECTURE.md)だけとする。
 - Core全体の完了条件は [core-completion-plan.md](./core-completion-plan.md)、Core-01固有の条件は [core-01-domain-command-oss-quality-completion-plan.md](./core-01-domain-command-oss-quality-completion-plan.md) を使う。
 
 ## 1. 状態のルール

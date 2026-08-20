@@ -76,8 +76,8 @@ function verifyCore08Boundary() {
 function verifyChangedScope() {
   const output = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
   const allowed = [
+    "PRODUCT.md",
     "ARCHITECTURE.md",
-    "SAMURAI_AGENT_MANUAL.md",
     "package.json",
     "plans/",
     "reports/core-completion/evidence/",

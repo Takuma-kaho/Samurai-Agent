@@ -2,8 +2,8 @@
 
 Samurai Agent の本実装前に、固定 Web UI の見た目だけを確認するための静止デモです。
 
-このデモは、`WEB_UI_DESIGN.md` の元になった視覚参照です。
-実装へ進む時は `WEB_UI_DESIGN.md` を正として読み、このデモは見た目確認用のサンプルとして扱います。
+このデモは、`WEB_UI_DESIGN.md`の元になった視覚参照です。
+実装へ進む時は`PRODUCT.md`と`ARCHITECTURE.md`を正本として読み、このデモと`WEB_UI_DESIGN.md`は見た目確認用の補助資料として扱います。
 
 ## 目的
 
@@ -52,5 +52,5 @@ design-lab/web-ui-demo/index.html
 2. このデモの `index.html`
 3. このデモの `styles.css`
 
-`WEB_UI_DESIGN.md` は、視覚設計、UI shell、CSS再利用ルールの正本です。
+`WEB_UI_DESIGN.md`は、視覚設計、UI shell、CSS再利用ルールの補助資料です。
 Runtime、DB、API、本番コンポーネント構成の正本ではありません。

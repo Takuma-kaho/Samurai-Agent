@@ -2,7 +2,7 @@
 
 最終更新: 2026-06-28
 
-このファイルは、backend 実装を前提に Web UI を作るための短い指針。UI は `WEB_UI_DESIGN.md` を最優先し、ここでは API と状態境界だけを扱う。
+このファイルは、backend実装を前提にWeb UIを作るための短い指針。製品と技術の正本は`PRODUCT.md`と`ARCHITECTURE.md`で、`WEB_UI_DESIGN.md`は見た目の補助資料として扱う。
 
 ## 基本方針
 

@@ -2,7 +2,7 @@
 
 ## 0. この文書の位置づけ
 
-この文書は、Samurai Native AppのWeb UIに関する視覚設計とUI責務の正本である。
+この文書は、Samurai Native AppのWeb UIに関する補助設計書である。設計正本ではない。
 
 ここで定義するもの。
 
@@ -19,13 +19,13 @@
 - Activity Historyの保存契約
 - Backend、Runtime、Gateway、DB、APIの仕様
 
-それらは PRINCIPLES.md、SAMURAI_AGENT_MANUAL.md、ARCHITECTURE.md の正本に従う。
+製品の役割は`PRODUCT.md`、技術境界は`ARCHITECTURE.md`に従う。
 
 ---
 
 ## 1. UIの役割
 
-Web UIは、Workspaceそのものではない。Samurai Native AppがWorkspaceを利用するためのクライアントである。
+Web UIは、Workspaceそのものではない。Samurai Native AppがWorkspaceを利用するためのClientである。Knowledge管理、教え込み、監査、Exportを主な価値とし、Chatは操作入口の一つとして扱う。
 
 ~~~mermaid
 flowchart LR
@@ -60,7 +60,7 @@ flowchart LR
 
 最初に見えるのは静かなChat作業面である。Workspace、Knowledge、Run History、Contextは必要な時だけ開く。
 
-Chat-firstは、Workspace Core全体の原則ではない。Native Appの表示・操作方法として採用する。
+Chat-firstは製品不変条件ではない。現在のNative Appで採用する表示方法の一つであり、`PRODUCT.md`のKnowledge管理・教え込み中心の役割を上書きしない。
 
 ---
 
@@ -254,4 +254,4 @@ Session全文、UIの開閉、split比率はWorkspace Backupの対象にしな�
 - 参照元固有名をUI文言や公開コンポーネント名に出さない
 - design-labの見た目を丸ごとコピーせず、tokenとrecipe単位で再利用する
 
-実装前に、PRINCIPLES.md、ARCHITECTURE.md、PUBLIC_NAMING.mdとの責務と用語の一致を確認する。
+実装前に、`PRODUCT.md`と`ARCHITECTURE.md`との責務と用語の一致を確認する。

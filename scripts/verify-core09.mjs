@@ -30,8 +30,8 @@ function assert(condition, message) {
 function verifyChangedScope() {
   const output = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
   const allowed = [
+    "PRODUCT.md",
     "ARCHITECTURE.md",
-    "SAMURAI_AGENT_MANUAL.md",
     "package.json",
     "plans/",
     "scripts/verify-core09.mjs",

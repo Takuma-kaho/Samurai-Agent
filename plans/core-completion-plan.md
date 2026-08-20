@@ -14,7 +14,7 @@
 
 本書は2026-07-11時点の資料と実装を確認して作成した。現在は、後から正本へ追加された`SAMURAI_AGENT_MANUAL.md`を本書より優先する。
 
-- 現在の上位正本: [PRINCIPLES.md](../PRINCIPLES.md)、[SAMURAI_AGENT_MANUAL.md](../SAMURAI_AGENT_MANUAL.md)、[ARCHITECTURE.md](../ARCHITECTURE.md)、[PUBLIC_NAMING.md](../PUBLIC_NAMING.md)、[WEB_UI_DESIGN.md](../WEB_UI_DESIGN.md)
+- 現在の上位正本: [PRODUCT.md](../PRODUCT.md)、[ARCHITECTURE.md](../ARCHITECTURE.md)
 - 2026-07-11時点で確認した正本: [PRINCIPLES.md](../PRINCIPLES.md)、[ARCHITECTURE.md](../ARCHITECTURE.md)、[PUBLIC_NAMING.md](../PUBLIC_NAMING.md)、[WEB_UI_DESIGN.md](../WEB_UI_DESIGN.md)
 - Learning計画: [Plan A](./learning-core-plan-a-context-retrieval.md)、[Plan B](./learning-core-plan-b-autonomous-review-evaluation.md)、[Plan C](./learning-core-plan-c-curator-automation.md)、[Roadmap](./learning-core-roadmap.md)
 - 既存のBackend評価: [Completion Ledger](./backend-architecture-completion-ledger.md)、[OSS Comparison](./backend-current-state-oss-comparison.md)、[External E2E Runbook](./backend-external-e2e-runbook.md)
