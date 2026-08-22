@@ -107,6 +107,13 @@
       "decision": "runを先に保存し、objective・work itemの準備中に失敗した場合は、保存済みのrun・objective・work itemを失敗状態へsettleしてからlockを解放する。通常Runtimeの即時実行と標準PG Workerのキュー実行は維持する。",
       "scope_check": "新しい入力制限、成功扱い、Test専用分岐、Skill本文の簡略化は追加せず、既存の失敗・retry・lock境界を途中失敗にも適用した。",
       "verification": "Runtime／Server typecheckとSkill・Worker focused testを再実行済み。実PostgreSQLでの途中失敗、再起動後のlease復旧、二重実行は未検証。"
+    },
+    {
+      "id": "standard-entry-export-and-shutdown-failure",
+      "problem": "標準entryがPostgreSQL HTTP Serverをimport時に読み込み、旧APIの互換テストと公開境界へ不要な依存を持ち込んでいた。また、Worker終了失敗がHTTP Serverのclose成功として返る可能性があった。",
+      "decision": "apps/server/src/index.tsは旧APIの互換exportを明示し、PostgreSQL HTTP Serverは標準起動関数内で遅延読込する。workspace-server-entry.tsは旧PG Serverの互換exportを直接保持する。Workerの同期throwを含む停止失敗は状態に残し、HTTP Serverは全リソースの終了を試みたうえでAggregateErrorとして返す。",
+      "scope_check": "標準起動先、旧SQLite migration、既存のAPI互換契約、認可・保存経路は変更していない。公開exportの縮小と停止失敗の表面化だけを行い、機能削除やtest専用分岐は追加していない。",
+      "verification": "Server typecheck、Worker／Automation focused test 11件、Server startup group 68件、local-light focused test 71件、architecture static、Web buildはPASS。Docker／network／browser／Electronは計画どおり未検証。実PostgreSQL Serverの停止失敗は未検証。"
     }
   ]
 }

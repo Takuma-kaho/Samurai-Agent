@@ -235,12 +235,12 @@ export class WorkspaceWorkerSupervisor {
 
     const starting = this.startPromise;
     const activeTick = this.activeTick;
-    const runnerClose = this.options.learningRunner.close();
-    const executionClose = this.options.executionJobWorker?.close?.() ?? Promise.resolve();
-    const automationClose = this.options.automationScheduler?.close?.() ?? Promise.resolve();
-    const clientEventClose = this.options.clientEventQueue?.close?.() ?? Promise.resolve();
-    const gatewayClose = this.options.gatewayMaintenance?.close?.() ?? Promise.resolve();
-    const skillOptimizationClose = this.options.skillOptimizationWorker?.close?.() ?? Promise.resolve();
+    const runnerClose = Promise.resolve().then(() => this.options.learningRunner.close());
+    const executionClose = Promise.resolve().then(() => this.options.executionJobWorker?.close?.());
+    const automationClose = Promise.resolve().then(() => this.options.automationScheduler?.close?.());
+    const clientEventClose = Promise.resolve().then(() => this.options.clientEventQueue?.close?.());
+    const gatewayClose = Promise.resolve().then(() => this.options.gatewayMaintenance?.close?.());
+    const skillOptimizationClose = Promise.resolve().then(() => this.options.skillOptimizationWorker?.close?.());
     const results = await Promise.allSettled([starting, activeTick, runnerClose, executionClose, automationClose, clientEventClose, gatewayClose, skillOptimizationClose]);
     const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
     this.permanentlyStopped = true;

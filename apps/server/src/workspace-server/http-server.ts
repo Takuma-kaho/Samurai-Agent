@@ -2535,13 +2535,39 @@ export async function createWorkspaceServerHttp(
     config,
     workerSupervisor,
     async close(): Promise<void> {
-      await workerSupervisor.stop();
-      await new Promise<void>((resolve) => io.close(() => resolve()));
-      if (httpServer.listening) {
-        await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
+      const failures: unknown[] = [];
+      try {
+        await workerSupervisor.stop();
+        const workerStatus = workerSupervisor.status();
+        if (workerStatus.stopReason === "shutdown_close_failed") {
+          failures.push(new Error(workerStatus.lastError?.message ?? "workspace_worker_shutdown_failed"));
+        }
+      } catch (error) {
+        failures.push(error);
       }
-      externalIntegration.close();
-      await core.close();
+      try {
+        await new Promise<void>((resolve) => io.close(() => resolve()));
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        if (httpServer.listening) {
+          await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
+        }
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        externalIntegration.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await core.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length > 0) throw new AggregateError(failures, "workspace_server_shutdown_failed");
     }
   };
 }

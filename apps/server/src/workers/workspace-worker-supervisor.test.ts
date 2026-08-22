@@ -199,4 +199,24 @@ describe("WorkspaceWorkerSupervisor", () => {
     });
     await expect(supervisor.start()).rejects.toThrow("workspace_worker_supervisor_closed");
   });
+
+  it("captures a synchronous close failure in the shutdown status", async () => {
+    const runner = makeRunner();
+    vi.mocked(runner.close).mockImplementationOnce(() => {
+      throw new Error("runner close threw");
+    });
+    const supervisor = new WorkspaceWorkerSupervisor({
+      learningRunner: runner,
+      maintenance: makeMaintenance(),
+      resolveContext: async () => ({ state: "enabled", context })
+    });
+
+    await supervisor.start();
+    await expect(supervisor.stop()).resolves.toBeUndefined();
+    expect(supervisor.status()).toMatchObject({
+      state: "stopped",
+      stopReason: "shutdown_close_failed",
+      lastError: { code: "workspace_worker_shutdown_failed", message: "runner close threw" }
+    });
+  });
 });

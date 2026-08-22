@@ -1,11 +1,37 @@
 import { pathToFileURL } from "node:url";
-import { closeApiServer, type ApiServer } from "./api-server";
-import { loadWorkspaceServerConfig } from "@samurai-agent/workspace-server";
-import { startWorkspaceServer, type WorkspaceServerHttp } from "./workspace-server/http-server";
+import {
+  closeApiServer,
+  createApiServer,
+  defaultWorkspaceRoot,
+  loadServerEnv,
+  resolveWorkspaceRoot,
+  setGatewayEmailImapClientFactoryForTest,
+  startServer,
+  trustedRuntimeApiInput,
+  trustedRuntimeApiPayload,
+  type ApiServer,
+  type ApiServerLifecycleState,
+  type ApiServerShutdownState,
+  type CreateApiServerOptions
+} from "./api-server";
+import type { WorkspaceServerHttp } from "./workspace-server/http-server";
 
-export * from "./api-server";
-export * from "./workspace-server/http-server";
-export * from "./workers/automation-scheduler";
+export {
+  closeApiServer,
+  createApiServer,
+  defaultWorkspaceRoot,
+  loadServerEnv,
+  resolveWorkspaceRoot,
+  setGatewayEmailImapClientFactoryForTest,
+  startServer,
+  trustedRuntimeApiInput,
+  trustedRuntimeApiPayload,
+  type ApiServer,
+  type ApiServerLifecycleState,
+  type ApiServerShutdownState,
+  type CreateApiServerOptions
+};
+export { startAutomationScheduler, type AutomationScheduler, type AutomationSchedulerState } from "./workers/automation-scheduler";
 
 const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 const isTestRuntime = Boolean(process.env.VITEST || process.env.VITEST_WORKER_ID || process.env.NODE_ENV === "test" || process.argv.some((arg) => arg.includes("vitest")));
@@ -35,6 +61,10 @@ export function installServerSignalHandlers(server: ApiServer | WorkspaceServerH
  * characterization tests, but it is never selected by the standard entry.
  */
 export async function startStandardServer(port?: number): Promise<WorkspaceServerHttp> {
+  const [{ loadWorkspaceServerConfig }, { startWorkspaceServer }] = await Promise.all([
+    import("@samurai-agent/workspace-server"),
+    import("./workspace-server/http-server")
+  ]);
   const config = loadWorkspaceServerConfig();
   return startWorkspaceServer({ ...config, ...(port !== undefined ? { port } : {}) });
 }
