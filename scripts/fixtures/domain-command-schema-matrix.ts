@@ -151,10 +151,7 @@ const definitionById = new Map(definitions.map((definition) => [definition.id, d
 // to return `session_scope_write_disabled`. Its public fields must not be
 // consumed or persisted after Core06 stopped new Session-scope writes.
 const terminalInputRejectionOperationIds = new Set(["memory.session.create"]);
-// This Core09 legacy kind is intentionally a stable safe-stop: it never has
-// a successful output path until a Session-free executor exists. Its exact
-// terminal error is asserted by the handler matrix instead.
-const terminalNoSuccessOperationIds = new Set(["automation.memory_review.run"]);
+const terminalNoSuccessOperationIds = new Set<string>();
 const staticAjv = createAjv();
 const projectionAjv = createAjv();
 const ts: typeof import("typescript") = createRequire(resolve(process.env.SAMURAI_REPO_ROOT ?? process.cwd(), "package.json"))("typescript");
@@ -240,6 +237,104 @@ const sessionlessAutomationJobRunSample = {
   automationRun: sessionlessAutomationRunSample,
   operation: sessionlessAutomationJobWriteSample.operation,
   activity: sessionlessAutomationJobWriteSample.activity
+};
+const memoryReviewResourceRef = { kind: "memory", id: "memory-schema-matrix", uri: "memory/memory-schema-matrix", version: "1", label: "Schema matrix Memory" };
+const memoryReviewActivityContext = { room_id: "schema-matrix-room", session_id: "session-schema-matrix", agent_id: "agent-schema-matrix" };
+const memoryReviewReflectionRun = {
+  id: "reflection-memory-review-schema-matrix",
+  kind: "scheduled",
+  source_run_id: "backend-run-schema-matrix",
+  session_id: "session-schema-matrix",
+  activity_context: memoryReviewActivityContext,
+  status: "completed",
+  candidate_key: "candidate-memory-review-schema-matrix",
+  candidate_signals: [{ kind: "explicit_memory_save", summary: "The user explicitly asked to preserve the Memory.", evidence_refs: [memoryReviewResourceRef], details: { source: "schema-matrix" } }],
+  deferred_reason: "none",
+  budget_unit: "tokens",
+  budget_estimate: 1,
+  input_summary: "Review Room-scoped Learning evidence.",
+  output_summary: "No additional mutation was required.",
+  started_at: "2026-01-01T00:00:00.000Z",
+  completed_at: "2026-01-01T00:00:00.000Z",
+  error: ""
+};
+const memoryReviewSuggestion = {
+  id: "suggestion-memory-review-schema-matrix",
+  reflection_run_id: memoryReviewReflectionRun.id,
+  suggestion_type: "memory",
+  status: "proposed",
+  title: "Schema matrix Memory suggestion",
+  content: "Keep the evidence-backed Memory.",
+  target_ref: memoryReviewResourceRef,
+  source_refs: [memoryReviewResourceRef],
+  confidence: 0.8,
+  created_at: "2026-01-01T00:00:00.000Z",
+  updated_at: "2026-01-01T00:00:00.000Z"
+};
+const memoryReviewEvaluation = {
+  id: "evaluation-memory-review-schema-matrix",
+  learning_resource_ref: memoryReviewResourceRef,
+  learning_resource_version: "1",
+  task_class: "schema-matrix",
+  compared_run_ids: ["backend-run-schema-matrix"],
+  before_metrics: { quality: 0.5 },
+  after_metrics: { quality: 0.8 },
+  effect_estimate: 0.3,
+  confidence: 0.8,
+  assessment: "helpful",
+  evaluation_kind: "applied",
+  applied_run_id: "backend-run-schema-matrix",
+  activity_context: memoryReviewActivityContext,
+  matched_conditions: ["same Room"],
+  affected_decision: "reuse Memory",
+  predicted_result: "better response",
+  actual_result: "better response",
+  prediction_assessment: "supported",
+  causal_assessment: "supported",
+  evidence_refs: [memoryReviewResourceRef],
+  evaluator: "schema-matrix",
+  created_at: "2026-01-01T00:00:00.000Z"
+};
+const memoryReviewCuratorReport = {
+  id: "curator-report-memory-review-schema-matrix",
+  checked_at: "2026-01-01T00:00:00.000Z",
+  dry_run: false,
+  paused: false,
+  snapshot_id: "learning-snapshot-schema-matrix",
+  evaluation_count: 1,
+  applied_mutation_count: 1,
+  skipped_reason: "none",
+  thresholds: { stale_after_days: 30, archive_after_days: 90, min_idle_hours: 1 },
+  counts: { memory_items: 1, wiki_pages: 0, skill_items: 1, skill_usage_rows: 1, suggestions: 1 },
+  skill_actions: [{ skill_id: "skill-schema-matrix", title: "Schema matrix Skill", current_state: "project", proposed_state: "active", action: "review", reason: "Evidence supports continued use.", usage_count: 1, last_activity_at: "2026-01-01T00:00:00.000Z", owner_pinned: false, suggestion_id: memoryReviewSuggestion.id }],
+  protected_skills: [{ skill_id: "pinned-skill-schema-matrix", title: "Pinned Skill", state: "pinned", reason: "owner_pinned" }]
+};
+const memoryReviewCuratorReviewReport = {
+  id: "curator-review-report-memory-review-schema-matrix",
+  checked_at: "2026-01-01T00:00:00.000Z",
+  dry_run: false,
+  counts: { keep_candidates: 1, patch_candidates: 1, consolidate_candidates: 1, archive_candidates: 1 },
+  keep_candidates: [{ kind: "memory", id: "memory-schema-matrix", title: "Schema matrix Memory", reason: "Evidence supports keeping it." }],
+  memory_merge_groups: [{ topic: "schema-matrix", memory_ids: ["memory-schema-matrix"], reason: "Same topic.", suggestion_id: memoryReviewSuggestion.id }],
+  skill_consolidation_groups: [{ group_key: "schema-matrix-skills", skill_ids: ["skill-schema-matrix"], suggested_umbrella_title: "Schema matrix Skills", reason: "Same procedure.", suggestion_id: memoryReviewSuggestion.id }],
+  wiki_patch_proposals: [{ wiki_id: "wiki-schema-matrix", title: "Schema matrix Wiki", reason: "Evidence suggests a patch.", suggestion_id: memoryReviewSuggestion.id }],
+  archive_candidates: [{ kind: "skill", id: "skill-schema-matrix", title: "Schema matrix Skill", reason: "No recent use.", suggestion_id: memoryReviewSuggestion.id }]
+};
+const memoryReviewEvaluationReport = {
+  id: "evaluation-report-memory-review-schema-matrix",
+  checked_at: "2026-01-01T00:00:00.000Z",
+  judge: { deterministic_status: "completed", external_status: "not_configured", provider_id: "schema-matrix", summary: "Deterministic checks passed." },
+  counts: { backend_runs: 1, backend_events: 1, workspace_changes: 1, tool_runs: 1, audit_records: 1, findings: 1, comparisons: 1 },
+  run_scores: [{ run_id: "backend-run-schema-matrix", backend_id: "fixture", status: "completed", score: 100, verdict: "pass", findings: [{ kind: "no_events", severity: "info", reason: "No blocking finding.", resource_refs: [memoryReviewResourceRef] }], suggested_improvements: ["Keep the current evidence path."] }],
+  comparisons: [{ current_run_id: "backend-run-schema-matrix", baseline_run_id: "backend-run-baseline-schema-matrix", result: "same", reason: "No material change." }]
+};
+const memoryReviewTraceSample = {
+  reflectionRun: memoryReviewReflectionRun,
+  suggestions: [memoryReviewSuggestion],
+  learningEvaluations: [memoryReviewEvaluation],
+  curatorReport: memoryReviewCuratorReport,
+  curatorReviewReport: memoryReviewCuratorReviewReport,
+  evaluationReport: memoryReviewEvaluationReport
 };
 const externalAppConnectionWriteSample = {
   resource: {
@@ -332,6 +427,14 @@ const semanticValidSamples = new Map<string, unknown>([
     "automation.job.requeue"
   ].map((operationId) => [`${operationId}:output`, sessionlessAutomationJobWriteSample.resource] as const),
   ["automation.job.run:output", sessionlessAutomationJobRunSample],
+  ["automation.memory_review.run:output", {
+    resource: sessionlessAutomationRunSample,
+    operation: sessionlessAutomationJobWriteSample.operation,
+    rollbackPoint: sessionlessAutomationJobWriteSample.rollbackPoint,
+    activity: sessionlessAutomationJobWriteSample.activity,
+    automationRun: sessionlessAutomationRunSample,
+    memoryReviewTrace: memoryReviewTraceSample
+  }],
   ...[
     "external_app.connection.create",
     "external_app.connection.revoke",

@@ -19,7 +19,7 @@ const adapter: BrowserAdapter = {
     return { bytes: Uint8Array.from([137, 80, 78, 71]), mime_type: "image/png", width: 1, height: 1 };
   }
 };
-const runtime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, undefined, { browserAdapter: adapter });
+const runtime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, { browserAdapter: adapter });
 try {
   const screenshot = await runtime.runBrowserAction({ operation: "browser.screenshot", url: "https://example.test", output_path: "browser/fixture.png" });
   assert.equal(screenshot.resource.adapter_id, adapter.id);

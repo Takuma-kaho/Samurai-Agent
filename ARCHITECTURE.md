@@ -12,16 +12,17 @@
 
 1. WorkspaceがKnowledgeと作業証拠の正本である。
 2. RoomがKnowledgeと認可の境界である。
-3. Sessionはアプリ側の任意参照であり、Workspace Resourceの必須親ではない。
-4. Native Appと外部アプリは同じWorkspace Coreを使う。
-5. Gateway、MCP、AdapterはDomain Operation、Activity Ingest、Queryを迂回しない。
+3. SessionのUI状態と、Coreが実行・証拠・復旧に使うSession記録を分ける。
+4. Native App、Workspace Core、Runtimeは一つの製品を構成し、外部アプリも同じCoreを使う。
+5. Gateway、MCP、AdapterはQuery、Domain Operation、Activity Ingest、Run Controlを迂回しない。
 6. BackendはWorkspace Storeへ直接アクセスしない。
-7. Activityは証拠、KnowledgeとSkillは再利用物として分ける。
-8. 自動学習は同じRoomの根拠付き処理に限定する。
-9. 本文ファイルとDatabaseを二重正本にしない。
-10. Surface、Session、Agent CacheをWorkspace Knowledgeの正本にしない。
-11. 未認証、権限失効、古いVersion、不完全な証拠は安全側で拒否する。
-12. Source、契約テスト、実環境確認、完成判定を別々に扱う。
+7. ActivityとEpisodeは証拠、Knowledge、Knowledge Wiki、Skillは再利用物として分ける。
+8. Memoryを独立したWorkspace Resourceにせず、経験はEpisode、再利用知識はKnowledgeとして表現する。
+9. 自動学習は同じRoomの根拠付き処理に限定する。
+10. 本文ファイルとDatabaseを二重正本にしない。
+11. Surface、Client UI状態、Runtime CacheをWorkspace Knowledgeの正本にしない。
+12. 未認証、権限失効、古いVersion、不完全な証拠は安全側で拒否する。
+13. Source、契約テスト、実環境確認、完成判定を別々に扱う。
 
 ---
 
@@ -29,12 +30,16 @@
 
 ~~~mermaid
 flowchart TB
-  subgraph Apps["Client Layer"]
-    Native["Samurai Native App"]
-    External["Codex / Claude Code / Cursor / CLI"]
+  subgraph Product["Samurai Product"]
+    Native["Native App"]
+    ClientAPI["Client API / Desktop IPC"]
+    Core["Workspace Core"]
+    Runtime["Runtime"]
+    KnowledgeHost["Knowledge Host"]
   end
 
-  subgraph Connect["Connection Layer"]
+  subgraph ExternalApps["External Apps"]
+    External["Codex / Claude Code / Cursor / CLI"]
     OAuth["OAuth / Pairing / Credential Adapter"]
     MCP["MCP / API / Plugin / Hook"]
     Gateway["Gateway"]
@@ -44,13 +49,13 @@ flowchart TB
     Query["Query"]
     Operation["Domain Operation"]
     Activity["Activity Ingest"]
+    RunControl["Run Control"]
   end
 
-  subgraph Core["Workspace Core"]
+  subgraph Workspace["Workspace Authority"]
     Auth["Principal / Room Authorization"]
     Store["Workspace Store"]
     History["Activity / Evidence / Audit"]
-    Host["Knowledge Host"]
     Jobs["Workspace Job"]
   end
 
@@ -59,28 +64,36 @@ flowchart TB
     Backends["Codex / Claude Code / Native Backend"]
   end
 
-  Native --> MCP
+  Native --> ClientAPI
+  ClientAPI --> Query
+  ClientAPI --> Operation
+  ClientAPI --> Activity
+  ClientAPI --> RunControl
   External --> MCP
   MCP --> OAuth
   OAuth --> Gateway
   Gateway --> Query
   Gateway --> Operation
   Gateway --> Activity
+  Gateway --> RunControl
   Query --> Auth
   Operation --> Auth
   Activity --> Auth
+  RunControl --> Auth
   Auth --> Store
   Auth --> History
-  Store --> Host
-  History --> Host
-  Host --> Jobs
-  Host --> Port
+  Auth --> Core
+  Core --> Runtime
+  Runtime --> Port
   Port --> Backends
+  History --> KnowledgeHost
+  Store --> KnowledgeHost
+  KnowledgeHost --> Jobs
   Jobs --> Store
-  Host --> Store
+  KnowledgeHost --> Store
 ~~~
 
-依存はClientからConnection、Formal Ingress、Workspace Core、Backend Portへ向かう。逆方向の直接参照を作らない。
+この図は処理の流れを表す。Native App、Workspace Core、Runtimeは内部的に分離するが、Samuraiという一つの製品を構成する。外部アプリはTransport AdapterとGatewayを経由し、Native Appと同じWorkspace Authorityへ到達する。package/import依存は12章で別に定義する。
 
 ---
 
@@ -88,18 +101,23 @@ flowchart TB
 
 | レイヤー | 持つ責務 | 持たない責務 |
 | --- | --- | --- |
-| Native App | Knowledge管理、教え込み、Chat、Session、Surface | Workspace正本の独占 |
+| Native App | Samuraiの公式製品面、Knowledge管理、教え込み、Chat、Session表示、Surface | Workspace正本、認可、実行状態の独占 |
+| Client API / Desktop IPC | Native App入力の変換、認証済みCore接続 | Workspaceへの直接書込み |
 | External App Adapter | 外部入力・結果の変換 | Room権限の決定 |
 | OAuth / Pairing | Connectionの本人性とCredential参照 | Workspace権限の付与 |
 | Gateway | 接続、再送、配信、Formal Ingressへの振り分け | Workspaceへの直接書込み |
 | Query | 認可済みの読取り | 副作用、学習起動 |
 | Domain Operation | 明示的な保存・変更・権限操作 | AI長時間処理 |
 | Activity Ingest | 外部実行証拠の正規化と保存 | 通常Knowledgeの即時確定 |
-| Workspace Core | 正本、認可、履歴、検索、成果物 | UI状態、App Session所有 |
-| Knowledge Host | Context構築、整理、学習、Backend調整 | Client Session所有 |
+| Run Control | 実行開始、Cancel、Resume、Syncなど内部実行制御の受付 | チームAgentの製品体験の定義 |
+| Workspace Core | 正本、認可、Session記録、履歴、検索、成果物 | UI表示状態、入力途中の内容 |
+| Runtime | 実行受付、Context構築、Backend接続、Event、取消、再開、復旧 | Knowledgeの正本、チームAgentのUI仕様 |
+| Knowledge Host | ActivityとEpisodeの整理、学習、Knowledge更新調整 | チームの一員としての実作業、Runtime全体の代替 |
 | Workspace Job | AI処理、学習、Curator、長時間処理 | 単純なCRUD、通常Query |
 | Backend Port | 交換可能な実行契約 | Knowledgeの正本 |
 | Surface | Coreデータの表示・操作 | 永続Resourceの所有 |
+
+「Agent」はチームの一員としてWorkspaceに参加する製品概念を指す。`AgentRuntime`や`AgentHost`は現行コード上の内部名であり、チームAgentそのものやKnowledge Hostを意味しない。チームAgentの表示、操作、自律性、実行範囲はNative App設計まで固定しない。
 
 ---
 
@@ -134,19 +152,27 @@ Connectionは接続元、委任元、許可Room上限、入口上限、失効状
 
 Maintenance identityは一つのDeploymentとWorkspaceにだけ結び、通常Client利用やBundle移送を許可しない。
 
-### 4.3 SessionRef
+### 4.3 SessionとSessionRef
 
-SessionRefは外部Sessionへの任意参照である。
+Sessionは、会話、作業、Runtime実行、Activityを関連付けるCore側の記録を持つ。ただし、SessionをKnowledge、Room、Artifactなどの所有者にはしない。
 
-- app_id
-- session_id
-- turn_id
-- message_id
-- resume_urlまたは外部参照キー
+Workspace Coreが持つもの。
 
-SessionRefを削除しても、Activity、Knowledge、Artifact、権限の正本が壊れないことを必須とする。
+- session identityとRoomとの関係
+- 実行、Backend Run、Activity、Evidenceとの関係
+- Cancel、Resume、Sync、Recoveryに必要な状態
+- 検索、履歴、監査に必要なmetadata
 
-### 4.4 Activity、Episode、Knowledge
+Clientが持つもの。
+
+- 入力途中の内容
+- Navigation、選択、split比率などのUI状態
+- Client固有の表示Cache
+- Workspaceへ保存すると決めていない会話本文
+
+SessionRefは外部Sessionへの任意参照であり、app_id、session_id、turn_id、message_id、resume_urlまたは外部参照キーを持てる。SessionRefを削除しても、Activity、Knowledge、Artifact、権限の正本が壊れないことを必須とする。
+
+### 4.4 Activity、Episode、Knowledge、Knowledge Wiki
 
 Activityは最低限、次を持つ。
 
@@ -158,7 +184,17 @@ Activityは最低限、次を持つ。
 - failure、correction、provenance
 - 任意のSessionRef
 
-Episodeは関連するActivityをまとめる。Knowledgeは`fact`、`decision`、`explanation`、`experience_rule`に分ける。
+Episodeは関連するActivityをまとめる。Memoryを別Resourceとして追加せず、従来Memoryと呼んでいた内容は、経験のまとまりをEpisode、再利用する知識をKnowledgeとして表現する。Activityはその根拠、Skillは再利用手順として分ける。
+
+Knowledgeは`fact`、`decision`、`explanation`、`experience_rule`に分ける。Knowledge WikiはKnowledgeをMarkdownページとして扱う主要方式であり、次を持つ。
+
+- 人間が読める本文とFrontmatter
+- Room scope
+- Link、backlink、検索、再index
+- Version、Evidence、provenance、状態
+- 提案、採用、却下、修正、Archive、復元
+
+Knowledge WikiはKnowledgeと競合する別の所有領域ではなく、同じRoom境界と認可を使う。検索IndexとDatabase metadataは再構築可能な管理情報であり、本文の二重正本にしない。
 
 呼出元の`verification_outcome`は自己申告として残せるが、機械検証の根拠にはしない。対象Versionと本文hashが一致する追記専用Attestationだけを`machine_verified`として扱う。
 
@@ -176,14 +212,14 @@ Episodeは関連するActivityをまとめる。Knowledgeは`fact`、`decision`�
 
 SurfaceのDOM、開閉、表示順、split比率をWorkspace正本へ保存しない。
 
-### 4.7 Agent Cache
+### 4.7 Runtime Cache
 
-Agent固有の短期メモ、生成Context、Cache、Session状態は派生データである。
+RuntimeやBackend固有の短期Context、生成Context、Cacheは派生データである。
 
 - 参照元のRoomとKnowledge Versionを記録する
 - 権限失効後は再利用しない
 - Export対象のKnowledge正本にしない
-- CacheからWorkspace Knowledgeを無条件に更新しない
+- CacheからWorkspace KnowledgeやKnowledge Wikiを無条件に更新しない
 
 ---
 
@@ -222,28 +258,52 @@ Activity Ingestは次の順で処理する。
 
 不完全なCaptureは成功扱いせず、再試行可能な状態と不足Evidenceを記録する。
 
+### 5.4 Run Control
+
+Run Controlは、Native Appまたは許可された外部接続から、Runtimeの実行制御を受け付ける内部契約である。
+
+- start：認可済みContextで処理を開始する
+- cancel：実行中または入力待ちの処理へ取消を要求する
+- resume：入力待ちの処理へ追加入力を渡す
+- sync：Backend側の最新状態を照合する
+- recover：再起動後に未確定の実行を復旧する
+
+これはチームAgentの製品仕様を固定する入口ではない。Chat、Workspace Job、将来のチームAgentなど、複数の製品面が共通Runtimeを安全に使うための内部境界である。受付時、外部作用前、保存前に認可と期待Versionを再確認する。
+
 ---
 
-## 6. HostとBackend
+## 6. Runtime、Knowledge Host、Backend
 
 ~~~mermaid
 sequenceDiagram
   participant App as Native / External App
-  participant G as Gateway
+  participant E as Client API / Gateway
   participant I as Formal Ingress
   participant W as Workspace Core
-  participant H as Knowledge Host
+  participant R as Runtime
   participant B as Backend Port
+  participant H as Knowledge Host
 
-  App->>G: Query / Operation / Activity
-  G->>I: 認証済みConnection Context
+  App->>E: Query / Operation / Activity / Run Control
+  E->>I: 認証済みCaller Context
   I->>W: Room認可と保存・読取り
-  W-->>H: Knowledge・Activity・Evidence
-  H->>B: 共通Backend入力
-  B-->>H: Backend Event・結果
-  H->>W: BackendRun・Activity・Change
+  I->>R: 認可済み実行要求
+  R->>W: Session・Context・実行状態
+  R->>B: 共通Backend入力
+  B-->>R: Backend Event・結果
+  R->>W: BackendRun・Activity・Change
+  W-->>H: Activity・Episode・Evidence
+  H->>W: provisional Knowledge / Wiki / Skill
   W-->>App: 結果・参照・再利用可能Context
 ~~~
+
+RuntimeとKnowledge Hostは別責務である。
+
+- Runtimeは、処理の受付、Context構築、Backend実行、Event、Sessionとの関連、Cancel、Resume、Sync、Recoveryを扱う。
+- Knowledge Hostは、確定したActivityとEpisodeを整理し、Knowledge、Knowledge Wiki、Skillの学習ループを動かす。
+- チームAgentはWorkspaceに参加する製品概念であり、どちらのHostとも同一ではない。
+
+現行コードの`AgentRuntime`はRuntime facade、`AgentHost`は実行制御を組み立てる内部Hostである。名称に`Agent`を含むが、チームAgentの製品仕様を表さない。将来改名する場合も、責務と移行対応を先に定義する。
 
 Backend Portは次を共通契約として扱う。
 
@@ -255,19 +315,34 @@ Backend Portは次を共通契約として扱う。
 
 BackendがWorkspace Store、Database、本文ファイルを直接操作することを禁止する。
 
+### 6.1 Run lifecycle
+
+Runtimeの実行状態は最低限、次を共通契約とする。
+
+~~~text
+queued → running → waiting_for_backend_input → running
+   └──────────────→ completed / failed / cancelled / outcome_unknown
+~~~
+
+- `cancelled`はBackend側の停止を確認できた場合にだけ使う。
+- 停止、完了、外部作用の有無を確認できない場合は`outcome_unknown`とし、成功扱いも自動Retryもしない。
+- Retryは新しいAttemptとして記録し、同じ外部作用を二重実行しない。
+- 再起動時はEventとBackend状態を照合し、根拠なしに`running`や`completed`へ戻さない。
+- Sessionがなくても実行できるWorkspace Jobを認めるが、Room、Principal、Activity、Auditとの関係を失わない。
+
 ---
 
 ## 7. Knowledge学習ループ
 
 ### 7.1 Review
 
-重要Activityは、同じRoomのReview Jobへ渡せる。Review Jobは記録済みhigh watermarkまでの対象をsnapshot digestへ含める。入力上限を超えた場合は一部だけを処理せず`blocked`にする。
+重要Activityと、それをまとめたEpisodeは、同じRoomのReview Jobへ渡せる。Review Jobは記録済みhigh watermarkまでの対象をsnapshot digestへ含める。入力上限を超えた場合は一部だけを処理せず`blocked`にする。
 
-Review結果はEvidence、Confidence、Job、Attempt、Version付き`provisional`として保存する。
+Review結果はEvidence、Confidence、Job、Attempt、Version付き`provisional`なKnowledge、Knowledge Wiki変更、Skillとして保存する。
 
 ### 7.2 UseとEvaluation
 
-KnowledgeやSkillを外部Agentへ渡す時は、利用したResource IDとVersionを記録する。結果が戻ったら、成功、失敗、訂正、機械検証、再利用結果をEvaluationとして接続する。
+Knowledge、Knowledge Wiki、SkillをRuntimeや外部アプリへ渡す時は、利用したResource IDとVersionを記録する。結果が戻ったら、成功、失敗、訂正、機械検証、再利用結果をEvaluationとして接続する。
 
 複数Knowledgeを同時利用した場合、結果との相関だけで個別Knowledgeの因果効果を確定しない。
 
@@ -310,7 +385,7 @@ Realtimeは通知直前にRoomの直接読取権限を再確認する。非公�
 
 ### 9.1 本文ファイルとDatabase
 
-Knowledge、Skill、Policy、PROFILE／SOULの本文は、人間が読めるファイルを正本とする。Databaseは次を管理する。
+Knowledge、Knowledge Wiki、Skill、Policy、PROFILE／SOULの本文は、人間が読めるファイルを正本とする。Databaseは次を管理する。
 
 - Resource identity
 - Workspace、Room、権限
@@ -337,7 +412,7 @@ Workspace BundleはDatabase imageではなく、Portable Recordと人間が読�
 含めるもの。
 
 - Room、親Room、Principal、Permission
-- Knowledge、Skill、Policy、PROFILE／SOUL
+- Knowledge、Knowledge Wiki、Skill、Policy、PROFILE／SOUL
 - Activity、Episode、Evidence、Version
 - Artifact、Collection
 - 必要なJob、Attempt、Audit、file hash
@@ -373,7 +448,7 @@ Transport固有処理はAdapter内へ閉じる。すべてのTransportは同じF
 - Queryは読取りだけ
 - 明示変更はDomain Operation
 - 実行結果はActivity Ingest
-- Backend実行要求はHostとBackend Port
+- Backend実行要求はRun Control、Runtime、Backend Port
 
 MCPやAdapterがWorkspace Store、SQLite、PostgreSQL、本文ファイルを直接参照しない。
 
@@ -391,10 +466,9 @@ OAuthはstate、PKCE、redirect target、Account、Workspace、Connectionを結�
 
 ## 11. Native App境界
 
-Native Appは次を所有する。
+Native AppはSamuraiの公式製品面として次を所有する。
 
-- ChatとSession
-- App Agentの会話状態
+- Chatの表示と入力状態
 - UIの開閉、Navigation、split比率
 - Surfaceの表示状態
 - App Session Backup
@@ -405,8 +479,9 @@ Workspaceは次を所有する。
 - Activity、Episode、Evidence、Audit
 - Artifact、Collection
 - Room、Principal、Permission
+- Session identity、Roomとの関係、Backend Run、取消・再開・復旧状態
 
-Native Appは正式なGatewayとFormal Ingressを使う。公式Clientであることを理由に、特別なKnowledge領域や直接Database経路を持たない。
+Native AppはClient APIまたはDesktop IPCからFormal IngressとRun Controlを使う。外部アプリとTransportは異なっても、同じ認可、Workspace Authority、Runtimeへ到達する。公式製品面であることを理由に、特別なKnowledge領域や直接Database経路を持たない。
 
 ---
 
@@ -415,17 +490,14 @@ Native Appは正式なGatewayとFormal Ingressを使う。公式Clientである�
 許可する依存。
 
 ~~~text
-Native App / External App
+Native App → Client API / Desktop IPC
+External App → Connection Adapter / Gateway
         ↓
-Connection Adapter / Gateway
-        ↓
-Query / Domain Operation / Activity Ingest
+Query / Domain Operation / Activity Ingest / Run Control
         ↓
 Authorization / Workspace Core / Store
-        ↓
-Knowledge Host / Workspace Job
-        ↓
-Backend Port → Backend implementation
+        ├→ Runtime → Backend Port → Backend implementation
+        └→ Knowledge Host → Workspace Job
 ~~~
 
 禁止する依存。
@@ -435,9 +507,25 @@ Backend Port → Backend implementation
 - SurfaceからDatabaseへの直接更新
 - Queryによる保存、学習、Session作成
 - SessionをRoom、Activity、Knowledge、Artifactの所有者にする
-- Agent CacheをKnowledge正本としてExportする
+- Runtime CacheをKnowledge正本としてExportする
 - Activity受信だけで通常Knowledgeを無条件に確定する
 - 片方の永続化だけを成功させるBest-effort更新
+
+### 12.1 現行実装との対応
+
+| 正本上の責務 | 現行の主な実装名 | 注意 |
+| --- | --- | --- |
+| Runtime facade | `packages/runtime/src/agent-runtime.ts` の`AgentRuntime` | チームAgentそのものではない |
+| Runtime Host | `packages/runtime/src/host/agent-host.ts` の`AgentHost` | 実行制御を組み立てる内部名 |
+| Run制御 | `RunControl`、`RunRecovery`、`SessionRunQueue` | Cancel、Resume、Sync、Recoveryを担当 |
+| 長時間Job | `WorkspaceJobWorker` | 学習、Curator等のdurable処理 |
+| Knowledge Wiki | `KnowledgeWikiRepository`、Wiki Domain Operations、PostgreSQL Wiki Adapter | KnowledgeのMarkdown方式 |
+| 旧Memory実装 | `MemoryRepository`、Memory schema、関連Domain Service | 新しい公開Resourceとして維持せず、EpisodeまたはKnowledgeへの移行対象 |
+| Workspace Authority | `workspace-server`、`workspace-store`、本文ファイル | 移行中の旧経路を正本仕様にしない |
+
+この表は現行実装を探すための対応表であり、package名を公開用語へ昇格させるものではない。名称変更時は責務、入口、保存先、失敗契約の移行表を同時に更新する。
+
+旧Memory実装は、保存済みデータをEpisodeまたはKnowledgeへ対応付け、Activityの根拠と手順化されたSkillを保全し、移行と互換読取りを検証してから廃止する。「正本でMemoryを使わない」ことだけを削除理由にしない。
 
 ---
 
@@ -460,7 +548,7 @@ Backend Port → Backend implementation
 - `fixed`Resource、Policy、PROFILE／SOULをAIが更新できない
 - Migration中の通常書込みと、Secretを含むBundleを拒否する
 - File Transaction失敗時に本文とDatabaseの片方だけを残さない
-- 権限失効後のRealtime配信とAgent Cache再利用を止める
+- 権限失効後のRealtime配信とRuntime Cache再利用を止める
 
 ### 13.3 完成判定
 

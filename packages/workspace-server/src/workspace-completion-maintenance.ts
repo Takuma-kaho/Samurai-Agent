@@ -12,12 +12,18 @@ const maxRoomsPerTick = 1_000;
 
 export interface WorkspaceCompletionMaintenanceTickResult {
   recoveredJobs: number;
+  blockedReviewJobs: number;
   recoveredFileBatches: number;
   purgedRawOutputs: number;
   queuedEvaluationCatchup: number;
   queuedCuratorJobs: number;
   skippedSemanticRooms: number;
   runs: readonly WorkspaceCompletionJobRunResult[];
+}
+
+export interface WorkspaceCompletionMaintenanceIdentity {
+  workspaceId: string;
+  accountId: string;
 }
 
 /** A short-lived, PostgreSQL/RLS-scoped scheduler. A host invokes one tick
@@ -29,6 +35,24 @@ export class WorkspaceCompletionMaintenanceService {
     readonly jobs: WorkspaceCompletionJobService,
     readonly curator: WorkspaceCompletionCuratorService
   ) {}
+
+  /**
+   * Hosted Worker composition needs a tenant list before it can construct an
+   * RLS-scoped maintenance context. PostgreSQL returns only identities that a
+   * Workspace owner explicitly configured; the worker never treats an owner
+   * account or an HTTP caller as a fallback identity.
+   */
+  async listConfiguredIdentities(): Promise<WorkspaceCompletionMaintenanceIdentity[]> {
+    return this.completion.store.database.withContext({
+      accountId: "workspace-worker",
+      worker: true
+    }, async (sql) => {
+      const result = await sql.query<{ workspace_id: string; account_id: string }>(
+        "SELECT workspace_id, account_id FROM samurai_list_completion_maintenance_identities()"
+      );
+      return result.rows.map((row) => ({ workspaceId: row.workspace_id, accountId: row.account_id }));
+    });
+  }
 
   async configureIdentity(context: WorkspaceRequestContext, input: { accountId: string }): Promise<{ accountId: string; replayed: boolean }> {
     assertOpaqueId(input.accountId, "workspace_completion_maintenance_account_id_invalid");
@@ -88,6 +112,9 @@ export class WorkspaceCompletionMaintenanceService {
     const recovery = await this.completion.recoverFileBatches(maintenanceContext);
     if (recovery.failed.length > 0) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 503, { failed_batch_ids: recovery.failed });
     const recoveredJobs = await this.jobs.recover(maintenanceContext);
+    const blockedReviewJobs = input.reviewPort
+      ? 0
+      : await this.jobs.blockQueuedReviewsWithoutPort(maintenanceContext, { limit: maxRuns });
     const purgedRawOutputs = await this.completion.purgeExpiredRawJobOutputs(withOperation(maintenanceContext, "retention"), { limit: 100 });
     const queuedEvaluationCatchup = await this.completion.enqueueEvaluationCatchup(withOperation(maintenanceContext, "evaluation-catchup"), { limit: 100 });
     const rooms = await this.readExecutableRooms(maintenanceContext);
@@ -131,6 +158,7 @@ export class WorkspaceCompletionMaintenanceService {
     }
     return {
       recoveredJobs,
+      blockedReviewJobs,
       recoveredFileBatches: recovery.recovered.length,
       purgedRawOutputs,
       queuedEvaluationCatchup,

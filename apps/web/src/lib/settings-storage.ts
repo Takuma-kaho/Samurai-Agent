@@ -22,6 +22,10 @@ function isSettingsRecord(value: unknown): value is SettingsRecord {
   return typeof value.ui_locale === "string" && supportedLocales.includes(value.ui_locale as SupportedLocale)
     && typeof value.output_locale === "string" && supportedLocales.includes(value.output_locale as SupportedLocale)
     && isCaptureMode(value.memory_capture_mode) && isCaptureMode(value.knowledge_wiki_capture_mode) && isCaptureMode(value.skill_capture_mode)
+    && typeof value.learning_enabled === "boolean" && typeof value.learning_budget_ratio === "number"
+    && Number.isFinite(value.learning_budget_ratio) && value.learning_budget_ratio >= 0 && value.learning_budget_ratio <= 1
+    && typeof value.learning_budget_window_days === "number" && Number.isInteger(value.learning_budget_window_days)
+    && value.learning_budget_window_days > 0
     && (value.external_provider_role === "assistive" || value.external_provider_role === "disabled") && typeof value.updated_at === "string";
 }
 function isCaptureMode(value: unknown): boolean { return value === "auto" || value === "manual" || value === "off"; }

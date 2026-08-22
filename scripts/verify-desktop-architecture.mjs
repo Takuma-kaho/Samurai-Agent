@@ -227,7 +227,8 @@ function checkDesktopResidentBehavior() {
 
 function checkClientEventQueue() {
   const schema = read("packages/core-schemas/src/index.ts");
-  const store = read("packages/workspace-store/src/index.ts");
+  const migration = read("packages/workspace-store/src/migrations/001-core-baseline.ts");
+  const store = read("packages/workspace-store/src/repositories/client-event-queue-repository.ts");
   const server = read("apps/server/src/api-server.ts");
   const desktop = read("apps/desktop/src/main.ts");
   const schemaTest = read("packages/core-schemas/src/core-schemas.test.ts");
@@ -235,7 +236,7 @@ function checkClientEventQueue() {
   const serverTest = read("apps/server/src/index.test.ts");
   const required = [
     [schema, "ClientEventRecordSchema"],
-    [store, "CREATE TABLE IF NOT EXISTS client_events"],
+    [migration, "CREATE TABLE IF NOT EXISTS client_events"],
     [store, "markClientEventDelivered"],
     [store, "ackClientEvent"],
     [store, "expireClientEvents"],
@@ -281,7 +282,8 @@ function checkOsNotificationHandling() {
 function checkGatewayExternalClientBoundary() {
   const schema = read("packages/core-schemas/src/index.ts");
   const gateway = read("packages/gateway/src/index.ts");
-  const runtime = read("packages/runtime/src/index.ts");
+  const runtime = read("packages/runtime/src/agent-runtime.ts");
+  const gatewayDomainService = read("packages/runtime/src/commands/services/gateway-domain-service.ts");
   const server = read("apps/server/src/api-server.ts");
   const serverTest = read("apps/server/src/index.test.ts");
   const gatewayServerRegion = regionBetween(
@@ -308,8 +310,10 @@ function checkGatewayExternalClientBoundary() {
     [serverTest, "routes Mobile message payloads through Gateway inbound"],
     [serverTest, "/api/gateway/mobile/messages"],
     [runtime, "async handleGatewayInbound"],
-    [runtime, "await this.runChatTurn"],
-    [runtime, "await this.store.saveGatewayInboundMessage"],
+    [runtime, "routeGatewayInbound"],
+    [runtime, "runChat: (input) => this.runChatTurn"],
+    [runtime, "saveInbound: (record) => this.store.saveGatewayInboundMessage"],
+    [gatewayDomainService, "const chat = await this.dependencies.inbound.runChat"],
     [server, "maybeCreateClientEventFromRuntimeEvent"],
     [server, "target_client_kind: \"desktop\""],
     [server, "client.notification.requested"]
@@ -335,8 +339,10 @@ function checkGatewayExternalClientBoundary() {
 function checkAppShotTemporaryContext() {
   const server = read("apps/server/src/api-server.ts");
   const desktop = read("apps/desktop/src/main.ts");
-  const runtime = read("packages/runtime/src/index.ts");
+  const runtime = read("packages/runtime/src/context/temporary-context-port.ts");
   const provider = read("packages/runtime/src/provider-profiles.ts");
+  const appShotSubmit = regionBetween(desktop, "async function submitAppShot", "function validateAppShotInput");
+  const quickAskSubmit = regionBetween(desktop, "async function submitQuickAsk", "function startClientEventPolling");
   const required = [
     [server, "/api/temporary-context"],
     [server, "temporaryContextTtlMs"],
@@ -358,9 +364,21 @@ function checkAppShotTemporaryContext() {
     [provider, "temporaryContextImages"]
   ];
   const missing = required.filter(([content, snippet]) => !content.includes(snippet)).map(([, snippet]) => snippet);
-  return result("appshot-temporary-context", missing.length === 0, missing.length === 0
-    ? "AppShot is routed through temporary context, and selected text stays in explicit Quick Ask confirmation"
-    : `missing snippets: ${missing.join(", ")}`);
+  const signedWorkspaceChat = [
+    [appShotSubmit, "activeWorkspaceServerRequest"],
+    [appShotSubmit, "activeWorkspaceExecutableRoomId"],
+    [appShotSubmit, "activeWorkspaceChatPath()"],
+    [appShotSubmit, "temporary_context"],
+    [quickAskSubmit, "activeWorkspaceServerRequest"],
+    [quickAskSubmit, "activeWorkspaceExecutableRoomId"],
+    [quickAskSubmit, "activeWorkspaceChatPath()"]
+  ].filter(([content, snippet]) => !content.includes(snippet)).map(([, snippet]) => snippet);
+  const legacySubmitPaths = ["/api/chat/sessions", "/api/surface/operations", "/api/temporary-context"]
+    .filter((snippet) => appShotSubmit.includes(snippet) || quickAskSubmit.includes(snippet));
+  const ok = missing.length === 0 && signedWorkspaceChat.length === 0 && legacySubmitPaths.length === 0;
+  return result("appshot-temporary-context", ok, ok
+    ? "AppShot and Quick Ask use signed Room-scoped PostgreSQL Chat; screenshot bytes remain temporary request context"
+    : `missing=${missing.join(", ") || "none"} signed_workspace_chat=${signedWorkspaceChat.join(", ") || "none"} legacy_submit_paths=${legacySubmitPaths.join(", ") || "none"}`);
 }
 
 function checkDeepLinkHandling() {
@@ -382,7 +400,9 @@ function checkDeepLinkHandling() {
 
 function checkWebDesktopBridge() {
   const api = read("apps/web/src/lib/api.ts");
-  const appVue = read("apps/web/src/App.vue");
+  const appWorkspace = read("apps/web/src/AppWorkspace.vue");
+  const preload = read("apps/desktop/src/preload.cts");
+  const desktop = read("apps/desktop/src/main.ts");
   const protocol = read("packages/ui-protocol/src/index.ts");
   const gateway = read("packages/gateway/src/index.ts");
   const required = [
@@ -390,15 +410,29 @@ function checkWebDesktopBridge() {
     [api, "window.samuraiDesktop?.apiBaseUrl"],
     [api, "attachments"],
     [api, "getBackendRun"],
-    [appVue, "io(getApiBaseUrl())"],
-    [appVue, "openBackendRunDeepLink"],
+    [appWorkspace, "onWorkspaceServerEvent"],
+    [preload, "onWorkspaceServerEvent"],
+    [desktop, "samurai:workspace-server:event"],
+    [desktop, "workspaceSocketAuth"],
+    [appWorkspace, "openBackendRunDeepLink"],
     [protocol, "attachments?: ResourceRef[]"],
     [gateway, "attachments: MessageEnvelope[\"attachments\"]"]
   ];
   const missing = required.filter(([content, snippet]) => !content.includes(snippet)).map(([, snippet]) => snippet);
-  return result("web-desktop-bridge", missing.length === 0, missing.length === 0
-    ? "web API base and message attachments share the normal SurfaceOperation path"
-    : `missing snippets: ${missing.join(", ")}`);
+  const legacySocketPath = path.join(root, "apps/web/src/lib/connect-app-socket.ts");
+  const legacySocket = existsSync(legacySocketPath) ? read("apps/web/src/lib/connect-app-socket.ts") : "";
+  const forbidden = legacySocket || api.includes("socket.io-client") || appWorkspace.includes("connectAppSocket") || desktop.includes("io(getApiBaseUrl())")
+    ? [
+        ...(legacySocket ? ["apps/web/src/lib/connect-app-socket.ts"] : []),
+        ...(api.includes("socket.io-client") ? ["web socket.io-client import"] : []),
+        ...(appWorkspace.includes("connectAppSocket") ? ["connectAppSocket"] : []),
+        ...(desktop.includes("io(getApiBaseUrl())") ? ["io(getApiBaseUrl())"] : [])
+      ]
+    : [];
+  const issues = [...missing, ...forbidden.map((item) => `forbidden:${item}`)];
+  return result("web-desktop-bridge", issues.length === 0, issues.length === 0
+    ? "browser uses signed HTTP and Desktop uses Main signed Socket plus preload IPC"
+    : `bridge contract issues: ${issues.join(", ")}`);
 }
 
 function result(name, ok, message) {

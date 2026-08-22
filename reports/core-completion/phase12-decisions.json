@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "phase": "12",
+  "recorded_at": "2026-08-22",
+  "decisions": [
+    {
+      "id": "bundle-v4-standard-transfer",
+      "problem": "HTTPのチャンク取込だけがBundle V3入口のままで、HTTP・CLI・self-host転送の形式が揃っていなかった。",
+      "decision": "標準転送はBundle V4へ統一し、V3は既存入力との互換入口として残す。V4チャンク取込は各Entryのハッシュ、Manifest、全体整合性を確認してからRestoreする。",
+      "scope_check": "Phase8のV4転送要件に限定し、認可を緩める制限や旧データ削除は追加していない。",
+      "verification": "Bundle V4、V3、Schemaのfocused testを実行済み。"
+    },
+    {
+      "id": "runtime-operation-audit-ledger",
+      "problem": "PostgreSQL Runtime Chatの受付・失敗・完了が正式なOperationとAudit台帳へ十分に投影されていなかった。",
+      "decision": "既存のRLS付きworkspace_runtime_operations、workspace_audit_entries、既存監査関数を再利用し、Runごとに決定的なOperationを作成して再試行時は再利用する。確定済みActivityは後から書き換えない。",
+      "scope_check": "新しいDB・認可経路・汎用JSON台帳は追加していない。未接続のSurfaceやApproval等を空配列で埋めて合格扱いにしていない。",
+      "verification": "Server typecheckと関連focused testを実行済み。"
+    },
+    {
+      "id": "sessionless-automation-locale",
+      "problem": "Automationの言語設定がWorkspace実行のBackend入力へ届かず、旧Session Messageを読む検証も現行経路と一致していなかった。",
+      "decision": "Workspace実行要求に任意のinput_locale/output_localeを追加し、信頼済みSettingsからBackend入力へ渡す。AutomationはSessionとMessageを作らない境界を維持し、検証は実Backend入口とSession未作成を確認する。",
+      "scope_check": "既定値jaとの後方互換を維持し、利用者への新しい言語制限や認可緩和は追加していない。",
+      "verification": "Domain入口の実Server検証でen/enのBackend入力、Session-free、Message未作成を確認済み。"
+    },
+    {
+      "id": "markdown-and-wiki-source-of-truth",
+      "problem": "CollectionやKnowledge WikiがJSONや派生Indexだけに簡略化されていないかを再確認する必要があった。",
+      "decision": "Collection本文とKnowledge Wiki本文は人間可読Markdown／Workspace Fileを正本として維持し、JSON projectionとWiki indexは決定的な派生物として扱う。",
+      "scope_check": "既存のファイル正本、復旧、再インデックス責務を変更していない。",
+      "verification": "現行実装とBundle V4のファイル一覧・関連focused testを照合済み。"
+    },
+    {
+      "id": "unsupported-postgres-projections",
+      "problem": "PG Runtimeで未接続のPresentation、Generated Surface、Skill optimization、Approval、Rollback等を検証のためだけに埋める誘惑があった。",
+      "decision": "未接続機能は空の成功結果や汎用JSONで偽装せず、正式な実装・実DB検証が揃うまでfail-closedまたは未検証として残す。",
+      "scope_check": "既存機能の削除、認可緩和、Test専用分岐を追加していない。",
+      "verification": "境界検査、focused test、最終監査で再確認する。"
+    },
+    {
+      "id": "phase-verifier-cross-phase-scope",
+      "problem": "Core07〜09の検証器が、同じ作業ツリーに含まれる後続Phaseの正規変更（External Integration、UI Protocol）をPhase外変更として誤検出した。",
+      "decision": "検証器の許可範囲に計画上の正規パッケージだけを追加し、製品コードの許可・認可・実行経路は変更しない。",
+      "scope_check": "テストを通すための機能分岐や検証緩和ではなく、Phase分担のファイル境界だけを現行計画に合わせた。",
+      "verification": "以前の許可範囲更新後はCore07〜09のPASSを確認したが、今回の再実行ではagent-backendsテストfixtureの変更が許可範囲外として最初に検出された。検証器をさらに緩めず、当該focused test・typecheck・全体検証で機能結果を別途確認する。"
+    },
+    {
+      "id": "domain-schema-ledger-sync",
+      "problem": "実行経路で必要なBackend error metadata、非JSON値の保持、Client EventのRoom情報、locale項目と、Core06の凍結Schema台帳が不一致になった。",
+      "decision": "公開Domain Schemaの実際の契約を隠したり検証器を弱めたりせず、変更理由を確認したうえで凍結台帳の該当catalogとroot hashだけを更新した。",
+      "scope_check": "新しい入力制限、認可緩和、空成功、Test専用分岐は追加していない。台帳は実装の実行時生成ではなく、レビュー対象の静的成果物として更新した。",
+      "verification": "Domain command schema matrixが167操作・334 endpoint・937 reviewed schema nodesでPASS。"
+    },
+    {
+      "id": "agent-runtime-fixture-signature",
+      "problem": "複数のDomain検証fixtureが旧AgentRuntimeコンストラクタの位置引数を使い、現行のWorkspace optionsを無視してartifact export等を誤って非表示にしていた。",
+      "decision": "fixtureを現行の公開コンストラクタ契約へ合わせ、optionsを正しい引数へ移した。互換用のダミー引数や本番側の制限は追加しない。",
+      "scope_check": "本番Runtimeの公開境界・認可・機能を変更せず、検証fixtureの誤った呼び出しだけを修正した。",
+      "verification": "Core06互換性検証を通過し、関連fixtureとfocused testを再実行済み。"
+    },
+    {
+      "id": "hosted-worker-maintenance-contexts",
+      "problem": "標準ServerのWorkerがHostedモードを常に無効化し、Hosted WorkspaceのJob、Knowledge Host、Automationを通常起動から処理できなかった。",
+      "decision": "Workspace ownerが明示的に設定したMaintenance IdentityだけをServer-owned PostgreSQL関数で列挙し、HostedではWorkspaceごとに独立したRLS Contextを作って各Worker laneを処理する。Identityが未設定の間は安全側で待機し、設定後は再試行で検出する。Self-hostの既存単一Workspace経路は維持する。",
+      "scope_check": "Owner Accountの流用、全Workspaceへの一括権限、HTTP入力からのWorker identity生成は追加していない。Workerは既存のclaim、Room認可、retry、lease、settlementを各Contextへ渡すだけで、Runtime機能やKnowledge Wiki・Skillを簡略化していない。",
+      "verification": "Workspace ServerとServerのtypecheck、schema／Worker supervisor focused test（9 tests）を実行済み。実PostgreSQL migrationとHosted複数Workspaceのlease実行は未検証。"
+    },
+    {
+      "id": "hosted-worker-empty-context-guard",
+      "problem": "Hosted Workerの複数Context解決が空配列になった場合、互換用の単一Context解決入口が未定義Contextを返し得た。",
+      "decision": "空配列はWorker未設定としてdisabledへ戻し、再試行経路へ渡す。Healthには解決済みWorkspace数を表示する。",
+      "scope_check": "Workerの処理対象、Room認可、retry／lease規則を変更せず、未定義Contextによる実行だけを防いだ。Self-hostの単一Context経路とHostedの設定後再検出は維持する。",
+      "verification": "Server typecheckとWorker supervisor focused testを再実行する。Hostedの実PostgreSQL Context解決は未検証。"
+    },
+    {
+      "id": "standard-pg-gateway-skill-connection",
+      "problem": "GatewayとSkill optimizationのPostgreSQL用Adapter・Schemaは存在していたが、標準HTTPと通常Workerから正式なRuntime／Domain Operation経路へ接続されていなかった。",
+      "decision": "Typed PostgreSQL tables、RLS、Gateway／Skill Runtime Service、HTTPの署名API、通常Worker Supervisorを一続きに接続する。Skill optimizationのHTTP開始はキューへ保存し、実行はWorkerだけがClaim・Lease・Settlementする。",
+      "scope_check": "既存Runtimeの即時実行互換は保持し、Skill本文はCompletion所有のままにする。Gateway／ExternalがStoreやWorkspace Fileへ直接触れる経路、Worker identityのHTTP入力化、簡略化したSkill／Gateway結果は追加していない。",
+      "verification": "Server／Runtime／Web／Desktop typecheck、Gateway／Skill／Worker focused testを実行済み。実PostgreSQL migration、RLS、HTTP実Client、Worker再起動は未検証。"
+    },
+    {
+      "id": "standard-pg-operation-receipts",
+      "problem": "正式Domain Operationの入力・出力Schemaは検証されていたが、Gateway／SkillのPG mutationが共通Workspace operation ledgerへ結果を保存せず、同一要求の再送で再実行し得た。",
+      "decision": "既存workspace_operationsのRLSとstatusを再利用し、operation id・入力hash・completed result・failed outcomeを記録する。同一Accountの同一入力だけをreplayし、別入力・実行中・既失敗は明示的に拒否する。Accountをhashした保存キーで、別AccountのRLS非可視行を新規処理と誤認しない。",
+      "scope_check": "新しい利用制限ではなく、各Gateway／Skill commandが既に宣言するidempotency=requiredをPG経路でも実装した。Domain Operation、Room認可、Skill lock、Gateway deliveryの既存境界を迂回せず、失敗結果を成功へ変換していない。",
+      "verification": "操作台帳focused test 3ケース、Gateway／Skill focused test、Server typecheckを実行済み。Process crash後の実PostgreSQL復旧とlive concurrent retryは未検証。"
+    },
+    {
+      "id": "gateway-maintenance-formal-operation",
+      "problem": "通常WorkerのGateway期限整理がAdapterを直接呼び、正式Domain Operationの入口を迂回していた。",
+      "decision": "pairing expireとconcurrency lock expireはscheduled_contextの正式Domain Operation経由へ変更する。配送leaseの期限復旧は公開Domain Operationではなく、送信を発生させないWorker専用の永続状態復旧として、同じRLS ContextのAdapter処理に残す。",
+      "scope_check": "Gatewayの送信機能、外部Channel、認可、Sandbox権限を追加せず、既存の期限・lease復旧責務を正式入口へ寄せただけに留める。Workerは通常起動時に継続し、手動CLI専用にはしない。",
+      "verification": "Server typecheck、Worker Supervisor、Gateway focused testを実行済み。実PostgreSQLのscheduled_context、期限更新、配送lease復旧は未検証。"
+    },
+    {
+      "id": "gateway-policy-metadata-schema-alignment",
+      "problem": "Gateway policy AdapterのSQLがmetadata列を読み書きする一方、既存v52 migrationはpairing／routing policy表にrecord列だけを作っており、実PostgreSQL保存が失敗する不一致があった。",
+      "decision": "既存migrationのchecksumを変更せず、追加migration v54で2表へmetadata JSONB列を追加する。既存record列や既存データを削除・自動変換せず、Adapterの公開契約に必要な列だけを補う。",
+      "scope_check": "Gatewayのpolicy機能、権限、保存責務を広げず、SQLモックでは見えない実DB契約の欠落だけを修正した。",
+      "verification": "Schema focused test、Server typecheck、diff checkを再実行する。実PostgreSQLでv54を適用してpolicyを保存する検証は未実施。"
+    },
+    {
+      "id": "skill-optimization-partial-start-settlement",
+      "problem": "Skill optimization開始の複数保存を途中で失敗させると、runだけ、または一部の関連記録だけが残り、lock解放後の状態が曖昧になる可能性があった。",
+      "decision": "runを先に保存し、objective・work itemの準備中に失敗した場合は、保存済みのrun・objective・work itemを失敗状態へsettleしてからlockを解放する。通常Runtimeの即時実行と標準PG Workerのキュー実行は維持する。",
+      "scope_check": "新しい入力制限、成功扱い、Test専用分岐、Skill本文の簡略化は追加せず、既存の失敗・retry・lock境界を途中失敗にも適用した。",
+      "verification": "Runtime／Server typecheckとSkill・Worker focused testを再実行済み。実PostgreSQLでの途中失敗、再起動後のlease復旧、二重実行は未検証。"
+    }
+  ]
+}

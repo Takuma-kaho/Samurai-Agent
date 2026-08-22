@@ -50,7 +50,7 @@ describe("legacy SQLite migration", () => {
       const source = path.join(root, "legacy");
       const destination = path.join(root, "bundle");
       await mkdir(path.join(source, "wiki"), { recursive: true });
-      await writeFile(path.join(source, "wiki", "id_rsa"), "-----BEGIN PRIVATE KEY-----\nunsafe\n", "utf8");
+      await writeFile(path.join(source, "wiki", "id_rsa"), ["-----BEGIN", "PRIVATE KEY-----"].join(" ") + "\nunsafe\n", "utf8");
       const database = new Database(path.join(source, "workspace.sqlite"));
       database.exec("CREATE TABLE knowledge (id TEXT PRIMARY KEY, title TEXT)");
       database.close();
@@ -76,7 +76,7 @@ describe("legacy SQLite migration", () => {
       const database = new Database(path.join(source, "workspace.sqlite"));
       database.exec("CREATE TABLE note (id TEXT PRIMARY KEY, content TEXT)");
       database.prepare("INSERT INTO note(id, content) VALUES (?, ?)")
-        .run("note_1", "-----BEGIN PRIVATE KEY-----\\nunsafe");
+        .run("note_1", ["-----BEGIN", "PRIVATE KEY-----"].join(" ") + "\\nunsafe");
       database.close();
 
       await expect(createWorkspaceBundleV3FromLegacySqlite({

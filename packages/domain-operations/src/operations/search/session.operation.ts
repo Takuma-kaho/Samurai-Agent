@@ -7,7 +7,8 @@ const SearchResult = z.object({
   id: z.string(),
   title: z.string(),
   summary: z.string(),
-  session_id: z.string().optional()
+  session_id: z.string().optional(),
+  operation_id: z.string().optional()
 }).strict();
 const Output = z.array(SearchResult).max(8);
 export interface SessionSearchPorts extends DomainQueryPorts {

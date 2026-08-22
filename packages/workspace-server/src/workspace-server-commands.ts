@@ -6,16 +6,20 @@ import {
   WorkspaceBundleV3Service,
   writeWorkspaceBundleV3Transport
 } from "./workspace-bundle-v3";
+import { WorkspaceBundleV4Service, writeWorkspaceBundleV4Transport, type StageWorkspaceBundleV4Input } from "./workspace-completion-bundle-v4";
 import { WorkspaceFileStore } from "./workspace-files";
 import { WorkspaceCompletionService } from "./workspace-completion-service";
 import { WorkspaceCompletionMigrationService } from "./workspace-completion-migration";
 import { WorkspaceCompletionMaintenanceService } from "./workspace-completion-maintenance";
 import { WorkspaceServerStore } from "./workspace-server-store";
+import type { WorkspaceBundleV3Manifest, WorkspaceExternalRoomAction, WorkspaceExternalRoomPrincipal } from "./types";
 
 export interface WorkspaceServerCommandDependencies {
   store: WorkspaceServerStore;
   files: WorkspaceFileStore;
   bundles: WorkspaceBundleV3Service;
+  /** Standard transfer and import path. V3 remains only for compatibility inputs. */
+  completionBundles?: WorkspaceBundleV4Service;
   /** Optional while old callers migrate; the running Core always supplies it. */
   completion?: WorkspaceCompletionService;
   completionMigrations?: WorkspaceCompletionMigrationService;
@@ -39,6 +43,7 @@ export class WorkspaceServerCommandService {
   private readonly store: WorkspaceServerStore;
   private readonly files: WorkspaceFileStore;
   private readonly bundles: WorkspaceBundleV3Service;
+  private readonly completionBundles?: WorkspaceBundleV4Service;
   private readonly completion?: WorkspaceCompletionService;
   private readonly completionMigrations?: WorkspaceCompletionMigrationService;
   private readonly maintenance?: WorkspaceCompletionMaintenanceService;
@@ -47,6 +52,7 @@ export class WorkspaceServerCommandService {
     this.store = dependencies.store;
     this.files = dependencies.files;
     this.bundles = dependencies.bundles;
+    this.completionBundles = dependencies.completionBundles;
     this.completion = dependencies.completion;
     this.completionMigrations = dependencies.completionMigrations;
     this.maintenance = dependencies.maintenance;
@@ -58,6 +64,48 @@ export class WorkspaceServerCommandService {
 
   createWorkspace(input: Parameters<WorkspaceServerStore["createWorkspace"]>[0]) {
     return this.store.createWorkspace(input);
+  }
+
+  registerAgent(
+    context: Parameters<WorkspaceServerStore["registerAgent"]>[0],
+    input: Parameters<WorkspaceServerStore["registerAgent"]>[1]
+  ) {
+    return this.store.registerAgent(context, input);
+  }
+
+  setAgentRoomPermission(
+    context: Parameters<WorkspaceServerStore["setAgentRoomPermission"]>[0],
+    input: Parameters<WorkspaceServerStore["setAgentRoomPermission"]>[1]
+  ) {
+    return this.store.setAgentRoomPermission(context, input);
+  }
+
+  upsertConnectionDescriptor(
+    context: Parameters<WorkspaceServerStore["upsertConnectionDescriptor"]>[0],
+    input: Parameters<WorkspaceServerStore["upsertConnectionDescriptor"]>[1]
+  ) {
+    return this.store.upsertConnectionDescriptor(context, input);
+  }
+
+  getWorkspace(context: Parameters<WorkspaceServerStore["getWorkspace"]>[0]) {
+    return this.store.getWorkspace(context);
+  }
+
+  listRooms(context: Parameters<WorkspaceServerStore["listRooms"]>[0]) {
+    return this.store.listRooms(context);
+  }
+
+  getExternalConnectionDescriptor(input: Parameters<WorkspaceServerStore["getExternalConnectionDescriptor"]>[0]) {
+    return this.store.getExternalConnectionDescriptor(input);
+  }
+
+  canExternalRoomAccess(input: {
+    workspaceId: string;
+    roomId: string;
+    principal: WorkspaceExternalRoomPrincipal;
+    action: WorkspaceExternalRoomAction;
+  }) {
+    return this.store.canExternalRoomAccess(input);
   }
 
   async importWorkspaceBundleTransport(
@@ -74,10 +122,19 @@ export class WorkspaceServerCommandService {
     );
     await mkdir(path.dirname(staging), { recursive: true, mode: 0o700 });
     try {
-      const bundle = await writeWorkspaceBundleV3Transport({
-        transport: input.transport,
-        destination: staging
-      });
+      const format = input.transport && typeof input.transport === "object" && !Array.isArray(input.transport)
+        ? (input.transport as { format?: unknown }).format
+        : undefined;
+      if (format === "samurai-workspace-bundle-v4") {
+        if (!this.completionBundles) throw new WorkspaceServerError("workspace_completion_bundle_service_unavailable", 503);
+        const bundle = await writeWorkspaceBundleV4Transport({ transport: input.transport, destination: staging });
+        return await this.completionBundles.importNew(context, {
+          sourceDirectory: bundle.directory,
+          targetWorkspaceId: input.targetWorkspaceId,
+          ...(input.targetWorkspaceName ? { targetWorkspaceName: input.targetWorkspaceName } : {})
+        });
+      }
+      const bundle = await writeWorkspaceBundleV3Transport({ transport: input.transport, destination: staging });
       return await this.bundles.importNew(context, {
         sourceDirectory: bundle.directory,
         targetWorkspaceId: input.targetWorkspaceId,
@@ -90,9 +147,13 @@ export class WorkspaceServerCommandService {
 
   stageWorkspaceBundle(
     context: Parameters<WorkspaceBundleV3Service["stageIncomingBundle"]>[0],
-    input: Parameters<WorkspaceBundleV3Service["stageIncomingBundle"]>[1]
+    input: Omit<Parameters<WorkspaceBundleV3Service["stageIncomingBundle"]>[1], "manifest"> & { manifest: WorkspaceBundleV3Manifest | StageWorkspaceBundleV4Input["manifest"] }
   ) {
-    return this.bundles.stageIncomingBundle(context, input);
+    if (isV4StageInput(input)) {
+      if (!this.completionBundles) throw new WorkspaceServerError("workspace_completion_bundle_service_unavailable", 503);
+      return this.completionBundles.stageIncomingBundle(context, input);
+    }
+    return this.bundles.stageIncomingBundle(context, input as Parameters<WorkspaceBundleV3Service["stageIncomingBundle"]>[1]);
   }
 
   writeWorkspaceBundleEntry(
@@ -100,12 +161,27 @@ export class WorkspaceServerCommandService {
     entryPath: Parameters<WorkspaceBundleV3Service["putIncomingBundleEntry"]>[1],
     content: Parameters<WorkspaceBundleV3Service["putIncomingBundleEntry"]>[2]
   ) {
+    if (this.completionBundles) {
+      return this.completionBundles.hasIncomingBundle(context).then((isV4) =>
+        isV4
+          ? this.completionBundles!.putIncomingBundleEntry(context, entryPath, content)
+          : this.bundles.putIncomingBundleEntry(context, entryPath, content)
+      );
+    }
     return this.bundles.putIncomingBundleEntry(context, entryPath, content);
   }
 
   completeWorkspaceBundleImport(
     context: Parameters<WorkspaceBundleV3Service["completeIncomingBundle"]>[0]
-  ) {
+  ): Promise<Awaited<ReturnType<WorkspaceBundleV3Service["completeIncomingBundle"]>> | Awaited<ReturnType<WorkspaceBundleV4Service["completeIncomingBundle"]>>> {
+    if (this.completionBundles) {
+      return this.completionBundles.hasIncomingBundle(context).then<
+        Awaited<ReturnType<WorkspaceBundleV3Service["completeIncomingBundle"]>> | Awaited<ReturnType<WorkspaceBundleV4Service["completeIncomingBundle"]>>
+      >(async (isV4) => isV4
+        ? this.completionBundles!.completeIncomingBundle(context)
+        : this.bundles.completeIncomingBundle(context)
+      );
+    }
     return this.bundles.completeIncomingBundle(context);
   }
 
@@ -173,6 +249,27 @@ export class WorkspaceServerCommandService {
     return this.store.deleteRecord(context, input);
   }
 
+  getRecord(
+    context: Parameters<WorkspaceServerStore["getRecord"]>[0],
+    input: Parameters<WorkspaceServerStore["getRecord"]>[1]
+  ) {
+    return this.store.getRecord(context, input);
+  }
+
+  listRecords(
+    context: Parameters<WorkspaceServerStore["listRecords"]>[0],
+    input: Parameters<WorkspaceServerStore["listRecords"]>[1]
+  ) {
+    return this.store.listRecords(context, input);
+  }
+
+  assertRoomExecutable(
+    context: Parameters<WorkspaceServerStore["assertRoomExecutable"]>[0],
+    roomId: Parameters<WorkspaceServerStore["assertRoomExecutable"]>[1]
+  ) {
+    return this.store.assertRoomExecutable(context, roomId);
+  }
+
   putJob(
     context: Parameters<WorkspaceServerStore["putJob"]>[0],
     input: Parameters<WorkspaceServerStore["putJob"]>[1]
@@ -192,6 +289,13 @@ export class WorkspaceServerCommandService {
     input: Parameters<WorkspaceCompletionService["ingestActivity"]>[1]
   ) {
     return this.requireCompletion().ingestActivity(context, input);
+  }
+
+  listCompletionActivities(
+    context: Parameters<WorkspaceCompletionService["listActivities"]>[0],
+    input: Parameters<WorkspaceCompletionService["listActivities"]>[1]
+  ) {
+    return this.requireCompletion().listActivities(context, input);
   }
 
   createCompletionEpisode(
@@ -349,27 +453,41 @@ export class WorkspaceServerCommandService {
       context.workspaceId,
       `transfer_${context.operationId}`
     );
-    return this.bundles.beginTransfer(context, destination);
+    return this.completionBundles
+      ? this.completionBundles.beginTransfer(context, destination)
+      : this.bundles.beginTransfer(context, destination);
   }
 
   recordTransferReceipt(
     context: Parameters<WorkspaceBundleV3Service["recordTransferReceipt"]>[0],
     input: Parameters<WorkspaceBundleV3Service["recordTransferReceipt"]>[1]
   ) {
-    return this.bundles.recordTransferReceipt(context, input);
+    return this.completionBundles
+      ? this.completionBundles.recordTransferReceipt(context, input)
+      : this.bundles.recordTransferReceipt(context, input);
   }
 
   rollbackTransfer(
     context: Parameters<WorkspaceBundleV3Service["rollbackTransfer"]>[0],
     transferId: Parameters<WorkspaceBundleV3Service["rollbackTransfer"]>[1]
   ) {
-    return this.bundles.rollbackTransfer(context, transferId);
+    return this.completionBundles
+      ? this.completionBundles.rollbackTransfer(context, transferId)
+      : this.bundles.rollbackTransfer(context, transferId);
   }
 
   completeTransfer(
     context: Parameters<WorkspaceBundleV3Service["completeTransfer"]>[0],
     transferId: Parameters<WorkspaceBundleV3Service["completeTransfer"]>[1]
   ) {
-    return this.bundles.completeTransfer(context, transferId);
+    return this.completionBundles
+      ? this.completionBundles.completeTransfer(context, transferId)
+      : this.bundles.completeTransfer(context, transferId);
   }
+}
+
+function isV4StageInput(
+  input: Omit<Parameters<WorkspaceBundleV3Service["stageIncomingBundle"]>[1], "manifest"> & { manifest: WorkspaceBundleV3Manifest | StageWorkspaceBundleV4Input["manifest"] }
+): input is StageWorkspaceBundleV4Input {
+  return input.manifest.format_version === 4;
 }

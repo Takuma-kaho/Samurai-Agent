@@ -72,7 +72,7 @@ async function upgrade(root: string): Promise<{ migrations: Awaited<ReturnType<W
 }
 
 function assertLatest(result: Awaited<ReturnType<typeof upgrade>>, freshSignature: ReturnType<typeof schemaSignature>): void {
-  assert.deepEqual(result.migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(result.migrations.map((migration) => migration.version), workspaceMigrations.map((migration) => migration.version));
   assert.deepEqual(result.migrations.map((migration) => migration.name), workspaceMigrations.map((migration) => migration.name));
   assert.deepEqual(result.migrations.slice(0, 5).map((migration) => migration.checksum), expectedChecksums);
   assert.deepEqual(result.signature, freshSignature);
@@ -212,11 +212,12 @@ try {
   await assertRejected(gapRoot, /schema_migration_history_gap:2:3/);
 
   const futureRoot = await temporaryRoot("future");
-  await seedAtVersion(futureRoot, 6);
+  const latestVersion = workspaceMigrations.at(-1)!.version;
+  await seedAtVersion(futureRoot, latestVersion);
   raw = new Database(dbPath(futureRoot));
-  raw.prepare("INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, ?)").run(7, "future", "future", new Date().toISOString());
+  raw.prepare("INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, ?)").run(latestVersion + 1, "future", "future", new Date().toISOString());
   raw.close();
-  await assertRejected(futureRoot, /schema_migration_version_too_new:7/);
+  await assertRejected(futureRoot, new RegExp(`schema_migration_version_too_new:${latestVersion + 1}`));
 
   await verifyFailureRollback();
   await verifyKnowledgeWikiCaptureMigration();

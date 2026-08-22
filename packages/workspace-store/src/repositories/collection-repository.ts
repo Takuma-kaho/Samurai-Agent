@@ -244,61 +244,55 @@ async deleteCollectionRecord(
     throw new CollectionRecordVersionConflictError(requiredVersion, existing);
   }
 
-  // A delete cannot use the normal replace-file coordinator.  Keep the old
-  // body in a same-volume staging path until the version-checked DB delete
-  // commits, and journal both halves for recovery after a process crash.
-  const transactionId = createId("file_transaction");
-  const stagedPath = `${existing.file_path}.delete-${transactionId}`;
+  // Move the old body into a same-volume staging path before the version-
+  // checked delete.  The shared coordinator owns the journal and recovery;
+  // the repository owns only the Collection row mutation.
+  const stagedPath = `${existing.file_path}.delete-${createId("file_transaction")}`;
   const targetPath = path.join(this.rootDir, existing.file_path);
   const stagedAbsolutePath = path.join(this.rootDir, stagedPath);
-  const createdAt = nowIso();
-  let staged = false;
-  let databaseCommitted = false;
-  await this.db.insertInto("workspace_file_transactions").values({
-    id: transactionId,
-    kind: "collection_record_delete",
-    status: "planned",
-    target_path: existing.file_path,
-    staged_path: stagedPath,
-    collection_id: collectionId,
-    record_id: recordId,
-    patch_id: null,
-    before_json: stringify(existing),
-    after_json: stringify({ deleted: true, version: existing.version }),
-    created_at: createdAt,
-    updated_at: createdAt
-  }).execute();
   try {
-    await rename(targetPath, stagedAbsolutePath);
-    staged = true;
-    await this.db.updateTable("workspace_file_transactions")
-      .set({ status: "staged", updated_at: nowIso() })
-      .where("id", "=", transactionId)
-      .execute();
-    const deleted = await this.db.transaction().execute(async (transaction) => {
-      const result = await transaction.deleteFrom("collection_records")
-        .where("collection_id", "=", collectionId)
-        .where("id", "=", recordId)
-        .where("version", "=", requiredVersion)
-        .executeTakeFirst();
-      if (Number(result.numDeletedRows ?? 0) !== 1) return false;
-      await transaction.updateTable("workspace_file_transactions")
-        .set({ status: "db_committed", updated_at: nowIso() })
-        .where("id", "=", transactionId)
-        .execute();
-      return true;
+    await this.fileTransactions.execute({
+      kind: "collection_record_delete",
+      targetPath: existing.file_path,
+      stagedPath,
+      collectionId,
+      recordId,
+      beforeJson: stringify(existing),
+      afterJson: stringify({ deleted: true, version: existing.version }),
+      stage: async () => rename(targetPath, stagedAbsolutePath),
+      rollbackStage: async () => rename(stagedAbsolutePath, targetPath),
+      finalize: async () => rm(stagedAbsolutePath, { force: true }),
+      preserveOnFinalizeFailure: true,
+      commit: async (transaction) => {
+        const deleted = await transaction.deleteFrom("collection_records")
+          .where("collection_id", "=", collectionId)
+          .where("id", "=", recordId)
+          .where("version", "=", requiredVersion)
+          .executeTakeFirst();
+        if (Number(deleted.numDeletedRows ?? 0) !== 1) throw new Error("collection_record_delete_version_conflict");
+      },
+      rollback: async (transaction) => {
+        const { file_path: _filePath, ...record } = existing;
+        await transaction.insertInto("collection_records").values({
+          id: record.id,
+          collection_id: record.collection_id,
+          file_path: existing.file_path,
+          record_json: stringify(record),
+          version: record.version,
+          created_at: record.created_at,
+          updated_at: record.updated_at
+        }).onConflict((conflict) => conflict.columns(["collection_id", "id"]).doUpdateSet({
+          file_path: existing.file_path,
+          record_json: stringify(record),
+          version: record.version,
+          updated_at: record.updated_at
+        })).execute();
+      }
     });
-    if (!deleted) {
+  } catch (error) {
+    if (error instanceof Error && error.message === "collection_record_delete_version_conflict") {
       const latest = await this.getCollectionRecord(collectionId, recordId);
       throw new CollectionRecordVersionConflictError(requiredVersion, latest ?? existing);
-    }
-    databaseCommitted = true;
-    await rm(stagedAbsolutePath, { force: true });
-    await this.db.deleteFrom("workspace_file_transactions").where("id", "=", transactionId).execute();
-  } catch (error) {
-    if (!databaseCommitted) {
-      if (staged) await rename(stagedAbsolutePath, targetPath).catch(() => undefined);
-      await this.db.deleteFrom("workspace_file_transactions").where("id", "=", transactionId).execute().catch(() => undefined);
     }
     throw error;
   }

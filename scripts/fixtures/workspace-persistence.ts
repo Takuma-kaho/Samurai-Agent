@@ -227,19 +227,35 @@ async function verifyActualWriteOwnership(): Promise<void> {
     artifact: ["repositories/artifact-repository.ts"],
     generated_surface: ["repositories/generated-surface-repository.ts"],
     memory: ["repositories/memory-repository.ts"],
-    knowledge_wiki: ["repositories/knowledge-wiki-repository.ts"],
-    skill: ["repositories/skill-repository.ts"],
+    knowledge_wiki: [
+      "repositories/knowledge-wiki-repository.ts",
+      "transactions/wiki-recovery-handler.ts"
+    ],
+    skill: [
+      "repositories/skill-repository.ts",
+      "transactions/skill-recovery-handler.ts"
+    ],
     learning: ["repositories/learning-repository.ts"],
     collection: [
       "repositories/collection-repository.ts",
-      "transactions/collection-record-recovery-handler.ts"
+      "transactions/collection-record-recovery-handler.ts",
+      "transactions/collection-schema-recovery-handler.ts"
     ],
-    automation: ["repositories/automation-repository.ts"],
+    automation: [
+      "repositories/automation-repository.ts",
+      "repositories/external-app-connection-repository.ts"
+    ],
+    external_integration: ["repositories/external-integration-repository.ts"],
     gateway: ["repositories/gateway-repository.ts"],
     workspace_metadata: ["repositories/workspace-metadata-repository.ts"],
     access_history: ["repositories/access-history-repository.ts"],
     activity_history: ["repositories/activity-history-repository.ts"],
-    workspace_job: ["repositories/workspace-job-repository.ts"]
+    workspace_job: ["repositories/workspace-job-repository.ts"],
+    room_permission: ["repositories/room-permission-repository.ts"],
+    room_agent: [
+      "repositories/room-agent-repository.ts",
+      "repositories/room-permission-repository.ts"
+    ]
   };
   const ownerByTable = new Map(
     workspaceResourceOwners().flatMap((owner) => owner.sqlite_tables.map((table) => [table, owner.owner] as const))

@@ -3,10 +3,10 @@
   "test_id": "D07",
   "command": "pnpm core:test:artifact",
   "status": "passed",
-  "commit_sha": "ce205d29560c12222060e5e6ba0d1ac05703b17e",
+  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
   "worktree_clean": false,
-  "source_sha256": "fa0ecb1f6e758f012e16565a9e313213d9a50b43ff4f7af0fe32bb140f8c5409",
-  "source_graph_sha256": "a698149afd29a6f272102745095baa6e83511a0dc11b5833b7b5c8638814a9fa",
+  "source_sha256": "c85b6110da0219c4785257829e72fe13597ddc6a23f6467ffb473c1a6eeb87c5",
+  "source_graph_sha256": "c1ce06177791ac2dd1c49d13cc1398d42cc0a631475bb3b27cf37320fd0b66b0",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/action-catalog/src/index.ts",
@@ -38,8 +38,8 @@
     "scripts/verify-artifact-revisions.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-09T09:05:24.765Z",
-  "completed_at": "2026-08-09T09:05:25.760Z",
+  "started_at": "2026-08-22T04:51:00.710Z",
+  "completed_at": "2026-08-22T04:51:01.777Z",
   "assertions": [
     {
       "name": "Immutable revision lineage",
@@ -86,9 +86,9 @@
     "status": "passed",
     "revisions": 3,
     "lineage": [
-      "artifact_revision_e6817e55aef04cce",
-      "artifact_revision_e6817e55aef04cce",
-      "artifact_revision_d32299a54a904277"
+      "artifact_revision_eec3d308fe024682",
+      "artifact_revision_eec3d308fe024682",
+      "artifact_revision_60a1889a01cd4dd9"
     ],
     "hashes_unique": true,
     "conflict_rejected": true,

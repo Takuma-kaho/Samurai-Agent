@@ -14,7 +14,7 @@ import {
   type ResourceRef,
   type TrustedWorkspaceSource
 } from "@samurai-agent/core-schemas";
-import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
+import type { DomainOperationOutput, TrustedDomainContext } from "@samurai-agent/domain-operations";
 import type { ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import type { RuntimeWriteResult } from "../../agent-runtime.js";
 import { RoomAuthorizationError, type RoomAuthorizationService } from "./room-authorization-service.js";
@@ -49,6 +49,7 @@ interface AutomationStore {
   acquireAutomationJobLock(jobId: string, input: { lockedUntil: string; lockOwnerToken: string; now?: string }): Promise<AutomationJobRecord | undefined>;
   createAutomationRun(run: AutomationRunRecord): Promise<AutomationRunRecord>;
   attachAutomationRunEvidence(input: { jobId: string; runId: string; lockOwnerToken: string; operationId: string; activityId?: string }): Promise<AutomationRunRecord | undefined>;
+  attachAutomationRunBackendRun(input: { jobId: string; runId: string; lockOwnerToken: string; backendRunId: string }): Promise<AutomationRunRecord | undefined>;
   settleAutomationRun(input: {
     jobId: string;
     runId: string;
@@ -71,6 +72,7 @@ interface AutomationMutationPort {
     inputSummary: string;
     operationName: string;
     proposedEffects: string[];
+    inputRef?: ResourceRef;
     targetResourceRefs?: ResourceRef[];
     core08Evidence: { changeType: "other" };
     execute(operation: OperationRecord, activity?: import("@samurai-agent/core-schemas").ActivityRecord): Promise<{
@@ -83,6 +85,15 @@ interface AutomationMutationPort {
 
 interface AutomationExecutionPort {
   reindexWiki(): Promise<{ active: number; total: number }>;
+  runInstruction(input: {
+    context: TrustedDomainContext;
+    job: AutomationJobRecord;
+    run: AutomationRunRecord;
+  }): Promise<{ backendRunId: string; status: string; summary: string; error?: string }>;
+  runCollectionTrigger?(input: {
+    context: TrustedDomainContext;
+    job: AutomationJobRecord;
+  }): Promise<{ summary: string } | undefined>;
   retryAt(failureCount: number): string;
 }
 
@@ -96,11 +107,12 @@ export class Core09AutomationDomainService {
     roomAuthorization: Pick<RoomAuthorizationService, "assertRoom">;
     mutation: AutomationMutationPort;
     execution: AutomationExecutionPort;
+    sessionlessMemoryReview: () => Promise<DomainOperationOutput<"automation.memory_review.run">>;
     requestError: (code: "not_found" | "conflict" | "forbidden" | "unavailable", message: string) => Error;
   }) {}
 
-  memoryReviewUnsupported(): never {
-    throw this.dependencies.requestError("unavailable", "automation_sessionless_executor_unsupported:memory_review");
+  runSessionlessMemoryReview(): Promise<DomainOperationOutput<"automation.memory_review.run">> {
+    return this.dependencies.sessionlessMemoryReview();
   }
 
   async save(input: {
@@ -379,6 +391,7 @@ export class Core09AutomationDomainService {
         inputSummary: `Run automation job: ${locked.title}`,
         operationName: "automation.job.run",
         proposedEffects: [`Run automation job ${locked.title}.`],
+        inputRef: automationJobRef(locked),
         targetResourceRefs: [automationJobRef(locked)],
         core08Evidence: { changeType: "other" },
         execute: async (operation, activity) => {
@@ -403,7 +416,7 @@ export class Core09AutomationDomainService {
           // Re-evaluate after the operation/activity evidence exists but before
           // the executor is allowed to cause an external or resource effect.
           authority = await this.authorityFromJob(reloaded, "execute");
-          const outcome = await this.executeSessionlessKind(reloaded);
+          const outcome = await this.executeSessionlessKind(reloaded, authority.context, run);
           return { resource: run, ref: automationRunRef(run, locked.title), summary: outcome.summary };
         }
       });
@@ -483,10 +496,34 @@ export class Core09AutomationDomainService {
     });
   }
 
-  private async executeSessionlessKind(job: AutomationJobRecord): Promise<{ summary: string }> {
-    if (job.kind !== "wiki_reindex") throw new Error("automation_sessionless_executor_guard_bypassed");
-    const result = await this.dependencies.execution.reindexWiki();
-    return { summary: `Reindexed Knowledge Wiki pages: ${result.active}/${result.total} active.` };
+  private async executeSessionlessKind(
+    job: AutomationJobRecord,
+    context: TrustedDomainContext,
+    run: AutomationRunRecord
+  ): Promise<{ summary: string }> {
+    if (job.kind === "wiki_reindex") {
+      const result = await this.dependencies.execution.reindexWiki();
+      return { summary: `Reindexed Knowledge Wiki pages: ${result.active}/${result.total} active.` };
+    }
+    if (job.delivery_target.channel === "collection_trigger" && this.dependencies.execution.runCollectionTrigger) {
+      const result = await this.dependencies.execution.runCollectionTrigger({ context, job });
+      if (result) return result;
+      throw new AutomationAuthorizationBlockedError("automation_collection_trigger_invalid");
+    }
+    if (!isWorkspaceInstructionKind(job.kind)) throw new Error("automation_sessionless_executor_guard_bypassed");
+    const result = await this.dependencies.execution.runInstruction({ context, job, run });
+    const linked = await this.dependencies.store.attachAutomationRunBackendRun({
+      jobId: job.id,
+      runId: run.id,
+      lockOwnerToken: required(job.lock_owner_token, "automation_execution_lock_token_missing"),
+      backendRunId: result.backendRunId
+    });
+    if (!linked) throw new AutomationExecutionStoppedError("automation_execution_claim_lost");
+    Object.assign(run, linked);
+    if (result.status !== "completed") {
+      throw new Error(result.error ?? `automation_backend_not_completed:${result.status}`);
+    }
+    return { summary: result.summary || `Completed automation job ${job.title}.` };
   }
 
   private async assertJobControl(job: AutomationJobRecord, context: TrustedDomainContext): Promise<void> {
@@ -638,6 +675,7 @@ export class Core09AutomationDomainService {
     inputSummary: string;
     operationName: string;
     proposedEffects: string[];
+    inputRef?: ResourceRef;
     targetResourceRefs?: ResourceRef[];
     execute(operation: OperationRecord): Promise<{ resource: AutomationJobRecord; ref: ResourceRef; summary: string }>;
   }): Promise<RuntimeWriteResult<AutomationJobRecord>> {
@@ -737,7 +775,11 @@ function isOneShot(schedule: string): boolean {
 }
 
 function isSessionlessExecutableKind(kind: AutomationJobRecord["kind"]): kind is "wiki_reindex" {
-  return kind === "wiki_reindex";
+  return kind === "wiki_reindex" || isWorkspaceInstructionKind(kind);
+}
+
+function isWorkspaceInstructionKind(kind: AutomationJobRecord["kind"]): kind is "daily_digest" | "custom_instruction" | "resource_translation" {
+  return kind === "daily_digest" || kind === "custom_instruction" || kind === "resource_translation";
 }
 
 function nextRun(schedule: string, fromMs = Date.now()): string {

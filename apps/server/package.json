@@ -7,13 +7,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
-    "workspace-server": "tsx src/workspace-server-entry.ts",
+    "workspace-server": "tsx src/index.ts",
     "workspace-server:admin": "tsx src/workspace-server-admin-cli.ts",
     "workspace-server:cli": "tsx src/workspace-server-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@samurai-agent/action-catalog": "workspace:*",
+    "@samurai-agent/collections": "workspace:*",
     "@samurai-agent/audit": "workspace:*",
     "@samurai-agent/capability-registry": "workspace:*",
     "@samurai-agent/core-schemas": "workspace:*",

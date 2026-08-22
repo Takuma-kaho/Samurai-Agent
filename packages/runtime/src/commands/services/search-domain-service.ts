@@ -19,6 +19,7 @@ interface SearchResult {
   title: string;
   summary: string;
   session_id?: string;
+  operation_id?: string;
 }
 type MemoryWithFilePath = MemoryFrontmatter & { file_path: string };
 type WikiWithFilePath = WikiFrontmatter & { file_path: string; resource_version: number };
@@ -55,7 +56,7 @@ export interface SearchReadStore {
   listCollectionRecords(collectionId?: string, options?: { resourceIds?: string[]; includeLegacy?: boolean }): Promise<CollectionRecordWithFilePath[]>;
 }
 
-export interface SessionSearchResult { kind: "session" | "message" | "artifact" | "audit"; id: string; title: string; summary: string; session_id?: string }
+export interface SessionSearchResult { kind: "session" | "message" | "artifact" | "audit"; id: string; title: string; summary: string; session_id?: string; operation_id?: string }
 export interface MemorySearchResult { id: string; topic: string; state: "session" | "provisional" | "active" | "sensitive" | "topic"; file_path: string; pinned?: boolean; version?: string; updated_at?: string }
 export interface WikiSearchResult { id: string; slug: string; title: string; file_path: string; pinned?: boolean; version: number; updated_at?: string }
 export interface SkillSearchResult { id: string; title: string; description: string; tags: string[]; file_path: string; pinned?: boolean; version: number; updated_at?: string }
@@ -104,7 +105,7 @@ export class SearchDomainService {
     for (const item of candidates) {
       const sessionId = item.session_id ?? (item.kind === "session" ? item.id : undefined);
       if (!sessionId || !await this.sessionResultAllowed(access, sessionId)) continue;
-      allowed.push({ kind: item.kind, id: item.id, title: item.title, summary: item.summary, ...(item.session_id ? { session_id: item.session_id } : {}) });
+      allowed.push({ kind: item.kind, id: item.id, title: item.title, summary: item.summary, ...(item.session_id ? { session_id: item.session_id } : {}), ...(item.operation_id ? { operation_id: item.operation_id } : {}) });
       if (allowed.length >= limit) break;
     }
     return allowed;

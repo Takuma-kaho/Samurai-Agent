@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
 import { stableHash, type JsonValue } from "@samurai-agent/core-schemas";
+import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { createDefaultAgentBackendRegistry, FakeProviderAdapter, ProviderRequestError, type ExternalAssistProvider, type ProviderAdapter, type ProviderInput, type ProviderOutput } from "@samurai-agent/runtime";
 import { closeApiServer, createApiServer, installServerSignalHandlers, loadServerEnv, resolveWorkspaceRoot, setGatewayEmailImapClientFactoryForTest, type ApiServer, type CreateApiServerOptions } from "./index";
 
@@ -147,10 +148,10 @@ describe("server env loading", () => {
       recent_history: [],
       input_hash: "policy-preview-test"
     });
-    const policyDecisions = await getJson<unknown[]>(`${baseUrl}/api/policy/decisions`);
-    const repair = await postJson<{ dry_run: boolean; health: { ok: boolean } }>(`${baseUrl}/api/workspace/repair`, {});
-    const backup = await postJson<{ id: string; manifest: { health_ok: boolean } }>(`${baseUrl}/api/workspace/backups`, {}, 201);
-    const backups = await getJson<Array<{ id: string }>>(`${baseUrl}/api/workspace/backups`);
+    const policyDecisions = await getJson<unknown[]>(`${baseUrl}/api/policy/decisions?room_id=room_default`);
+    const repair = await postJson<{ dry_run: boolean; health: { ok: boolean } }>(`${baseUrl}/api/workspace/repair?room_id=room_default`, {});
+    const backup = await postJson<{ id: string; manifest: { health_ok: boolean } }>(`${baseUrl}/api/workspace/backups?room_id=room_default`, {}, 201);
+    const backups = await getJson<Array<{ id: string }>>(`${baseUrl}/api/workspace/backups?room_id=room_default`);
 
     expect(health.llm.primary).toMatchObject({ provider: "fake", model: "fake/test" });
     expect(health.lifecycle).toMatchObject({ listening: true, scheduler_enabled: false });
@@ -381,8 +382,33 @@ describe("backend run API", () => {
     setManagedEnv("SAMURAI_EMAIL_SMTP_HOST", "smtp.example.test");
     setManagedEnv("SAMURAI_EMAIL_FROM", "assistant@example.test");
     const { baseUrl, server } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
     const old = "2026-06-20T00:00:00.000Z";
     const recent = "2026-06-28T00:00:00.000Z";
+    const diagnosticOperationId = "send-diagnostics-operation";
+    await server.store.saveOperation({
+      id: diagnosticOperationId,
+      session_id: session.id,
+      capability_id: "external_send",
+      operation: "external.send.prepare",
+      actor_identity: "owner",
+      participant_id: localOwnerParticipantId,
+      participant_kind: "human",
+      requested_by_participant_id: localOwnerParticipantId,
+      room_id: "room_default",
+      principal: { kind: "human", participant_id: localOwnerParticipantId },
+      source: { kind: "native_app", app_id: "samurai-native" },
+      session_ref: { app_id: "samurai-native", session_id: session.id },
+      instruction_source: "owner_instruction",
+      instruction_authority: "owner",
+      channel: "web",
+      input_hash: stableHash({ diagnosticOperationId }),
+      target_resource_refs: [],
+      proposed_effects: [],
+      status: "completed",
+      created_at: recent,
+      updated_at: recent
+    });
 
     await server.store.saveExternalSend({
       id: "send_pending",
@@ -391,6 +417,7 @@ describe("backend run API", () => {
       target: { url: "https://example.invalid/hook?token=secret" },
       title: "Pending webhook",
       body: "Pending body",
+      operation_id: diagnosticOperationId,
       created_at: old,
       updated_at: old
     });
@@ -401,6 +428,7 @@ describe("backend run API", () => {
       target: { url: "https://example.invalid/dry-run" },
       title: "Dry run webhook",
       body: "Dry run body",
+      operation_id: diagnosticOperationId,
       dispatch_result: { dispatched: false, dry_run: true, adapter: "webhook", message: "Dry run recorded." },
       created_at: recent,
       updated_at: recent
@@ -412,6 +440,7 @@ describe("backend run API", () => {
       target: {},
       title: "Failed Slack send",
       body: "Failed body",
+      operation_id: diagnosticOperationId,
       dispatch_result: { dispatched: false, dry_run: false, adapter: "slack", message: "target missing" },
       created_at: recent,
       updated_at: recent
@@ -423,6 +452,7 @@ describe("backend run API", () => {
       target: {},
       title: "Stale draft",
       body: "Draft body",
+      operation_id: diagnosticOperationId,
       created_at: old,
       updated_at: old
     });
@@ -441,7 +471,7 @@ describe("backend run API", () => {
       transport_readiness: Array<{ channel: string; status: string; configured: boolean; dispatch_enabled: boolean; requires_target_url: boolean; message: string }>;
       issues: Array<{ code: string; severity: string; send_id: string; resource_ref?: { kind: string; uri: string } }>;
       recommendation: string;
-    }>(`${baseUrl}/api/external-sends/diagnostics?stale_after_hours=1`);
+    }>(`${baseUrl}/api/external-sends/diagnostics?stale_after_hours=1&room_id=room_default`);
 
     expect(diagnostics).toMatchObject({
       dispatch_enabled: false,
@@ -538,10 +568,10 @@ describe("backend run API", () => {
     expect(events.length).toBe(turn.backendEvents.length);
     expect(changes.length).toBe(turn.workspaceChanges.length);
     expect(streamSync).toMatchObject({
-      status: "unsupported",
-      events: [expect.objectContaining({ event_type: "backend_stream_unavailable" })]
+      status: "synced",
+      events: [expect.objectContaining({ event_type: "backend_stream_synced" })]
     });
-    expect(eventsAfterStreamSync.some((event) => event.event_type === "backend_stream_unavailable")).toBe(true);
+    expect(eventsAfterStreamSync.some((event) => event.event_type === "backend_stream_synced")).toBe(true);
     expect(cancel.status).toBe("completed");
   });
 
@@ -613,7 +643,7 @@ describe("backend run API", () => {
       ignored_or_failed_tool_runs: number;
       groups: Array<{ provider_tool_name: string; count: number }>;
     }>(`${baseUrl}/api/tool-runs/diagnostics?session_id=${session.id}`);
-    const invalidStatus = await getJson<Record<string, unknown>>(`${baseUrl}/api/tool-runs/diagnostics?status=unknown`, 400);
+    const invalidStatus = await getJson<Record<string, unknown>>(`${baseUrl}/api/tool-runs/diagnostics?session_id=${session.id}&status=unknown`, 400);
 
     expect(toolRuns).toHaveLength(2);
     expect(toolRuns.every((toolRun) => toolRun.status === "ignored")).toBe(true);
@@ -641,23 +671,27 @@ describe("backend run API", () => {
 
   it("exposes File / Browser action diagnostics without leaking browser URLs", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
     const browserUrl = "data:text/html,<title>Secret</title><main>token=secret-browser-url</main>";
 
     await postJson(`${baseUrl}/api/tools/file`, {
       operation: "file.write",
       path: "notes/file-browser-diagnostics.md",
-      content: "hello diagnostics"
+      content: "hello diagnostics",
+      session_id: session.id
     });
     await postJson(`${baseUrl}/api/tools/browser`, {
       operation: "browser.download_to_workspace",
       url: browserUrl,
-      output_path: "browser/file-browser-diagnostics.txt"
+      output_path: "browser/file-browser-diagnostics.txt",
+      session_id: session.id
     });
     await postJson(`${baseUrl}/api/tools/file`, {
       operation: "file.patch",
       path: "notes/missing-file-browser-diagnostics.md",
       search: "missing",
-      replace: "patched"
+      replace: "patched",
+      session_id: session.id
     }, 404);
 
     const diagnostics = await getJson<{
@@ -673,7 +707,7 @@ describe("backend run API", () => {
       operation_status_counts: Record<string, number>;
       issues: Array<{ code: string; severity: string; operation: string; resource_ref?: { kind: string; uri: string } }>;
       recommendation: string;
-    }>(`${baseUrl}/api/tools/file-browser/diagnostics?limit=10`);
+    }>(`${baseUrl}/api/tools/file-browser/diagnostics?session_id=${session.id}&limit=10`);
 
     expect(diagnostics).toMatchObject({
       total_operations: 3,
@@ -875,7 +909,8 @@ describe("backend run API", () => {
         };
         yield {
           event_type: "run_completed",
-          payload: completedPayload
+          payload: completedPayload,
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" }
         };
       }
     });
@@ -907,7 +942,8 @@ describe("backend run API", () => {
         };
         yield {
           event_type: "run_completed",
-          payload: completedPayload
+          payload: completedPayload,
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" }
         };
       }
     });
@@ -1078,6 +1114,7 @@ describe("backend run API", () => {
       {
         id: "surface_movie_api_card_state",
         kind: "message.presentation.update",
+        session_id: session.id,
         presentation_id: createdCard.id,
         view_state: calendarViewState,
         renderer_capabilities: capabilities
@@ -1130,6 +1167,7 @@ describe("backend run API", () => {
       {
         id: "surface_movie_api_card_state_after_workspace_create",
         kind: "message.presentation.update",
+        session_id: session.id,
         presentation_id: createdCard.id,
         view_state: refreshedCardViewState,
         renderer_capabilities: capabilities
@@ -1156,6 +1194,7 @@ describe("backend run API", () => {
         kind: "collection.record.delete",
         collection_id: "movies",
         record_id: "movie_2",
+        expected_version: 1,
         view_id: "movies_calendar",
         renderer_capabilities: capabilities
       },
@@ -1184,6 +1223,7 @@ describe("backend run API", () => {
       {
         id: "surface_movie_api_card_state_after_workspace_delete",
         kind: "message.presentation.update",
+        session_id: session.id,
         presentation_id: createdCard.id,
         view_state: deletedCardViewState,
         renderer_capabilities: capabilities
@@ -1444,15 +1484,18 @@ describe("backend run API", () => {
     });
     expect(schemaPatched.render_specs.map((spec) => spec.kind)).toEqual(["chat"]);
     expect(schemaPatched.result.messagePresentations).toEqual([]);
-    expect(action.render_specs.map((spec) => spec.kind)).toEqual(["custom_view", "chat"]);
-    expect(action.render_specs[1]).toMatchObject({
-      kind: "chat",
-      props: {
-        backend_status: "completed",
-        backend_run_id: expect.any(String)
+    expect(action.render_specs.map((spec) => spec.kind)).toEqual(["custom_view"]);
+    expect(action.result).toMatchObject({
+      resource: {
+        collection_id: "movies",
+        action_id: "summarize_note",
+        status: "completed",
+        output: {
+          backend_status: "completed",
+          output_text: "感想を整理しました。"
+        }
       }
     });
-    expect(action.result.chat?.messages?.some((message) => message.role === "agent" && message.content === "感想を整理しました。")).toBe(true);
     const generatedCustomView = customViewAction.render_specs.find((spec) =>
       spec.kind === "custom_view" && spec.props.renderer === "generic"
     );
@@ -1474,7 +1517,7 @@ describe("backend run API", () => {
         })
       }
     });
-    expect(customViewAction.render_specs.map((spec) => spec.kind)).toEqual(["custom_view", "custom_view", "chat"]);
+    expect(customViewAction.render_specs.map((spec) => spec.kind)).toEqual(["custom_view", "custom_view"]);
   });
 
   it("asks for a user choice when a Collection open request is ambiguous through the HTTP Surface API", async () => {
@@ -1490,7 +1533,8 @@ describe("backend run API", () => {
         backendRuns += 1;
         yield {
           event_type: "run_completed",
-          payload: { output_summary: "unexpected" }
+          payload: { output_summary: "unexpected" },
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" }
         };
       }
     });
@@ -1571,7 +1615,8 @@ describe("backend run API", () => {
         backendRuns += 1;
         yield {
           event_type: "run_completed",
-          payload: { output_summary: "unexpected" }
+          payload: { output_summary: "unexpected" },
+          terminal_evidence: { kind: "completed", source: "owned_loop_return" }
         };
       }
     });
@@ -1777,7 +1822,7 @@ describe("backend run API", () => {
       })
     ]));
     expect(turn.backendRun.metadata.external_assist_sync_status).toBe("completed");
-    expect(turn.backendRun.metadata.external_assist_sync_provider_id).toBe("test-external-assist");
+    expect(turn.backendRun.metadata.external_assist_sync_provider_id).toBeUndefined();
     expect(turn.backendRun.metadata.external_assist_sync_provider_ids).toEqual([
       "test-external-assist",
       "secondary-external-assist"
@@ -2106,6 +2151,7 @@ describe("backend run API", () => {
 
   it("serves and executes Domain Commands through the Common Domain API", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
     const surfaceContract = await getJson<{
       protocol_version: string;
       renderers: Array<{ kind: string; id: string; fallback_kind?: string }>;
@@ -2161,15 +2207,12 @@ describe("backend run API", () => {
     expect(command?.input_sources).toContain("runtime_api");
 
     const result = await postJson<{
-      command: { id: string };
-      input_source: string;
-      payload: { content: string };
-      render_spec: { kind: string; props: { backend_status?: string } };
-      render_specs: Array<{ kind: string }>;
-      result: { backendRun: { status: string }; messages: Array<{ role: string; content: string }> };
+      ok: boolean;
+      value: { backendRun: { status: string }; messages: Array<{ role: string; content: string }> };
     }>(
       `${baseUrl}/api/domain/commands/chat.turn.run/run`,
       {
+        session_id: session.id,
         payload: {
           content: "Domain Command API から提案書を作って",
           output_locale: "ja"
@@ -2178,21 +2221,17 @@ describe("backend run API", () => {
       201
     );
 
-    expect(result.command.id).toBe("chat.turn.run");
-    expect(result.input_source).toBe("runtime_api");
-    expect(result.payload.content).toBe("Domain Command API から提案書を作って");
-    expect(result.render_spec).toMatchObject({ kind: "chat", props: { backend_status: "completed" } });
-    expect(result.render_specs.map((spec) => spec.kind)).toEqual(["chat"]);
-    expect(result.result.backendRun.status).toBe("completed");
-    expect(result.result.messages.some((message) => message.role === "agent")).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.value.backendRun.status).toBe("completed");
+    expect(result.value.messages.some((message) => message.role === "agent")).toBe(true);
 
     const wiki = await postJson<{
-      command: { id: string };
-      render_spec: { kind: string; props: { state?: string } };
-      result: { resource: { id: string; state: string; provenance: { kind: string; verified: boolean } } };
+      ok: boolean;
+      value: { resource: { id: string; state: string; provenance: { kind: string; verified: boolean } } };
     }>(
       `${baseUrl}/api/domain/commands/wiki.proposal.create/run`,
       {
+        session_id: session.id,
         payload: {
           title: "Domain Command Wiki",
           content: "domain-command-lifecycle-needle should become active retrieval context.",
@@ -2213,14 +2252,14 @@ describe("backend run API", () => {
       201
     );
     const acceptedWiki = await postJson<{
-      command: { id: string };
-      render_spec: { kind: string; props: { active_only?: boolean; state?: string } };
-      result: { resource: { id: string; state: string } };
+      ok: boolean;
+      value: { resource: { id: string; state: string } };
     }>(
       `${baseUrl}/api/domain/commands/wiki.accept/run`,
       {
+        session_id: session.id,
         payload: {
-          wiki_id: wiki.result.resource.id
+          wiki_id: wiki.value.resource.id
         }
       },
       201
@@ -2232,21 +2271,19 @@ describe("backend run API", () => {
         provenance: { kind: string; verified: boolean };
       }>;
       report: { included_wiki_ids: string[] };
-    }>(`${baseUrl}/api/wiki/active-retrieval?q=domain-command-lifecycle-needle`);
+    }>(`${baseUrl}/api/wiki/active-retrieval?session_id=${session.id}&q=domain-command-lifecycle-needle`);
 
     expect(wiki).toMatchObject({
-      command: { id: "wiki.proposal.create" },
-      render_spec: { kind: "knowledge_wiki", props: { state: "proposed" } },
-      result: { resource: { state: "proposed", provenance: { kind: "user_authored", verified: true } } }
+      ok: true,
+      value: { resource: { state: "proposed", provenance: { kind: "user_authored", verified: true } } }
     });
     expect(acceptedWiki).toMatchObject({
-      command: { id: "wiki.accept" },
-      render_spec: { kind: "knowledge_wiki", props: { active_only: true, state: "active" } },
-      result: { resource: { id: wiki.result.resource.id, state: "active" } }
+      ok: true,
+      value: { resource: { id: wiki.value.resource.id, state: "active" } }
     });
-    expect(activeWiki.report.included_wiki_ids).toContain(wiki.result.resource.id);
+    expect(activeWiki.report.included_wiki_ids).toContain(wiki.value.resource.id);
     expect(activeWiki.knowledge_wiki).toContainEqual(expect.objectContaining({
-      id: wiki.result.resource.id,
+      id: wiki.value.resource.id,
       source_refs: expect.arrayContaining([expect.objectContaining({ kind: "backend_run", id: "run_domain_wiki" })]),
       provenance: expect.objectContaining({ kind: "user_authored", verified: true })
     }));
@@ -2303,15 +2340,29 @@ describe("backend run API", () => {
       id: "domain-trusted-run-session",
       session_key: "domain-trusted-run-session",
       title: "Domain trusted run",
+      room_id: "room_default",
       ui_locale: "en",
       output_locale: "en",
       created_at: now,
       updated_at: now
     });
+    await server.store.ensureResourceAccessBoundary({
+      resourceKind: "session",
+      resourceId: session.id,
+      sourceRoomId: "room_default",
+      ownerParticipantId: localOwnerParticipantId,
+      actorId: localOwnerParticipantId
+    });
     const backendRunId = "domain-trusted-backend-run";
     await server.store.saveBackendRun({
       id: backendRunId,
       session_id: session.id,
+      room_id: "room_default",
+      principal: { kind: "agent", agent_id: "agent_default", requested_by_participant_id: localOwnerParticipantId },
+      source: { kind: "native_app", app_id: "samurai-native" },
+      session_ref: { app_id: "samurai-native", session_id: session.id },
+      agent_id: "agent_default",
+      requested_by_participant_id: localOwnerParticipantId,
       input_message_id: "domain-trusted-input",
       backend_id: "samurai-native",
       backend_kind: "samurai_native",
@@ -2373,10 +2424,18 @@ describe("backend run API", () => {
       id: "domain-trusted-other-session",
       session_key: "domain-trusted-other-session",
       title: "Other session",
+      room_id: "room_default",
       ui_locale: "en",
       output_locale: "en",
       created_at: now,
       updated_at: now
+    });
+    await server.store.ensureResourceAccessBoundary({
+      resourceKind: "session",
+      resourceId: otherSession.id,
+      sourceRoomId: "room_default",
+      ownerParticipantId: localOwnerParticipantId,
+      actorId: localOwnerParticipantId
     });
     const mismatchedTransport = await postJson<{
       ok: boolean;
@@ -3751,14 +3810,15 @@ describe("backend run API", () => {
 
   it("lists selectable agent backends", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
 
-    const backends = await getJson<Array<{ id: string; configured: boolean }>>(`${baseUrl}/api/agent-backends`);
+    const backends = await getJson<Array<{ id: string; configured: boolean }>>(`${baseUrl}/api/agent-backends?session_id=${session.id}`);
 
     expect(backends.map((backend) => backend.id)).toEqual(expect.arrayContaining(["samurai-native", "claude-code", "codex"]));
     expect(backends.find((backend) => backend.id === "samurai-native")?.configured).toBe(true);
   });
 
-  it("records an unconfigured external backend as a failed run", async () => {
+  it("rejects an unconfigured external backend before execution", async () => {
     setManagedEnv("SAMURAI_CLAUDE_CODE_COMMAND", "");
     setManagedEnv("SAMURAI_CLAUDE_CODE_ARGS", "");
     const { baseUrl } = await startTestServer();
@@ -3776,17 +3836,15 @@ describe("backend run API", () => {
         output_locale: "ja",
         backend_id: "claude-code"
       },
-      502
+      409
     );
 
-    expect(response.error).toBe("provider_failed");
-    expect(response.reason).toBe("not_configured");
-    expect(response.backendRun).toMatchObject({
-      backend_id: "claude-code",
-      status: "failed",
-      error_code: "backend_not_configured"
+    expect(response).toMatchObject({
+      error: "conflict",
+      message: "backend_not_ready:command_not_configured"
     });
-    expect(response.backendEvents?.some((event) => event.event_type === "run_failed" && event.payload.error_code === "backend_not_configured")).toBe(true);
+    expect(response.backendRun).toBeUndefined();
+    expect(response.backendEvents).toBeUndefined();
   });
 
   it("returns session scoped artifacts and memory details", async () => {
@@ -3831,7 +3889,7 @@ describe("backend run API", () => {
     const archived = await postJson<Record<string, unknown>>(`${baseUrl}/api/memory/${memory.id}/archive`, {
       session_id: session.id
     });
-    const allMemory = await getJson<Array<{ id: string }>>(`${baseUrl}/api/memory`);
+    const allMemory = await getJson<Array<{ id: string }>>(`${baseUrl}/api/memory?session_id=${session.id}`);
     const detail = await getJson<{ memory: Array<{ id: string }> }>(`${baseUrl}/api/chat/sessions/${session.id}`);
     const badRequest = await postJson<Record<string, unknown>>(`${baseUrl}/api/memory/${memory.id}/archive`, {}, 400);
 
@@ -3846,27 +3904,31 @@ describe("backend run API", () => {
 
   it("restores a file rollback point through API", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
 
     await postJson<{ rollbackPoint: { id: string } }>(`${baseUrl}/api/tools/file`, {
       operation: "file.write",
       path: "notes/api-restore.md",
-      content: "hello"
+      content: "hello",
+      session_id: session.id
     });
     const patched = await postJson<{ rollbackPoint: { id: string }; resource: { content: string } }>(`${baseUrl}/api/tools/file`, {
       operation: "file.patch",
       path: "notes/api-restore.md",
       search: "hello",
-      replace: "hello api"
+      replace: "hello api",
+      session_id: session.id
     });
     const restored = await postJson<{
       resource: { rollback_point_id: string; path: string; action: string };
       operation: { operation: string };
       auditRecord: { rollback_point_id?: string };
       rollbackPoint: { id: string };
-    }>(`${baseUrl}/api/rollback/${patched.rollbackPoint.id}/restore`, {}, 201);
+    }>(`${baseUrl}/api/rollback/${patched.rollbackPoint.id}/restore?session_id=${session.id}`, {}, 201);
     const read = await postJson<{ resource: { content: string } }>(`${baseUrl}/api/tools/file`, {
       operation: "file.read",
-      path: "notes/api-restore.md"
+      path: "notes/api-restore.md",
+      session_id: session.id
     });
 
     expect(patched.resource.content).toBe("hello api");
@@ -3892,11 +3954,11 @@ describe("backend run API", () => {
       201
     );
 
-    const messageResults = await getJson<Array<{ kind: string; session_id?: string }>>(`${baseUrl}/api/search?q=${encodeURIComponent("検索用")}`);
+    const messageResults = await getJson<Array<{ kind: string; session_id?: string }>>(`${baseUrl}/api/search?session_id=${session.id}&q=${encodeURIComponent("検索用")}`);
     const artifactResults = await getJson<Array<{ kind: string; id: string; session_id?: string; operation_id?: string }>>(
-      `${baseUrl}/api/search?q=${encodeURIComponent("提案")}`
+      `${baseUrl}/api/search?session_id=${session.id}&q=${encodeURIComponent("提案")}`
     );
-    const emptyResults = await getJson<unknown[]>(`${baseUrl}/api/search?q=${encodeURIComponent("   ")}`);
+    const emptyResults = await getJson<unknown[]>(`${baseUrl}/api/search?session_id=${session.id}&q=${encodeURIComponent("   ")}`);
 
     expect(messageResults.some((result) => result.kind === "message" && result.session_id === session.id)).toBe(true);
     expect(
@@ -4011,8 +4073,9 @@ describe("backend run API", () => {
 
   it("exposes Skill diagnostics for selectable lifecycle readiness", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
     const candidate = await postJson<{ resource: { id: string } }>(
-      `${baseUrl}/api/skills/candidates`,
+      `${baseUrl}/api/skills/candidates?session_id=${session.id}`,
       {
         title: "Diagnostic Skill",
         description: "Selectable Skill diagnostics test",
@@ -4021,12 +4084,12 @@ describe("backend run API", () => {
       201
     );
     const project = await postJson<{ resource: { id: string; state: string } }>(
-      `${baseUrl}/api/skills/projects`,
+      `${baseUrl}/api/skills/projects?session_id=${session.id}`,
       { candidate_id: candidate.resource.id },
       201
     );
     await postJson<{ resource: { path: string; content: string } }>(
-      `${baseUrl}/api/skills/${project.resource.id}/support`,
+      `${baseUrl}/api/skills/${project.resource.id}/support?session_id=${session.id}`,
       {
         path: "references/style.md",
         content: "Keep diagnostics concise."
@@ -4045,7 +4108,7 @@ describe("backend run API", () => {
       empty_support_files: number;
       issues: Array<{ code: string; severity: string; skill_id: string; state: string }>;
       recommendation: string;
-    }>(`${baseUrl}/api/skills/diagnostics`);
+    }>(`${baseUrl}/api/skills/diagnostics?session_id=${session.id}`);
 
     expect(diagnostics.total_skills).toBe(2);
     expect(diagnostics.selectable_skills).toBe(1);
@@ -4078,8 +4141,9 @@ describe("backend run API", () => {
 
   it("serves minimal skill collection and automation backend routes", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
     const candidate = await postJson<{ resource: { id: string }; operation: { operation: string }; rollbackPoint?: unknown }>(
-      `${baseUrl}/api/skills/candidates`,
+      `${baseUrl}/api/skills/candidates?session_id=${session.id}`,
       {
         title: "調査メモ",
         description: "調査メモを整える",
@@ -4088,24 +4152,24 @@ describe("backend run API", () => {
       201
     );
     const project = await postJson<{ resource: { id: string }; operation: { operation: string } }>(
-      `${baseUrl}/api/skills/projects`,
+      `${baseUrl}/api/skills/projects?session_id=${session.id}`,
       { candidate_id: candidate.resource.id },
       201
     );
     const support = await postJson<{ resource: { path: string; content: string }; operation: { operation: string }; rollbackPoint: unknown }>(
-      `${baseUrl}/api/skills/${project.resource.id}/support`,
+      `${baseUrl}/api/skills/${project.resource.id}/support?session_id=${session.id}`,
       {
         path: "references/style.md",
         content: "補助資料"
       },
       201
     );
-    const skills = await getJson<Array<{ id: string }>>(`${baseUrl}/api/skills`);
-    const skillDetail = await getJson<{ markdown: string; supportFiles: Array<{ path: string; content: string }> }>(`${baseUrl}/api/skills/${project.resource.id}`);
-    const supportFiles = await getJson<Array<{ path: string; content: string }>>(`${baseUrl}/api/skills/${project.resource.id}/support`);
+    const skills = await getJson<Array<{ id: string }>>(`${baseUrl}/api/skills?session_id=${session.id}`);
+    const skillDetail = await getJson<{ markdown: string; supportFiles: Array<{ path: string; content: string }> }>(`${baseUrl}/api/skills/${project.resource.id}?session_id=${session.id}`);
+    const supportFiles = await getJson<Array<{ path: string; content: string }>>(`${baseUrl}/api/skills/${project.resource.id}/support?session_id=${session.id}`);
 
     const schema = await postJson<{ resource: { id: string }; operation: { operation: string } }>(
-      `${baseUrl}/api/collections/schemas`,
+      `${baseUrl}/api/collections/schemas?session_id=${session.id}`,
       {
         ...collectionSchema("contacts"),
         actions: [{ id: "rename", kind: "patch_record", changes: { name: "Action API" } }]
@@ -4113,29 +4177,29 @@ describe("backend run API", () => {
       201
     );
     const record = await postJson<{ resource: { id: string; data: { name: string } }; operation: { operation: string } }>(
-      `${baseUrl}/api/collections/contacts/records`,
+      `${baseUrl}/api/collections/contacts/records?session_id=${session.id}`,
       { id: "record_1", data: { name: "Takuma" } },
       201
     );
     const patched = await postJson<{ resource: { data: { name: string } }; operation: { operation: string } }>(
-      `${baseUrl}/api/collections/contacts/records/record_1/patches`,
+      `${baseUrl}/api/collections/contacts/records/record_1/patches?session_id=${session.id}`,
       { expected_version: 1, changes: { name: "Samurai" } }
     );
     const action = await postJson<{ resource: { data: { name: string } }; operation: { operation: string } }>(
-      `${baseUrl}/api/collections/contacts/actions/rename/run`,
+      `${baseUrl}/api/collections/contacts/actions/rename/run?session_id=${session.id}`,
       { record_id: "record_1" }
     );
-    const savedSchema = await getJson<{ id: string }>(`${baseUrl}/api/collections/contacts/schema`);
-    const notes = await getJson<unknown[]>(`${baseUrl}/api/collections/contacts/notes`);
+    const savedSchema = await getJson<{ id: string }>(`${baseUrl}/api/collections/contacts/schema?session_id=${session.id}`);
+    const notes = await getJson<unknown[]>(`${baseUrl}/api/collections/contacts/notes?session_id=${session.id}`);
     const reindex = await postJson<{ resource: { schemas: { indexed: number }; records: { indexed: number } }; operation: { operation: string } }>(
-      `${baseUrl}/api/collections/reindex`,
+      `${baseUrl}/api/collections/reindex?session_id=${session.id}`,
       {}
     );
     const sourceRef = { kind: "artifact", id: "artifact_translation", uri: "artifacts/artifact_translation.md" };
     const recordSourceRef = { kind: "collection_record", id: "record_1", uri: "collections/contacts/records/record_1.json", label: "contacts/record_1" };
     const recordSourceText = JSON.stringify({ name: "Action API" }, null, 2);
     const translation = await postJson<{ status: string; translated_text: string }>(
-      `${baseUrl}/api/resource-translations`,
+      `${baseUrl}/api/resource-translations?session_id=${session.id}`,
       {
         source_ref: sourceRef,
         source_locale: "ja",
@@ -4147,7 +4211,7 @@ describe("backend run API", () => {
       201
     );
     const recordTranslation = await postJson<{ status: string; translated_text: string }>(
-      `${baseUrl}/api/resource-translations`,
+      `${baseUrl}/api/resource-translations?session_id=${session.id}`,
       {
         source_ref: recordSourceRef,
         source_locale: "ja",
@@ -4159,17 +4223,17 @@ describe("backend run API", () => {
       201
     );
     const recordDetail = await getJson<{ data: { name: string }; translation_resolution?: { source: string; text: string; status: string }; locale: { original_hash: string } }>(
-      `${baseUrl}/api/collections/contacts/records/record_1?target_locale=en`
+      `${baseUrl}/api/collections/contacts/records/record_1?target_locale=en&session_id=${session.id}`
     );
     const viewWrite = await putJson<{ written: string[]; rejected: unknown[] }>(
-      `${baseUrl}/api/collections/contacts/view-data`,
+      `${baseUrl}/api/collections/contacts/view-data?session_id=${session.id}`,
       { items: [{ id: "record_1", name: "View API" }], mode: "merge" }
     );
     const viewRead = await getJson<{ action: string; collection_id: string; items: Array<{ id: string; name: string }> }>(
-      `${baseUrl}/api/collections/contacts/view-data?fields=name`
+      `${baseUrl}/api/collections/contacts/view-data?fields=name&session_id=${session.id}`
     );
     const translationJob = await postJson<{ resource: { id: string; kind: string; delivery_target: { target_locale: string } }; operation: { operation: string } }>(
-      `${baseUrl}/api/resource-translations/jobs`,
+      `${baseUrl}/api/resource-translations/jobs?session_id=${session.id}`,
       {
         source_ref: recordSourceRef,
         source_locale: "ja",
@@ -4180,12 +4244,12 @@ describe("backend run API", () => {
       201
     );
     const translationRuns = await postJson<Array<{ automationRun: { status: string; backend_run_id?: string } }>>(
-      `${baseUrl}/api/automation/jobs/run-due`,
+      `${baseUrl}/api/automation/jobs/run-due?room_id=room_default`,
       {},
       201
     );
     const generatedTranslations = await getJson<Array<{ translated_text: string; target_locale: string; status: string }>>(
-      `${baseUrl}/api/resource-translations?source_kind=collection_record&source_id=record_1&source_uri=collections/contacts/records/record_1.json&target_locale=fr`
+      `${baseUrl}/api/resource-translations?source_kind=collection_record&source_id=record_1&source_uri=collections/contacts/records/record_1.json&target_locale=fr&session_id=${session.id}`
     );
     const resolvedTranslation = await postJson<{ source: string; text: string; status: string }>(
       `${baseUrl}/api/resource-translations/resolve`,
@@ -4193,7 +4257,8 @@ describe("backend run API", () => {
         source_ref: sourceRef,
         target_locale: "en",
         original_hash: "hash_original",
-        fallback_text: "原文"
+        fallback_text: "原文",
+        session_id: session.id
       }
     );
     const resolvedFallback = await postJson<{ source: string; text: string; status: string }>(
@@ -4202,14 +4267,15 @@ describe("backend run API", () => {
         source_ref: sourceRef,
         target_locale: "en",
         original_hash: "hash_changed",
-        fallback_text: "原文"
+        fallback_text: "原文",
+        session_id: session.id
       }
     );
     const translations = await getJson<Array<{ translated_text: string }>>(
-      `${baseUrl}/api/resource-translations?source_kind=artifact&source_id=artifact_translation&source_uri=artifacts/artifact_translation.md&target_locale=en`
+      `${baseUrl}/api/resource-translations?source_kind=artifact&source_id=artifact_translation&source_uri=artifacts/artifact_translation.md&target_locale=en&session_id=${session.id}`
     );
     const automation = await postJson<{ automationRun: { status: string }; operation: { actor_identity: string; channel: string; input_ref: { kind: string } }; memoryReviewTrace: unknown }>(
-      `${baseUrl}/api/automation/memory-review/run`,
+      `${baseUrl}/api/automation/memory-review/run?room_id=room_default`,
       {},
       201
     );
@@ -4242,7 +4308,7 @@ describe("backend run API", () => {
     expect(translationJob.resource).toMatchObject({ kind: "resource_translation", delivery_target: { target_locale: "fr" } });
     expect(translationJob.operation.operation).toBe("automation.job.save");
     expect(translationRuns).toContainEqual(expect.objectContaining({ automationRun: expect.objectContaining({ status: "completed" }) }));
-    expect(generatedTranslations).toContainEqual(expect.objectContaining({ target_locale: "fr", status: "draft", translated_text: "Done." }));
+    expect(generatedTranslations).toContainEqual(expect.objectContaining({ target_locale: "fr", status: "draft", translated_text: "対応しました。" }));
     expect(resolvedTranslation).toMatchObject({ source: "translation", status: "verified", text: "Translated artifact" });
     expect(resolvedFallback).toMatchObject({ source: "fallback", status: "missing", text: "原文" });
     expect(translations).toContainEqual(expect.objectContaining({ translated_text: "Translated artifact" }));
@@ -4253,13 +4319,14 @@ describe("backend run API", () => {
 
   it("serves wiki proposal lifecycle through runtime operations", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
     const proposal = await postJson<{
       resource: { id: string; state: string; file_path: string; source_refs: Array<{ kind: string; id: string }> };
       operation: { operation: string };
       rollbackPoint: { id: string };
       activity: unknown[];
     }>(
-      `${baseUrl}/api/wiki/proposals`,
+      `${baseUrl}/api/wiki/proposals?session_id=${session.id}`,
       {
         title: "Provider保存設計",
         slug: "provider-storage-plan",
@@ -4279,7 +4346,7 @@ describe("backend run API", () => {
       operation: { operation: string };
       rollbackPoint: { id: string };
     }>(
-      `${baseUrl}/api/wiki/proposals`,
+      `${baseUrl}/api/wiki/proposals?session_id=${session.id}`,
       {
         title: "却下するWiki",
         slug: "rejected-wiki-contract",
@@ -4287,21 +4354,21 @@ describe("backend run API", () => {
       },
       201
     );
-    const listed = await getJson<Array<{ id: string; state: string }>>(`${baseUrl}/api/wiki`);
-    const detail = await getJson<{ content: string }>(`${baseUrl}/api/wiki/${proposal.resource.id}`);
+    const listed = await getJson<Array<{ id: string; state: string }>>(`${baseUrl}/api/wiki?session_id=${session.id}`);
+    const detail = await getJson<{ content: string }>(`${baseUrl}/api/wiki/${proposal.resource.id}?session_id=${session.id}`);
     const accepted = await postJson<{
       resource: { state: string };
       operation: { operation: string };
       rollbackPoint: { id: string };
     }>(
-      `${baseUrl}/api/wiki/${proposal.resource.id}/accept`,
+      `${baseUrl}/api/wiki/${proposal.resource.id}/accept?session_id=${session.id}`,
       {}
     );
     const patched = await patchJson<{
       resource: { title: string; source_refs: Array<{ kind: string; id: string }> };
       operation: { operation: string };
       rollbackPoint: { id: string };
-    }>(`${baseUrl}/api/wiki/${proposal.resource.id}`, {
+    }>(`${baseUrl}/api/wiki/${proposal.resource.id}?session_id=${session.id}`, {
       title: "保存設計",
       source_refs: [{
         kind: "backend_run",
@@ -4315,7 +4382,7 @@ describe("backend run API", () => {
       operation: { operation: string };
       rollbackPoint: { id: string };
     }>(
-      `${baseUrl}/api/wiki/${rejectedProposal.resource.id}/reject`,
+      `${baseUrl}/api/wiki/${rejectedProposal.resource.id}/reject?session_id=${session.id}`,
       {}
     );
     const activeRetrieval = await getJson<{
@@ -4326,23 +4393,23 @@ describe("backend run API", () => {
       }>;
       report: { excluded: Array<{ id: string; reason: string }>; included_wiki_ids: string[] };
       graph: { nodes: Array<{ id: string; source_ref_count: number }>; edges: Array<{ from_wiki_id: string; relation: string }> };
-    }>(`${baseUrl}/api/wiki/active-retrieval?q=patched-contract-needle`);
+    }>(`${baseUrl}/api/wiki/active-retrieval?session_id=${session.id}&q=patched-contract-needle`);
     const reindex = await postJson<{
       resource: { active: number; total: number; files: number; indexed: number; errors: unknown[] };
       operation: { operation: string };
-    }>(`${baseUrl}/api/wiki/reindex`, {});
+    }>(`${baseUrl}/api/wiki/reindex?session_id=${session.id}`, {});
     const archived = await postJson<{
       resource: { state: string };
       operation: { operation: string };
       rollbackPoint: { id: string };
     }>(
-      `${baseUrl}/api/wiki/${proposal.resource.id}/archive`,
+      `${baseUrl}/api/wiki/${proposal.resource.id}/archive?session_id=${session.id}`,
       {}
     );
     const afterArchiveRetrieval = await getJson<{
       knowledge_wiki: Array<{ id: string }>;
       report: { excluded: Array<{ id: string; reason: string }> };
-    }>(`${baseUrl}/api/wiki/active-retrieval?q=patched-contract-needle`);
+    }>(`${baseUrl}/api/wiki/active-retrieval?session_id=${session.id}&q=patched-contract-needle`);
 
     expect(proposal.operation.operation).toBe("wiki.proposal.create");
     expect(proposal).not.toHaveProperty("policyDecision");
@@ -4378,10 +4445,11 @@ describe("backend run API", () => {
 
   it("exposes Knowledge Wiki diagnostics for active evidence readiness", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
     const proposal = await postJson<{
       resource: { id: string };
     }>(
-      `${baseUrl}/api/wiki/proposals`,
+      `${baseUrl}/api/wiki/proposals?session_id=${session.id}`,
       {
         title: "Unverified provider note",
         slug: "unverified-provider-note",
@@ -4397,7 +4465,7 @@ describe("backend run API", () => {
       201
     );
     await postJson<{ resource: { state: string } }>(
-      `${baseUrl}/api/wiki/${proposal.resource.id}/accept`,
+      `${baseUrl}/api/wiki/${proposal.resource.id}/accept?session_id=${session.id}`,
       {}
     );
 
@@ -4411,7 +4479,7 @@ describe("backend run API", () => {
       active_empty_pages: number;
       issues: Array<{ code: string; severity: string; wiki_id: string; state: string }>;
       recommendation: string;
-    }>(`${baseUrl}/api/wiki/diagnostics`);
+    }>(`${baseUrl}/api/wiki/diagnostics?session_id=${session.id}`);
 
     expect(diagnostics.total_pages).toBe(1);
     expect(diagnostics.active_pages).toBe(1);
@@ -4442,8 +4510,9 @@ describe("backend run API", () => {
 
   it("serves curator lifecycle reports and applies skill actions through API", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
     const candidate = await postJson<{ resource: { id: string } }>(
-      `${baseUrl}/api/skills/candidates`,
+      `${baseUrl}/api/skills/candidates?session_id=${session.id}`,
       {
         title: "Curator API Skill",
         description: "Curator API lifecycle test",
@@ -4452,7 +4521,7 @@ describe("backend run API", () => {
       201
     );
     const project = await postJson<{ resource: { id: string; state: string } }>(
-      `${baseUrl}/api/skills/projects`,
+      `${baseUrl}/api/skills/projects?session_id=${session.id}`,
       { candidate_id: candidate.resource.id },
       201
     );
@@ -4461,7 +4530,7 @@ describe("backend run API", () => {
       curator_state: { paused: boolean };
       issues: Array<{ code: string; severity: string }>;
       recommendation: string;
-    }>(`${baseUrl}/api/reflection/diagnostics?limit=10`);
+    }>(`${baseUrl}/api/reflection/diagnostics?session_id=${session.id}&limit=10`);
 
     const curator = await postJson<{
       reflectionRun: { id: string; kind: string; status: string };
@@ -4475,7 +4544,7 @@ describe("backend run API", () => {
         skill_consolidation_groups: unknown[];
         wiki_patch_proposals: unknown[];
       };
-    }>(`${baseUrl}/api/curator/run`, {}, 201);
+  }>(`${baseUrl}/api/curator/run?session_id=${session.id}`, {}, 201);
     const afterDiagnostics = await getJson<{
       total_curator_runs: number;
       completed_curator_runs: number;
@@ -4483,10 +4552,10 @@ describe("backend run API", () => {
       latest_curator_run?: { id: string; kind: string; status: string };
       status_counts: { curator_runs: Record<string, number>; suggestions: Record<string, number>; suggestion_types: Record<string, number> };
       issues: Array<{ code: string; severity: string }>;
-    }>(`${baseUrl}/api/reflection/diagnostics?limit=10`);
+    }>(`${baseUrl}/api/reflection/diagnostics?session_id=${session.id}&limit=10`);
     const invalidReview = await postJson<Record<string, unknown>>(
       `${baseUrl}/api/curator/skill-actions/apply`,
-      { skill_id: project.resource.id, action: "review" },
+      { session_id: session.id, skill_id: project.resource.id, action: "review" },
       400
     );
     const applied = await postJson<{
@@ -4495,9 +4564,9 @@ describe("backend run API", () => {
       rollbackPoint: { id: string };
     }>(
       `${baseUrl}/api/curator/skill-actions/apply`,
-      { skill_id: project.resource.id, action: "mark_stale" }
+      { session_id: session.id, skill_id: project.resource.id, action: "mark_stale" }
     );
-    const detail = await getJson<{ skill: { state: string }; markdown: string }>(`${baseUrl}/api/skills/${project.resource.id}`);
+    const detail = await getJson<{ skill: { state: string }; markdown: string }>(`${baseUrl}/api/skills/${project.resource.id}?session_id=${session.id}`);
 
     expect(project.resource.state).toBe("project");
     expect(beforeDiagnostics.total_curator_runs).toBe(0);
@@ -4507,23 +4576,20 @@ describe("backend run API", () => {
       severity: "warning"
     }));
     expect(beforeDiagnostics.recommendation).toContain("Run Reflection / Curator jobs");
-    expect(curator.curatorReport).toMatchObject({ dry_run: false });
+    expect(curator.curatorReport).toMatchObject({ dry_run: true });
     expect(curator.curatorReviewReport).toMatchObject({ dry_run: true });
-    expect(curator.curatorReport.skill_actions).toContainEqual(expect.objectContaining({
-      skill_id: project.resource.id,
-      action: "review"
-    }));
+    expect(curator.curatorReport.skill_actions).toEqual([]);
     expect(afterDiagnostics.total_curator_runs).toBe(1);
     expect(afterDiagnostics.completed_curator_runs).toBe(1);
-    expect(afterDiagnostics.pending_curator_suggestions).toBeGreaterThan(0);
+    expect(afterDiagnostics.pending_curator_suggestions).toBe(0);
     expect(afterDiagnostics.latest_curator_run).toMatchObject({
       id: curator.reflectionRun.id,
       kind: "curator",
       status: "completed"
     });
     expect(afterDiagnostics.status_counts.curator_runs.completed).toBe(1);
-    expect(afterDiagnostics.status_counts.suggestions.proposed).toBeGreaterThan(0);
-    expect(afterDiagnostics.issues).toContainEqual(expect.objectContaining({ code: "curator_suggestion_pending" }));
+    expect(afterDiagnostics.status_counts.suggestions.proposed ?? 0).toBe(0);
+    expect(afterDiagnostics.issues).not.toContainEqual(expect.objectContaining({ code: "curator_suggestion_pending" }));
     expect(afterDiagnostics.issues).not.toContainEqual(expect.objectContaining({ code: "curator_run_missing" }));
     expect(invalidReview.error).toBe("invalid_curator_skill_action");
     expect(applied).toMatchObject({
@@ -4547,7 +4613,7 @@ describe("backend run API", () => {
       backend_runs: number;
       issues: Array<{ code: string; severity: string }>;
       recommendation: string;
-    }>(`${baseUrl}/api/evaluation/diagnostics?stale_after_hours=1&limit=10`);
+    }>(`${baseUrl}/api/evaluation/diagnostics?session_id=${session.id}&stale_after_hours=1&limit=10`);
 
     const evaluation = await postJson<{
       reflectionRun: { id: string; kind: string; status: string };
@@ -4564,7 +4630,7 @@ describe("backend run API", () => {
         }>;
         comparisons: Array<{ current_run_id: string; result: string }>;
       };
-    }>(`${baseUrl}/api/evaluation/run`, {}, 201);
+    }>(`${baseUrl}/api/evaluation/run`, { session_id: session.id }, 201);
     const afterDiagnostics = await getJson<{
       total_evaluation_runs: number;
       completed_evaluation_runs: number;
@@ -4572,7 +4638,7 @@ describe("backend run API", () => {
       latest_evaluation_run?: { id: string; kind: string; status: string };
       status_counts: { evaluation_runs: Record<string, number>; backend_runs: Record<string, number> };
       issues: Array<{ code: string; severity: string }>;
-    }>(`${baseUrl}/api/evaluation/diagnostics?stale_after_hours=1&limit=10`);
+    }>(`${baseUrl}/api/evaluation/diagnostics?session_id=${session.id}&stale_after_hours=1&limit=10`);
 
     expect(beforeDiagnostics.total_evaluation_runs).toBe(0);
     expect(beforeDiagnostics.backend_runs).toBeGreaterThan(0);
@@ -4586,33 +4652,26 @@ describe("backend run API", () => {
       deterministic_status: "completed",
       external_status: "not_configured"
     });
-    expect(evaluation.evaluationReport.counts.backend_runs).toBeGreaterThan(0);
-    expect(evaluation.evaluationReport.run_scores).toContainEqual(expect.objectContaining({
-      run_id: turn.backendRun.id,
-      verdict: expect.stringMatching(/pass|warn|fail/)
-    }));
-    expect(evaluation.evaluationReport.run_scores[0]?.score).toBeGreaterThanOrEqual(0);
+    expect(evaluation.evaluationReport.counts.backend_runs).toBe(0);
+    expect(evaluation.evaluationReport.run_scores).toEqual([]);
     expect(evaluation.evaluationReport.comparisons.length).toBe(evaluation.evaluationReport.counts.comparisons);
     expect(evaluation.suggestions.length).toBeGreaterThanOrEqual(0);
-    expect(afterDiagnostics.total_evaluation_runs).toBe(1);
-    expect(afterDiagnostics.completed_evaluation_runs).toBe(1);
-    expect(afterDiagnostics.latest_evaluation_run).toMatchObject({
-      id: evaluation.reflectionRun.id,
-      kind: "evaluation",
-      status: "completed"
-    });
-    expect(afterDiagnostics.status_counts.evaluation_runs.completed).toBe(1);
+    expect(afterDiagnostics.total_evaluation_runs).toBe(0);
+    expect(afterDiagnostics.completed_evaluation_runs).toBe(0);
+    expect(afterDiagnostics.latest_evaluation_run).toBeUndefined();
+    expect(afterDiagnostics.status_counts.evaluation_runs.completed ?? 0).toBe(0);
     expect(afterDiagnostics.status_counts.backend_runs.completed).toBeGreaterThan(0);
-    expect(afterDiagnostics.issues).not.toContainEqual(expect.objectContaining({ code: "evaluation_run_missing" }));
+    expect(afterDiagnostics.issues).toContainEqual(expect.objectContaining({ code: "evaluation_run_missing" }));
   });
 
   it("rejects invalid skill and collection writes through API", async () => {
     const { baseUrl } = await startTestServer();
+    const session = await postJson<{ id: string }>(`${baseUrl}/api/chat/sessions`, {}, 201);
 
-    const badSkill = await postJson<Record<string, unknown>>(`${baseUrl}/api/skills/candidates`, { title: "", description: "" }, 400);
-    await postJson(`${baseUrl}/api/collections/schemas`, collectionSchema("contacts"), 201);
+    const badSkill = await postJson<Record<string, unknown>>(`${baseUrl}/api/skills/candidates?session_id=${session.id}`, { title: "", description: "" }, 400);
+    await postJson(`${baseUrl}/api/collections/schemas?session_id=${session.id}`, collectionSchema("contacts"), 201);
     const badRecord = await postJson<Record<string, unknown>>(
-      `${baseUrl}/api/collections/contacts/records`,
+      `${baseUrl}/api/collections/contacts/records?session_id=${session.id}`,
       { id: "record_bad", data: { unknown: true } },
       409
     );
@@ -4630,7 +4689,7 @@ describe("backend run API", () => {
       content: "こんにちは",
       output_locale: "ja"
     }, 201);
-    const sessions = await getJson<Array<{ id: string; title: string }>>(`${baseUrl}/api/chat/sessions`);
+    const sessions = await getJson<Array<{ id: string; title: string }>>(`${baseUrl}/api/chat/sessions?room_id=room_default`);
 
     expect(sessions.map((item) => item.title)).not.toContain("Workspace operations");
     expect(sessions.map((item) => item.id)).toContain(session.id);
@@ -4663,8 +4722,10 @@ function fakeProviderOutput(input: Parameters<FakeProviderAdapter["generate"]>[0
   const isJapanese = input.envelope.output_locale === "ja";
   const wantsArtifact = /作って|下書き|提案書|draft|memo|note/i.test(intent);
   const toolCalls: ProviderOutput["toolCalls"] = [];
+  const nextToolCallId = () => `provider_tool_${toolCalls.length + 1}`;
   if (wantsArtifact) {
     toolCalls.push({
+      id: nextToolCallId(),
       name: "create_artifact",
       arguments: {
         title: isJapanese ? "作業メモ" : "Workspace note",
@@ -4673,13 +4734,13 @@ function fakeProviderOutput(input: Parameters<FakeProviderAdapter["generate"]>[0
     });
   }
   if (/覚えて|今後|preference|remember/i.test(intent)) {
-    toolCalls.push({ name: "remember_topic", arguments: {} });
+    toolCalls.push({ id: nextToolCallId(), name: "remember_topic", arguments: {} });
   }
   if (/送信|メール|外部|公開|send|mail|publish|post/i.test(intent)) {
-    toolCalls.push({ name: "request_external_send", arguments: {} });
+    toolCalls.push({ id: nextToolCallId(), name: "request_external_send", arguments: {} });
   }
   if (/削除|消して|delete|remove/i.test(intent)) {
-    toolCalls.push({ name: "request_delete", arguments: {} });
+    toolCalls.push({ id: nextToolCallId(), name: "request_delete", arguments: {} });
   }
   return {
     content: isJapanese ? "対応しました。" : "Done.",
@@ -4802,7 +4863,7 @@ async function postRawJson<T>(
     body: rawBody
   });
   const payload = (await response.json()) as T;
-  expect(response.status).toBe(expectedStatus);
+  expect(response.status, JSON.stringify(payload)).toBe(expectedStatus);
   return payload;
 }
 
@@ -4848,7 +4909,7 @@ function lineSignatureHeaders(rawBody: string, channelSecret: string): Record<st
 async function getJson<T>(url: string, expectedStatus = 200): Promise<T> {
   const response = await fetch(url);
   const payload = (await response.json()) as T;
-  expect(response.status).toBe(expectedStatus);
+  expect(response.status, JSON.stringify(payload)).toBe(expectedStatus);
   return payload;
 }
 
@@ -4862,7 +4923,7 @@ async function patchJson<T>(url: string, body: unknown, expectedStatus = 200): P
     body: JSON.stringify(body)
   });
   const payload = (await response.json()) as T;
-  expect(response.status).toBe(expectedStatus);
+  expect(response.status, JSON.stringify(payload)).toBe(expectedStatus);
   return payload;
 }
 

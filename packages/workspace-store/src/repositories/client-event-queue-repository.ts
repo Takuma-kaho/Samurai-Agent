@@ -6,6 +6,7 @@ import { decodeJson, encodeJson } from "./serialization";
 function clientEventToRow(event: ClientEventRecord): ClientEventsTable {
   return {
     id: event.id,
+    room_id: event.room_id ?? null,
     target_client_kind: event.target_client_kind,
     target_client_id: event.target_client_id ?? null,
     event_type: event.event_type,
@@ -23,6 +24,7 @@ function clientEventToRow(event: ClientEventRecord): ClientEventsTable {
 function clientEventFromRow(row: ClientEventsTable): ClientEventRecord {
   return {
     id: row.id,
+    ...(row.room_id ? { room_id: row.room_id } : {}),
     target_client_kind: row.target_client_kind as ClientEventRecord["target_client_kind"],
     target_client_id: row.target_client_id ?? undefined,
     event_type: row.event_type as ClientEventRecord["event_type"],

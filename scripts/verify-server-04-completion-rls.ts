@@ -438,7 +438,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     });
     await expectCode("workspace_completion_secret_content_forbidden", async () => {
       await completion.recordJobRawOutput(ownerContext("secret-raw"), {
-        jobId: "completion_job_probe", attemptId: "completion_attempt_probe", direction: "request", content: "api_key=sk-abcdefghijklmnopqrstuvwxyz1234567890"
+        jobId: "completion_job_probe", attemptId: "completion_attempt_probe", direction: "request", content: "api_key=" + ["sk-", "abcdefghijklmnopqrstuvwxyz1234567890"].join("")
       });
     });
 

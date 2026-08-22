@@ -37,9 +37,6 @@ importers:
       socket.io:
         specifier: ^4.8.3
         version: 4.8.3
-      socket.io-client:
-        specifier: ^4.8.3
-        version: 4.8.3
       vue:
         specifier: ^3.5.38
         version: 3.5.38(typescript@5.9.3)
@@ -105,6 +102,9 @@ importers:
       '@samurai-agent/capability-registry':
         specifier: workspace:*
         version: link:../../packages/capability-registry
+      '@samurai-agent/collections':
+        specifier: workspace:*
+        version: link:../../packages/collections
       '@samurai-agent/core-schemas':
         specifier: workspace:*
         version: link:../../packages/core-schemas
@@ -359,9 +359,6 @@ importers:
       '@samurai-agent/ui-protocol':
         specifier: workspace:*
         version: link:../ui-protocol
-      '@samurai-agent/workspace-store':
-        specifier: workspace:*
-        version: link:../workspace-store
 
   packages/skill-optimization:
     dependencies:

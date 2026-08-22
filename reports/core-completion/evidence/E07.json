@@ -3,16 +3,17 @@
   "test_id": "E07",
   "command": "pnpm core:test:wiki-learning-loop",
   "status": "passed",
-  "commit_sha": "c54112fcaf6a492959f09af185de427a7787b9bf",
+  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
   "worktree_clean": false,
-  "source_sha256": "ce4cda43518cd69d5d1cd894d44d9c5d9efcd19202508574d6eb77a756a578cf",
-  "source_graph_sha256": "bd6124024d56f25a817c73b0a1a4d46ff93fa892b1943501c6ff4a425a7e5a37",
+  "source_sha256": "88dd8143ef634de7adf9428bec98ccd1aab3c2465aaef2eaf719e8b717f72359",
+  "source_graph_sha256": "ed538475cdfa045157c671828f78a1d8f0e0eca7b4e4b18df28cffff0a22aedb",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
-    "packages/core-schemas/src/index.ts",
-    "packages/learning/src/background-review.ts",
+    "packages/domain-operations/src/operations/wiki/archive.operation.ts",
+    "packages/domain-operations/src/operations/wiki/patch.operation.ts",
+    "packages/learning/src/core05.ts",
     "packages/runtime/src/agent-runtime.ts",
-    "packages/runtime/src/index.ts",
+    "packages/runtime/src/commands/services/core05-background-review-mutation-domain-service.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
     "packages/workspace-store/src/kernel/migration-runner.ts",
@@ -38,8 +39,8 @@
     "scripts/verify-wiki-learning-loop.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-01T09:18:06.041Z",
-  "completed_at": "2026-08-01T09:18:07.066Z",
+  "started_at": "2026-08-21T21:51:37.333Z",
+  "completed_at": "2026-08-21T21:51:39.297Z",
   "assertions": [
     {
       "name": "20-task closed-loop evidence",
@@ -68,22 +69,18 @@
       "expected": true
     },
     {
-      "name": "Background Review mutation kinds",
+      "name": "Background Review Wiki mutation kinds",
       "actual": [
-        "wiki_patch",
         "wiki_create",
-        "wiki_merge",
-        "wiki_archive"
+        "wiki_patch"
       ],
       "expected": [
-        "wiki_patch",
         "wiki_create",
-        "wiki_merge",
-        "wiki_archive"
+        "wiki_patch"
       ]
     },
     {
-      "name": "Curator and rollback close the loop",
+      "name": "Explicit Wiki patch/archive, replacement review, curator and rollback close the loop",
       "actual": true,
       "expected": true
     }
@@ -102,7 +99,7 @@
     ],
     "patched": true,
     "created": true,
-    "merged": true,
+    "replacement_proposed": true,
     "archived": true,
     "curator_completed": true,
     "reused_updated_version": true,
@@ -128,10 +125,9 @@
       "wiki_patch",
       "wiki_patch",
       "wiki_patch",
-      "wiki_archive",
-      "wiki_merge",
-      "wiki_create",
-      "wiki_patch"
+      "wiki_patch",
+      "wiki_patch",
+      "wiki_create"
     ]
   }
 }

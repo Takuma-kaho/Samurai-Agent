@@ -11,7 +11,6 @@ import {
   type SessionRecord
 } from "@samurai-agent/core-schemas";
 import type { RuntimeEventSink } from "@samurai-agent/ui-protocol";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { buildContextPreview, type ContextPreviewPorts } from "../context/context-preview";
 import { createBackendToolBridge } from "../host/backend-tool-bridge";
 import { projectBackendEventForUi } from "../backend/event-bridge";
@@ -34,6 +33,7 @@ import type {
   HostDiagnosticsPort,
   TurnRequest
 } from "../host/host-types";
+import type { RuntimeWorkspacePort } from "./runtime-workspace-ports";
 
 export interface HostExternalAssistSyncInput {
   sessionId: string;
@@ -56,7 +56,7 @@ export interface HostToolInput {
 export interface RuntimeHostCompositionDependencies {
   /** Infrastructure shared by the Host adapters. */
   core: {
-    store: WorkspaceStore;
+    store: RuntimeWorkspacePort;
     backendRegistry: AgentBackendRegistry;
     emit: RuntimeEventSink;
   };
@@ -355,16 +355,23 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
             assistantContent: output.content,
             role: settings.external_provider_role
           });
-          const status = records.some((record) => record.status === "failed")
-            ? "failed"
-            : records.some((record) => record.status === "completed")
-              ? "completed"
+          const status = records.some((record) => record.status === "completed")
+            ? "completed"
+            : records.some((record) => record.status === "failed")
+              ? "failed"
               : "skipped";
+          const providerIds = records.map((record) => record.provider_id);
           const updated = {
             ...run,
-            metadata: { ...run.metadata, external_assist_sync_status: status }
+            metadata: {
+              ...run.metadata,
+              external_assist_sync_status: status,
+              ...(providerIds.length === 1 ? { external_assist_sync_provider_id: providerIds[0] } : {}),
+              external_assist_sync_provider_ids: providerIds,
+              external_assist_sync_statuses: records.map((record) => record.status)
+            }
           };
-          await deps.core.store.updateBackendRun(updated);
+          await deps.core.store.updateRunMetadata({ runId: run.id, metadata: updated.metadata });
           run.metadata = updated.metadata;
         }
       },

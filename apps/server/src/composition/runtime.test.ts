@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe("Core 02 production composition", () => {
-  it("routes Chat, Gateway, and Automation through the composed Host", async () => {
+  it("routes Chat and Automation through the composed Host and fails closed for an unbound Gateway contact", async () => {
     vi.stubEnv("SAMURAI_BACKEND_DEFAULT", "mock");
     const root = await mkdtemp(path.join(tmpdir(), "samurai-core02-composition-"));
     roots.push(root);
@@ -60,8 +60,9 @@ describe("Core 02 production composition", () => {
               backend_id: "mock",
               metadata: { idempotency_key: "composition-gateway-1" }
             });
-            if (!result.chat) throw new Error("composition_gateway_chat_missing");
-            return result.chat.backendRun.id;
+            expect(result.chat).toBeUndefined();
+            expect(result.inbound).toMatchObject({ status: "blocked", error: "gateway_participant_authentication_required" });
+            return undefined;
           }
         },
         {
@@ -87,39 +88,27 @@ describe("Core 02 production composition", () => {
         observed.push({ name: ingressCase.name, runId: await ingressCase.run() });
       }
 
-      for (const entry of observed) {
+      for (const entry of observed.filter((entry): entry is { name: string; runId: string } => typeof entry.runId === "string")) {
         const run = await store.getBackendRun(entry.runId);
         expect(run, `${entry.name} did not create a Backend Run`).toMatchObject({ id: entry.runId, status: "completed", backend_id: "mock" });
       }
-      expect(new Set(observed.map((entry) => entry.runId)).size).toBe(3);
+      expect(new Set(observed.filter((entry) => entry.runId).map((entry) => entry.runId)).size).toBe(2);
     } finally {
       await runtime.shutdown();
       await store.close();
     }
   });
 
-  it("waits for Chat Learning Review before returning a committed result", async () => {
+  it("registers a Chat Learning candidate after settlement without running Review inline", async () => {
     vi.stubEnv("SAMURAI_BACKEND_DEFAULT", "mock");
     const root = await mkdtemp(path.join(tmpdir(), "samurai-core02-chat-review-"));
     roots.push(root);
     const store = await WorkspaceStore.create({ rootDir: root });
-    let reviewStarted!: () => void;
-    const started = new Promise<void>((resolve) => { reviewStarted = resolve; });
-    let releaseReview!: () => void;
-    const release = new Promise<void>((resolve) => { releaseReview = resolve; });
     const runtime = composeAgentRuntime({
       store,
       backendRegistry: new AgentBackendRegistry([new MockBackend()]),
       workspaceOptions: {
-        productionLogger: () => undefined,
-        detachBackgroundReview: true,
-        backgroundReviewRunner: {
-          run: async () => {
-            reviewStarted();
-            await release;
-            throw new Error("learning review failed");
-          }
-        }
+        productionLogger: () => undefined
       }
     });
 
@@ -129,7 +118,7 @@ describe("Core 02 production composition", () => {
       let returned = false;
       const resultPromise = runtime.runChatTurn({
         sessionId: session.id,
-        content: "chat review",
+        content: "この内容を記憶に保存してください。",
         backend_id: "mock",
         idempotency_key: "chat-review-1"
       }).then((result) => {
@@ -137,17 +126,11 @@ describe("Core 02 production composition", () => {
         return result;
       });
 
-      await started;
-      expect(returned).toBe(false);
-      releaseReview();
       const result = await resultPromise;
 
+      expect(returned).toBe(true);
       expect(result.backendRun.status).toBe("completed");
-      expect(result.reflectionRuns).toContainEqual(expect.objectContaining({ status: "failed" }));
-      expect(result.backendEvents).toContainEqual(expect.objectContaining({
-        event_type: "host_post_turn_failed",
-        payload: expect.objectContaining({ operation_id: "learning_review" })
-      }));
+      expect((await store.listReflectionRuns()).filter((run) => run.source_run_id === result.backendRun.id)).toContainEqual(expect.objectContaining({ kind: "background_review", status: "queued" }));
     } finally {
       await runtime.shutdown();
       await store.close();

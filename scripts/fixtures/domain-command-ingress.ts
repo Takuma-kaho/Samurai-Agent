@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getDomainCommandEntry } from "../../packages/action-catalog/src/index";
-import { AgentBackendRegistry, type AgentBackend } from "../../packages/agent-backends/src/index";
+import { AgentBackendRegistry, type AgentBackend, type BackendRunInput } from "../../packages/agent-backends/src/index";
 import type { ArtifactRecord, JsonValue, OperationRecord } from "../../packages/core-schemas/src/index";
 import { DomainOperationRegistry } from "../../packages/domain-operations/src/registry/operation-registry";
 import { localOwnerParticipantId } from "../../packages/room-permissions/src/index";
@@ -133,6 +133,7 @@ const root = await mkdtemp(path.join(tmpdir(), "samurai-command-ingress-"));
 let runtime: AgentRuntime;
 let bridgeArtifactPayload: Record<string, JsonValue> = structuredClone(artifactPayload);
 let latestBridgeRunId: string | undefined;
+let latestBridgeInput: BackendRunInput | undefined;
 let lateServerErrorHandler: ((error: Error) => void) | undefined;
 const bridgeBackend: AgentBackend = {
   id: "command-ingress-bridge",
@@ -142,6 +143,7 @@ const bridgeBackend: AgentBackend = {
   execution_owner: "host",
   async *runTurn(input) {
     latestBridgeRunId = input.run_id;
+    latestBridgeInput = input;
     // This is the normal Backend event contract.  It deliberately does not
     // call AgentRuntime or a test-only helper: Runtime must normalize the
     // emitted Provider tool event into the registered Domain Command itself.
@@ -368,10 +370,11 @@ try {
     assert.ok(latestBridgeRunId, "automation entrance must create a real BackendRun");
     const automationBackendRun = await server.store.getBackendRun(latestBridgeRunId);
     assert.ok(automationBackendRun, "automation entrance BackendRun must persist");
-    const automationInputMessage = (await server.store.listMessages(automationBackendRun.session_id))
-      .find((message) => message.id === automationBackendRun.input_message_id);
-    assert.equal(automationInputMessage?.envelope?.input_locale, "en", "Automation input locale must reach the BackendRun envelope");
-    assert.equal(automationInputMessage?.envelope?.output_locale, "en", "Automation output locale must reach the BackendRun envelope");
+    assert.equal(automationBackendRun.session_id, undefined, "automation Workspace execution must remain Session-free");
+    assert.equal(automationBackendRun.input_message_id, undefined, "automation Workspace execution must not create a Message");
+    assert.ok(latestBridgeInput, "automation Backend must receive the Workspace input envelope");
+    assert.equal(latestBridgeInput.envelope.input_locale, "en", "Automation input locale must reach the BackendRun envelope");
+    assert.equal(latestBridgeInput.envelope.output_locale, "en", "Automation output locale must reach the BackendRun envelope");
     const execution = await server.store.getDomainCommandExecution(`automation:${job.id}:${now}`);
     assert.equal(execution?.status, "completed", "automation wrapper Domain Command must complete");
   }));

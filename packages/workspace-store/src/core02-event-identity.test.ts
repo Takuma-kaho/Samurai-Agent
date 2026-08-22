@@ -4,6 +4,10 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { createId, nowIso, type BackendEventRecord, type MessageEnvelope, type SessionRecord } from "@samurai-agent/core-schemas";
+import { WorkspaceDatabase } from "./kernel/workspace-database";
+import { WorkspaceMigrationRunner } from "./kernel/migration-runner";
+import { WorkspacePaths } from "./kernel/workspace-paths";
+import { workspaceMigrations } from "./migrations";
 import { WorkspaceStore } from "./workspace-store";
 
 const roots: string[] = [];
@@ -11,17 +15,8 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 
 describe("Core 02 event source identity", () => {
   it("migrates ID-first dedupe and preserves every canonical part", async () => {
-    const fixture = await createFixture();
-    await fixture.store.close();
-    const database = new Database(path.join(fixture.root, "workspace.sqlite"));
-    try {
-      database.exec("DROP INDEX IF EXISTS idx_backend_events_source_sequence");
-      database.exec("CREATE UNIQUE INDEX idx_backend_events_source_sequence ON backend_events(run_id, attempt_no, source_sequence) WHERE source_sequence IS NOT NULL");
-      database.exec("DELETE FROM schema_migrations WHERE version IN (6, 7)");
-    } finally {
-      database.close();
-    }
-    const store = await WorkspaceStore.create({ rootDir: fixture.root });
+    const fixture = await createFixtureFromVersion(5);
+    const store = fixture.store;
 
     const verification = new Database(store.dbPath, { readonly: true });
     try {
@@ -69,9 +64,17 @@ describe("Core 02 event source identity", () => {
   });
 });
 
-async function createFixture(): Promise<{ root: string; store: WorkspaceStore; runId: string; sessionId: string }> {
-  const root = await mkdtemp(path.join(tmpdir(), "samurai-core02-event-identity-"));
+async function createFixtureFromVersion(version: number): Promise<{ root: string; store: WorkspaceStore; runId: string; sessionId: string }> {
+  const root = await mkdtemp(path.join(tmpdir(), `samurai-core02-event-identity-v${version}-`));
   roots.push(root);
+  const paths = new WorkspacePaths(root);
+  await paths.ensureWorkspaceLayout();
+  const database = new WorkspaceDatabase(paths);
+  try {
+    await new WorkspaceMigrationRunner(database.open(), workspaceMigrations.filter((migration) => migration.version <= version)).migrate();
+  } finally {
+    await database.close();
+  }
   const store = await WorkspaceStore.create({ rootDir: root });
   const now = nowIso();
   const session: SessionRecord = { id: createId("session"), session_key: "web:owner:event-identity", title: "Event identity", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now };

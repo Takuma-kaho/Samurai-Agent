@@ -655,6 +655,22 @@ async updateBackendRun(run: BackendRunRecord): Promise<BackendRunRecord> {
   return run;
 }
 
+/**
+ * Updates only post-settlement metadata.  Host post-turn work must not be able
+ * to rewrite lifecycle state, terminal evidence, or the output message after
+ * the atomic settlement has committed.
+ */
+async updateRunMetadata(input: { runId: string; metadata: Record<string, JsonValue> }): Promise<BackendRunRecord> {
+  const updated = await this.db.updateTable("backend_runs")
+    .set({ metadata_json: stringify(input.metadata) })
+    .where("id", "=", input.runId)
+    .executeTakeFirst();
+  if (Number(updated.numUpdatedRows ?? 0) !== 1) throw new Error(`backend_run_not_found:${input.runId}`);
+  const run = await this.getBackendRun(input.runId);
+  if (!run) throw new Error(`backend_run_not_found:${input.runId}`);
+  return run;
+}
+
 async getBackendRun(runId: string): Promise<BackendRunRecord | undefined> {
   const row = await this.db.selectFrom("backend_runs").selectAll().where("id", "=", runId).executeTakeFirst();
   return row ? backendRunFromRow(row) : undefined;

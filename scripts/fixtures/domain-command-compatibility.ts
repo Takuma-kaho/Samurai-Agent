@@ -29,7 +29,7 @@ const readyBackend: AgentBackend = {
   async *runTurn() { backendRuns += 1; yield { event_type: "run_completed", payload: { output_summary: "done" } }; }
 };
 const readyRuntime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([readyBackend]));
-const adapterRuntime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([readyBackend]), undefined, undefined, undefined, {
+const adapterRuntime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([readyBackend]), undefined, undefined, {
   browserAdapter: {
     id: "effective-browser",
     async interact(input) { return { url: input.url }; },

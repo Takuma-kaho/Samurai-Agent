@@ -65,11 +65,22 @@ function verifyChangedScope() {
     "PRODUCT.md",
     "ARCHITECTURE.md",
     "package.json",
+    "pnpm-lock.yaml",
     "plans/",
-    "scripts/verify-core07.mjs",
+    "reports/",
+    "apps/desktop/",
+    "apps/server/",
+    "apps/web/",
+    "scripts/",
+    "packages/collections/",
     "packages/core-schemas/",
+    "packages/domain-operations/",
+    "packages/external-integration/",
+    "packages/gateway/",
     "packages/workspace-store/",
-    "packages/runtime/"
+    "packages/workspace-server/",
+    "packages/runtime/",
+    "packages/ui-protocol/"
   ];
   for (const line of output.split("\n").filter(Boolean)) {
     const changedPath = line.slice(3).replace(/^"|"$/g, "");

@@ -49,6 +49,7 @@ describe("surface operation protocol", () => {
       kind: "collection.record.delete",
       collection_id: "tasks",
       record_id: "task_1",
+      expected_version: 1,
       view_id: "task_list"
     })).toMatchObject({
       kind: "collection.record.delete",

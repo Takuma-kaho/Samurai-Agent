@@ -56,7 +56,7 @@ if (mode === "during_internal_transaction") {
       actorId: localOwnerParticipantId
     });
   }
-  const runtime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, undefined, { domainCommandRunningTimeoutMs: 100 });
+  const runtime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, { domainCommandRunningTimeoutMs: 100 });
   await runtime.runRuntimeApiDomainCommand({
     command_id: "collection.patch.apply",
     idempotency_key: "crash-during-internal-transaction",

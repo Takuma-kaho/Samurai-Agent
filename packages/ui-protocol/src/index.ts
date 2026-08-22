@@ -183,6 +183,7 @@ export interface CollectionRecordDeleteOperation extends SurfaceOperationBase {
   kind: "collection.record.delete";
   collection_id: string;
   record_id: string;
+  expected_version: number;
   view_id?: string;
 }
 
@@ -975,6 +976,7 @@ const RawSurfaceOperationSchema = z.discriminatedUnion("kind", [
     kind: z.literal("collection.record.delete"),
     collection_id: z.string().min(1),
     record_id: z.string().min(1),
+    expected_version: z.number().int().positive(),
     view_id: z.string().min(1).optional()
   }),
   z.object({

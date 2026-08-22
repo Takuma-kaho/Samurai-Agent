@@ -407,13 +407,12 @@ export const bHandlerExpectations = {
     cases: [{ id: "rebind", input: { job_id: "automation_fixture" }, branches: ["authority:explicit-rebind"], calls: [call("rebindSessionlessAutomationJobAuthority", { context: handlerContext, jobId: "automation_fixture" })] }]
   },
   "automation.memory_review.run": {
-    requiredBranches: ["executor:unsupported"],
+    requiredBranches: ["executor:room-scoped"],
     cases: [{
-      id: "safe-stop",
+      id: "room-scoped-executor",
       input: {},
-      branches: ["executor:unsupported"],
-      throws: "automation_sessionless_executor_unsupported:memory_review",
-      calls: [call("sessionlessMemoryReviewUnsupported")]
+      branches: ["executor:room-scoped"],
+      calls: [call("runSessionlessMemoryReview")]
     }]
   },
   "external_app.connection.create": {

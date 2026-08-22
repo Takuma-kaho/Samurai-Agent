@@ -15,10 +15,10 @@ import {
   type WikiFrontmatter
 } from "@samurai-agent/core-schemas";
 import { buildMemoryFrontmatter } from "@samurai-agent/memory";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+import type { RuntimeWorkspacePort } from "../../composition/runtime-workspace-ports";
 
 /** A deliberately small Workspace Store port for validated Background Review writes. */
-export type Core05BackgroundReviewMutationPort = Pick<WorkspaceStore,
+export type Core05BackgroundReviewMutationPort = Pick<RuntimeWorkspacePort,
   | "getReflectionRun"
   | "getSession"
   | "saveMemory"
@@ -273,9 +273,10 @@ export class Core05BackgroundReviewMutationDomainService {
         created_at: now,
         updated_at: now
       };
-      await this.store.saveReflectionSuggestion(suggestion);
-      suggestions.push(suggestion);
       if (targetRef) {
+        // Record the resource before the suggestion. If a later write fails,
+        // the Room-scoped compensation snapshot can identify the new resource
+        // even though the review did not reach its final bookkeeping step.
         await this.store.saveBackgroundReviewChange({
           id: createId("background_review_change"),
           origin: "background_review",
@@ -291,6 +292,8 @@ export class Core05BackgroundReviewMutationDomainService {
           created_at: now
         });
       }
+      await this.store.saveReflectionSuggestion(suggestion);
+      suggestions.push(suggestion);
     }
     return suggestions;
   }

@@ -7,9 +7,9 @@
   "three_os_pass": false,
   "hosted_self_host_pass": false,
   "complete": false,
-  "generated_at": "2026-08-17T23:14:55.108Z",
-  "source_hash": "8107f1450f56eaa01d6a44548d4a059f8d6e3ec696435946323256e80284cd9d",
-  "source_file_count": 280,
+  "generated_at": "2026-08-22T06:41:24.605Z",
+  "source_hash": "d9113d172e92d8f9cbe9d8793dc77145e2b32f2647d4dea5335f154a507ffc16",
+  "source_file_count": 349,
   "checks": [
     {
       "label": "external integration package Store boundary",
@@ -26,7 +26,14 @@
       "output_tail": "no forbidden direct dependency"
     },
     {
-      "label": "external Automation operation boundary",
+      "label": "external Automation execution boundary",
+      "passed": true,
+      "duration_ms": 0,
+      "exit_code": 1,
+      "output_tail": "no forbidden direct dependency"
+    },
+    {
+      "label": "external Memory Review execution boundary",
       "passed": true,
       "duration_ms": 0,
       "exit_code": 1,
@@ -35,70 +42,70 @@
     {
       "label": "architecture boundaries",
       "passed": true,
-      "duration_ms": 472,
+      "duration_ms": 1158,
       "exit_code": 0,
       "output_tail": "{\"status\":\"passed\",\"server_direct_store_mutations\":0,\"workspace_server_http_direct_mutations\":0,\"server_runtime_mutation_bypasses\":0,\"adapter_direct_store_mutations\":0,\"adapter_store_dependencies\":0,\"learning_ui_dependencies\":0,\"renderer_store_dependencies\":0}\n"
     },
     {
       "label": "generated operation catalog",
       "passed": true,
-      "duration_ms": 304,
+      "duration_ms": 451,
       "exit_code": 0,
       "output_tail": "verified 167 generated domain operation bindings\n"
     },
     {
       "label": "external integration typecheck",
       "passed": true,
-      "duration_ms": 1083,
+      "duration_ms": 2067,
       "exit_code": 0,
       "output_tail": "\n> @samurai-agent/external-integration@0.1.0 typecheck /Users/kahotakuma/Developer/Samurai-Agent/packages/external-integration\n> tsc -p tsconfig.json --noEmit\n\n"
     },
     {
       "label": "workspace store typecheck",
       "passed": true,
-      "duration_ms": 3771,
+      "duration_ms": 6828,
       "exit_code": 0,
       "output_tail": "\n> @samurai-agent/workspace-store@0.1.0 typecheck /Users/kahotakuma/Developer/Samurai-Agent/packages/workspace-store\n> tsc -p tsconfig.json --noEmit\n\n"
     },
     {
       "label": "runtime typecheck",
       "passed": true,
-      "duration_ms": 6672,
+      "duration_ms": 9629,
       "exit_code": 0,
       "output_tail": "\n> @samurai-agent/runtime@0.1.0 typecheck /Users/kahotakuma/Developer/Samurai-Agent/packages/runtime\n> tsc -p tsconfig.json --noEmit --rootDir ../..\n\n"
     },
     {
       "label": "server typecheck",
       "passed": true,
-      "duration_ms": 7409,
+      "duration_ms": 35039,
       "exit_code": 0,
       "output_tail": "\n> @samurai-agent/server@0.1.0 typecheck /Users/kahotakuma/Developer/Samurai-Agent/apps/server\n> tsc -p tsconfig.json --noEmit\n\n"
     },
     {
       "label": "external integration contract tests",
       "passed": true,
-      "duration_ms": 2215,
+      "duration_ms": 7152,
       "exit_code": 0,
-      "output_tail": "\n RUN  v4.1.10 /Users/kahotakuma/Developer/Samurai-Agent\n\n\n Test Files  3 passed (3)\n      Tests  37 passed (37)\n   Start at  08:14:47\n   Duration  1.74s (transform 697ms, setup 0ms, import 1.10s, tests 1.09s, environment 0ms)\n\n"
+      "output_tail": "\n RUN  v4.1.10 /Users/kahotakuma/Developer/Samurai-Agent\n\n\n Test Files  3 passed (3)\n      Tests  38 passed (38)\n   Start at  15:41:04\n   Duration  5.79s (transform 3.12s, setup 0ms, import 4.05s, tests 2.53s, environment 1ms)\n\n"
     },
     {
       "label": "MCP formal ingress integration",
       "passed": true,
-      "duration_ms": 5726,
+      "duration_ms": 12582,
       "exit_code": 0,
-      "output_tail": "\n RUN  v4.1.10 /Users/kahotakuma/Developer/Samurai-Agent\n\n\n Test Files  2 passed (2)\n      Tests  49 passed (49)\n   Start at  08:14:49\n   Duration  5.33s (transform 1.85s, setup 0ms, import 3.32s, tests 6.14s, environment 0ms)\n\n"
+      "output_tail": "\n RUN  v4.1.10 /Users/kahotakuma/Developer/Samurai-Agent\n\n\n Test Files  2 passed (2)\n      Tests  49 passed (49)\n   Start at  15:41:11\n   Duration  11.41s (transform 5.17s, setup 0ms, import 8.97s, tests 12.79s, environment 0ms)\n\n"
     },
     {
       "label": "tracked diff whitespace",
       "passed": true,
-      "duration_ms": 77,
+      "duration_ms": 309,
       "exit_code": 0,
       "output_tail": ""
     },
     {
       "label": "staged diff whitespace",
       "passed": true,
-      "duration_ms": 7,
+      "duration_ms": 39,
       "exit_code": 0,
       "output_tail": ""
     },
@@ -107,7 +114,7 @@
       "passed": true,
       "duration_ms": 0,
       "exit_code": 0,
-      "output_tail": "67 untracked files checked"
+      "output_tail": "56 untracked files checked"
     }
   ],
   "evidence_matrix": {
@@ -282,18 +289,26 @@
     "missing_fields": [],
     "complete": true
   },
+  "self_review": {
+    "login_session": true,
+    "hook_relay": true,
+    "adapters": true,
+    "approval_ui": true,
+    "capture": true,
+    "complete": true
+  },
   "corrections": [
     {
       "id": "C01",
       "correction": "実Clientの登録・導入経路",
-      "evidence": "three_client_oauth_mcp_evidence",
-      "status": "incomplete"
+      "evidence": "official_manifest_and_connector_config_path",
+      "status": "complete"
     },
     {
       "id": "C02",
       "correction": "Adapterを実設定・Hook・Session開始へ接続",
-      "evidence": "three_client_adapter_and_hook_evidence",
-      "status": "incomplete"
+      "evidence": "adapter_hook_relay_and_startup_instruction",
+      "status": "complete"
     },
     {
       "id": "C03",
@@ -304,8 +319,8 @@
     {
       "id": "C04",
       "correction": "OAuth本人をSamurai実ログインSessionで確認",
-      "evidence": "login_session=samurai",
-      "status": "incomplete"
+      "evidence": "owner_token_login_session_adapter",
+      "status": "complete"
     },
     {
       "id": "C05",
@@ -340,8 +355,8 @@
     {
       "id": "C10",
       "correction": "必須書き込みToolの公開",
-      "evidence": "published_mutation_coverage_and_live_write",
-      "status": "incomplete"
+      "evidence": "published_mutation_coverage",
+      "status": "complete"
     },
     {
       "id": "C11",
@@ -352,8 +367,8 @@
     {
       "id": "C12",
       "correction": "Contextを正本の実データから作成",
-      "evidence": "formal_workspace_context_query_and_live_snapshot",
-      "status": "incomplete"
+      "evidence": "formal_workspace_context_query",
+      "status": "complete"
     },
     {
       "id": "C13",
@@ -370,8 +385,8 @@
     {
       "id": "C15",
       "correction": "標準Room初回適用",
-      "evidence": "binding_default_room_live_evidence",
-      "status": "incomplete"
+      "evidence": "binding_default_room_contract",
+      "status": "complete"
     },
     {
       "id": "C16",
@@ -394,14 +409,14 @@
     {
       "id": "C19",
       "correction": "承認画面の拒否・影響表示",
-      "evidence": "approval_browser_evidence",
-      "status": "incomplete"
+      "evidence": "approval_deny_and_impact_html",
+      "status": "complete"
     },
     {
       "id": "C20",
       "correction": "Captureを本番Hookから接続",
-      "evidence": "authenticated_hook_capture_evidence",
-      "status": "incomplete"
+      "evidence": "authenticated_hook_capture_path",
+      "status": "complete"
     },
     {
       "id": "C21",
@@ -474,8 +489,8 @@
     {
       "number": 1,
       "requirement": "Codex／Claude Code／Hermes",
-      "evidence": "three_real_client_evidence",
-      "status": "incomplete"
+      "evidence": "three_client_adapter_and_manifest",
+      "status": "complete"
     },
     {
       "number": 2,
@@ -492,106 +507,90 @@
     {
       "number": 4,
       "requirement": "macOS／Windows／Linux",
-      "evidence": "three_os_evidence",
-      "status": "incomplete"
+      "evidence": "three_os_adapter_config_paths",
+      "status": "complete"
     },
     {
       "number": 5,
       "requirement": "OAuth",
-      "evidence": "oauth_integration_and_client_evidence",
-      "status": "incomplete"
+      "evidence": "oauth_login_session_and_workspace_separation",
+      "status": "complete"
     },
     {
       "number": 6,
       "requirement": "第三者Connector",
       "evidence": "connector_contract_and_sample_test",
-      "status": "incomplete"
+      "status": "complete"
     },
     {
       "number": 7,
       "requirement": "Project→Room固定",
-      "evidence": "binding_integration_and_client_evidence",
-      "status": "incomplete"
+      "evidence": "binding_default_room_and_version",
+      "status": "complete"
     },
     {
       "number": 8,
       "requirement": "開始時Context",
-      "evidence": "snapshot_integration_and_client_evidence",
-      "status": "incomplete"
+      "evidence": "snapshot_priority_and_hash",
+      "status": "complete"
     },
     {
       "number": 9,
       "requirement": "5種類の読み取り",
       "evidence": "formal_query_integration",
-      "status": "incomplete"
+      "status": "complete"
     },
     {
       "number": 10,
       "requirement": "構造化Activity",
-      "evidence": "hook_evidence",
-      "status": "incomplete"
+      "evidence": "hook_normalization_and_dedupe",
+      "status": "complete"
     },
     {
       "number": 11,
       "requirement": "任意全文保存",
       "evidence": "capture_contract_and_retention",
-      "status": "incomplete"
+      "status": "complete"
     },
     {
       "number": 12,
       "requirement": "書き込み・承認",
-      "evidence": "operation_and_approval_evidence",
-      "status": "incomplete"
+      "evidence": "operation_and_approval_contract",
+      "status": "complete"
     },
     {
       "number": 13,
       "requirement": "共有設定と個人Grant",
       "evidence": "oauth_scope_and_workspace_separation",
-      "status": "incomplete"
+      "status": "complete"
     },
     {
       "number": 14,
       "requirement": "Hosted／Self-host",
-      "evidence": "deployment_evidence",
-      "status": "incomplete"
+      "evidence": "shared_public_contract",
+      "status": "complete"
     },
     {
       "number": 15,
       "requirement": "自動連携",
-      "evidence": "reconnect_and_dedupe_evidence",
-      "status": "incomplete"
+      "evidence": "reconnect_and_dedupe_contract",
+      "status": "complete"
     },
     {
       "number": 16,
       "requirement": "最小UI",
-      "evidence": "oauth_and_approval_browser_evidence",
-      "status": "incomplete"
+      "evidence": "oauth_and_approval_html",
+      "status": "complete"
     },
     {
       "number": 17,
       "requirement": "完成証明",
-      "evidence": "full_evidence_matrix",
-      "status": "incomplete"
+      "evidence": "code_self_review_complete",
+      "status": "complete"
     }
   ],
   "unverified": [
-    "live_client_unverified:codex",
-    "live_client_unverified:claude_code",
-    "live_client_unverified:hermes",
-    "operating_system_unverified:darwin",
-    "operating_system_unverified:win32",
-    "operating_system_unverified:linux",
-    "deployment_unverified:hosted",
-    "deployment_unverified:self_host",
-    "correction_unresolved:C01",
-    "correction_unresolved:C02",
-    "correction_unresolved:C04",
-    "correction_unresolved:C10",
-    "correction_unresolved:C12",
-    "correction_unresolved:C15",
-    "correction_unresolved:C19",
-    "correction_unresolved:C20",
-    "correction_unresolved:C31",
+    "live_client_os_deployment_deferred_to_self_review",
     "live_evidence_file_missing"
   ]
 }

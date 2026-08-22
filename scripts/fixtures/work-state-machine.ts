@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ObjectiveRecord, WorkItemRecord } from "../../packages/core-schemas/src/index";
-import { AgentBackendRegistry, type AgentBackend } from "../../packages/agent-backends/src/index";
+import type { AgentBackend } from "../../packages/agent-backends/src/index";
 import { WorkspaceStore } from "../../packages/workspace-store/src/index";
 import { DurableWorkCoordinator } from "../../packages/runtime/src/execution/durable-work-coordinator";
 import { createFollowUpWorkItem, steerWorkItem, transitionObjectiveState, WorkStateTransitionError } from "../../packages/runtime/src/execution/work-state-machine";
@@ -55,6 +55,7 @@ const store = await WorkspaceStore.create({ rootDir: root });
 let cancelledBackendRun = "";
 const backend: AgentBackend = {
   id: "state-backend", kind: "mock", label: "State backend",
+  sessionPolicy: { acquisition: "none", resume: "unsupported" }, execution_owner: "host",
   async *runTurn() { yield { event_type: "run_completed", payload: {} }; },
   async cancelRun(runId) { cancelledBackendRun = runId; }
 };
@@ -66,7 +67,14 @@ try {
     id: "backend-running", session_id: "session-model", input_message_id: "message-model", backend_id: backend.id,
     backend_kind: backend.kind, status: "running", started_at: now, input_summary: "model", metadata: {}
   });
-  const coordinator = new DurableWorkCoordinator(store, new AgentBackendRegistry([backend]));
+  const coordinator = new DurableWorkCoordinator(store, {
+    async cancelRun(runId) {
+      const run = await store.getBackendRun(runId);
+      assert.ok(run, `missing backend run: ${runId}`);
+      cancelledBackendRun = runId;
+      return store.updateBackendRun({ ...run, status: "cancelled", completed_at: now });
+    }
+  });
   const persistedSteer = await coordinator.steer(workItems[0].id, "Persist this steering instruction", now);
   assert.match((await store.getWorkItem(persistedSteer.id))!.instruction, /Persist this steering instruction/);
   const persistedFollowUp = await coordinator.followUp(workItems[0].id, "Persist this follow-up", now);

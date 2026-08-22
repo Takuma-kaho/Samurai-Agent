@@ -3,32 +3,45 @@
   "test_id": "C05",
   "command": "pnpm core:test:portability",
   "status": "passed",
-  "commit_sha": "e6f8fb92f35e3337b887dda8087e0e606a3a11a5",
-  "worktree_clean": true,
-  "source_sha256": "8f6c73586d00348903f8a38967159f52016d7b78956d51a960fa7bb3f135901d",
-  "source_graph_sha256": "3d15cf2b40d73d53e15488acfa8edb58361a0f2f9d6b796c85493875c7e86099",
+  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
+  "worktree_clean": false,
+  "source_sha256": "9940b8211318013f0480ecdfd4a491ea5460e82016877b1c195aead86a8780ab",
+  "source_graph_sha256": "9d490cec2a010b96bb8de0bea1e9e5445fac24008e7109738a5c23b1c3074487",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/core-schemas/src/index.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/workspace-portability.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-workspace-portability.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-28T15:19:05.300Z",
-  "completed_at": "2026-07-28T15:19:05.784Z",
+  "started_at": "2026-08-21T19:34:54.457Z",
+  "completed_at": "2026-08-21T19:34:54.821Z",
   "assertions": [
     {
       "name": "Portable resource hash",
-      "actual": "e8ed1a5c",
-      "expected": "e8ed1a5c"
+      "actual": "61df0004",
+      "expected": "61df0004"
     },
     {
       "name": "Cross-resource refs preserved",
@@ -39,10 +52,16 @@
       "name": "Required resource kinds",
       "actual": [
         "session",
+        "event",
         "artifact",
-        "collection",
+        "surface_metadata",
         "memory",
-        "skill"
+        "wiki",
+        "skill",
+        "collection",
+        "settings",
+        "queue",
+        "history"
       ],
       "expected": [
         "session",
@@ -55,15 +74,22 @@
   ],
   "result": {
     "status": "passed",
-    "source_hash": "e8ed1a5c",
-    "target_hash": "e8ed1a5c",
+    "source_hash": "61df0004",
+    "target_hash": "61df0004",
     "refs_preserved": true,
+    "derived_surface_bundle_omitted": true,
     "resources": [
       "session",
+      "event",
       "artifact",
-      "collection",
+      "surface_metadata",
       "memory",
-      "skill"
+      "wiki",
+      "skill",
+      "collection",
+      "settings",
+      "queue",
+      "history"
     ]
   }
 }

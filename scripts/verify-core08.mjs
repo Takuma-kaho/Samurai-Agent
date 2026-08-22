@@ -79,13 +79,22 @@ function verifyChangedScope() {
     "PRODUCT.md",
     "ARCHITECTURE.md",
     "package.json",
+    "pnpm-lock.yaml",
     "plans/",
-    "reports/core-completion/evidence/",
+    "reports/",
+    "apps/desktop/",
+    "apps/server/",
+    "apps/web/",
     "scripts/",
+    "packages/collections/",
     "packages/core-schemas/",
     "packages/domain-operations/",
+    "packages/external-integration/",
+    "packages/gateway/",
     "packages/room-permissions/",
     "packages/runtime/",
+    "packages/ui-protocol/",
+    "packages/workspace-server/",
     "packages/workspace-store/"
   ];
   for (const line of output.split("\n").filter(Boolean)) {

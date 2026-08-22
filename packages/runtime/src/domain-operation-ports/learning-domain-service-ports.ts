@@ -10,7 +10,7 @@ export function createLearningDomainServicePorts(services: Pick<RuntimeDomainSer
       pauseCurator: () => services.learningDomainService.pause()
     },
     "curator.restore": {
-      restoreCuratorSnapshot: (id) => services.learningDomainService.restoreLearningSnapshot(id),
+      restoreCuratorSnapshot: (id, roomId) => services.learningDomainService.restoreLearningSnapshot(id, roomId),
       curatorSnapshotNotFoundError: () => services.learningDomainService.snapshotNotFoundError()
     },
     "curator.resume": {

@@ -26,18 +26,25 @@ const server = preflight.kind === "unavailable"
   ? start("API", process.execPath, ["--import", "tsx", apiEntry], {
       env: {
         ...process.env,
-        PORT: String(apiPort)
+        PORT: String(apiPort),
+        ...(process.env.SAMURAI_CORS_ORIGINS || process.env.SAMURAI_SERVER_PUBLIC === "1"
+          ? {}
+          : { SAMURAI_CORS_ORIGINS: "http://127.0.0.1:5173,http://localhost:5173" })
       }
     })
   : undefined;
 
 if (preflight.kind === "ready") {
   console.log(`[dev] Reusing existing API: ${healthUrl}`);
-  const contract = await probeSurfaceContract(contractUrl);
-  if (contract.kind !== "ready") {
-    console.error(`[dev] Existing API is missing required surface operations: ${contract.missing.join(", ") || "unknown"}.`);
-    console.error(`[dev] Stop the old API process on ${apiPort}, then run pnpm run dev again.`);
-    process.exit(1);
+  if (preflight.storage !== "postgresql") {
+    const contract = await probeSurfaceContract(contractUrl);
+    if (contract.kind !== "ready") {
+      console.error(`[dev] Existing API is missing required surface operations: ${contract.missing.join(", ") || "unknown"}.`);
+      console.error(`[dev] Stop the old API process on ${apiPort}, then run pnpm run dev again.`);
+      process.exit(1);
+    }
+  } else {
+    console.warn("[dev] PostgreSQL Workspace Server is ready; legacy Surface routes are not used by this probe.");
   }
 } else if (preflight.kind === "starting") {
   console.log(`[dev] API port is already in use; waiting for existing Samurai Agent API: ${healthUrl}`);
@@ -105,13 +112,17 @@ async function monitorHealth(url) {
       const response = await fetch(url);
       if (response.ok) {
         const health = await response.json();
-        if (health?.ok === true && health?.db?.ok !== false) {
-          const contract = await probeSurfaceContract(contractUrl);
-          if (contract.kind !== "ready") {
-            console.error(`[dev] API is reachable but missing required surface operations: ${contract.missing.join(", ") || "unknown"}.`);
-            console.error(`[dev] Stop the old API process on ${apiPort}, then run pnpm run dev again.`);
-            shutdown(1);
-            return;
+        if (isHealthyApi(health)) {
+          if (health.storage !== "postgresql") {
+            const contract = await probeSurfaceContract(contractUrl);
+            if (contract.kind !== "ready") {
+              console.error(`[dev] API is reachable but missing required surface operations: ${contract.missing.join(", ") || "unknown"}.`);
+              console.error(`[dev] Stop the old API process on ${apiPort}, then run pnpm run dev again.`);
+              shutdown(1);
+              return;
+            }
+          } else {
+            console.warn("[dev] PostgreSQL Workspace Server is ready; legacy Surface routes are not used by this probe.");
           }
           console.log(`[dev] API is ready: ${url}`);
           return;
@@ -164,16 +175,20 @@ async function probeApi(url) {
       return { kind: "occupied" };
     }
 
-    if (!health || typeof health !== "object" || !("ok" in health) || !("db" in health)) {
+    if (!health || typeof health !== "object" || !("ok" in health)) {
       return { kind: "occupied" };
     }
-    if (response.ok && health.ok === true && health.db?.ok !== false) {
-      return { kind: "ready" };
+    if (response.ok && isHealthyApi(health)) {
+      return { kind: "ready", storage: health.storage === "postgresql" ? "postgresql" : "sqlite" };
     }
     return { kind: "starting" };
   } catch {
     return (await isPortOpen(apiPort)) ? { kind: "occupied" } : { kind: "unavailable" };
   }
+}
+
+function isHealthyApi(health) {
+  return health?.ok === true && health?.db?.ok !== false;
 }
 
 async function isPortOpen(port) {

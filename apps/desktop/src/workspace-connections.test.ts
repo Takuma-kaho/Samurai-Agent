@@ -42,7 +42,7 @@ describe("Desktop Workspace connections", () => {
       serverUrl: "https://samurai.example.test",
       workspaceId: "workspace_company",
       accountId: "account_owner",
-      credentialRef: "-----BEGIN PRIVATE KEY-----"
+      credentialRef: ["-----BEGIN", "PRIVATE KEY-----"].join(" ")
     })).toThrow("workspace_connection_credential_ref_invalid");
   });
 

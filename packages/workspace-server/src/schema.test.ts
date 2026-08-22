@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -23,6 +23,24 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("samurai_workspace_is_writable");
     expect(schema).toContain("samurai_record_workspace_transfer_receipt");
     expect(schema).toContain("samurai_append_workspace_audit");
+    expect(schema).toContain("samurai_list_completion_maintenance_identities");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_gateway_runtime_state");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_skill_optimization_state");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_gateway_policy_metadata_columns");
+    for (const table of [
+      "workspace_gateway_pairings", "workspace_gateway_pairing_policies", "workspace_gateway_routing_policies",
+      "workspace_gateway_inbound_messages", "workspace_gateway_deliveries", "workspace_gateway_boundary_policies",
+      "workspace_gateway_mcp_configs", "workspace_gateway_concurrency_locks", "workspace_gateway_sandbox_instances",
+      "workspace_gateway_sandbox_syncs", "workspace_skill_optimization_runs", "workspace_skill_optimization_datasets",
+      "workspace_skill_optimization_objectives", "workspace_skill_optimization_work_items", "workspace_skill_optimization_candidates",
+      "workspace_skill_optimization_evaluations", "workspace_skill_optimization_promotions", "workspace_skill_optimization_snapshots",
+      "workspace_skill_optimization_locks"
+    ]) {
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+      expect(schema).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("workspace_gateway_deliveries_due");
+    expect(schema).toContain("workspace_skill_optimization_work_items_due");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_import_account_identity_is_non_destructive");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_operation_and_file_recovery_guards");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_operation_completion_and_transfer_receipt_guards");
@@ -104,6 +122,11 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_migration_run_start_audit");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_final_ledger");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_legacy_staging_ledger_repair");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_settings_respect_workspace_freeze");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_agent_connection_import_guards");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_client_event_room_authorization");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_transfer_ledger");
+    expect(schema).toContain("ALTER POLICY workspace_runtime_settings_access ON workspace_runtime_settings");
     for (const table of [
       "workspace_completion_configurations", "workspace_completion_activities", "workspace_completion_episodes",
       "workspace_completion_episode_activities", "workspace_completion_resources", "workspace_completion_resource_versions", "workspace_completion_skill_files",
@@ -133,7 +156,52 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("samurai_begin_completion_migration_run");
     expect(schema).toContain("workspace_completion_migration_run_capability_invalid");
     expect(schema).toContain("samurai_record_workspace_bundle_v4");
+    expect(schema).toContain("samurai_record_workspace_bundle_v4_transfer");
     expect(schema).toContain("samurai_repair_workspace_bundle_v4_legacy_ledger");
     expect(schema).toContain("samurai_guard_completion_machine_attestation");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_agent_room_permissions_and_connection_descriptors");
+    for (const table of ["workspace_agents", "workspace_agent_room_permissions", "workspace_connection_descriptors"]) {
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("workspace_agents_write_denied");
+    expect(schema).toContain("workspace_agent_room_permissions_write_denied");
+    expect(schema).toContain("workspace_connection_descriptors_write_denied");
+    expect(schema).toContain("samurai_register_workspace_agent");
+    expect(schema).toContain("samurai_can_agent_room");
+    expect(schema).toContain("SELECT COALESCE(CASE action_name");
+    expect(schema).toContain("samurai_set_workspace_agent_room_permission");
+    expect(schema).toContain("samurai_upsert_workspace_connection_descriptor");
+    expect(schema).toContain("workspace_agents_backend_id_nonempty");
+    expect(schema).toContain("samurai_set_workspace_agent_backend");
+    expect(schema).toContain("samurai_import_workspace_agent");
+    expect(schema).toContain("samurai_import_workspace_agent_room_permission");
+    expect(schema).toContain("samurai_import_workspace_connection_descriptor");
+    expect(schema).toContain("workspace_completion_episodes_external_key_unique");
+    for (const table of ["workspace_runtime_sessions", "workspace_runtime_messages", "workspace_runtime_runs", "workspace_runtime_events", "workspace_runtime_activities", "workspace_runtime_resources"]) {
+      expect(schema).toContain(`CREATE TABLE ${table}`);
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("workspace_runtime_runs_idempotency_index");
+    expect(schema).toContain("workspace_runtime_reservations");
+    expect(schema).toContain("workspace_runtime_client_events_room_fkey");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_jobs_and_runs");
+    for (const table of ["workspace_runtime_automation_jobs", "workspace_runtime_automation_runs"]) {
+      expect(schema).toContain(`CREATE TABLE ${table}`);
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("workspace_runtime_automation_jobs_due_index");
+    expect(schema).toContain("workspace_runtime_automation_runs_job_index");
+    expect(schema).toContain("CREATE TABLE workspace_external_integration_records (");
+    expect(schema).toContain("CREATE UNIQUE INDEX workspace_external_integration_records_workspace_unique_index");
+    expect(schema).toContain("CREATE UNIQUE INDEX workspace_external_integration_records_global_unique_index");
+    const externalMigration = migrations.find((migration) => migration.version === 45);
+    expect(externalMigration?.statements.join("\n")).not.toContain("PRIMARY KEY (workspace_id, record_type, id)");
+    const runtimeMigration = migrations.find((migration) => migration.version === 43);
+    expect(runtimeMigration?.statements.join("\n")).not.toContain("workspace_runtime_automation_jobs");
+    const automationMigration = migrations.find((migration) => migration.version === 44);
+    expect(automationMigration?.statements.join("\n")).toContain("workspace_runtime_automation_jobs");
+    expect(schema).not.toContain("api_key TEXT");
+    expect(schema).not.toContain("access_token TEXT");
+    expect(schema).not.toContain("secret TEXT");
   });
 });

@@ -58,7 +58,7 @@ describe("Core 05 Phase 1 learning foundation", () => {
     const workspaceSkill = await runtime.runDomainQuery({ query_id: "skill.view", payload: { skill_id: "skill-workspace" } }, { runId: runA.id });
     expect((workspaceSkill.result as { content: string }).content).toContain("workspace catalog");
     expect(readSkillMarkdown).toHaveBeenCalledWith("skill-workspace");
-    await expect(runtime.runDomainQuery({ query_id: "memory.search", payload: { query: "search" } })).rejects.toThrow("room_context_required");
+    await expect(runtime.runRuntimeApiDomainQuery({ query_id: "memory.search", payload: { query: "search" } })).rejects.toThrow("room_context_required");
 
     const unscopedRun: BackendRunRecord = { ...runA, id: "run-unscoped-search", agent_id: undefined };
     await store.saveBackendRun(unscopedRun);

@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "phase": "13",
+  "recorded_at": "2026-08-22",
+  "decisions": [
+    {
+      "id": "postgres-chat-formal-room-ingress",
+      "problem": "標準PostgreSQL ChatのSession作成がRoom IDを共有Domain Operationへ渡さず、HTTPが正式入口を迂回し得る状態だった。",
+      "decision": "session.createへRoom IDを追加し、PostgreSQLのSession作成とChat実行をそれぞれ正式なDomain OperationからRuntimeへ接続する。Room IDがないPostgreSQL要求はfail-closedにする。",
+      "scope_check": "Room認可、Activity、Runtimeの責務を迂回せず、旧Gateway/Automationの共有契約は入力を任意のまま保つ。新しい利用制限や認可緩和は追加していない。",
+      "verification": "Server、Domain Operation、Workspace ServerのtypecheckとSession/Bundle/File focused testを実行済み。実PostgreSQL HTTP検証は未実施。"
+    },
+    {
+      "id": "agent-worktree-physical-separation",
+      "problem": "外部Agentの作業ディレクトリへCore Workspaceの物理ルートを渡し得た。",
+      "decision": "標準PostgreSQL RuntimeはWorkspace本文ルートとは別のAgent worktree rootを受け取り、起動時に絶対パスの重なりを拒否する。Backendへ渡すworkspace_rootとworking_directoryも同じ分離済みルートに限定する。",
+      "scope_check": "Agent worktreeの機能を削除せず、Coreの物理分離だけを明示する。許可パスの追加や認可の迂回は行っていない。",
+      "verification": "Server typecheckと静的境界検査を実行済み。外部CLIの実接続と実PostgreSQL検証は未実施。"
+    },
+    {
+      "id": "signed-chat-idempotency-activity-repair",
+      "problem": "署名対象外のIdempotency Keyで再送を識別でき、Runtime確定後のCompletion Activity投影が欠落しても再送で修復できなかった。",
+      "decision": "Idempotency Keyを署名ペイロードへ含め、Session作成は決定的Operationで一度だけ作成する。Chatは同じRuntime結果を再取得し、Completion Activityが欠けている場合だけ同じIDへ投影を再試行する。Runtimeの監査台帳や完了状態は置き換えない。",
+      "scope_check": "正式なRoom認可・Runtime Operation・Completion Activityを使い、Replayを無制限に許可する新仕様やTest専用分岐を追加していない。",
+      "verification": "Desktop/Web/Server/Domainのtypecheckを実行済み。署名付きHTTPの実DB再送検証は未実施。"
+    },
+    {
+      "id": "completion-generic-file-ledger-conflict",
+      "problem": "Completionが所有する物理パスへ旧Generic Workspace File台帳が残っている場合、別台帳のまま上書きする余地があった。",
+      "decision": "Completion所有rootをGeneric File入口から拒否し、既存のGeneric台帳行との衝突は自動移行・上書きせず明示的な409として停止する。",
+      "scope_check": "Markdown本文の正本、Room認可、ファイルTransactionを維持し、既存データを暗黙削除・移行する新仕様は追加していない。",
+      "verification": "Workspace Server typecheck、Completion File focused test、静的検証を実行済み。既存PG台帳を使った衝突検証は未実施。"
+    },
+    {
+      "id": "collection-exact-patch-history-recovery",
+      "problem": "Collection本文とRecord indexが確定した後にPatch履歴だけ失敗すると、再起動後も安全な修復手段がなく永久にblockedになった。",
+      "decision": "失敗時にPatch ID・内容・操作IDを回復マーカーとして保存し、reindex時に本文、版、Record、Schema、操作IDが完全一致する場合だけPatch履歴を再作成してreadyへ戻す。一致しなければ停止して手動復旧を要求する。",
+      "scope_check": "任意のblockedレコードを再構築せず、本文をJSONへ置換せず、CollectionのMarkdown正本と履歴台帳を保つ。",
+      "verification": "Server typecheckを実行済み。実DBでの途中失敗・再起動復旧は未実施。"
+    },
+    {
+      "id": "desktop-socket-single-transport",
+      "problem": "旧Web Socket.IO描画経路がMainの署名Socket/IPC経路と並存し、旧経路には認証境界がなかった。",
+      "decision": "旧Socket.IO Web renderer入口を削除し、Webは署名API、Desktopは署名APIとMain/IPCの標準経路だけを使う。Socket.IO Server依存はGateway等の既存責務から無断削除しない。",
+      "scope_check": "外部アプリ・Native Appの新機能を追加せず、既存の安全な接続層へ統一した。",
+      "verification": "Desktop architecture verifier、Web/Desktop typecheckを実行済み。ブラウザ、Electron、3OSの実機検証は未実施。"
+    },
+    {
+      "id": "verifier-read-only-by-default",
+      "problem": "物理境界検証器が通常実行時に追跡済みEvidence JSONを書き換えていた。",
+      "decision": "通常の検証は読み取り専用とし、Evidence生成は明示的なwrite-evidence引数がある場合だけ許可する。",
+      "scope_check": "検証結果を合格へ書き換える緩和ではなく、検証器が製品成果物を変更しないPhase10の境界を回復した。",
+      "verification": "物理境界検証を通常モードで実行し、PASSかつEvidence差分なしを確認済み。"
+    },
+    {
+      "id": "postgres-operation-facade-boundary",
+      "problem": "PG Chatの正式Operation handlerが、Server adapterからRuntimeの個別更新メソッドを直接呼ぶ形になり、Core06のcommand-bus境界検証に抵触した。",
+      "decision": "chat.turn.runとsession.createのhandlerをPostgresRuntimeCommandServiceの正式Domain Command facadeで実行し、HTTP adapterはその共有入口だけを呼ぶ。Room認可、Runtime台帳、Completion Activityの実装はそのままfacade内のRuntimeへ委譲する。",
+      "scope_check": "検証器の検出を名前変更で回避せず、共有Operationの入力検証とhandler実行を実経路へ集約した。新しいAPI制限、認可緩和、別の永続化経路は追加していない。",
+      "verification": "Server typecheckとCore06 architecture boundariesを実行済み。"
+    },
+    {
+      "id": "standard-worker-review-cassette",
+      "problem": "通常起動のWorkerがReview Port未設定時にReview Jobを処理できず、レビュー機能だけが常にblockedになっていた。",
+      "decision": "標準Serverの既存Backend RegistryからHost所有のSamurai Nativeだけをレビュー専用Portへ接続し、SnapshotをJSON証拠として渡す。DB、Workspaceファイル、Agent worktree、Tool bridgeは渡さず、provider未設定や不正JSONは成功へ変換しない。既存の明示的なHost cassette注入は優先する。",
+      "scope_check": "レビューの候補検証、Room Snapshot再確認、適用Transactionは既存Completion責務を使う。Native以外を暗黙に実行する新しい権限やファイルアクセスを追加していない。",
+      "verification": "Server/Workspace Server typecheckを実行済み。providerを使う実PostgreSQL Worker検証は未実施。"
+    },
+    {
+      "id": "reviewed-operation-schema-projection-refresh",
+      "problem": "Knowledge分類の4カテゴリ化とsession.createのRoom ID入力追加により、固定Schema catalogの旧ハッシュが実Operationと不一致になった。",
+      "decision": "変更されたLeaf、親Projection、関連Wiki出力の固定catalogとroot参照だけを正本のOperation定義に合わせて更新し、Schema matrixのレビュー済み状態と全フィールド検証を維持する。",
+      "scope_check": "ハッシュを無条件に合わせず、実Zod Operationからのprojectionとcatalog構造を照合した。Knowledgeカテゴリを旧2種へ戻すことや、Room IDを隠して認可を省略することはしていない。",
+      "verification": "domain-command-schema-matrixを実行し、167 Operations、334 endpoints、未レビューSchema 0、projection parity trueを確認済み。"
+    },
+    {
+      "id": "phase13-unverified-boundaries-remain-visible",
+      "problem": "Gateway標準PG接続、通常起動Worker、Generated Surface PG経路、実PostgreSQL、Hosted/Self-host、外部CLI、Native実機の証拠が不足している。",
+      "decision": "不足した証拠を空配列・mock・旧SQLite成功結果で補わず、実装済み部品と実運用接続を別判定に残す。P0またはNative開始を妨げるP1が残る限りNative App開始Gateを不合格とする。",
+      "scope_check": "未完成機能の削除や仕様縮小を行わず、最終監査で実装・設計境界・実行経路・検証証拠を再確認する。",
+      "verification": "Phase13監査で再判定する。"
+    },
+    {
+      "id": "postgres-generated-surface-persistence-and-replay",
+      "problem": "標準PostgreSQL経路ではGenerated SurfaceのRoom台帳、bundleファイル、正式Operation、Completion Activityを一続きで実行する入口が不足していた。",
+      "decision": "Generated Surfaceのcreate/revise/state/action/interaction/exportを既存の正式Domain Operationへ接続し、SurfaceとRevisionはRoom-scoped record、HTML/CSS/Script/assetはWorkspace Fileとして保存する。PGの再送は決定的IDとOperationRecordのinput_hashで同じ結果を再利用し、欠落したCompletion Activityだけを同じIDへ再投影する。",
+      "scope_check": "Generated Surface専用DBや汎用JSON書き込みを追加せず、Room認可、File境界、Activity、既存Runtimeの責務を維持した。途中でファイルだけが確定する場合は同じOperationの再試行で照合・継続し、別Revisionの競合は409で停止する。",
+      "verification": "Server、Domain Operation、Runtime、Workspace Server、Web、Desktopのtypecheckを実行済み。実PostgreSQLでのcreate/revise途中失敗・再送検証は未実施。"
+    },
+    {
+      "id": "generated-surface-target-command-boundary",
+      "problem": "Generated Surface Actionを接続する際、任意のCommandを汎用payloadのまま成功扱いにすると、宣言済みDomain OperationとRoom Activityを迂回する危険があった。",
+      "decision": "Action宣言のcommand_idをDomain Operationの入力Schemaで再検証し、標準PGで実装済みのArtifact/Collection Commandだけを既存adapterへ接続する。未接続Commandは成功応答を返さずInteractionへ失敗を記録して503とし、Generated Surface自身を再帰的に実行する入口は追加しない。",
+      "scope_check": "新しい認可制限や成功のためのmockを追加せず、カタログにある既存Commandの実行能力だけを利用した。未接続範囲は欠落として可視化し、全Command対応と誤認させない。",
+      "verification": "Server typecheckとDomain schema matrixを実行済み。標準PGの実Action実行は実DB未接続のため未検証。"
+    },
+    {
+      "id": "generated-surface-signed-bundle-assets",
+      "problem": "署名API経由でbundleを取得してsrcdoc表示へ移した後、asset_refsのファイル内容がbundleへ含まれず、画像などが表示できなかった。",
+      "decision": "bundle応答と単一HTML表示・HTML exportにはRoom認可済みFileから資産をbase64で含め、相対参照をdata URLへ変換する。ZIP exportは再利用可能性を保つためHTMLの相対参照と個別assetファイルを維持する。preview_urlも標準Workspace Serverの署名付きRoom routeへ正規化する。",
+      "scope_check": "外部URL、ネットワーク、iframe権限、認可を追加せず、既存のSurface CSPとasset path検証を維持した。資産ファイルを本文やDBへ複製せず、表示時のtransport変換に限定した。",
+      "verification": "Server、Runtime、Web、Desktopのtypecheckを実行済み。ブラウザ/Electron実機での画像表示と実PostgreSQLのasset復元は未実施。"
+    },
+    {
+      "id": "verifier-unverified-exit-status",
+      "problem": "local-light検証はDocker、ネットワーク、ブラウザ、Electronを実行しないため、未検証項目があっても終了コード0になり得た。",
+      "decision": "実行失敗は1、未検証が残る場合は2、全項目を確認できた場合だけ0を返す。未検証を成功へ変換せず、CIや上位判定が不完全な検証を区別できるようにする。",
+      "scope_check": "製品機能の制限や新しい認可仕様は追加せず、Phase10の検証結果の意味だけを正確にした。",
+      "verification": "local-lightの静的確認と実行結果で、未検証時のexit_code=2を再確認する。"
+    },
+    {
+      "id": "core-report-read-only-default",
+      "problem": "Core completion集約器が通常実行で追跡済みlatest.json/latest.mdを上書きし、検証と証拠生成の責務が混在していた。",
+      "decision": "通常実行は一時ディレクトリへレポートを出力し、追跡済みレポート更新はcore:reportの明示的なwrite-report経路だけに限定する。既存Evidenceを自動修正せず、古い証拠は不一致として表示する。",
+      "scope_check": "合格判定を緩和せず、レポートの保存先だけを明示的な操作へ分離した。既存のEvidence・製品コード・機能仕様は変更していない。",
+      "verification": "Core completion集約器の構文確認と、通常実行が追跡済みレポートを変更しないことを確認する。"
+    },
+    {
+      "id": "server05-source-coverage",
+      "problem": "Server 05のsource hash対象からWorkspace Server実装が漏れ、外部連携の実行境界を変更してもlive evidenceの版確認に反映されなかった。",
+      "decision": "packages/workspace-server/srcをServer 05のsource hash対象へ含める。既存live evidenceを合格へ書き換えず、hash不一致として再取得を要求する。",
+      "scope_check": "外部連携の機能や権限を広げず、証拠が実装の変更を取りこぼさないよう検証対象を正確にした。",
+      "verification": "Server 05 verifierのsource対象とJSON出力を確認する。実Client・3OS・Hosted/Self-hostのlive evidenceは未実施。"
+    },
+    {
+      "id": "browser-signed-realtime-connection",
+      "problem": "ServerとDesktopには署名済みSocketのClient Event経路がある一方、WebはHTTP更新だけで統合Realtime経路へ接続していなかった。",
+      "decision": "WebもIndexedDB内のEd25519鍵でSocket.IO handshakeを署名し、署名済みRoom一覧だけを購読する。受信イベントはDesktopと同じ最小noticeへサニタイズし、任意Socket payloadや未認証購読は公開しない。",
+      "scope_check": "旧Webの未認証Socket描画経路を復活させず、Serverの既存認証・Room再検証・アクセス取消をそのまま使う。RealtimeのためにRoom認可、Core、DB責務を変更していない。",
+      "verification": "Web typecheckと差分空白検証を実行済み。ブラウザ実接続、再接続、Room権限変更、3OS/Electronは未実施。"
+    },
+    {
+      "id": "external-ingress-server-boundary",
+      "problem": "PG External App ingress adapterがConnection、Room認可、Workspace/Activity参照をPostgreSQLまたはWorkspace Storeへ直接実行していた。",
+      "decision": "Connection lookup、Room authorization、Workspace/Room参照、Activity historyをWorkspace Server Command/Completion boundaryへ移し、External adapterは正式Ingressと既存Use Caseだけを呼ぶ。認可判断は同じPostgreSQL関数をServer boundary内で実行し、失敗時は従来のdeny結果を維持する。",
+      "scope_check": "External AppのQuery/Domain Operation/Activity Ingestの機能を削除せず、Transport adapterへDB権限を追加することもせず、禁止されていた直接参照だけを除去した。Room権限の内容やConnectionの所有境界は変更していない。",
+      "verification": "Workspace Server、Server typecheckを実行済み。External Appの実PG/RLS・Activity失敗再送検証は未実施。"
+    },
+    {
+      "id": "generated-surface-exact-replay-revision",
+      "problem": "完了済みGenerated Surface操作の再送時、後続Revisionが存在すると最新Revisionを返し、元操作のActivity対象を取り違える可能性があった。",
+      "decision": "操作IDとSurface IDから決定的に算出したRevision IDを再取得し、Revisionのdomain_operation_idとsurface_idを照合する。対象Revisionが欠落している場合は成功扱いにせず、復旧が必要な503を返す。",
+      "scope_check": "新しいRevision履歴やDBを追加せず、既存の決定的ID・OperationRecord・Room File境界を使って再実行対象を限定した。後続Revisionの削除、最新Revisionへの巻き戻し、認可緩和は行っていない。",
+      "verification": "Server typecheckとGenerated Surface focused testを再実行する。実PostgreSQLで後続Revisionを含む再送は未実施。"
+    },
+    {
+      "id": "generated-surface-state-edit-classification",
+      "problem": "generated_surface.stateはSurfaceのstateを永続更新するworkspace_mutationなのに、Room内容のアクセス分類がreadだった。",
+      "decision": "既存のstate Domain Operationが実行するpin/unpin/archiveをSurface editとして分類し、Roomの既存認可判定と一致させる。",
+      "scope_check": "新しい機能制限やSession要件を追加せず、既存の状態更新処理をread権限で通していた分類不整合だけを修正した。Actionの検証と対象Command実行の分離は変更しない。",
+      "verification": "Core06のoperation access/schema/handler検証を再実行する。実PostgreSQLのRoom権限でのstate変更は未実施。"
+    },
+    {
+      "id": "collection-replay-response",
+      "problem": "Collectionのファイル・索引処理は再実行を扱っていたが、HTTPと外部Commandの応答が常にreplayed:falseで、利用者に二重実行の結果を誤表示していた。",
+      "decision": "既存のpending／ready／deleting判定からreplayedを返し、HTTP・External・Generated Surface targetではresource本文から内部マーカーを分離して応答の境界へ出す。Markdown正本、索引、rollback、blocked recoveryの処理は変更しない。",
+      "scope_check": "再実行を拒否する新制限、JSONを正本にする変更、既存Collection機能の削除は行わず、既に存在したidempotencyの状態を正確に公開するだけに留めた。",
+      "verification": "ServerとWorkspace Serverのtypecheck、Collection／External ingress focused testを再実行する。実PostgreSQLでの途中失敗後の再送は未実施。"
+    },
+    {
+      "id": "standard-learning-review-port",
+      "problem": "標準ServerのWorkspaceLearningRunnerにKnowledge Review Portが渡らず、通常起動のLearning Jobが常に利用不可として処理されていた。",
+      "decision": "既存のHost-owned Samurai Native BackendからKnowledge Snapshot専用のReview Portを構成し、標準起動時だけ既定値としてRunnerへ渡す。明示的なreviewPorts注入は優先し、BackendへDB、Workspace File、Tool bridge、Agent worktreeを渡さない。出力は既存のEvidence引用・分類・Room検証を通す。",
+      "scope_check": "新しいAgent権限、外部Provider接続、Evidenceなしの自動Knowledge変更を追加せず、既存Workerが要求していたPortの標準Compositionだけを補った。",
+      "verification": "Server、Workspace Server typecheckとLearning focused testを再実行する。標準起動Workerの実PostgreSQL lease/retry/Activity検証は未実施。"
+    },
+    {
+      "id": "generated-surface-sfc-script-boundary",
+      "problem": "Generated Surfaceのsrcdoc生成文字列にHTMLのscript終了タグを直接含めたため、Vue SFCのscriptブロックが途中で閉じられ、Web buildが失敗した。",
+      "decision": "SFCソース上では終了タグを分割して組み立て、実行時のsrcdocには従来どおり正しいscript終了タグを出力する。SurfaceのCSP、sandbox、asset inline、Action bridgeの仕様は変更しない。",
+      "scope_check": "ビルドを通すために表示内容やsandbox権限を弱めず、Generated Surfaceの実行経路を別実装へ逃がさず、SFC構文と実行時HTMLの境界だけを修正した。",
+      "verification": "Web production build成功を確認済み。ブラウザでのsrcdoc実表示とAction実行は未実施。"
+    },
+    {
+      "id": "client-event-room-payload-boundary",
+      "problem": "既存SQLite互換APIのBackend Run通知がRoom付きClient Eventを正式Operationへ渡す際、保存対象のroom_idまで信頼コンテキスト偽装として拒否され、通知が欠落した。",
+      "decision": "client.event.saveに限り、Schema上の保存データであるroom_idを正式コンテキストへ取り込み、既存のWorkspace管理権限に加えてそのRoomのread権限を再確認する。Artifact、Chat、一般Domain Commandのpayload内Room指定は従来どおり拒否する。",
+      "scope_check": "Client EventをStoreへ直接保存せず、Domain Operation、Room認可、idempotencyを維持した。通知をRoomなしへ変換して境界を失わせる実装や、全OperationのRoom指定許可は行っていない。",
+      "verification": "Runtime typecheckと既存Backend Run通知の統合テストを実行済み。PG Client Eventの実DB再送は未実施。"
+    },
+    {
+      "id": "sandbox-host-execution-boundary",
+      "problem": "Gatewayのpath/Core root保護を追加する際、backend=noneを一律停止し、Runtime内で既存利用されていたホスト実行とローカルSandbox検証まで失わせていた。",
+      "decision": "backend=noneはRuntime境界内の既存host processとして復元する。ただし、追加したallowed_paths／denied_paths、workspace cwdの正規化、Core root拒否、partial host pathの安全側停止、秘密情報の一時 materialize とcleanupは維持する。具体Sandboxが必要な利用者はDocker/SSH/remoteを明示して選択する。",
+      "scope_check": "host fallbackを新しい権限として拡張せず、Gateway/Sandboxの既存契約を復元した。Workspace Coreへの直接Store書込みや、許可外パスの利用、認可緩和、テスト専用分岐は追加していない。",
+      "verification": "Sandbox verifierとGateway全体テストを再実行する。Docker、SSH、remote、実PostgreSQL、実Clientの検証は別途未実施として残す。"
+    },
+    {
+      "id": "cancellation-fixture-signal-readiness",
+      "problem": "Agent Backendの強制終了検証fixtureがREADYを出力した後にSIGTERM Handlerを登録していたため、親ProcessのcancelがHandler登録前に到達すると、意図したSIGKILLではなく通常SIGTERMで終了する競合があった。",
+      "decision": "fixtureのSIGTERM HandlerをREADY出力より前に登録し、検証対象であるprocess-runnerのSIGTERM→SIGKILL経路を安定して観測できるようにする。製品のcancel実装、終了判定、証拠の意味は変更しない。",
+      "scope_check": "テストを通すためにSIGTERMをSIGKILLへ変換する製品分岐や終了結果の緩和は追加していない。実際のProcess終了イベントを確認する検証意図を保ったまま、fixtureの準備順だけを修正した。",
+      "verification": "Agent Backendの対象Focused testを再実行し、全体CIで他のcancel／process closeテストと併せて確認する。"
+    }
+  ]
+}

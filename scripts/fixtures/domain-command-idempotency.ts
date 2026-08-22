@@ -227,7 +227,7 @@ try {
   assert.equal(crashBeforeRecovery?.version, 1);
   assert.deepEqual(crashBeforeRecovery?.data, { value: "before" });
   let crashTransactionReplayCalls = 0;
-  const replayRuntime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, undefined, { domainCommandRunningTimeoutMs: 100 });
+  const replayRuntime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, { domainCommandRunningTimeoutMs: 100 });
   const crashTransactionResult = await replayRuntime.runRuntimeApiDomainCommand({
     command_id: "collection.patch.apply",
     idempotency_key: "crash-during-internal-transaction",

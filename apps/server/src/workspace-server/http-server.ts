@@ -2,7 +2,20 @@ import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createHash } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
+import path from "node:path";
 import { Server as SocketServer } from "socket.io";
+import { ClientEventRecordSchema, ResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactRecord, type BackendEventRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type JsonValue, type SupportedLocale } from "@samurai-agent/core-schemas";
+import { builtinSurfaceRendererRegistryEntries } from "@samurai-agent/ui-protocol";
+import { domainCommandInputSources, listDomainCommandEntries, listDomainQueryEntries, type DomainCommandInputSource } from "@samurai-agent/action-catalog";
+import { parseDomainOperationInput, type DomainCommandId, type GeneratedSurfaceCreateInput, type GeneratedSurfaceReviseInput, type TrustedDomainContext } from "@samurai-agent/domain-operations";
+import {
+  createDefaultAgentBackendRegistry,
+  createProviderRegistryFromEnv,
+  generatedSurfaceCsp,
+  safeGeneratedSurfaceAssetPath
+} from "@samurai-agent/runtime";
+import type { RunChatTurnResult } from "@samurai-agent/runtime";
+import { createSurfaceRenderSpec, parseSurfaceOperation, type SurfaceOperation, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   WorkspaceServerError,
   WorkspaceServerStore,
@@ -11,7 +24,7 @@ import {
   canonicalJson,
   createVerifiedWorkspaceHumanCaller,
   loadWorkspaceServerConfig,
-  readWorkspaceBundleV3Transport,
+  readWorkspaceBundleV4Transport,
   resolveRequestWorkspaceId,
   verifyAccountSignature,
   type WorkspaceLearningScope,
@@ -19,14 +32,48 @@ import {
   type WorkspaceLearningSettings,
   type WorkspaceCompletionResourceKind,
   type WorkspaceCompletionAttestationPort,
+  type WorkspaceCompletionReviewPort,
   type WorkspaceCompletionPolicyOperation,
   type WorkspaceCompletionScope,
   type WorkspaceCompletionSemanticCuratorPort,
+  type WorkspaceBundleV3Manifest,
+  type WorkspaceBundleV4Manifest,
   type WorkspaceRequestContext,
+  type WorkspaceServerCommandService,
   type WorkspaceServerConfig
 } from "@samurai-agent/workspace-server";
-import { createWorkspaceServerCore } from "./core";
+import { createWorkspaceServerCore, type WorkspaceServerCore } from "./core";
 import { WorkspaceRealtimeGate, roomSocketRoom, workspaceSocketRoom } from "./realtime";
+import { WorkspaceWorkerSupervisor } from "../workers/workspace-worker-supervisor";
+import { createWorkspaceCompletionBackendReviewPort } from "../workers/workspace-completion-review-port";
+import { createWorkspaceLearningBackendReviewPort } from "../workers/workspace-learning-review-port";
+import { PostgresRuntimeExecutionWorker } from "../workers/postgres-runtime-execution-worker";
+import { PostgresRuntimeCommandService, type PostgresRuntimeChatCompletionEvent } from "../adapters/runtime/postgres-runtime-chat";
+import { runPostgresChatTurnThroughDomainOperation } from "../adapters/runtime/postgres-chat-domain-operation";
+import { createPostgresChatSessionThroughDomainOperation } from "../adapters/runtime/postgres-session-domain-operation";
+import { PostgresRuntimeClientEvents } from "../adapters/runtime/postgres-runtime-client-events";
+import { PostgresRuntimeSettings } from "../adapters/runtime/postgres-runtime-settings";
+import { PostgresRuntimeAutomation } from "../adapters/runtime/postgres-runtime-automation";
+import { PostgresKnowledgeWiki } from "../adapters/runtime/postgres-knowledge-wiki";
+import { PostgresCollection } from "../adapters/runtime/postgres-collection";
+import { PostgresKnowledgeMemory } from "../adapters/runtime/postgres-knowledge-memory";
+import { PostgresArtifact } from "../adapters/runtime/postgres-artifact";
+import { PostgresGeneratedSurface, type GeneratedSurfaceTargetCommandResult } from "../adapters/runtime/postgres-generated-surface";
+import { PostgresGatewayDomainOperations } from "../adapters/runtime/postgres-gateway-domain-operation";
+import { PostgresSkillDomainOperations } from "../adapters/runtime/postgres-skill-domain-operation";
+import { PostgresGatewayMaintenanceWorker } from "../workers/postgres-gateway-maintenance-worker";
+import { PostgresSkillOptimizationWorker } from "../workers/postgres-skill-optimization-worker";
+import type { OAuthAccountAuthorizationPort, OAuthBrowserSessionPort } from "@samurai-agent/external-integration";
+import {
+  createPostgresExternalIntegrationRuntime,
+  externalIntegrationRequestWorkspaceId,
+  isPostgresExternalIntegrationPath
+} from "../adapters/external/postgres-external-integration";
+import { PostgresExternalAppIngressFactory } from "../adapters/external/postgres-external-app-ingress";
+import { runPostgresExternalIntegrationContext } from "../adapters/external/postgres-external-integration-store";
+
+const automationJobKinds = ["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"] as const;
+const postgresTemporaryContextMaxBytes = 8 * 1024 * 1024;
 
 interface AuthenticatedRequest extends Request {
   samurai?: {
@@ -54,6 +101,7 @@ export interface WorkspaceServerHttp {
   httpServer: HttpServer;
   io: SocketServer;
   config: WorkspaceServerConfig;
+  workerSupervisor: WorkspaceWorkerSupervisor;
   close(): Promise<void>;
 }
 
@@ -65,9 +113,26 @@ export interface WorkspaceServerHttpOptions {
   /** Optional host cassette for the explicitly requested semantic dry-run.
    * It is never created from an HTTP request or enabled by default. */
   semanticCuratorPort?: WorkspaceCompletionSemanticCuratorPort;
+  /** Optional process-owned cassette for completion review jobs. When omitted,
+   * standard composition uses the host-owned Samurai Native backend without
+   * passing DB, file, or Agent-worktree capabilities to it. */
+  completionReviewPort?: WorkspaceCompletionReviewPort;
   /** Host-only verification cassette. HTTP cannot select this Port or submit
    * a raw attestation result. */
   attestationPort?: WorkspaceCompletionAttestationPort;
+  /** Optional host-owned backend registry. It is shared by the HTTP Runtime
+   * entry and never receives database or filesystem capabilities. */
+  backendRegistry?: ReturnType<typeof createDefaultAgentBackendRegistry>;
+  /** Optional host-owned Samurai login/session adapters for OAuth browser
+   * approval. Without these ports the external HTTP surface stays mounted but
+   * browser authorization fails closed. */
+  externalIntegration?: {
+    browserSession?: OAuthBrowserSessionPort;
+    browserAuthorization?: OAuthAccountAuthorizationPort;
+    allowedOrigins?: readonly string[];
+    trustedProxy?: boolean;
+    hookRelayCommand?: string;
+  };
 }
 
 export async function createWorkspaceServerHttp(
@@ -75,7 +140,99 @@ export async function createWorkspaceServerHttp(
   options: WorkspaceServerHttpOptions = {}
 ): Promise<WorkspaceServerHttp> {
   const core = await createWorkspaceServerCore(config, { attestationPort: options.attestationPort });
-  const { store, files, bundles, commands, learning, completion, completionJobs, curator, completionMigrations, maintenance } = core;
+  const { store, files, bundles, completionBundles, commands, learning, completion, completionJobs, curator, completionMigrations, maintenance } = core;
+  const provider = createProviderRegistryFromEnv();
+  const backendRegistry = options.backendRegistry ?? createDefaultAgentBackendRegistry(
+    provider,
+    process.env,
+    { repoRoot: process.cwd() }
+  );
+  const completionReviewPort = options.completionReviewPort ?? createWorkspaceCompletionBackendReviewPort(backendRegistry);
+  const learningReviewPort = options.reviewPorts === undefined
+    ? createWorkspaceLearningBackendReviewPort(backendRegistry)
+    : undefined;
+  const automation = new PostgresRuntimeAutomation({
+    database: core.database,
+    store,
+    backendRegistry,
+    agentWorktreeRoot: path.join(config.storageRoot, "agent-worktrees"),
+    coreWorkspaceRoot: path.join(config.storageRoot, "workspaces"),
+    maxRuns: 10
+  });
+  const knowledgeWiki = new PostgresKnowledgeWiki(completion, commands);
+  const collections = new PostgresCollection(commands, files);
+  const knowledgeMemory = new PostgresKnowledgeMemory(completion, commands);
+  const runtimeSettings = new PostgresRuntimeSettings(core.database, store);
+  const artifacts = new PostgresArtifact(commands, files, (context, input) => commands.ingestCompletionActivity(context, input));
+  const generatedSurfaces = new PostgresGeneratedSurface(
+    commands,
+    files,
+    createPostgresGeneratedSurfaceTargetCommand({ commands, collections, artifacts })
+  );
+  const clientEvents = new PostgresRuntimeClientEvents(core.database, store);
+  const externalIngress = new PostgresExternalAppIngressFactory({
+    files,
+    commands,
+    completion,
+    knowledgeWiki,
+    knowledgeMemory,
+    collections,
+    artifacts
+  });
+  const skillOptimizationHostComplete = async (input: { sessionId?: string; messages: Array<{ role: string; content: string }> }) => {
+    const content = input.messages.map((message) => `${message.role}: ${message.content}`).join("\n\n").trim();
+    const output = await provider.generate({
+      envelope: {
+        id: createId("envelope"),
+        source: "web",
+        actor_identity: "owner",
+        session_key: input.sessionId ? `skill-optimization:${input.sessionId}` : "skill-optimization:worker",
+        user_intent: content || "Generate a reviewable Skill optimization candidate.",
+        attachments: [],
+        input_locale: "ja",
+        output_locale: "ja",
+        metadata: {},
+        received_at: nowIso()
+      },
+      activeMemory: [],
+      knowledgeWiki: [],
+      collectionNotes: [],
+      selectedSkills: [],
+      sessionSearch: [],
+      availableTools: [],
+      recentMessages: [],
+      temporaryContext: []
+    });
+    return { content: output.content };
+  };
+  const externalIntegration = await createPostgresExternalIntegrationRuntime({
+    database: core.database,
+    commands,
+    ingress: externalIngress,
+    config,
+    ...(options.externalIntegration?.browserSession ? { browserSession: options.externalIntegration.browserSession } : {}),
+    ...(options.externalIntegration?.browserAuthorization ? { browserAuthorization: options.externalIntegration.browserAuthorization } : {}),
+    ...(options.externalIntegration?.allowedOrigins ? { allowedOrigins: options.externalIntegration.allowedOrigins } : {}),
+    ...(options.externalIntegration?.trustedProxy !== undefined ? { trustedProxy: options.externalIntegration.trustedProxy } : {}),
+    ...(options.externalIntegration?.hookRelayCommand ? { hookRelayCommand: options.externalIntegration.hookRelayCommand } : {})
+  });
+  const resolveWorkerContexts = async (signal: AbortSignal) => {
+    if (signal.aborted) return { state: "disabled" as const, reason: "aborted_before_identity_resolution" };
+    if (config.mode === "self_host") {
+      if (!config.selfHostWorkspaceId || !config.initialAdminId) {
+        return { state: "disabled" as const, reason: "self_host_worker_identity_unconfigured" };
+      }
+      const identity = await maintenance.getIdentity({ workspaceId: config.selfHostWorkspaceId, accountId: config.initialAdminId });
+      return identity.accountId
+        ? { state: "enabled" as const, contexts: [{ workspaceId: config.selfHostWorkspaceId, accountId: identity.accountId }] }
+        : { state: "disabled" as const, reason: "maintenance_identity_unconfigured" };
+    }
+    const identities = await maintenance.listConfiguredIdentities();
+    return {
+      state: "enabled" as const,
+      contexts: identities.map((identity) => ({ workspaceId: identity.workspaceId, accountId: identity.accountId }))
+    };
+  };
   const app = express();
   const httpServer = createServer(app);
   const corsOrigins = config.corsOrigins;
@@ -90,14 +247,86 @@ export async function createWorkspaceServerHttp(
   app.use(requestRateGuard({ windowMs: 60_000, limit: config.publicNetwork ? 180 : 600 }));
   app.use(cors({ origin: corsOrigins.length > 0 ? [...corsOrigins] : false, credentials: false }));
   app.use(express.json({ limit: "36mb" }));
+  app.use(express.urlencoded({ extended: false, limit: "2mb" }));
+  app.use((req, res, next) => {
+    if (!isPostgresExternalIntegrationPath(req.path)) {
+      next();
+      return;
+    }
+    const workspaceId = externalIntegrationRequestWorkspaceId({
+      query: req.query as Record<string, unknown>,
+      body: req.body,
+      headers: req.headers as Record<string, unknown>
+    }, config);
+    const controller = new AbortController();
+    const onAborted = () => controller.abort();
+    const onClosed = () => {
+      if (!req.complete) controller.abort();
+    };
+    req.once("aborted", onAborted);
+    req.once("close", onClosed);
+    const request = {
+      method: req.method,
+      url: `${req.protocol}://${req.get("host") ?? "localhost"}${req.originalUrl}`,
+      headers: externalRequestHeaders(req),
+      body: req.body,
+      remoteAddress: req.socket.remoteAddress,
+      signal: controller.signal
+    };
+    void runPostgresExternalIntegrationContext({ ...(workspaceId ? { workspaceId } : {}) }, () => externalIntegration.handler(request))
+      .then((response) => {
+        if (res.headersSent) return;
+        for (const [name, value] of Object.entries(response.headers)) res.setHeader(name, value);
+        res.status(response.status).send(response.body);
+      })
+      .catch(next)
+      .finally(() => {
+        req.off("aborted", onAborted);
+        req.off("close", onClosed);
+      });
+  });
   const io = new SocketServer(httpServer, { cors: { origin: corsOrigins.length > 0 ? [...corsOrigins] : false, credentials: false } });
   const realtimeGate = new WorkspaceRealtimeGate();
-  const learningRunner = new WorkspaceLearningRunner(learning, options.reviewPorts ?? [], {
+  const learningRunner = new WorkspaceLearningRunner(learning, options.reviewPorts ?? (learningReviewPort ? [learningReviewPort] : []), {
     onSettled: async ({ context, job }) => {
       await realtimeGate.run(context.workspaceId, async () => {
         await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: job.roomId, kind: "learning.job.updated" });
       });
     }
+  });
+  const workerSupervisor = new WorkspaceWorkerSupervisor({
+    learningRunner,
+    maintenance,
+    executionJobWorker: new PostgresRuntimeExecutionWorker(core.database),
+    gatewayMaintenance: new PostgresGatewayMaintenanceWorker(core.database),
+    skillOptimizationWorker: new PostgresSkillOptimizationWorker({
+      database: core.database,
+      completion,
+      repoRoot: process.cwd(),
+      hostComplete: skillOptimizationHostComplete
+    }),
+    automationScheduler: automation,
+    clientEventQueue: {
+      runTick: async (context, { signal }) => {
+        if (signal.aborted) return;
+        await clientEvents.expire({
+          ...context,
+          operationId: `client_event_expire_${context.operationId}`
+        });
+      }
+    },
+    ...(completionReviewPort ? { reviewPort: completionReviewPort } : {}),
+    ...(options.semanticCuratorPort ? { semanticPort: options.semanticCuratorPort } : {}),
+    resolveContext: async (signal) => {
+      const resolved = await resolveWorkerContexts(signal);
+      if (resolved.state === "disabled") return resolved;
+      const firstContext = resolved.contexts[0];
+      return firstContext
+        ? { state: "enabled", context: firstContext }
+        : { state: "disabled", reason: "worker_contexts_unconfigured" };
+    },
+    resolveContexts: resolveWorkerContexts,
+    retryDisabledContext: config.mode === "hosted"
   });
 
   const authenticate = accountAuthenticator(store);
@@ -107,16 +336,82 @@ export async function createWorkspaceServerHttp(
   // current membership before reaching the store.
   const authenticateInvitationAcceptance = workspaceAuthenticator(store, config, { requireMembership: false });
 
-  app.get("/api/health", (_req, res) => {
+  const gatewayOperationsFor = (context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">) => new PostgresGatewayDomainOperations({
+    database: core.database,
+    workspaceId: context.workspaceId,
+    accountId: context.accountId,
+    // Gateway pairing is transport admission only. Until a verified Room
+    // participant is resolved, the shared Core deliberately stops before
+    // Session/Chat/Sandbox execution.
+    core: {
+      ensureSession: async () => { throw new WorkspaceServerError("gateway_participant_authentication_required", 403); },
+      runChat: async () => { throw new WorkspaceServerError("gateway_participant_authentication_required", 403); }
+    },
+    emit: async (name) => {
+      await emitAuthorizedWorkspaceEvent(io, store, { workspaceId: context.workspaceId, kind: name });
+    },
+    notFoundError: (message) => new WorkspaceServerError(message, 404),
+    conflictError: (message) => new WorkspaceServerError(message, 409),
+    errorMessage: (error) => publicError(error).error
+  });
+
+  const gatewayContextFor = (req: Request, inputSource: TrustedDomainContext["inputSource"]): TrustedDomainContext => {
+    const context = workspaceContext(req);
+    const signed = authenticated(req);
+    const operationId = req.header("x-samurai-operation-id")?.trim() || req.header("idempotency-key")?.trim();
+    if (!operationId) throw new WorkspaceServerError("workspace_operation_id_required", 400);
+    return {
+      inputSource,
+      workspaceId: context.workspaceId,
+      actorId: context.accountId,
+      correlationId: signed.requestId,
+      idempotencyKey: operationId
+    };
+  };
+
+  const skillOperationsFor = (context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId?: string) => new PostgresSkillDomainOperations({
+    database: core.database,
+    completion,
+    workspaceId: context.workspaceId,
+    accountId: context.accountId,
+    repoRoot: process.cwd(),
+    hostComplete: skillOptimizationHostComplete,
+    autoStartOptimization: false,
+    ...(roomId ? { roomId } : {})
+  });
+
+  app.get("/api/health", asyncRoute(async (_req, res) => {
+    const workerStatus = workerSupervisor.status();
+    let database: { ok: true } | { ok: false; reason: string };
+    try {
+      await core.database.ping();
+      database = { ok: true };
+    } catch (error) {
+      database = { ok: false, reason: publicError(error).error };
+    }
     res.json({
-      ok: true,
+      ok: database.ok,
       storage: "postgresql",
+      db: database,
       mode: config.mode,
       ...(config.mode === "self_host" ? { workspace_id: config.selfHostWorkspaceId } : {}),
       rls: "required",
-      public_network: config.publicNetwork
+      public_network: config.publicNetwork,
+      worker_supervisor: {
+        state: workerStatus.state,
+        enabled: workerStatus.enabled,
+        consecutive_failures: workerStatus.consecutiveFailures,
+        successful_ticks: workerStatus.successfulTicks,
+        ...(workerStatus.disabledReason ? { disabled_reason: workerStatus.disabledReason } : {}),
+        ...(workerStatus.stopReason ? { stop_reason: workerStatus.stopReason } : {}),
+        ...(workerStatus.lastTickAt ? { last_tick_at: workerStatus.lastTickAt } : {}),
+        ...(workerStatus.lastSuccessfulTickAt ? { last_successful_tick_at: workerStatus.lastSuccessfulTickAt } : {}),
+        ...(workerStatus.workspaceCount !== undefined ? { workspace_count: workerStatus.workspaceCount } : {}),
+        ...(workerStatus.nextRetryAt ? { next_retry_at: workerStatus.nextRetryAt } : {}),
+        ...(workerStatus.lastError?.code ? { last_error_code: workerStatus.lastError.code } : {})
+      }
     });
-  });
+  }));
 
   app.post("/api/account/register", asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
@@ -208,6 +503,801 @@ export async function createWorkspaceServerHttp(
     res.json({ rooms: await store.listRooms(workspaceContext(req)) });
   }));
 
+  app.get("/api/workspaces/:workspaceId/agents", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json({ agents: await store.listAgents(workspaceContext(req)) });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/settings", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await runtimeSettings.get(workspaceContext(req)));
+  }));
+
+  app.patch("/api/workspaces/:workspaceId/settings", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    res.json(await runtimeSettings.patch(context, objectBody(req.body)));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/agent-backends", authenticateWorkspace, asyncRoute(async (_req, res) => {
+    res.json(backendRegistry.statuses());
+  }));
+
+  // PostgreSQL Gateway control-plane surface. Every mutation is bound through
+  // the formal Gateway Domain Operation, while list/detail queries use the
+  // same RLS-scoped adapter and never touch the legacy SQLite Store.
+  app.get("/api/workspaces/:workspaceId/gateway/pairings", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const gateway = gatewayOperationsFor(workspaceContext(req));
+    res.json(await gateway.adapter.listPairings({
+      ...(queryString(req, "status") ? { status: queryString(req, "status") } : {}),
+      ...(queryString(req, "channel") ? { channel: queryString(req, "channel") } : {}),
+      ...(queryString(req, "source_identity") ? { sourceIdentity: queryString(req, "source_identity") } : {}),
+      ...(queryString(req, "session_key") ? { sessionKey: queryString(req, "session_key") } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    }));
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/pairing-policies", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).listPairingPolicies());
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/pairing-policies/:channel", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).getPairingPolicy(pathParam(req, "channel") as never));
+  }));
+  app.post("/api/workspaces/:workspaceId/gateway/pairing-policies", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "gateway.pairing_policy.save", objectBody(req.body));
+    res.status(201).json(result.value);
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/routing-policies", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).listRoutingPolicies());
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/routing-policies/:channel", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).getRoutingPolicy(pathParam(req, "channel") as never));
+  }));
+  app.post("/api/workspaces/:workspaceId/gateway/routing-policies", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "gateway.routing_policy.save", objectBody(req.body));
+    res.status(201).json(result.value);
+  }));
+  app.post("/api/workspaces/:workspaceId/gateway/pairings/expire", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "gateway.pairing.expire", objectBody(req.body));
+    res.json(result.value);
+  }));
+  for (const action of ["approve", "reject", "rotate", "revoke"] as const) {
+    app.post(`/api/workspaces/:workspaceId/gateway/pairings/:pairingId/${action}`, authenticateWorkspace, asyncRoute(async (req, res) => {
+      const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), `gateway.pairing.${action}`, { pairing_id: pathParam(req, "pairingId") });
+      res.json(result.value);
+    }));
+  }
+  app.get("/api/workspaces/:workspaceId/gateway/inbound", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).adapter.listInboundMessages({
+      ...(queryString(req, "status") ? { status: queryString(req, "status") } : {}),
+      ...(queryString(req, "channel") ? { channel: queryString(req, "channel") } : {}),
+      ...(queryString(req, "source_identity") ? { sourceIdentity: queryString(req, "source_identity") } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    }));
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/boundary-policies", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).adapter.listBoundaryPolicies({
+      ...(queryString(req, "source_channel") ? { sourceChannel: queryString(req, "source_channel") } : {}),
+      ...(queryString(req, "session_key") ? { sessionKey: queryString(req, "session_key") } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    }));
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/mcp-configs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const enabled = queryString(req, "enabled");
+    res.json((await gatewayOperationsFor(workspaceContext(req)).adapter.listMcpConfigs({
+      ...(enabled === "true" || enabled === "false" ? { enabled: enabled === "true" } : {}),
+      ...(queryString(req, "server_name") ? { serverName: queryString(req, "server_name") } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    })).map(summarizePostgresGatewayMcpConfig));
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/mcp-configs/:configId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const config = await gatewayOperationsFor(workspaceContext(req)).adapter.getMcpConfig(pathParam(req, "configId"));
+    if (!config) throw new WorkspaceServerError("gateway_mcp_config_not_found", 404);
+    res.json(summarizePostgresGatewayMcpConfig(config));
+  }));
+  app.post("/api/workspaces/:workspaceId/gateway/mcp-configs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "gateway.mcp_config.save", objectBody(req.body));
+    res.status(201).json(summarizePostgresGatewayMcpConfig(result.value as never));
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/concurrency-locks", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).adapter.listConcurrencyLocks({
+      ...(queryString(req, "status") ? { status: queryString(req, "status") } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    }));
+  }));
+  app.post("/api/workspaces/:workspaceId/gateway/concurrency-locks/expire", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "gateway.concurrency_lock.expire", objectBody(req.body));
+    res.json(result.value);
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/sandbox-instances", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).adapter.listSandboxInstances({
+      ...(queryString(req, "status") ? { status: queryString(req, "status") } : {}),
+      ...(queryString(req, "scope") ? { scope: queryString(req, "scope") } : {}),
+      ...(queryString(req, "backend") ? { backend: queryString(req, "backend") } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    }));
+  }));
+  app.get("/api/workspaces/:workspaceId/gateway/sandbox-workspace-syncs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await gatewayOperationsFor(workspaceContext(req)).adapter.listSandboxWorkspaceSyncs({
+      ...(queryString(req, "instance_id") ? { instanceId: queryString(req, "instance_id") } : {}),
+      ...(queryString(req, "instance_key") ? { instanceKey: queryString(req, "instance_key") } : {}),
+      ...(queryString(req, "status") ? { status: queryString(req, "status") } : {}),
+      ...(queryString(req, "direction") ? { direction: queryString(req, "direction") } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    }));
+  }));
+  for (const action of ["recreate", "delete"] as const) {
+    app.post(`/api/workspaces/:workspaceId/gateway/sandbox-instances/:sandboxId/${action}`, authenticateWorkspace, asyncRoute(async (req, res) => {
+      const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), `gateway.sandbox.${action}`, { sandbox_id: pathParam(req, "sandboxId") });
+      res.json(result.value);
+    }));
+  }
+  app.post("/api/workspaces/:workspaceId/gateway/sandbox-instances/:sandboxId/sync", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "gateway.sandbox.sync", {
+      sandbox_id: pathParam(req, "sandboxId"),
+      ...(body.direction === undefined ? {} : { direction: body.direction }),
+      dry_run: body.dry_run === undefined ? true : booleanField(body, "dry_run")
+    });
+    res.json(result.value);
+  }));
+  app.post("/api/workspaces/:workspaceId/gateway/repair", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const result = await gatewayOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "gateway.state.repair", {
+      dry_run: body.dry_run === undefined ? true : booleanField(body, "dry_run")
+    });
+    res.json(result.value);
+  }));
+  app.post("/api/workspaces/:workspaceId/gateway/inbound", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = workspaceContext(req);
+    const result = await gatewayOperationsFor(context).execute(gatewayContextFor(req, "gateway_inbound"), "gateway.inbound.route", objectBody(req.body));
+    res.status(202).json(result.value);
+  }));
+
+  // Skill Optimization uses the same formal operations as the Runtime. The
+  // body remains in Completion's recoverable file transaction; only durable
+  // run/candidate/evaluation state is read from the PostgreSQL adapter.
+  app.get("/api/workspaces/:workspaceId/skill-optimizations", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = workspaceContext(req);
+    const roomId = queryString(req, "room_id") || undefined;
+    res.json(await skillOperationsFor(context, roomId).adapter.listRuns({
+      ...(queryString(req, "skill_id") ? { skillId: queryString(req, "skill_id") } : {}),
+      ...(roomId ? { roomId } : {}),
+      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+    }));
+  }));
+  app.get("/api/workspaces/:workspaceId/skill-optimizations/:runId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const detail = await skillOperationsFor(workspaceContext(req)).adapter.detail(pathParam(req, "runId"));
+    if (!detail) throw new WorkspaceServerError("skill_optimization_run_not_found", 404);
+    res.json(detail);
+  }));
+  app.post("/api/workspaces/:workspaceId/skills/:skillId/optimizations", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const result = await skillOperationsFor(workspaceContext(req), optionalStringField(body, "room_id") || undefined).execute(
+      gatewayContextFor(req, "runtime_api"),
+      "skill.optimization.start",
+      {
+        skill_id: pathParam(req, "skillId"),
+        ...(optionalStringField(body, "objective") ? { objective: optionalStringField(body, "objective") } : {}),
+        ...(body.golden_examples === undefined ? {} : { golden_examples: body.golden_examples }),
+        ...(body.synthetic_examples === undefined ? {} : { synthetic_examples: body.synthetic_examples })
+      }
+    );
+    res.status(202).json(result.value);
+  }));
+  app.post("/api/workspaces/:workspaceId/skill-optimizations/:runId/cancel", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const result = await skillOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "skill.optimization.cancel", { optimization_run_id: pathParam(req, "runId") });
+    res.json(result.value);
+  }));
+  for (const action of ["promote", "reject"] as const) {
+    app.post(`/api/workspaces/:workspaceId/skill-optimizations/:runId/${action}`, authenticateWorkspace, asyncRoute(async (req, res) => {
+      const body = objectBody(req.body);
+      const candidateId = optionalStringField(body, "candidate_id") || queryString(req, "candidate_id");
+      if (!candidateId) throw new WorkspaceServerError("skill_optimization_candidate_id_required", 400);
+      const result = await skillOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), `skill.optimization.${action}`, {
+        optimization_run_id: pathParam(req, "runId"), candidate_id: candidateId
+      });
+      res.json(result.value);
+    }));
+  }
+  app.post("/api/workspaces/:workspaceId/skill-optimizations/:runId/rollback", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const result = await skillOperationsFor(workspaceContext(req)).execute(gatewayContextFor(req, "runtime_api"), "skill.optimization.rollback", {
+      ...(optionalStringField(body, "promotion_id") ? { promotion_id: optionalStringField(body, "promotion_id") } : {}),
+      ...(optionalStringField(body, "snapshot_id") ? { snapshot_id: optionalStringField(body, "snapshot_id") } : {})
+    });
+    res.json(result.value);
+  }));
+
+  app.get("/api/workspaces/:workspaceId/surface/contract", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const source = queryString(req, "source");
+    if (source && !domainCommandInputSources.includes(source as DomainCommandInputSource)) {
+      throw new WorkspaceServerError("invalid_domain_command_source", 400);
+    }
+    const renderers = [...builtinSurfaceRendererRegistryEntries];
+    res.json({
+      protocol_version: "1",
+      renderers,
+      render_kinds: [...new Set(renderers.map((renderer) => renderer.kind))],
+      commands: listDomainCommandEntries(source as DomainCommandInputSource | undefined),
+      queries: listDomainQueryEntries(source as DomainCommandInputSource | undefined),
+      input_sources: domainCommandInputSources
+    });
+  }));
+
+  // Room-scoped Runtime entry. The old SQLite chat routes are not mounted in
+  // this PostgreSQL process; every request below is signed and passes through
+  // the same Workspace/Room RLS context as the other Server operations.
+  app.get("/api/workspaces/:workspaceId/chat/sessions", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.listSessions());
+  }));
+
+  app.post("/api/workspaces/:workspaceId/chat/sessions", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory);
+    const input = {
+      roomId: stringField(body, "room_id"),
+      ...(optionalStringField(body, "title") ? { title: optionalStringField(body, "title") } : {}),
+      ...(body.ui_locale === undefined ? {} : { uiLocale: supportedLocaleField(body, "ui_locale") }),
+      ...(body.output_locale === undefined ? {} : { outputLocale: supportedLocaleField(body, "output_locale") })
+    };
+    const session = await createPostgresChatSessionThroughDomainOperation(runtimeCommands, {
+      workspaceId: context.workspaceId,
+      accountId: context.accountId,
+      operationId: context.operationId,
+      input: {
+        room_id: input.roomId,
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.uiLocale ? { ui_locale: input.uiLocale } : {}),
+        ...(input.outputLocale ? { output_locale: input.outputLocale } : {})
+      }
+    });
+    res.status(201).json(session);
+  }));
+
+  app.get("/api/workspaces/:workspaceId/chat/sessions/:sessionId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    const detail = await runtimeCommands.getSessionDetail(pathParam(req, "sessionId"));
+    if (!detail) throw new WorkspaceServerError("runtime_session_not_found", 404);
+    res.json(detail);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/chat/sessions/:sessionId/messages", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = workspaceContext(req);
+    const idempotencyKey = stringHeader(req, "idempotency-key");
+    const completionContext: WorkspaceRequestContext = {
+      ...context,
+      operationId: `runtime_chat_activity_${createHash("sha256").update(`${context.workspaceId}|${idempotencyKey}`).digest("hex").slice(0, 48)}`
+    };
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
+      async (event) => recordPostgresChatCompletionActivity(commands, completionContext, event));
+    const metadata = body.metadata === undefined ? undefined : jsonObjectField(body, "metadata");
+    const result = await runPostgresChatTurnThroughDomainOperation(runtimeCommands, {
+      workspaceId: context.workspaceId,
+      accountId: context.accountId,
+      sessionId: pathParam(req, "sessionId"),
+      idempotencyKey,
+      input: {
+        content: stringField(body, "content"),
+        ...(optionalStringField(body, "agent_id") ? { agent_id: optionalStringField(body, "agent_id") } : {}),
+        ...(optionalStringField(body, "backend_id") ? { backend_id: optionalStringField(body, "backend_id") } : {}),
+        ...(body.input_locale === undefined ? {} : { input_locale: supportedLocaleField(body, "input_locale") }),
+        ...(body.output_locale === undefined ? {} : { output_locale: supportedLocaleField(body, "output_locale") }),
+        ...(metadata ? { metadata } : {}),
+        ...(body.attachments === undefined ? {} : { attachments: resourceRefsField(body, "attachments") }),
+        ...(body.temporary_context === undefined ? {} : { temporary_context: temporaryContextField(body, "temporary_context") })
+      }
+    });
+    const renderSpec = postgresChatRenderSpec(result);
+    res.json({ result, render_spec: renderSpec, render_specs: [renderSpec] });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/chat/runs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.listBackendRuns(queryString(req, "session_id")));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/chat/runs/:runId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    const run = await runtimeCommands.getBackendRun(pathParam(req, "runId"));
+    if (!run) throw new WorkspaceServerError("runtime_backend_run_not_found", 404);
+    res.json(run);
+  }));
+
+  app.get("/api/workspaces/:workspaceId/chat/runs/:runId/events", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.listBackendEvents(pathParam(req, "runId")));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/chat/changes", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.listWorkspaceChanges(queryString(req, "session_id")));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/chat/activity", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("runtime_activity_room_id_required", 400);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.listActivity(roomId));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/chat/search", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    const query = queryString(req, "q");
+    if (!roomId) throw new WorkspaceServerError("runtime_search_room_id_required", 400);
+    if (!query) throw new WorkspaceServerError("runtime_search_query_required", 400);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.search(roomId, query));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/client-events", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const targetClientKind = optionalStringField(req.query as Record<string, unknown>, "target_client_kind");
+    if (targetClientKind !== undefined && targetClientKind !== "desktop" && targetClientKind !== "web" && targetClientKind !== "any") {
+      throw new WorkspaceServerError("client_event_target_kind_invalid", 400);
+    }
+    const status = optionalStringField(req.query as Record<string, unknown>, "status");
+    if (status !== undefined && !["pending", "delivered", "acked", "expired", "failed"].includes(status)) {
+      throw new WorkspaceServerError("client_event_status_invalid", 400);
+    }
+    res.json({ events: await clientEvents.list(workspaceContext(req), {
+      ...(targetClientKind ? { targetClientKind: targetClientKind as ClientEventRecord["target_client_kind"] } : {}),
+      ...(optionalStringField(req.query as Record<string, unknown>, "target_client_id") ? { targetClientId: optionalStringField(req.query as Record<string, unknown>, "target_client_id") } : {}),
+      ...(status ? { status: status as ClientEventRecord["status"] } : {}),
+      ...(queryNumber(req, "limit") !== undefined ? { limit: queryNumber(req, "limit") } : {})
+    }) });
+  }));
+
+  app.post("/api/workspaces/:workspaceId/client-events", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const event = ClientEventRecordSchema.safeParse(req.body);
+    if (!event.success) throw new WorkspaceServerError("client_event_invalid", 400);
+    const saved = await clientEvents.save(operationContext(req), event.data);
+    res.status(saved.replayed ? 200 : 201).json(saved);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/client-events/:eventId/deliver", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const result = await clientEvents.deliver(operationContext(req), pathParam(req, "eventId"));
+    res.json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/client-events/:eventId/ack", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const result = await clientEvents.acknowledge(operationContext(req), pathParam(req, "eventId"));
+    res.json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/client-events/:eventId/fail", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const errorCode = optionalStringField(body, "error_code") ?? "client_event_failed";
+    const result = await clientEvents.fail(operationContext(req), pathParam(req, "eventId"), errorCode);
+    res.json(result);
+  }));
+
+  // Knowledge Wiki is the Markdown-facing Knowledge projection. Every read
+  // requires a Room, and every mutation uses the signed Completion command
+  // boundary; the HTTP layer never writes a Wiki file or table directly.
+  app.get("/api/workspaces/:workspaceId/knowledge-wiki", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_wiki_room_id_required", 400);
+    res.json({ pages: await knowledgeWiki.list(workspaceContext(req), roomId, queryString(req, "include_archived") === "true") });
+  }));
+  app.get("/api/workspaces/:workspaceId/knowledge-wiki/graph", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.graph(workspaceContext(req), roomId, queryString(req, "query")));
+  }));
+  app.get("/api/workspaces/:workspaceId/knowledge-wiki/lint", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.diagnostics(workspaceContext(req), roomId));
+  }));
+  app.post("/api/workspaces/:workspaceId/knowledge-wiki/reindex", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = stringField(objectBody(req.body), "room_id");
+    res.json(await knowledgeWiki.reindex(workspaceContext(req), roomId));
+  }));
+  app.post("/api/workspaces/:workspaceId/knowledge-wiki/proposals", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const saved = await knowledgeWiki.create(context, {
+      roomId: stringField(body, "room_id"), title: stringField(body, "title"), content: stringField(body, "content"),
+      ...(optionalStringField(body, "slug") ? { slug: optionalStringField(body, "slug") } : {}),
+      ...(body.tags === undefined ? {} : { tags: stringArrayField(body, "tags") }),
+      ...(body.content_locale === undefined ? {} : { contentLocale: supportedLocaleField(body, "content_locale") }),
+      ...(body.knowledge_kind === undefined ? {} : { knowledgeKind: completionKnowledgeKind(stringField(body, "knowledge_kind")) }),
+      reason: optionalStringField(body, "reason") ?? "Knowledge Wiki proposal created"
+    });
+    if (!saved.replayed && saved.wiki.scope.kind === "room" && saved.wiki.scope.roomId) {
+      await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: saved.wiki.scope.roomId, kind: "knowledge-wiki.updated" });
+    }
+    res.status(saved.replayed ? 200 : 201).json(saved);
+  }));
+  app.get("/api/workspaces/:workspaceId/knowledge-wiki/:wikiId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeWiki.get(workspaceContext(req), pathParam(req, "wikiId")));
+  }));
+  app.get("/api/workspaces/:workspaceId/knowledge-wiki/:wikiId/backlinks", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.backlinks(workspaceContext(req), roomId, pathParam(req, "wikiId")));
+  }));
+  app.patch("/api/workspaces/:workspaceId/knowledge-wiki/:wikiId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const saved = await knowledgeWiki.update(context, pathParam(req, "wikiId"), {
+      ...(optionalStringField(body, "title") ? { title: optionalStringField(body, "title") } : {}),
+      ...(body.content === undefined ? {} : { content: stringField(body, "content") }),
+      ...(body.tags === undefined ? {} : { tags: stringArrayField(body, "tags") }),
+      ...(body.content_locale === undefined ? {} : { contentLocale: supportedLocaleField(body, "content_locale") }),
+      reason: optionalStringField(body, "reason") ?? "Knowledge Wiki page updated"
+    });
+    res.json(saved);
+  }));
+  app.post("/api/workspaces/:workspaceId/knowledge-wiki/:wikiId/accept", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    res.json(await knowledgeWiki.setState(context, pathParam(req, "wikiId"), "active", "Knowledge Wiki proposal accepted"));
+  }));
+  app.post("/api/workspaces/:workspaceId/knowledge-wiki/:wikiId/reject", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    res.json(await knowledgeWiki.setState(context, pathParam(req, "wikiId"), "rejected", "Knowledge Wiki proposal rejected"));
+  }));
+  app.post("/api/workspaces/:workspaceId/knowledge-wiki/:wikiId/archive", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    res.json(await knowledgeWiki.setArchived(context, pathParam(req, "wikiId"), true, "Knowledge Wiki page archived"));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/knowledge-memory", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_memory_room_id_required", 400);
+    res.json({ memories: await knowledgeMemory.list(workspaceContext(req), roomId, queryString(req, "include_archived") === "true") });
+  }));
+  app.get("/api/workspaces/:workspaceId/knowledge-memory/search", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    const query = queryString(req, "q");
+    if (!roomId || !query) throw new WorkspaceServerError("knowledge_memory_search_input_required", 400);
+    res.json({ memories: await knowledgeMemory.search(workspaceContext(req), roomId, query, queryNumber(req, "limit") ?? 50) });
+  }));
+  app.get("/api/workspaces/:workspaceId/knowledge-memory/:memoryId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeMemory.get(workspaceContext(req), pathParam(req, "memoryId")));
+  }));
+  app.post("/api/workspaces/:workspaceId/knowledge-memory/:memoryId/archive", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    res.json(await knowledgeMemory.archive(context, pathParam(req, "memoryId"), optionalStringField(objectBody(req.body), "reason") ?? "Memory archived by owner"));
+  }));
+
+  // Collection files are the editable source. PostgreSQL keeps only the
+  // Room-scoped index, versions, and recovery state; all UI mutations below
+  // pass through the Collection use case and return a Surface render spec.
+  app.get("/api/workspaces/:workspaceId/collections/schemas", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    res.json({ schemas: await collections.listSchemas(workspaceContext(req), roomId) });
+  }));
+  app.post("/api/workspaces/:workspaceId/collections/schemas", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const schema = objectBody(body.schema) as unknown as CollectionSchema;
+    const saved = await collections.saveSchema(context, stringField(body, "room_id"), schema, body.expected_version === undefined ? undefined : numberField(body, "expected_version"));
+    const { replayed, ...resource } = saved;
+    res.status(replayed ? 200 : 201).json({ schema: resource, replayed });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/schema", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    res.json({ schema: await collections.getSchema(workspaceContext(req), roomId, pathParam(req, "collectionId")) });
+  }));
+  app.put("/api/workspaces/:workspaceId/collections/:collectionId/schema", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const schema = objectBody(body.schema) as unknown as CollectionSchema;
+    const saved = await collections.saveSchema(context, stringField(body, "room_id"), schema, numberField(body, "expected_version"));
+    const { replayed, ...resource } = saved;
+    res.json({ schema: resource, replayed });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/records", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    res.json({ records: await collections.listRecords(workspaceContext(req), roomId, pathParam(req, "collectionId")) });
+  }));
+  app.post("/api/workspaces/:workspaceId/collections/:collectionId/records", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const collectionId = pathParam(req, "collectionId");
+    const record = await collections.createRecord(context, stringField(body, "room_id"), collectionRecordFromBody(collectionId, body));
+    const { replayed, ...resource } = record;
+    res.status(replayed ? 200 : 201).json({ record: resource, replayed });
+  }));
+  app.post("/api/workspaces/:workspaceId/collections/:collectionId/records/:recordId/patches", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const changes = jsonObjectField(body, "changes");
+    const record = await collections.applyPatch(context, stringField(body, "room_id"), pathParam(req, "collectionId"), pathParam(req, "recordId"), {
+      ...(optionalStringField(body, "patch_id") ? { id: optionalStringField(body, "patch_id") } : {}),
+      changes,
+      ...(body.expected_version === undefined ? {} : { expected_version: numberField(body, "expected_version") })
+    });
+    const { replayed, ...resource } = record;
+    res.json({ record: resource, replayed });
+  }));
+  app.delete("/api/workspaces/:workspaceId/collections/:collectionId/records/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const record = await collections.deleteRecord(context, stringField(body, "room_id"), pathParam(req, "collectionId"), pathParam(req, "recordId"), numberField(body, "expected_version"));
+    const { replayed, ...resource } = record;
+    res.json({ record: resource, replayed });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/notes", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    res.json({ notes: await collections.listNotes(workspaceContext(req), roomId, pathParam(req, "collectionId")) });
+  }));
+  app.post("/api/workspaces/:workspaceId/collections/reindex", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    res.json(await collections.reindex(context, stringField(objectBody(req.body), "room_id")));
+  }));
+  app.post("/api/workspaces/:workspaceId/collections/surface/operations", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const roomId = stringField(body, "room_id");
+    const operation = parseSurfaceOperation(body.operation);
+    const context = operationContext(req);
+    if (!operation || operation.id !== context.operationId) throw new WorkspaceServerError("collection_surface_operation_invalid", 400);
+    let result: unknown;
+    let resultKind: "collection_view" | "collection_record" | "collection_patch" | "collection_delete" | "collection_action";
+    let renderSpec: SurfaceRenderSpec;
+    if (operation.kind === "collection.view.present") {
+      const presented = await collections.presentView(context, roomId, operation.collection_id, operation.view_id);
+      result = presented;
+      resultKind = "collection_view";
+      renderSpec = presented.render_spec;
+    } else if (operation.kind === "collection.record.create") {
+      const record = await collections.createRecord(context, roomId, {
+        id: operation.record_id, collection_id: operation.collection_id, data: operation.data, resource_refs: [], created_at: nowIso(), updated_at: nowIso()
+      });
+      result = record;
+      resultKind = "collection_record";
+      renderSpec = (await collections.presentView(context, roomId, operation.collection_id)).render_spec;
+    } else if (operation.kind === "collection.record.patch") {
+      const record = await collections.applyPatch(context, roomId, operation.collection_id, operation.record_id, {
+        id: operation.patch_id, changes: operation.changes,
+        ...(operation.expected_version === undefined ? {} : { expected_version: operation.expected_version })
+      });
+      result = record;
+      resultKind = "collection_patch";
+      renderSpec = (await collections.presentView(context, roomId, operation.collection_id, operation.metadata?.view_id && typeof operation.metadata.view_id === "string" ? operation.metadata.view_id : undefined)).render_spec;
+    } else if (operation.kind === "collection.record.delete") {
+      result = await collections.deleteRecord(context, roomId, operation.collection_id, operation.record_id, operation.expected_version);
+      resultKind = "collection_delete";
+      renderSpec = (await collections.presentView(context, roomId, operation.collection_id, operation.view_id)).render_spec;
+    } else if (operation.kind === "collection.action.run") {
+      const action = await collections.runAction(context, roomId, operation);
+      result = action.result;
+      resultKind = "collection_action";
+      renderSpec = action.presented.render_spec;
+    } else {
+      throw new WorkspaceServerError("collection_surface_operation_kind_invalid", 400);
+    }
+    res.status(201).json({ operation, result_kind: resultKind, render_spec: renderSpec, render_specs: [renderSpec], result });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/artifacts", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("artifact_room_id_required", 400);
+    res.json({ artifacts: await artifacts.list(workspaceContext(req), roomId) });
+  }));
+  app.get("/api/workspaces/:workspaceId/artifacts/:artifactId/content", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("artifact_room_id_required", 400);
+    const detail = await artifacts.get(workspaceContext(req), roomId, pathParam(req, "artifactId"));
+    res.type(detail.artifact.metadata.content_type === "application/json" ? "application/json" : "text/plain").send(detail.content);
+  }));
+  app.get("/api/workspaces/:workspaceId/artifacts/:artifactId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("artifact_room_id_required", 400);
+    res.json(await artifacts.get(workspaceContext(req), roomId, pathParam(req, "artifactId")));
+  }));
+  app.post("/api/workspaces/:workspaceId/artifacts", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await artifacts.create(context, {
+      roomId: stringField(body, "room_id"),
+      title: stringField(body, "title"),
+      content: artifactContentField(body, "content"),
+      ...(body.kind === undefined ? {} : { kind: artifactKindField(body, "kind") }),
+      ...(body.locale === undefined ? {} : { locale: supportedLocaleField(body, "locale") }),
+      ...(body.source_locales === undefined ? {} : { sourceLocales: supportedLocaleArrayField(body, "source_locales") }),
+      ...(body.metadata === undefined ? {} : { metadata: jsonObjectField(body, "metadata") })
+    });
+    if (!result.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: stringField(body, "room_id"), kind: "artifact.created" });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+  app.post("/api/workspaces/:workspaceId/artifacts/surface/operations", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const operation = parseSurfaceOperation(body.operation);
+    const roomId = stringField(body, "room_id");
+    const context = operationContext(req);
+    if (!operation || operation.kind !== "artifact.request" || operation.id !== context.operationId) throw new WorkspaceServerError("artifact_surface_operation_invalid", 400);
+    const result = await artifacts.runSurfaceOperation(context, roomId, operation);
+    res.status(201).json(result);
+  }));
+
+  // Generated Surface is a Room-scoped projection. Its bundle files are read
+  // through the Workspace File boundary, while create/revise/state/action and
+  // interaction changes use the formal Domain Operation handlers.
+  app.get("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("generated_surface_room_id_required", 400);
+    res.json(await generatedSurfaces.detail(workspaceContext(req), roomId, pathParam(req, "surfaceId")));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/revisions/:revisionId/bundle", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("generated_surface_room_id_required", 400);
+    res.json(await generatedSurfaces.bundle(workspaceContext(req), roomId, pathParam(req, "surfaceId"), pathParam(req, "revisionId")));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/revisions/:revisionId/preview", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("generated_surface_room_id_required", 400);
+    const context = workspaceContext(req);
+    const exported = await generatedSurfaces.export(context, roomId, { surface_id: pathParam(req, "surfaceId"), revision_id: pathParam(req, "revisionId"), format: "html" });
+    const assets = await generatedSurfaces.readAssets(context, roomId, exported.revision);
+    res.set("Content-Security-Policy", generatedSurfaceCsp);
+    res.set("X-Content-Type-Options", "nosniff");
+    res.type("html").send(generatedSurfaceDocument(exported.bundle, exported.surface.actions, generatedSurfaceAssetPayload(assets)));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/export", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("generated_surface_room_id_required", 400);
+    const format = queryString(req, "format") === "zip" ? "zip" : "html";
+    const input = { surface_id: pathParam(req, "surfaceId"), ...(queryString(req, "revision_id") ? { revision_id: queryString(req, "revision_id") } : {}), format } as const;
+    if (format === "zip") {
+      const zip = await generatedSurfaces.createExportZip(workspaceContext(req), roomId, input);
+      res.json({ file_name: zip.fileName, content_type: "application/zip", content_base64: zip.content.toString("base64") });
+      return;
+    }
+    const context = workspaceContext(req);
+    const exported = await generatedSurfaces.export(context, roomId, input);
+    const assets = await generatedSurfaces.readAssets(context, roomId, exported.revision);
+    const content = generatedSurfaceDocument(exported.bundle, exported.surface.actions, generatedSurfaceAssetPayload(assets));
+    res.json({ file_name: exported.file_name, content_type: "text/html", content_base64: Buffer.from(content, "utf8").toString("base64") });
+  }));
+
+  app.post("/api/workspaces/:workspaceId/generated-surfaces", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const roomId = stringField(body, "room_id");
+    const { room_id: _roomId, ...input } = body;
+    const context = operationContext(req);
+    const result = await generatedSurfaces.create(context, roomId, input as GeneratedSurfaceCreateInput);
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/revise", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const roomId = stringField(body, "room_id");
+    const { room_id: _roomId, ...input } = body;
+    const context = operationContext(req);
+    const result = await generatedSurfaces.revise(context, roomId, { ...input, surface_id: pathParam(req, "surfaceId") } as GeneratedSurfaceReviseInput);
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/actions/:actionId/run", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const roomId = stringField(body, "room_id");
+    const context = operationContext(req);
+    const actionPayload = body.action_payload === undefined ? {} : jsonObjectField(body, "action_payload");
+    const result = await generatedSurfaces.runAction(context, {
+      room_id: roomId,
+      surface_id: pathParam(req, "surfaceId"),
+      action_id: pathParam(req, "actionId"),
+      ...(optionalStringField(body, "revision_id") ? { revision_id: optionalStringField(body, "revision_id") } : {}),
+      ...(optionalStringField(body, "interaction_id") ? { interaction_id: optionalStringField(body, "interaction_id") } : {}),
+      ...(optionalStringField(body, "message_id") ? { message_id: optionalStringField(body, "message_id") } : {}),
+      action_payload: actionPayload
+    });
+    res.status(201).json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/state", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const roomId = stringField(body, "room_id");
+    const context = operationContext(req);
+    const action = stringField(body, "action");
+    if (action !== "pin" && action !== "unpin" && action !== "archive") throw new WorkspaceServerError("generated_surface_state_action_invalid", 400);
+    res.json(await generatedSurfaces.state(context, {
+      room_id: roomId,
+      surface_id: pathParam(req, "surfaceId"),
+      action,
+      ...(optionalStringField(body, "interaction_id") ? { interaction_id: optionalStringField(body, "interaction_id") } : {}),
+      ...(optionalStringField(body, "message_id") ? { message_id: optionalStringField(body, "message_id") } : {})
+    }));
+  }));
+
+  app.post("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/interactions", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const roomId = stringField(body, "room_id");
+    const context = operationContext(req);
+    const kind = stringField(body, "kind");
+    if (!["opened", "pinned", "unpinned", "dismissed", "action", "corrected", "regenerated"].includes(kind)) {
+      throw new WorkspaceServerError("generated_surface_interaction_kind_invalid", 400);
+    }
+    const commandResult = body.command_result === undefined ? undefined : generatedSurfaceJsonValueField(body, "command_result");
+    res.status(201).json(await generatedSurfaces.recordInteraction(context, {
+      room_id: roomId,
+      surface_id: pathParam(req, "surfaceId"),
+      kind: kind as never,
+      ...(optionalStringField(body, "interaction_id") ? { interaction_id: optionalStringField(body, "interaction_id") } : {}),
+      ...(optionalStringField(body, "revision_id") ? { revision_id: optionalStringField(body, "revision_id") } : {}),
+      ...(optionalStringField(body, "message_id") ? { message_id: optionalStringField(body, "message_id") } : {}),
+      ...(optionalStringField(body, "command_id") ? { command_id: optionalStringField(body, "command_id") } : {}),
+      ...(commandResult === undefined ? {} : { command_result: commandResult }),
+      ...(body.user_feedback === undefined ? {} : { user_feedback: stringField(body, "user_feedback") })
+    }));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/automation/jobs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = optionalStringField(req.query as Record<string, unknown>, "room_id");
+    res.json({ jobs: await automation.listJobs(workspaceContext(req), roomId) });
+  }));
+
+  app.post("/api/workspaces/:workspaceId/automation/jobs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const created = await automation.createJob(context, {
+      roomId: stringField(body, "room_id"),
+      title: stringField(body, "title"),
+      kind: automationKindField(body, "kind"),
+      schedule: stringField(body, "schedule"),
+      targetInstruction: stringField(body, "target_instruction"),
+      ...(body.delivery_target === undefined ? {} : { deliveryTarget: jsonObjectField(body, "delivery_target") }),
+      ...(body.enabled === undefined ? {} : { enabled: booleanField(body, "enabled") }),
+      ...(body.next_run_at === undefined ? {} : { nextRunAt: stringField(body, "next_run_at") }),
+      ...(body.max_attempts === undefined ? {} : { maxAttempts: numberField(body, "max_attempts") }),
+      ...(optionalStringField(body, "connection_id") ? { connectionId: optionalStringField(body, "connection_id") } : {}),
+      ...(body.session_ref === undefined ? {} : { sessionRef: jsonObjectField(body, "session_ref") })
+    });
+    if (!created.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: created.job.room_id!, kind: "automation.job.created" });
+    res.status(created.replayed ? 200 : 201).json(created);
+  }));
+
+  app.get("/api/workspaces/:workspaceId/automation/jobs/:jobId/runs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json({ runs: await automation.listRuns(workspaceContext(req), pathParam(req, "jobId")) });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/automation/runs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("automation_room_id_required", 400);
+    res.json({ runs: await automation.listRunsForRoom(workspaceContext(req), roomId) });
+  }));
+
+  app.post("/api/workspaces/:workspaceId/automation/run-now", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await automation.runNow(context, {
+      roomId: stringField(body, "room_id"),
+      kind: automationKindField(body, "kind")
+    });
+    if (!result.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: result.job.room_id!, kind: "automation.job.created" });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/automation/jobs/:jobId/management", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const state = stringField(body, "state");
+    if (state !== "allowed" && state !== "manager_stopped") throw new WorkspaceServerError("automation_management_state_invalid", 400);
+    const context = operationContext(req);
+    const updated = await automation.setManagementState(context, { jobId: pathParam(req, "jobId"), state });
+    if (!updated.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: updated.job.room_id!, kind: "automation.job.management_changed" });
+    res.status(updated.replayed ? 200 : 200).json(updated);
+  }));
+
+  app.post("/api/workspaces/:workspaceId/agents", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const result = await commands.registerAgent(operationContext(req), {
+      ...(optionalStringField(body, "agent_id") ? { id: optionalStringField(body, "agent_id") } : {}),
+      displayName: stringField(body, "display_name"),
+      ...(optionalStringField(body, "description") ? { description: optionalStringField(body, "description") } : {}),
+      ...(optionalStringField(body, "backend_id") ? { backendId: optionalStringField(body, "backend_id") } : {})
+    });
+    if (!result.replayed) await emitAuthorizedWorkspaceEvent(io, store, { workspaceId: result.agent.workspaceId, kind: "workspace.agent.registered" });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+
   app.post("/api/workspaces/:workspaceId/rooms", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const context = workspaceContext(req);
@@ -228,6 +1318,59 @@ export async function createWorkspaceServerHttp(
 
   app.get("/api/workspaces/:workspaceId/rooms/:roomId/members", authenticateWorkspace, asyncRoute(async (req, res) => {
     res.json({ members: await store.listRoomMembers(workspaceContext(req), pathParam(req, "roomId")) });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/rooms/:roomId/agent-permissions", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json({ permissions: await store.listAgentRoomPermissions(workspaceContext(req), pathParam(req, "roomId")) });
+  }));
+
+  app.put("/api/workspaces/:workspaceId/rooms/:roomId/agents/:agentId/permission", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const result = await realtimeGate.run(context.workspaceId, async () => commands.setAgentRoomPermission(context, {
+      roomId: pathParam(req, "roomId"),
+      agentId: pathParam(req, "agentId"),
+      canView: booleanField(body, "can_view"),
+      canEdit: booleanField(body, "can_edit"),
+      canExecute: booleanField(body, "can_execute"),
+      expectedVersion: numberField(body, "expected_version")
+    }));
+    if (!result.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: result.permission.roomId, kind: "workspace.agent.room_permission.changed" });
+    res.status(result.replayed ? 200 : 201).json({ permission: result.permission, replayed: result.replayed });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/connections", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json({ connections: await store.listConnectionDescriptors(workspaceContext(req)) });
+  }));
+
+  app.put("/api/workspaces/:workspaceId/connections/:connectionId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const allowedRoomIds = body.allowed_room_ids === undefined ? undefined : stringArrayField(body, "allowed_room_ids");
+    const ingressClasses = body.ingress_classes === undefined ? undefined : stringArrayField(body, "ingress_classes");
+    if (body.token !== undefined || body.api_key !== undefined || body.secret !== undefined || body.secret_ref !== undefined) {
+      throw new WorkspaceServerError("workspace_connection_secret_forbidden", 400);
+    }
+    const result = await realtimeGate.run(context.workspaceId, async () => commands.upsertConnectionDescriptor(context, {
+      id: pathParam(req, "connectionId"),
+      ...(optionalStringField(body, "agent_id") ? { agentId: optionalStringField(body, "agent_id") } : {}),
+      principalAccountId: stringField(body, "principal_account_id"),
+      connectorId: stringField(body, "connector_id"),
+      appId: stringField(body, "app_id"),
+      status: connectionStatusField(body, "status"),
+      expiresAt: stringField(body, "expires_at"),
+      ...(optionalStringField(body, "revoked_at") ? { revokedAt: optionalStringField(body, "revoked_at") } : {}),
+      ...(allowedRoomIds ? { allowedRoomIds } : {}),
+      ...(body.room_limit === undefined ? {} : { roomLimit: numberField(body, "room_limit") }),
+      ...(ingressClasses ? { ingressClasses } : {}),
+      expectedVersion: numberField(body, "expected_version")
+    }));
+    if (!result.replayed) {
+      for (const roomId of result.descriptor.allowedRoomIds) {
+        await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId, kind: "workspace.connection_descriptor.changed" });
+      }
+    }
+    res.status(result.replayed ? 200 : 201).json({ connection: result.descriptor, replayed: result.replayed });
   }));
 
   app.post("/api/workspaces/:workspaceId/rooms/:roomId/parent/preview", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -1281,19 +2424,19 @@ export async function createWorkspaceServerHttp(
   app.get("/api/workspaces/:workspaceId/transfers/:transferId/bundle", authenticateWorkspace, asyncRoute(async (req, res) => {
     const context = workspaceContext(req);
     const transferId = pathParam(req, "transferId");
-    const transfer = await bundles.getTransferBundle(context, transferId);
-    const transport = await readWorkspaceBundleV3Transport(transfer.directory);
-    res.setHeader("content-type", "application/vnd.samurai.workspace-bundle-v3+json");
+    const transfer = await completionBundles.getTransferBundle(context, transferId);
+    const transport = await readWorkspaceBundleV4Transport(transfer.directory);
+    res.setHeader("content-type", "application/vnd.samurai.workspace-bundle-v4+json");
     res.json(transport);
   }));
 
   app.get("/api/workspaces/:workspaceId/transfers/:transferId/manifest", authenticateWorkspace, asyncRoute(async (req, res) => {
-    const transfer = await bundles.getTransferBundle(workspaceContext(req), pathParam(req, "transferId"));
+    const transfer = await completionBundles.getTransferBundle(workspaceContext(req), pathParam(req, "transferId"));
     res.json({ manifest: transfer.manifest });
   }));
 
   app.get("/api/workspaces/:workspaceId/transfers/:transferId/entries/{*entryPath}", authenticateWorkspace, asyncRoute(async (req, res) => {
-    const entry = await bundles.getTransferEntry(workspaceContext(req), pathParam(req, "transferId"), wildcardParam(req.params.entryPath));
+    const entry = await completionBundles.getTransferEntry(workspaceContext(req), pathParam(req, "transferId"), wildcardParam(req.params.entryPath));
     res.setHeader("content-type", entry.contentType);
     res.send(entry.content);
   }));
@@ -1383,17 +2526,21 @@ export async function createWorkspaceServerHttp(
     res.status(normalized.status).json({ error: normalized.code, ...(normalized.details ? { details: normalized.details } : {}) });
   });
 
+  await workerSupervisor.start();
+
   return {
     app,
     httpServer,
     io,
     config,
+    workerSupervisor,
     async close(): Promise<void> {
-      await learningRunner.close();
+      await workerSupervisor.stop();
       await new Promise<void>((resolve) => io.close(() => resolve()));
       if (httpServer.listening) {
         await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
       }
+      externalIntegration.close();
       await core.close();
     }
   };
@@ -1521,11 +2668,94 @@ function operationContext(req: Request): WorkspaceRequestContext {
   };
 }
 
+function postgresRuntimeCommands(
+  database: WorkspaceServerCore["database"],
+  config: WorkspaceServerConfig,
+  backendRegistry: ReturnType<typeof createDefaultAgentBackendRegistry>,
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+  io: SocketServer,
+  store: WorkspaceServerStore,
+  knowledgeMemory: PostgresKnowledgeMemory,
+  onCompletionActivity?: (event: PostgresRuntimeChatCompletionEvent) => Promise<void>
+): PostgresRuntimeCommandService {
+  const clientEvents = new PostgresRuntimeClientEvents(database, store);
+  let runtimeCommands: PostgresRuntimeCommandService;
+  runtimeCommands = new PostgresRuntimeCommandService({
+    database,
+    workspaceId: context.workspaceId,
+    accountId: context.accountId,
+    backendRegistry,
+    knowledgeMemory,
+    agentWorktreeRoot: path.join(config.storageRoot, "agent-worktrees", context.workspaceId),
+    coreWorkspaceRoot: path.join(config.storageRoot, "workspaces"),
+    ...(onCompletionActivity ? { onCompletionActivity } : {}),
+    onEvent: async (event: BackendEventRecord, roomId: string) => {
+      await emitAuthorizedRoomWorkspaceEvent(io, store, {
+        workspaceId: context.workspaceId,
+        roomId,
+        kind: "runtime.event.created"
+      });
+      if (event.event_type !== "run_completed" && event.event_type !== "run_failed" && event.event_type !== "backend_waiting_for_native_input") return;
+      const run = await runtimeCommands.getBackendRun(event.run_id);
+      if (!run) return;
+      const notification = PostgresRuntimeClientEvents.notificationForRun(run);
+      if (!notification) return;
+      const operationId = `client_event_save_${createHash("sha256").update(`${context.workspaceId}|${notification.id}`).digest("hex").slice(0, 40)}`;
+      await clientEvents.save({ workspaceId: context.workspaceId, accountId: context.accountId, operationId }, notification);
+    }
+  });
+  return runtimeCommands;
+}
+
+/** Converts a settled PG Runtime run into the product's formal Completion
+ * Activity. Runtime's detailed operational ledger remains the source for
+ * execution state; Completion receives a stable, Room-scoped evidence row. */
+async function recordPostgresChatCompletionActivity(
+  commands: WorkspaceServerCore["commands"],
+  context: WorkspaceRequestContext,
+  event: PostgresRuntimeChatCompletionEvent
+): Promise<void> {
+  const roomId = event.session.room_id;
+  if (!roomId) return;
+  const outcome = event.run.status === "completed"
+    ? "completed"
+    : event.run.status === "waiting_for_backend_input"
+      ? "unknown"
+      : "failed";
+  const changedResources = [event.operation?.result_ref?.id, event.run.output_message_id].filter((value): value is string => Boolean(value));
+  await commands.ingestCompletionActivity(context, {
+    id: `completion_activity_${createHash("sha256").update(`${context.workspaceId}|${event.run.id}`).digest("hex").slice(0, 48)}`,
+    roomId,
+    sourceApp: "samurai-workspace-chat",
+    sourceId: event.run.id,
+    ...(event.operation ? { operationId: event.operation.id } : {}),
+    instructionSummary: event.instructionSummary,
+    ...(event.resultSummary ? { resultSummary: event.resultSummary } : {}),
+    changedResources,
+    verificationOutcome: outcome === "completed" ? "not_run" : outcome === "unknown" ? "unknown" : "failed",
+    failureState: outcome === "completed" ? "none" : "unresolved",
+    outcome,
+    payload: {
+      backend_id: event.run.backend_id,
+      runtime_run_id: event.run.id,
+      runtime_status: event.run.status,
+      ...(event.run.error_code ? { error_code: event.run.error_code } : {})
+    },
+    ...(event.run.session_ref ? {
+      sessionRef: {
+        appId: event.run.session_ref.app_id,
+        ...(event.run.session_ref.session_id ? { sessionId: event.run.session_ref.session_id } : {})
+      }
+    } : {})
+  });
+}
+
 function signedRequestPayload(req: Request, workspaceId?: string): {
   method: string;
   path: string;
   workspaceId?: string;
   operationId?: string;
+  idempotencyKey?: string;
   requestId: string;
   timestamp: string;
   body: unknown;
@@ -1536,6 +2766,7 @@ function signedRequestPayload(req: Request, workspaceId?: string): {
     path: req.path,
     ...(workspaceId ? { workspaceId } : {}),
     ...(req.header("x-samurai-operation-id") ? { operationId: stringHeader(req, "x-samurai-operation-id") } : {}),
+    ...(req.header("idempotency-key") ? { idempotencyKey: stringHeader(req, "idempotency-key") } : {}),
     requestId: signed.requestId,
     timestamp: signed.timestamp,
     body: req.body ?? {}
@@ -1724,6 +2955,19 @@ function createRateGuard(options: { windowMs: number; limit: number }): (key: st
   };
 }
 
+function collectionRecordFromBody(collectionId: string, body: Record<string, unknown>): CollectionRecord {
+  const timestamp = nowIso();
+  return {
+    id: stringField(body, "record_id"),
+    collection_id: collectionId,
+    ...(body.version === undefined ? {} : { version: numberField(body, "version") }),
+    data: jsonObjectField(body, "data"),
+    resource_refs: body.resource_refs === undefined ? [] : resourceRefsField(body, "resource_refs"),
+    created_at: optionalStringField(body, "created_at") ?? timestamp,
+    updated_at: optionalStringField(body, "updated_at") ?? timestamp
+  };
+}
+
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new WorkspaceServerError("request_body_invalid", 400);
   return value as Record<string, unknown>;
@@ -1735,22 +2979,145 @@ function objectField(body: Record<string, unknown>, key: string): Record<string,
   return value as Record<string, unknown>;
 }
 
-function workspaceBundleManifestField(body: Record<string, unknown>, key: string): {
-  format_version: 3;
-  workspace_id: string;
-  exported_at: string;
-  source: { hosting_mode: "hosted" | "self_host"; database_placement: "shared" | "dedicated" };
-  schema_version?: number;
-  transfer_id?: string;
-  files: Record<string, string>;
-  record_counts: Record<string, number>;
-  integrity_hash: string;
-} {
+function jsonObjectField(body: Record<string, unknown>, key: string): Record<string, JsonValue> {
   const value = objectField(body, key);
+  const encoded = JSON.stringify(value);
+  if (encoded.length > 200_000 || !isJsonObject(value)) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value as Record<string, JsonValue>;
+}
+
+function isJsonObject(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every(isJsonValue);
+}
+
+function isJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (typeof value === "object") return isJsonObject(value);
+  return false;
+}
+
+function supportedLocaleField(body: Record<string, unknown>, key: string): SupportedLocale {
+  const value = stringField(body, key);
+  if (!(supportedLocales as readonly string[]).includes(value)) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value as SupportedLocale;
+}
+
+function automationKindField(body: Record<string, unknown>, key: string): (typeof automationJobKinds)[number] {
+  const value = stringField(body, key);
+  if (!(automationJobKinds as readonly string[]).includes(value)) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value as (typeof automationJobKinds)[number];
+}
+
+function artifactKindField(body: Record<string, unknown>, key: string): ArtifactRecord["kind"] {
+  const value = stringField(body, key);
+  const kinds: readonly ArtifactRecord["kind"][] = ["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"];
+  if (!kinds.includes(value as ArtifactRecord["kind"])) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value as ArtifactRecord["kind"];
+}
+
+function artifactContentField(body: Record<string, unknown>, key: string): string | Record<string, JsonValue> | JsonValue[] {
+  const value = body[key];
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    if (!value.every(isJsonValue)) throw new WorkspaceServerError(`${key}_invalid`, 400);
+    return value as JsonValue[];
+  }
+  if (value && typeof value === "object" && isJsonObject(value)) return value as Record<string, JsonValue>;
+  throw new WorkspaceServerError(`${key}_invalid`, 400);
+}
+
+function supportedLocaleArrayField(body: Record<string, unknown>, key: string): SupportedLocale[] {
+  const value = body[key];
+  if (!Array.isArray(value) || value.length < 1 || value.length > 20) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value.map((item) => {
+    if (typeof item !== "string" || !(supportedLocales as readonly string[]).includes(item)) throw new WorkspaceServerError(`${key}_invalid`, 400);
+    return item as SupportedLocale;
+  });
+}
+
+function resourceRefsField(body: Record<string, unknown>, key: string) {
+  const value = body[key];
+  if (!Array.isArray(value)) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  try {
+    return ResourceRefSchema.array().max(32).parse(value);
+  } catch {
+    throw new WorkspaceServerError(`${key}_invalid`, 400);
+  }
+}
+
+interface PostgresTemporaryContextAttachment {
+  id: string;
+  kind: "desktop_screenshot";
+  label?: string;
+  source_name?: string;
+  mime_type: "image/png";
+  data_url: string;
+  created_at: string;
+  expires_at: string;
+  metadata?: Record<string, JsonValue>;
+}
+
+/**
+ * AppShot is intentionally carried only through the signed Runtime request.
+ * It is validated here and never copied into a Runtime message, Activity, or
+ * database row. The Backend receives the ephemeral attachment directly.
+ */
+function temporaryContextField(body: Record<string, unknown>, key: string): PostgresTemporaryContextAttachment[] {
+  const value = body[key];
+  if (!Array.isArray(value) || value.length > 4) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new WorkspaceServerError(`${key}_invalid`, 400);
+    const record = item as Record<string, unknown>;
+    const id = typeof record.id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.id)
+      ? record.id
+      : undefined;
+    if (!id || record.kind !== "desktop_screenshot") throw new WorkspaceServerError(`${key}_invalid`, 400);
+    const dataUrl = typeof record.data_url === "string" ? record.data_url.trim() : "";
+    const bytes = parsePostgresTemporaryContextPngDataUrl(dataUrl);
+    if (!bytes) throw new WorkspaceServerError(`${key}_invalid`, 400);
+    const createdAt = typeof record.created_at === "string" ? record.created_at.trim() : "";
+    const expiresAt = typeof record.expires_at === "string" ? record.expires_at.trim() : "";
+    const expiresAtMs = Date.parse(expiresAt);
+    if (!createdAt || !expiresAt || !Number.isFinite(Date.parse(createdAt)) || !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+      throw new WorkspaceServerError(`${key}_expired_or_invalid`, 400);
+    }
+    const sourceName = typeof record.source_name === "string" ? record.source_name.trim().slice(0, 160) : "";
+    const label = typeof record.label === "string" ? record.label.trim().slice(0, 240) : sourceName || "Desktop screenshot";
+    return {
+      id,
+      kind: "desktop_screenshot",
+      ...(label ? { label } : {}),
+      ...(sourceName ? { source_name: sourceName } : {}),
+      mime_type: "image/png",
+      data_url: `data:image/png;base64,${bytes.toString("base64")}`,
+      created_at: createdAt,
+      expires_at: expiresAt,
+      ...(record.metadata === undefined ? {} : { metadata: jsonObjectField(record, "metadata") })
+    };
+  });
+}
+
+function parsePostgresTemporaryContextPngDataUrl(dataUrl: string): Buffer | undefined {
+  const prefix = "data:image/png;base64,";
+  if (!dataUrl.startsWith(prefix)) return undefined;
+  const base64 = dataUrl.slice(prefix.length);
+  if (!base64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) return undefined;
+  const bytes = Buffer.from(base64, "base64");
+  if (bytes.length === 0 || bytes.length > postgresTemporaryContextMaxBytes) return undefined;
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47];
+  return pngSignature.every((byte, index) => bytes[index] === byte) ? bytes : undefined;
+}
+
+function workspaceBundleManifestField(body: Record<string, unknown>, key: string): WorkspaceBundleV3Manifest | WorkspaceBundleV4Manifest {
+  const value = objectField(body, key);
+  const formatVersion = numberField(value, "format_version");
+  if (formatVersion === 4) return value as unknown as WorkspaceBundleV4Manifest;
   const source = objectField(value, "source");
   const files = objectField(value, "files");
   const recordCounts = objectField(value, "record_counts");
-  const formatVersion = numberField(value, "format_version");
   if (formatVersion !== 3 || source.hosting_mode !== "hosted" && source.hosting_mode !== "self_host"
     || source.database_placement !== "shared" && source.database_placement !== "dedicated") {
     throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
@@ -2038,6 +3405,12 @@ function membershipStateField(body: Record<string, unknown>, key: string): "acti
   throw new WorkspaceServerError(`${key}_invalid`, 400);
 }
 
+function connectionStatusField(body: Record<string, unknown>, key: string): "active" | "revoked" | "expired" {
+  const status = stringField(body, key);
+  if (status === "active" || status === "revoked" || status === "expired") return status;
+  throw new WorkspaceServerError(`${key}_invalid`, 400);
+}
+
 function transferReceiptField(body: Record<string, unknown>, key: string): {
   format_version: 1;
   transfer_id: string;
@@ -2092,6 +3465,13 @@ function stringHeader(req: Request, name: string): string {
   return value;
 }
 
+function externalRequestHeaders(req: Request): Record<string, string | undefined> {
+  return Object.fromEntries(Object.entries(req.headers).map(([key, value]) => [
+    key,
+    Array.isArray(value) ? value.join(",") : value
+  ]));
+}
+
 function queryString(req: Request, key: string): string | undefined {
   const value = req.query[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -2123,6 +3503,241 @@ function optionalPathParam(req: Request, key: string): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+function createPostgresGeneratedSurfaceTargetCommand(dependencies: {
+  commands: WorkspaceServerCommandService;
+  collections: PostgresCollection;
+  artifacts: PostgresArtifact;
+}): (
+  context: WorkspaceRequestContext,
+  input: { roomId: string; commandId: string; payload: Record<string, JsonValue>; operationId: string }
+) => Promise<GeneratedSurfaceTargetCommandResult> {
+  return async (context, input) => {
+    await dependencies.commands.assertRoomExecutable(context, input.roomId);
+    let payload: Record<string, JsonValue>;
+    try {
+      payload = parseDomainOperationInput(input.commandId as DomainCommandId, input.payload) as unknown as Record<string, JsonValue>;
+    } catch {
+      throw new WorkspaceServerError("generated_surface_target_payload_invalid", 400, { command_id: input.commandId });
+    }
+    let result: unknown;
+    let changedResources: string[] = [];
+    switch (input.commandId) {
+      case "artifact.create": {
+        const created = await dependencies.artifacts.create(context, {
+          roomId: input.roomId,
+          title: generatedSurfaceRequiredString(payload, "title"),
+          content: generatedSurfaceRequiredString(payload, "content"),
+          ...(payload.input_locale === undefined ? {} : { sourceLocales: [supportedLocaleField({ input_locale: payload.input_locale }, "input_locale")] }),
+          ...(payload.kind === undefined ? {} : { kind: artifactKindField({ kind: payload.kind }, "kind") }),
+          ...(payload.output_locale === undefined ? {} : { locale: supportedLocaleField({ output_locale: payload.output_locale }, "output_locale") }),
+          ...(payload.metadata === undefined ? {} : { metadata: generatedSurfaceObject(payload.metadata, "metadata") })
+        });
+        result = created;
+        changedResources = [created.artifact.id, created.artifact.file_ref.uri];
+        break;
+      }
+      case "collection.record.create": {
+        const collectionId = generatedSurfaceRequiredString(payload, "collection_id");
+        const recordId = generatedSurfaceOptionalString(payload, "record_id") ?? `record_${createHash("sha256").update(`${input.operationId}|${collectionId}`).digest("hex").slice(0, 40)}`;
+        const record = await dependencies.collections.createRecord(context, input.roomId, {
+          id: recordId,
+          collection_id: collectionId,
+          data: generatedSurfaceObject(payload.data, "data"),
+          resource_refs: payload.resource_refs === undefined ? [] : ResourceRefSchema.array().max(32).parse(payload.resource_refs),
+          created_at: nowIso(),
+          updated_at: nowIso()
+        });
+        const { replayed, ...resource } = record;
+        result = { resource, replayed };
+        changedResources = [record.id, record.file_path];
+        break;
+      }
+      case "collection.patch.apply": {
+        const record = await dependencies.collections.applyPatch(
+          context,
+          input.roomId,
+          generatedSurfaceRequiredString(payload, "collection_id"),
+          generatedSurfaceRequiredString(payload, "record_id"),
+          {
+            changes: generatedSurfaceObject(payload.changes, "changes"),
+            ...(generatedSurfaceOptionalString(payload, "patch_id") ? { id: generatedSurfaceOptionalString(payload, "patch_id") } : {}),
+            ...(typeof payload.expected_version === "number" ? { expected_version: payload.expected_version } : {})
+          }
+        );
+        const { replayed, ...resource } = record;
+        result = { resource, replayed };
+        changedResources = [record.id, record.file_path];
+        break;
+      }
+      case "collection.record.delete": {
+        const record = await dependencies.collections.deleteRecord(
+          context,
+          input.roomId,
+          generatedSurfaceRequiredString(payload, "collection_id"),
+          generatedSurfaceRequiredString(payload, "record_id"),
+          generatedSurfaceRequiredNumber(payload, "expected_version")
+        );
+        const { replayed, ...resource } = record;
+        result = { resource, replayed };
+        changedResources = [record.id, record.file_path];
+        break;
+      }
+      case "collection.action.run": {
+        const operation = parseSurfaceOperation({
+          id: input.operationId,
+          kind: "collection.action.run",
+          collection_id: generatedSurfaceRequiredString(payload, "collection_id"),
+          action_id: generatedSurfaceRequiredString(payload, "action_id"),
+          ...(generatedSurfaceOptionalString(payload, "record_id") ? { record_id: generatedSurfaceOptionalString(payload, "record_id") } : {}),
+          payload: payload.payload === undefined ? {} : generatedSurfaceObject(payload.payload, "payload")
+        });
+        if (!operation || operation.kind !== "collection.action.run") throw new WorkspaceServerError("generated_surface_target_payload_invalid", 400);
+        const action = await dependencies.collections.runAction(context, input.roomId, operation);
+        result = action.result;
+        changedResources = [operation.collection_id];
+        break;
+      }
+      default:
+        throw new WorkspaceServerError("generated_surface_target_command_not_connected", 503, { command_id: input.commandId });
+    }
+
+    const resultValue = result as JsonValue;
+    await dependencies.commands.ingestCompletionActivity(context, {
+      id: `completion_activity_${createHash("sha256").update(`${context.workspaceId}|generated_surface_target|${input.operationId}`).digest("hex").slice(0, 48)}`,
+      roomId: input.roomId,
+      sourceApp: "generated-surface",
+      sourceId: input.commandId,
+      operationId: input.operationId,
+      instructionSummary: `Generated Surface action: ${input.commandId}`,
+      resultSummary: `Generated Surface action ${input.commandId} completed.`,
+      changedResources,
+      verificationOutcome: "confirmed",
+      failureState: "none",
+      outcome: "completed",
+      payload: { command_id: input.commandId, result: resultValue }
+    });
+    return { result: resultValue, resourceRefs: changedResources };
+  };
+}
+
+function generatedSurfaceRequiredString(payload: Record<string, JsonValue>, key: string): string {
+  const value = payload[key];
+  if (typeof value !== "string" || !value.trim()) throw new WorkspaceServerError(`generated_surface_${key}_required`, 400);
+  return value.trim();
+}
+
+function generatedSurfaceOptionalString(payload: Record<string, JsonValue>, key: string): string | undefined {
+  const value = payload[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !value.trim()) throw new WorkspaceServerError(`generated_surface_${key}_invalid`, 400);
+  return value.trim();
+}
+
+function generatedSurfaceRequiredNumber(payload: Record<string, JsonValue>, key: string): number {
+  const value = payload[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new WorkspaceServerError(`generated_surface_${key}_invalid`, 400);
+  return value;
+}
+
+function generatedSurfaceObject(value: JsonValue | undefined, key: string): Record<string, JsonValue> {
+  if (!isJsonObject(value)) throw new WorkspaceServerError(`generated_surface_${key}_invalid`, 400);
+  return value as Record<string, JsonValue>;
+}
+
+function generatedSurfaceJsonValueField(body: Record<string, unknown>, key: string): JsonValue {
+  const value = body[key];
+  if (!isJsonValue(value)) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value as JsonValue;
+}
+
+function generatedSurfaceDocument(bundle: { html: string; css?: string; script?: string }, actions: Array<{ id: string }> = [], assets: Array<{ path: string; content_base64: string; mime_type: string }> = []): string {
+  const bridge = JSON.stringify({ actions: actions.map((action) => action.id) }).replace(/</g, "\\u003c");
+  const html = inlineGeneratedSurfaceAssets(bundle.html, assets);
+  const css = (bundle.css ?? "").replace(/<\/style/gi, "<\\/style");
+  const script = (bundle.script ?? "").replace(/<\/script/gi, "<\\/script");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${generatedSurfaceCsp}"><style>${css}</style></head><body>${html}<script>${script}</script><script>window.samuraiGeneratedSurface=${bridge};window.dispatchSamuraiAction=function(actionId,payload){window.parent.postMessage({type:"samurai.generated_surface.action",action_id:actionId,payload:payload||{}},"*")};</script></body></html>`;
+}
+
+function generatedSurfaceAssetPayload(assets: Array<{ path: string; content: Buffer; mime_type: string }>): Array<{ path: string; content_base64: string; mime_type: string }> {
+  return assets.map((asset) => ({ path: asset.path, content_base64: asset.content.toString("base64"), mime_type: asset.mime_type }));
+}
+
+function inlineGeneratedSurfaceAssets(source: string, assets: Array<{ path: string; content_base64: string; mime_type: string }>): string {
+  const dataByPath = new Map<string, string>();
+  for (const asset of assets) {
+    const path = safeGeneratedSurfaceAssetPath(asset.path);
+    if (!path) continue;
+    const dataUrl = `data:${asset.mime_type};base64,${asset.content_base64}`;
+    dataByPath.set(path, dataUrl);
+    dataByPath.set(`assets/${path}`, dataUrl);
+  }
+  const replaceReference = (reference: string): string => {
+    const normalized = reference.trim().replace(/^\.\//, "");
+    return dataByPath.get(normalized) ?? reference;
+  };
+  return source
+    .replace(/((?:src|href)\s*=\s*["'])([^"']+)(["'])/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`)
+    .replace(/(url\(\s*["']?)([^"')]+)(["']?\s*\))/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`);
+}
+
+function postgresChatRenderSpec(result: RunChatTurnResult): SurfaceRenderSpec {
+  const agentMessage = result.messages.find((message) => message.role === "agent");
+  return createSurfaceRenderSpec({
+    kind: "chat",
+    priority: "primary",
+    state: result.backendRun.status === "failed" ? "error" : result.backendRun.status === "waiting_for_backend_input" ? "loading" : "ready",
+    title: result.session.title,
+    resource_refs: [
+      { kind: "session", id: result.session.id, uri: `sessions/${result.session.id}`, label: result.session.title },
+      { kind: "backend_run", id: result.backendRun.id, uri: `backend-runs/${result.backendRun.id}`, label: result.backendRun.input_summary },
+      ...result.artifacts.map((artifact) => artifact.file_ref)
+    ],
+    props: {
+      session_id: result.session.id,
+      backend_run_id: result.backendRun.id,
+      backend_status: result.backendRun.status,
+      message_ids: result.messages.map((message) => message.id),
+      primary_message_id: agentMessage?.id ?? null,
+      artifact_ids: result.artifacts.map((artifact) => artifact.id),
+      memory_ids: result.memories.map((memory) => memory.id),
+      reflection_suggestion_ids: result.reflectionSuggestions.map((suggestion) => suggestion.id)
+    },
+    errors: result.backendRun.status === "failed" ? [{
+      code: result.backendRun.error_code ?? "backend_failed",
+      message: result.backendRun.output_summary ?? "Backend run failed.",
+      retryable: true
+    }] : undefined,
+    fallback: result.backendRun.status === "failed" ? {
+      kind: "run_history",
+      title: "Run history",
+      message: "Open run history to inspect the failed backend trace.",
+      props: { run_ids: [result.backendRun.id], selected_run_id: result.backendRun.id }
+    } : undefined
+  });
+}
+
+function summarizePostgresGatewayMcpConfig(config: GatewayMcpConfigRecord): Record<string, unknown> {
+  if (config.transport === "stdio") {
+    return {
+      ...config,
+      stdio: {
+        ...config.stdio,
+        env: Object.keys(config.stdio.env),
+        secret_env: Object.keys(config.stdio.secret_env),
+        secret_files: config.stdio.secret_files.map((file) => ({ secret_ref_id: file.secret_ref_id, filename: file.filename, env: file.env, mode: file.mode }))
+      }
+    };
+  }
+  return {
+    ...config,
+    http: {
+      ...config.http,
+      headers: Object.keys(config.http.headers),
+      secret_headers: Object.keys(config.http.secret_headers)
+    }
+  };
+}
+
 function normalizeError(error: unknown): WorkspaceServerError {
   if (error instanceof WorkspaceServerError) return error;
   const message = error instanceof Error ? error.message : "workspace_server_internal_error";
@@ -2131,8 +3746,11 @@ function normalizeError(error: unknown): WorkspaceServerError {
   if (/room_(?:not_available|parent_not_available|not_found_or_access_denied)/.test(message)) {
     return new WorkspaceServerError("room_not_available", 404);
   }
-  const conflictCode = message.match(/(?:room_(?:parent_membership_required|move_parent_membership_required|hierarchy_cycle|last_owner_cannot_be_removed|membership_version_conflict|version_conflict)|workspace_(?:membership_version_conflict|last_owner_cannot_be_revoked|record_room_change_forbidden|file_room_change_forbidden|account_not_active))/)?.[0];
+  const conflictCode = message.match(/(?:room_(?:parent_membership_required|move_parent_membership_required|hierarchy_cycle|last_owner_cannot_be_removed|membership_version_conflict|version_conflict)|workspace_(?:membership_version_conflict|last_owner_cannot_be_revoked|record_room_change_forbidden|file_room_change_forbidden|account_not_active|agent_room_permission_version_conflict|connection_descriptor_version_conflict))/)?.[0];
   if (conflictCode) return new WorkspaceServerError(conflictCode, 409);
+  if (/workspace_(?:agent_input_invalid|agent_room_permission_invalid|connection_descriptor_invalid|connection_principal_not_active|connection_agent_not_active|connection_room_binding_invalid|connection_descriptor_expired|connection_descriptor_revocation_required|connection_descriptor_identity_invalid|connection_room_limit_invalid|connection_ingress_classes_invalid)/.test(message)) {
+    return new WorkspaceServerError("workspace_request_rejected", 400);
+  }
   if (/room_membership_invalid/.test(message)) return new WorkspaceServerError("room_membership_invalid", 400);
   if (/workspace_admin_permission_required/.test(message)) return new WorkspaceServerError("workspace_admin_permission_required", 403);
   if (/workspace_owner_permission_required/.test(message)) return new WorkspaceServerError("workspace_owner_permission_required", 403);

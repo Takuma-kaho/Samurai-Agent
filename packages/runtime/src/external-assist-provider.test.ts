@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import {
 } from "./external-assist-provider";
 
 const roots: string[] = [];
+const readText = (filePath: string) => readFile(filePath, "utf8");
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -34,7 +35,7 @@ describe("local file external assist provider", () => {
         keywords: ["frontend"]
       }
     ]);
-    const provider = new LocalFileExternalAssistProvider({ filePath, maxHints: 1 });
+    const provider = new LocalFileExternalAssistProvider({ filePath, maxHints: 1, readText });
 
     const hints = await provider.prefetch({
       sessionId: "session_1",
@@ -63,7 +64,7 @@ describe("local file external assist provider", () => {
       SAMURAI_EXTERNAL_ASSIST_FILE: filePath,
       SAMURAI_EXTERNAL_ASSIST_PROVIDER_ID: "env-local-assist",
       SAMURAI_EXTERNAL_ASSIST_MAX_HINTS: "3"
-    });
+    }, readText);
 
     expect(provider?.id).toBe("env-local-assist");
     await expect(provider?.prefetch({
@@ -96,7 +97,7 @@ describe("local file external assist provider", () => {
       SAMURAI_EXTERNAL_ASSIST_FILES: [releaseFile, gatewayFile].join(path.delimiter),
       SAMURAI_EXTERNAL_ASSIST_PROVIDER_IDS: "release-assist,gateway-assist",
       SAMURAI_EXTERNAL_ASSIST_MAX_HINTS: "2"
-    });
+    }, readText);
 
     expect(providers.map((provider) => provider.id)).toEqual(["release-assist", "gateway-assist"]);
     await expect(providers[0]?.prefetch({

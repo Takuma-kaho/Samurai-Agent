@@ -208,14 +208,19 @@ export class CollectionDomainService {
     return result;
   }
 
-  async executeTriggerJob(job: AutomationJobRecord): Promise<string | undefined> {
+  async executeTriggerJob(job: AutomationJobRecord, trustedContext: TrustedDomainContext): Promise<{ summary: string } | undefined> {
     const target = triggerTarget(job.delivery_target);
     if (!target) return undefined;
     const schema = await this.dependencies.mutation.getSchema(target.collectionId);
     if (!schema || !findAction(schema, target.actionId)) return undefined;
-    // Core08 has no trusted Automation Room/Principal ingress yet. A trigger
-    // must fail closed instead of manufacturing a Session for a Chat turn.
-    throw this.dependencies.requestError("forbidden", "collection_automation_context_required");
+    await this.runAction({
+      collectionId: target.collectionId,
+      actionId: target.actionId,
+      recordId: target.recordId,
+      trustedContext,
+      payload: job.delivery_target
+    });
+    return { summary: `Executed Collection trigger ${target.collectionId}/${target.actionId}.` };
   }
 
   schemaDocs() { return { action: "schemaDocs" as const, schema_docs: this.dependencies.queries.schemaDocs() }; }

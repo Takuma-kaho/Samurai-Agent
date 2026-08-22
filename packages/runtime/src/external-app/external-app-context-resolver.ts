@@ -50,6 +50,7 @@ export interface ResolvedExternalAppContext {
     participant: ParticipantPrincipal;
     roomId: string;
     correlationId: string;
+    connectionId: string;
     idempotencyKey?: string;
     externalAllowedRoomIds: readonly string[];
     sessionRef?: SessionRef;
@@ -137,6 +138,7 @@ export class ExternalAppContextResolver {
         participant,
         roomId: target.requested_room_id,
         correlationId: target.correlation_id,
+        connectionId: connection.id,
         externalAllowedRoomIds: [...connection.allowed_room_ids],
         ...(target.idempotency_key ? { idempotencyKey: target.idempotency_key } : {}),
         ...(sessionRef ? { sessionRef } : {}),

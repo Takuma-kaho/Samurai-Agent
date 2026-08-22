@@ -1,4 +1,4 @@
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
+import type { RuntimeResourceCatalogPort } from "../../composition/runtime-workspace-ports";
 import {
   canonicalRoomShareableResourceReference,
   type CanonicalRoomShareableResourceReference,
@@ -12,18 +12,7 @@ export interface ResolvedRoomShareableResource extends CanonicalRoomShareableRes
   sourceRoomId?: string;
 }
 
-type ResourceCatalogStore = Pick<WorkspaceStore,
-  | "getSession"
-  | "getOperation"
-  | "getArtifact"
-  | "getMemory"
-  | "getWiki"
-  | "getSkill"
-  | "getCollectionSchema"
-  | "getCollectionRecord"
-  | "getGeneratedSurface"
-  | "getResourceAccessBoundary"
->;
+type ResourceCatalogStore = RuntimeResourceCatalogPort;
 
 /**
  * Resolves a public typed share reference to one real Workspace resource.

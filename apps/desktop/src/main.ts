@@ -42,14 +42,69 @@ import {
   workspaceRoomMoveRequest
 } from "./workspace-room-requests.js";
 import {
-  workspaceLearningResourceIdRequest,
-  workspaceLearningResourceCreateRequest,
-  workspaceLearningResourceListRequest,
-  workspaceLearningResourceStateRequest,
-  workspaceLearningResourceUpdateRequest,
-  workspaceLearningSearchRequest,
   workspaceLearningSettingsRequest
 } from "./workspace-learning-requests.js";
+import { workspaceSettingsPatchJson, workspaceSettingsPatchRequest } from "./workspace-settings-requests.js";
+import {
+  workspaceCompletionResourceCreateRequest,
+  workspaceCompletionResourceIdRequest,
+  workspaceCompletionResourceListRequest,
+  workspaceCompletionResourceStateRequest,
+  workspaceCompletionResourceUpdateRequest,
+  workspaceCompletionSearchRequest,
+  workspaceWikiCreateRequest,
+  workspaceWikiIdRequest,
+  workspaceWikiListRequest,
+  workspaceWikiPatchRequest,
+  workspaceWikiQueryRequest,
+  workspaceWikiStateRequest
+} from "./workspace-completion-requests.js";
+import {
+  workspaceCollectionIdRequest,
+  workspaceCollectionRecordCreateRequest,
+  workspaceCollectionRecordDeleteRequest,
+  workspaceCollectionRecordPatchRequest,
+  workspaceCollectionRoomRequest,
+  workspaceCollectionSchemaSaveRequest,
+  workspaceCollectionSurfaceOperationRequest
+} from "./workspace-collection-requests.js";
+import {
+  workspaceChatSessionIdRequest,
+  workspaceChatSessionRequest,
+  workspaceChatTurnRequest
+} from "./workspace-chat-requests.js";
+import {
+  workspaceMemoryArchiveRequest,
+  workspaceMemoryIdRequest,
+  workspaceMemoryListRequest,
+  workspaceMemorySearchRequest
+} from "./workspace-memory-requests.js";
+import {
+  workspaceAutomationJobCreateRequest,
+  workspaceAutomationJobIdRequest,
+  workspaceAutomationListRequest,
+  workspaceAutomationManagementRequest,
+  workspaceAutomationRunNowRequest
+} from "./workspace-automation-requests.js";
+import {
+  workspaceArtifactCreateRequest,
+  workspaceArtifactIdRequest,
+  workspaceArtifactListRequest,
+  workspaceArtifactSurfaceOperationRequest
+} from "./workspace-artifact-requests.js";
+import {
+  workspaceGeneratedSurfaceActionRequest,
+  workspaceGeneratedSurfaceBundleRequest,
+  workspaceGeneratedSurfaceExportRequest,
+  workspaceGeneratedSurfaceRoomRequest,
+  workspaceGeneratedSurfaceStateRequest
+} from "./workspace-generated-surface-requests.js";
+import {
+  workspaceSkillOptimizationActionRequest,
+  workspaceSkillOptimizationIdRequest,
+  workspaceSkillOptimizationListRequest,
+  workspaceSkillOptimizationStartRequest
+} from "./workspace-skill-optimization-requests.js";
 
 interface HealthState {
   ok: boolean;
@@ -90,16 +145,6 @@ interface TemporaryContextItem {
   dataUrl: string;
   createdAt: string;
   expiresAt: string;
-}
-
-interface TemporaryContextResponse {
-  id: string;
-  kind: "temporary_context";
-  uri: string;
-  label: string;
-  mime_type: "image/png";
-  created_at: string;
-  expires_at: string;
 }
 
 interface ClientEventRecord {
@@ -477,6 +522,455 @@ function registerIpcHandlers(): void {
       workspaceScoped: true
     });
   });
+  ipcMain.handle("samurai:workspace-server:settings:get", async () => {
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath().replace(/\/chat$/, "")}/settings`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:settings:patch", async (_event, input: unknown) => {
+    const request = workspaceSettingsPatchRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "PATCH",
+      path: `${activeWorkspaceChatPath().replace(/\/chat$/, "")}/settings`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: workspaceSettingsPatchJson(request.body)
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:backends", async () => {
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath().replace(/\/chat$/, "")}/agent-backends`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:surface:contract", async (_event, source: unknown) => {
+    const query = typeof source === "string" && source.length > 0 ? `?source=${encodeURIComponent(source.slice(0, 80))}` : "";
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath().replace(/\/chat$/, "")}/surface/contract${query}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:sessions:list", async () => {
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath()}/sessions`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:session:create", async (_event, input: unknown) => {
+    const request = workspaceChatSessionRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+     path: `${activeWorkspaceChatPath()}/sessions`,
+     workspaceScoped: true,
+      operationId: request.operationId,
+     body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:session:get", async (_event, input: unknown) => {
+    const sessionId = workspaceChatSessionIdRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath()}/sessions/${encodeURIComponent(sessionId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:message:send", async (_event, input: unknown) => {
+    const request = workspaceChatTurnRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceChatPath()}/sessions/${encodeURIComponent(request.sessionId)}/messages`,
+      workspaceScoped: true,
+      idempotencyKey: request.idempotencyKey,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:search", async (_event, input: unknown) => {
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    if (typeof value.query !== "string" || !value.query.trim() || value.query.length > 200_000) throw new Error("query_invalid");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath()}/search?room_id=${encodeURIComponent(roomId)}&q=${encodeURIComponent(value.query.trim())}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:runs:list", async (_event, input: unknown) => {
+    const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const sessionId = typeof value.sessionId === "string" ? requiredWorkspaceOpaqueField(value, "sessionId") : undefined;
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath()}/runs${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:run:get", async (_event, input: unknown) => {
+    const runId = requiredWorkspaceOpaqueField(input, "runId");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath()}/runs/${encodeURIComponent(runId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:events:list", async (_event, input: unknown) => {
+    const runId = requiredWorkspaceOpaqueField(input, "runId");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath()}/runs/${encodeURIComponent(runId)}/events`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:changes:list", async (_event, input: unknown) => {
+    const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const sessionId = typeof value.sessionId === "string" ? requiredWorkspaceOpaqueField(value, "sessionId") : undefined;
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath()}/changes${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:activity:list", async (_event, input: unknown) => {
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath()}/activity?room_id=${encodeURIComponent(roomId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:audit:get", async () => {
+    const body = await activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceChatPath().replace(/\/chat$/, "")}/audit`,
+      workspaceScoped: true
+    });
+    if (!body || typeof body !== "object" || Array.isArray(body) || !Array.isArray((body as { entries?: unknown }).entries)) {
+      throw new Error("workspace_audit_response_invalid");
+    }
+    return {
+      auditRecords: [],
+      operations: [],
+      policyDecisions: [],
+      approvalRequests: [],
+      rollbackPoints: [],
+      workspaceEntries: (body as { entries: unknown[] }).entries
+    };
+  });
+  ipcMain.handle("samurai:workspace-server:completion:resources:list", async (_event, input: unknown) => {
+    const request = workspaceCompletionResourceListRequest(input);
+    const query = new URLSearchParams();
+    if (request.scopeKind === "room") query.set("room_id", request.roomId);
+    if (request.kind) query.set("kind", request.kind);
+    if (request.includeArchived) query.set("include_archived", "true");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceCompletionPath()}/resources${query.size ? `?${query.toString()}` : ""}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:resource:get", async (_event, input: unknown) => {
+    const resourceId = workspaceCompletionResourceIdRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceCompletionPath()}/resources/${encodeURIComponent(resourceId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:resource:body", async (_event, input: unknown) => {
+    const resourceId = workspaceCompletionResourceIdRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceCompletionPath()}/resources/${encodeURIComponent(resourceId)}/body`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:resource:create", async (_event, input: unknown) => {
+    const request = workspaceCompletionResourceCreateRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceCompletionPath()}/resources`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:resource:update", async (_event, input: unknown) => {
+    const request = workspaceCompletionResourceUpdateRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "PUT",
+      path: `${activeWorkspaceCompletionPath()}/resources/${encodeURIComponent(request.resourceId)}`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:resource:fixed", async (_event, input: unknown) => {
+    const request = workspaceCompletionResourceStateRequest(input, "fixed");
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceCompletionPath()}/resources/${encodeURIComponent(request.resourceId)}/fixed`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:resource:archive", async (_event, input: unknown) => {
+    const request = workspaceCompletionResourceStateRequest(input, "archive");
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceCompletionPath()}/resources/${encodeURIComponent(request.resourceId)}/archive`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:knowledge:search", async (_event, input: unknown) => {
+    const request = workspaceCompletionSearchRequest(input);
+    const query = new URLSearchParams({ room_id: request.roomId, q: request.query });
+    if (request.limit !== undefined) query.set("limit", String(request.limit));
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceCompletionPath()}/knowledge/search?${query.toString()}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:skills:list", async (_event, input: unknown) => {
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceCompletionPath()}/skills?room_id=${encodeURIComponent(roomId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:completion:skills:get", async (_event, input: unknown) => {
+    const resourceId = workspaceCompletionResourceIdRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceCompletionPath()}/skills/${encodeURIComponent(resourceId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:skill-optimizations:list", async (_event, input: unknown) => {
+    const request = workspaceSkillOptimizationListRequest(input);
+    const query = new URLSearchParams();
+    if (request.skillId) query.set("skill_id", request.skillId);
+    if (request.roomId) query.set("room_id", request.roomId);
+    if (request.limit !== undefined) query.set("limit", String(request.limit));
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceSkillOptimizationPath()}${query.size ? `?${query.toString()}` : ""}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:skill-optimizations:get", async (_event, input: unknown) => {
+    const request = workspaceSkillOptimizationIdRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceSkillOptimizationPath()}/${encodeURIComponent(request.runId)}`,
+      workspaceScoped: true
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:skill-optimizations:start", async (_event, input: unknown) => {
+    const request = workspaceSkillOptimizationStartRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceSkillsPath()}/${encodeURIComponent(request.skillId)}/optimizations`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: {
+        ...(request.roomId ? { room_id: request.roomId } : {}),
+        ...(request.objective ? { objective: request.objective } : {}),
+        ...(request.goldenExamples ? { golden_examples: request.goldenExamples } : {}),
+        ...(request.syntheticExamples ? { synthetic_examples: request.syntheticExamples } : {})
+      }
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:skill-optimizations:action", async (_event, input: unknown) => {
+    const request = workspaceSkillOptimizationActionRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceSkillOptimizationPath()}/${encodeURIComponent(request.runId)}/${request.action}`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      body: {
+        ...(request.candidateId ? { candidate_id: request.candidateId } : {}),
+        ...(request.promotionId ? { promotion_id: request.promotionId } : {}),
+        ...(request.snapshotId ? { snapshot_id: request.snapshotId } : {})
+      }
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:list", async (_event, input: unknown) => {
+    const request = workspaceWikiListRequest(input);
+    const query = new URLSearchParams({ room_id: request.roomId });
+    if (request.includeArchived) query.set("include_archived", "true");
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceKnowledgeWikiPath()}?${query.toString()}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:get", async (_event, input: unknown) => {
+    const wikiId = workspaceWikiIdRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceKnowledgeWikiPath()}/${encodeURIComponent(wikiId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:create", async (_event, input: unknown) => {
+    const request = workspaceWikiCreateRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceKnowledgeWikiPath()}/proposals`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:update", async (_event, input: unknown) => {
+    const request = workspaceWikiPatchRequest(input);
+    return activeWorkspaceServerRequest({ method: "PATCH", path: `${activeWorkspaceKnowledgeWikiPath()}/${encodeURIComponent(request.wikiId)}`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:state", async (_event, input: unknown) => {
+    const request = workspaceWikiStateRequest(input);
+    const state = input && typeof input === "object" && "state" in input && (input as Record<string, unknown>).state;
+    if (state !== "accept" && state !== "reject" && state !== "archive") throw new Error("wiki_state_invalid");
+    const suffix = state === "accept" ? "accept" : state === "reject" ? "reject" : "archive";
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceKnowledgeWikiPath()}/${encodeURIComponent(request.wikiId)}/${suffix}`, workspaceScoped: true, operationId: request.operationId, body: { reason: request.reason } });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:reindex", async (_event, input: unknown) => {
+    const request = workspaceWikiListRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: activeWorkspaceKnowledgeWikiPath() + "/reindex", workspaceScoped: true, body: { room_id: request.roomId } });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:graph", async (_event, input: unknown) => {
+    const request = workspaceWikiQueryRequest(input);
+    const query = new URLSearchParams({ room_id: request.roomId });
+    if (request.query) query.set("query", request.query);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceKnowledgeWikiPath()}/graph?${query.toString()}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:lint", async (_event, input: unknown) => {
+    const request = workspaceWikiListRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceKnowledgeWikiPath()}/lint?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-wiki:backlinks", async (_event, input: unknown) => {
+    const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const wikiId = workspaceWikiIdRequest(value);
+    const roomId = requiredWorkspaceOpaqueField(value, "roomId");
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceKnowledgeWikiPath()}/${encodeURIComponent(wikiId)}/backlinks?room_id=${encodeURIComponent(roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-memory:list", async (_event, input: unknown) => {
+    const request = workspaceMemoryListRequest(input);
+    const query = new URLSearchParams({ room_id: request.roomId });
+    if (request.includeArchived) query.set("include_archived", "true");
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceKnowledgeMemoryPath()}?${query.toString()}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-memory:get", async (_event, input: unknown) => {
+    const memoryId = workspaceMemoryIdRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceKnowledgeMemoryPath()}/${encodeURIComponent(memoryId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-memory:search", async (_event, input: unknown) => {
+    const request = workspaceMemorySearchRequest(input);
+    const query = new URLSearchParams({ room_id: request.roomId, q: request.query });
+    if (request.limit !== undefined) query.set("limit", String(request.limit));
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceKnowledgeMemoryPath()}/search?${query.toString()}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:knowledge-memory:archive", async (_event, input: unknown) => {
+    const request = workspaceMemoryArchiveRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceKnowledgeMemoryPath()}/${encodeURIComponent(request.memoryId)}/archive`, workspaceScoped: true, operationId: request.operationId, body: { reason: request.reason } });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:schemas:list", async (_event, input: unknown) => {
+    const request = workspaceCollectionRoomRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceCollectionsPath()}/schemas?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:schema:get", async (_event, input: unknown) => {
+    const request = workspaceCollectionIdRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceCollectionsPath()}/${encodeURIComponent(request.collectionId)}/schema?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:schema:save", async (_event, input: unknown) => {
+    const request = workspaceCollectionSchemaSaveRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceCollectionsPath()}/schemas`, workspaceScoped: true, operationId: request.operationId, body: { room_id: request.roomId, schema: request.schema, ...(request.expectedVersion === undefined ? {} : { expected_version: request.expectedVersion }) } });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:records:list", async (_event, input: unknown) => {
+    const request = workspaceCollectionIdRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceCollectionsPath()}/${encodeURIComponent(request.collectionId)}/records?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:record:create", async (_event, input: unknown) => {
+    const request = workspaceCollectionRecordCreateRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceCollectionsPath()}/${encodeURIComponent(request.collectionId)}/records`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:record:patch", async (_event, input: unknown) => {
+    const request = workspaceCollectionRecordPatchRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceCollectionsPath()}/${encodeURIComponent(request.collectionId)}/records/${encodeURIComponent(request.recordId)}/patches`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:record:delete", async (_event, input: unknown) => {
+    const request = workspaceCollectionRecordDeleteRequest(input);
+    return activeWorkspaceServerRequest({ method: "DELETE", path: `${activeWorkspaceCollectionsPath()}/${encodeURIComponent(request.collectionId)}/records/${encodeURIComponent(request.recordId)}`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:notes:list", async (_event, input: unknown) => {
+    const request = workspaceCollectionIdRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceCollectionsPath()}/${encodeURIComponent(request.collectionId)}/notes?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:reindex", async (_event, input: unknown) => {
+    const request = workspaceCollectionRoomRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceCollectionsPath()}/reindex`, workspaceScoped: true, body: { room_id: request.roomId } });
+  });
+  ipcMain.handle("samurai:workspace-server:collections:surface", async (_event, input: unknown) => {
+    const request = workspaceCollectionSurfaceOperationRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceCollectionsPath()}/surface/operations`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:automation:jobs:list", async (_event, input: unknown) => {
+    const request = workspaceAutomationListRequest(input);
+    const query = request.roomId ? `?room_id=${encodeURIComponent(request.roomId)}` : "";
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceAutomationPath()}/jobs${query}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:automation:jobs:create", async (_event, input: unknown) => {
+    const request = workspaceAutomationJobCreateRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceAutomationPath()}/jobs`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:automation:runs:list", async (_event, input: unknown) => {
+    const request = workspaceAutomationListRequest(input);
+    const query = request.roomId ? `?room_id=${encodeURIComponent(request.roomId)}` : "";
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceAutomationPath()}/runs${query}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:automation:job:runs", async (_event, input: unknown) => {
+    const jobId = workspaceAutomationJobIdRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceAutomationPath()}/jobs/${encodeURIComponent(jobId)}/runs`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:automation:management", async (_event, input: unknown) => {
+    const request = workspaceAutomationManagementRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceAutomationPath()}/jobs/${encodeURIComponent(request.jobId)}/management`, workspaceScoped: true, operationId: request.operationId, body: { state: request.state } });
+  });
+  ipcMain.handle("samurai:workspace-server:automation:run-now", async (_event, input: unknown) => {
+    const request = workspaceAutomationRunNowRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceAutomationPath()}/run-now`, workspaceScoped: true, operationId: request.operationId, body: { room_id: request.roomId, kind: request.kind } });
+  });
+  ipcMain.handle("samurai:workspace-server:artifacts:list", async (_event, input: unknown) => {
+    const request = workspaceArtifactListRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceArtifactsPath()}?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:artifact:get", async (_event, input: unknown) => {
+    const request = workspaceArtifactIdRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceArtifactsPath()}/${encodeURIComponent(request.artifactId)}?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:artifact:create", async (_event, input: unknown) => {
+    const request = workspaceArtifactCreateRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: activeWorkspaceArtifactsPath(), workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:artifact:surface", async (_event, input: unknown) => {
+    const request = workspaceArtifactSurfaceOperationRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceArtifactsPath()}/surface/operations`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:generated-surface:get", async (_event, input: unknown) => {
+    const request = workspaceGeneratedSurfaceRoomRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:generated-surface:bundle", async (_event, input: unknown) => {
+    const request = workspaceGeneratedSurfaceBundleRequest(input);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/revisions/${encodeURIComponent(request.revisionId)}/bundle?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:generated-surface:action", async (_event, input: unknown) => {
+    const request = workspaceGeneratedSurfaceActionRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/actions/${encodeURIComponent(request.actionId)}/run`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:generated-surface:state", async (_event, input: unknown) => {
+    const request = workspaceGeneratedSurfaceStateRequest(input);
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/state`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:generated-surface:export", async (_event, input: unknown) => {
+    const request = workspaceGeneratedSurfaceExportRequest(input);
+    const query = new URLSearchParams({ room_id: request.roomId, format: request.format });
+    if (request.revisionId) query.set("revision_id", request.revisionId);
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/export?${query.toString()}`, workspaceScoped: true });
+  });
   ipcMain.handle("samurai:workspace-server:room-members:list", async (_event, input: unknown) => {
     const roomId = requiredWorkspaceOpaqueField(input, "roomId");
     return activeWorkspaceServerRequest({
@@ -533,65 +1027,6 @@ function registerIpcHandlers(): void {
       body: request.body
     });
   });
-  ipcMain.handle("samurai:workspace-server:learning:resources:list", async (_event, input: unknown) => {
-    const scope = workspaceLearningResourceListRequest(input);
-    const query = new URLSearchParams({ scope_kind: scope.scopeKind });
-    if (scope.scopeKind === "room") query.set("room_id", scope.roomId);
-    if (scope.includeArchived) query.set("include_archived", "true");
-    return activeWorkspaceServerRequest({
-      method: "GET",
-      path: `${activeWorkspaceLearningPath()}/resources?${query.toString()}`,
-      workspaceScoped: true
-    });
-  });
-  ipcMain.handle("samurai:workspace-server:learning:resource:get", async (_event, input: unknown) => {
-    const resourceId = workspaceLearningResourceIdRequest(input);
-    return activeWorkspaceServerRequest({
-      method: "GET",
-      path: `${activeWorkspaceLearningPath()}/resources/${encodeURIComponent(resourceId)}`,
-      workspaceScoped: true
-    });
-  });
-  ipcMain.handle("samurai:workspace-server:learning:resource:create", async (_event, input: unknown) => {
-    const request = workspaceLearningResourceCreateRequest(input);
-    return activeWorkspaceServerRequest({
-      method: "POST",
-      path: `${activeWorkspaceLearningPath()}/resources`,
-      workspaceScoped: true,
-      operationId: request.operationId,
-      body: request.body
-    });
-  });
-  ipcMain.handle("samurai:workspace-server:learning:resource:update", async (_event, input: unknown) => {
-    const request = workspaceLearningResourceUpdateRequest(input);
-    return activeWorkspaceServerRequest({
-      method: "PUT",
-      path: `${activeWorkspaceLearningPath()}/resources/${encodeURIComponent(request.resourceId)}`,
-      workspaceScoped: true,
-      operationId: request.operationId,
-      body: request.body
-    });
-  });
-  ipcMain.handle("samurai:workspace-server:learning:resource:fixed", async (_event, input: unknown) => {
-    const request = workspaceLearningResourceStateRequest(input, "fixed");
-    return activeWorkspaceServerRequest({
-      method: "POST",
-      path: `${activeWorkspaceLearningPath()}/resources/${encodeURIComponent(request.resourceId)}/fixed`,
-      workspaceScoped: true,
-      operationId: request.operationId,
-      body: request.body
-    });
-  });
-  ipcMain.handle("samurai:workspace-server:learning:resource:archive", async (_event, input: unknown) => {
-    const request = workspaceLearningResourceStateRequest(input, "archive");
-    return activeWorkspaceServerRequest({
-      method: "POST",
-      path: `${activeWorkspaceLearningPath()}/resources/${encodeURIComponent(request.resourceId)}/archive`,
-      workspaceScoped: true,
-      operationId: request.operationId,
-      body: request.body
-    });
-  });
   ipcMain.handle("samurai:workspace-server:learning:settings:get", async (_event, input: unknown) => {
     const roomId = requiredWorkspaceOpaqueField(input, "roomId");
     return activeWorkspaceServerRequest({
@@ -610,16 +1045,6 @@ function registerIpcHandlers(): void {
       body: request.body
     });
   });
-  ipcMain.handle("samurai:workspace-server:learning:search", async (_event, input: unknown) => {
-    const request = workspaceLearningSearchRequest(input);
-    const query = new URLSearchParams({ room_id: request.roomId, q: request.query });
-    if (request.limit !== undefined) query.set("limit", String(request.limit));
-    return activeWorkspaceServerRequest({
-      method: "GET",
-      path: `${activeWorkspaceLearningPath()}/search?${query.toString()}`,
-      workspaceScoped: true
-    });
-  });
   ipcMain.handle("samurai:workspace-server:status", async () => workspaceServerStatus());
   ipcMain.handle("samurai:app:quit", () => {
     isQuitting = true;
@@ -633,11 +1058,11 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:quick-ask:submit", async (_event, input: unknown): Promise<QuickAskResult> => {
     const quickAsk = validateQuickAskInput(input);
-    return await submitQuickAsk(quickAsk, config);
+    return await submitQuickAsk(quickAsk);
   });
   ipcMain.handle("samurai:app-shot:submit", async (_event, input: unknown): Promise<AppShotResult> => {
     const appShot = validateAppShotInput(input);
-    return await submitAppShot(appShot, config);
+    return await submitAppShot(appShot);
   });
 }
 
@@ -710,10 +1135,11 @@ function applyWorkspaceConnection(connection: WorkspaceConnection | undefined): 
 }
 
 interface WorkspaceServerRequestInput {
-  method: "GET" | "POST" | "PUT" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   body?: Record<string, unknown>;
   operationId?: string;
+  idempotencyKey?: string;
   workspaceScoped: boolean;
 }
 
@@ -771,6 +1197,7 @@ async function signedWorkspaceServerRequest(
     path: url.pathname,
     ...(input.workspaceScoped ? { workspaceId: connection.workspaceId } : {}),
     ...(input.operationId ? { operationId: input.operationId } : {}),
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
     requestId,
     timestamp,
     body
@@ -787,9 +1214,10 @@ async function signedWorkspaceServerRequest(
       "x-samurai-timestamp": timestamp,
       "x-samurai-signature": signature,
       ...(input.workspaceScoped ? { "x-samurai-workspace-id": connection.workspaceId } : {}),
-      ...(input.operationId ? { "x-samurai-operation-id": input.operationId } : {})
+      ...(input.operationId ? { "x-samurai-operation-id": input.operationId } : {}),
+      ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {})
     },
-    ...(input.method === "GET" || input.method === "DELETE" ? {} : { body: JSON.stringify(body) })
+    ...(input.method === "GET" ? {} : { body: JSON.stringify(body) })
   });
   const text = await response.text();
   let responseBody: unknown = undefined;
@@ -947,6 +1375,85 @@ function activeWorkspaceRoomsPath(): string {
 
 function activeWorkspaceLearningPath(): string {
   return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/learning`;
+}
+
+function activeWorkspaceCompletionPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/completion`;
+}
+
+function activeWorkspaceSkillsPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/skills`;
+}
+
+function activeWorkspaceSkillOptimizationPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/skill-optimizations`;
+}
+
+function activeWorkspaceKnowledgeWikiPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/knowledge-wiki`;
+}
+
+function activeWorkspaceKnowledgeMemoryPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/knowledge-memory`;
+}
+
+function activeWorkspaceCollectionsPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/collections`;
+}
+
+function activeWorkspaceAutomationPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/automation`;
+}
+
+function activeWorkspaceArtifactsPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/artifacts`;
+}
+
+function activeWorkspaceGeneratedSurfacesPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/generated-surfaces`;
+}
+
+function activeWorkspaceClientEventsPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/client-events`;
+}
+
+function activeWorkspaceChatPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/chat`;
+}
+
+async function activeWorkspaceExecutableRoomId(): Promise<string> {
+  const body = await activeWorkspaceServerRequest({
+    method: "GET",
+    path: activeWorkspaceRoomsPath(),
+    workspaceScoped: true
+  });
+  if (!body || typeof body !== "object" || Array.isArray(body) || !Array.isArray((body as { rooms?: unknown }).rooms)) {
+    throw new Error("workspace_rooms_response_invalid");
+  }
+  const room = (body as { rooms: unknown[] }).rooms.find((item): item is { id: string; canExecute?: boolean } =>
+    Boolean(item && typeof item === "object" && !Array.isArray(item)
+      && typeof (item as { id?: unknown }).id === "string"
+      && (item as { canExecute?: unknown }).canExecute === true)
+  );
+  if (!room) throw new Error("workspace_room_execute_required");
+  return room.id;
+}
+
+function workspaceChatSessionResponseId(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as { id?: unknown }).id !== "string") {
+    throw new Error("workspace_chat_session_response_invalid");
+  }
+  return (value as { id: string }).id;
+}
+
+function workspaceChatTurnResponseSessionId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const result = (value as { result?: unknown }).result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+  const session = (result as { session?: unknown }).session;
+  if (!session || typeof session !== "object" || Array.isArray(session)) return undefined;
+  const id = (session as { id?: unknown }).id;
+  return typeof id === "string" && id.trim() ? id : undefined;
 }
 
 async function workspaceServerStatus(): Promise<{
@@ -1176,7 +1683,7 @@ async function listAppShotSources(): Promise<Array<{ id: string; name: string; t
   });
 }
 
-async function submitAppShot(input: AppShotInput, inputConfig: DesktopConfig): Promise<AppShotResult> {
+async function submitAppShot(input: AppShotInput): Promise<AppShotResult> {
   cleanupTemporaryContextItems();
   const item = temporaryContextItems.get(input.sourceId);
   if (!item) {
@@ -1186,55 +1693,54 @@ async function submitAppShot(input: AppShotInput, inputConfig: DesktopConfig): P
     temporaryContextItems.delete(item.id);
     throw new Error("スクショの一時Contextが期限切れです。もう一度AppShotを開いてください。");
   }
-  const health = await probeHealth(inputConfig);
-  latestHealth = health;
-  updateTrayMenu();
-  if (!health.ok) {
-    throw new Error(serverOfflineMessage(inputConfig));
-  }
-  const temporaryContext = await apiRequest<TemporaryContextResponse>(inputConfig, "/api/temporary-context", {
+  const roomId = await activeWorkspaceExecutableRoomId();
+  const session = await activeWorkspaceServerRequest({
     method: "POST",
-    body: JSON.stringify({
-      kind: item.kind,
-      label: item.label,
-      source_name: item.sourceName,
-      data_url: item.dataUrl,
-      metadata: {
-        source_client_kind: "desktop",
-        source_client_feature: "app_shot"
-      }
-    })
-  });
-  const session = await apiRequest<{ id: string }>(inputConfig, "/api/chat/sessions", {
-    method: "POST",
-    body: JSON.stringify({
+    path: `${activeWorkspaceChatPath()}/sessions`,
+    workspaceScoped: true,
+    body: {
+      room_id: roomId,
       title: draftSessionTitle(input.content),
       ui_locale: "ja",
       output_locale: "ja"
-    })
+    }
   });
-  const envelope = await apiRequest<{ result?: { session?: { id?: string } } }>(inputConfig, "/api/surface/operations", {
+  const sessionId = workspaceChatSessionResponseId(session);
+  const result = await activeWorkspaceServerRequest({
     method: "POST",
-    body: JSON.stringify({
-      id: `desktop_app_shot_${Date.now()}`,
-      kind: "message.submit",
-      session_id: session.id,
+    path: `${activeWorkspaceChatPath()}/sessions/${encodeURIComponent(sessionId)}/messages`,
+    workspaceScoped: true,
+    idempotencyKey: `desktop_app_shot_${randomUUID()}`,
+    body: {
       content: input.content,
       input_locale: "ja",
       output_locale: "ja",
-      attachments: [temporaryContextResourceRef(temporaryContext)],
+      temporary_context: [{
+        id: item.id,
+        kind: item.kind,
+        label: item.label,
+        source_name: item.sourceName,
+        mime_type: item.mimeType,
+        data_url: item.dataUrl,
+        created_at: item.createdAt,
+        expires_at: item.expiresAt,
+        metadata: {
+          source_client_kind: "desktop",
+          source_client_feature: "app_shot"
+        }
+      }],
       metadata: {
         source_client_kind: "desktop",
         source_client_feature: "app_shot",
         app_shot_source_name: item.sourceName,
-        temporary_context_expires_at: temporaryContext.expires_at
+        temporary_context_expires_at: item.expiresAt
       }
-    })
+    }
   });
   temporaryContextItems.delete(item.id);
   return {
-    sessionId: envelope.result?.session?.id ?? session.id,
-    temporaryContextItemId: temporaryContext.id
+    sessionId: workspaceChatTurnResponseSessionId(result) ?? sessionId,
+    temporaryContextItemId: item.id
   };
 }
 
@@ -1272,15 +1778,6 @@ function createTemporaryContextItem(input: {
     dataUrl: input.dataUrlValue,
     createdAt,
     expiresAt: new Date(input.createdAtMs + temporaryContextTtlMs).toISOString()
-  };
-}
-
-function temporaryContextResourceRef(input: TemporaryContextResponse): { kind: string; id: string; uri: string; label: string } {
-  return {
-    kind: input.kind,
-    id: input.id,
-    uri: input.uri,
-    label: input.label
   };
 }
 
@@ -1352,7 +1849,7 @@ async function routeDeepLinkToRenderer(url: string): Promise<void> {
     await loadMainWindow();
     return;
   }
-  const availability = await checkDeepLinkTargetAvailability(target, config);
+  const availability = await checkDeepLinkTargetAvailability(target);
   if (!availability.ok) {
     await mainWindow.loadURL(dataUrl(statusPageHtml({
       title: "Deep Linkの対象が見つかりません",
@@ -1499,8 +1996,7 @@ function normalizeInvitationServerUrl(value: string | null): string | undefined 
 }
 
 async function checkDeepLinkTargetAvailability(
-  target: DeepLinkTarget,
-  inputConfig: DesktopConfig
+  target: DeepLinkTarget
 ): Promise<{ ok: true } | { ok: false; detail?: string }> {
   if (target.kind === "workspace" || target.kind === "quick-ask") {
     return { ok: true };
@@ -1511,13 +2007,51 @@ async function checkDeepLinkTargetAvailability(
   if (!target.id) {
     return { ok: false, detail: `${target.kind} id is missing.` };
   }
-  const path = target.kind === "session"
-    ? `/api/chat/sessions/${encodeURIComponent(target.id)}`
-    : target.kind === "artifact"
-      ? `/api/artifacts/${encodeURIComponent(target.id)}`
-      : `/api/backend-runs/${encodeURIComponent(target.id)}`;
   try {
-    await apiRequest<unknown>(inputConfig, path, { method: "GET" });
+    if (target.kind === "session") {
+      await activeWorkspaceServerRequest({
+        method: "GET",
+        path: `${activeWorkspaceChatPath()}/sessions/${encodeURIComponent(target.id)}`,
+        workspaceScoped: true
+      });
+    } else if (target.kind === "run") {
+      await activeWorkspaceServerRequest({
+        method: "GET",
+        path: `${activeWorkspaceChatPath()}/runs/${encodeURIComponent(target.id)}`,
+        workspaceScoped: true
+      });
+    } else {
+      // Artifact links do not carry a Room ID. Resolve the target only through
+      // Rooms the current Account can read; the Artifact API keeps the final
+      // Room check and never exposes a Workspace-wide unauthorised lookup.
+      const roomsBody = await activeWorkspaceServerRequest({
+        method: "GET",
+        path: activeWorkspaceRoomsPath(),
+        workspaceScoped: true
+      });
+      const rooms = roomsBody && typeof roomsBody === "object" && !Array.isArray(roomsBody)
+        && Array.isArray((roomsBody as { rooms?: unknown }).rooms)
+        ? (roomsBody as { rooms: unknown[] }).rooms
+        : [];
+      let lastError: unknown;
+      for (const room of rooms) {
+        const roomId = room && typeof room === "object" && typeof (room as { id?: unknown }).id === "string"
+          ? (room as { id: string }).id
+          : undefined;
+        if (!roomId) continue;
+        try {
+          await activeWorkspaceServerRequest({
+            method: "GET",
+            path: `${activeWorkspaceArtifactsPath()}/${encodeURIComponent(target.id)}?room_id=${encodeURIComponent(roomId)}`,
+            workspaceScoped: true
+          });
+          return { ok: true };
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError instanceof Error ? lastError : new Error("workspace_artifact_not_found");
+    }
     return { ok: true };
   } catch (error) {
     return {
@@ -1527,27 +2061,26 @@ async function checkDeepLinkTargetAvailability(
   }
 }
 
-async function submitQuickAsk(input: QuickAskInput, inputConfig: DesktopConfig): Promise<QuickAskResult> {
-  const health = await probeHealth(inputConfig);
-  latestHealth = health;
-  updateTrayMenu();
-  if (!health.ok) {
-    throw new Error(serverOfflineMessage(inputConfig));
-  }
-  const session = await apiRequest<{ id: string }>(inputConfig, "/api/chat/sessions", {
+async function submitQuickAsk(input: QuickAskInput): Promise<QuickAskResult> {
+  const roomId = await activeWorkspaceExecutableRoomId();
+  const session = await activeWorkspaceServerRequest({
     method: "POST",
-    body: JSON.stringify({
+    path: `${activeWorkspaceChatPath()}/sessions`,
+    workspaceScoped: true,
+    body: {
+      room_id: roomId,
       title: draftSessionTitle(input.content),
       ui_locale: "ja",
       output_locale: "ja"
-    })
+    }
   });
-  const envelope = await apiRequest<{ result?: { session?: { id?: string } } }>(inputConfig, "/api/surface/operations", {
+  const sessionId = workspaceChatSessionResponseId(session);
+  const result = await activeWorkspaceServerRequest({
     method: "POST",
-    body: JSON.stringify({
-      id: `desktop_quick_ask_${Date.now()}`,
-      kind: "message.submit",
-      session_id: session.id,
+    path: `${activeWorkspaceChatPath()}/sessions/${encodeURIComponent(sessionId)}/messages`,
+    workspaceScoped: true,
+    idempotencyKey: `desktop_quick_ask_${randomUUID()}`,
+    body: {
       content: input.content,
       input_locale: "ja",
       output_locale: "ja",
@@ -1555,9 +2088,9 @@ async function submitQuickAsk(input: QuickAskInput, inputConfig: DesktopConfig):
         source_client_kind: "desktop",
         source_client_feature: input.sourceFeature
       }
-    })
+    }
   });
-  return { sessionId: envelope.result?.session?.id ?? session.id };
+  return { sessionId: workspaceChatTurnResponseSessionId(result) ?? sessionId };
 }
 
 function startClientEventPolling(): void {
@@ -1577,11 +2110,15 @@ async function pollClientEvents(): Promise<void> {
   }
   clientEventPollInFlight = true;
   try {
-    const events = await apiRequest<ClientEventRecord[]>(
-      config,
-      "/api/client-events?target_client_kind=desktop&status=pending&limit=20",
-      { method: "GET" }
-    );
+    const body = await activeWorkspaceServerRequest({
+      method: "GET",
+      path: `${activeWorkspaceClientEventsPath()}?target_client_kind=desktop&status=pending&limit=20`,
+      workspaceScoped: true
+    });
+    if (!body || typeof body !== "object" || Array.isArray(body) || !Array.isArray((body as { events?: unknown }).events)) {
+      throw new Error("workspace_client_events_response_invalid");
+    }
+    const events = (body as { events: unknown[] }).events.filter((event): event is ClientEventRecord => isClientEventRecord(event));
     for (const event of events) {
       await handleClientEvent(event);
     }
@@ -1614,18 +2151,47 @@ async function handleClientEvent(event: ClientEventRecord): Promise<void> {
 }
 
 async function markClientEventDelivered(eventId: string): Promise<void> {
-  await apiRequest<ClientEventRecord>(config, `/api/client-events/${encodeURIComponent(eventId)}/deliver`, { method: "POST" });
+  await activeWorkspaceServerRequest({
+    method: "POST",
+    path: `${activeWorkspaceClientEventsPath()}/${encodeURIComponent(eventId)}/deliver`,
+    workspaceScoped: true,
+    operationId: clientEventOperationId("deliver", eventId)
+  });
 }
 
 async function ackClientEvent(eventId: string): Promise<void> {
-  await apiRequest<ClientEventRecord>(config, `/api/client-events/${encodeURIComponent(eventId)}/ack`, { method: "POST" });
+  await activeWorkspaceServerRequest({
+    method: "POST",
+    path: `${activeWorkspaceClientEventsPath()}/${encodeURIComponent(eventId)}/ack`,
+    workspaceScoped: true,
+    operationId: clientEventOperationId("ack", eventId)
+  });
 }
 
 async function failClientEvent(eventId: string, code: string): Promise<void> {
-  await apiRequest<ClientEventRecord>(config, `/api/client-events/${encodeURIComponent(eventId)}/fail`, {
+  await activeWorkspaceServerRequest({
     method: "POST",
-    body: JSON.stringify({ error_code: code })
+    path: `${activeWorkspaceClientEventsPath()}/${encodeURIComponent(eventId)}/fail`,
+    workspaceScoped: true,
+    operationId: clientEventOperationId("fail", eventId),
+    body: { error_code: code }
   });
+}
+
+function isClientEventRecord(value: unknown): value is ClientEventRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const event = value as Partial<ClientEventRecord>;
+  return typeof event.id === "string"
+    && (event.target_client_kind === "desktop" || event.target_client_kind === "web" || event.target_client_kind === "any")
+    && typeof event.event_type === "string"
+    && typeof event.status === "string"
+    && Boolean(event.payload && typeof event.payload === "object" && !Array.isArray(event.payload))
+    && Array.isArray(event.resource_refs)
+    && typeof event.created_at === "string";
+}
+
+function clientEventOperationId(action: "deliver" | "ack" | "fail", eventId: string): string {
+  return `client_event_${action}_${createHash("sha256").update(eventId).digest("hex").slice(0, 40)}`;
 }
 
 function showClientNotification(event: ClientEventRecord): void {
@@ -1737,21 +2303,6 @@ function isNavigationAborted(error: unknown): boolean {
   }
   const candidate = error as { code?: unknown; errno?: unknown };
   return candidate.code === "ERR_ABORTED" || candidate.errno === -3;
-}
-
-async function apiRequest<T>(inputConfig: DesktopConfig, path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${inputConfig.apiBaseUrl}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(init.headers ?? {})
-    },
-    ...init
-  });
-  const body = await response.json().catch(() => undefined);
-  if (!response.ok) {
-    throw new Error(typeof body === "object" && body && "error" in body ? String(body.error) : `${response.status} ${response.statusText}`);
-  }
-  return body as T;
 }
 
 function validateQuickAskInput(input: unknown): QuickAskInput {

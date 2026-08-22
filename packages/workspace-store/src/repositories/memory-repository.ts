@@ -161,9 +161,10 @@ async listMemoryForSession(sessionId: string, options: {
       eb.and([eb("usage_scope_kind", "=", "session"), eb("usage_scope_ref_id", "=", options.activityContext!.session_id)])
     ]));
   }
+  const roomTopicSource = `session:${sessionId}`;
   const rows = await query.orderBy("updated_at", "desc").execute();
   return rows
-    .filter((row) => envelopeIds.has(row.source))
+    .filter((row) => envelopeIds.has(row.source) || row.source === roomTopicSource)
     .map((row) => ({ ...withUsageScope(parse<MemoryFrontmatter>(row.frontmatter_json)), file_path: row.file_path }));
 }
 

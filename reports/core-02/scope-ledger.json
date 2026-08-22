@@ -1,12 +1,11 @@
 {
   "schema_version": 2,
   "scope": "Core-02 Phase 0-7",
-  "status": "implementation_complete_environment_pending",
-  "started_at": "2026-07-23T13:29:51.297Z",
-  "finished_at": "2026-07-23T13:35:04.313Z",
-  "interrupted": true,
-  "stop_signal": "SIGINT",
-  "commit_sha": "6e11095f3399a2189bb6300077e74a871aa3da9a",
+  "status": "implementation_complete_ci_pending",
+  "started_at": "2026-08-22T01:45:02.613Z",
+  "finished_at": "2026-08-22T01:45:46.839Z",
+  "interrupted": false,
+  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
   "production_source": [
     "packages/core-schemas/src/index.ts",
     "packages/agent-backends/src/index.ts",
@@ -208,7 +207,7 @@
     {
       "id": "Phase 7",
       "description": "source-freeze verification",
-      "status": "unverified",
+      "status": "verified",
       "source": [
         "packages/core-schemas/src/index.ts",
         "packages/agent-backends/src/index.ts",
@@ -288,8 +287,8 @@
         },
         {
           "name": "git diff check",
-          "status": "unverified",
-          "exit_code": null
+          "status": "pass",
+          "exit_code": 0
         }
       ]
     }
@@ -299,21 +298,21 @@
       "id": "core02-runtime-focused",
       "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs packages/runtime/src/execution packages/runtime/src/host",
       "exit_code": 0,
-      "duration_ms": 2715,
+      "duration_ms": 2010,
       "status": "pass"
     },
     {
       "id": "core02-workspace-sqlite",
       "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs packages/workspace-store/src/core02-admission.test.ts packages/workspace-store/src/core02-event-identity.test.ts packages/workspace-store/src/core02-settlement.test.ts",
       "exit_code": 0,
-      "duration_ms": 1463,
+      "duration_ms": 3306,
       "status": "pass"
     },
     {
       "id": "core02-production-composition",
       "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs apps/server/src/composition/runtime.test.ts",
       "exit_code": 0,
-      "duration_ms": 2091,
+      "duration_ms": 3946,
       "status": "pass"
     }
   ],
@@ -322,7 +321,7 @@
       "name": "core:host-runtime:check",
       "command": "node scripts/check-core-host-runtime.mjs",
       "exit_code": 0,
-      "duration_ms": 36030,
+      "duration_ms": 780,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -331,7 +330,7 @@
       "name": "core-02 independent blocker audit",
       "command": "node scripts/audit-core-host-runtime.mjs",
       "exit_code": 0,
-      "duration_ms": 2568,
+      "duration_ms": 591,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -340,7 +339,7 @@
       "name": "core-schemas typecheck",
       "command": "node_modules/.bin/tsc -p packages/core-schemas/tsconfig.json --noEmit",
       "exit_code": 0,
-      "duration_ms": 2374,
+      "duration_ms": 3680,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -349,7 +348,7 @@
       "name": "agent-backends typecheck",
       "command": "node_modules/.bin/tsc -p packages/agent-backends/tsconfig.json --noEmit",
       "exit_code": 0,
-      "duration_ms": 1493,
+      "duration_ms": 3945,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -358,7 +357,7 @@
       "name": "workspace-store typecheck",
       "command": "node_modules/.bin/tsc -p packages/workspace-store/tsconfig.json --noEmit",
       "exit_code": 0,
-      "duration_ms": 14504,
+      "duration_ms": 5999,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -367,7 +366,7 @@
       "name": "runtime typecheck",
       "command": "node_modules/.bin/tsc -p packages/runtime/tsconfig.json --noEmit --rootDir ../..",
       "exit_code": 0,
-      "duration_ms": 173993,
+      "duration_ms": 7873,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -376,7 +375,7 @@
       "name": "server typecheck",
       "command": "node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit",
       "exit_code": 0,
-      "duration_ms": 6097,
+      "duration_ms": 12036,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -386,7 +385,7 @@
       "test_id": "core02-runtime-focused",
       "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs packages/runtime/src/execution packages/runtime/src/host",
       "exit_code": 0,
-      "duration_ms": 2715,
+      "duration_ms": 2010,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -396,7 +395,7 @@
       "test_id": "core02-workspace-sqlite",
       "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs packages/workspace-store/src/core02-admission.test.ts packages/workspace-store/src/core02-event-identity.test.ts packages/workspace-store/src/core02-settlement.test.ts",
       "exit_code": 0,
-      "duration_ms": 1463,
+      "duration_ms": 3306,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -406,7 +405,7 @@
       "test_id": "core02-production-composition",
       "command": "node_modules/.bin/vitest run --config vitest.core02.config.mjs apps/server/src/composition/runtime.test.ts",
       "exit_code": 0,
-      "duration_ms": 2091,
+      "duration_ms": 3946,
       "status": "pass",
       "termination": "exit",
       "timed_out": false
@@ -414,10 +413,10 @@
     {
       "name": "git diff check",
       "command": "git diff --no-ext-diff --no-textconv --check",
-      "exit_code": null,
-      "duration_ms": 69684,
-      "status": "unverified",
-      "termination": "signal:SIGINT",
+      "exit_code": 0,
+      "duration_ms": 56,
+      "status": "pass",
+      "termination": "exit",
       "timed_out": false
     }
   ],

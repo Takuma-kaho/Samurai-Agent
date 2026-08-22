@@ -1078,5 +1078,5 @@ function sameSkillIndexContent(left: SkillIndexTable, right: SkillIndexTable): b
     && left.usage_scope_kind === right.usage_scope_kind
     && left.usage_scope_ref_id === right.usage_scope_ref_id
     && left.file_path === right.file_path
-    && left.frontmatter_json === right.frontmatter_json;
+    && stableHash(parse(left.frontmatter_json)) === stableHash(parse(right.frontmatter_json));
 }

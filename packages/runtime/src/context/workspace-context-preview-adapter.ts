@@ -4,7 +4,7 @@ import { nowIso, type ExternalAssistRecord, type SkillFrontmatter } from "@samur
 import type { ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { type ExternalAssistProviderPort, buildExternalAssistContext } from "./external-assist-context.js";
 import { buildKnowledgeWikiContext, type WorkspaceContextCandidatesStore } from "./workspace-context-candidates.js";
-import { type ContextPreviewPorts, type ContextPreviewSearchResult } from "./context-preview.js";
+import { type ContextPreviewMemoryResult, type ContextPreviewPorts, type ContextPreviewSearchResult } from "./context-preview.js";
 import type { SkillContextEnvironment, SkillContextSkill } from "./skill-context.js";
 import type { ExternalAssistContextStore } from "./external-assist-context.js";
 import { RoomAuthorizationError, RoomAuthorizationService } from "../commands/services/room-authorization-service.js";
@@ -120,10 +120,13 @@ export class WorkspaceContextPreviewAdapter {
             candidates,
             report: {
               ...result.report,
-              candidate_count: candidates.length,
+              // Keep the retrieval candidate count before Room filtering and
+              // active-memory redaction. Context assembly uses the difference
+              // to explain why a candidate was omitted.
+              candidate_count: result.report.candidate_count,
               included_count: candidates.length,
               included_memory_ids: candidates.map((candidate) => candidate.frontmatter.id),
-              excluded: []
+              excluded: await this.filterMemoryExclusions(access, result.report.excluded)
             }
           };
         },
@@ -253,6 +256,13 @@ export class WorkspaceContextPreviewAdapter {
   private async filterResources<T>(access: WorkspaceContextPreviewAccess, values: T[], resourceKind: string, resourceId: (value: T) => string): Promise<T[]> {
     const filtered = await Promise.all(values.map(async (value) => ({ value, allowed: await this.resourceAllowed(access, resourceKind, resourceId(value)) })));
     return filtered.filter((entry) => entry.allowed).map((entry) => entry.value);
+  }
+
+  private async filterMemoryExclusions(access: WorkspaceContextPreviewAccess, exclusions: ContextPreviewMemoryResult["report"]["excluded"]): Promise<ContextPreviewMemoryResult["report"]["excluded"]> {
+    const visible = await Promise.all(exclusions.map(async (entry) => {
+      return await this.resourceAllowed(access, "memory", entry.id) ? entry : undefined;
+    }));
+    return visible.filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
   }
 
   private async resourceAllowed(access: WorkspaceContextPreviewAccess, resourceKind: string, resourceId: string): Promise<boolean> {

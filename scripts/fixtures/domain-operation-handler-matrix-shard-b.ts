@@ -244,9 +244,9 @@ async function main(): Promise<void> {
   for (const testCase of bHandlerExpectations["automation.job.reauthorize"].cases) await runCase("automation.job.reauthorize", testCase, findDefinition("automation.job.reauthorize"), (r) => ({ reauthorizeSessionlessAutomationJob: asyncRec(r, "reauthorizeSessionlessAutomationJob", automationJob) }));
   for (const testCase of bHandlerExpectations["automation.job.rebind_authority"].cases) await runCase("automation.job.rebind_authority", testCase, findDefinition("automation.job.rebind_authority"), (r) => ({ rebindSessionlessAutomationJobAuthority: asyncRec(r, "rebindSessionlessAutomationJobAuthority", automationJob) }));
   await runCase("automation.memory_review.run", bHandlerExpectations["automation.memory_review.run"].cases[0]!, findDefinition("automation.memory_review.run"), (r) => ({
-    sessionlessMemoryReviewUnsupported: () => {
-      r("sessionlessMemoryReviewUnsupported", [], undefined);
-      throw new Error("automation_sessionless_executor_unsupported:memory_review");
+    runSessionlessMemoryReview: async () => {
+      r("runSessionlessMemoryReview", [], sessionlessAutomationRunResult);
+      return sessionlessAutomationRunResult;
     }
   }));
 

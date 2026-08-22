@@ -14,11 +14,12 @@ export type {
   WorkspaceMemberRecord
 } from "./repositories/room-permission-repository";
 
-import { defaultSettings, type BackendRunRecord, type RoomRecord } from "@samurai-agent/core-schemas";
+import { defaultSettings, type BackendRunRecord, type RoomRecord, type WorkspaceFilePort } from "@samurai-agent/core-schemas";
 import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceBundleService } from "./backup/workspace-bundle-service";
 import { WorkspaceKernelService } from "./kernel/workspace-kernel-service";
 import { WorkspacePaths } from "./kernel/workspace-paths";
+import { createWorkspaceFilePort } from "./kernel/workspace-file-port";
 import { AccessHistoryRepository } from "./repositories/access-history-repository";
 import { ActivityHistoryRepository } from "./repositories/activity-history-repository";
 import { ArtifactRepository } from "./repositories/artifact-repository";
@@ -85,6 +86,7 @@ interface WorkspaceComposition {
 export class WorkspaceStore {
   readonly rootDir: string;
   readonly dbPath: string;
+  readonly filePort: WorkspaceFilePort;
 
   private readonly kernel: WorkspaceKernelService;
   private readonly restoreFailureInjector: WorkspaceStoreOptions["restoreFailureInjector"];
@@ -98,6 +100,7 @@ export class WorkspaceStore {
     this.kernel = new WorkspaceKernelService(options.rootDir, options.fileTransactionFailureInjector);
     this.rootDir = this.kernel.rootDir;
     this.dbPath = this.kernel.dbPath;
+    this.filePort = createWorkspaceFilePort();
     this.restoreFailureInjector = options.restoreFailureInjector;
     this.rebuildComposition();
   }
@@ -133,6 +136,9 @@ export class WorkspaceStore {
     const { room, agent, createdRoom, createdAgent } = await this.composition.roomAgent.ensureDefaults(settings, {
       createRoomWithOwner: (room) => this.composition.roomPermissions.createRoomWithOwner(room, localOwnerParticipantId)
     });
+    if (settings.default_room_id !== room.id || settings.default_agent_id !== agent.id) {
+      await this.composition.metadata.patchSettings({ default_room_id: room.id, default_agent_id: agent.id });
+    }
     // Migration 009 seeds existing Workspaces once.  On later opens we do not
     // scan or repair Room ownership; only a newly-created default pair gets
     // its explicit initial Agent permission here.
@@ -407,6 +413,7 @@ export class WorkspaceStore {
     facade.commitCore02RunTransition = session.commitCore02RunTransition.bind(session);
     facade.commitCore02BackendSession = session.commitCore02BackendSession.bind(session);
     facade.updateBackendRun = session.updateBackendRun.bind(session);
+    facade.updateRunMetadata = session.updateRunMetadata.bind(session);
     facade.getBackendRun = session.getBackendRun.bind(session);
     facade.listBackendRuns = session.listBackendRuns.bind(session);
     facade.listCore02RecoveryCandidates = session.listCore02RecoveryCandidates.bind(session);
@@ -636,6 +643,7 @@ export class WorkspaceStore {
     facade.getAutomationRun = automation.getAutomationRun.bind(automation);
     facade.listAutomationRuns = automation.listAutomationRuns.bind(automation);
     facade.attachAutomationRunEvidence = automation.attachAutomationRunEvidence.bind(automation);
+    facade.attachAutomationRunBackendRun = automation.attachAutomationRunBackendRun.bind(automation);
     facade.settleAutomationRun = automation.settleAutomationRun.bind(automation);
     facade.listExpiredAutomationRunClaims = automation.listExpiredAutomationRunClaims.bind(automation);
 
@@ -745,6 +753,7 @@ export class WorkspaceStore {
 
 /** Type-level public surface retained for current Store callers. */
 export interface WorkspaceStore {
+  readonly filePort: WorkspaceFilePort;
   migrate: WorkspaceKernelService["migrate"];
   listSchemaMigrations: WorkspaceKernelService["listSchemaMigrations"];
   getSqliteRuntimeSettings: WorkspaceKernelService["getSqliteRuntimeSettings"];
@@ -823,12 +832,14 @@ export interface WorkspaceStore {
   commitCore02RunTransition: SessionExecutionRepository["commitCore02RunTransition"];
   commitCore02BackendSession: SessionExecutionRepository["commitCore02BackendSession"];
   updateBackendRun: SessionExecutionRepository["updateBackendRun"];
+  updateRunMetadata: SessionExecutionRepository["updateRunMetadata"];
   getBackendRun: SessionExecutionRepository["getBackendRun"];
   listBackendRuns: SessionExecutionRepository["listBackendRuns"];
   listCore02RecoveryCandidates: SessionExecutionRepository["listCore02RecoveryCandidates"];
   listRunHistoryEntries: SessionExecutionRepository["listRunHistoryEntries"];
   saveBackendEvent: SessionExecutionRepository["saveBackendEvent"];
   appendCore02Event: SessionExecutionRepository["appendCore02Event"];
+  /** Host diagnostic event IDs use the stable `host-diagnostic:<run>:<attempt>:<operation>` form. */
   appendHostDiagnostic: SessionExecutionRepository["appendHostDiagnostic"];
   commitCore02LifecycleEvent: SessionExecutionRepository["commitCore02LifecycleEvent"];
   listBackendEvents: SessionExecutionRepository["listBackendEvents"];
@@ -1052,6 +1063,7 @@ export interface WorkspaceStore {
   getAutomationRun: AutomationRepository["getAutomationRun"];
   listAutomationRuns: AutomationRepository["listAutomationRuns"];
   attachAutomationRunEvidence: AutomationRepository["attachAutomationRunEvidence"];
+  attachAutomationRunBackendRun: AutomationRepository["attachAutomationRunBackendRun"];
   settleAutomationRun: AutomationRepository["settleAutomationRun"];
   listExpiredAutomationRunClaims: AutomationRepository["listExpiredAutomationRunClaims"];
 

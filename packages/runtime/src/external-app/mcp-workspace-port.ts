@@ -24,12 +24,12 @@ export interface RuntimeMcpWorkspacePortOptions {
   /** Operational integration records only. Workspace content never crosses
    * this adapter; it is reached through ExternalAppIngress queries. */
   integrationStore: ExternalIntegrationStore;
-  runtime: AgentRuntime;
+  runtime: Pick<AgentRuntime, "createExternalAppIngress">;
   bindings: RoomBindingService;
   snapshots: ContextSnapshotService;
 }
 
-export function createRuntimeContextSnapshotSource(input: { runtime: AgentRuntime }): (target: ExternalWorkspaceTarget, signal?: AbortSignal) => Promise<ContextSnapshotSource> {
+export function createRuntimeContextSnapshotSource(input: { runtime: Pick<AgentRuntime, "createExternalAppIngress"> }): (target: ExternalWorkspaceTarget, signal?: AbortSignal) => Promise<ContextSnapshotSource> {
   return async (target, signal) => {
     const ingress = input.runtime.createExternalAppIngress(target.workspaceId);
     const ingressTarget = {
@@ -81,10 +81,7 @@ export function createRuntimeContextSnapshotSource(input: { runtime: AgentRuntim
 }
 
 const externalMutationOperations = [
-  "artifact.create", "artifact.revise", "artifact.restore_revision", "collection.schema.save", "collection.record.create", "collection.patch.apply",
-  "collection.record.delete",
-  // Proposal/candidate creation is intentionally separate from publication
-  // or promotion of human-owned Knowledge and Skills.
+  "artifact.create", "artifact.revise", "artifact.restore_revision", "collection.schema.save", "collection.record.create", "collection.patch.apply", "collection.record.delete",
   "wiki.proposal.create", "wiki.patch", "wiki.archive", "skill.candidate.create", "skill.patch",
   "resource.copy", "resource.move", "resource.promote", "resource.redact",
   "policy.change.request", "profile.change.request", "soul.change.request"

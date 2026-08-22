@@ -51,14 +51,15 @@ import type {
   WikiFrontmatter,
   WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
-import { supportedLocales } from "@samurai-agent/core-schemas";
+import { defaultSettings, supportedLocales } from "@samurai-agent/core-schemas";
 import { type LocaleKey, t } from "@samurai-agent/localization";
 import type { SurfaceRenderKind, SurfaceRendererCapabilities, SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   api,
   ApiError,
   createIdempotencyKey,
-  getApiBaseUrl,
+  getWorkspaceClientBridge,
+  setActiveWorkspaceRoomId,
   type AgentBackendStatus,
   type ApprovalLifecyclePayload,
   type ArchiveMemoryPayload,
@@ -78,6 +79,7 @@ import {
   type SessionDetail,
   type SurfaceContractPayload
 } from "./lib/api";
+import { configureBrowserWorkspaceConnection, type BrowserWorkspaceConnectionInput } from "./lib/workspace-browser-auth";
 import CollectionWorkspaceView from "./components/CollectionWorkspaceView.vue";
 import GeneratedSurfaceCard from "./components/GeneratedSurfaceCard.vue";
 import SkillOptimizationCard from "./components/SkillOptimizationCard.vue";
@@ -122,7 +124,6 @@ import { persistSettings, readStoredSettings } from "./lib/settings-storage";
 import { useMessageActions } from "./lib/use-message-actions";
 import { collectionDefaultViewId, collectionListErrorMessage, collectionSchemaRenderer, collectionSchemaTitle } from "./lib/collection-list-state";
 import { useDisclosureState } from "./lib/use-disclosure-state";
-import { connectAppSocket } from "./lib/connect-app-socket";
 import { appendById, mergeById } from "./lib/array-state";
 import {
   appCollectionData,
@@ -145,15 +146,7 @@ type ChatDisplayMessage = {
   activityItems?: WorkActivityItem[];
   streamItems?: PendingAgentStreamItem[];
 };
-const settings = ref<SettingsRecord>({
-  ui_locale: "ja",
-  output_locale: "ja",
-  memory_capture_mode: "auto",
-  knowledge_wiki_capture_mode: "auto",
-  skill_capture_mode: "auto",
-  external_provider_role: "assistive",
-  updated_at: new Date().toISOString()
-});
+const settings = ref<SettingsRecord>(defaultSettings());
 const workspaceConnectionState = ref<DesktopWorkspaceConnectionState>({ connections: [] });
 const workspaceConnectionLoading = ref(false);
 const workspaceConnectionError = ref<string | null>(null);
@@ -164,21 +157,22 @@ const workspaceRoomError = ref<string | null>(null);
 const selectedWorkspaceRoomId = ref<string | undefined>();
 let stopWorkspaceRealtimeEvents: (() => void) | undefined;
 let workspaceRealtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-const workspaceConnectionAvailable = computed(() => typeof window !== "undefined" && Boolean(
-  window.samuraiDesktop?.listWorkspaceConnections
-  && window.samuraiDesktop?.upsertWorkspaceConnection
-  && window.samuraiDesktop?.selectWorkspaceConnection
-  && window.samuraiDesktop?.getWorkspaceServerStatus
+const workspaceConnectionAvailable = computed(() => Boolean(
+  getWorkspaceClientBridge()?.listWorkspaceConnections
+  && getWorkspaceClientBridge()?.upsertWorkspaceConnection
+  && getWorkspaceClientBridge()?.selectWorkspaceConnection
+  && getWorkspaceClientBridge()?.getWorkspaceServerStatus
 ));
-const workspaceRoomAvailable = computed(() => typeof window !== "undefined" && Boolean(
-  window.samuraiDesktop?.listWorkspaceRooms
-  && window.samuraiDesktop?.listWorkspaceRoomMembers
-  && window.samuraiDesktop?.createWorkspaceRoom
-  && window.samuraiDesktop?.previewWorkspaceRoomMove
-  && window.samuraiDesktop?.moveWorkspaceRoom
-  && window.samuraiDesktop?.previewWorkspaceRoomMember
-  && window.samuraiDesktop?.setWorkspaceRoomMember
+const workspaceRoomAvailable = computed(() => Boolean(
+  getWorkspaceClientBridge()?.listWorkspaceRooms
+  && getWorkspaceClientBridge()?.listWorkspaceRoomMembers
+  && getWorkspaceClientBridge()?.createWorkspaceRoom
+  && getWorkspaceClientBridge()?.previewWorkspaceRoomMove
+  && getWorkspaceClientBridge()?.moveWorkspaceRoom
+  && getWorkspaceClientBridge()?.previewWorkspaceRoomMember
+  && getWorkspaceClientBridge()?.setWorkspaceRoomMember
 ));
+const browserWorkspaceMode = computed(() => typeof window !== "undefined" && !window.samuraiDesktop);
 const workspaceRoomWorkspaceVersion = computed(() => {
   const body = workspaceServerStatus.value?.workspace?.body;
   if (!body || typeof body !== "object") return undefined;
@@ -531,7 +525,6 @@ onMounted(async () => {
   }
   subscribeWorkspaceRealtimeEvents();
   void loadWorkspaceConnections();
-  connectSocket();
   await Promise.all([loadSettings(), loadAgentBackends(), loadSurfaceContract(), loadSessionsWithRetry()]);
   window.addEventListener("hashchange", desktopDeepLinkHashHandler);
   await applyDesktopDeepLinkHash();
@@ -557,6 +550,8 @@ watch(
 watch(activeSurfaceSpec, (spec) => {
   if (spec) prepareSurfaceDraft(spec);
 });
+
+watch(selectedWorkspaceRoomId, (roomId) => setActiveWorkspaceRoomId(roomId), { immediate: true });
 
 async function loadSessions() {
   sessions.value = await api.listSessions();
@@ -710,7 +705,8 @@ async function sendMessage() {
     const session = activeSession.value ?? await api.createSession({
       title: draftSessionTitle(content),
       ui_locale: settings.value.ui_locale,
-      output_locale: settings.value.output_locale
+      output_locale: settings.value.output_locale,
+      ...(selectedWorkspaceRoomId.value ? { room_id: selectedWorkspaceRoomId.value } : {})
     });
     activeSession.value = session;
     promoteSessionToTop(session);
@@ -1140,7 +1136,8 @@ async function openMessagePresentation(presentation: MessagePresentationRecord) 
     if (presentation.kind === "generated_surface" && presentation.surface_id) {
       const detail = await api.getGeneratedSurface(presentation.surface_id);
       const revisionId = presentation.revision_id ?? detail.surface.current_revision_id;
-      const spec = generatedSurfaceRenderSpec(detail.surface, revisionId);
+      const bundle = await api.getGeneratedSurfaceBundle(detail.surface.id, revisionId);
+      const spec = generatedSurfaceRenderSpec(detail.surface, revisionId, bundle);
       openSurfaceSpec(spec);
       activeMessagePresentationId.value = presentation.id;
       viewMode.value = "chat";
@@ -1164,9 +1161,12 @@ async function openMessagePresentation(presentation: MessagePresentationRecord) 
   }
 }
 
-function generatedSurfaceRenderSpec(surface: NonNullable<Awaited<ReturnType<typeof api.getGeneratedSurface>>>["surface"], revisionId: string): SurfaceRenderSpec {
+function generatedSurfaceRenderSpec(
+  surface: NonNullable<Awaited<ReturnType<typeof api.getGeneratedSurface>>>["surface"],
+  revisionId: string,
+  bundle: Awaited<ReturnType<typeof api.getGeneratedSurfaceBundle>>
+): SurfaceRenderSpec {
   const revision = surface.current_revision_id === revisionId ? surface.current_revision_id : revisionId;
-  const apiBase = getApiBaseUrl() ?? "";
   return {
     id: `generated_surface_${surface.id}_${revision}`,
     kind: "custom_view",
@@ -1176,7 +1176,7 @@ function generatedSurfaceRenderSpec(surface: NonNullable<Awaited<ReturnType<type
       renderer_version: "1",
       surface_id: surface.id,
       revision_id: revision,
-      preview_url: `${apiBase}/api/generated-surfaces/${encodeURIComponent(surface.id)}/revisions/${encodeURIComponent(revision)}/preview`,
+      srcdoc: generatedSurfaceDocument(bundle.bundle, surface.actions, bundle.csp),
       actions: surface.actions,
       input_data_schema: surface.input_data_schema,
       data: {}
@@ -1207,9 +1207,41 @@ async function exportGeneratedSurface(spec: SurfaceRenderSpec, format: "html" | 
   const surfaceId = typeof spec.props.surface_id === "string" ? spec.props.surface_id : "";
   const revisionId = typeof spec.props.revision_id === "string" ? spec.props.revision_id : "";
   if (!surfaceId || !revisionId) return;
-  const base = getApiBaseUrl() ?? "";
-  const url = `${base}/api/generated-surfaces/${encodeURIComponent(surfaceId)}/export?revision_id=${encodeURIComponent(revisionId)}&format=${format}`;
-  window.open(url, "_blank", "noopener,noreferrer");
+  const exported = await api.exportGeneratedSurface(surfaceId, revisionId, format);
+  const bytes = Uint8Array.from(atob(exported.content_base64), (character) => character.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: exported.content_type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = exported.file_name;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function generatedSurfaceDocument(bundle: { html: string; css?: string; script?: string; assets?: Array<{ path: string; content_base64: string; mime_type: string }> }, actions: Array<{ id: string }>, csp: string): string {
+  const bridge = JSON.stringify({ actions: actions.map((action) => action.id) }).replace(/</g, "\\u003c");
+  const html = inlineGeneratedSurfaceAssets(bundle.html, bundle.assets ?? []);
+  const css = (bundle.css ?? "").replace(/<\/style/gi, "<\\/style");
+  const script = (bundle.script ?? "").replace(/<\/script/gi, "<\\/script");
+  const closeScriptTag = "</" + "script>";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${css}</style></head><body>${html}<script>${script}${closeScriptTag}<script>window.samuraiGeneratedSurface=${bridge};window.dispatchSamuraiAction=function(actionId,payload){window.parent.postMessage({type:"samurai.generated_surface.action",action_id:actionId,payload:payload||{}},"*")};${closeScriptTag}</body></html>`;
+}
+
+function inlineGeneratedSurfaceAssets(source: string, assets: Array<{ path: string; content_base64: string; mime_type: string }>): string {
+  const dataByPath = new Map<string, string>();
+  for (const asset of assets) {
+    const path = asset.path.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+    if (!path || path.startsWith("/") || path.includes("..")) continue;
+    const dataUrl = `data:${asset.mime_type};base64,${asset.content_base64}`;
+    dataByPath.set(path, dataUrl);
+    dataByPath.set(`assets/${path}`, dataUrl);
+  }
+  const replaceReference = (reference: string): string => {
+    const normalized = reference.trim().replace(/^\.\//, "");
+    return dataByPath.get(normalized) ?? reference;
+  };
+  return source
+    .replace(/((?:src|href)\s*=\s*["'])([^"']+)(["'])/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`)
+    .replace(/(url\(\s*["']?)([^"')]+)(["']?\s*\))/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`);
 }
 
 async function runGeneratedSurfaceAction(spec: SurfaceRenderSpec, action: { id: string; label: string }, payload: Record<string, JsonValue> = {}) {
@@ -1260,7 +1292,7 @@ async function loadWorkspaceConnections(): Promise<void> {
 }
 
 function subscribeWorkspaceRealtimeEvents(): void {
-  const listener = typeof window === "undefined" ? undefined : window.samuraiDesktop?.onWorkspaceServerEvent;
+  const listener = getWorkspaceClientBridge()?.onWorkspaceServerEvent;
   if (!listener) return;
   stopWorkspaceRealtimeEvents = listener((event: DesktopWorkspaceRealtimeEvent | undefined) => {
     if (!event) return;
@@ -1310,6 +1342,24 @@ async function saveWorkspaceConnection(input: { label: string; serverUrl: string
   }
 }
 
+async function saveBrowserWorkspaceConnection(input: BrowserWorkspaceConnectionInput): Promise<void> {
+  if (!browserWorkspaceMode.value) throw new Error("workspace_browser_mode_required");
+  workspaceConnectionLoading.value = true;
+  workspaceConnectionError.value = null;
+  try {
+    await configureBrowserWorkspaceConnection(input);
+    workspaceConnectionState.value = await getWorkspaceClientBridge()!.listWorkspaceConnections!();
+    await refreshWorkspaceServerStatus();
+  } catch (error) {
+    workspaceConnectionError.value = settings.value.ui_locale === "ja"
+      ? `ブラウザ接続を保存できませんでした。${error instanceof Error ? ` (${error.message})` : ""}`
+      : `Could not save the browser connection.${error instanceof Error ? ` (${error.message})` : ""}`;
+    throw new Error("workspace_browser_connection_save_failed");
+  } finally {
+    workspaceConnectionLoading.value = false;
+  }
+}
+
 async function importActiveWorkspaceIdentity(): Promise<void> {
   const bridge = workspaceConnectionBridge();
   if (!bridge?.importActiveWorkspaceIdentityFromClipboard) return;
@@ -1352,6 +1402,12 @@ async function refreshWorkspaceServerStatus(): Promise<void> {
 async function loadWorkspaceRooms(): Promise<void> {
   const bridge = workspaceConnectionBridge();
   if (!bridge?.listWorkspaceRooms) return;
+  if (!workspaceConnectionState.value.activeConnectionId) {
+    workspaceRooms.value = [];
+    selectedWorkspaceRoomId.value = undefined;
+    workspaceRoomError.value = null;
+    return;
+  }
   workspaceRoomLoading.value = true;
   workspaceRoomError.value = null;
   try {
@@ -1466,7 +1522,9 @@ const workspaceServerStatusDisplay = computed<{ message: string; tone: "ready" |
   };
   if (!status.identityAvailable) return {
     tone: "warning",
-    message: settings.value.ui_locale === "ja" ? "この端末の本人情報が未登録です。秘密鍵をコピーしてから、Desktopの安全な読み込みを使ってください。" : "This device has no registered identity. Copy the private key, then import it through Desktop protected storage."
+    message: settings.value.ui_locale === "ja"
+      ? (browserWorkspaceMode.value ? "ブラウザの本人情報が未登録です。公開鍵と秘密鍵を入力して接続してください。" : "この端末の本人情報が未登録です。秘密鍵をコピーしてから、Desktopの安全な読み込みを使ってください。")
+      : (browserWorkspaceMode.value ? "This browser has no identity. Enter the public and private keys to connect." : "This device has no registered identity. Copy the private key, then import it through Desktop protected storage.")
   };
   if (status.workspace?.status === 200) {
     const rooms = status.rooms?.body;
@@ -1487,7 +1545,7 @@ const workspaceServerStatusDisplay = computed<{ message: string; tone: "ready" |
 });
 
 function workspaceConnectionBridge(): NonNullable<Window["samuraiDesktop"]> | undefined {
-  const bridge = typeof window === "undefined" ? undefined : window.samuraiDesktop;
+  const bridge = getWorkspaceClientBridge();
   if (!bridge?.listWorkspaceConnections || !bridge.upsertWorkspaceConnection || !bridge.selectWorkspaceConnection) return undefined;
   return bridge as NonNullable<Window["samuraiDesktop"]>;
 }
@@ -1613,15 +1671,6 @@ function promoteSessionToTop(session: SessionRecord) {
   sessions.value = [session, ...sessions.value.filter((item) => item.id !== session.id)];
 }
 
-function connectSocket() {
-  connectAppSocket({
-    activeSession, activity, approvalRequests, operations, policyDecisions, backendRuns, backendEvents,
-    workspaceChanges, settings, promoteSession: promoteSessionToTop, applyStreamingRun, applyStreamingEvent,
-    persistSettings, reloadActiveSession,
-    acceptSession: (session) => !isInternalSessionTitle(session.title)
-      && (!isInitialTitle(session.title) || activeSession.value?.id === session.id)
-  });
-}
 function hasPersistedPendingUserMessage(): boolean {
   if (!pendingUserMessage.value) {
     return false;
@@ -2222,8 +2271,10 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
         :set-workspace-room-member="setWorkspaceRoomMember"
         :active-workspace-connection-id="workspaceConnectionState.activeConnectionId"
         :workspace-connections="workspaceConnectionState.connections"
+        :browser-workspace-mode="browserWorkspaceMode"
         :select-workspace-connection="selectWorkspaceConnection"
         :save-workspace-connection="saveWorkspaceConnection"
+        :save-browser-workspace-connection="saveBrowserWorkspaceConnection"
         :import-workspace-identity="importActiveWorkspaceIdentity"
         :register-workspace-server-account="registerWorkspaceServerAccount"
         :locale-display-name="localeDisplayName"

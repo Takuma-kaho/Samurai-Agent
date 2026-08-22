@@ -91,7 +91,50 @@ export interface RoomResourceShareRecord {
   updated_at: string;
 }
 
-type DbExecutor = Kysely<WorkspaceDb> | Transaction<WorkspaceDb>;
+export type DbExecutor = Kysely<WorkspaceDb> | Transaction<WorkspaceDb>;
+
+export interface ManagedResourceBoundaryInput {
+  resourceKind: "wiki" | "skill";
+  resourceId: string;
+  sourceRoomId: string;
+  ownerParticipantId: string;
+  creatorParticipantId?: string;
+  resourceCreatedAt?: string;
+}
+
+/** Resource repositories use these narrow functions for Room-boundary writes. */
+export async function insertManagedResourceBoundary(db: DbExecutor, input: ManagedResourceBoundaryInput): Promise<void> {
+  const now = nowIso();
+  await db.insertInto("resource_access_boundaries").values({
+    id: createId("resource-boundary"),
+    resource_kind: input.resourceKind,
+    resource_id: input.resourceId,
+    source_room_id: input.sourceRoomId,
+    owner_participant_id: input.ownerParticipantId,
+    creator_participant_id: input.creatorParticipantId ?? null,
+    resource_created_at: input.resourceCreatedAt ?? null,
+    boundary_registered_at: now,
+    updated_at: now
+  }).execute();
+}
+
+export async function deleteManagedResourceBoundary(db: DbExecutor, input: { resourceKind: "wiki" | "skill"; resourceId: string; sourceRoomId: string }): Promise<void> {
+  await db.deleteFrom("resource_access_boundaries")
+    .where("resource_kind", "=", input.resourceKind)
+    .where("resource_id", "=", input.resourceId)
+    .where("source_room_id", "=", input.sourceRoomId)
+    .execute();
+}
+
+export async function moveManagedResourceBoundary(db: DbExecutor, input: { resourceKind: "wiki" | "skill"; resourceId: string; sourceRoomId: string; targetRoomId: string }): Promise<boolean> {
+  const result = await db.updateTable("resource_access_boundaries")
+    .set({ source_room_id: input.targetRoomId, updated_at: nowIso() })
+    .where("resource_kind", "=", input.resourceKind)
+    .where("resource_id", "=", input.resourceId)
+    .where("source_room_id", "=", input.sourceRoomId)
+    .executeTakeFirst();
+  return Number(result.numUpdatedRows ?? 0) === 1;
+}
 
 /**
  * SQLite owner for current participation and explicit resource shares.

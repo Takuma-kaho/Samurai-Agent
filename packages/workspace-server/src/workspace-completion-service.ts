@@ -336,6 +336,28 @@ export class WorkspaceCompletionService {
     });
   }
 
+  async listActivities(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { roomId: string; activityId?: string; sourceApp?: string; sourceId?: string; outcome?: string; limit?: number; offset?: number }
+  ): Promise<WorkspaceCompletionActivity[]> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    const offset = input.offset ?? 0;
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new WorkspaceServerError("workspace_completion_activity_offset_invalid", 400);
+    return this.store.database.withContext(context, async (sql) => {
+      const result = await sql.query<ActivityRow>(
+        `SELECT * FROM workspace_completion_activities
+         WHERE workspace_id = $1 AND room_id = $2
+           AND ($3::TEXT IS NULL OR id = $3)
+           AND ($4::TEXT IS NULL OR source_app = $4)
+           AND ($5::TEXT IS NULL OR source_id = $5)
+           AND ($6::TEXT IS NULL OR outcome = $6)
+         ORDER BY finalized_at DESC, id DESC LIMIT $7 OFFSET $8`,
+        [context.workspaceId, input.roomId, input.activityId ?? null, input.sourceApp ?? null, input.sourceId ?? null, input.outcome ?? null, boundedLimit(input.limit), offset]
+      );
+      return result.rows.map(activityFromRow);
+    });
+  }
+
   async createEpisode(context: WorkspaceRequestContext, input: { id?: string; roomId: string; goal: string; sourceApp?: string; externalEpisodeKey?: string; sessionRef?: WorkspaceCompletionEpisode["sessionRef"] }): Promise<{ episode: WorkspaceCompletionEpisode; replayed: boolean }> {
     assertOpaqueId(input.roomId, "room_id_invalid");
     assertSafeText(input.goal, "workspace_completion_episode_goal_invalid");
@@ -2869,7 +2891,7 @@ export class WorkspaceCompletionService {
   }
 
   private async finalizeBatch(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, batchId: string): Promise<void> {
-    const batch = await this.store.database.withContext(context, async (sql) => {
+    await this.store.database.withContext(context, async (sql) => {
       const header = await sql.query<{ id: string; scope_kind: "workspace" | "room"; room_id: string | null; status: "db_committed" | "renamed" | "rolled_back" }>(
         "SELECT id, scope_kind, room_id, status FROM workspace_completion_file_batches WHERE workspace_id = $1 AND id = $2",
         [context.workspaceId, batchId]
@@ -2884,10 +2906,64 @@ export class WorkspaceCompletionService {
       const scope = row.scope_kind === "workspace"
         ? { kind: "workspace" as const }
         : { kind: "room" as const, roomId: requiredRoomId(row.room_id) };
-      return { workspaceId: context.workspaceId, id: batchId, scope, status: row.status, entries: entries.rows.map((entry) => ({ path: entry.path, sha256: entry.sha256, content: Buffer.alloc(Number(entry.size)) })) };
-    });
-    if (batch.status !== "renamed") await this.files.recover(batch);
-    await this.store.database.withContext(context, async (sql) => {
+      const paths = entries.rows.map((entry) => entry.path);
+      // Hold the resource rows while the physical rename runs. A newer batch
+      // either waits for this recovery or is already visible here and is
+      // rejected, so an older transaction can never overwrite the current
+      // resource file after its metadata has advanced.
+      await sql.query(
+        `SELECT resource_id FROM workspace_completion_resource_versions
+         WHERE workspace_id = $1 AND file_batch_id = $2
+         UNION
+         SELECT resource_id FROM workspace_completion_skill_files
+         WHERE workspace_id = $1 AND file_batch_id = $2`,
+        [context.workspaceId, batchId]
+      );
+      await sql.query(
+        `SELECT * FROM workspace_completion_resources
+         WHERE workspace_id = $1 AND id IN (
+           SELECT resource_id FROM workspace_completion_resource_versions WHERE workspace_id = $1 AND file_batch_id = $2
+           UNION
+           SELECT resource_id FROM workspace_completion_skill_files WHERE workspace_id = $1 AND file_batch_id = $2
+         ) FOR UPDATE`,
+        [context.workspaceId, batchId]
+      );
+      if (paths.length > 0) {
+        const conflictingResource = await sql.query<{ file_path: string }>(
+          `SELECT version.file_path
+           FROM workspace_completion_resource_versions version
+           JOIN workspace_completion_resources resource
+             ON resource.workspace_id = version.workspace_id AND resource.id = version.resource_id
+           WHERE version.workspace_id = $1
+             AND version.file_path = ANY($2::TEXT[])
+             AND version.file_batch_id IS DISTINCT FROM $3
+             AND (resource.current_confirmed_version = version.version
+               OR resource.current_provisional_version = version.version
+               OR resource.candidate_version = version.version)
+           LIMIT 1`,
+          [context.workspaceId, paths, batchId]
+        );
+        if (conflictingResource.rows[0]) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 503, { path: conflictingResource.rows[0].file_path });
+        const conflictingDocument = await sql.query<{ file_path: string }>(
+          `SELECT file_path FROM workspace_completion_workspace_documents
+           WHERE workspace_id = $1 AND file_path = ANY($2::TEXT[]) AND file_batch_id IS DISTINCT FROM $3
+           LIMIT 1`,
+          [context.workspaceId, paths, batchId]
+        );
+        if (conflictingDocument.rows[0]) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 503, { path: conflictingDocument.rows[0].file_path });
+        // Completion owns these paths. A legacy generic-file ledger entry is
+        // an ownership conflict, not permission to overwrite or silently
+        // migrate the user's file; surface it for an explicit recovery.
+        const conflictingWorkspaceFile = await sql.query<{ path: string }>(
+          `SELECT path FROM workspace_files
+           WHERE workspace_id = $1 AND path = ANY($2::TEXT[])
+           LIMIT 1`,
+          [context.workspaceId, paths]
+        );
+        if (conflictingWorkspaceFile.rows[0]) throw new WorkspaceServerError("workspace_completion_file_ledger_conflict", 409, { path: conflictingWorkspaceFile.rows[0].path });
+      }
+      const batch = { workspaceId: context.workspaceId, id: batchId, scope, status: row.status, entries: entries.rows.map((entry) => ({ path: entry.path, sha256: entry.sha256, content: Buffer.alloc(Number(entry.size)) })) };
+      if (batch.status !== "renamed") await this.files.recover(batch);
       await sql.query(
         `UPDATE workspace_completion_file_batches SET status = 'renamed', updated_at = NOW()
          WHERE workspace_id = $1 AND id = $2 AND status = 'db_committed'`,

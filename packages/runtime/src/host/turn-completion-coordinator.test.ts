@@ -5,7 +5,7 @@ import { TurnCompletionCoordinator } from "./turn-completion-coordinator";
 import type { AdmittedTurn, TurnOutput, TurnSettlementInput } from "./host-types";
 
 describe("TurnCompletionCoordinator", () => {
-  it("does not run Learning Review after a normal turn", async () => {
+  it("runs Learning Review after a normal turn", async () => {
     const calls: string[] = [];
     const settled = completedRun();
     const coordinator = new TurnCompletionCoordinator(
@@ -23,7 +23,7 @@ describe("TurnCompletionCoordinator", () => {
       turnOutput: { content: "done", events: [] }
     });
 
-    expect(calls).toEqual(["telemetry"]);
+    expect(calls).toEqual(["learning-review", "telemetry"]);
   });
 
   it("keeps the committed result when independent post-turn work fails", async () => {

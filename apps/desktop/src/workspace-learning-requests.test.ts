@@ -1,38 +1,23 @@
 import { describe, expect, it } from "vitest";
-import {
-  workspaceLearningResourceIdRequest,
-  workspaceLearningResourceCreateRequest,
-  workspaceLearningResourceListRequest,
-  workspaceLearningSettingsRequest
-} from "./workspace-learning-requests";
+import { workspaceLearningSettingsRequest } from "./workspace-learning-requests";
+import { workspaceCompletionResourceCreateRequest } from "./workspace-completion-requests";
 
-describe("Desktop learning operation boundary", () => {
-  it("accepts only a resource identifier for history lookup", () => {
-    expect(workspaceLearningResourceIdRequest({ resourceId: "resource_one", url: "https://attacker.example" })).toBe("resource_one");
-    expect(() => workspaceLearningResourceIdRequest({ resourceId: "" })).toThrow("resourceId_invalid");
-  });
-
-  it("allows the renderer to ask for archived items without opening another query surface", () => {
-    expect(workspaceLearningResourceListRequest({
-      scopeKind: "room", roomId: "room_product", includeArchived: true, serverUrl: "https://attacker.example"
-    })).toEqual({ scopeKind: "room", roomId: "room_product", includeArchived: true });
-  });
-
-  it("creates a fixed Room Knowledge request without a renderer URL, key, or arbitrary payload", () => {
-    expect(workspaceLearningResourceCreateRequest({
-      scopeKind: "room", roomId: "room_product", kind: "knowledge", title: " Deploy ",
-      content: " Verified steps ", reason: " Human confirmed ", operationId: "learning_create_1",
-      privateKey: "must-not-leave-renderer", serverUrl: "https://attacker.example", payload: { secret: "no" }
+describe("Desktop learning and completion operation boundaries", () => {
+  it("sends Knowledge resources through the Completion contract", () => {
+    expect(workspaceCompletionResourceCreateRequest({
+      scopeKind: "room", roomId: "room_product", kind: "knowledge", knowledgeKind: "experience_rule", title: " Deploy ",
+      content: " Verified steps ", reason: " Human confirmed ", operationId: "knowledge_create_1",
+      privateKey: "must-not-leave-renderer", serverUrl: "https://attacker.example"
     })).toEqual({
-      operationId: "learning_create_1",
+      operationId: "knowledge_create_1",
       body: {
-        scope_kind: "room", room_id: "room_product", kind: "knowledge",
+        scope_kind: "room", room_id: "room_product", kind: "knowledge", knowledge_kind: "experience_rule", metadata: {},
         title: "Deploy", content: "Verified steps", reason: "Human confirmed"
       }
     });
   });
 
-  it("allows an opaque SecretRef but never accepts a secret value or a cross-scope rule", () => {
+  it("allows an opaque SecretRef but never accepts a secret value", () => {
     expect(workspaceLearningSettingsRequest({
       scopeKind: "workspace", enabled: true, engineId: "local_engine", secretRef: "keychain_learning",
       expectedVersion: 1, operationId: "learning_settings_1", apiKey: "actual-secret"
@@ -43,10 +28,6 @@ describe("Desktop learning operation boundary", () => {
         secret_ref: "keychain_learning", expected_version: 1
       }
     });
-    expect(() => workspaceLearningResourceCreateRequest({
-      scopeKind: "room", roomId: "room_product", kind: "workspace_rule", isAbsoluteRule: true,
-      title: "Bad", content: "Bad", reason: "Bad", operationId: "learning_bad_rule"
-    })).toThrow("workspace_learning_resource_scope_invalid");
     expect(() => workspaceLearningSettingsRequest({
       scopeKind: "workspace", enabled: true, secretRef: `sk-${"a".repeat(24)}`,
       operationId: "learning_bad_secret_ref"

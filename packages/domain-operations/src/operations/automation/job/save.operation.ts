@@ -24,7 +24,8 @@ const automationJobSave = defineCommand<AutomationJobSavePorts>()({
   "title": "Save automation job",
   "description": "Save an automation job definition.",
   "sources": [
-    "runtime_api"
+    "runtime_api",
+    "external_app"
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",

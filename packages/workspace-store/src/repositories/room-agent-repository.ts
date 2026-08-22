@@ -39,12 +39,6 @@ export class RoomAgentRepository {
       await this.createAgent(agent);
       createdAgent = true;
     }
-    if (settings.default_room_id === room.id && settings.default_agent_id === agent.id) return { room, agent, createdRoom, createdAgent };
-    await this.db.updateTable("settings").set({
-      default_room_id: room.id,
-      default_agent_id: agent.id,
-      updated_at: now
-    }).where("id", "=", "default").execute();
     return { room, agent, createdRoom, createdAgent };
   }
 

@@ -63,7 +63,7 @@ const props = defineProps<{
   isPdfArtifact: (artifact: ArtifactRecord) => boolean;
   isImageArtifact: (artifact: ArtifactRecord) => boolean;
   isArtifactPreviewable: (artifact: ArtifactRecord) => boolean;
-  artifactContentUrl: (artifact: ArtifactRecord) => string;
+  artifactContentUrl: (artifact: ArtifactRecord, content: string) => string;
   markdownPreviewHtml: (content: string) => string;
   memoryStateLabel: (state: MemoryFrontmatter["state"]) => string;
   workspaceRoomAvailable: boolean;
@@ -165,8 +165,8 @@ const emit = defineEmits<{ close: [] }>();
         </section>
 
         <section v-if="props.activeArtifact && props.canvasMode === 'preview'" class="canvas-preview">
-          <object v-if="props.isPdfArtifact(props.activeArtifact.artifact)" class="pdf-preview" :data="props.artifactContentUrl(props.activeArtifact.artifact)" type="application/pdf"><a :href="props.artifactContentUrl(props.activeArtifact.artifact)" target="_blank" rel="noreferrer">{{ props.label("workspace.open_raw") }}</a></object>
-          <img v-else-if="props.isImageArtifact(props.activeArtifact.artifact)" class="image-preview" :src="props.artifactContentUrl(props.activeArtifact.artifact)" :alt="props.activeArtifact.artifact.title" />
+          <object v-if="props.isPdfArtifact(props.activeArtifact.artifact)" class="pdf-preview" :data="props.artifactContentUrl(props.activeArtifact.artifact, props.activeArtifact.content)" type="application/pdf"><a :href="props.artifactContentUrl(props.activeArtifact.artifact, props.activeArtifact.content)" target="_blank" rel="noreferrer">{{ props.label("workspace.open_raw") }}</a></object>
+          <img v-else-if="props.isImageArtifact(props.activeArtifact.artifact)" class="image-preview" :src="props.artifactContentUrl(props.activeArtifact.artifact, props.activeArtifact.content)" :alt="props.activeArtifact.artifact.title" />
           <article v-else-if="props.isArtifactPreviewable(props.activeArtifact.artifact)" class="markdown-preview lit-surface" v-html="props.markdownPreviewHtml(props.activeArtifact.content)"></article>
           <pre v-else class="document-surface">{{ props.activeArtifact.content }}</pre>
         </section>

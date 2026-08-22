@@ -20,6 +20,7 @@ import type {
   MemoryFrontmatter,
   MessageRecord,
   MessagePresentationRecord,
+  ObjectiveRecord,
   OperationRecord,
   PolicyDecisionRecord,
   RollbackPoint,
@@ -28,6 +29,7 @@ import type {
   SurfaceRendererRegistryEntry,
   SupportedLocale,
   ResourceRef,
+  WorkItemRecord,
   WikiFrontmatter,
   WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
@@ -37,6 +39,7 @@ import type {
   SurfaceRenderKind,
   SurfaceRendererCapabilities
 } from "@samurai-agent/ui-protocol";
+import { browserWorkspaceBridge } from "./workspace-browser-bridge";
 
 export interface SessionDetail {
   session: SessionRecord;
@@ -62,6 +65,20 @@ export interface ArtifactDetail {
 export interface MemoryDetail {
   memory: MemoryFrontmatter & { file_path: string };
   content: string;
+}
+
+export interface WorkspaceKnowledgeMemoryPage {
+  memory: MemoryFrontmatter & { file_path: string };
+  content: string;
+  scope?: { kind: "workspace" | "room"; roomId?: string };
+  metadata?: Record<string, JsonValue>;
+}
+
+export interface WorkspaceKnowledgeMemoryArchivePayload {
+  memory: MemoryFrontmatter & { file_path: string };
+  content: string;
+  changed: boolean;
+  replayed?: boolean;
 }
 
 export interface WikiDetail {
@@ -90,6 +107,24 @@ export interface GeneratedSurfaceDetail {
   surface: GeneratedSurfaceDefinition;
   revisions: GeneratedSurfaceRevisionRecord[];
   interactions: Array<Record<string, JsonValue>>;
+}
+
+export interface GeneratedSurfaceBundleDetail {
+  surface: GeneratedSurfaceDefinition;
+  revision: GeneratedSurfaceRevisionRecord;
+  bundle: {
+    html: string;
+    css?: string;
+    script?: string;
+    assets?: Array<{ path: string; content_base64: string; mime_type: string }>;
+  };
+  csp: string;
+}
+
+export interface GeneratedSurfaceExportPayload {
+  file_name: string;
+  content_type: string;
+  content_base64: string;
 }
 
 export interface SkillOptimizationDetail {
@@ -196,6 +231,23 @@ export interface AuditPayload {
   policyDecisions: PolicyDecisionRecord[];
   approvalRequests: ApprovalRequest[];
   rollbackPoints: RollbackPoint[];
+  workspaceEntries?: WorkspaceAuditEntry[];
+}
+
+export interface WorkspaceAuditEntry {
+  id: number;
+  workspaceId: string;
+  roomId?: string;
+  actorAccountId: string;
+  action: string;
+  outcome: "completed" | "rejected" | "failed";
+  operationId?: string;
+  subjectKind?: string;
+  subjectId?: string;
+  beforeVersion?: number;
+  afterVersion?: number;
+  details: Record<string, JsonValue>;
+  createdAt: string;
 }
 
 export interface ApprovalLifecyclePayload {
@@ -230,7 +282,7 @@ export interface AutomationRunSummary {
   id: string;
   kind: string;
   source: string;
-  status: "started" | "completed" | "failed";
+  status: "started" | "completed" | "failed" | "blocked";
   session_id?: string;
   backend_run_id?: string;
   started_at: string;
@@ -329,48 +381,6 @@ export interface DesktopWorkspaceLearningScope {
   roomId?: string;
 }
 
-export interface DesktopWorkspaceLearningResource {
-  workspaceId: string;
-  id: string;
-  scope: DesktopWorkspaceLearningScope;
-  kind: "knowledge" | "memory" | "skill" | "workspace_rule";
-  state: "active" | "provisional" | "archived" | "conflict";
-  isAbsoluteRule: boolean;
-  aiUpdateLocked: boolean;
-  confidence?: number;
-  sourceJobId?: string;
-  sourceAttemptId?: string;
-  title: string;
-  content: string;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface DesktopWorkspaceLearningResourceVersion {
-  resourceId: string;
-  version: number;
-  changeKind: "created" | "updated" | "evidence_appended" | "conflict_recorded" | "archived" | "restored" | "copied" | "moved" | "promoted" | "fixed" | "unfixed";
-  state: DesktopWorkspaceLearningResource["state"];
-  aiUpdateLocked: boolean;
-  confidence?: number;
-  sourceJobId?: string;
-  sourceAttemptId?: string;
-  title: string;
-  content: string;
-  reason: string;
-  createdAt: string;
-}
-
-export interface DesktopWorkspaceLearningEvidence {
-  resourceId: string;
-  resourceVersion: number;
-  activityId?: string;
-  kind: "activity" | "human_correction" | "explicit_remember" | "use_outcome" | "human_edit";
-  summary: string;
-  createdAt: string;
-}
-
 export interface DesktopWorkspaceLearningSettings {
   workspaceId: string;
   id: string;
@@ -386,6 +396,46 @@ export interface DesktopWorkspaceLearningSettings {
   tokensReserved: number;
   version: number;
   updatedAt: string;
+}
+
+export interface WorkspaceCompletionResourceView {
+  workspaceId: string;
+  id: string;
+  scope: { kind: "workspace" | "room"; roomId?: string };
+  kind: "knowledge" | "skill" | "policy";
+  knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule";
+  title: string;
+  evidenceState: string;
+  lifecycleState: string;
+  aiProtection: "editable" | "fixed";
+  creationSource: string;
+  aiManaged: boolean;
+  version: number;
+  currentConfirmedVersion?: number;
+  currentProvisionalVersion?: number;
+  candidateVersion?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceCompletionResourceDetail {
+  resource: WorkspaceCompletionResourceView;
+  current_version: { version: number; metadata: Record<string, JsonValue>; contentHash: string; reason: string; createdAt: string };
+  versions: Array<Record<string, JsonValue>>;
+  evidence: Array<Record<string, JsonValue>>;
+}
+
+export interface WorkspaceCompletionResourceBody {
+  resource: WorkspaceCompletionResourceView;
+  version: WorkspaceCompletionResourceDetail["current_version"];
+  content: string;
+}
+
+export interface WorkspaceKnowledgeWikiPage {
+  wiki: WikiFrontmatter & { file_path: string };
+  content: string;
+  scope?: { kind: "workspace" | "room"; roomId?: string };
+  metadata?: Record<string, JsonValue>;
 }
 
 export interface DesktopRoomMovePreview {
@@ -427,7 +477,111 @@ declare global {
       importActiveWorkspaceIdentityFromClipboard?: () => Promise<DesktopWorkspaceConnectionState>;
       registerWorkspaceServerAccount?: (displayName?: string) => Promise<unknown>;
       getWorkspaceServerStatus?: () => Promise<DesktopWorkspaceServerStatus>;
+      getWorkspaceSettings?: () => Promise<SettingsRecord>;
+      patchWorkspaceSettings?: (input: { patch: Partial<Omit<SettingsRecord, "updated_at">>; operationId: string }) => Promise<{ settings: SettingsRecord; replayed?: boolean }>;
       listWorkspaceRooms?: () => Promise<{ rooms: DesktopWorkspaceRoom[] }>;
+      listWorkspaceAgentBackends?: () => Promise<AgentBackendStatus[]>;
+      getWorkspaceSurfaceContract?: (source?: DomainCommandInputSource) => Promise<SurfaceContractPayload>;
+      listWorkspaceChatSessions?: () => Promise<SessionRecord[]>;
+      createWorkspaceChatSession?: (input: { roomId: string; title?: string; uiLocale?: SupportedLocale; outputLocale?: SupportedLocale; operationId: string }) => Promise<SessionRecord>;
+      getWorkspaceChatSession?: (input: { sessionId: string }) => Promise<SessionDetail>;
+      sendWorkspaceChatMessage?: (input: {
+        sessionId: string;
+        content: string;
+        idempotencyKey: string;
+        inputLocale?: SupportedLocale;
+        outputLocale?: SupportedLocale;
+        backendId?: string;
+        metadata?: Record<string, JsonValue>;
+        attachments?: ResourceRef[];
+      }) => Promise<ChatTurnResult | ChatSurfaceOperationResult>;
+      listWorkspaceCompletionResources?: (input: { scopeKind: "workspace" | "room"; roomId?: string; kind?: "knowledge" | "skill"; includeArchived?: boolean }) => Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
+      getWorkspaceCompletionResource?: (input: { resourceId: string }) => Promise<WorkspaceCompletionResourceDetail>;
+      getWorkspaceCompletionResourceBody?: (input: { resourceId: string }) => Promise<WorkspaceCompletionResourceBody>;
+      createWorkspaceCompletionResource?: (input: {
+        scopeKind: "workspace" | "room";
+        roomId?: string;
+        kind: "knowledge" | "skill";
+        knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule";
+        title: string;
+        content: string;
+        metadata?: Record<string, JsonValue>;
+        reason: string;
+        operationId: string;
+      }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
+      updateWorkspaceCompletionResource?: (input: {
+        resourceId: string;
+        scopeKind: "workspace" | "room";
+        roomId?: string;
+        kind: "knowledge" | "skill";
+        knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule";
+        title: string;
+        content: string;
+        metadata?: Record<string, JsonValue>;
+        reason: string;
+        expectedVersion: number;
+        operationId: string;
+      }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
+      setWorkspaceCompletionResourceFixed?: (input: { resourceId: string; fixed: boolean; expectedVersion: number; reason: string; operationId: string }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
+      archiveWorkspaceCompletionResource?: (input: { resourceId: string; archived: boolean; expectedVersion: number; reason: string; operationId: string }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
+      searchWorkspaceCompletionKnowledge?: (input: { roomId: string; query: string; limit?: number }) => Promise<{ resources: Array<WorkspaceCompletionResourceView & { rank?: number }>; next_cursor?: string }>;
+      listWorkspaceCompletionSkills?: (input: { roomId: string }) => Promise<{ skills: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
+      getWorkspaceCompletionSkill?: (input: { resourceId: string }) => Promise<{ resource: WorkspaceCompletionResourceView; version: WorkspaceCompletionResourceDetail["current_version"]; content: string; support_files?: Array<Record<string, JsonValue>> }>;
+      listWorkspaceSkillOptimizations?: (input: { skillId?: string; roomId?: string; limit?: number }) => Promise<SkillOptimizationRun[]>;
+      getWorkspaceSkillOptimization?: (input: { runId: string }) => Promise<SkillOptimizationDetail>;
+      startWorkspaceSkillOptimization?: (input: { skillId: string; roomId?: string; objective?: string; goldenExamples?: JsonValue[]; syntheticExamples?: JsonValue[]; operationId: string }) => Promise<{ run: SkillOptimizationRun; dataset: SkillOptimizationDataset; objective: ObjectiveRecord; work_item: WorkItemRecord }>;
+      runWorkspaceSkillOptimizationAction?: (input: { runId: string; action: "cancel" | "promote" | "reject" | "rollback"; candidateId?: string; promotionId?: string; snapshotId?: string; operationId: string }) => Promise<Record<string, unknown>>;
+      listWorkspaceKnowledgeWiki?: (input: { roomId: string; includeArchived?: boolean }) => Promise<{ pages: WorkspaceKnowledgeWikiPage[] }>;
+      getWorkspaceKnowledgeWiki?: (input: { wikiId: string }) => Promise<WorkspaceKnowledgeWikiPage>;
+      createWorkspaceKnowledgeWiki?: (input: { roomId: string; title: string; content: string; slug?: string; tags?: string[]; contentLocale?: SupportedLocale; knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule"; reason: string; operationId: string }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
+      updateWorkspaceKnowledgeWiki?: (input: { wikiId: string; title?: string; content?: string; tags?: string[]; contentLocale?: SupportedLocale; reason: string; operationId: string }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
+      setWorkspaceKnowledgeWikiState?: (input: { wikiId: string; state: "accept" | "reject" | "archive"; reason: string; operationId: string }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
+      reindexWorkspaceKnowledgeWiki?: (input: { roomId: string }) => Promise<{ active: number; total: number; links: number }>;
+      getWorkspaceKnowledgeWikiGraph?: (input: { roomId: string; query?: string }) => Promise<Record<string, unknown>>;
+      getWorkspaceKnowledgeWikiLint?: (input: { roomId: string }) => Promise<Record<string, unknown>>;
+      getWorkspaceKnowledgeWikiBacklinks?: (input: { roomId: string; wikiId: string }) => Promise<Array<{ from_wiki_id: string; label: string }>>;
+      listWorkspaceKnowledgeMemory?: (input: { roomId: string; includeArchived?: boolean }) => Promise<{ memories: WorkspaceKnowledgeMemoryPage[] }>;
+      getWorkspaceKnowledgeMemory?: (input: { memoryId: string }) => Promise<WorkspaceKnowledgeMemoryPage>;
+      searchWorkspaceKnowledgeMemory?: (input: { roomId: string; query: string; limit?: number }) => Promise<{ memories: Array<WorkspaceKnowledgeMemoryPage & { rank?: number }> }>;
+      archiveWorkspaceKnowledgeMemory?: (input: { memoryId: string; reason: string; operationId: string }) => Promise<WorkspaceKnowledgeMemoryArchivePayload>;
+      listWorkspaceCollectionSchemas?: (input: { roomId: string }) => Promise<{ schemas: Array<CollectionSchema & { file_path: string; resource_version: number; room_id: string }> }>;
+      getWorkspaceCollectionSchema?: (input: { roomId: string; collectionId: string }) => Promise<{ schema: CollectionSchema & { file_path: string; resource_version: number; room_id: string } }>;
+      saveWorkspaceCollectionSchema?: (input: { roomId: string; schema: CollectionSchema; expectedVersion?: number; operationId: string }) => Promise<{ schema: CollectionSchema & { file_path: string; resource_version: number; room_id: string }; replayed?: boolean }>;
+      listWorkspaceCollectionRecords?: (input: { roomId: string; collectionId: string }) => Promise<{ records: Array<CollectionRecord & { file_path: string }> }>;
+      createWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; data: Record<string, JsonValue>; operationId: string }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
+      patchWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; patchId?: string; changes: Record<string, JsonValue>; expectedVersion?: number; operationId: string }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
+      deleteWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; expectedVersion: number; operationId: string }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
+      listWorkspaceCollectionNotes?: (input: { roomId: string; collectionId: string }) => Promise<{ notes: Array<{ file_path: string; content: string; collection_id: string; role: "context_only" }> }>;
+      reindexWorkspaceCollections?: (input: { roomId: string }) => Promise<Record<string, unknown>>;
+      runWorkspaceCollectionSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation }) => Promise<SurfaceOperationResultEnvelope>;
+      listWorkspaceArtifacts?: (input: { roomId: string }) => Promise<{ artifacts: ArtifactRecord[] }>;
+      getWorkspaceArtifact?: (input: { roomId: string; artifactId: string }) => Promise<ArtifactDetail>;
+      createWorkspaceArtifact?: (input: { roomId: string; title: string; content: string | Record<string, JsonValue> | JsonValue[]; kind?: ArtifactRecord["kind"]; locale?: SupportedLocale; sourceLocales?: SupportedLocale[]; metadata?: Record<string, JsonValue>; operationId: string }) => Promise<{ artifact: ArtifactRecord; content: string; replayed?: boolean }>;
+      runWorkspaceArtifactSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation }) => Promise<SurfaceOperationResultEnvelope>;
+      getWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string }) => Promise<GeneratedSurfaceDetail>;
+      getWorkspaceGeneratedSurfaceBundle?: (input: { roomId: string; surfaceId: string; revisionId: string }) => Promise<GeneratedSurfaceBundleDetail>;
+      runWorkspaceGeneratedSurfaceAction?: (input: { roomId: string; surfaceId: string; actionId: string; revisionId?: string; interactionId?: string; messageId?: string; actionPayload?: Record<string, JsonValue>; operationId: string }) => Promise<Record<string, unknown>>;
+      runWorkspaceGeneratedSurfaceState?: (input: { roomId: string; surfaceId: string; action: "pin" | "unpin" | "archive"; interactionId?: string; messageId?: string; operationId: string }) => Promise<GeneratedSurfaceDefinition>;
+      exportWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; revisionId?: string; format: "html" | "zip" }) => Promise<GeneratedSurfaceExportPayload>;
+      listWorkspaceAutomationJobs?: (input: { roomId?: string }) => Promise<{ jobs: AutomationJobRecord[] }>;
+      createWorkspaceAutomationJob?: (input: {
+        roomId: string;
+        title: string;
+        kind: string;
+        schedule: string;
+        targetInstruction: string;
+        deliveryTarget?: Record<string, JsonValue>;
+        enabled?: boolean;
+        nextRunAt?: string;
+        maxAttempts?: number;
+        connectionId?: string;
+        sessionRef?: Record<string, JsonValue>;
+        operationId: string;
+      }) => Promise<{ job: AutomationJobRecord; replayed?: boolean }>;
+      listWorkspaceAutomationRuns?: (input: { roomId?: string }) => Promise<{ runs: AutomationRunSummary[] }>;
+      listWorkspaceAutomationJobRuns?: (input: { jobId: string }) => Promise<{ runs: AutomationRunSummary[] }>;
+      setWorkspaceAutomationManagement?: (input: { jobId: string; state: "allowed" | "manager_stopped"; operationId: string }) => Promise<{ job: AutomationJobRecord; replayed?: boolean }>;
+      runWorkspaceAutomationNow?: (input: { roomId: string; kind?: string; operationId: string }) => Promise<{ job: AutomationJobRecord; replayed?: boolean }>;
       listWorkspaceRoomMembers?: (roomId: string) => Promise<{ members: DesktopWorkspaceRoomMembership[] }>;
       createWorkspaceRoom?: (input: {
         name: string;
@@ -460,36 +614,6 @@ declare global {
         expectedVersion: number;
         operationId: string;
       }) => Promise<{ member: DesktopWorkspaceRoomMembership; affected_room_ids: string[]; replayed?: boolean }>;
-      listWorkspaceLearningResources?: (input: { scopeKind: "workspace" | "room"; roomId?: string; includeArchived?: boolean }) => Promise<{ resources: DesktopWorkspaceLearningResource[] }>;
-      createWorkspaceLearningResource?: (input: {
-        scopeKind: "workspace" | "room";
-        roomId?: string;
-        kind: DesktopWorkspaceLearningResource["kind"];
-        isAbsoluteRule?: boolean;
-        title: string;
-        content: string;
-        reason: string;
-        operationId: string;
-      }) => Promise<{ resource: DesktopWorkspaceLearningResource; replayed?: boolean }>;
-      getWorkspaceLearningResource?: (input: { resourceId: string }) => Promise<{
-        resource: DesktopWorkspaceLearningResource;
-        versions: DesktopWorkspaceLearningResourceVersion[];
-        evidence: DesktopWorkspaceLearningEvidence[];
-      }>;
-      updateWorkspaceLearningResource?: (input: {
-        resourceId: string;
-        scopeKind: "workspace" | "room";
-        roomId?: string;
-        kind: DesktopWorkspaceLearningResource["kind"];
-        isAbsoluteRule?: boolean;
-        title: string;
-        content: string;
-        reason: string;
-        expectedVersion: number;
-        operationId: string;
-      }) => Promise<{ resource: DesktopWorkspaceLearningResource; replayed?: boolean }>;
-      setWorkspaceLearningResourceFixed?: (input: { resourceId: string; fixed: boolean; expectedVersion: number; reason: string; operationId: string }) => Promise<{ resource: DesktopWorkspaceLearningResource; replayed?: boolean }>;
-      archiveWorkspaceLearningResource?: (input: { resourceId: string; archived: boolean; expectedVersion: number; reason: string; operationId: string }) => Promise<{ resource: DesktopWorkspaceLearningResource; replayed?: boolean }>;
       getWorkspaceLearningSettings?: (roomId: string) => Promise<{
         settings: DesktopWorkspaceLearningSettings;
         workspace_settings?: DesktopWorkspaceLearningSettings;
@@ -513,7 +637,13 @@ declare global {
         expectedVersion?: number;
         operationId: string;
       }) => Promise<{ settings: DesktopWorkspaceLearningSettings; replayed?: boolean }>;
-      searchWorkspaceKnowledge?: (input: { roomId: string; query: string; limit?: number }) => Promise<{ resources: DesktopWorkspaceLearningResource[] }>;
+      searchWorkspace?: (input: { roomId: string; query: string }) => Promise<SearchResult[]>;
+      getWorkspaceAudit?: () => Promise<AuditPayload>;
+      listWorkspaceActivity?: (input: { roomId: string }) => Promise<ActivityInboxItem[]>;
+      listWorkspaceBackendRuns?: (input: { sessionId?: string }) => Promise<BackendRunRecord[]>;
+      getWorkspaceBackendRun?: (input: { runId: string }) => Promise<BackendRunRecord>;
+      listWorkspaceBackendEvents?: (input: { runId: string }) => Promise<BackendEventRecord[]>;
+      listWorkspaceChanges?: (input: { sessionId?: string }) => Promise<WorkspaceChangeRecord[]>;
       onWorkspaceServerEvent?: (listener: (event: DesktopWorkspaceRealtimeEvent | undefined) => void) => () => void;
     };
   }
@@ -522,6 +652,30 @@ declare global {
 export function getApiBaseUrl(): string | undefined {
   const value = typeof window === "undefined" ? undefined : window.samuraiDesktop?.apiBaseUrl;
   return value ? value.replace(/\/$/, "") : undefined;
+}
+
+let activeWorkspaceRoomId: string | undefined;
+
+/** AppWorkspace sets this after the signed Room list is loaded. The bridge
+ * never accepts a Room from an arbitrary URL or renderer payload. */
+export function setActiveWorkspaceRoomId(roomId: string | undefined): void {
+  activeWorkspaceRoomId = roomId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(roomId) ? roomId : undefined;
+}
+
+function activeWorkspaceBridge(): NonNullable<Window["samuraiDesktop"]> | undefined {
+  if (typeof window === "undefined") return undefined;
+  return window.samuraiDesktop ?? browserWorkspaceBridge();
+}
+
+export function getWorkspaceClientBridge(): NonNullable<Window["samuraiDesktop"]> | undefined {
+  return activeWorkspaceBridge();
+}
+
+function workspaceRequestRequired<T>(feature: string): Promise<T> {
+  return Promise.reject(new ApiError(503, "Workspace Server connection required", {
+    error: "workspace_connection_required",
+    feature
+  }));
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -558,65 +712,135 @@ export const api = {
   getHealth() {
     return request<HealthPayload>("/api/health");
   },
-  createSession(input: Partial<Pick<SessionRecord, "title" | "ui_locale" | "output_locale">> = {}) {
-    return request<SessionRecord>("/api/chat/sessions", {
-      method: "POST",
-      body: JSON.stringify(input)
-    });
+  createSession(input: Partial<Pick<SessionRecord, "title" | "ui_locale" | "output_locale">> & { room_id?: string } = {}) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.createWorkspaceChatSession) {
+      if (!input.room_id) return Promise.reject(new ApiError(400, "Room is required", { error: "room_id_required" }));
+      return bridge.createWorkspaceChatSession({
+        roomId: input.room_id,
+        operationId: createIdempotencyKey(),
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.ui_locale ? { uiLocale: input.ui_locale } : {}),
+        ...(input.output_locale ? { outputLocale: input.output_locale } : {})
+      });
+    }
+    return workspaceRequestRequired<SessionRecord>("chat.session.create");
   },
   listSessions() {
-    return request<SessionRecord[]>("/api/chat/sessions");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceChatSessions) return bridge.listWorkspaceChatSessions();
+    return workspaceRequestRequired<SessionRecord[]>("chat.session.list");
   },
   getSession(sessionId: string) {
-    return request<SessionDetail>(`/api/chat/sessions/${sessionId}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceChatSession) return bridge.getWorkspaceChatSession({ sessionId });
+    return workspaceRequestRequired<SessionDetail>("chat.session.get");
   },
   listAgentBackends() {
-    return request<AgentBackendStatus[]>("/api/agent-backends");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceAgentBackends) return bridge.listWorkspaceAgentBackends();
+    return workspaceRequestRequired<AgentBackendStatus[]>("agent-backends.list");
   },
   getSurfaceContract(source?: DomainCommandInputSource) {
-    return request<SurfaceContractPayload>(source ? `/api/surface/contract?source=${encodeURIComponent(source)}` : "/api/surface/contract");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceSurfaceContract) return bridge.getWorkspaceSurfaceContract(source);
+    return workspaceRequestRequired<SurfaceContractPayload>("surface.contract");
   },
   runDomainCommand<T = unknown>(commandId: string, payload: Record<string, JsonValue>, idempotencyKey = createIdempotencyKey()) {
-    return request<{ command: SurfaceCommandEntry; result: T; render_spec?: unknown; render_specs?: unknown[] }>(`/api/domain/commands/${encodeURIComponent(commandId)}/run`, {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify({ payload })
-    });
+    const bridge = activeWorkspaceBridge();
+    if (commandId === "generated_surface.state" && bridge?.runWorkspaceGeneratedSurfaceState && activeWorkspaceRoomId && typeof payload.surface_id === "string" && (payload.action === "pin" || payload.action === "unpin" || payload.action === "archive")) {
+      return bridge.runWorkspaceGeneratedSurfaceState({
+        roomId: activeWorkspaceRoomId,
+        surfaceId: payload.surface_id,
+        action: payload.action,
+        ...(typeof payload.interaction_id === "string" ? { interactionId: payload.interaction_id } : {}),
+        ...(typeof payload.message_id === "string" ? { messageId: payload.message_id } : {}),
+        operationId: idempotencyKey
+      }) as Promise<T>;
+    }
+    return workspaceRequestRequired<{ command: SurfaceCommandEntry; result: T; render_spec?: unknown; render_specs?: unknown[] }>("domain.command.run");
   },
   getGeneratedSurface(surfaceId: string) {
-    return request<GeneratedSurfaceDetail>(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceGeneratedSurface && activeWorkspaceRoomId) return bridge.getWorkspaceGeneratedSurface({ roomId: activeWorkspaceRoomId, surfaceId });
+    return workspaceRequestRequired<GeneratedSurfaceDetail>("generated-surface.get");
   },
   runGeneratedSurfaceAction(surfaceId: string, actionId: string, payload: { revision_id?: string; interaction_id?: string; message_id?: string; action_payload?: Record<string, JsonValue> }) {
-    return request(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}/actions/${encodeURIComponent(actionId)}/run`, {
-      method: "POST",
-      body: JSON.stringify({ payload })
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.runWorkspaceGeneratedSurfaceAction && activeWorkspaceRoomId) {
+      return bridge.runWorkspaceGeneratedSurfaceAction({
+        roomId: activeWorkspaceRoomId,
+        surfaceId,
+        actionId,
+        ...(payload.revision_id ? { revisionId: payload.revision_id } : {}),
+        ...(payload.interaction_id ? { interactionId: payload.interaction_id } : {}),
+        ...(payload.message_id ? { messageId: payload.message_id } : {}),
+        ...(payload.action_payload ? { actionPayload: payload.action_payload } : {}),
+        operationId: createIdempotencyKey()
+      });
+    }
+    return workspaceRequestRequired<Record<string, unknown>>("generated-surface.action.run");
   },
   getGeneratedSurfaceBundle(surfaceId: string, revisionId: string) {
-    return request<{ revision: GeneratedSurfaceRevisionRecord; bundle: { html: string; css?: string; script?: string }; csp: string }>(`/api/generated-surfaces/${encodeURIComponent(surfaceId)}/revisions/${encodeURIComponent(revisionId)}/bundle`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceGeneratedSurfaceBundle && activeWorkspaceRoomId) return bridge.getWorkspaceGeneratedSurfaceBundle({ roomId: activeWorkspaceRoomId, surfaceId, revisionId });
+    return workspaceRequestRequired<GeneratedSurfaceBundleDetail>("generated-surface.bundle.get");
+  },
+  exportGeneratedSurface(surfaceId: string, revisionId: string, format: "html" | "zip") {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.exportWorkspaceGeneratedSurface && activeWorkspaceRoomId) return bridge.exportWorkspaceGeneratedSurface({ roomId: activeWorkspaceRoomId, surfaceId, revisionId, format });
+    return workspaceRequestRequired<GeneratedSurfaceExportPayload>("generated-surface.export");
   },
   listSkillOptimizationRuns(skillId?: string) {
-    return request<SkillOptimizationRun[]>(skillId ? `/api/skill-optimizations?skill_id=${encodeURIComponent(skillId)}` : "/api/skill-optimizations");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceSkillOptimizations) {
+      return bridge.listWorkspaceSkillOptimizations({
+        ...(skillId ? { skillId } : {}),
+        ...(activeWorkspaceRoomId ? { roomId: activeWorkspaceRoomId } : {})
+      });
+    }
+    return workspaceRequestRequired<SkillOptimizationRun[]>("skill-optimization.list");
   },
   getSkillOptimization(runId: string) {
-    return request<SkillOptimizationDetail>(`/api/skill-optimizations/${encodeURIComponent(runId)}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceSkillOptimization) return bridge.getWorkspaceSkillOptimization({ runId });
+    return workspaceRequestRequired<SkillOptimizationDetail>("skill-optimization.get");
+  },
+  startSkillOptimization(input: { skillId: string; objective?: string; goldenExamples?: JsonValue[]; syntheticExamples?: JsonValue[] }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.startWorkspaceSkillOptimization) {
+      return bridge.startWorkspaceSkillOptimization({
+        skillId: input.skillId,
+        ...(activeWorkspaceRoomId ? { roomId: activeWorkspaceRoomId } : {}),
+        ...(input.objective ? { objective: input.objective } : {}),
+        ...(input.goldenExamples ? { goldenExamples: input.goldenExamples } : {}),
+        ...(input.syntheticExamples ? { syntheticExamples: input.syntheticExamples } : {}),
+        operationId: createIdempotencyKey()
+      });
+    }
+    return workspaceRequestRequired<SkillOptimizationDetail>("skill-optimization.start");
+  },
+  runSkillOptimizationAction(input: { runId: string; action: "cancel" | "promote" | "reject" | "rollback"; candidateId?: string; promotionId?: string; snapshotId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.runWorkspaceSkillOptimizationAction) {
+      return bridge.runWorkspaceSkillOptimizationAction({ ...input, operationId: createIdempotencyKey() });
+    }
+    return workspaceRequestRequired<Record<string, unknown>>(`skill-optimization.${input.action}`);
   },
   runSurfaceOperation<T>(operation: SurfaceOperation) {
-    return request<SurfaceOperationResultEnvelope<T>>("/api/surface/operations", {
-      method: "POST",
-      body: JSON.stringify(operation)
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.runWorkspaceCollectionSurfaceOperation && activeWorkspaceRoomId && operation.kind.startsWith("collection.")) {
+      return bridge.runWorkspaceCollectionSurfaceOperation({ roomId: activeWorkspaceRoomId, operation }) as Promise<SurfaceOperationResultEnvelope<T>>;
+    }
+    if (bridge?.runWorkspaceArtifactSurfaceOperation && activeWorkspaceRoomId && operation.kind === "artifact.request") {
+      return bridge.runWorkspaceArtifactSurfaceOperation({ roomId: activeWorkspaceRoomId, operation }) as Promise<SurfaceOperationResultEnvelope<T>>;
+    }
+    return workspaceRequestRequired<SurfaceOperationResultEnvelope<T>>("surface.operation.run");
   },
   updateMessagePresentationViewState(presentationId: string, viewState: Record<string, JsonValue>) {
-    return request<SurfaceOperationResultEnvelope<MessagePresentationRecord>>("/api/surface/operations", {
-      method: "POST",
-      body: JSON.stringify({
-        id: `surface_presentation_state_${presentationId}_${Date.now()}`,
-        kind: "message.presentation.update",
-        presentation_id: presentationId,
-        view_state: viewState
-      })
-    });
+    void presentationId;
+    void viewState;
+    return workspaceRequestRequired<SurfaceOperationResultEnvelope<MessagePresentationRecord>>("message.presentation.update");
   },
   submitChatSurfaceOperation(input: {
     idempotencyKey: string;
@@ -629,240 +853,413 @@ export const api = {
     metadata?: Record<string, JsonValue>;
     attachments?: ResourceRef[];
   }) {
-    return request<ChatSurfaceOperationResult>("/api/surface/operations", {
-      method: "POST",
-      headers: { "Idempotency-Key": input.idempotencyKey },
-      body: JSON.stringify({
-        id: input.idempotencyKey,
-        kind: "message.submit",
-        session_id: input.sessionId,
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.sendWorkspaceChatMessage) {
+      return bridge.sendWorkspaceChatMessage({
+        sessionId: input.sessionId,
         content: input.content,
-        input_locale: input.inputLocale,
-        output_locale: input.outputLocale,
-        renderer_capabilities: input.rendererCapabilities,
-        metadata: input.metadata,
-        attachments: input.attachments ?? [],
-        ...(input.backendId ? { backend_id: input.backendId } : {})
-      })
-    });
+        idempotencyKey: input.idempotencyKey,
+        ...(input.inputLocale ? { inputLocale: input.inputLocale } : {}),
+        outputLocale: input.outputLocale,
+        ...(input.backendId ? { backendId: input.backendId } : {}),
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+        ...(input.attachments?.length ? { attachments: input.attachments } : {})
+      }).then((result) => {
+        const envelope = result as ChatSurfaceOperationResult;
+        return envelope.result && envelope.render_spec
+          ? envelope
+          : { result, render_spec: undefined, render_specs: [] };
+      });
+    }
+    return workspaceRequestRequired<ChatSurfaceOperationResult>("chat.message.submit");
   },
   sendMessage(sessionId: string, content: string, outputLocale: SupportedLocale, idempotencyKey: string, backendId?: string) {
-    return request<ChatTurnResult>(`/api/chat/sessions/${sessionId}/messages`, {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify({
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.sendWorkspaceChatMessage) {
+      return bridge.sendWorkspaceChatMessage({
+        sessionId,
         content,
-        output_locale: outputLocale,
-        ...(backendId ? { backend_id: backendId } : {})
-      })
-    });
+        outputLocale,
+        idempotencyKey,
+        ...(backendId ? { backendId } : {})
+      }).then((payload) => isChatSurfaceEnvelope(payload) ? payload.result : payload);
+    }
+    return workspaceRequestRequired<ChatTurnResult>("chat.message.send");
   },
   startChat(content: string, uiLocale: SupportedLocale, outputLocale: SupportedLocale, idempotencyKey: string, backendId?: string) {
-    return request<ChatTurnResult>("/api/chat/messages", {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify({
-        content,
-        ui_locale: uiLocale,
-        output_locale: outputLocale,
-        ...(backendId ? { backend_id: backendId } : {})
-      })
-    });
+    return workspaceRequestRequired<ChatTurnResult>("chat.message.start");
   },
   search(query: string) {
-    return request<SearchResult[]>(`/api/search?q=${encodeURIComponent(query)}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.searchWorkspace && activeWorkspaceRoomId) return bridge.searchWorkspace({ roomId: activeWorkspaceRoomId, query });
+    return workspaceRequestRequired<SearchResult[]>("workspace.search");
   },
   getArtifact(id: string) {
-    return request<ArtifactDetail>(`/api/artifacts/${id}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceArtifact && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceArtifact({ roomId: activeWorkspaceRoomId, artifactId: id });
+    }
+    return workspaceRequestRequired<ArtifactDetail>("artifact.get");
   },
   getAudit() {
-    return request<AuditPayload>("/api/audit");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceAudit) return bridge.getWorkspaceAudit();
+    return workspaceRequestRequired<AuditPayload>("workspace.audit");
   },
   getActivity() {
-    return request<ActivityInboxItem[]>("/api/activity");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceActivity && activeWorkspaceRoomId) return bridge.listWorkspaceActivity({ roomId: activeWorkspaceRoomId });
+    return workspaceRequestRequired<ActivityInboxItem[]>("workspace.activity");
   },
   listBackendRuns(sessionId?: string) {
-    return request<BackendRunRecord[]>(sessionId ? `/api/backend-runs?session_id=${encodeURIComponent(sessionId)}` : "/api/backend-runs");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceBackendRuns) return bridge.listWorkspaceBackendRuns(sessionId ? { sessionId } : {});
+    return workspaceRequestRequired<BackendRunRecord[]>("runtime.runs.list");
   },
   getBackendRun(runId: string) {
-    return request<BackendRunRecord>(`/api/backend-runs/${encodeURIComponent(runId)}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceBackendRun) return bridge.getWorkspaceBackendRun({ runId });
+    return workspaceRequestRequired<BackendRunRecord>("runtime.run.get");
   },
   listBackendEvents(runId: string) {
-    return request<BackendEventRecord[]>(`/api/backend-runs/${runId}/events`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceBackendEvents) return bridge.listWorkspaceBackendEvents({ runId });
+    return workspaceRequestRequired<BackendEventRecord[]>("runtime.events.list");
   },
   listWorkspaceChanges(sessionId?: string) {
-    return request<WorkspaceChangeRecord[]>(sessionId ? `/api/workspace-changes?session_id=${encodeURIComponent(sessionId)}` : "/api/workspace-changes");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceChanges) return bridge.listWorkspaceChanges(sessionId ? { sessionId } : {});
+    return workspaceRequestRequired<WorkspaceChangeRecord[]>("runtime.changes.list");
   },
   listMemory() {
-    return request<Array<MemoryFrontmatter & { file_path: string }>>("/api/memory");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceKnowledgeMemory && activeWorkspaceRoomId) {
+      return bridge.listWorkspaceKnowledgeMemory({ roomId: activeWorkspaceRoomId }).then((result) => result.memories.map((page) => page.memory));
+    }
+    return workspaceRequestRequired<Array<MemoryFrontmatter & { file_path: string }>>("knowledge-memory.list");
   },
   getMemory(id: string) {
-    return request<MemoryDetail>(`/api/memory/${id}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceKnowledgeMemory && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceKnowledgeMemory({ memoryId: id }).then((page) => ({ memory: page.memory, content: page.content }));
+    }
+    return workspaceRequestRequired<MemoryDetail>("knowledge-memory.get");
   },
   archiveMemory(id: string, sessionId: string) {
-    return request<ArchiveMemoryPayload>(`/api/memory/${id}/archive`, {
-      method: "POST",
-      body: JSON.stringify({ session_id: sessionId })
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.archiveWorkspaceKnowledgeMemory && activeWorkspaceRoomId) {
+      return bridge.archiveWorkspaceKnowledgeMemory({ memoryId: id, reason: "Memory archived by owner", operationId: createIdempotencyKey() });
+    }
+    return workspaceRequestRequired<ArchiveMemoryPayload>("knowledge-memory.archive");
   },
   listSkills() {
-    return request<SkillIndexEntry[]>("/api/skills");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceCompletionSkills && activeWorkspaceRoomId) {
+      return bridge.listWorkspaceCompletionSkills({ roomId: activeWorkspaceRoomId }).then((result) => result.skills.map((skill) => skillIndexFromCompletion(skill)));
+    }
+    return workspaceRequestRequired<SkillIndexEntry[]>("skill.list");
   },
   getSkill(id: string) {
-    return request<{ skill: SkillIndexEntry; markdown: string }>(`/api/skills/${id}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceCompletionSkill && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceCompletionSkill({ resourceId: id }).then((detail) => ({
+        skill: skillIndexFromCompletion(detail.resource, detail.version.metadata),
+        markdown: detail.content
+      }));
+    }
+    return workspaceRequestRequired<{ skill: SkillIndexEntry; markdown: string }>("skill.get");
   },
   patchSkill(id: string, input: { title?: string; description?: string; content?: string; tags?: string[] }) {
-    return request<RuntimeWritePayload<SkillIndexEntry>>(`/api/skills/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceCompletionSkill && bridge.updateWorkspaceCompletionResource && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceCompletionSkill({ resourceId: id }).then((detail) => {
+        const metadata = { ...detail.version.metadata, ...(input.description === undefined ? {} : { description: input.description }), ...(input.tags === undefined ? {} : { tags: input.tags }) };
+        return bridge.updateWorkspaceCompletionResource!({
+          resourceId: id,
+          scopeKind: detail.resource.scope.kind,
+          ...(detail.resource.scope.kind === "room" ? { roomId: detail.resource.scope.roomId } : {}),
+          kind: "skill",
+          title: input.title ?? detail.resource.title,
+          content: input.content ?? detail.content,
+          metadata,
+          reason: "ユーザーがSkill本文を編集",
+          expectedVersion: detail.resource.version,
+          operationId: createIdempotencyKey()
+        });
+      });
+    }
+    return workspaceRequestRequired<RuntimeWritePayload<SkillIndexEntry>>("skill.update");
   },
   setSkillActive(id: string, active: boolean) {
-    return request<RuntimeWritePayload<SkillIndexEntry>>(`/api/skills/${id}/state`, { method: "POST", body: JSON.stringify({ state: active ? "active" : "disabled" }) });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceCompletionSkill && bridge.archiveWorkspaceCompletionResource && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceCompletionSkill({ resourceId: id }).then((detail) => bridge.archiveWorkspaceCompletionResource!({
+        resourceId: id,
+        archived: !active,
+        expectedVersion: detail.resource.version,
+        reason: active ? "ユーザーがSkillを再開" : "ユーザーがSkillを停止",
+        operationId: createIdempotencyKey()
+      }));
+    }
+    return workspaceRequestRequired<RuntimeWritePayload<SkillIndexEntry>>("skill.state");
   },
   listWiki() {
-    return request<Array<WikiFrontmatter & { file_path: string }>>("/api/wiki");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceKnowledgeWiki && activeWorkspaceRoomId) {
+      return bridge.listWorkspaceKnowledgeWiki({ roomId: activeWorkspaceRoomId }).then((result) => result.pages.map((page) => page.wiki));
+    }
+    return workspaceRequestRequired<Array<WikiFrontmatter & { file_path: string }>>("knowledge-wiki.list");
   },
   getWiki(id: string) {
-    return request<WikiDetail>(`/api/wiki/${id}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceKnowledgeWiki && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceKnowledgeWiki({ wikiId: id });
+    }
+    return workspaceRequestRequired<WikiDetail>("knowledge-wiki.get");
   },
   createWikiProposal(input: { title: string; content: string; slug?: string; tags?: string[]; content_locale?: SupportedLocale }) {
-    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>("/api/wiki/proposals", {
-      method: "POST",
-      body: JSON.stringify(input)
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.createWorkspaceKnowledgeWiki && activeWorkspaceRoomId) {
+      return bridge.createWorkspaceKnowledgeWiki({
+        roomId: activeWorkspaceRoomId, title: input.title, content: input.content, ...(input.slug ? { slug: input.slug } : {}),
+        ...(input.tags ? { tags: input.tags } : {}), ...(input.content_locale ? { contentLocale: input.content_locale } : {}),
+        reason: "Knowledge Wiki proposal created", operationId: createIdempotencyKey()
+      });
+    }
+    return workspaceRequestRequired<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>("knowledge-wiki.create");
   },
   acceptWiki(id: string) {
-    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>(`/api/wiki/${id}/accept`, {
-      method: "POST",
-      body: JSON.stringify({})
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.setWorkspaceKnowledgeWikiState && activeWorkspaceRoomId) {
+      return bridge.setWorkspaceKnowledgeWikiState({ wikiId: id, state: "accept", reason: "Knowledge Wiki proposal accepted", operationId: createIdempotencyKey() });
+    }
+    return workspaceRequestRequired<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>("knowledge-wiki.accept");
   },
   rejectWiki(id: string) {
-    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>(`/api/wiki/${id}/reject`, {
-      method: "POST",
-      body: JSON.stringify({})
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.setWorkspaceKnowledgeWikiState && activeWorkspaceRoomId) {
+      return bridge.setWorkspaceKnowledgeWikiState({ wikiId: id, state: "reject", reason: "Knowledge Wiki proposal rejected", operationId: createIdempotencyKey() });
+    }
+    return workspaceRequestRequired<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>("knowledge-wiki.reject");
   },
   patchWiki(id: string, input: Partial<Pick<WikiFrontmatter, "title" | "tags" | "content_locale">> & { content?: string }) {
-    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>(`/api/wiki/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(input)
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.updateWorkspaceKnowledgeWiki && activeWorkspaceRoomId) {
+      return bridge.updateWorkspaceKnowledgeWiki({ wikiId: id, ...(input.title ? { title: input.title } : {}), ...(input.content ? { content: input.content } : {}), ...(input.tags ? { tags: input.tags } : {}), ...(input.content_locale ? { contentLocale: input.content_locale } : {}), reason: "Knowledge Wiki page updated", operationId: createIdempotencyKey() });
+    }
+    return workspaceRequestRequired<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>("knowledge-wiki.update");
   },
   archiveWiki(id: string) {
-    return request<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>(`/api/wiki/${id}/archive`, {
-      method: "POST",
-      body: JSON.stringify({})
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.setWorkspaceKnowledgeWikiState && activeWorkspaceRoomId) {
+      return bridge.setWorkspaceKnowledgeWikiState({ wikiId: id, state: "archive", reason: "Knowledge Wiki page archived", operationId: createIdempotencyKey() });
+    }
+    return workspaceRequestRequired<RuntimeWritePayload<WikiFrontmatter & { file_path: string }>>("knowledge-wiki.archive");
   },
   reindexWiki() {
-    return request<RuntimeWritePayload<{ active: number; total: number }>>("/api/wiki/reindex", {
-      method: "POST",
-      body: JSON.stringify({})
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.reindexWorkspaceKnowledgeWiki && activeWorkspaceRoomId) {
+      return bridge.reindexWorkspaceKnowledgeWiki({ roomId: activeWorkspaceRoomId });
+    }
+    return workspaceRequestRequired<RuntimeWritePayload<{ active: number; total: number }>>("knowledge-wiki.reindex");
   },
   getWikiGraph(query?: string) {
-    return request<Record<string, unknown>>(`/api/wiki/graph${query ? `?query=${encodeURIComponent(query)}` : ""}`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceKnowledgeWikiGraph && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceKnowledgeWikiGraph({ roomId: activeWorkspaceRoomId, ...(query ? { query } : {}) });
+    }
+    return workspaceRequestRequired<Record<string, unknown>>("knowledge-wiki.graph");
   },
   getWikiDiagnostics() {
-    return request<Record<string, unknown>>("/api/wiki/lint");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceKnowledgeWikiLint && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceKnowledgeWikiLint({ roomId: activeWorkspaceRoomId });
+    }
+    return workspaceRequestRequired<Record<string, unknown>>("knowledge-wiki.lint");
   },
   getWikiBacklinks(id: string) {
-    return request<Array<{ from_wiki_id: string; label: string }>>(`/api/wiki/${id}/backlinks`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceKnowledgeWikiBacklinks && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceKnowledgeWikiBacklinks({ roomId: activeWorkspaceRoomId, wikiId: id });
+    }
+    return workspaceRequestRequired<Array<{ from_wiki_id: string; label: string }>>("knowledge-wiki.backlinks");
   },
   createSkillCandidate(input: { title: string; description: string; content?: string; tags?: string[]; required_capabilities?: string[] }) {
-    return request<RuntimeWritePayload<SkillIndexEntry>>("/api/skills/candidates", {
-      method: "POST",
-      body: JSON.stringify(input)
-    });
+    void input;
+    return workspaceRequestRequired<RuntimeWritePayload<SkillIndexEntry>>("skill.candidate.create");
   },
   saveSkillProject(candidateId: string) {
-    return request<RuntimeWritePayload<SkillIndexEntry>>("/api/skills/projects", {
-      method: "POST",
-      body: JSON.stringify({ candidate_id: candidateId })
-    });
+    void candidateId;
+    return workspaceRequestRequired<RuntimeWritePayload<SkillIndexEntry>>("skill.project.save");
   },
   saveCollectionSchema(schema: CollectionSchema) {
-    return request<RuntimeWritePayload<CollectionSchema & { file_path: string }>>("/api/collections/schemas", {
-      method: "POST",
-      body: JSON.stringify(schema)
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.saveWorkspaceCollectionSchema && activeWorkspaceRoomId) {
+      return bridge.saveWorkspaceCollectionSchema({ schema, roomId: activeWorkspaceRoomId, operationId: createIdempotencyKey() });
+    }
+    void schema;
+    return workspaceRequestRequired<RuntimeWritePayload<CollectionSchema & { file_path: string }>>("collection.schema.save");
   },
   listCollectionSchemas() {
-    return request<Array<CollectionSchema & { file_path: string }>>("/api/collections/schemas");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceCollectionSchemas && activeWorkspaceRoomId) {
+      return bridge.listWorkspaceCollectionSchemas({ roomId: activeWorkspaceRoomId }).then((result) => result.schemas);
+    }
+    return workspaceRequestRequired<Array<CollectionSchema & { file_path: string }>>("collection.schema.list");
   },
   getCollectionSchema(collectionId: string) {
-    return request<CollectionSchema & { file_path: string }>(`/api/collections/${collectionId}/schema`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceCollectionSchema && activeWorkspaceRoomId) {
+      return bridge.getWorkspaceCollectionSchema({ roomId: activeWorkspaceRoomId, collectionId }).then((result) => result.schema);
+    }
+    void collectionId;
+    return workspaceRequestRequired<CollectionSchema & { file_path: string }>("collection.schema.get");
   },
   createCollectionRecord(collectionId: string, input: Partial<CollectionRecord> & { data: CollectionRecord["data"] }) {
-    return request<RuntimeWritePayload<CollectionRecord & { file_path: string }>>(`/api/collections/${collectionId}/records`, {
-      method: "POST",
-      body: JSON.stringify(input)
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.createWorkspaceCollectionRecord && activeWorkspaceRoomId) {
+      return bridge.createWorkspaceCollectionRecord({
+        roomId: activeWorkspaceRoomId,
+        collectionId,
+        recordId: input.id ?? `record_${Date.now()}`,
+        data: input.data,
+        operationId: createIdempotencyKey()
+      });
+    }
+    void collectionId;
+    void input;
+    return workspaceRequestRequired<RuntimeWritePayload<CollectionRecord & { file_path: string }>>("collection.record.create");
   },
   listCollectionRecords(collectionId: string) {
-    return request<Array<CollectionRecord & { file_path: string }>>(`/api/collections/${collectionId}/records`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceCollectionRecords && activeWorkspaceRoomId) {
+      return bridge.listWorkspaceCollectionRecords({ roomId: activeWorkspaceRoomId, collectionId }).then((result) => result.records);
+    }
+    void collectionId;
+    return workspaceRequestRequired<Array<CollectionRecord & { file_path: string }>>("collection.record.list");
   },
   applyCollectionPatch(collectionId: string, recordId: string, input: { id?: string; changes: Record<string, unknown>; created_at?: string }) {
-    return request<RuntimeWritePayload<CollectionRecord & { file_path: string }>>(
-      `/api/collections/${collectionId}/records/${recordId}/patches`,
-      {
-        method: "POST",
-        body: JSON.stringify(input)
-      }
-    );
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.patchWorkspaceCollectionRecord && activeWorkspaceRoomId) {
+      return bridge.patchWorkspaceCollectionRecord({
+        roomId: activeWorkspaceRoomId,
+        collectionId,
+        recordId,
+        ...(input.id ? { patchId: input.id } : {}),
+        changes: input.changes as Record<string, JsonValue>,
+        operationId: createIdempotencyKey()
+      });
+    }
+    void collectionId;
+    void recordId;
+    void input;
+    return workspaceRequestRequired<RuntimeWritePayload<CollectionRecord & { file_path: string }>>("collection.record.patch");
   },
-  deleteCollectionRecord(collectionId: string, recordId: string) {
-    return request<CollectionRecord & { file_path: string }>(`/api/collections/${collectionId}/records/${recordId}`, {
-      method: "DELETE"
-    });
+  deleteCollectionRecord(collectionId: string, recordId: string, expectedVersion: number) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.deleteWorkspaceCollectionRecord && activeWorkspaceRoomId) {
+      return bridge.deleteWorkspaceCollectionRecord({ roomId: activeWorkspaceRoomId, collectionId, recordId, expectedVersion, operationId: createIdempotencyKey() });
+    }
+    void collectionId;
+    void recordId;
+    void expectedVersion;
+    return workspaceRequestRequired<CollectionRecord & { file_path: string }>("collection.record.delete");
   },
   listCollectionNotes(collectionId: string) {
-    return request<Array<{ file_path: string; content: string }>>(`/api/collections/${collectionId}/notes`);
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceCollectionNotes && activeWorkspaceRoomId) {
+      return bridge.listWorkspaceCollectionNotes({ roomId: activeWorkspaceRoomId, collectionId }).then((result) => result.notes);
+    }
+    void collectionId;
+    return workspaceRequestRequired<Array<{ file_path: string; content: string }>>("collection.notes.list");
   },
   runMemoryReviewAutomation() {
-    return request<AutomationRunPayload>("/api/automation/memory-review/run", {
-      method: "POST",
-      body: JSON.stringify({})
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.runWorkspaceAutomationNow && activeWorkspaceRoomId) {
+      return bridge.runWorkspaceAutomationNow({ roomId: activeWorkspaceRoomId, kind: "memory_review", operationId: createIdempotencyKey() });
+    }
+    return workspaceRequestRequired<AutomationRunPayload>("automation.memory-review.run");
   },
   listAutomationJobs() {
-    return request<AutomationJobRecord[]>("/api/automation/jobs");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceAutomationJobs && activeWorkspaceRoomId) {
+      return bridge.listWorkspaceAutomationJobs({ roomId: activeWorkspaceRoomId }).then((result) => result.jobs);
+    }
+    return workspaceRequestRequired<AutomationJobRecord[]>("automation.jobs.list");
   },
   listAutomationRuns() {
-    return request<AutomationRunSummary[]>("/api/automation/runs");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceAutomationRuns && activeWorkspaceRoomId) {
+      return bridge.listWorkspaceAutomationRuns({ roomId: activeWorkspaceRoomId }).then((result) => result.runs);
+    }
+    return workspaceRequestRequired<AutomationRunSummary[]>("automation.runs.list");
   },
   setAutomationStatus(id: string, status: "enabled" | "disabled") {
-    return request<RuntimeWritePayload<AutomationJobRecord>>(`/api/automation/jobs/${id}/status`, { method: "POST", body: JSON.stringify({ status }) });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.setWorkspaceAutomationManagement && activeWorkspaceRoomId) {
+      return bridge.setWorkspaceAutomationManagement({ jobId: id, state: status === "enabled" ? "allowed" : "manager_stopped", operationId: createIdempotencyKey() });
+    }
+    void id;
+    void status;
+    return workspaceRequestRequired<RuntimeWritePayload<AutomationJobRecord>>("automation.job.status");
   },
   getSettings() {
-    return request<SettingsRecord>("/api/settings");
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceSettings) return bridge.getWorkspaceSettings();
+    return workspaceRequestRequired<SettingsRecord>("workspace.settings.get");
   },
   patchSettings(patch: Partial<Omit<SettingsRecord, "updated_at">>) {
-    return request<SettingsRecord>("/api/settings", {
-      method: "PATCH",
-      body: JSON.stringify(patch)
-    });
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.patchWorkspaceSettings) {
+      return bridge.patchWorkspaceSettings({ patch, operationId: createIdempotencyKey() }).then((result) => result.settings);
+    }
+    return workspaceRequestRequired<SettingsRecord>("workspace.settings.patch");
   },
   approveApprovalRequest(id: string) {
-    return request<ApprovalLifecyclePayload>(`/api/approval-requests/${id}/approve`, {
-      method: "POST",
-      body: JSON.stringify({})
-    });
+    void id;
+    return workspaceRequestRequired<ApprovalLifecyclePayload>("approval.request.approve");
   },
   denyApprovalRequest(id: string, reason = "Denied by owner.") {
-    return request<ApprovalLifecyclePayload>(`/api/approval-requests/${id}/deny`, {
-      method: "POST",
-      body: JSON.stringify({ reason })
-    });
+    void id;
+    void reason;
+    return workspaceRequestRequired<ApprovalLifecyclePayload>("approval.request.deny");
   },
   restoreRollbackPoint(id: string) {
-    return request<unknown>(`/api/rollback/${id}/restore`, {
-      method: "POST",
-      body: JSON.stringify({})
-    });
+    void id;
+    return workspaceRequestRequired<unknown>("rollback.restore");
   }
 };
 
+function isChatSurfaceEnvelope(value: ChatTurnResult | ChatSurfaceOperationResult): value is ChatSurfaceOperationResult {
+  return "result" in value && !!value.result && typeof value.result === "object";
+}
+
+function skillIndexFromCompletion(
+  resource: WorkspaceCompletionResourceView,
+  metadata: Record<string, JsonValue> = {}
+): SkillIndexEntry {
+  const tags = Array.isArray(metadata.tags) ? metadata.tags.filter((value): value is string => typeof value === "string") : [];
+  const requiredCapabilities = Array.isArray(metadata.required_capabilities)
+    ? metadata.required_capabilities.filter((value): value is string => typeof value === "string")
+    : [];
+  const state: SkillIndexEntry["state"] = resource.lifecycleState === "archived"
+    ? "archived"
+    : resource.aiProtection === "fixed" ? "pinned" : "active";
+  return {
+    id: resource.id,
+    title: resource.title,
+    description: typeof metadata.description === "string" ? metadata.description : resource.title,
+    tags,
+    state,
+    required_capabilities: requiredCapabilities,
+    file_path: `completion/skills/${resource.id}`
+  };
+}
+
 async function readJson(response: Response): Promise<unknown> {
+  if (typeof response.text !== "function" && typeof response.json === "function") {
+    return response.json();
+  }
   const text = await response.text();
   if (!text) {
     return undefined;

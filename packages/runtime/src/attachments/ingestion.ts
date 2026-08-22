@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { AttachmentIngestionRecordSchema, createId, nowIso, type AttachmentIngestionRecord, type JsonValue, type ResourceRef } from "@samurai-agent/core-schemas";
@@ -26,7 +25,8 @@ export async function ingestAttachment(input: AttachmentIngestionInput): Promise
   while (attempts < maxAttempts) {
     attempts += 1;
     try {
-      bytes = await (input.read ?? (async (filePath) => readFile(filePath)))(input.filePath);
+      if (!input.read) throw new Error("attachment_reader_unavailable");
+      bytes = await input.read(input.filePath);
       break;
     } catch (caught) {
       error = caught;

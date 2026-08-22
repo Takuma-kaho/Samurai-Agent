@@ -1,5 +1,5 @@
 import type { BackendRunInput } from "@samurai-agent/agent-backends";
-import type { BackendRunRecord, JsonValue } from "@samurai-agent/core-schemas";
+import type { BackendRunRecord, JsonValue, SupportedLocale } from "@samurai-agent/core-schemas";
 
 /**
  * Stable Backend cassette input for a Room-first Workspace Run.
@@ -12,7 +12,9 @@ export function workspaceBackendInput(
   run: BackendRunRecord,
   now: () => string,
   userInput: string,
-  metadata: Record<string, JsonValue> = {}
+  metadata: Record<string, JsonValue> = {},
+  inputLocale: SupportedLocale = "ja",
+  outputLocale: SupportedLocale = "ja"
 ): BackendRunInput {
   if (!run.room_id) throw new Error(`workspace_run_room_required:${run.id}`);
   const appSession = run.session_ref
@@ -35,14 +37,14 @@ export function workspaceBackendInput(
       session_key: backendSessionKey,
       user_intent: normalizedInput,
       attachments: [],
-      input_locale: "ja",
-      output_locale: "ja",
+      input_locale: inputLocale,
+      output_locale: outputLocale,
       metadata: mergedMetadata,
       received_at: now()
     },
     user_input: normalizedInput,
-    input_locale: "ja",
-    output_locale: "ja",
+    input_locale: inputLocale,
+    output_locale: outputLocale,
     active_memory: [],
     recent_messages: [],
     metadata: mergedMetadata,

@@ -106,7 +106,7 @@ export async function createWorkspaceServerCore(
     const curator = new WorkspaceCompletionCuratorService(completion);
     const maintenance = new WorkspaceCompletionMaintenanceService(completion, completionJobs, curator);
     const completionMigrations = new WorkspaceCompletionMigrationService(completion);
-    const commands = new WorkspaceServerCommandService({ store, files, bundles, completion, completionMigrations, maintenance });
+    const commands = new WorkspaceServerCommandService({ store, files, bundles, completionBundles, completion, completionMigrations, maintenance });
     return {
       config,
       database,

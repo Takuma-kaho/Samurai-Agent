@@ -7,6 +7,10 @@ import type { WorkspaceCaller } from "./types";
 export interface WorkspaceDatabaseContext {
   accountId: string;
   workspaceId?: string;
+  /** A Server-owned operational integration transaction. This is distinct
+   * from a Workspace content caller and is only set by the external
+   * integration composition root. */
+  externalIntegration?: boolean;
   bootstrap?: boolean;
   /** A short-lived, account-bound import capability created by PostgreSQL. */
   importId?: string;
@@ -16,6 +20,9 @@ export interface WorkspaceDatabaseContext {
   /** Server-owned completion migration capability. */
   migrationRunId?: string;
   migrationOperation?: "completion_backfill" | "completion_rollback";
+  /** A Server-owned worker transaction used only to enumerate configured
+   * maintenance identities before opening one RLS-scoped Workspace tick. */
+  worker?: boolean;
 }
 
 export interface WorkspaceSql {
@@ -72,6 +79,11 @@ export class PostgresWorkspaceDatabase {
     })) {
       throw new WorkspaceServerError("workspace_server_schema_migration_required", 503);
     }
+  }
+
+  /** Lightweight readiness probe used by the unauthenticated health route. */
+  async ping(): Promise<void> {
+    await this.appPool.query("SELECT 1");
   }
 
   async close(): Promise<void> {
@@ -240,6 +252,7 @@ async function setTenantContext(client: PoolClient, context: WorkspaceDatabaseCo
   const caller = isTrustedWorkspaceCallerForAccount(context.caller, context.accountId) ? context.caller : undefined;
   await client.query("SELECT set_config('samurai.account_id', $1, true)", [context.accountId]);
   await client.query("SELECT set_config('samurai.workspace_id', $1, true)", [context.workspaceId ?? ""]);
+  await client.query("SELECT set_config('samurai.external_integration', $1, true)", [context.externalIntegration ? "1" : ""]);
   await client.query("SELECT set_config('samurai.bootstrap', $1, true)", [context.bootstrap ? "1" : ""]);
   await client.query("SELECT set_config('samurai.import_id', $1, true)", [context.importId ?? ""]);
   await client.query("SELECT set_config('samurai.caller_kind', $1, true)", [caller?.kind ?? ""]);
@@ -249,4 +262,5 @@ async function setTenantContext(client: PoolClient, context: WorkspaceDatabaseCo
   await client.query("SELECT set_config('samurai.caller_operation_id', $1, true)", [caller?.operationId ?? ""]);
   await client.query("SELECT set_config('samurai.completion_migration_run_id', $1, true)", [context.migrationRunId ?? ""]);
   await client.query("SELECT set_config('samurai.completion_migration_operation', $1, true)", [context.migrationOperation ?? ""]);
+  await client.query("SELECT set_config('samurai.worker', $1, true)", [context.worker ? "1" : ""]);
 }

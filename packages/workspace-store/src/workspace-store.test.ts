@@ -73,7 +73,7 @@ describe("workspace store", () => {
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
-    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
+    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
   });
 
   it("persists human-owned Workspace and Room startup Context", async () => {
@@ -202,6 +202,7 @@ describe("workspace store", () => {
     const now = "2026-07-08T00:00:00.000Z";
     const event: ClientEventRecord = {
       id: createId("client_event"),
+      room_id: "room_queue_test",
       target_client_kind: "desktop",
       event_type: "client.notification.requested",
       status: "pending",
@@ -243,6 +244,7 @@ describe("workspace store", () => {
     expect(delivered).toMatchObject({ id: event.id, status: "delivered", delivered_at: "2026-07-08T00:01:00.000Z" });
     expect(acked).toMatchObject({ id: event.id, status: "acked", acked_at: "2026-07-08T00:02:00.000Z" });
     expect(expired.map((item) => item.id)).toEqual([expiredEvent.id]);
+    expect(persisted).toMatchObject({ id: event.id, room_id: "room_queue_test" });
     expect(persisted?.status).toBe("acked");
     expect(expiredPersisted?.status).toBe("expired");
   });

@@ -4,10 +4,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
-import { AgentRuntime } from "./index.js";
+import { AgentRuntime, FakeProviderAdapter } from "./index.js";
 
 const roots: string[] = [];
 const allKinds = ["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"] as const;
+const workspaceInstructionKinds = ["daily_digest", "custom_instruction", "resource_translation"] as const;
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -18,7 +19,7 @@ describe("Core09 Session-free Automation", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-core09-automation-kinds-"));
     roots.push(root);
     const store = await WorkspaceStore.create({ rootDir: root });
-    const runtime = new AgentRuntime(store);
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/core09", async () => ({ content: "Done.", toolCalls: [] })));
     const dueAt = "2026-08-10T00:00:00.000Z";
     const jobs = await Promise.all(allKinds.map((kind) => runtime.saveAutomationJob({
       title: `Core09 ${kind}`,
@@ -34,14 +35,22 @@ describe("Core09 Session-free Automation", () => {
 
     const byKind = new Map(runs.map((run) => [run.automationRun.kind, run]));
     expect(byKind.get("wiki_reindex")).toMatchObject({ automationRun: { status: "completed" } });
-    for (const kind of allKinds.filter((kind) => kind !== "wiki_reindex")) {
+    for (const kind of workspaceInstructionKinds) {
+      expect(byKind.get(kind)).toMatchObject({
+        automationRun: { status: "completed", backend_run_id: expect.any(String) }
+      });
+    }
+    for (const kind of allKinds.filter((kind) => kind !== "wiki_reindex" && !workspaceInstructionKinds.includes(kind as typeof workspaceInstructionKinds[number]))) {
       expect(byKind.get(kind)).toMatchObject({
         automationRun: { status: "blocked", error_code: "automation_sessionless_executor_unsupported" },
         blocked: true
       });
     }
     expect(storedJobs.find((job) => job?.kind === "wiki_reindex")).toMatchObject({ authorization_state: "ready", failure_count: 0, last_run_at: expect.any(String) });
-    for (const job of storedJobs.filter((job): job is NonNullable<typeof job> => Boolean(job && job.kind !== "wiki_reindex"))) {
+    for (const job of storedJobs.filter((job): job is NonNullable<typeof job> => Boolean(job && workspaceInstructionKinds.includes(job.kind as typeof workspaceInstructionKinds[number])))) {
+      expect(job).toMatchObject({ status: "enabled", authorization_state: "ready", failure_count: 0, last_run_at: expect.any(String) });
+    }
+    for (const job of storedJobs.filter((job): job is NonNullable<typeof job> => Boolean(job && job.kind !== "wiki_reindex" && !workspaceInstructionKinds.includes(job.kind as typeof workspaceInstructionKinds[number])))) {
       expect(job).toMatchObject({ status: "disabled", authorization_state: "blocked", failure_count: 0, retry_after_at: undefined, locked_until: undefined });
     }
     expect(storedRuns).toHaveLength(allKinds.length);
@@ -367,11 +376,11 @@ describe("Core09 Session-free Automation", () => {
 
     await expect(runtime.runCuratorJob()).rejects.toMatchObject({
       code: "unavailable",
-      message: expect.stringMatching(/^(session_compatibility_required:curator\.run|automation_sessionless_executor_unsupported:skill_curator)$/)
+      message: "learning_session_required"
     });
     await expect(runtime.runEvaluationJob()).rejects.toMatchObject({
-      code: "forbidden",
-      message: "room_context_required"
+      code: "unavailable",
+      message: "learning_session_required"
     });
     expect(await store.listSessions()).toEqual([]);
 

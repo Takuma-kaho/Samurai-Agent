@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ExternalAssistHintSchema, type ExternalAssistHint, type ExternalAssistProviderConfigDiagnostics } from "@samurai-agent/core-schemas";
 import type { ExternalAssistPrefetchInput, ExternalAssistProvider, ExternalAssistSyncInput } from "../agent-runtime";
@@ -7,7 +6,10 @@ export interface LocalFileExternalAssistProviderOptions {
   id?: string;
   filePath: string;
   maxHints?: number;
+  readText?: (filePath: string) => Promise<string>;
 }
+
+export type ExternalAssistFileReader = (filePath: string) => Promise<string>;
 
 export interface HttpExternalAssistProviderOptions {
   id?: string;
@@ -46,7 +48,8 @@ export class LocalFileExternalAssistProvider implements ExternalAssistProvider {
   }
 
   async prefetch(input: ExternalAssistPrefetchInput): Promise<ExternalAssistHint[]> {
-    const items = parseLocalExternalAssistItems(await readFile(this.options.filePath, "utf8"));
+    if (!this.options.readText) throw new Error("external_assist_file_reader_unavailable");
+    const items = parseLocalExternalAssistItems(await this.options.readText(this.options.filePath));
     const terms = tokenize([
       input.query,
       ...input.recentMessages.map((message) => message.content),
@@ -140,11 +143,11 @@ export class HttpExternalAssistProvider implements ExternalAssistProvider {
   }
 }
 
-export function createExternalAssistProviderFromEnv(env: NodeJS.ProcessEnv = process.env): ExternalAssistProvider | undefined {
-  return createExternalAssistProvidersFromEnv(env)[0];
+export function createExternalAssistProviderFromEnv(env: NodeJS.ProcessEnv = process.env, readText?: ExternalAssistFileReader): ExternalAssistProvider | undefined {
+  return createExternalAssistProvidersFromEnv(env, readText)[0];
 }
 
-export function createExternalAssistProvidersFromEnv(env: NodeJS.ProcessEnv = process.env): ExternalAssistProvider[] {
+export function createExternalAssistProvidersFromEnv(env: NodeJS.ProcessEnv = process.env, readText?: ExternalAssistFileReader): ExternalAssistProvider[] {
   const diagnostics = describeExternalAssistProviderConfig(env);
   if (!diagnostics.configured) {
     return [];
@@ -165,6 +168,7 @@ export function createExternalAssistProvidersFromEnv(env: NodeJS.ProcessEnv = pr
   return filePaths.map((filePath, index) => new LocalFileExternalAssistProvider({
     id: providerIds[index],
     filePath: path.resolve(filePath),
+    readText,
     maxHints: Number.parseInt(env.SAMURAI_EXTERNAL_ASSIST_MAX_HINTS ?? "", 10)
   }));
 }

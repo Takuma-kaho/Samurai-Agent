@@ -78,6 +78,7 @@ interface ScopedLearningSnapshotManifest {
   resource_ids: Record<SnapshotResourceKind, string[]>;
   files: string[];
   resource_versions: LearningResourceVersionRecord[];
+  resource_edges?: LearningResourceEdgeRecord[];
 }
 
 interface SnapshotResources {
@@ -267,12 +268,19 @@ async listLearningEvaluations(input: {
 
 async saveLearningResourceEdge(recordInput: LearningResourceEdgeRecord): Promise<LearningResourceEdgeRecord> {
   const record = LearningResourceEdgeRecordSchema.parse(recordInput);
-  const directory = path.join(this.rootDir, "learning-graph", "edges"); await mkdir(directory,{recursive:true});
-  const target=path.join(directory,`${record.id}.json`),pending=`${target}.pending`;await writeFile(pending,`${JSON.stringify(record,null,2)}\n`);await rename(pending,target);return record;
+  const directory = path.join(this.rootDir, "learning-graph", "edges");
+  await mkdir(directory, { recursive: true });
+  const target = learningResourceEdgePath(this.rootDir, record.id);
+  const pending = `${target}.pending`;
+  await writeFile(pending, `${JSON.stringify(record, null, 2)}\n`);
+  await rename(pending, target);
+  return record;
 }
 
 async listLearningResourceEdges(): Promise<LearningResourceEdgeRecord[]> {
-  const directory=path.join(this.rootDir,"learning-graph","edges");const files=(await readdir(directory).catch(()=>[])).filter(x=>x.endsWith(".json")).sort();return Promise.all(files.map(async file=>LearningResourceEdgeRecordSchema.parse(JSON.parse(await readFile(path.join(directory,file),"utf8")))));
+  const directory = path.join(this.rootDir, "learning-graph", "edges");
+  const files = (await readdir(directory).catch(() => [])).filter((file) => file.endsWith(".json")).sort();
+  return Promise.all(files.map(async (file) => LearningResourceEdgeRecordSchema.parse(JSON.parse(await readFile(path.join(directory, file), "utf8")))));
 }
 
 async createLearningSnapshot(runId: string): Promise<LearningSnapshotRecord> {
@@ -283,6 +291,7 @@ async createLearningSnapshot(runId: string): Promise<LearningSnapshotRecord> {
   const sourceRoomResourceIds = await this.sourceRoomResourceIds(scope);
   const resources = await this.loadSnapshotResources(sourceRoomResourceIds, true);
   const resourceIds = snapshotResourceIds(resources);
+  const resourceEdges = (await this.listLearningResourceEdges()).filter((edge) => edgeInSnapshotScope(edge, scope, resourceIds));
   const [supportFiles, memoryVersions, skillVersions, wikiVersions, skillUsage, evaluations, resourceUses] = await Promise.all([
     Promise.all(resources.skill.map((skill) => this.resources.listSkillSupportFiles(skill.id))).then((files) => files.flat()),
     this.listLearningResourceVersions({ resourceKind: "memory", resourceIds: resourceIds.memory }),
@@ -305,7 +314,8 @@ async createLearningSnapshot(runId: string): Promise<LearningSnapshotRecord> {
     scope,
     resource_ids: resourceIds,
     files,
-    resource_versions: resourceVersions
+    resource_versions: resourceVersions,
+    resource_edges: resourceEdges
   };
   await mkdir(snapshotRoot, { recursive: true });
   const snapshotFilesRoot = path.join(snapshotRoot, "files");
@@ -367,15 +377,16 @@ async pruneLearningSnapshots(retain = 20): Promise<{ retained: number; removed: 
   return { retained: Math.min(snapshots.length, keep), removed };
 }
 
-async restoreLearningSnapshot(id: string, options: { allowRoomScope?: boolean } = {}): Promise<LearningSnapshotRecord | undefined> {
+async restoreLearningSnapshot(id: string, options: { allowRoomScope?: boolean; roomId?: string } = {}): Promise<LearningSnapshotRecord | undefined> {
   const row = await this.db.selectFrom("learning_snapshots").selectAll().where("id", "=", id).executeTakeFirst();
   if (!row) return undefined;
   const snapshotRoot = snapshotRootPath(this.rootDir, row.path);
   const manifest = await readScopedLearningSnapshotManifest(snapshotRoot);
   if (manifest.scope.kind === "room") {
     const run = await this.getReflectionRun(row.run_id);
-    if (run?.activity_context?.room_id !== manifest.scope.roomId) throw new Error("learning_snapshot_room_scope_mismatch");
+    if (await this.reflectionRunRoomId(run) !== manifest.scope.roomId) throw new Error("learning_snapshot_room_scope_mismatch");
     if (!options.allowRoomScope) throw new Error("learning_snapshot_room_scope_restore_requires_compensation");
+    if (!options.roomId || options.roomId !== manifest.scope.roomId) throw new Error("learning_snapshot_room_context_required");
   }
   const currentResources = await this.loadSnapshotResources(manifest.resource_ids, false);
   const createdResources = options.allowRoomScope
@@ -397,6 +408,9 @@ async restoreLearningSnapshot(id: string, options: { allowRoomScope?: boolean } 
     throw new Error(`learning_snapshot_reindex_failed:${JSON.stringify({ memory: synchronization.memory.errors, skills: synchronization.skills.errors, wiki: synchronization.wiki.errors })}`);
   }
   await this.restoreSnapshotResourceVersions(manifest.resource_ids, createdResources, manifest.resource_versions);
+  if (manifest.resource_edges !== undefined) {
+    await this.restoreLearningResourceEdges(manifest.resource_edges, manifest.scope, manifest.resource_ids, createdResources);
+  }
   const restoredAt = nowIso();
   await this.db.updateTable("learning_snapshots").set({ restored_at: restoredAt }).where("id", "=", id).execute();
   return learningSnapshotFromRow({ ...row, restored_at: restoredAt });
@@ -404,9 +418,16 @@ async restoreLearningSnapshot(id: string, options: { allowRoomScope?: boolean } 
 
 private async snapshotScope(runId: string): Promise<LearningSnapshotScope> {
   const run = await this.getReflectionRun(runId);
-  return run?.activity_context?.room_id
-    ? { kind: "room", roomId: run.activity_context.room_id }
-    : { kind: "legacy" };
+  const roomId = await this.reflectionRunRoomId(run);
+  if (roomId) return { kind: "room", roomId };
+  return { kind: "legacy" };
+}
+
+private async reflectionRunRoomId(run: ReflectionRunRecord | undefined): Promise<string | undefined> {
+  if (run?.activity_context?.room_id) return run.activity_context.room_id;
+  if (!run?.session_id) return undefined;
+  const session = await this.db.selectFrom("sessions").select("room_id").where("id", "=", run.session_id).executeTakeFirst();
+  return session?.room_id ?? undefined;
 }
 
 private async sourceRoomResourceIds(scope: LearningSnapshotScope): Promise<Record<SnapshotResourceKind, string[]>> {
@@ -483,6 +504,23 @@ private async restoreSnapshotResourceVersions(
       await transaction.insertInto("learning_resource_versions").values(versions.map(learningResourceVersionToRow)).execute();
     }
   });
+}
+
+private async restoreLearningResourceEdges(
+  snapshotEdges: LearningResourceEdgeRecord[],
+  scope: LearningSnapshotScope,
+  snapshotIds: Record<SnapshotResourceKind, string[]>,
+  createdIds: Record<SnapshotResourceKind, string[]>
+): Promise<void> {
+  const currentEdges = await this.listLearningResourceEdges();
+  const affectedKeys = scope.kind === "legacy"
+    ? undefined
+    : new Set([...snapshotResourceRefKeys(snapshotIds), ...snapshotResourceRefKeys(createdIds)]);
+  const edgesToRemove = affectedKeys
+    ? currentEdges.filter((edge) => edgeTouchesResourceKeys(edge, affectedKeys))
+    : currentEdges;
+  await Promise.all(edgesToRemove.map((edge) => rm(learningResourceEdgePath(this.rootDir, edge.id), { force: true })));
+  await Promise.all(snapshotEdges.map((edge) => this.saveLearningResourceEdge(edge)));
 }
 
 async saveBackgroundReviewChange(record: BackgroundReviewChangeRecord): Promise<BackgroundReviewChangeRecord> {
@@ -857,13 +895,47 @@ async function readScopedLearningSnapshotManifest(snapshotRoot: string): Promise
     }
     assertManagedRelativePath(version.file_path);
   }
+  const resourceEdges = parsed.resource_edges === undefined
+    ? undefined
+    : LearningResourceEdgeRecordSchema.array().parse(parsed.resource_edges);
+  if (resourceEdges?.some((edge) => !edgeInSnapshotScope(edge, scope, normalizedResourceIds))) {
+    throw new Error("learning_snapshot_manifest_invalid");
+  }
   return {
     format: "core06-scoped-v1",
     scope,
     resource_ids: normalizedResourceIds,
     files,
-    resource_versions: versions
+    resource_versions: versions,
+    ...(resourceEdges === undefined ? {} : { resource_edges: resourceEdges })
   };
+}
+
+function learningResourceEdgePath(rootDir: string, id: string): string {
+  if (!id || id.includes("/") || id.includes("\\") || id === "." || id === "..") {
+    throw new Error("learning_resource_edge_id_invalid");
+  }
+  return containedPath(rootDir, path.join("learning-graph", "edges", `${id}.json`), "learning_resource_edge_path_invalid");
+}
+
+function edgeInSnapshotScope(
+  edge: LearningResourceEdgeRecord,
+  scope: LearningSnapshotScope,
+  resourceIds: Record<SnapshotResourceKind, string[]>
+): boolean {
+  return scope.kind === "legacy" || edgeTouchesResourceKeys(edge, snapshotResourceRefKeys(resourceIds));
+}
+
+function edgeTouchesResourceKeys(edge: LearningResourceEdgeRecord, keys: Set<string>): boolean {
+  return keys.has(resourceRefKey(edge.from_ref)) || keys.has(resourceRefKey(edge.to_ref));
+}
+
+function snapshotResourceRefKeys(resourceIds: Record<SnapshotResourceKind, string[]>): Set<string> {
+  return new Set(snapshotResourceKinds.flatMap((kind) => resourceIds[kind].map((id) => `${kind}:${id}`)));
+}
+
+function resourceRefKey(ref: { kind: string; id: string }): string {
+  return `${ref.kind === "knowledge_wiki" ? "wiki" : ref.kind}:${ref.id}`;
 }
 
 function parseLearningSnapshotScope(value: unknown): LearningSnapshotScope {

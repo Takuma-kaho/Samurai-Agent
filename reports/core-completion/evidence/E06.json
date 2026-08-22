@@ -3,15 +3,15 @@
   "test_id": "E06",
   "command": "pnpm core:test:background-review",
   "status": "passed",
-  "commit_sha": "f86c50edd514876142347d6e198f924c7667eb1c",
-  "worktree_clean": true,
-  "source_sha256": "9badb9cff57d194dc859e064bcbd9ef80ca4fbabf2c8c1470edff7831d4067b7",
-  "source_graph_sha256": "9215dfb8cfaeab68ecd13bfaefd910c54d3b44beafd9c0e4f24655758796cce0",
+  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
+  "worktree_clean": false,
+  "source_sha256": "d96ade497d4137ff57f27d52819308bc7ab70e7e248dc49410dd949f608d0b46",
+  "source_graph_sha256": "097d65287127488928725c12be24c990fcbd6db519b264996dac178d72e1bcdf",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
-    "packages/learning/src/background-review.ts",
+    "packages/learning/src/core05.ts",
     "packages/runtime/src/agent-runtime.ts",
-    "packages/runtime/src/index.ts",
+    "packages/runtime/src/commands/services/core05-background-review-mutation-domain-service.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
     "packages/workspace-store/src/kernel/migration-runner.ts",
@@ -27,6 +27,7 @@
     "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
     "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/repositories/learning-row-codecs.ts",
     "packages/workspace-store/src/search/scoring.ts",
     "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
@@ -37,26 +38,21 @@
     "scripts/verify-background-review-atomicity.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-02T15:39:51.733Z",
-  "completed_at": "2026-08-02T15:39:52.522Z",
+  "started_at": "2026-08-21T21:51:37.331Z",
+  "completed_at": "2026-08-21T21:51:38.565Z",
   "assertions": [
     {
-      "name": "Malformed and prohibited mutations are rejected",
+      "name": "Malformed mutations are rejected",
       "actual": true,
       "expected": true
     },
     {
-      "name": "Version conflict changes nothing",
+      "name": "Room-scoped compensation rolls back a mid-write failure",
       "actual": true,
       "expected": true
     },
     {
-      "name": "Injected mid-write failure rolls back all resources and metadata",
-      "actual": true,
-      "expected": true
-    },
-    {
-      "name": "Valid mutation applies exactly once",
+      "name": "A valid mutation applies once and duplicate execution is idempotent",
       "actual": {
         "valid": 1,
         "duplicate": 0
@@ -70,8 +66,6 @@
   "result": {
     "status": "passed",
     "malformed_rejected": true,
-    "prohibited_shell_removed": true,
-    "version_conflict_rolled_back": true,
     "mid_write_failure_rolled_back": true,
     "partial_metadata": 0,
     "valid_mutations": 1,

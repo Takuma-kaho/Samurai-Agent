@@ -1,10 +1,10 @@
 import { rename, rm } from "node:fs/promises";
 import path from "node:path";
-import { createId, nowIso } from "@samurai-agent/core-schemas";
 import type { Transaction, Kysely } from "kysely";
 import type { WorkspaceDb, WorkspaceFileTransactionsTable } from "../kernel/workspace-db-schema";
 import type { SkillWithFilePath } from "../workspace-store-contracts";
 import { skillToRow } from "../repositories/memory-skill-row-codecs";
+import { deleteManagedResourceBoundary, insertManagedResourceBoundary, moveManagedResourceBoundary } from "../repositories/room-permission-repository";
 import type { WorkspaceFileTransactionRecoveryHandler } from "./workspace-file-transaction-coordinator";
 
 /** DB half of an atomic same-path Skill update.  State transitions that move
@@ -49,18 +49,14 @@ export class SkillRecoveryHandler implements WorkspaceFileTransactionRecoveryHan
     if (!source || source.resource_version !== input.expectedSourceVersion) return false;
     await transaction.insertInto("skill_index").values(toRow(input.after)).execute();
     if (input.targetBoundary) {
-      await insertBoundary(transaction, "skill", input.after.id, input.targetBoundary);
+      await insertManagedResourceBoundary(transaction, { resourceKind: "skill", resourceId: input.after.id, ...input.targetBoundary });
     }
     return true;
   }
 
   async rollbackCopy(transaction: Transaction<WorkspaceDb>, after: SkillWithFilePath, targetBoundary?: ManagedResourceBoundary): Promise<void> {
     if (targetBoundary) {
-      await transaction.deleteFrom("resource_access_boundaries")
-        .where("resource_kind", "=", "skill")
-        .where("resource_id", "=", after.id)
-        .where("source_room_id", "=", targetBoundary.sourceRoomId)
-        .execute();
+      await deleteManagedResourceBoundary(transaction, { resourceKind: "skill", resourceId: after.id, sourceRoomId: targetBoundary.sourceRoomId });
     }
     await transaction.deleteFrom("skill_index")
       .where("id", "=", after.id)
@@ -89,12 +85,7 @@ export class SkillRecoveryHandler implements WorkspaceFileTransactionRecoveryHan
     if (share) return "boundary_has_shares";
     const updated = await this.commitUpdate(transaction, { before: input.before, after: input.after });
     if (!updated) return "version_conflict";
-    const boundaryUpdate = await transaction.updateTable("resource_access_boundaries")
-      .set({ source_room_id: input.targetRoomId, updated_at: nowIso() })
-      .where("id", "=", boundary.id)
-      .where("source_room_id", "=", input.sourceRoomId)
-      .executeTakeFirst();
-    if (Number(boundaryUpdate.numUpdatedRows ?? 0) !== 1) {
+    if (!await moveManagedResourceBoundary(transaction, { resourceKind: "skill", resourceId: input.before.id, sourceRoomId: input.sourceRoomId, targetRoomId: input.targetRoomId })) {
       throw new Error(`skill_scope_move_boundary_update_failed:${input.before.id}`);
     }
     return "ok";
@@ -107,13 +98,7 @@ export class SkillRecoveryHandler implements WorkspaceFileTransactionRecoveryHan
     targetRoomId: string;
   }): Promise<void> {
     await this.rollbackUpdate(transaction, { before: input.before, after: input.after });
-    const updated = await transaction.updateTable("resource_access_boundaries")
-      .set({ source_room_id: input.sourceRoomId, updated_at: nowIso() })
-      .where("resource_kind", "=", "skill")
-      .where("resource_id", "=", input.before.id)
-      .where("source_room_id", "=", input.targetRoomId)
-      .executeTakeFirst();
-    if (Number(updated.numUpdatedRows ?? 0) !== 1) {
+    if (!await moveManagedResourceBoundary(transaction, { resourceKind: "skill", resourceId: input.before.id, sourceRoomId: input.targetRoomId, targetRoomId: input.sourceRoomId })) {
       throw new Error(`skill_scope_move_rollback_boundary_conflict:${input.before.id}`);
     }
   }
@@ -137,26 +122,6 @@ export interface ManagedResourceBoundary {
 }
 
 export type ScopeMoveResult = "ok" | "version_conflict" | "boundary_missing" | "boundary_source_mismatch" | "boundary_has_shares";
-
-async function insertBoundary(
-  transaction: Transaction<WorkspaceDb>,
-  resourceKind: "wiki" | "skill",
-  resourceId: string,
-  input: ManagedResourceBoundary
-): Promise<void> {
-  const now = nowIso();
-  await transaction.insertInto("resource_access_boundaries").values({
-    id: createId("resource-boundary"),
-    resource_kind: resourceKind,
-    resource_id: resourceId,
-    source_room_id: input.sourceRoomId,
-    owner_participant_id: input.ownerParticipantId,
-    creator_participant_id: input.creatorParticipantId ?? null,
-    resource_created_at: input.resourceCreatedAt ?? null,
-    boundary_registered_at: now,
-    updated_at: now
-  }).execute();
-}
 
 function toRow(value: SkillWithFilePath) {
   const { file_path, resource_version, frontmatter } = value;

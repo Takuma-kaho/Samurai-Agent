@@ -69,6 +69,8 @@ const props = defineProps<{
   workspaceConnections: NativeWorkspaceConnection[];
   selectWorkspaceConnection: (connectionId: string) => void | Promise<void>;
   saveWorkspaceConnection: (input: { label: string; serverUrl: string; workspaceId: string; accountId: string }) => void | Promise<void>;
+  browserWorkspaceMode?: boolean;
+  saveBrowserWorkspaceConnection?: (input: { label: string; serverUrl: string; workspaceId: string; accountId: string; publicKey: string; privateKey: string }) => void | Promise<void>;
   importWorkspaceIdentity?: () => void | Promise<void>;
   registerWorkspaceServerAccount?: () => void | Promise<void>;
   localeDisplayName: (locale: SupportedLocale) => string;
@@ -201,6 +203,8 @@ const emit = defineEmits<{ "update:searchQuery": [value: string] }>();
         :connections="props.workspaceConnections"
         :select-connection="props.selectWorkspaceConnection"
         :save-connection="props.saveWorkspaceConnection"
+        :browser-mode="props.browserWorkspaceMode"
+        :save-browser-connection="props.saveBrowserWorkspaceConnection"
         :import-identity="props.importWorkspaceIdentity"
         :register-account="props.registerWorkspaceServerAccount"
       />

@@ -371,7 +371,11 @@ function principalForConnection(connection: Awaited<ReturnType<ExternalAppConnec
       requestedByParticipantId: connection.delegated_principal.requested_by_participant_id
     };
   }
-  return { kind: "agent", agentId: connection.delegated_principal.agent_id };
+  return {
+    kind: "agent",
+    agentId: connection.delegated_principal.agent_id,
+    requestedByParticipantId: connection.delegated_principal.requested_by_participant_id
+  };
 }
 
 function cryptoRandomId(): string {

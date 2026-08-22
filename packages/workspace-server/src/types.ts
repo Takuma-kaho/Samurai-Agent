@@ -10,6 +10,12 @@ export type WorkspaceMembershipState = (typeof workspaceMembershipStates)[number
 export const workspaceStates = ["active", "read_only", "archived"] as const;
 export type WorkspaceState = (typeof workspaceStates)[number];
 
+export const workspaceAgentStatuses = ["active", "disabled", "revoked"] as const;
+export type WorkspaceAgentStatus = (typeof workspaceAgentStatuses)[number];
+
+export const workspaceConnectionStatuses = ["active", "revoked", "expired"] as const;
+export type WorkspaceConnectionStatus = (typeof workspaceConnectionStatuses)[number];
+
 export const workspaceTransferStates = ["preparing", "exported", "imported", "committed", "rolled_back", "failed"] as const;
 export type WorkspaceTransferState = (typeof workspaceTransferStates)[number];
 
@@ -65,6 +71,15 @@ export interface WorkspaceRequestContext {
   migrationOperation?: "completion_backfill" | "completion_rollback";
 }
 
+/** Internal principal shape used by the formal external-ingress boundary.
+ * Transport adapters may construct this value, but they cannot use it to
+ * bypass the Workspace Server's Room checks. */
+export type WorkspaceExternalRoomPrincipal =
+  | { kind: "human"; participantId: string }
+  | { kind: "agent"; agentId: string; requestedByParticipantId: string };
+
+export type WorkspaceExternalRoomAction = "read" | "edit" | "execute" | "manage_settings";
+
 export interface WorkspaceMembership {
   workspaceId: string;
   accountId: string;
@@ -110,6 +125,56 @@ export interface WorkspaceRoom {
   version: number;
   /** Current caller capability; it does not grant access to any other Room. */
   canManage?: boolean;
+  /** Current caller capability for starting a Runtime turn in this Room. */
+  canExecute?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceAgent {
+  workspaceId: string;
+  id: string;
+  displayName: string;
+  description: string;
+  /** Backend selected by the Workspace owner for this Agent. */
+  backendId: string;
+  status: WorkspaceAgentStatus;
+  version: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceAgentRoomPermission {
+  workspaceId: string;
+  roomId: string;
+  agentId: string;
+  canView: boolean;
+  canEdit: boolean;
+  canExecute: boolean;
+  version: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Only non-secret Connection metadata is persisted. Credential material stays
+ * in an operator-owned secure store and is never part of this descriptor. */
+export interface WorkspaceConnectionDescriptor {
+  workspaceId: string;
+  id: string;
+  agentId?: string;
+  principalAccountId: string;
+  connectorId: string;
+  appId: string;
+  status: WorkspaceConnectionStatus;
+  expiresAt: string;
+  revokedAt?: string;
+  allowedRoomIds: string[];
+  roomLimit: number;
+  ingressClasses: string[];
+  version: number;
+  createdBy: string;
   createdAt: string;
   updatedAt: string;
 }

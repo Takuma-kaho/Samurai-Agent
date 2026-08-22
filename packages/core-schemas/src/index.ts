@@ -128,7 +128,9 @@ export const learningAssessments = ["helpful", "neutral", "harmful", "insufficie
 /** Evidence and use are independent axes for Core 05 learning resources. */
 export const learningEvidenceStates = ["direct_confirmed", "inferred", "supported", "conflict"] as const;
 export const learningUsageStates = ["normal", "limited", "dormant"] as const;
-export const learningKnowledgeKinds = ["reference", "experience_rule"] as const;
+/** `reference` is retained only for legacy SQLite/Wiki documents. New
+ * Completion and PostgreSQL Wiki resources use the four product categories. */
+export const learningKnowledgeKinds = ["fact", "decision", "explanation", "experience_rule", "reference"] as const;
 export const learningEvaluationVerdicts = ["supported", "refuted", "indeterminate"] as const;
 export const learningBudgetUnits = ["currency", "tokens"] as const;
 export const learningCandidateSignalKinds = [
@@ -327,6 +329,20 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 );
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/** Filesystem capability supplied by an application composition root. */
+export interface WorkspaceFilePort {
+  readText(path: string): Promise<string>;
+  readTextIfExists(path: string): Promise<string | undefined>;
+  readBytes(path: string): Promise<Uint8Array>;
+  readBytesIfExists(path: string): Promise<Uint8Array | undefined>;
+  writeText(path: string, content: string): Promise<void>;
+  writeBytes(path: string, content: Uint8Array): Promise<void>;
+  remove(path: string): Promise<void>;
+  ensureParent(path: string): Promise<void>;
+  isFile(path: string): Promise<boolean>;
+  stat(path: string): Promise<{ size: number; modifiedAt: string }>;
+}
 
 export const BackendSessionPolicySchema = z.object({
   acquisition: BackendSessionAcquisitionModeSchema,
@@ -639,6 +655,8 @@ export const WorkspaceExecutionRequestSchema = z.object({
   backend_id: z.string().trim().min(1).optional(),
   agent_id: z.string().trim().min(1).optional(),
   input_summary: z.string().max(20_000).optional(),
+  input_locale: SupportedLocaleSchema.optional(),
+  output_locale: SupportedLocaleSchema.optional(),
   input_message_id: z.string().trim().min(1).optional(),
   metadata: z.record(jsonValueSchema).default({})
 }).strict();
@@ -1012,6 +1030,9 @@ const backendEventProviderShape: z.ZodRawShape = {
 const backendEventPayload = (shape: z.ZodRawShape = {}) => z.object({ ...backendEventProviderShape, ...shape }).strict();
 const backendEventTextPayload = backendEventPayload({
   text: z.string().min(1),
+  // Compatibility marker retained after unknown provider values are converted
+  // to JSON null by the event bridge.
+  non_json: jsonValueSchema.optional(),
   item_type: z.string().min(1).optional(),
   display_kind: z.string().min(1).optional(),
   activity_kind: z.string().min(1).optional(),
@@ -1106,6 +1127,8 @@ const backendProcessFailurePayload = backendEventPayload({
   reason: z.string().min(1).nullable().optional(),
   message: z.string().optional(),
   error_code: z.string().min(1).optional(),
+  status: z.number().int().optional(),
+  model: z.string().min(1).optional(),
   retryable: z.boolean().optional(),
   cause_category: z.string().min(1).optional(),
   exit_code: z.number().int().nullable().optional(),
@@ -1202,6 +1225,7 @@ export const BackendEventPayloadSchemas = {
   backend_stream_unavailable: backendEventPayload({
     reason: z.string().min(1).nullable().optional(),
     message: z.string().optional(),
+    run_status: z.string().min(1).optional(),
     ui_visible: z.boolean().optional()
   }),
   host_post_turn_failed: backendProcessFailurePayload,
@@ -1264,6 +1288,8 @@ export const BackendEventRecordSchema: z.ZodType<BackendEventRecord, z.ZodTypeDe
 
 export const ClientEventRecordSchema = z.object({
   id: z.string().min(1),
+  /** Room-scoped notifications use the same Room boundary as their Run. */
+  room_id: z.string().min(1).optional(),
   target_client_kind: ClientTargetKindSchema,
   target_client_id: z.string().min(1).optional(),
   event_type: ClientEventTypeSchema,

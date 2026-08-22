@@ -7,6 +7,7 @@ import type { WorkspaceCompletionFileEntry, WorkspaceCompletionResourceKind, Wor
 
 const frontmatterBoundary = "---";
 const resourceIdPattern = /^[a-z][a-z0-9_:-]{0,127}$/;
+const completionOwnedRoots = new Set([".completion-staging", ".versions", "knowledge", "policies", "profile", "skills"]);
 
 export interface WorkspaceCompletionDocument {
   id: string;
@@ -145,6 +146,14 @@ export class WorkspaceCompletionFileService {
     }
     return resolved;
   }
+}
+
+/** Paths under these roots are owned by Completion's file transaction. The
+ * generic Workspace file command must not create a second ledger for them. */
+export function isWorkspaceCompletionOwnedPath(value: string): boolean {
+  const relative = assertSafeRelativePath(value);
+  const first = relative.split("/", 1)[0];
+  return completionOwnedRoots.has(first ?? "");
 }
 
 export function completionResourcePath(input: { id: string; kind: WorkspaceCompletionResourceKind; scope: WorkspaceCompletionScope; version?: number; candidate?: boolean }): string {

@@ -4,6 +4,7 @@ import process from "node:process";
 import { committedSourceEvidence } from "./lib/core-evidence.mjs";
 
 const root = process.cwd();
+const writeEvidence = process.argv.includes("--write-evidence");
 const lineCount = (file) => readFileSync(path.join(root, file), "utf8").split("\n").length;
 const sourceFiles = (directory) => {
   const files = [];
@@ -28,9 +29,12 @@ const requiredDirectories = [
 ];
 const missingDirectories = requiredDirectories.filter((directory) => !existsSync(path.join(root, directory)));
 const result = { status: oversizedEntrypoints.length === 0 && missingDirectories.length === 0 ? "passed" : "partial", entrypoint_limit: 500, module_line_warning: 1200, entrypoints: entrypoints.map((file) => ({ file, lines: lineCount(file) })), oversized_entrypoints: oversizedEntrypoints, large_modules_advisory: largeModules, missing_directories: missingDirectories };
-const now = new Date().toISOString();
-const evidenceDir = path.join(root, "reports/core-completion/evidence"); mkdirSync(evidenceDir, { recursive: true });
-const evidenceSources = [...allSources, "scripts/verify-physical-module-boundaries.mjs", "scripts/lib/core-evidence.mjs"];
-writeFileSync(path.join(evidenceDir, "A01.json"), `${JSON.stringify({ schema_version: 1, test_id: "A01", command: "pnpm core:test:physical-boundaries", status: result.status, ...committedSourceEvidence(root, evidenceSources), started_at: now, completed_at: now, assertions: [{ name: "Entrypoints remain composition/export focused", actual: oversizedEntrypoints, expected: [] }, { name: "Required responsibility directories", actual: missingDirectories, expected: [] }], advisories: [{ name: "Large modules recorded for follow-up", actual: largeModules }], result }, null, 2)}\n`);
+if (writeEvidence) {
+  const now = new Date().toISOString();
+  const evidenceDir = path.join(root, "reports/core-completion/evidence");
+  mkdirSync(evidenceDir, { recursive: true });
+  const evidenceSources = [...allSources, "scripts/verify-physical-module-boundaries.mjs", "scripts/lib/core-evidence.mjs"];
+  writeFileSync(path.join(evidenceDir, "A01.json"), `${JSON.stringify({ schema_version: 1, test_id: "A01", command: "pnpm core:test:physical-boundaries -- --write-evidence", status: result.status, ...committedSourceEvidence(root, evidenceSources), started_at: now, completed_at: now, assertions: [{ name: "Entrypoints remain composition/export focused", actual: oversizedEntrypoints, expected: [] }, { name: "Required responsibility directories", actual: missingDirectories, expected: [] }], advisories: [{ name: "Large modules recorded for follow-up", actual: largeModules }], result }, null, 2)}\n`);
+}
 process.stdout.write(`${JSON.stringify(result)}\n`);
 if (result.status !== "passed") process.exitCode = 1;

@@ -56,7 +56,8 @@ function staticBoundaryCheck() {
   const forbidden = [
     ["external integration package Store boundary", "WorkspaceStore|better-sqlite|kysely|node:fs", "packages/external-integration/src"],
     ["runtime MCP Workspace Store boundary", "import type \\{ WorkspaceStore \\}|options\\.store\\.(get|list)|new WorkspaceStore", "packages/runtime/src/external-app/mcp-workspace-port.ts"],
-    ["external Automation operation boundary", "external_app", "packages/domain-operations/src/operations/automation"]
+    ["external Automation execution boundary", "external_app", "packages/domain-operations/src/operations/automation/job/run.operation.ts"],
+    ["external Memory Review execution boundary", "external_app", "packages/domain-operations/src/operations/automation/memory_review/run.operation.ts"]
   ];
   for (const [label, pattern, target] of forbidden) {
     const result = spawnSync("rg", ["-n", pattern, target], { cwd: root, encoding: "utf8" });
@@ -128,6 +129,7 @@ function isServer05Source(relativePath) {
     || relativePath.startsWith("packages/runtime/src/domain-operation-ports/workspace-context-")
     || relativePath.startsWith("packages/runtime/src/domain-operation-")
     || relativePath === "packages/runtime/src/agent-runtime.ts"
+    || relativePath.startsWith("packages/workspace-server/src/")
     || relativePath === "packages/domain-operations/src/definition/access-classification.ts"
     || relativePath.startsWith("packages/domain-operations/src/operations/resource/version/")
     || relativePath.startsWith("packages/domain-operations/src/operations/workspace/context/")
@@ -192,12 +194,14 @@ function flowMatrix(entries) {
 }
 
 async function publicMutationCoverage() {
-  const [serverSource, mcpSource, runtimeSource] = await Promise.all([
+  const [legacyServerSource, postgresIntegrationSource, postgresIngressSource, mcpSource, runtimeSource] = await Promise.all([
     readFile(path.join(root, "apps/server/src/external-integration.ts"), "utf8"),
+    readFile(path.join(root, "apps/server/src/adapters/external/postgres-external-integration.ts"), "utf8"),
+    readFile(path.join(root, "apps/server/src/adapters/external/postgres-external-app-ingress.ts"), "utf8"),
     readFile(path.join(root, "packages/external-integration/src/mcp.ts"), "utf8"),
     readFile(path.join(root, "packages/runtime/src/external-app/mcp-workspace-port.ts"), "utf8")
   ]);
-  const surface = `${serverSource}\n${mcpSource}\n${runtimeSource}`;
+  const surface = `${legacyServerSource}\n${postgresIntegrationSource}\n${postgresIngressSource}\n${mcpSource}\n${runtimeSource}`;
   const capabilities = requiredMutationCapabilities.map((capability) => ({
     ...capability,
     missing: capability.terms.filter((term) => !surface.includes(`"${term}"`))
@@ -254,9 +258,18 @@ async function main() {
   const selfReview = await selfReviewCoverage();
   const corrections = correctionLedger({ implementationPass, integrationPass, matrix, flows, mutationCoverage, context, selfReview });
   const requirements = requirementLedger({ implementationPass, integrationPass, matrix, corrections });
+  const liveClientPass = Object.values(matrix.clients).every(Boolean);
+  const threeOsPass = Object.values(matrix.operating_systems).every(Boolean);
+  const hostedSelfHostPass = Object.values(matrix.deployments).every(Boolean);
   const complete = implementationPass
     && integrationPass
     && selfReview.complete
+    && matrix.complete
+    && flows.complete
+    && liveClientPass
+    && threeOsPass
+    && hostedSelfHostPass
+    && evidence.issues.length === 0
     && corrections.filter((item) => item.id !== "C31").every((item) => item.status === "complete")
     && requirements.every((item) => item.status === "complete");
   const report = {
@@ -264,9 +277,9 @@ async function main() {
     status: implementationPass ? (complete ? "PASS" : "INCOMPLETE") : "FAIL",
     implementation_pass: implementationPass,
     integration_pass: integrationPass,
-    live_client_pass: Object.values(matrix.clients).every(Boolean),
-    three_os_pass: Object.values(matrix.operating_systems).every(Boolean),
-    hosted_self_host_pass: Object.values(matrix.deployments).every(Boolean),
+    live_client_pass: liveClientPass,
+    three_os_pass: threeOsPass,
+    hosted_self_host_pass: hostedSelfHostPass,
     complete,
     generated_at: new Date().toISOString(),
     source_hash: source.hash,

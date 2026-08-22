@@ -23,6 +23,7 @@ export type WorkspacePersistenceOwner =
   | "gateway"
   | "workspace_metadata"
   | "room_agent"
+  | "room_permission"
   | "access_history"
   | "activity_history"
   | "workspace_job";
@@ -132,13 +133,19 @@ const owners: readonly WorkspaceResourceOwner[] = [
     owner: "workspace_metadata",
     directories: ["profile"],
     backup_roots: ["profile"],
-    sqlite_tables: ["settings", "plugin_states", "resource_translations"]
+    sqlite_tables: ["settings", "room_context_metadata", "plugin_states", "resource_translations"]
   },
   {
     owner: "access_history",
     directories: ["rollback"],
     backup_roots: ["rollback"],
     sqlite_tables: ["policy_decisions", "approval_requests", "audit_records", "rollback_points", "grants"]
+  },
+  {
+    owner: "room_permission",
+    directories: [],
+    backup_roots: [],
+    sqlite_tables: ["workspace_members", "room_members", "room_agents", "agent_workspace_permissions", "resource_access_boundaries", "room_resource_shares"]
   },
   {
     owner: "activity_history",

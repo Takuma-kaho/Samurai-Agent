@@ -3,7 +3,7 @@ import express from "express";
 import type { Express, NextFunction, Request, Response } from "express";
 import { createHmac, createPublicKey, createVerify, timingSafeEqual } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Server as HttpServer } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
@@ -124,6 +124,7 @@ import {
   type ProviderRegistry
 } from "@samurai-agent/runtime";
 import { composeAgentRuntime } from "./composition/runtime";
+import { createRuntimeWorkspaceFilePort } from "./adapters/runtime/workspace-file-port";
 import {
   isDomainCommandId,
   isDomainQueryId,
@@ -458,7 +459,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     : describeExternalAssistProviderConfig();
   const externalAssistProviders = injectedExternalAssistProviders.length > 0
     ? injectedExternalAssistProviders
-    : createExternalAssistProvidersFromEnv();
+    : createExternalAssistProvidersFromEnv(process.env, (filePath) => readFile(filePath, "utf8"));
   const backendWorkingDirectoryMode = resolveBackendWorkingDirectoryMode();
   const backendRegistry = options.backendRegistry ?? createDefaultAgentBackendRegistry(provider, process.env, { repoRoot });
   const temporaryContexts = createTemporaryContextStore();
@@ -469,9 +470,9 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
     backendWorkingDirectoryMode,
     repoRoot,
     enableBackendBackgroundReview: options.automationScheduler !== false,
-    detachBackgroundReview: true,
     resolveTemporaryContextRef: (ref) => temporaryContexts.resolve(ref),
-    productionLogger
+    productionLogger,
+    filePort: createRuntimeWorkspaceFilePort()
   } });
   await runtime.startup();
   const externalIntegrationOptions = options.externalIntegration === false
@@ -4484,25 +4485,32 @@ export function closeApiServer(server: ApiServer): Promise<void> {
     if (!httpClosed.completed) errors.push(new Error("api_server_http_shutdown_timeout"));
     else if (httpClosed.error) errors.push(httpClosed.error);
     try {
-      const runtimeClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.runtime.shutdown()), deadlineAt);
-      if (!runtimeClosed.completed) {
-        errors.push(new Error("api_server_runtime_shutdown_timeout"));
-        safeToCloseStore = false;
-      } else if (runtimeClosed.error) {
-        errors.push(runtimeClosed.error);
-        safeToCloseStore = false;
-      }
-    } catch (error) {
-      errors.push(error);
-      safeToCloseStore = false;
-    }
-    try {
       const temporaryClosed = await awaitBeforeDeadline(Promise.resolve().then(() => server.temporaryContexts.close()), deadlineAt);
       if (!temporaryClosed.completed) {
         errors.push(new Error("api_server_temporary_context_shutdown_timeout"));
         safeToCloseStore = false;
       } else if (temporaryClosed.error) {
         errors.push(temporaryClosed.error);
+      }
+    } catch (error) {
+      errors.push(error);
+      safeToCloseStore = false;
+    }
+    try {
+      // The legacy API server owns the SQLite Runtime composition. Its shared
+      // shutdown contract closes MCP/background resources here; the standard
+      // PostgreSQL server has its own Host lifecycle and never enters this
+      // close path. Keep the older injected Runtime shape compatible too.
+      const runtimeShutdown = typeof server.runtime.shutdownMcpProcessPool === "function"
+        ? () => server.runtime.shutdownMcpProcessPool()
+        : () => server.runtime.shutdown();
+      const runtimeClosed = await awaitBeforeDeadline(Promise.resolve().then(runtimeShutdown), deadlineAt);
+      if (!runtimeClosed.completed) {
+        errors.push(new Error("api_server_runtime_shutdown_timeout"));
+        safeToCloseStore = false;
+      } else if (runtimeClosed.error) {
+        errors.push(runtimeClosed.error);
+        safeToCloseStore = false;
       }
     } catch (error) {
       errors.push(error);
@@ -4739,9 +4747,19 @@ async function runDynamicRuntimeApiQuery(
 /** The owner-authenticated HTTP adapter selects authority before Runtime entry. */
 function runtimeRequestContext(req: Request, context: TrustedRuntimeApiContext = {}): TrustedRuntimeApiContext {
   const signal = (req as Request & { signal?: AbortSignal }).signal;
+  const transport = apiRoomAccessContext(req);
   return {
     ...context,
-    participant: context.participant ?? { kind: "human", participantId: localOwnerParticipantId },
+    ...(context.roomId || !transport.roomId ? {} : { roomId: transport.roomId }),
+    ...(context.sessionId || !transport.sessionId ? {} : { sessionId: transport.sessionId }),
+    // A persisted BackendRun carries the authoritative participant. Let the
+    // Runtime resolve it and reject any mismatched trusted participant; do not
+    // replace it with the HTTP adapter's local Owner identity first.
+    ...(context.participant
+      ? { participant: context.participant }
+      : context.runId
+        ? {}
+        : { participant: { kind: "human", participantId: localOwnerParticipantId } }),
     source: context.source ?? { kind: "native_app", app_id: "samurai-native" },
     ...(signal ? { signal } : {})
   };
@@ -8224,6 +8242,7 @@ function clientEventFromRequestBody(input: unknown): ClientEventRecord | undefin
     : undefined;
   const event = {
     id: typeof body.id === "string" && body.id.trim() ? body.id.trim() : createId("client_event"),
+    ...(typeof body.room_id === "string" && body.room_id.trim() ? { room_id: body.room_id.trim() } : {}),
     target_client_kind: targetClientKind,
     ...(targetClientId ? { target_client_id: targetClientId } : {}),
     event_type: eventType,
@@ -8275,6 +8294,7 @@ function clientEventForBackendRun(run: BackendRunRecord): ClientEventRecord | un
       run_id: run.id,
       status: run.status
     }).slice(0, 24)}`,
+    ...(run.room_id ? { room_id: run.room_id } : {}),
     target_client_kind: "desktop",
     event_type: "client.notification.requested",
     status: "pending",

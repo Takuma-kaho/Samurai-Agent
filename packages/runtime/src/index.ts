@@ -21,6 +21,8 @@ export * from "./execution/session-run-queue";
 export * from "./execution/run-control";
 export * from "./execution/run-recovery";
 export * from "./execution/turn-executor";
+export { buildGeneratedSurfaceRevision, safeGeneratedSurfaceAssetPath, type GeneratedSurfaceBundleInput } from "./presentation/generated-surface";
+export { BackendEventBridge, normalizeBackendOutputEvent, projectBackendEventForUi } from "./backend/event-bridge";
 export * from "./composition/create-agent-host";
 export * from "./composition/runtime-host";
 export * from "./host/turn-admission";
@@ -36,3 +38,18 @@ export * from "./external-app/external-app-context-resolver";
 export * from "./external-app/external-app-ingress";
 export * from "./external-app/reference-adapter";
 export * from "./external-app/mcp-workspace-port";
+// PostgreSQL Server adapters compose these formal services with a database
+// port; the service remains transport-independent and preserves the shared
+// Domain Operation behavior used by the legacy Runtime.
+export {
+  GatewayDomainService,
+  type GatewayDomainServiceDependencies,
+  type GatewayInboundInput
+} from "./commands/services/gateway-domain-service";
+export { createGatewayDomainServicePorts } from "./domain-operation-ports/gateway-domain-service-ports";
+export {
+  SkillDomainService,
+  type OptimizationSkill,
+  type SkillOptimizationPort
+} from "./commands/services/skill-domain-service";
+export { createSkillDomainServicePorts } from "./domain-operation-ports/skill-domain-service-ports";

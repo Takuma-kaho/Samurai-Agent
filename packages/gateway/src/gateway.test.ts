@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { access, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -47,6 +47,8 @@ import {
 } from "./index";
 
 describe("gateway", () => {
+  const testCoreWorkspaceRoot = path.join(tmpdir(), "samurai-gateway-test-core-root");
+
   it("creates fixed web, local cli, and cron contexts", () => {
     const web = createWebEnvelope("hello");
     const local = createLocalCliEnvelope("local action", "project/main");
@@ -325,6 +327,291 @@ describe("gateway", () => {
     expect(() => normalizeGatewayWorkspacePath("/etc/passwd")).toThrow("gateway_absolute_path_not_allowed");
   });
 
+  it("blocks command cwd outside the allowed path before the adapter runs", async () => {
+    let adapterCalled = false;
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-path-policy",
+        session_key: "webhook:source-path-policy:main"
+      }),
+      sandbox: {
+        mode: "all" as const,
+        scope: "session" as const,
+        backend: "none" as const,
+        workspace_access: "read_write" as const,
+        network_access: "none" as const,
+        allowed_paths: [{ root: "safe", access: "read_write" as const }],
+        denied_paths: ["safe/secrets"],
+        metadata: {}
+      }
+    };
+
+    const result = await executeSandboxCommand(boundary, { command: "node", cwd: "other" }, {
+      execute: async () => {
+        adapterCalled = true;
+        return { exit_code: 0, stdout: "", stderr: "" };
+      }
+    }, { workspaceRoot: await mkdtemp(path.join(tmpdir(), "samurai-sandbox-policy-command-")) });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      reason: "path_not_allowed",
+      error: "sandbox_path_not_allowed"
+    });
+    expect(adapterCalled).toBe(false);
+  });
+
+  it("blocks denied command cwd before the adapter runs", async () => {
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-denied-path",
+        session_key: "webhook:source-denied-path:main"
+      }),
+      sandbox: {
+        mode: "all" as const,
+        scope: "session" as const,
+        backend: "none" as const,
+        workspace_access: "read_write" as const,
+        network_access: "none" as const,
+        allowed_paths: [{ root: "workspace", access: "read_write" as const }],
+        denied_paths: ["secrets"],
+        metadata: {}
+      }
+    };
+
+    const result = await executeSandboxCommand(boundary, { command: "node", cwd: "secrets" }, {
+      execute: async () => ({ exit_code: 0, stdout: "", stderr: "" })
+    }, { workspaceRoot: await mkdtemp(path.join(tmpdir(), "samurai-sandbox-policy-denied-")) });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      reason: "path_not_allowed",
+      error: "sandbox_path_denied"
+    });
+  });
+
+  it("does not claim host execution can isolate a partial workspace path", async () => {
+    let adapterCalled = false;
+    const result = await executeSandboxCommand({
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-host-partial-path",
+        session_key: "webhook:source-host-partial-path:main"
+      }),
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        backend: "none",
+        workspace_access: "read_write",
+        network_access: "none",
+        allowed_paths: [{ root: "safe", access: "read_write" }],
+        denied_paths: [],
+        metadata: {}
+      }
+    }, { command: "node", cwd: "safe" }, {
+      execute: async () => {
+        adapterCalled = true;
+        return { exit_code: 0, stdout: "", stderr: "" };
+      }
+    }, { workspaceRoot: await mkdtemp(path.join(tmpdir(), "samurai-sandbox-host-partial-")) });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      reason: "path_not_allowed",
+      error: "sandbox_host_partial_path_not_supported"
+    });
+    expect(adapterCalled).toBe(false);
+  });
+
+  it("mounts only explicitly allowed Docker paths", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-docker-path-"));
+    await mkdir(path.join(workspaceRoot, "tools"), { recursive: true });
+    let captured: { command: string; args: string[] } | undefined;
+    const fakeSpawn = ((command: string, args: string[]) => {
+      captured = { command, args };
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: PassThrough;
+        stderr: PassThrough;
+        stdin: PassThrough;
+        kill(signal?: NodeJS.Signals): boolean;
+      };
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin = new PassThrough();
+      child.kill = () => true;
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("close", 0, null);
+      });
+      return child;
+    }) as unknown as typeof import("node:child_process").spawn;
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-docker-path",
+        session_key: "webhook:source-docker-path:main"
+      }),
+      sandbox: {
+        mode: "all" as const,
+        scope: "session" as const,
+        backend: "docker" as const,
+        workspace_access: "read_write" as const,
+        network_access: "none" as const,
+        allowed_paths: [{ root: "tools", access: "read_write" as const }],
+        denied_paths: [],
+        metadata: { docker_image: "samurai-test-sandbox:latest" }
+      }
+    };
+
+    const result = await executeSandboxCommand(boundary, { command: "node", cwd: "tools" }, createSandboxCommandAdapter({ spawnProcess: fakeSpawn }), { workspaceRoot });
+
+    expect(result.status).toBe("completed");
+    expect(captured?.args).toContain(`-v`);
+    expect(captured?.args).toContain(`${path.resolve(workspaceRoot, "tools")}:/workspace/tools:rw`);
+    expect(captured?.args).not.toContain(`${path.resolve(workspaceRoot)}:/workspace:rw`);
+  });
+
+  it("blocks full-root sync for local, Docker, SSH, and remote transports without an explicit root grant", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-sync-policy-workspace-"));
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-sync-policy-remote-"));
+    await writeFile(path.join(workspaceRoot, "secret.txt"), "must not copy");
+    const cases = [
+      { backend: "none" as const, metadata: { workspace_sync_transport: "local" } },
+      { backend: "docker" as const, metadata: { docker_container_id: "container" } },
+      { backend: "ssh" as const, metadata: { ssh_target: "agent@example.test" } },
+      { backend: "remote" as const, metadata: { remote_target: "agent@example.test" } }
+    ];
+
+    for (const testCase of cases) {
+      const boundary = {
+        ...createDefaultGatewayBoundaryPolicy({
+          source_channel: "webhook",
+          source_identity: `source-sync-${testCase.backend}`,
+          session_key: `webhook:source-sync-${testCase.backend}:main`
+        }),
+        sandbox: {
+          mode: "all" as const,
+          scope: "session" as const,
+          backend: testCase.backend,
+          workspace_access: "read_write" as const,
+          network_access: "none" as const,
+          allowed_paths: [{ root: "safe", access: "read_write" as const }],
+          denied_paths: [],
+          metadata: testCase.metadata
+        }
+      };
+
+      const result = await executeSandboxWorkspaceSync(boundary.sandbox, {
+        direction: "seed_to_sandbox",
+        workspace_root: workspaceRoot,
+        remote_workspace_root: testCase.backend === "docker" ? "/workspace" : remoteRoot
+      }, createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot }));
+
+      expect(result).toMatchObject({
+        status: "failed",
+        reason: "path_not_allowed",
+        error: "sandbox_path_not_allowed"
+      });
+    }
+    await expect(access(path.join(remoteRoot, "secret.txt"))).rejects.toBeTruthy();
+  });
+
+  it("blocks raw sync from a Core workspace root even when the root is allowed", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-core-root-"));
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-core-root-remote-"));
+    await writeFile(path.join(workspaceRoot, "workspace.sqlite"), "core database marker");
+
+    const result = await executeSandboxWorkspaceSync({
+      mode: "all",
+      scope: "session",
+      backend: "none",
+      workspace_access: "read_write",
+      network_access: "none",
+      allowed_paths: [{ root: "workspace", access: "read_write" }],
+      denied_paths: [],
+      metadata: { workspace_sync_transport: "local" }
+    }, {
+      direction: "seed_to_sandbox",
+      workspace_root: workspaceRoot,
+      remote_workspace_root: remoteRoot
+    }, createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: workspaceRoot }));
+
+    expect(result).toMatchObject({
+      status: "failed",
+      reason: "path_not_allowed",
+      error: "sandbox_core_workspace_root_not_allowed"
+    });
+    await expect(access(path.join(remoteRoot, "workspace.sqlite"))).rejects.toBeTruthy();
+  });
+
+  it("syncs only the granted subtree and skips denied descendants", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-subtree-source-"));
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-subtree-target-"));
+    await mkdir(path.join(workspaceRoot, "safe", "nested"), { recursive: true });
+    await mkdir(path.join(workspaceRoot, "safe", "secrets"), { recursive: true });
+    await writeFile(path.join(workspaceRoot, "safe", "nested", "allowed.txt"), "allowed");
+    await writeFile(path.join(workspaceRoot, "safe", "secrets", "blocked.txt"), "blocked");
+    await writeFile(path.join(workspaceRoot, "outside.txt"), "outside");
+
+    const result = await executeSandboxWorkspaceSync({
+      mode: "all",
+      scope: "session",
+      backend: "none",
+      workspace_access: "read_write",
+      network_access: "none",
+      allowed_paths: [{ root: "safe", access: "read_write" }],
+      denied_paths: ["safe/secrets"],
+      metadata: { workspace_sync_transport: "local" }
+    }, {
+      direction: "seed_to_sandbox",
+      workspace_root: workspaceRoot,
+      remote_workspace_root: remoteRoot,
+      metadata: { workspace_sync_roots: ["safe"] }
+    }, createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot }));
+
+    expect(result.status).toBe("completed");
+    await expect(access(path.join(remoteRoot, "safe", "nested", "allowed.txt"))).resolves.toBeUndefined();
+    await expect(access(path.join(remoteRoot, "safe", "secrets", "blocked.txt"))).rejects.toBeTruthy();
+    await expect(access(path.join(remoteRoot, "outside.txt"))).rejects.toBeTruthy();
+  });
+
+  it("blocks sandbox deletion when the workspace root is denied", async () => {
+    let adapterCalled = false;
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-delete-path",
+        session_key: "webhook:source-delete-path:main"
+      }),
+      sandbox: {
+        mode: "all" as const,
+        scope: "session" as const,
+        backend: "docker" as const,
+        workspace_access: "read_write" as const,
+        network_access: "none" as const,
+        allowed_paths: [{ root: "workspace", access: "read_write" as const }],
+        denied_paths: ["workspace"],
+        metadata: {}
+      }
+    };
+
+    const result = await executeSandboxLifecycleAction(boundary.sandbox, {
+      action: "delete",
+      instance_key: "docker:session:delete-path"
+    }, {
+      run: async () => {
+        adapterCalled = true;
+        return { status: "completed", resource_refs: [] };
+      }
+    });
+
+    expect(result).toMatchObject({ status: "failed", reason: "path_not_allowed", error: "sandbox_path_denied" });
+    expect(adapterCalled).toBe(false);
+  });
+
   it("reports sandbox executor capability diagnostics without contacting remote targets", () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const spawnProbe = ((command: string, args: string[]) => {
@@ -366,7 +653,7 @@ describe("gateway", () => {
     ]));
   });
 
-  it("executes sandbox commands through the host adapter and redacts SecretRef material", async () => {
+  it("executes bounded host sandbox commands and redacts resolved SecretRef material", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-host-"));
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
@@ -386,7 +673,7 @@ describe("gateway", () => {
         backend: "none" as const,
         workspace_access: "read" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {}
@@ -409,8 +696,7 @@ describe("gateway", () => {
 
     expect(result).toMatchObject({
       status: "completed",
-      resolved_secret_ref_ids: ["secret_exec"],
-      stdout: "[redacted:secret_exec]\n"
+      resolved_secret_ref_ids: ["secret_exec"]
     });
     expect(JSON.stringify(result)).not.toContain("sandbox-secret");
     expect(JSON.stringify(result)).not.toContain("EXEC_TOKEN");
@@ -456,7 +742,7 @@ describe("gateway", () => {
         backend: "docker" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: { docker_image: "samurai-test-sandbox:latest" }
@@ -551,7 +837,7 @@ describe("gateway", () => {
         backend: "ssh" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {
@@ -608,7 +894,7 @@ describe("gateway", () => {
         backend: "ssh" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: { workspace_sync_transport: "local" }
@@ -622,7 +908,7 @@ describe("gateway", () => {
         workspace_root: workspaceRoot,
         remote_workspace_root: remoteRoot
       },
-      createSandboxWorkspaceSyncAdapter()
+      createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot })
     );
 
     expect(result).toMatchObject({
@@ -667,7 +953,7 @@ describe("gateway", () => {
         backend: "ssh" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {
@@ -684,7 +970,7 @@ describe("gateway", () => {
         workspace_root: workspaceRoot,
         remote_workspace_root: "/srv/samurai/workspace"
       },
-      createSandboxWorkspaceSyncAdapter({ spawnProcess: fakeSpawn })
+      createSandboxWorkspaceSyncAdapter({ spawnProcess: fakeSpawn, workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot })
     );
 
     expect(result.status).toBe("completed");
@@ -721,7 +1007,7 @@ describe("gateway", () => {
         backend: "ssh" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: { workspace_sync_transport: "local" }
@@ -735,7 +1021,7 @@ describe("gateway", () => {
         workspace_root: workspaceRoot,
         remote_workspace_root: remoteRoot
       },
-      createSandboxWorkspaceSyncAdapter()
+      createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot })
     );
 
     expect(result).toMatchObject({
@@ -781,7 +1067,7 @@ describe("gateway", () => {
         backend: "docker" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: { docker_container_id: "samurai-sandbox-test" }
@@ -1396,8 +1682,9 @@ rl.on("line", (line) => {
       secrets: []
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
+    const pendingRejection = expect(pending).rejects.toThrow("mcp_process_closed");
     const closing = adapter.closeAll();
-    await expect(pending).rejects.toThrow("mcp_process_closed");
+    await pendingRejection;
     await closing;
     await expect(adapter.invoke({
       server_name: "calendar",

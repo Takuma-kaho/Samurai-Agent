@@ -144,6 +144,7 @@ export interface WritePortableWorkspaceBundleSnapshotInput {
   destination: string;
   includeLegacyLearning?: boolean;
   excludeMembershipAccountIds?: readonly string[];
+  transferId?: string;
 }
 
 export interface ImportWorkspaceBundleInput {
@@ -240,7 +241,7 @@ export class WorkspaceBundleV3Service {
     await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
     await mkdir(destination, { recursive: false, mode: 0o700 });
     try {
-      const written = await this.writeStableBundleDirectory(context, destination, undefined, {
+      const written = await this.writeStableBundleDirectory(context, destination, input.transferId, {
         includeLegacyLearning: input.includeLegacyLearning !== false,
         excludeMembershipAccountIds: input.excludeMembershipAccountIds ?? []
       });
@@ -274,8 +275,8 @@ export class WorkspaceBundleV3Service {
     // A second request with the same operation ID must resume the same
     // transfer. Do not run another state-changing operation ledger entry.
     if (begun.transferId !== transferId) throw new WorkspaceServerError("workspace_transfer_not_ready", 409);
-    return runExclusiveTransferExport(canonicalJson([context.workspaceId, transferId]), async () => {
-      const transfer = await readTransfer(this.store, context, transferId);
+    return runExclusiveWorkspaceTransferExport(canonicalJson([context.workspaceId, transferId]), async () => {
+      const transfer = await readWorkspaceTransfer(this.store, context, transferId);
       if (transfer.state === "exported" && transfer.bundlePath) {
         const verified = await verifyWorkspaceBundleV3(transfer.bundlePath);
         return { id: `bundle_${transferId}`, directory: transfer.bundlePath, manifest: verified.manifest, transferId };
@@ -292,7 +293,7 @@ export class WorkspaceBundleV3Service {
         // If another process completed the durable DB transition while this
         // process was racing for the destination directory, prefer that
         // verified result instead of incorrectly failing the transfer.
-        const resumed = await readTransfer(this.store, context, transferId).catch(() => undefined);
+        const resumed = await readWorkspaceTransfer(this.store, context, transferId).catch(() => undefined);
         if (resumed?.state === "exported" && resumed.bundlePath) {
           const verified = await verifyWorkspaceBundleV3(resumed.bundlePath);
           return { id: `bundle_${transferId}`, directory: resumed.bundlePath, manifest: verified.manifest, transferId };
@@ -426,7 +427,7 @@ export class WorkspaceBundleV3Service {
   ): Promise<{ directory: string; manifest: WorkspaceBundleV3Manifest }> {
     assertOpaqueId(transferId, "workspace_transfer_id_invalid");
     await assertWorkspaceOwner(this.store, context);
-    const transfer = await readTransfer(this.store, context, transferId);
+    const transfer = await readWorkspaceTransfer(this.store, context, transferId);
     if (transfer.state !== "exported" || !transfer.bundlePath) throw new WorkspaceServerError("workspace_transfer_not_ready", 409);
     const verified = await verifyWorkspaceBundleV3(transfer.bundlePath);
     if (verified.manifest.transfer_id !== transferId) throw new WorkspaceServerError("workspace_transfer_bundle_mismatch", 409);
@@ -876,7 +877,7 @@ async function assertImportedBundleMatches(
   if (!result.rows[0]) throw new WorkspaceServerError("workspace_import_target_exists", 409);
 }
 
-async function runExclusiveTransferExport<T>(key: string, action: () => Promise<T>): Promise<T> {
+export async function runExclusiveWorkspaceTransferExport<T>(key: string, action: () => Promise<T>): Promise<T> {
   const previous = transferExportLocks.get(key) ?? Promise.resolve();
   let release!: () => void;
   const completion = new Promise<void>((resolve) => { release = resolve; });
@@ -909,7 +910,7 @@ function snapshotFingerprint(snapshot: WorkspaceSnapshot): string {
   return hashText(canonicalJson(JSON.parse(JSON.stringify(snapshot))));
 }
 
-async function readTransfer(
+export async function readWorkspaceTransfer(
   store: WorkspaceServerStore,
   context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
   transferId: string

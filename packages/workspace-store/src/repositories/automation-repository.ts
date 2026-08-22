@@ -194,6 +194,35 @@ export class AutomationRepository {
     });
   }
 
+  /** Links a Session-free Backend Run while the scheduler claim is still owned. */
+  async attachAutomationRunBackendRun(input: {
+    jobId: string;
+    runId: string;
+    lockOwnerToken: string;
+    backendRunId: string;
+  }): Promise<AutomationRunRecord | undefined> {
+    return this.db.transaction().execute(async (transaction) => {
+      const [jobRow, runRow, backendRun] = await Promise.all([
+        transaction.selectFrom("automation_jobs").selectAll().where("id", "=", input.jobId).executeTakeFirst(),
+        transaction.selectFrom("automation_runs").selectAll().where("id", "=", input.runId).executeTakeFirst(),
+        transaction.selectFrom("backend_runs").select(["id", "room_id", "session_id"]).where("id", "=", input.backendRunId).executeTakeFirst()
+      ]);
+      if (!jobRow || jobRow.lock_owner_token !== input.lockOwnerToken) return undefined;
+      if (!runRow || runRow.status !== "started" || runRow.job_id !== input.jobId) return undefined;
+      const run = automationRunFromRow(runRow);
+      if (run.backend_run_id && run.backend_run_id !== input.backendRunId) {
+        throw new Error("automation_run_backend_conflict");
+      }
+      if (!backendRun || backendRun.session_id !== null || backendRun.room_id !== run.room_id) {
+        throw new Error("automation_backend_run_scope_invalid");
+      }
+      if (run.backend_run_id === input.backendRunId) return run;
+      const updated = AutomationRunRecordSchema.parse({ ...run, backend_run_id: input.backendRunId });
+      await transaction.updateTable("automation_runs").set(automationRunToRow(updated)).where("id", "=", input.runId).execute();
+      return updated;
+    });
+  }
+
   /** Settles the Job and Run together, but only for the scheduler claim owner. */
   async settleAutomationRun(input: AutomationRunSettlementInput): Promise<AutomationRunClaim | undefined> {
     return this.db.transaction().execute(async (transaction) => {

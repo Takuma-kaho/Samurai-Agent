@@ -26,7 +26,7 @@ function simplePdf(title: string, content: string): Uint8Array {
 const root = await mkdtemp(path.join(tmpdir(), "samurai-pdf-export-"));
 const store = await WorkspaceStore.create({ rootDir: root });
 const adapter: PdfExportAdapter = { id: "fixture-pdf", async export(input) { return simplePdf(input.title, input.content); } };
-const runtime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, undefined, { pdfExportAdapter: adapter });
+const runtime = new AgentRuntime(store, undefined, undefined, undefined, undefined, undefined, { pdfExportAdapter: adapter });
 try {
   const now = new Date().toISOString();
   const file = await store.writeArtifactContent("pdf-source", "Exported report content", { extension: "md" });

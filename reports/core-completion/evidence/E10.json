@@ -3,10 +3,10 @@
   "test_id": "E10",
   "command": "pnpm core:test:learning-guardrails",
   "status": "passed",
-  "commit_sha": "f86c50edd514876142347d6e198f924c7667eb1c",
-  "worktree_clean": true,
-  "source_sha256": "0a53442ed9528d8c28c05d7a394d0bb27c19fae532f1427555ca2d7a3b74b88b",
-  "source_graph_sha256": "857b31ff584f646f384a1fa3cf09936f34a5fef5616a58455cfcac284ae0a288",
+  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
+  "worktree_clean": false,
+  "source_sha256": "e130720d3310d7ff7a6a48a821865a83c22e7a6649c289189ed300b39427857d",
+  "source_graph_sha256": "030b9841591a930b761235cbc02337c4b324955e3fd78cae9ffcadda3bc14394",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/learning/src/guardrail-evaluation.ts",
@@ -35,8 +35,8 @@
     "scripts/verify-learning-guardrails.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-02T15:39:51.715Z",
-  "completed_at": "2026-08-02T15:39:51.868Z",
+  "started_at": "2026-08-21T21:50:53.208Z",
+  "completed_at": "2026-08-21T21:50:53.658Z",
   "assertions": [
     {
       "name": "Same-fingerprint work quality and Generated Surface outcome improve",

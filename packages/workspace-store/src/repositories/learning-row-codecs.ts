@@ -1,5 +1,6 @@
 import {
   ExternalAssistRecordSchema,
+  LearningBudgetUnitSchema,
   nowIso,
   type BackgroundReviewChangeRecord,
   type CuratorStateRecord,
@@ -170,7 +171,7 @@ export function reflectionRunFromRow(row: ReflectionRunsTable): ReflectionRunRec
     candidate_key: row.candidate_key ?? undefined,
     candidate_signals: row.candidate_signals_json ? parse(row.candidate_signals_json) : undefined,
     deferred_reason: row.deferred_reason ?? undefined,
-    budget_unit: row.budget_unit as ReflectionRunRecord["budget_unit"],
+    budget_unit: row.budget_unit ? LearningBudgetUnitSchema.parse(row.budget_unit) : undefined,
     budget_estimate: row.budget_estimate ?? undefined,
     input_summary: row.input_summary,
     output_summary: row.output_summary ?? undefined,

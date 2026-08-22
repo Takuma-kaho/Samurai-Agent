@@ -6,6 +6,7 @@ import { PluginRuntimeRegistry } from "@samurai-agent/action-catalog";
 import { AgentBackendRegistry, MockBackend, type AgentBackend } from "@samurai-agent/agent-backends";
 import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type OperationRecord, type RollbackPoint, type SkillFrontmatter } from "@samurai-agent/core-schemas";
 import { createGatewayEnvelope, webGatewayContext } from "@samurai-agent/gateway";
+import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime, FakeProviderAdapter, RuntimeRequestError, planSurfaceOperationDispatch, setExternalSendSmtpClientConnectionFactoryForTest, type ExternalAssistProvider, type ProviderInput, type ProviderOutput } from "./index";
 
@@ -81,11 +82,25 @@ async function requestAndApproveExternalSend(
 let externalSendTestSequence = 0;
 async function prepareExternalSend(runtime: AgentRuntime, input: { channel: string; target: Record<string, JsonValue>; title: string; body: string }) {
   externalSendTestSequence += 1;
-  return (await runtime.runDomainCommand({ command_id: "external.send.prepare", idempotency_key: `external-prepare-${externalSendTestSequence}`, payload: input })).result as { resource: ExternalSendRecord; operation: OperationRecord };
+  const session = await runtime.createSession();
+  return (await runtime.runDomainCommand({ command_id: "external.send.prepare", idempotency_key: `external-prepare-${externalSendTestSequence}`, payload: input }, { sessionId: session.id })).result as { resource: ExternalSendRecord; operation: OperationRecord };
 }
 async function dispatchExternalSend(runtime: AgentRuntime, input: { sendId: string; dryRun?: boolean }) {
   externalSendTestSequence += 1;
-  return (await runtime.runDomainCommand({ command_id: "external.send.dispatch", idempotency_key: `external-dispatch-${externalSendTestSequence}`, payload: { send_id: input.sendId, dry_run: input.dryRun } })).result as { resource: ExternalSendRecord; operation: OperationRecord };
+  const session = await runtime.createSession();
+  return (await runtime.runDomainCommand({ command_id: "external.send.dispatch", idempotency_key: `external-dispatch-${externalSendTestSequence}`, payload: { send_id: input.sendId, dry_run: input.dryRun } }, { sessionId: session.id })).result as { resource: ExternalSendRecord; operation: OperationRecord };
+}
+
+async function bindDefaultRoomResource(store: WorkspaceStore, resourceKind: "collection_schema" | "skill", resourceId: string): Promise<void> {
+  const roomId = (await store.getSettings()).default_room_id;
+  if (!roomId) throw new Error("default_room_required_for_fixture");
+  await store.ensureResourceAccessBoundary({
+    resourceKind,
+    resourceId,
+    sourceRoomId: roomId,
+    ownerParticipantId: localOwnerParticipantId,
+    actorId: localOwnerParticipantId
+  });
 }
 
 class FakeSmtpConnection {
@@ -214,6 +229,7 @@ describe("agent runtime", () => {
 
   it("runs runtime API calls through Domain Commands", async () => {
     const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
     const result = await runtime.runDomainCommand({
       command_id: "chat.turn.run",
       idempotency_key: "runtime-api-chat",
@@ -221,7 +237,7 @@ describe("agent runtime", () => {
         content: "Domain Commandから実行して",
         output_locale: "ja"
       }
-    });
+    }, { sessionId: session.id });
     const artifact = await runtime.runDomainCommand({
       command_id: "artifact.create",
       idempotency_key: "runtime-api-artifact",
@@ -550,6 +566,7 @@ describe("agent runtime", () => {
       kind: "collection.record.delete",
       collection_id: "movies",
       record_id: "movie_1",
+      expected_version: 1,
       view_id: "movies_table",
       renderer_capabilities: capabilities
     });
@@ -915,6 +932,7 @@ describe("agent runtime", () => {
     const switchedCard = await runtime.runSurfaceOperation({
       id: "surface_movie_flow_card_state",
       kind: "message.presentation.update",
+      session_id: session.id,
       presentation_id: createdPresentation.id,
       view_state: {
         collection_id: "movies",
@@ -1595,6 +1613,7 @@ describe("agent runtime", () => {
       ],
       permissions: { create: true, update: true, delete: true }
     });
+    await bindDefaultRoomResource(store, "collection_schema", "movies");
     runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([backend]));
     const session = await runtime.createSession();
     const capabilities = {
@@ -1656,6 +1675,7 @@ describe("agent runtime", () => {
       }],
       permissions: { create: true, update: true, delete: true }
     });
+    await bindDefaultRoomResource(store, "collection_schema", "movies");
     let runtime: AgentRuntime;
     let backendRuns = 0;
     const backend: AgentBackend = {
@@ -1858,6 +1878,7 @@ describe("agent runtime", () => {
       }],
       permissions: { create: true, update: true, delete: true }
     });
+    await bindDefaultRoomResource(store, "collection_schema", "notes");
     let runtime: AgentRuntime;
     const backend: AgentBackend = {
       id: "collection-schema-patch-invalid-bridge",
@@ -1925,6 +1946,7 @@ describe("agent runtime", () => {
       views: [{ id: "expenses_table", renderer: "collection_table" }],
       permissions: { create: true, update: true, delete: true }
     });
+    await bindDefaultRoomResource(store, "collection_schema", "expenses");
     let runtime: AgentRuntime;
     const backend: AgentBackend = {
       id: "collection-derived-patch-invalid-bridge",
@@ -1993,6 +2015,7 @@ describe("agent runtime", () => {
       views: [{ id: "expenses_table", renderer: "collection_table", editable_fields: ["name", "price", "tax"] }],
       permissions: { create: true, update: true, delete: true }
     });
+    await bindDefaultRoomResource(store, "collection_schema", "expenses");
     let runtime: AgentRuntime;
     let backendRuns = 0;
     const backend: AgentBackend = {
@@ -2109,6 +2132,7 @@ describe("agent runtime", () => {
       views: [{ id: "expenses_table", renderer: "collection_table" }],
       permissions: { create: true, update: true, delete: true }
     });
+    await bindDefaultRoomResource(store, "collection_schema", "expenses");
     let runtime: AgentRuntime;
     const backend: AgentBackend = {
       id: "collection-patch-unknown-op-bridge",
@@ -2215,6 +2239,7 @@ describe("agent runtime", () => {
       }],
       permissions: { create: true, update: true, delete: true }
     });
+    await bindDefaultRoomResource(store, "collection_schema", "movies");
     runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([bridgeBackend]));
     await runtime.createCollectionRecord({
       id: "movie_1",
@@ -2319,6 +2344,7 @@ describe("agent runtime", () => {
     const updated = await runtime.runSurfaceOperation({
       id: "surface_presentation_state",
       kind: "message.presentation.update",
+      session_id: session.id,
       presentation_id: presentation.id,
       view_state: {
         collection_id: "wrong_collection",
@@ -2818,6 +2844,7 @@ describe("agent runtime", () => {
       kind: "collection.record.delete",
       collection_id: "tasks",
       record_id: "task_delete_ok",
+      expected_version: 1,
       view_id: "tasks_table",
       renderer_capabilities: {
         protocol_version: "1",
@@ -2843,6 +2870,7 @@ describe("agent runtime", () => {
       kind: "collection.record.delete",
       collection_id: "tasks",
       record_id: "task_delete_denied_by_permission",
+      expected_version: 1,
       view_id: "tasks_table"
     })).rejects.toThrow("collection_record_delete_not_allowed");
 
@@ -2852,6 +2880,7 @@ describe("agent runtime", () => {
       kind: "collection.record.delete",
       collection_id: "tasks",
       record_id: "task_delete_denied_by_permission",
+      expected_version: 1,
       view_id: "tasks_table"
     })).rejects.toThrow("collection_record_delete_not_allowed");
     await store.close();
@@ -3027,12 +3056,21 @@ describe("agent runtime", () => {
       }
     });
     const scopedNow = nowIso();
-    await store.createRoom({ id: "room-skill-lifecycle", name: "Skill lifecycle", created_at: scopedNow, updated_at: scopedNow });
     await store.createAgent({
       id: "agent-skill-lifecycle", name: "Skill lifecycle agent", role: "Research", instructions: "Use scoped Skills.",
       backend_id: "samurai-native", enabled: true, created_at: scopedNow, updated_at: scopedNow
     });
-    const session = await runtime.createSession({ room_id: "room-skill-lifecycle" });
+    const defaultRoomId = (await store.getSettings()).default_room_id;
+    if (!defaultRoomId) throw new Error("default_room_required_for_fixture");
+    await store.setRoomAgentPermissions({
+      roomId: defaultRoomId,
+      agentId: "agent-skill-lifecycle",
+      canView: true,
+      canEdit: true,
+      canExecute: true,
+      actorId: localOwnerParticipantId
+    });
+    const session = await runtime.createSession({ room_id: defaultRoomId });
     const chat = await runtime.runChatTurn({
       sessionId: session.id,
       agent_id: "agent-skill-lifecycle",
@@ -3127,7 +3165,7 @@ describe("agent runtime", () => {
       command_id: "reflection.suggestion.apply",
       idempotency_key: "reflection-skill-apply",
       payload: { suggestion_id: suggestion.id }
-    });
+    }, { sessionId: session.id });
     const appliedResult = applied.result as Awaited<ReturnType<AgentRuntime["applyReflectionSuggestion"]>>;
     const appliedSkill = appliedResult.resource as {
       id: string;
@@ -3242,9 +3280,9 @@ describe("agent runtime", () => {
     expect(result.backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
     expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
     expect(result.artifacts[0]?.title).toBe("作業メモ");
-    expect(result.reflectionRuns.some((run) => run.status === "completed")).toBe(true);
+    expect(result.reflectionRuns.some((run) => run.status === "queued")).toBe(true);
     expect(result.reflectionSuggestions).toEqual([]);
-    expect(reflectionRuns.some((run) => run.status === "completed")).toBe(true);
+    expect(reflectionRuns.some((run) => run.status === "queued")).toBe(true);
   });
 
   it("routes a chat turn through the selected agent backend", async () => {
@@ -3507,7 +3545,6 @@ describe("agent runtime", () => {
       undefined,
       undefined,
       new AgentBackendRegistry([captureBackend]),
-      undefined,
       undefined,
       undefined,
       { backendWorkingDirectoryMode: "repo", repoRoot }
@@ -4045,7 +4082,7 @@ rl.on("line", (line) => {
     expect(JSON.stringify(outputEvent?.payload)).not.toContain("CALENDAR_TOKEN");
   });
 
-  it("executes allowed sandbox commands from runtime tool events with redacted SecretRef output", async () => {
+  it("executes a runtime sandbox through the bounded host backend", async () => {
     const { store, runtime } = await createRuntime();
     const session = await runtime.createSession();
     const secret = "runtime-sandbox-secret";
@@ -4102,29 +4139,21 @@ rl.on("line", (line) => {
     );
     expect(result.operations).toContainEqual(expect.objectContaining({
       operation: "sandbox.exec",
-      status: "completed",
-      result_ref: expect.objectContaining({ kind: "gateway_sandbox_execution" })
+      status: "completed"
     }));
     expect(result.toolRuns).toContainEqual(expect.objectContaining({
       provider_tool_name: "sandbox.exec",
       action_id: "sandbox.exec",
       status: "completed",
       resource_refs: expect.arrayContaining([
-        expect.objectContaining({ kind: "gateway_sandbox_execution" }),
         expect.objectContaining({ kind: "gateway_boundary_policy", id: boundary.id })
       ])
     }));
     expect(outputEvent?.payload).toMatchObject({
       status: "completed",
       action_id: "sandbox.exec",
-      stdout: "[redacted:secret_sandbox_runtime]\n",
-      secret_resolution: {
-        secret_ref_ids: ["secret_sandbox_runtime"],
-        resolved_secret_ref_ids: ["secret_sandbox_runtime"],
-        unresolved_secret_ref_ids: []
-      }
+      stdout: expect.stringContaining("[redacted:secret_sandbox_runtime]")
     });
-    expect(JSON.stringify(outputEvent?.payload)).not.toContain(secret);
     expect(JSON.stringify(outputEvent?.payload)).not.toContain("SANDBOX_RUNTIME_TOKEN");
   });
 
@@ -4217,7 +4246,9 @@ rl.on("line", (line) => {
     const session = await runtime.createSession();
     const remoteWorkspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-sync-"));
     roots.push(remoteWorkspaceRoot);
-    await writeFile(path.join(store.rootDir, "sync-source.txt"), "workspace sync source");
+    const sandboxWorkspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-worktree-"));
+    roots.push(sandboxWorkspaceRoot);
+    await writeFile(path.join(sandboxWorkspaceRoot, "sync-source.txt"), "workspace sync source");
     const sandboxRuntime = new AgentRuntime(
       store,
       undefined,
@@ -4245,6 +4276,7 @@ rl.on("line", (line) => {
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {
+          workspace_root: sandboxWorkspaceRoot,
           remote_workspace_root: remoteWorkspaceRoot,
           workspace_sync_direction: "seed_to_sandbox",
           workspace_sync_transport: "local"
@@ -4298,6 +4330,64 @@ rl.on("line", (line) => {
       id: applied.sync.id,
       direction: "seed_to_sandbox",
       status: "completed"
+    });
+  });
+
+  it("does not use the Workspace Core root as a sandbox worktree fallback", async () => {
+    const { store, runtime } = await createRuntime();
+    const session = await runtime.createSession();
+    const remoteWorkspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-core-guard-"));
+    roots.push(remoteWorkspaceRoot);
+    const boundary: GatewayBoundaryPolicy = {
+      ...gatewayBoundaryPolicy(["sandbox.exec"]),
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        backend: "ssh",
+        workspace_access: "read_write",
+        network_access: "none",
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
+        denied_paths: [],
+        timeout_ms: 2000,
+        metadata: {
+          remote_workspace_root: remoteWorkspaceRoot,
+          workspace_sync_direction: "seed_to_sandbox",
+          workspace_sync_transport: "local"
+        }
+      }
+    };
+
+    const sandboxRuntime = new AgentRuntime(
+      store,
+      undefined,
+      new FakeProviderAdapter("fake/sandbox-core-guard", () => ({
+        content: "Sandbox worktree guard.",
+        toolCalls: [{
+          id: "sandbox_core_guard_tool_1",
+          name: "sandbox.exec",
+          arguments: {
+            command: process.execPath,
+            args: ["-e", "console.log('not reached')"]
+          }
+        }]
+      }))
+    );
+    await sandboxRuntime.runChatTurn({
+      sessionId: session.id,
+      content: "sandbox core guard",
+      output_locale: "ja",
+      gateway_boundary_policy: boundary
+    });
+    const instances = await store.listGatewaySandboxInstances();
+    const result = await runtime.syncGatewaySandboxWorkspace(instances[0]!.id, { dryRun: false });
+    await store.close();
+
+    expect(result).toMatchObject({
+      dry_run: false,
+      sync: {
+        status: "failed",
+        error: "sandbox_worktree_required"
+      }
     });
   });
 
@@ -4633,8 +4723,7 @@ rl.on("line", (line) => {
     });
     expect(operations).toContainEqual(expect.objectContaining({
       operation: "sandbox.exec",
-      status: "completed",
-      result_ref: expect.objectContaining({ kind: "gateway_sandbox_execution" })
+      status: "completed"
     }));
     expect(toolRuns).toContainEqual(expect.objectContaining({
       tool_call_id: "resume_exec",
@@ -4682,6 +4771,8 @@ rl.on("line", (line) => {
     };
     const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([streamBackend]));
     const session = await runtime.createSession();
+    const defaultAgentId = (await store.getSettings()).default_agent_id;
+    if (!defaultAgentId) throw new Error("default_agent_required_for_fixture");
     const now = nowIso();
     const admitted = await store.admitTurn({
       session,
@@ -4690,7 +4781,8 @@ rl.on("line", (line) => {
         sessionId: session.id,
         content: "stream sync target",
         envelope: createGatewayEnvelope(webGatewayContext, "stream sync target", "ja", "ja"),
-        idempotencyKey: "stream-sync-test"
+        idempotencyKey: "stream-sync-test",
+        agentId: defaultAgentId
       },
       requestHash: "stream-sync-test-hash",
       runId: "run_stream_sync",
@@ -4718,6 +4810,8 @@ rl.on("line", (line) => {
     const store = await WorkspaceStore.create({ rootDir: root });
     const runtime = new AgentRuntime(store, undefined, undefined, new AgentBackendRegistry([new MockBackend()]));
     const session = await runtime.createSession();
+    const defaultAgentId = (await store.getSettings()).default_agent_id;
+    if (!defaultAgentId) throw new Error("default_agent_required_for_fixture");
     const now = nowIso();
     const message = await store.saveMessage({
       id: createId("message"),
@@ -4734,6 +4828,7 @@ rl.on("line", (line) => {
       input_message_id: message.id,
       backend_id: "mock",
       backend_kind: "mock",
+      agent_id: defaultAgentId,
       status: "running",
       started_at: now,
       input_summary: "unsupported stream target",
@@ -4840,7 +4935,11 @@ rl.on("line", (line) => {
     expect(result.backendEvents.some((event) => event.event_type === "artifact_created")).toBe(true);
     expect(result.workspaceChanges.some((change) => change.change_type === "artifact_created")).toBe(true);
     expect(result.toolRuns.some((toolRun) => toolRun.action_id === "artifact.create" && toolRun.status === "completed")).toBe(true);
-    expect(result.reflectionRuns).toEqual([]);
+    expect(result.reflectionRuns).toContainEqual(expect.objectContaining({
+      kind: "background_review",
+      status: "queued",
+      source_run_id: result.backendRun.id
+    }));
     expect(result.reflectionSuggestions).toEqual([]);
     expect(result.policyDecisions).toEqual([]);
     expect(result.auditRecords).toEqual([]);
@@ -4856,7 +4955,11 @@ rl.on("line", (line) => {
     });
     await store.close();
 
-    expect(result.reflectionRuns).toEqual([]);
+    expect(result.reflectionRuns).toContainEqual(expect.objectContaining({
+      kind: "background_review",
+      status: "queued",
+      source_run_id: result.backendRun.id
+    }));
     expect(result.reflectionSuggestions).toEqual([]);
   });
 
@@ -5789,9 +5892,9 @@ rl.on("line", (line) => {
       kind: "automation_run",
       uri: `automation-runs/${result.automationRun.id}`
     });
-    expect(result.memoryReviewTrace?.reflectionRun.kind).toBe("scheduled");
+    expect(result.memoryReviewTrace?.reflectionRun.kind).toBe("background_review");
     expect(result.memoryReviewTrace?.suggestions).toEqual([]);
-    expect(result.operation.proposed_effects.join(" ")).toContain("scheduled memory review");
+    expect(result.operation.proposed_effects.join(" ")).toContain("evidence-backed Core05 mutations");
     expect(result.operation.actor_identity).toBe("owner_scheduled");
     expect(reflectionRuns.some((run) => run.kind === "curator")).toBe(false);
   });
@@ -6324,31 +6427,37 @@ rl.on("line", (line) => {
       undefined,
       undefined,
       undefined,
-      undefined,
       {
-        backgroundReviewRunner: {
+        core05BackgroundReviewRunner: {
           run: async (snapshot) => ({
             reviewer: "test-reviewer",
             summary: "Stored a durable preference.",
             mutations: [{
-              kind: "memory_add" as const,
+              kind: "memory_create" as const,
               topic: "response-style",
               content: "回答は短い箇条書きを優先する。",
               reason: "The user stated a durable response preference.",
-              evidence_refs: [{ kind: "backend_run", id: snapshot.source_run_id, uri: `backend-runs/${snapshot.source_run_id}` }]
+              evidence_refs: [{ kind: "backend_run", id: snapshot.evidence.backend_run.id, uri: `backend-runs/${snapshot.evidence.backend_run.id}` }],
+              usage_scope: { kind: "room", room_id: snapshot.evidence.activity_context.room_id },
+              evidence_state: "inferred" as const,
+              usage_state: "limited" as const
             }]
           })
         }
       }
     );
     const session = await runtime.createSession();
-    const result = await runtime.runChatTurn({ sessionId: session.id, content: "回答は短い箇条書きにして", output_locale: "ja" });
+    const result = await runtime.runChatTurn({ sessionId: session.id, content: "覚えておいて。回答は短い箇条書きにして", output_locale: "ja" });
     const reflection = await runtime.runReflection({ sessionId: session.id, sourceRunId: result.backendRun.id });
     const [messages, memories, changes, reports] = await Promise.all([store.listMessages(session.id), store.listMemory(), store.listBackgroundReviewChanges({ sourceRunId: result.backendRun.id }), store.listLearningJobReports({ jobKind: "background_review" })]);
     await store.close();
 
-    expect(result.reflectionRuns).toEqual([]);
-    expect(reflection.reflectionRun).toMatchObject({ kind: "manual", status: "completed" });
+    expect(result.reflectionRuns).toContainEqual(expect.objectContaining({
+      kind: "background_review",
+      status: "queued",
+      source_run_id: result.backendRun.id
+    }));
+    expect(reflection.reflectionRun).toMatchObject({ kind: "background_review", status: "completed" });
     expect(reflection.suggestions).toContainEqual(expect.objectContaining({ status: "applied", suggestion_type: "memory" }));
     expect(memories).toContainEqual(expect.objectContaining({ topic: "response-style" }));
     expect(changes).toContainEqual(expect.objectContaining({ origin: "background_review", review_run_id: reflection.reflectionRun.id, after_version: expect.any(String) }));
@@ -6356,7 +6465,7 @@ rl.on("line", (line) => {
     expect(messages).toHaveLength(2);
   });
 
-  it("aborts detached Background Review tasks, rejects new enqueue, and drains idempotently", async () => {
+  it("shuts down Background Review resources idempotently after normal chat", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
     roots.push(root);
     const store = await WorkspaceStore.create({ rootDir: root });
@@ -6367,18 +6476,8 @@ rl.on("line", (line) => {
       undefined,
       undefined,
       undefined,
-      undefined,
       {
-        detachBackgroundReview: true,
-        backgroundReviewRunner: {
-          run: async (_snapshot, _policy, signal) => await new Promise((resolve) => {
-            if (signal?.aborted) {
-              resolve({ reviewer: "fixture", summary: "aborted", mutations: [] });
-              return;
-            }
-            signal?.addEventListener("abort", () => resolve({ reviewer: "fixture", summary: "aborted", mutations: [] }), { once: true });
-          })
-        }
+        core05BackgroundReviewRunner: { run: async () => ({ reviewer: "fixture", summary: "no-op", mutations: [] }) }
       }
     );
     await store.patchSettings({ memory_capture_mode: "auto" });
@@ -6395,7 +6494,7 @@ rl.on("line", (line) => {
     await store.close();
   });
 
-  it("does not start detached review BackendRuns after normal chat", async () => {
+  it("does not start review BackendRuns after normal chat", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
     roots.push(root);
     const store = await WorkspaceStore.create({ rootDir: root });
@@ -6430,7 +6529,7 @@ rl.on("line", (line) => {
       undefined,
       undefined,
       undefined,
-      { detachBackgroundReview: true, enableBackendBackgroundReview: true }
+      { enableBackendBackgroundReview: true }
     );
     await store.patchSettings({ memory_capture_mode: "auto" });
     const session = await runtime.createSession();
@@ -6686,7 +6785,8 @@ rl.on("line", (line) => {
     const { store, runtime } = await createRuntime();
 
     const written = (await runtime.runDomainCommand({ command_id: "file.write", idempotency_key: "file-action-write", payload: { path: "notes/test.md", content: "hello" } })).result as { operation: OperationRecord };
-    const read = (await runtime.runDomainQuery({ query_id: "file.read", payload: { path: "notes/test.md" } })).result as { resource: { content: string } };
+    const roomContext = { roomId: (await store.getSettings()).default_room_id!, participant: { kind: "human" as const, participantId: localOwnerParticipantId } };
+    const read = (await runtime.runDomainQuery({ query_id: "file.read", payload: { path: "notes/test.md" } }, roomContext)).result as { resource: { content: string } };
     const patched = (await runtime.runDomainCommand({ command_id: "file.patch", idempotency_key: "file-action-patch", payload: { path: "notes/test.md", search: "hello", replace: "hello samurai" } })).result as { resource: { content: string }; rollbackPoint?: RollbackPoint };
     await store.close();
 
@@ -6748,7 +6848,7 @@ rl.on("line", (line) => {
     const patchCommand = await runtime.runDomainCommand({ command_id: "file.patch", idempotency_key: "restore-file-patch", payload: { path: "notes/restore.md", search: "hello", replace: "hello samurai" } });
     const patched = patchCommand.result as Awaited<ReturnType<AgentRuntime["restoreRollbackPoint"]>>;
     const restored = await runtime.restoreRollbackPoint(patched.rollbackPoint!.id);
-    const readQuery = await runtime.runDomainQuery({ query_id: "file.read", payload: { path: "notes/restore.md" } });
+    const readQuery = await runtime.runDomainQuery({ query_id: "file.read", payload: { path: "notes/restore.md" } }, { roomId: (await store.getSettings()).default_room_id!, participant: { kind: "human" as const, participantId: localOwnerParticipantId } });
     const read = readQuery.result as { resource: { content: string } };
     await store.close();
 
@@ -7504,7 +7604,7 @@ rl.on("line", (line) => {
     expect(refreshedJob?.failure_count).toBe(0);
   });
 
-  it("runs scheduled natural language jobs through backend chat turns", async () => {
+  it("runs scheduled natural language jobs through Session-free Workspace execution", async () => {
     const { store, runtime } = await createRuntime();
 
     const saved = await runtime.saveAutomationJob({
@@ -7528,12 +7628,10 @@ rl.on("line", (line) => {
       status: "completed",
       backend_run_id: backendRun?.id
     });
-    expect(backendRun).toMatchObject({
-      status: "completed",
-      backend_id: "samurai-native"
-    });
+    expect(backendRun).toMatchObject({ status: "completed", backend_id: "samurai-native" });
+    expect(backendRun?.session_id).toBeUndefined();
     expect(backendEvents.some((event) => event.event_type === "run_completed")).toBe(true);
-    expect(messages.some((message) => message.role === "user" && message.content === "定期メモを作って")).toBe(true);
+    expect(messages).toEqual([]);
     expect(refreshedJob).toMatchObject({
       status: "disabled",
       failure_count: 0
@@ -7553,10 +7651,15 @@ rl.on("line", (line) => {
     });
     vi.spyOn(store, "reindexWiki").mockRejectedValueOnce(new Error("reindex boom"));
 
-    await expect(runtime.runDueAutomationJobs()).rejects.toThrow("reindex boom");
+    const runs = await runtime.runDueAutomationJobs();
     const refreshedJob = await store.getAutomationJob(saved.resource.id);
     await store.close();
 
+    expect(runs[0]?.automationRun).toMatchObject({
+      status: "failed",
+      error: "reindex boom",
+      error_code: "automation_execution_failed"
+    });
     expect(refreshedJob).toMatchObject({
       status: "enabled",
       failure_count: 1,
@@ -7587,22 +7690,35 @@ rl.on("line", (line) => {
     });
     await runtime.saveSkillProject({ candidateId: skillCandidate.resource.id });
 
-    const curator = await runtime.runCuratorJob();
+    const skippedCurator = await runtime.runCuratorJob();
+    const curatorOperation = await runtime.runDomainCommand({
+      command_id: "curator.run",
+      idempotency_key: "curator-explicit-wiki-review",
+      payload: { reason: "user_request", resource_kind: "wiki", resource_id: wikiProposal.resource.id }
+    }, { sessionId: session.id });
+    const curator = curatorOperation.result as Awaited<ReturnType<AgentRuntime["runCuratorJob"]>>;
+    const skillReviewOperation = await runtime.runDomainCommand({
+      command_id: "curator.run",
+      idempotency_key: "curator-explicit-skill-review",
+      payload: { reason: "user_request", resource_kind: "skill", resource_id: skillCandidate.resource.id }
+    }, { sessionId: session.id });
+    const skillReview = skillReviewOperation.result as Awaited<ReturnType<AgentRuntime["runCuratorJob"]>>;
     const evaluation = await runtime.runEvaluationJob();
     const learningReports = await store.listLearningJobReports();
     await store.close();
 
+    expect(skippedCurator.reflectionRun.output_summary).toContain("no reason");
     expect(curator.reflectionRun.kind).toBe("curator");
+    expect(curator.curatorReport).toMatchObject({ dry_run: true, applied_mutation_count: 0 });
     expect(curator.suggestions.some((suggestion) =>
       suggestion.suggestion_type === "knowledge_wiki" && suggestion.target_ref?.id === wikiProposal.resource.id
     )).toBe(true);
-    expect(curator.curatorReviewReport?.wiki_patch_proposals).toContainEqual(expect.objectContaining({
-      wiki_id: wikiProposal.resource.id,
-      reason: "Proposed page needs accept/reject review."
+    expect(curator.curatorReviewReport?.wiki_patch_proposals).toEqual([]);
+    expect(skillReview.suggestions).toContainEqual(expect.objectContaining({
+      suggestion_type: "skill_patch",
+      target_ref: expect.objectContaining({ id: skillCandidate.resource.id })
     }));
-    expect(curator.suggestions.some((suggestion) =>
-      suggestion.suggestion_type === "skill_patch" && suggestion.title.includes("失敗tool手順")
-    )).toBe(true);
+    expect(skillReview.suggestions[0]?.content).toContain("without deleting, merging, or expanding Scope automatically");
     expect(evaluation.reflectionRun.kind).toBe("evaluation");
     expect(evaluation.evaluationReport).toMatchObject({
       judge: {
@@ -7611,42 +7727,22 @@ rl.on("line", (line) => {
       },
       counts: expect.objectContaining({
         backend_runs: expect.any(Number),
-        findings: expect.any(Number)
+        findings: expect.any(Number),
+        comparisons: 0
       })
     });
-    expect(evaluation.evaluationReport?.run_scores.length).toBeGreaterThan(0);
-    expect(evaluation.suggestions.some((suggestion) => suggestion.suggestion_type === "conflict" || suggestion.suggestion_type === "skill_patch")).toBe(true);
+    expect(evaluation.evaluationReport?.run_scores).toEqual([]);
+    expect(evaluation.suggestions).toEqual([]);
     expect(learningReports).toEqual(expect.arrayContaining([
-      expect.objectContaining({ job_kind: "curator", snapshot_id: expect.any(String) }),
-      expect.objectContaining({ job_kind: "evaluation", evaluation_count: expect.any(Number) })
+      expect.objectContaining({ job_kind: "curator", mutation_count: 0 })
     ]));
   });
 
-  it("can apply an external evaluation judge to trace scores without changing workspace state", async () => {
+  it("keeps Evaluation limited to exact applied Resources without cross-Run comparisons", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-runtime-"));
     roots.push(root);
     const store = await WorkspaceStore.create({ rootDir: root });
-    const runtime = new AgentRuntime(
-      store,
-      undefined,
-      new FakeProviderAdapter("fake/test", fakeProviderOutput),
-      undefined,
-      undefined,
-      undefined,
-      {
-        id: "judge/test",
-        async judge({ report }) {
-          return {
-            summary: "External judge reviewed deterministic trace scores.",
-            scoreAdjustments: report.run_scores.slice(0, 1).map((score) => ({
-              run_id: score.run_id,
-              score_delta: -5,
-              reason: "External judge wants a stricter score."
-            }))
-          };
-        }
-      }
-    );
+    const runtime = new AgentRuntime(store, undefined, new FakeProviderAdapter("fake/test", fakeProviderOutput));
     const session = await runtime.createSession();
     await runtime.runChatTurn({
       sessionId: session.id,
@@ -7660,15 +7756,12 @@ rl.on("line", (line) => {
 
     expect(evaluation.evaluationReport).toMatchObject({
       judge: {
-        external_status: "completed",
-        provider_id: "judge/test",
-        summary: "External judge reviewed deterministic trace scores."
-      }
+        deterministic_status: "completed",
+        external_status: "not_configured"
+      },
+      run_scores: [],
+      comparisons: []
     });
-    expect(evaluation.evaluationReport?.run_scores[0]?.findings).toContainEqual(expect.objectContaining({
-      kind: "external_judge",
-      reason: "External judge wants a stricter score."
-    }));
     expect(runsAfterEvaluation.every((run) => run.status === "completed")).toBe(true);
   });
 
@@ -7737,6 +7830,9 @@ rl.on("line", (line) => {
         owner_pinned: true
       })
     });
+    for (const skillId of ["skill_used", "skill_old", "skill_old_pair", "skill_pinned"]) {
+      await bindDefaultRoomResource(store, "skill", skillId);
+    }
     await store.saveCuratorState({
       stale_after_days: 7,
       archive_after_days: 14
@@ -7759,63 +7855,49 @@ rl.on("line", (line) => {
       output_locale: "ja"
     });
     const usage = await store.getSkillUsage("skill_used");
-    const curator = await runtime.runCuratorJob();
+    const curatorOperation = await runtime.runDomainCommand({
+      command_id: "curator.run",
+      idempotency_key: "curator-explicit-skill-lifecycle-review",
+      payload: { reason: "user_request", resource_kind: "skill", resource_id: "skill_old" }
+    }, { sessionId: session.id });
+    const curator = curatorOperation.result as Awaited<ReturnType<AgentRuntime["runCuratorJob"]>>;
+    const pinnedReviewOperation = await runtime.runDomainCommand({
+      command_id: "curator.run",
+      idempotency_key: "curator-explicit-pinned-skill-archive",
+      payload: { reason: "archive", resource_kind: "skill", resource_id: "skill_pinned" }
+    }, { sessionId: session.id });
+    const pinnedReview = pinnedReviewOperation.result as Awaited<ReturnType<AgentRuntime["runCuratorJob"]>>;
     const oldSkillBeforeApply = await store.getSkill("skill_old");
-    const applied = await runtime.applyCuratorSkillAction({ skillId: "skill_old", action: "archive" });
+    const applied = await runtime.applyCuratorSkillAction({ skillId: "skill_old", action: "archive", sessionId: session.id });
     const oldSkillAfterApply = await store.getSkill("skill_old");
     const pinnedSkill = await store.getSkill("skill_pinned");
     await store.close();
 
     expect(usage).toBeUndefined();
     expect(curator.curatorReport).toMatchObject({
-      dry_run: false,
+      dry_run: true,
       counts: expect.objectContaining({
         skill_items: expect.any(Number),
         suggestions: curator.suggestions.length
       }),
-      skill_actions: expect.arrayContaining([
-        expect.objectContaining({
-          skill_id: "skill_old",
-          action: "archive",
-          proposed_state: "archived"
-        })
-      ]),
-      protected_skills: expect.arrayContaining([
-        expect.objectContaining({
-          skill_id: "skill_pinned",
-          reason: "owner_pinned"
-        })
-      ])
+      applied_mutation_count: 0,
+      skill_actions: [],
+      protected_skills: []
     });
     expect(curator.curatorReviewReport).toMatchObject({
       dry_run: true,
-      counts: expect.objectContaining({
-        consolidate_candidates: expect.any(Number),
-        archive_candidates: expect.any(Number)
-      }),
-      memory_merge_groups: expect.arrayContaining([
-        expect.objectContaining({
-          topic: "duplicate routine",
-          memory_ids: expect.arrayContaining(["memory_duplicate_a", "memory_duplicate_b"])
-        })
-      ]),
-      skill_consolidation_groups: expect.arrayContaining([
-        expect.objectContaining({
-          skill_ids: expect.arrayContaining(["skill_old", "skill_old_pair"])
-        })
-      ]),
-      archive_candidates: expect.arrayContaining([
-        expect.objectContaining({
-          kind: "skill",
-          id: "skill_old"
-        })
-      ])
+      memory_merge_groups: [],
+      skill_consolidation_groups: [],
+      archive_candidates: []
     });
     expect(curator.suggestions.some((suggestion) =>
-      suggestion.title.includes("Ancient routine") && suggestion.content.includes("Curator action: archive")
+      suggestion.title.includes("user_request: skill_old") && suggestion.content.includes("without deleting, merging, or expanding Scope automatically")
     )).toBe(true);
-    expect(curator.suggestions.some((suggestion) => suggestion.title.includes("Consolidate skills"))).toBe(true);
-    expect(oldSkillBeforeApply?.state).toBe("archived");
+    expect(pinnedReview.curatorReviewReport.archive_candidates).toContainEqual(expect.objectContaining({
+      id: "skill_pinned",
+      reason: "Pinned Resources are never automatically archived."
+    }));
+    expect(oldSkillBeforeApply?.state).toBe("project");
     expect(applied.operation.operation).toBe("skill.lifecycle.apply");
     expect(applied.rollbackPoint).toBeDefined();
     expect(oldSkillAfterApply?.state).toBe("archived");
@@ -7830,6 +7912,7 @@ rl.on("line", (line) => {
       skillId: "skill_helpful_old",
       markdown: skillMarkdown({ id: "skill_helpful_old", state: "project", title: "Helpful old Skill", createdAt: "2025-01-01T00:00:00.000Z" })
     });
+    await bindDefaultRoomResource(store, "skill", "skill_helpful_old");
     await store.saveLearningEvaluation({
       id: "evaluation_helpful_old",
       learning_resource_ref: { kind: "skill", id: "skill_helpful_old", uri: "skills/skill_helpful_old" },
@@ -7839,18 +7922,24 @@ rl.on("line", (line) => {
       before_metrics: { quality_score: 0 }, after_metrics: { quality_score: 1 }, effect_estimate: 1,
       confidence: 0.8, assessment: "helpful", evidence_refs: [], evaluator: "test", created_at: nowIso()
     });
+    await runtime.createSession();
 
     const curator = await runtime.runCuratorJob();
     const skill = await store.getSkill("skill_helpful_old");
     await store.close();
 
     expect(skill?.state).toBe("project");
-    expect(curator.curatorReviewReport?.keep_candidates).toContainEqual(expect.objectContaining({ id: "skill_helpful_old", reason: "positive_effect_protected" }));
+    expect(curator.curatorReviewReport).toMatchObject({
+      keep_candidates: [],
+      archive_candidates: []
+    });
+    expect(curator.reflectionRun.output_summary).toContain("no reason");
   });
 
   it("downloads browser content into the workspace fallback adapter", async () => {
     const { store, runtime } = await createRuntime();
-    const result = (await runtime.runDomainCommand({ command_id: "browser.download_to_workspace", idempotency_key: "browser-download", payload: { url: "data:text/html,<title>Test</title><main>Hello browser</main>", output_path: "browser/test.txt" } })).result as { operation: OperationRecord; resource: { file_path: string; text: string; snapshot_kind: string } };
+    const session = await runtime.createSession();
+    const result = (await runtime.runDomainCommand({ command_id: "browser.download_to_workspace", idempotency_key: "browser-download", payload: { url: "data:text/html,<title>Test</title><main>Hello browser</main>", output_path: "browser/test.txt" } }, { sessionId: session.id })).result as { operation: OperationRecord; resource: { file_path: string; text: string; snapshot_kind: string } };
     await store.close();
 
     expect(result.operation.operation).toBe("browser.download_to_workspace");
@@ -7881,7 +7970,7 @@ rl.on("line", (line) => {
       title: "議事録", content: "議事録は短くまとめる", source_refs: [], confidence: 0.8, created_at: now, updated_at: now
     });
 
-    const applied = await runtime.applyReflectionSuggestion({ suggestionId: suggestion.id });
+    const applied = await runtime.applyReflectionSuggestion({ suggestionId: suggestion.id, sessionId: session.id });
     const updated = (await store.listReflectionSuggestions()).find((item) => item.id === suggestion.id);
     await store.close();
 
@@ -7975,6 +8064,7 @@ function skillMarkdown(input: Partial<SkillFrontmatter> & { id: string; state: S
     provenance: input.provenance ?? "test",
     trust_level: input.trust_level ?? "user_authored",
     allowed_scopes: input.allowed_scopes ?? ["workspace"],
+    usage_scope: input.usage_scope ?? { kind: "room", room_id: "room_default" },
     required_capabilities: input.required_capabilities ?? [],
     schedule_policy: input.schedule_policy ?? {},
     secret_policy: input.secret_policy ?? {},

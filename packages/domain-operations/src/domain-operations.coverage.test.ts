@@ -214,7 +214,6 @@ describe("Domain Operation strict gate coverage", () => {
             "reauthorizeSessionlessAutomationJob", "rebindSessionlessAutomationJobAuthority",
             "createExternalAppConnection", "updateExternalAppConnectionScope", "revokeExternalAppConnection"
           ].includes(name)) return outputs.get(id);
-          if (name === "sessionlessMemoryReviewUnsupported") throw new Error("automation_sessionless_executor_unsupported:memory_review");
           if (name === "releaseAutomationJobLock" || name === "requeueAutomationJob") return outputs.get(id);
           if (/^(acknowledge|deliver|fail|save)ClientEvent$/.test(name)) return outputs.get(id);
           if ([
@@ -344,14 +343,6 @@ describe("Domain Operation strict gate coverage", () => {
           : {})
       };
       executionCases.set(definition.id, { input, context });
-      if (definition.id === "automation.memory_review.run") {
-        await expect(binding.execute(context, input)).rejects.toThrow("automation_sessionless_executor_unsupported:memory_review");
-        for (const inputSource of definition.sources.slice(1)) {
-          await expect(binding.execute({ ...context, inputSource, correlationId: `coverage-${definition.id}-${inputSource}` }, input))
-            .rejects.toThrow("automation_sessionless_executor_unsupported:memory_review");
-        }
-        continue;
-      }
       if (definition.id === "memory.session.create") {
         await expect(binding.execute(context, input)).rejects.toThrow("memorySessionScopeWriteDisabledError");
         for (const inputSource of definition.sources.slice(1)) {

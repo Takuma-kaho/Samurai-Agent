@@ -1,13 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 
 const root = process.cwd();
 const scorecardPath = path.join(root, "plans/core-completion-scorecard.json");
-const reportDir = path.join(root, "reports/core-completion");
 const args = new Set(process.argv.slice(2));
+const writeReportRequested = args.has("--write-report");
+const reportDir = writeReportRequested
+  ? path.join(root, "reports/core-completion")
+  : await mkdtemp(path.join(tmpdir(), "samurai-core-completion-"));
 const categoryIndex = process.argv.indexOf("--category");
 const selectedCategory = categoryIndex >= 0 ? process.argv[categoryIndex + 1] : undefined;
 
@@ -76,5 +80,5 @@ const failedGates = gates.filter((gate) => gate.status !== "passed");
 const markdown = [`# Core Completion Report`, "", `- Commit: \`${head}\``, `- Score: **${score}/${maximumScore}**`, `- Required gates: **${gates.length - failedGates.length}/${gates.length}**`, `- Complete: **${complete ? "yes" : "no"}**`, "", "## Incomplete tests", "", ...(missing.length ? missing.map((test) => `- ${test.id}: ${test.failures.join(", ")}`) : ["- none"]), "", "## Failed gates", "", ...(failedGates.length ? failedGates.map((gate) => `- ${gate.id}: ${gate.failures.join(", ")}`) : ["- none"]), ""].join("\n");
 await writeFile(path.join(reportDir, "latest.md"), markdown);
 
-console.log(`Core completion: ${score}/${maximumScore}; gates ${gates.length - failedGates.length}/${gates.length}; complete=${complete}`);
+console.log(`Core completion: ${score}/${maximumScore}; gates ${gates.length - failedGates.length}/${gates.length}; complete=${complete}; report_dir=${reportDir}; persisted=${writeReportRequested}`);
 if (!args.has("--report-only") && !complete) process.exitCode = 1;

@@ -23,7 +23,15 @@ export interface WorkspaceFileTransactionRequest {
   patchId?: string;
   beforeJson: string;
   afterJson: string;
-  stagedContent: string;
+  stagedContent?: string;
+  /** Stages an existing file when the operation is not a replace-file write. */
+  stage?: () => Promise<void>;
+  /** Completes the filesystem half after the database transaction commits. */
+  finalize?: () => Promise<void>;
+  /** Restores staging when the database transaction does not commit. */
+  rollbackStage?: () => Promise<void>;
+  /** Some finalizers are themselves recoverable and must keep the journal. */
+  preserveOnFinalizeFailure?: boolean;
   commit(transaction: Transaction<WorkspaceDb>): Promise<void>;
   rollback(transaction: Transaction<WorkspaceDb>): Promise<void>;
 }
@@ -68,7 +76,12 @@ export class WorkspaceFileTransactionCoordinator {
 
     try {
       this.failureInjector?.("planned");
-      await writeFile(stagedAbsolutePath, request.stagedContent, { flag: "wx" });
+      if (request.stage) {
+        await request.stage();
+      } else {
+        if (request.stagedContent === undefined) throw new Error(`workspace_file_transaction_staged_content_missing:${request.kind}`);
+        await writeFile(stagedAbsolutePath, request.stagedContent, { flag: "wx" });
+      }
       await this.db.updateTable("workspace_file_transactions").set({ status: "staged", updated_at: new Date().toISOString() }).where("id", "=", id).execute();
       this.failureInjector?.("staged");
       await this.db.transaction().execute(async (transaction) => {
@@ -79,7 +92,11 @@ export class WorkspaceFileTransactionCoordinator {
       databaseCommitted = true;
       this.failureInjector?.("db_committed");
       renameAttempted = true;
-      await rename(stagedAbsolutePath, targetAbsolutePath);
+      if (request.finalize) {
+        await request.finalize();
+      } else {
+        await rename(stagedAbsolutePath, targetAbsolutePath);
+      }
       fileRenamed = true;
       this.failureInjector?.("renamed");
       await this.db.deleteFrom("workspace_file_transactions").where("id", "=", id).execute();
@@ -90,6 +107,8 @@ export class WorkspaceFileTransactionCoordinator {
       }
       if (!databaseCommitted) {
         try {
+          if (request.rollbackStage) await request.rollbackStage();
+          else await rm(stagedAbsolutePath, { force: true });
           await this.db.deleteFrom("workspace_file_transactions").where("id", "=", id).execute();
         } catch {
           preserveForRecovery = true;
@@ -97,7 +116,7 @@ export class WorkspaceFileTransactionCoordinator {
         throw error;
       }
       // Before rename or after a successful rename, the journal is the only safe recovery path.
-      if (!renameAttempted || fileRenamed) {
+      if (!renameAttempted || fileRenamed || request.preserveOnFinalizeFailure) {
         preserveForRecovery = true;
         throw error;
       }

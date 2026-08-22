@@ -17,6 +17,7 @@ import {
   type ToolRunRecord
 } from "@samurai-agent/core-schemas";
 import type { Core05BackgroundReviewRunner, Core05ReviewSnapshot } from "@samurai-agent/learning";
+import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentRuntime } from "./agent-runtime.js";
 
@@ -202,7 +203,7 @@ describe("Core 05 completed learning path", () => {
       contentHash: memory.content_hash!,
       decisionSummary: "Use the Memory.",
       matchedConditions: ["Room B"]
-    })).rejects.toThrow("learning_resource_use_scope_mismatch");
+    })).rejects.toThrow("room_authorization_denied");
     await fixture.store.close();
   });
 
@@ -276,12 +277,13 @@ describe("Core 05 completed learning path", () => {
     const versionTwo = await fixture.runtime.updateLearningResourceVersion({
       resourceKind: "memory",
       resourceId: memory.id,
+      sessionId: fixture.sessionA.id,
       changeReason: "user correction",
       content: "Version two",
       usageScope: { kind: "agent", agent_id: fixture.agentA.id }
     });
     expect(versionTwo.resource_version).toMatchObject({ version: "2", parent_version: "1", is_current: true });
-    const restored = await fixture.runtime.restoreLearningResourceVersion({ resourceKind: "memory", resourceId: memory.id, targetVersion: "1", reason: "user correction" });
+    const restored = await fixture.runtime.restoreLearningResourceVersion({ resourceKind: "memory", resourceId: memory.id, targetVersion: "1", sessionId: fixture.sessionA.id, reason: "user correction" });
     expect(restored.resource_version).toMatchObject({ version: "3", parent_version: "2", restored_from_version: "1", is_current: true });
     expect(await fixture.store.readMemoryContent(memory.id)).toBe("Version one");
     expect(await fixture.store.getMemory(memory.id)).toMatchObject({
@@ -298,19 +300,19 @@ describe("Core 05 completed learning path", () => {
     const fixture = await createFixture();
     const run = await createCompletedRun(fixture, "run-archive");
     const ordinary = await createVersionedMemory(fixture, { id: "memory-archive", content: "Archive only by reason.", run });
-    const noReason = await fixture.runtime.runDomainCommand({ command_id: "curator.run", idempotency_key: "curator-no-reason", payload: {} });
+    const noReason = await fixture.runtime.runDomainCommand({ command_id: "curator.run", idempotency_key: "curator-no-reason", payload: {} }, { sessionId: fixture.sessionA.id });
     expect((noReason.result as { curatorReport: { dry_run: boolean } }).curatorReport.dry_run).toBe(true);
     expect(await fixture.store.getMemory(ordinary.id)).toMatchObject({ state: "topic" });
 
     const pinned = await createVersionedMemory(fixture, { id: "memory-pinned", content: "Never auto archive.", run, pinned: true });
-    await fixture.runtime.runDomainCommand({ command_id: "curator.run", idempotency_key: "curator-pinned", payload: { reason: "archive", resource_kind: "memory", resource_id: pinned.id } });
+    await fixture.runtime.runDomainCommand({ command_id: "curator.run", idempotency_key: "curator-pinned", payload: { reason: "archive", resource_kind: "memory", resource_id: pinned.id } }, { sessionId: fixture.sessionA.id });
     expect(await fixture.store.getMemory(pinned.id)).toMatchObject({ state: "topic", pinned: true });
 
-    const archived = await fixture.runtime.runDomainCommand({ command_id: "curator.run", idempotency_key: "curator-archive", payload: { reason: "archive", resource_kind: "memory", resource_id: ordinary.id } });
+    const archived = await fixture.runtime.runDomainCommand({ command_id: "curator.run", idempotency_key: "curator-archive", payload: { reason: "archive", resource_kind: "memory", resource_id: ordinary.id } }, { sessionId: fixture.sessionA.id });
     const snapshotId = (archived.result as { curatorReport: { snapshot_id?: string } }).curatorReport.snapshot_id;
     expect(snapshotId).toBeTruthy();
     expect(await fixture.store.getMemory(ordinary.id)).toMatchObject({ state: "archived", version: "2", usage_state: "dormant" });
-    await fixture.runtime.runDomainCommand({ command_id: "curator.restore", idempotency_key: "curator-restore", payload: { snapshot_id: snapshotId } });
+    await fixture.runtime.runDomainCommand({ command_id: "curator.restore", idempotency_key: "curator-restore", payload: { snapshot_id: snapshotId } }, { sessionId: fixture.sessionA.id });
     expect(await fixture.store.getMemory(ordinary.id)).toMatchObject({ state: "topic", version: "1", usage_state: "normal" });
     expect(await fixture.store.getCurrentLearningResourceVersion({ resourceKind: "memory", resourceId: ordinary.id })).toMatchObject({ version: "1", is_current: true });
     await fixture.store.close();
@@ -355,12 +357,12 @@ describe("Core 05 completed learning path", () => {
       command_id: "wiki.proposal.create",
       idempotency_key: "explicit-wiki",
       payload: { title: "Explicit wiki", content: "Keep existing explicit operations." }
-    });
+    }, { sessionId: fixture.sessionA.id });
     await fixture.runtime.runDomainCommand({
       command_id: "skill.candidate.create",
       idempotency_key: "explicit-skill",
       payload: { title: "Explicit skill", content: "1. Do this." }
-    });
+    }, { sessionId: fixture.sessionA.id });
     const automation = await fixture.runtime.runMemoryReviewAutomation();
     expect(automation.automationRun.status).toBe("completed");
     expect((await fixture.store.listWiki({ activeOnly: false })).some((page) => page.title === "Explicit wiki")).toBe(true);
@@ -394,14 +396,21 @@ async function createFixture(input: { runner?: Core05BackgroundReviewRunner } = 
   const agentB: AgentRecord = { id: nextId("agent-b"), name: "Agent B", role: "Writing", instructions: "Use Room B only.", backend_id: backend.id, enabled: true, created_at: now, updated_at: now };
   const sessionA: SessionRecord = { id: nextId("session-a"), session_key: nextId("key-a"), room_id: roomA.id, title: "Room A Session", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now };
   const sessionB: SessionRecord = { id: nextId("session-b"), session_key: nextId("key-b"), room_id: roomB.id, title: "Room B Session", ui_locale: "ja", output_locale: "ja", created_at: now, updated_at: now };
-  await Promise.all([store.createRoom(roomA), store.createRoom(roomB), store.createAgent(agentA), store.createAgent(agentB), store.createSession(sessionA), store.createSession(sessionB)]);
+  await Promise.all([store.createRoomWithOwner(roomA, localOwnerParticipantId), store.createRoomWithOwner(roomB, localOwnerParticipantId), store.createAgent(agentA), store.createAgent(agentB), store.createSession(sessionA), store.createSession(sessionB)]);
+  await Promise.all([
+    store.setRoomAgentPermissions({ roomId: roomA.id, agentId: agentA.id, canView: true, canEdit: true, canExecute: true, actorId: localOwnerParticipantId }),
+    store.setRoomAgentPermissions({ roomId: roomB.id, agentId: agentB.id, canView: true, canEdit: true, canExecute: true, actorId: localOwnerParticipantId })
+  ]);
+  await Promise.all([
+    store.ensureResourceAccessBoundary({ resourceKind: "session", resourceId: sessionA.id, sourceRoomId: roomA.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId }),
+    store.ensureResourceAccessBoundary({ resourceKind: "session", resourceId: sessionB.id, sourceRoomId: roomB.id, ownerParticipantId: localOwnerParticipantId, actorId: localOwnerParticipantId })
+  ]);
   await store.patchSettings({ default_room_id: roomA.id, default_agent_id: agentA.id });
   const runtime = new AgentRuntime(
     store,
     undefined,
     undefined,
     new AgentBackendRegistry([backend]),
-    undefined,
     undefined,
     undefined,
     input.runner ? { core05BackgroundReviewRunner: input.runner } : {}
@@ -465,6 +474,15 @@ async function createVersionedMemory(
   await fixture.store.saveMemory(frontmatter, input.content);
   const stored = await fixture.store.getMemory(input.id);
   if (!stored) throw new Error("fixture_memory_missing");
+  await fixture.store.ensureResourceAccessBoundary({
+    resourceKind: "memory",
+    resourceId: stored.id,
+    sourceRoomId: fixture.roomA.id,
+    ownerParticipantId: localOwnerParticipantId,
+    creatorParticipantId: localOwnerParticipantId,
+    resourceCreatedAt: stored.created_at,
+    actorId: localOwnerParticipantId
+  });
   await fixture.store.saveLearningResourceVersion({
     record: versionRecord({ resourceKind: "memory", resourceId: stored.id, version: "1", filePath: stored.file_path, contentHash: stored.content_hash!, sourceRunIds: [input.run.id], actor: "fixture" })
   });
@@ -545,7 +563,7 @@ async function evaluate(fixture: Fixture, sourceRunId: string) {
     command_id: "evaluation.run",
     idempotency_key: `evaluate-${sourceRunId}`,
     payload: { source_run_id: sourceRunId }
-  });
+  }, { sessionId: (await fixture.store.getBackendRun(sourceRunId))?.session_id ?? undefined, roomId: fixture.roomA.id });
   return result.result as { learningEvaluations: Array<{ prediction_assessment?: string; causal_assessment?: string; compared_run_ids: string[] }> };
 }
 

@@ -447,6 +447,35 @@ export class WorkspaceCompletionJobService {
     });
   }
 
+  /** A Review Job cannot be processed without the host-owned review cassette.
+   * Keep the missing capability explicit instead of leaving the Job queued
+   * forever in a normal Server process that was started without that cassette. */
+  async blockQueuedReviewsWithoutPort(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { limit?: number } = {}
+  ): Promise<number> {
+    const limit = boundedLimit(input.limit ?? 100);
+    return this.completion.store.database.withContext(context, async (sql) => {
+      const blocked = await sql.query<{ id: string }>(
+        `WITH candidates AS (
+           SELECT id FROM workspace_completion_jobs
+           WHERE workspace_id = $1 AND kind = 'review' AND status = 'queued'
+           ORDER BY updated_at ASC, id ASC
+           LIMIT $2
+           FOR UPDATE SKIP LOCKED
+         )
+         UPDATE workspace_completion_jobs AS job
+         SET status = 'blocked', lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+             blocked_reason = $3, updated_by = $4, updated_at = NOW()
+         FROM candidates
+         WHERE job.workspace_id = $1 AND job.id = candidates.id
+         RETURNING job.id`,
+        [context.workspaceId, limit, JSON.stringify({ code: "workspace_completion_review_port_unavailable", retryable: false }), context.accountId]
+      );
+      return blocked.rows.length;
+    });
+  }
+
   /** An oversized snapshot is not a retryable worker failure: handing an
    * incomplete episode to the Review cassette would make its decision
    * unsound. Keep the reason as structured data so a human can deliberately

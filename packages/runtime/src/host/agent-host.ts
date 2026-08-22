@@ -181,7 +181,7 @@ export class AgentHost {
     let run = admittedRun;
     const summary = request.input_summary?.trim() || "Workspace execution";
     const baseBackendInput: BackendRunInput = {
-      ...workspaceBackendInput(admittedRun, this.clock, summary, request.metadata),
+      ...workspaceBackendInput(admittedRun, this.clock, summary, request.metadata, request.input_locale, request.output_locale),
       abort_signal: controller.signal
     };
     try {

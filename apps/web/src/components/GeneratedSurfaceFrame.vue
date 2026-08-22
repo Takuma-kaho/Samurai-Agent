@@ -16,6 +16,7 @@ const props = defineProps<{
 
 const frameRef = ref<HTMLIFrameElement | null>(null);
 const previewUrl = computed(() => typeof props.spec.props.preview_url === "string" ? props.spec.props.preview_url : "");
+const srcdoc = computed(() => typeof props.spec.props.srcdoc === "string" ? props.spec.props.srcdoc : "");
 const actions = computed<GeneratedAction[]>(() => {
   const value = props.spec.props.actions;
   return Array.isArray(value)
@@ -67,10 +68,11 @@ onUnmounted(() => window.removeEventListener("message", handleMessage));
       <button type="button" :disabled="props.saving" @click="props.exportSurface(props.spec, 'zip')">ZIP</button>
     </div>
     <iframe
-      v-if="previewUrl"
+      v-if="srcdoc || previewUrl"
       ref="frameRef"
       class="generated-surface-iframe"
-      :src="previewUrl"
+      :src="srcdoc ? undefined : previewUrl"
+      :srcdoc="srcdoc || undefined"
       sandbox="allow-scripts"
       title="生成された独自UI"
     ></iframe>
