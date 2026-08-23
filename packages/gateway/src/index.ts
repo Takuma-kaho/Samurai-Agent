@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -35,6 +36,38 @@ export {
 
 const mcpProcessCloseGraceMs = 1_000;
 const mcpProcessCloseKillWaitMs = 1_000;
+
+const inheritedChildEnvironmentKeys = [
+  "PATH",
+  "PATHEXT",
+  "SystemRoot",
+  "WINDIR",
+  "ComSpec",
+  "HOME",
+  "USERPROFILE",
+  "TMP",
+  "TEMP",
+  "TMPDIR",
+  "SHELL",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LC_LANG",
+  "XDG_RUNTIME_DIR",
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "SSH_AUTH_SOCK",
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT"
+] as const;
+
+/** External tools must never inherit application credentials from the Server. */
+export function safeChildEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    inheritedChildEnvironmentKeys.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]]])
+  );
+}
 
 export interface RouteSessionInput {
   source: MessageEnvelope["source"];
@@ -126,6 +159,8 @@ export interface McpToolAdapterInput {
 }
 
 export interface McpToolAdapter {
+  /** Backend that actually enforces the boundary for this adapter. */
+  sandboxBackend?: SandboxExecutorBackend;
   invoke(input: McpToolAdapterInput): Promise<{ output?: JsonValue; resource_refs?: Array<{ kind: string; id?: string; uri: string; label?: string }> }>;
 }
 
@@ -139,7 +174,7 @@ export interface McpToolExecutionResult {
   resolved_secret_ref_ids: string[];
   secret_resolution: SecretResolutionSummary;
   sandbox: SandboxExecutionPlan;
-  reason?: McpToolInvocationPlan["reason"] | "secret_resolution_failed" | "adapter_failed";
+  reason?: McpToolInvocationPlan["reason"] | "secret_resolution_failed" | "adapter_failed" | "sandbox_isolation_unavailable";
   error?: string;
 }
 
@@ -202,7 +237,7 @@ export interface SandboxCommandExecutionResult {
   resolved_secret_ref_ids: string[];
   secret_resolution: SecretResolutionSummary;
   sandbox: SandboxExecutionPlan;
-  reason?: "secret_resolution_failed" | "adapter_failed" | "command_failed" | "sandbox_disabled" | "invalid_command" | "path_not_allowed";
+  reason?: "secret_resolution_failed" | "adapter_failed" | "command_failed" | "sandbox_disabled" | "invalid_command" | "path_not_allowed" | "sandbox_isolation_unavailable";
   error?: string;
 }
 
@@ -545,7 +580,7 @@ export function createStdioMcpToolAdapter(options: StdioMcpToolAdapterOptions): 
       let client: StdioJsonRpcClient | undefined;
       try {
         const env = buildStdioMcpEnv({
-          baseEnv: options.env ?? process.env,
+          baseEnv: safeChildEnvironment(options.env ?? process.env),
           config,
           materials: input.secrets,
           secretFiles
@@ -664,7 +699,7 @@ export function createHttpMcpToolAdapter(options: HttpMcpToolAdapterOptions): Mc
 export function createSandboxCommandAdapter(options: SandboxCommandAdapterOptions = {}): SandboxCommandAdapter {
   return {
     async execute(input) {
-      const invocation = createSandboxProcessInvocation(input, options.env ?? process.env);
+      const invocation = createSandboxProcessInvocation(input, safeChildEnvironment(options.env ?? process.env));
       return runSandboxProcess(invocation, {
         stdin: invocation.stdin ?? input.stdin,
         timeoutMs: input.timeout_ms ?? input.sandbox.timeout_ms ?? 30_000,
@@ -686,7 +721,7 @@ export function inspectSandboxExecutorCapabilities(options: {
       backend: "none",
       available: true,
       reason: "host_process",
-      detail: "Host process execution is available inside the Runtime boundary."
+      detail: "Host process execution is available only for trusted local_cli/cron boundaries; it is not an isolation boundary."
     },
     probeSandboxExecutor("docker", "docker", ["--version"], spawnProbe, timeoutMs),
     probeSandboxExecutor("ssh", "ssh", ["-V"], spawnProbe, timeoutMs),
@@ -761,6 +796,23 @@ export async function executeSandboxCommand(
     }
   }
 
+  const isolationError = sandbox.backend === "none"
+    ? sandboxIsolationCapabilityError(sandbox, "none", policy.source_channel)
+    : undefined;
+  if (isolationError) {
+    return {
+      status: "blocked",
+      command,
+      resource_refs: [],
+      secret_ref_ids: secretRefIds,
+      resolved_secret_ref_ids: [],
+      secret_resolution: emptySecretSummary,
+      sandbox,
+      reason: "sandbox_isolation_unavailable",
+      error: isolationError
+    };
+  }
+
   const secretBundle = await createSecretResolutionBundle(policy.secret_refs, {
     env: options.env,
     fileRoot: options.fileRoot
@@ -791,8 +843,8 @@ export async function executeSandboxCommand(
       secrets: secretBundle.materials,
       secret_files_materialized: secretFiles
     });
-    const stdout = redactSecretText(output.stdout, secretBundle.materials);
-    const stderr = redactSecretText(output.stderr, secretBundle.materials);
+    const stdout = redactSandboxOutput(output.stdout, secretBundle.materials);
+    const stderr = redactSandboxOutput(output.stderr, secretBundle.materials);
     const failed = output.exit_code !== 0 || Boolean(output.signal);
     return {
       status: failed ? "failed" : "completed",
@@ -819,7 +871,9 @@ export async function executeSandboxCommand(
       secret_resolution: secretBundle.summary,
       sandbox,
       reason: "adapter_failed",
-      error: message
+      error: secretBundle.materials.length > 0
+        ? "sandbox_adapter_failed_with_secret_material"
+        : message
     };
   } finally {
     await secretFiles?.cleanup();
@@ -1106,7 +1160,7 @@ export function planMcpToolInvocation(
 }
 
 export async function executeMcpToolInvocation(
-  boundary: Pick<GatewayBoundaryPolicy, "mcp_config_refs" | "sandbox">,
+  boundary: Pick<GatewayBoundaryPolicy, "mcp_config_refs" | "sandbox" | "source_channel">,
   input: McpToolExecutionInput,
   adapter: McpToolAdapter,
   options: {
@@ -1128,6 +1182,26 @@ export async function executeMcpToolInvocation(
       secret_resolution: emptySecretSummary,
       sandbox,
       reason: plan.reason
+    };
+  }
+
+  const isolationError = sandboxIsolationCapabilityError(
+    sandbox,
+    adapter.sandboxBackend ?? "none",
+    boundary.source_channel
+  );
+  if (isolationError) {
+    return {
+      status: "blocked",
+      server_name: input.server_name,
+      tool_name: input.tool_name,
+      resource_refs: [],
+      secret_ref_ids: plan.secret_ref_ids,
+      resolved_secret_ref_ids: [],
+      secret_resolution: emptySecretSummary,
+      sandbox,
+      reason: "sandbox_isolation_unavailable",
+      error: isolationError
     };
   }
 
@@ -1161,7 +1235,7 @@ export async function executeMcpToolInvocation(
       status: "completed",
       server_name: input.server_name,
       tool_name: input.tool_name,
-      output: redactSecretMaterials(result.output, secretBundle.materials),
+      output: redactMcpOutput(result.output, secretBundle.materials),
       resource_refs: result.resource_refs ?? [],
       secret_ref_ids: plan.secret_ref_ids,
       resolved_secret_ref_ids: secretBundle.summary.resolved_secret_ref_ids,
@@ -1180,7 +1254,9 @@ export async function executeMcpToolInvocation(
       secret_resolution: secretBundle.summary,
       sandbox,
       reason: "adapter_failed",
-      error: redactSecretText(errorMessage, secretBundle.materials)
+      error: secretBundle.materials.length > 0
+        ? "mcp_adapter_failed_with_secret_material"
+        : redactSecretText(errorMessage, secretBundle.materials)
     };
   }
 }
@@ -1192,6 +1268,34 @@ function secretResolutionSummaryFromIds(secretRefIds: string[]): SecretResolutio
     unresolved_secret_ref_ids: [],
     unresolved_reasons: {}
   };
+}
+
+function sandboxIsolationCapabilityError(
+  sandbox: SandboxExecutionPlan,
+  adapterBackend: SandboxExecutorBackend,
+  sourceChannel?: GatewayBoundaryPolicy["source_channel"]
+): string | undefined {
+  if (adapterBackend !== sandbox.backend) {
+    return "sandbox_adapter_backend_mismatch";
+  }
+  if (sandbox.backend !== "none") {
+    return undefined;
+  }
+  if (sourceChannel !== "local_cli" && sourceChannel !== "cron") {
+    return "sandbox_unisolated_backend_not_allowed";
+  }
+  if (sandbox.network_access !== "external") {
+    return "sandbox_network_isolation_unavailable";
+  }
+  if (sandbox.workspace_access !== "read_write") {
+    return "sandbox_workspace_isolation_unavailable";
+  }
+  if (sandbox.denied_paths.length > 0 || !sandbox.allowed_paths.some((rule) =>
+    (rule.root === "workspace" || rule.root === ".") && rule.access === "read_write"
+  )) {
+    return "sandbox_workspace_isolation_unavailable";
+  }
+  return undefined;
 }
 
 export function createSandboxExecutionPlan(policy: GatewayBoundaryPolicy["sandbox"]): SandboxExecutionPlan {
@@ -2101,19 +2205,19 @@ async function syncDockerWorkspace(input: SandboxWorkspaceSyncAdapterInput, spaw
     args: input.direction === "seed_to_sandbox"
       ? ["cp", dockerLocalSource(input.workspace_root, root), `${container}:${dockerRemoteTarget(remoteRoot, root)}`]
       : ["cp", `${container}:${dockerRemoteSource(remoteRoot, root)}`, dockerLocalTarget(input.workspace_root, root)],
-    env: process.env
+    env: safeChildEnvironment()
   }));
   const output = input.direction === "mirror"
     ? await runTwoStepWorkspaceSync([
       ...roots.map((root) => ({
         command: "docker",
         args: ["cp", dockerLocalSource(input.workspace_root, root), `${container}:${dockerRemoteTarget(remoteRoot, root)}`],
-        env: process.env
+        env: safeChildEnvironment()
       })),
       ...roots.map((root) => ({
         command: "docker",
         args: ["cp", `${container}:${dockerRemoteSource(remoteRoot, root)}`, dockerLocalTarget(input.workspace_root, root)],
-        env: process.env
+        env: safeChildEnvironment()
       }))
     ], input, spawnProcess, "mirror_two_pass_update")
     : await runWorkspaceSyncSequence(forward, input, spawnProcess);
@@ -2168,8 +2272,8 @@ async function syncRemoteWorkspace(input: SandboxWorkspaceSyncAdapterInput, spaw
     const rootArgs = [...args];
     if (input.direction === "mirror") rootArgs.push("--update");
     return {
-      forward: { command: "rsync", args: [...rootArgs, localRoot, remote], env: process.env },
-      reverse: { command: "rsync", args: [...rootArgs, remote, localRoot], env: process.env }
+      forward: { command: "rsync", args: [...rootArgs, localRoot, remote], env: safeChildEnvironment() },
+      reverse: { command: "rsync", args: [...rootArgs, remote, localRoot], env: safeChildEnvironment() }
     };
   });
   if (input.direction === "mirror") {
@@ -2239,7 +2343,7 @@ async function runDockerSandboxLifecycle(input: SandboxLifecycleAdapterInput, sp
     };
   }
   const args = input.action === "recreate" ? ["restart", container] : ["rm", "-f", container];
-  return runSandboxLifecycleProcess({ command: "docker", args, env: process.env }, input, spawnProcess);
+  return runSandboxLifecycleProcess({ command: "docker", args, env: safeChildEnvironment() }, input, spawnProcess);
 }
 
 async function runRemoteSandboxLifecycle(input: SandboxLifecycleAdapterInput, spawnProcess: typeof spawn): Promise<SandboxLifecycleAdapterOutput> {
@@ -2266,7 +2370,7 @@ async function runRemoteSandboxLifecycle(input: SandboxLifecycleAdapterInput, sp
   return runSandboxLifecycleProcess({
     command: "ssh",
     args: [target, configuredCommand],
-    env: process.env
+    env: safeChildEnvironment()
   }, input, spawnProcess);
 }
 
@@ -2836,7 +2940,7 @@ class StdioMcpProcessPool {
       handle.secretFiles = secretFiles;
       if (handle.controller.signal.aborted) throw new Error("mcp_process_startup_aborted");
       const env = buildStdioMcpEnv({
-        baseEnv: this.options.env ?? process.env,
+        baseEnv: safeChildEnvironment(this.options.env ?? process.env),
         config,
         materials: input.secrets,
         secretFiles
@@ -3203,7 +3307,10 @@ class StdioJsonRpcClient {
 }
 
 function createPairingCode(): string {
-  return Math.random().toString(36).slice(2, 8).toUpperCase();
+  // Pairing codes are an authentication factor for an external contact. Do
+  // not derive them from Math.random(), which is predictable and not
+  // suitable for security-sensitive admission codes.
+  return randomBytes(6).toString("hex").toUpperCase();
 }
 
 function redactSecretMaterials(value: JsonValue | undefined, secrets: SecretResolutionMaterial[]): JsonValue | undefined {
@@ -3229,4 +3336,16 @@ function redactSecretMaterials(value: JsonValue | undefined, secrets: SecretReso
 
 function redactSecretText(value: string, secrets: SecretResolutionMaterial[]): string {
   return secrets.reduce<string>((current, secret) => current.replaceAll(secret.value, `[redacted:${secret.id}]`), redactSecretLikeString(value));
+}
+
+const secretOutputWithheldMessage = "output_withheld_secret_material_injected";
+
+function redactSandboxOutput(value: string, secrets: SecretResolutionMaterial[]): string {
+  return secrets.length > 0 ? secretOutputWithheldMessage : redactSecretText(value, secrets);
+}
+
+function redactMcpOutput(value: JsonValue | undefined, secrets: SecretResolutionMaterial[]): JsonValue | undefined {
+  return secrets.length > 0
+    ? { redacted: true, reason: secretOutputWithheldMessage }
+    : redactSecretMaterials(value, secrets);
 }

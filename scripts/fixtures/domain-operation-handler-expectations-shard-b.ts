@@ -288,11 +288,13 @@ const automationMutation = (operationName: string, proposedEffects: readonly str
   execute: fn,
   ...extra
 });
-const browserMutation = (operationName: string, url: string) => ({
+const browserMutation = (operationName: string, url: string, action?: "click" | "input") => ({
   session,
   envelope,
   operationName,
-  proposedEffects: [`${operationName} ${url} without mutating external state.`],
+  proposedEffects: [action
+    ? `${operationName} ${action} ${url} may mutate external state and requires approval.`
+    : `${operationName} ${url} without mutating external state.`],
   execute: fn
 });
 const artifactMutation = (operationName: string, inputSummary: string, proposedEffects: readonly string[], extra: Record<string, unknown> = {}) => ({
@@ -491,9 +493,9 @@ export const bHandlerExpectations = {
   "browser.interact": {
     requiredBranches: ["action:navigate", "action:click", "action:input"],
     cases: [
-      { id: "navigate", input: { url: "https://example.com/fixture" }, branches: ["action:navigate"], calls: [call("ensureBrowserSession"), call("createBrowserEnvelope", session, "browser.interact: https://example.com/fixture"), call("runBrowserMutation", browserMutation("browser.interact", "https://example.com/fixture")), call("interactWithBrowser", { url: "https://example.com/fixture", action: "navigate" }), call("stableBrowserHash", "https://example.com/fixture")] },
-      { id: "click", input: { url: "https://example.com/fixture", action: "click", selector: "#save" }, branches: ["action:click"], calls: [call("ensureBrowserSession"), call("createBrowserEnvelope", session, "browser.interact: https://example.com/fixture"), call("runBrowserMutation", browserMutation("browser.interact", "https://example.com/fixture")), call("interactWithBrowser", { url: "https://example.com/fixture", action: "click", selector: "#save" }), call("stableBrowserHash", "https://example.com/fixture")] },
-      { id: "input", input: { url: "https://example.com/fixture", action: "input", selector: "#name", value: "Fixture" }, branches: ["action:input"], calls: [call("ensureBrowserSession"), call("createBrowserEnvelope", session, "browser.interact: https://example.com/fixture"), call("runBrowserMutation", browserMutation("browser.interact", "https://example.com/fixture")), call("interactWithBrowser", { url: "https://example.com/fixture", action: "input", selector: "#name", value: "Fixture" }), call("stableBrowserHash", "https://example.com/fixture")] }
+      { id: "navigate", input: { url: "https://example.com/fixture" }, branches: ["action:navigate"], calls: [call("ensureBrowserSession"), call("createBrowserEnvelope", session, "browser.interact: https://example.com/fixture"), call("runBrowserMutation", browserMutation("browser.navigate", "https://example.com/fixture")), call("interactWithBrowser", { url: "https://example.com/fixture", action: "navigate" }), call("stableBrowserHash", "https://example.com/fixture")] },
+      { id: "click", input: { url: "https://example.com/fixture", action: "click", selector: "#save" }, branches: ["action:click"], calls: [call("ensureBrowserSession"), call("createBrowserEnvelope", session, "browser.interact: https://example.com/fixture"), call("runBrowserMutation", browserMutation("browser.interact", "https://example.com/fixture", "click")), call("interactWithBrowser", { url: "https://example.com/fixture", action: "click", selector: "#save" }), call("stableBrowserHash", "https://example.com/fixture")] },
+      { id: "input", input: { url: "https://example.com/fixture", action: "input", selector: "#name", value: "Fixture" }, branches: ["action:input"], calls: [call("ensureBrowserSession"), call("createBrowserEnvelope", session, "browser.interact: https://example.com/fixture"), call("runBrowserMutation", browserMutation("browser.interact", "https://example.com/fixture", "input")), call("interactWithBrowser", { url: "https://example.com/fixture", action: "input", selector: "#name", value: "Fixture" }), call("stableBrowserHash", "https://example.com/fixture")] }
     ]
   },
   "browser.navigate": {

@@ -233,8 +233,14 @@ export class RuntimeDomainApi {
     return result.result;
   }
 
-  async deleteCollectionRecord(input: { collectionId: string; recordId: string; viewId?: string }): Promise<unknown> {
-    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("collectionRecordDelete"), idempotency_key: "collection_record_delete_request", payload: { collection_id: input.collectionId, record_id: input.recordId, ...(input.viewId === undefined ? {} : { view_id: input.viewId }) } });
+  async deleteCollectionRecord(input: { collectionId: string; recordId: string; expectedVersion: number; viewId?: string }): Promise<unknown> {
+    const payload = {
+      collection_id: input.collectionId,
+      record_id: input.recordId,
+      expected_version: input.expectedVersion,
+      ...(input.viewId === undefined ? {} : { view_id: input.viewId })
+    };
+    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("collectionRecordDelete"), idempotency_key: `collection_record_delete_request:${stableHash(payload)}`, payload });
     return result.result;
   }
 

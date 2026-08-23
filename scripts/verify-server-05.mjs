@@ -62,12 +62,13 @@ function staticBoundaryCheck() {
   for (const [label, pattern, target] of forbidden) {
     const result = spawnSync("rg", ["-n", pattern, target], { cwd: root, encoding: "utf8" });
     const output = String(result.stdout ?? "").trim();
+    const passed = result.status === 1 || (result.status === 0 && !output);
     checks.push({
       label,
-      passed: result.status !== 0 || !output,
+      passed,
       duration_ms: 0,
       exit_code: result.status,
-      output_tail: output || "no forbidden direct dependency"
+      output_tail: output || (result.status === 1 ? "no forbidden direct dependency" : "rg_failed")
     });
   }
 }

@@ -96,6 +96,7 @@ export class PostgresSkillDomainOperations {
     skillId: string;
     sessionId?: string;
     workerId: string;
+    roomId: string;
     signal?: AbortSignal;
   }): Promise<void> {
     return this.service.runClaimedOptimization(input);

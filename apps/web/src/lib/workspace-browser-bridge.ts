@@ -104,6 +104,16 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       undefined,
       input.idempotencyKey
     ),
+    writeWorkspaceAttachment: (input) => workspaceRequest(
+      "PUT",
+      `/files/${workspaceAttachmentPath(input.path)}`,
+      {
+        room_id: input.roomId,
+        content_base64: input.contentBase64,
+        expected_version: input.expectedVersion
+      },
+      input.operationId
+    ),
     searchWorkspace: (input) => workspaceRequest<SearchResult[]>("GET", `/chat/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}`),
     listWorkspaceBackendRuns: (input) => workspaceRequest<BackendRunRecord[]>("GET", `/chat/runs${input.sessionId ? `?session_id=${encodeURIComponent(input.sessionId)}` : ""}`),
     getWorkspaceBackendRun: (input) => workspaceRequest<BackendRunRecord>("GET", `/chat/runs/${encodeURIComponent(input.runId)}`),
@@ -231,6 +241,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       ...(input.revisionId ? { revision_id: input.revisionId } : {}),
       ...(input.interactionId ? { interaction_id: input.interactionId } : {}),
       ...(input.messageId ? { message_id: input.messageId } : {}),
+      ...(input.confirmed === true ? { confirmed: true } : {}),
       ...(input.actionPayload ? { action_payload: input.actionPayload } : {})
     }, input.operationId),
     runWorkspaceGeneratedSurfaceState: (input) => workspaceRequest("POST", `/generated-surfaces/${encodeURIComponent(input.surfaceId)}/state`, {
@@ -285,6 +296,11 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     onWorkspaceServerEvent: (listener) => subscribeBrowserWorkspaceRealtime(listener)
   };
   return bridge;
+}
+
+function workspaceAttachmentPath(value: string): string {
+  if (!/^attachments\/[A-Za-z0-9._-]{1,220}$/.test(value)) throw new Error("workspace_attachment_path_invalid");
+  return value.split("/").map((part) => encodeURIComponent(part)).join("/");
 }
 
 let cachedBrowserBridge: DesktopBridge | undefined;

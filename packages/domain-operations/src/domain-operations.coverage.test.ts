@@ -108,6 +108,29 @@ describe("Domain Operation strict gate coverage", () => {
           ].includes(name)) return outputs.get(id);
           if (name === "getReflectionSession") return fixtureSession(String(args[0]));
           if (name === "getReflectionBackendRun") return fixtureBackendRun(String(args[0]), reflectionSessionId);
+          if (name === "getExternalSend") return {
+            id: "external.send.dispatch-fixture",
+            channel: "webhook",
+            status: "approved",
+            target: { url: "https://example.test/hook" },
+            title: "External send fixture",
+            body: "fixture",
+            created_at: "2026-07-16T00:00:00.000Z",
+            updated_at: "2026-07-16T00:00:00.000Z"
+          };
+          if (name === "claimDispatch") return { record: args[0] ? {
+            id: "external.send.dispatch-fixture",
+            channel: "webhook",
+            status: "approved",
+            target: { url: "https://example.test/hook" },
+            title: "External send fixture",
+            body: "fixture",
+            created_at: "2026-07-16T00:00:00.000Z",
+            updated_at: "2026-07-16T00:00:00.000Z"
+          } : undefined, claim_token: "external-send-claim-fixture" };
+          if (name === "settleDispatch") return (args[0] as { record: unknown }).record;
+          if (name === "markOutcomeUnknown") return { id: "external.send.dispatch-fixture", status: "outcome_unknown", channel: "webhook", target: {}, title: "External send fixture", body: "fixture", created_at: "2026-07-16T00:00:00.000Z", updated_at: "2026-07-16T00:00:00.000Z" };
+          if (name === "getWorkItemObjective") return { ...fixtureRecord(String(args[0])), room_id: "coverage-room" };
           if (name === "listCollectionRecords") return { collection_id: "sample", count: 0, items: [], linked_data: {}, schema_fields: {} };
           if (name === "getActivityHistory") return undefined;
           if (name === "getResourceVersion") return outputs.get(id);
@@ -319,7 +342,7 @@ describe("Domain Operation strict gate coverage", () => {
       const context = {
         inputSource: definition.sources[0]!,
         workspaceId: "workspace",
-        actorId: "actor",
+        actorId: definition.id === "memory.archive" ? "paired_contact" : "actor",
         roomId: "coverage-room",
         participant: { kind: "human" as const, participantId: "human:owner" },
         correlationId: `coverage-${definition.id}`,

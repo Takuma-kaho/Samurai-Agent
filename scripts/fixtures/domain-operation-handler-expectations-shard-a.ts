@@ -111,16 +111,17 @@ const mutation = (operationName: string, proposedEffects: readonly string[], ext
   execute: fn,
   ...extra
 });
+const collectionTriggerContext = {
+  inputSource: "runtime_api",
+  workspaceId: "handler-matrix-workspace",
+  actorId: "handler-matrix-actor",
+  correlationId: "handler-matrix",
+  sessionId: "session_fixture",
+  runId: "run_fixture"
+};
 
 const contextMutation = (operationName: string, inputSummary: string, proposedEffects: readonly string[], extra: Record<string, unknown> = {}) => ({
-  trustedContext: {
-    inputSource: "runtime_api",
-    workspaceId: "handler-matrix-workspace",
-    actorId: "handler-matrix-actor",
-    correlationId: "handler-matrix",
-    sessionId: "session_fixture",
-    runId: "run_fixture"
-  },
+  trustedContext: collectionTriggerContext,
   operationName,
   inputSummary,
   proposedEffects,
@@ -234,11 +235,11 @@ export const aHandlerExpectations = {
   },
   "collection.patch.apply": {
     requiredBranches: ["patch:explicit-id-and-version"],
-    cases: [{ id: "all-fields", input: { collection_id: "collection_fixture", record_id: "record_fixture", changes: { status: "done" }, expected_version: 2, patch_id: "patch_fixture" }, branches: ["patch:explicit-id-and-version"], calls: [call("runCollectionMutation", contextMutation("collection.patch.apply", "Apply collection patch: collection_fixture/record_fixture", ["Apply a collection patch to an existing local record."])), call("applyCollectionRecordPatch", { collectionId: "collection_fixture", recordId: "record_fixture", patch: { id: "patch_fixture", record_id: "record_fixture", changes: { status: "done" }, expected_version: 2, source_operation_id: "operation_fixture", created_at: "$generated:time" } }), call("collectionRecordRef", collectionRecord), call("createCollectionRollback", operation, [collectionRecordRef], { record: collectionRecord }, { record: collectionRecord }), call("queueCollectionTrigger", { collectionId: "collection_fixture", recordId: "record_fixture", event: "record.patched" })] }]
+    cases: [{ id: "all-fields", input: { collection_id: "collection_fixture", record_id: "record_fixture", changes: { status: "done" }, expected_version: 2, patch_id: "patch_fixture" }, branches: ["patch:explicit-id-and-version"], calls: [call("runCollectionMutation", contextMutation("collection.patch.apply", "Apply collection patch: collection_fixture/record_fixture", ["Apply a Collection patch and durably queue matching trigger jobs."])), call("applyCollectionRecordPatch", { collectionId: "collection_fixture", recordId: "record_fixture", patch: { id: "patch_fixture", record_id: "record_fixture", changes: { status: "done" }, expected_version: 2, source_operation_id: "operation_fixture", created_at: "$generated:time" }, trigger: { event: "record.patched", operation, trustedContext: collectionTriggerContext } }), call("collectionRecordRef", collectionRecord), call("createCollectionRollback", operation, [collectionRecordRef], { record: collectionRecord }, { record: collectionRecord })] }]
   },
   "collection.record.create": {
     requiredBranches: ["record:explicit-id-and-refs"],
-    cases: [{ id: "all-fields", input: { collection_id: "collection_fixture", record_id: "record_fixture", data: { title: "Fixture" }, resource_refs: [artifactRef] }, branches: ["record:explicit-id-and-refs"], calls: [call("runCollectionMutation", contextMutation("collection.record.create", "Create collection record: collection_fixture/record_fixture", ["Create a collection record file and SQLite index row."])), call("saveCollectionRecord", { id: "record_fixture", collection_id: "collection_fixture", version: 1, data: { title: "Fixture" }, resource_refs: [artifactRef], created_at: "$generated:time", updated_at: "$generated:time" }), call("collectionRecordRef", collectionRecord), call("createCollectionRollback", operation, [collectionRecordRef], {}, { collection_id: "collection_fixture", record_id: "record_fixture" }), call("queueCollectionTrigger", { collectionId: "collection_fixture", recordId: "record_fixture", event: "record.created" })] }]
+    cases: [{ id: "all-fields", input: { collection_id: "collection_fixture", record_id: "record_fixture", data: { title: "Fixture" }, resource_refs: [artifactRef] }, branches: ["record:explicit-id-and-refs"], calls: [call("runCollectionMutation", contextMutation("collection.record.create", "Create collection record: collection_fixture/record_fixture", ["Create a Collection record file, SQLite index row, and durable matching trigger job."])), call("saveCollectionRecord", { id: "record_fixture", collection_id: "collection_fixture", version: 1, data: { title: "Fixture" }, resource_refs: [artifactRef], created_at: "$generated:time", updated_at: "$generated:time" }, { event: "record.created", operation, trustedContext: collectionTriggerContext }), call("collectionRecordRef", collectionRecord), call("createCollectionRollback", operation, [collectionRecordRef], {}, { collection_id: "collection_fixture", record_id: "record_fixture" })] }]
   },
   "collection.record.delete": {
     requiredBranches: ["view_id:explicit", "view_id:omitted", "expected_version:explicit"],

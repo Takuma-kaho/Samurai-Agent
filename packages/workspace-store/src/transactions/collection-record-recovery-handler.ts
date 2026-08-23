@@ -10,9 +10,45 @@ type StoredRecord = Omit<CollectionRecord, "version"> & { version: number; file_
 
 /** Owns Collection record SQLite writes and recovery; the coordinator stays resource-neutral. */
 export class CollectionRecordRecoveryHandler implements WorkspaceFileTransactionRecoveryHandler {
-  readonly kinds = ["collection_record_patch", "collection_record_repair", "collection_record_delete"] as const;
+  readonly kinds = ["collection_record_create", "collection_record_patch", "collection_record_repair", "collection_record_delete"] as const;
 
   constructor(private readonly db: Kysely<WorkspaceDb>, private readonly rootDir: string) {}
+
+  async commitCreate(transaction: Transaction<WorkspaceDb>, input: { record: StoredRecord }): Promise<void> {
+    const { file_path, ...record } = input.record;
+    if (!file_path) throw new Error("collection_record_create_file_path_missing");
+    await transaction.insertInto("collection_records").values({
+      id: record.id,
+      collection_id: record.collection_id,
+      file_path,
+      record_json: JSON.stringify(record),
+      version: record.version,
+      created_at: record.created_at,
+      updated_at: record.updated_at
+    }).execute();
+  }
+
+  async rollbackCreate(transaction: Transaction<WorkspaceDb>, input: { record: StoredRecord; fileTransactionId?: string }): Promise<void> {
+    const current = await transaction.selectFrom("collection_records")
+      .select("version")
+      .where("collection_id", "=", input.record.collection_id)
+      .where("id", "=", input.record.id)
+      .executeTakeFirst();
+    if (current && current.version !== input.record.version) {
+      throw new Error(`workspace_file_transaction_rollback_conflict:${input.record.collection_id}:${input.record.id}`);
+    }
+    if (current) {
+      const deleted = await transaction.deleteFrom("collection_records")
+        .where("collection_id", "=", input.record.collection_id)
+        .where("id", "=", input.record.id)
+        .where("version", "=", input.record.version)
+        .executeTakeFirst();
+      if (Number(deleted.numDeletedRows ?? 0) !== 1) {
+        throw new Error(`workspace_file_transaction_rollback_conflict:${input.record.collection_id}:${input.record.id}`);
+      }
+    }
+    await this.deleteTriggerJobs(transaction, input.fileTransactionId);
+  }
 
   async commitPatch(transaction: Transaction<WorkspaceDb>, input: { collectionId: string; recordId: string; before: StoredRecord; after: StoredRecord; patch: CollectionPatch }): Promise<boolean> {
     const update = await transaction.updateTable("collection_records")
@@ -29,9 +65,17 @@ export class CollectionRecordRecoveryHandler implements WorkspaceFileTransaction
     return true;
   }
 
-  async rollbackPatch(transaction: Transaction<WorkspaceDb>, input: { collectionId: string; recordId: string; before: StoredRecord; after: StoredRecord; patchId: string }): Promise<void> {
+  async rollbackPatch(transaction: Transaction<WorkspaceDb>, input: {
+    collectionId: string;
+    recordId: string;
+    before: StoredRecord;
+    after: StoredRecord;
+    patchId: string;
+    fileTransactionId?: string;
+  }): Promise<void> {
     await this.rollbackRecord(transaction, input);
     await transaction.deleteFrom("collection_patches").where("collection_id", "=", input.collectionId).where("record_id", "=", input.recordId).where("id", "=", input.patchId).execute();
+    await this.deleteTriggerJobs(transaction, input.fileTransactionId);
   }
 
   async commitRepair(transaction: Transaction<WorkspaceDb>, input: { collectionId: string; recordId: string; before: StoredRecord; after: StoredRecord }): Promise<boolean> {
@@ -74,11 +118,25 @@ export class CollectionRecordRecoveryHandler implements WorkspaceFileTransaction
       await rm(stagedPath, { force: true });
       return "rolled_back";
     }
+    if (row.kind === "collection_record_create") {
+      if (!row.collection_id || !row.record_id) throw new Error(`workspace_file_transaction_invalid:${row.id}`);
+      await this.db.transaction().execute(async (transaction) => {
+        await this.rollbackCreate(transaction, { record: after, fileTransactionId: row.id });
+      });
+      return "rolled_back";
+    }
     if (!row.collection_id || !row.record_id) throw new Error(`workspace_file_transaction_invalid:${row.id}`);
     const before = JSON.parse(row.before_json) as StoredRecord;
     await this.db.transaction().execute(async (transaction) => {
       if (row.kind === "collection_record_patch" && row.patch_id) {
-        await this.rollbackPatch(transaction, { collectionId: row.collection_id!, recordId: row.record_id!, before, after, patchId: row.patch_id });
+        await this.rollbackPatch(transaction, {
+          collectionId: row.collection_id!,
+          recordId: row.record_id!,
+          before,
+          after,
+          patchId: row.patch_id,
+          fileTransactionId: row.id
+        });
       } else {
         await this.rollbackRepair(transaction, { collectionId: row.collection_id!, recordId: row.record_id!, before, after });
       }
@@ -101,6 +159,11 @@ export class CollectionRecordRecoveryHandler implements WorkspaceFileTransaction
       .where("version", "=", input.after.version)
       .executeTakeFirst();
     if (Number(update.numUpdatedRows) !== 1) throw new Error(`workspace_file_transaction_rollback_conflict:${input.collectionId}:${input.recordId}`);
+  }
+
+  private async deleteTriggerJobs(transaction: Transaction<WorkspaceDb>, fileTransactionId?: string): Promise<void> {
+    if (!fileTransactionId) return;
+    await transaction.deleteFrom("automation_jobs").where("file_transaction_id", "=", fileTransactionId).execute();
   }
 }
 

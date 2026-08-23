@@ -3,8 +3,8 @@ import type { ObjectiveRecord, WorkItemRecord } from "@samurai-agent/core-schema
 import type { TrustedDomainContext } from "../../definition/index.js";
 import workItemCreate from "./create.operation.js";
 
-const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test" };
-const objective = { id: "objective_1" } as ObjectiveRecord;
+const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", roomId: "room_test", correlationId: "correlation_test" };
+const objective = { id: "objective_1", room_id: "room_test" } as ObjectiveRecord;
 
 describe("work_item.create handler", () => {
   it("owns defaults, record creation, and persistence", async () => {

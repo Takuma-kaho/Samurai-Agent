@@ -29,6 +29,7 @@ export function automationJobToRow(job: AutomationJobRecord): AutomationJobsTabl
     management_operation_id: record.management_operation_id ?? null,
     created_operation_id: record.created_operation_id ?? null,
     rebound_operation_id: record.rebound_operation_id ?? null,
+    file_transaction_id: null,
     next_run_at: record.next_run_at ?? null,
     last_run_at: record.last_run_at ?? null,
     retry_after_at: record.retry_after_at ?? null,

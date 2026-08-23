@@ -43,3 +43,6 @@ jobs:
 
       - name: Audit high severity dependencies
         run: pnpm audit --audit-level=high
+
+      - name: Scan repository for leaked secrets and release hygiene issues
+        run: pnpm run core:test:release-hygiene

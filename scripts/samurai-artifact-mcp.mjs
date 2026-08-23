@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+const artifactKinds = ["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"];
+const supportedLocales = ["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"];
 const artifactInputSchema = {
   type: "object",
   required: ["title", "content"],
@@ -8,9 +10,11 @@ const artifactInputSchema = {
     content: { type: "string", description: "Complete Artifact body." },
     kind: {
       type: "string",
-      enum: ["markdown", "document", "table", "chart", "structured_draft", "generated_report", "note"],
+      enum: artifactKinds,
       description: "Optional Artifact kind. Markdown is the default path in v1."
     },
+    input_locale: { type: "string", enum: supportedLocales, description: "Optional source locale." },
+    output_locale: { type: "string", enum: supportedLocales, description: "Optional output locale." },
     metadata: { type: "object", description: "Optional non-secret metadata." }
   }
 };
@@ -268,10 +272,24 @@ function sanitizeArtifactInput(args) {
   if (!title || !content) {
     throw new Error("Both title and content are required.");
   }
+  if (args.kind !== undefined && (typeof args.kind !== "string" || !artifactKinds.includes(args.kind))) {
+    throw new Error(`Unsupported Artifact kind: ${String(args.kind)}.`);
+  }
+  if (args.input_locale !== undefined && (typeof args.input_locale !== "string" || !supportedLocales.includes(args.input_locale))) {
+    throw new Error(`Unsupported input locale: ${String(args.input_locale)}.`);
+  }
+  if (args.output_locale !== undefined && (typeof args.output_locale !== "string" || !supportedLocales.includes(args.output_locale))) {
+    throw new Error(`Unsupported output locale: ${String(args.output_locale)}.`);
+  }
+  if (args.metadata !== undefined && (!args.metadata || typeof args.metadata !== "object" || Array.isArray(args.metadata))) {
+    throw new Error("Artifact metadata must be an object.");
+  }
   return {
     title,
     content,
     ...(typeof args.kind === "string" ? { kind: args.kind } : {}),
+    ...(typeof args.input_locale === "string" ? { input_locale: args.input_locale } : {}),
+    ...(typeof args.output_locale === "string" ? { output_locale: args.output_locale } : {}),
     ...(args.metadata && typeof args.metadata === "object" && !Array.isArray(args.metadata) ? { metadata: args.metadata } : {})
   };
 }

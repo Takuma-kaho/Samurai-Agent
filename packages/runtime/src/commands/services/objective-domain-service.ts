@@ -2,7 +2,7 @@ import type { ObjectiveRecord, WorkItemRecord } from "@samurai-agent/core-schema
 
 export interface ObjectiveWritePort {
   save(record: ObjectiveRecord): Promise<ObjectiveRecord>;
-  transition(objectiveId: string, action: "pause" | "resume" | "cancel"): Promise<{
+  transition(objectiveId: string, action: "pause" | "resume" | "cancel", roomId: string): Promise<{
     objective: ObjectiveRecord; workItems: WorkItemRecord[]; cancelBackendRunIds: string[];
   }>;
 }
@@ -16,7 +16,7 @@ export class ObjectiveDomainService {
     return this.dependencies.objectives.save(record);
   }
 
-  transition(id: string, action: "pause" | "resume" | "cancel") {
-    return this.dependencies.objectives.transition(id, action);
+  transition(id: string, action: "pause" | "resume" | "cancel", roomId: string) {
+    return this.dependencies.objectives.transition(id, action, roomId);
   }
 }

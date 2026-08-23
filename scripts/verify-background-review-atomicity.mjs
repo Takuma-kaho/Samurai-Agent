@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import process from "node:process";
 import { committedSourceEvidence } from "./lib/core-evidence.mjs";
+import { evaluateVerifierAssertions, reportVerifierFailures, verifierEvidenceStatus } from "./lib/verifier-assertions.mjs";
 
 const root = process.cwd();
 const prefix = process.platform === "darwin"
@@ -24,7 +25,8 @@ const sources = [
   "packages/workspace-store/src/index.ts",
   "scripts/fixtures/background-review-atomicity.ts",
   "scripts/verify-background-review-atomicity.mjs",
-  "scripts/lib/core-evidence.mjs"
+  "scripts/lib/core-evidence.mjs",
+  "scripts/lib/verifier-assertions.mjs"
 ];
 
 try {
@@ -42,22 +44,24 @@ try {
   const completedAt = new Date().toISOString();
   const evidenceDirectory = path.join(root, "reports/core-completion/evidence");
   mkdirSync(evidenceDirectory, { recursive: true });
+  const assertions = [
+      { name: "Malformed mutations are rejected", actual: result.malformed_rejected, expected: true },
+      { name: "Room-scoped compensation rolls back a mid-write failure", actual: result.mid_write_failure_rolled_back && result.partial_metadata === 0, expected: true },
+      { name: "A valid mutation applies once and duplicate execution is idempotent", actual: { valid: result.valid_mutations, duplicate: result.duplicate_mutations }, expected: { valid: 1, duplicate: 0 } }
+    ];
+  const failures = evaluateVerifierAssertions(assertions, result);
   writeFileSync(path.join(evidenceDirectory, "E06.json"), `${JSON.stringify({
     schema_version: 1,
     test_id: "E06",
     command: "pnpm core:test:background-review",
-    status: "passed",
+    status: verifierEvidenceStatus(result, failures),
     ...committedSourceEvidence(root, sources),
     started_at: startedAt,
     completed_at: completedAt,
-    assertions: [
-      { name: "Malformed mutations are rejected", actual: result.malformed_rejected, expected: true },
-      { name: "Room-scoped compensation rolls back a mid-write failure", actual: result.mid_write_failure_rolled_back && result.partial_metadata === 0, expected: true },
-      { name: "A valid mutation applies once and duplicate execution is idempotent", actual: { valid: result.valid_mutations, duplicate: result.duplicate_mutations }, expected: { valid: 1, duplicate: 0 } }
-    ],
+    assertions, ...(failures.length ? { failures } : {}),
     result
   }, null, 2)}\n`);
-  process.stdout.write(`${raw}\n`);
+  reportVerifierFailures("E06", failures); process.stdout.write(`${raw}\n`);
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }

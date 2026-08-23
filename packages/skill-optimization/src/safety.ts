@@ -8,7 +8,7 @@ const secretPatterns = [
   /\bsk-[a-z0-9]{16,}\b/i,
   /\bAKIA[0-9A-Z]{16}\b/,
   /\bBearer\s+[A-Za-z0-9._-]{16,}/i,
-  /\b(api[_-]?key|access[_-]?token|secret)\s*[:=]\s*['"]?[A-Za-z0-9_./+=-]{16,}/i
+  /\b(api[_-]?key|access[_-]?token|client[_-]?secret|oauth[_-]?client[_-]?secret|refresh[_-]?token|private[_-]?key|password|cookie|credential|authorization|secret)\s*[:=]\s*['"]?[A-Za-z0-9_./+=-]{8,}/i
 ];
 
 export function evaluateSkillOptimizationSafety(body: string): SkillOptimizationSafetyResult {

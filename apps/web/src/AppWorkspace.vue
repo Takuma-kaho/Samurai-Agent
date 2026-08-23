@@ -44,6 +44,7 @@ import type {
   MessagePresentationRecord,
   OperationRecord,
   PolicyDecisionRecord,
+  ResourceRef,
   RollbackPoint,
   SessionRecord,
   SettingsRecord,
@@ -155,6 +156,8 @@ const workspaceRooms = ref<DesktopWorkspaceRoom[]>([]);
 const workspaceRoomLoading = ref(false);
 const workspaceRoomError = ref<string | null>(null);
 const selectedWorkspaceRoomId = ref<string | undefined>();
+let workspaceRoomGeneration = 0;
+let lastObservedWorkspaceRoomId: string | undefined;
 let stopWorkspaceRealtimeEvents: (() => void) | undefined;
 let workspaceRealtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 const workspaceConnectionAvailable = computed(() => Boolean(
@@ -551,29 +554,44 @@ watch(activeSurfaceSpec, (spec) => {
   if (spec) prepareSurfaceDraft(spec);
 });
 
-watch(selectedWorkspaceRoomId, (roomId) => setActiveWorkspaceRoomId(roomId), { immediate: true });
+watch(selectedWorkspaceRoomId, (roomId) => {
+  setActiveWorkspaceRoomId(roomId);
+  if (roomId === lastObservedWorkspaceRoomId) return;
+  lastObservedWorkspaceRoomId = roomId;
+  workspaceRoomGeneration += 1;
+  startDraftChat();
+  sessions.value = [];
+  if (roomId !== undefined) {
+    void loadSessionsWithRetry(workspaceRoomGeneration);
+  }
+}, { immediate: true });
 
-async function loadSessions() {
-  sessions.value = await api.listSessions();
+async function loadSessions(generation = workspaceRoomGeneration) {
+  const listedSessions = await api.listSessions();
+  if (generation !== workspaceRoomGeneration) return;
+  sessions.value = listedSessions;
   const currentSession = activeSession.value ? sessions.value.find((session) => session.id === activeSession.value?.id) : undefined;
   if (currentSession) {
-    await openSession(currentSession.id);
+    await openSession(currentSession.id, generation);
     return;
   }
-  startDraftChat();
+  if (generation === workspaceRoomGeneration) startDraftChat();
 }
 
-async function loadSessionsWithRetry() {
+async function loadSessionsWithRetry(generation = workspaceRoomGeneration) {
   const retryDelays = [250, 600, 1000];
+  if (generation !== workspaceRoomGeneration) return;
   initializing.value = true;
   sessionLoadError.value = false;
   for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
     try {
-      await loadSessions();
+      await loadSessions(generation);
+      if (generation !== workspaceRoomGeneration) return;
       sessionLoadError.value = false;
       initializing.value = false;
       return;
     } catch {
+      if (generation !== workspaceRoomGeneration) return;
       if (attempt === retryDelays.length) {
         sessionLoadError.value = true;
         initializing.value = false;
@@ -599,6 +617,7 @@ async function loadSettings() {
 
 function startDraftChat() {
   activeSession.value = null;
+  loading.value = false;
   messages.value = [];
   messagePresentations.value = [];
   pendingUserMessage.value = null;
@@ -617,15 +636,22 @@ function startDraftChat() {
   activeArtifact.value = null;
   activeMemory.value = null;
   activeSurfaceSpec.value = null;
+  activeMessagePresentationId.value = null;
+  lastSurfaceRenderSpec.value = null;
+  lastSurfaceRenderSpecs.value = [];
+  memoryContent.value = {};
   prompt.value = "";
   clearAttachments();
+  pendingChatOperation.value = null;
   viewMode.value = "chat";
   schedulePromptFocus();
 }
 
-async function openSession(sessionId: string) {
+async function openSession(sessionId: string, generation = workspaceRoomGeneration) {
   const detail = await api.getSession(sessionId);
-  await applySessionDetail(detail);
+  if (generation !== workspaceRoomGeneration) return;
+  await applySessionDetail(detail, generation);
+  if (generation !== workspaceRoomGeneration) return;
   await refreshAuditContext();
   viewMode.value = "chat";
 }
@@ -682,6 +708,7 @@ async function sendMessage() {
   if (prompt.value.trim().length === 0 || loading.value) {
     return;
   }
+  const roomGeneration = workspaceRoomGeneration;
   const content = prompt.value.trim();
   const operation = pendingChatOperation.value?.content === content
     ? pendingChatOperation.value
@@ -708,8 +735,11 @@ async function sendMessage() {
       output_locale: settings.value.output_locale,
       ...(selectedWorkspaceRoomId.value ? { room_id: selectedWorkspaceRoomId.value } : {})
     });
+    if (roomGeneration !== workspaceRoomGeneration) return;
     activeSession.value = session;
     promoteSessionToTop(session);
+    const attachments = await uploadSelectedChatAttachments(roomGeneration, operation.idempotencyKey);
+    if (roomGeneration !== workspaceRoomGeneration) return;
     const envelope = await api.submitChatSurfaceOperation({
       idempotencyKey: operation.idempotencyKey,
       sessionId: session.id,
@@ -721,8 +751,10 @@ async function sendMessage() {
       metadata: {
         frontend_surface_contract_version: surfaceContract.value?.protocol_version ?? "1",
         ...(activeAppContext() ? { active_app_context: activeAppContext() } : {})
-      }
+      },
+      ...(attachments?.length ? { attachments } : {})
     });
+    if (roomGeneration !== workspaceRoomGeneration) return;
     const result = envelope.result;
     const renderSpecs = envelopeRenderSpecs(envelope);
     lastSurfaceRenderSpec.value = envelope.render_spec;
@@ -752,10 +784,12 @@ async function sendMessage() {
     approvalRequests.value = [...result.approvalRequests, ...approvalRequests.value];
     rollbackPoints.value = [...result.rollbackPoints, ...rollbackPoints.value];
     activity.value = result.activity;
-    await reloadActiveSession();
+    await reloadActiveSession(roomGeneration);
+    if (roomGeneration !== workspaceRoomGeneration) return;
     clearAttachments();
     pendingChatOperation.value = null;
   } catch (error) {
+    if (roomGeneration !== workspaceRoomGeneration) return;
     pendingUserMessage.value = null;
     resetPendingAgentResponse();
     prompt.value = content;
@@ -768,8 +802,58 @@ async function sendMessage() {
     }
     throw error;
   } finally {
-    loading.value = false;
+    if (roomGeneration === workspaceRoomGeneration) loading.value = false;
   }
+}
+
+async function uploadSelectedChatAttachments(generation: number, operationId: string): Promise<ResourceRef[] | undefined> {
+  const roomId = selectedWorkspaceRoomId.value;
+  if (!selectedAttachments.value.length) return undefined;
+  if (!roomId) throw new Error("room_id_required_for_attachment");
+  const refs: ResourceRef[] = [];
+  for (const attachment of selectedAttachments.value) {
+    if (generation !== workspaceRoomGeneration) return undefined;
+    if (attachment.size > 8 * 1024 * 1024) throw new Error("attachment_too_large");
+    if (attachment.resourceRef) {
+      refs.push(attachment.resourceRef);
+      continue;
+    }
+    const filePath = chatAttachmentPath(attachment);
+    const contentBase64 = await fileToBase64(attachment.file);
+    const uploaded = await api.uploadWorkspaceAttachment({
+      roomId,
+      path: filePath,
+      contentBase64,
+      expectedVersion: 0,
+      operationId: `${operationId}.attachment.${attachment.id.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 64)}`
+    });
+    const ref: ResourceRef = {
+      kind: "file",
+      id: uploaded.file.sha256,
+      uri: uploaded.file.path,
+      version: String(uploaded.file.version),
+      label: attachment.name
+    };
+    attachment.resourceRef = ref;
+    refs.push(ref);
+  }
+  return refs;
+}
+
+function chatAttachmentPath(attachment: { id: string; name: string }): string {
+  const id = attachment.id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 96) || "attachment";
+  const name = attachment.name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "file";
+  return `attachments/${id}-${name}`;
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function activeAppContext(): Record<string, JsonValue> | undefined {
@@ -1244,13 +1328,14 @@ function inlineGeneratedSurfaceAssets(source: string, assets: Array<{ path: stri
     .replace(/(url\(\s*["']?)([^"')]+)(["']?\s*\))/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`);
 }
 
-async function runGeneratedSurfaceAction(spec: SurfaceRenderSpec, action: { id: string; label: string }, payload: Record<string, JsonValue> = {}) {
+async function runGeneratedSurfaceAction(spec: SurfaceRenderSpec, action: { id: string; label: string; requires_confirmation?: boolean }, payload: Record<string, JsonValue> = {}) {
   const surfaceId = typeof spec.props.surface_id === "string" ? spec.props.surface_id : "";
   const revisionId = typeof spec.props.revision_id === "string" ? spec.props.revision_id : "";
   if (!surfaceId || !revisionId) return;
   await api.runGeneratedSurfaceAction(surfaceId, action.id, {
     revision_id: revisionId,
     interaction_id: `surface_interaction_${Date.now()}`,
+    confirmed: action.requires_confirmation === true,
     action_payload: payload
   });
   await reloadActiveSession();
@@ -1580,7 +1665,8 @@ async function reviewWorkSummary(block: WorkSummaryBlock) {
   }
 }
 
-async function applySessionDetail(detail: SessionDetail) {
+async function applySessionDetail(detail: SessionDetail, generation = workspaceRoomGeneration) {
+  if (generation !== workspaceRoomGeneration) return;
   activeSession.value = detail.session;
   updateSessionInPlace(detail.session);
   messages.value = detail.messages;
@@ -1600,22 +1686,27 @@ async function applySessionDetail(detail: SessionDetail) {
   if (activeMemory.value && !detail.memory.some((item) => item.id === activeMemory.value?.memory.id)) {
     activeMemory.value = null;
   }
-  await hydrateMemoryContent(detail.memory);
+  await hydrateMemoryContent(detail.memory, generation);
 }
 
-async function reloadActiveSession() {
+async function reloadActiveSession(generation = workspaceRoomGeneration) {
   if (!activeSession.value) {
     return;
   }
-  await applySessionDetail(await api.getSession(activeSession.value.id));
+  const sessionId = activeSession.value.id;
+  const detail = await api.getSession(sessionId);
+  if (generation !== workspaceRoomGeneration || activeSession.value?.id !== sessionId) return;
+  await applySessionDetail(detail, generation);
 }
 
-async function hydrateMemoryContent(items: Array<MemoryFrontmatter & { file_path: string }>) {
+async function hydrateMemoryContent(items: Array<MemoryFrontmatter & { file_path: string }>, generation = workspaceRoomGeneration) {
+  if (generation !== workspaceRoomGeneration) return;
   const missing = items.filter((item) => memoryContent.value[item.id] === undefined);
   if (missing.length === 0) {
     return;
   }
   const details = await Promise.all(missing.map((item) => api.getMemory(item.id).catch(() => undefined)));
+  if (generation !== workspaceRoomGeneration) return;
   memoryContent.value = {
     ...memoryContent.value,
     ...Object.fromEntries(details.filter((item): item is MemoryDetail => Boolean(item)).map((item) => [item.memory.id, item.content]))

@@ -32,8 +32,9 @@ export interface WorkspaceFileTransactionRequest {
   rollbackStage?: () => Promise<void>;
   /** Some finalizers are themselves recoverable and must keep the journal. */
   preserveOnFinalizeFailure?: boolean;
-  commit(transaction: Transaction<WorkspaceDb>): Promise<void>;
-  rollback(transaction: Transaction<WorkspaceDb>): Promise<void>;
+  /** The journal id lets the resource attach deferred queue rows to this exact file commit. */
+  commit(transaction: Transaction<WorkspaceDb>, fileTransactionId: string): Promise<void>;
+  rollback(transaction: Transaction<WorkspaceDb>, fileTransactionId: string): Promise<void>;
 }
 
 /** Coordinates a filesystem rename with one SQLite transaction without knowing resource semantics. */
@@ -86,7 +87,7 @@ export class WorkspaceFileTransactionCoordinator {
       this.failureInjector?.("staged");
       await this.db.transaction().execute(async (transaction) => {
         this.failureInjector?.("db_transaction");
-        await request.commit(transaction);
+        await request.commit(transaction, id);
         await transaction.updateTable("workspace_file_transactions").set({ status: "db_committed", updated_at: new Date().toISOString() }).where("id", "=", id).execute();
       });
       databaseCommitted = true;
@@ -122,7 +123,7 @@ export class WorkspaceFileTransactionCoordinator {
       }
       try {
         await this.db.transaction().execute(async (transaction) => {
-          await request.rollback(transaction);
+          await request.rollback(transaction, id);
           await transaction.deleteFrom("workspace_file_transactions").where("id", "=", id).execute();
         });
       } catch (rollbackError) {

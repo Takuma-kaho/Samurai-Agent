@@ -43,6 +43,20 @@ export interface Core09AutomationRunResult {
   blocked?: true;
 }
 
+/**
+ * A pre-authorized, immutable snapshot for a trigger job that another
+ * transaction will persist.  It deliberately contains no queue side effect.
+ */
+export interface CollectionTriggerDelivery {
+  workspaceId: string;
+  roomId: string;
+  authority: NonNullable<AutomationJobRecord["authority"]>;
+  createdPrincipalSnapshot: NonNullable<AutomationJobRecord["created_principal_snapshot"]>;
+  sourceSnapshot: NonNullable<AutomationJobRecord["source_snapshot"]>;
+  connectionId?: string;
+  sessionRef?: NonNullable<AutomationJobRecord["session_ref"]>;
+}
+
 interface AutomationStore {
   saveAutomationJob(job: AutomationJobRecord): Promise<AutomationJobRecord>;
   getAutomationJob(id: string): Promise<AutomationJobRecord | undefined>;
@@ -113,6 +127,23 @@ export class Core09AutomationDomainService {
 
   runSessionlessMemoryReview(): Promise<DomainOperationOutput<"automation.memory_review.run">> {
     return this.dependencies.sessionlessMemoryReview();
+  }
+
+  /**
+   * Validates the initiating authority before Collection starts its file/DB
+   * transaction.  The job itself is inserted by that same transaction.
+   */
+  async prepareCollectionTriggerDelivery(context: TrustedDomainContext): Promise<CollectionTriggerDelivery> {
+    const authority = await this.authorityFromContext(context, "edit");
+    return {
+      workspaceId,
+      roomId: authority.roomId,
+      authority: authority.authority,
+      createdPrincipalSnapshot: authority.principal,
+      sourceSnapshot: authority.source,
+      ...(authority.connectionId ? { connectionId: authority.connectionId } : {}),
+      ...(context.sessionRef ? { sessionRef: context.sessionRef } : {})
+    };
   }
 
   async save(input: {
@@ -562,11 +593,14 @@ export class Core09AutomationDomainService {
       if (!source || source.kind !== "external_app" || !source.connector_id || source.app_id !== context.participant.appId || source.connector_id !== context.participant.connectorId) {
         throw this.dependencies.requestError("forbidden", "automation_external_connection_context_mismatch");
       }
-      const connection = await this.dependencies.store.getExternalAppConnectionByConnector({ workspaceId, connectorId: source.connector_id });
+      const connection = context.connectionId
+        ? await this.dependencies.store.getExternalAppConnection(context.connectionId)
+        : await this.dependencies.store.getExternalAppConnectionByConnector({ workspaceId, connectorId: source.connector_id });
       if (!connection || connection.status !== "active") throw new AutomationAuthorizationBlockedError("automation_connection_revoked");
       if (connection.app_id !== source.app_id || !connection.allowed_room_ids.includes(context.roomId) || !connection.ingress_classes.includes("domain_operation")) {
         throw new AutomationAuthorizationBlockedError("automation_connection_scope_denied");
       }
+      if (context.connectionId && connection.id !== context.connectionId) throw new AutomationAuthorizationBlockedError("automation_connection_scope_denied");
       if (!sameDelegated(connection.delegated_principal, context.participant.delegatedBy)) {
         throw new AutomationAuthorizationBlockedError("automation_delegated_principal_mismatch");
       }

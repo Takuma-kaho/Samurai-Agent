@@ -15,7 +15,10 @@ export function externalSendToRow(send: ExternalSendRecord): ExternalSendsTable 
     dispatch_result_json: send.dispatch_result ? stringify(send.dispatch_result) : null,
     created_at: send.created_at,
     updated_at: send.updated_at,
-    dispatched_at: send.dispatched_at ?? null
+    dispatched_at: send.dispatched_at ?? null,
+    dispatch_claim_token: null,
+    dispatch_claimed_at: null,
+    dispatch_lease_until: null
   };
 }
 

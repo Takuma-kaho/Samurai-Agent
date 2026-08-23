@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { ensureAgentWorktree, assertAgentWorktreeSeparated } from "./agent-worktree";
 import {
   chatTurnRun,
@@ -11,6 +13,7 @@ import {
   ActivityInboxItemSchema,
   ArtifactRecordSchema,
   BackendEventRecordSchema,
+  BackendTerminalEvidenceSchema,
   BackendRunRecordSchema,
   MessageEnvelopeSchema,
   ResourceRefSchema,
@@ -31,6 +34,7 @@ import {
   type MessageEnvelope,
   type MessagePresentationRecord,
   type OperationRecord,
+  type ResourceRef,
   OperationRecordSchema,
   PrincipalSchema,
   TrustedWorkspaceSourceSchema,
@@ -38,11 +42,12 @@ import {
   WorkspaceChangeRecordSchema,
   type SupportedLocale
 } from "@samurai-agent/core-schemas";
-import type { AgentBackendRegistry, BackendRunInput, MemoryCandidateLike, TemporaryContextAttachment } from "@samurai-agent/agent-backends";
+import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput, BackendTerminalEvidence, MemoryCandidateLike, TemporaryContextAttachment } from "@samurai-agent/agent-backends";
 import { BackendEventBridge, type RunChatTurnResult } from "@samurai-agent/runtime";
 import {
   PostgresWorkspaceDatabase,
   WorkspaceServerError,
+  type WorkspaceRequestContext,
   type WorkspaceSql
 } from "@samurai-agent/workspace-server";
 
@@ -67,6 +72,13 @@ export interface PostgresRuntimeChatOptions {
   principal?: import("@samurai-agent/core-schemas").Principal;
   source?: import("@samurai-agent/core-schemas").TrustedWorkspaceSource;
   sessionRefAppId?: string;
+  operationId?: string;
+  /** Reads a Room-authorized Workspace File through the formal file Port. */
+  readWorkspaceFile?: (
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    roomId: string,
+    ref: ResourceRef
+  ) => Promise<{ path: string; version: number; sha256: string; content: Buffer }>;
 }
 
 export interface PostgresRuntimeChatCompletionEvent {
@@ -123,6 +135,10 @@ export interface PostgresRuntimeChatTurnInput {
   attachments?: Array<z.infer<typeof ResourceRefSchema>>;
   temporaryContext?: TemporaryContextAttachment[];
   idempotencyKey: string;
+  retryOfRunId?: string;
+  attemptNo?: number;
+  /** Optional owner/lease cancellation for long-running worker executions. */
+  signal?: AbortSignal;
 }
 
 export type PostgresRuntimeDomainCommandInput =
@@ -144,6 +160,14 @@ interface RuntimeAgent {
   instructions: string;
   backendId: string;
 }
+
+interface MaterializedWorkspaceAttachment {
+  context: TemporaryContextAttachment;
+  absolutePath: string;
+}
+
+const runtimeWorkspaceAttachmentMaxBytes = 8 * 1024 * 1024;
+const runtimeWorkspaceAttachmentMaxTotalBytes = 32 * 1024 * 1024;
 
 interface RuntimeAdmission {
   session: SessionRecord;
@@ -303,6 +327,8 @@ export class PostgresRuntimeChat {
   private readonly principal?: import("@samurai-agent/core-schemas").Principal;
   private readonly source?: import("@samurai-agent/core-schemas").TrustedWorkspaceSource;
   private readonly sessionRefAppId: string;
+  private readonly operationId?: string;
+  private readonly readWorkspaceFile?: PostgresRuntimeChatOptions["readWorkspaceFile"];
 
   constructor(options: PostgresRuntimeChatOptions) {
     this.database = options.database;
@@ -318,6 +344,8 @@ export class PostgresRuntimeChat {
     this.principal = options.principal ? PrincipalSchema.parse(options.principal) : undefined;
     this.source = options.source ? TrustedWorkspaceSourceSchema.parse(options.source) : undefined;
     this.sessionRefAppId = options.sessionRefAppId?.trim() || "samurai-native";
+    this.operationId = options.operationId?.trim() || undefined;
+    this.readWorkspaceFile = options.readWorkspaceFile;
   }
 
   async createSession(input: PostgresRuntimeSessionInput): Promise<SessionRecord> {
@@ -483,6 +511,335 @@ export class PostgresRuntimeChat {
     });
   }
 
+  async cancelBackendRun(runId: string): Promise<BackendRunRecord> {
+    const initial = await this.requireControlRun(runId);
+    if (isSettled(initial)) return initial;
+    const admission = await this.admissionForRun(initial);
+    if (initial.status === "queued") {
+      const evidence = { kind: "not_started" as const, source: "preflight_rejection" as const };
+      const terminal = await this.controlTerminalEvent(initial, evidence, {
+        code: "cancelled",
+        message: "Queued run was cancelled before backend start.",
+        retryable: false,
+        causeCategory: "cancellation"
+      }, "cancel");
+      const cancelled = await this.commitTerminal({ admission, terminal, output: "", requestedCancel: true });
+      await this.notifyControlCompletion(admission, cancelled, terminal, true);
+      return cancelled;
+    }
+
+    const preExternal = isPreExternalPhase(initial.phase);
+    const cancelling = await this.markCancelling(initial);
+    if (isSettled(cancelling)) return cancelling;
+    const backend = this.backendRegistry.get(cancelling.backend_id);
+    let cancellation: { kind: "settled"; evidence: BackendTerminalEvidence } | { kind: "requested" } | { kind: "unsupported" } = { kind: "unsupported" };
+    let cancelError: unknown;
+    if (backend?.cancelRun) {
+      try {
+        cancellation = await withTimeout(backend.cancelRun(runId), 2_500);
+      } catch (error) {
+        cancelError = error;
+      }
+    }
+    const latest = await this.getBackendRun(runId);
+    if (!latest) throw new WorkspaceServerError(`runtime_backend_run_not_found:${runId}`, 404);
+    if (isSettled(latest)) return latest;
+    const evidence: BackendTerminalEvidence = cancellation.kind === "settled"
+      ? cancellation.evidence
+      : preExternal
+        ? { kind: "not_started", source: "preflight_rejection" }
+        : { kind: "indeterminate", reason: cancelError ? "cancel_unconfirmed" : "cancel_unconfirmed", providerStarted: true, mayHaveSideEffects: true };
+    const failure = evidence.kind === "indeterminate"
+      ? {
+          code: cancelError ? "backend_cancel_failed" : "backend_cancel_unconfirmed",
+          message: cancelError instanceof Error ? summarize(cancelError.message, 240) : "Backend cancellation could not be confirmed.",
+          retryable: false,
+          causeCategory: "cancellation" as const
+        }
+      : evidence.kind === "failed" ? evidence.error : undefined;
+    const terminal = await this.controlTerminalEvent(cancelling, evidence, failure, "cancel");
+    const settled = await this.commitTerminal({ admission, terminal, output: "", requestedCancel: true });
+    await this.notifyControlCompletion(admission, settled, terminal, true);
+    return settled;
+  }
+
+  async resumeBackendRun(runId: string, input: Record<string, JsonValue>): Promise<BackendRunRecord> {
+    const initial = await this.requireControlRun(runId);
+    if (isSettled(initial)) return initial;
+    if (initial.status !== "waiting_for_backend_input") throw new WorkspaceServerError(`runtime_run_not_waiting:${runId}`, 409);
+    const safeInput = validateResumeInput(input);
+    const backend = this.backendRegistry.get(initial.backend_id);
+    if (!backend?.resumeRun || !initial.backend_session_id) {
+      const admission = await this.admissionForRun(initial);
+      const failure = {
+        code: !initial.backend_session_id ? "backend_native_session_missing" : "backend_resume_unsupported",
+        message: !initial.backend_session_id ? "Backend cannot resume because its native Session ID is missing." : "Backend does not support resume.",
+        retryable: false,
+        causeCategory: "configuration" as const
+      };
+      const terminal = await this.controlTerminalEvent(initial, { kind: "not_started", source: "preflight_rejection" }, failure, "resume-unsupported");
+      const settled = await this.commitTerminal({ admission, terminal, output: "" });
+      await this.notifyControlCompletion(admission, settled, terminal);
+      return settled;
+    }
+    const resumed = await this.prepareResumeRun(initial, safeInput);
+    if (isSettled(resumed)) return resumed;
+    const admission = await this.admissionForRun(resumed);
+    const backendSessionId = resumed.backend_session_id;
+    if (!backendSessionId) throw new WorkspaceServerError("runtime_resume_backend_session_missing", 409);
+    const streamInput: Record<string, JsonValue> = { ...safeInput, backend_session_id: backendSessionId };
+    const settled = await this.executeBackendStream({
+      admission: { ...admission, run: resumed },
+      stream: backend.resumeRun(resumed.id, streamInput),
+      unknownOnError: true
+    });
+    await this.notifyCompletionActivity(await this.project(settled), admission.userMessage.content);
+    return settled;
+  }
+
+  async syncBackendRun(runId: string): Promise<BackendRunRecord> {
+    const run = await this.requireControlRun(runId);
+    if (isSettled(run)) return run;
+    const admission = await this.admissionForRun(run);
+    const backend = this.backendRegistry.get(run.backend_id);
+    if (!backend?.streamEvents) {
+      const event = BackendEventRecordSchema.parse({
+        id: `event:control-sync:${stableHash({ workspaceId: this.workspaceId, runId: run.id, attemptNo: run.current_attempt ?? 1 }).slice(0, 40)}`,
+        run_id: run.id,
+        session_id: run.session_id,
+        event_type: "backend_stream_unavailable",
+        sequence: await this.nextEventSequence(run.id),
+        attempt_no: run.current_attempt ?? 1,
+        source_event_id: `control:sync-unavailable:${run.id}:${run.current_attempt ?? 1}`,
+        payload: { reason: "stream_sync_unsupported", message: "Backend stream synchronization is unavailable.", run_status: run.status },
+        resource_refs: [],
+        created_at: nowIso()
+      });
+      const saved = await this.appendEvent(event);
+      if (saved) await this.notifyEvent(saved, admission.session.room_id!);
+      return (await this.getBackendRun(run.id)) ?? run;
+    }
+    const settled = await this.executeBackendStream({ admission, stream: backend.streamEvents(run.id), unknownOnError: true });
+    await this.notifyCompletionActivity(await this.project(settled), admission.userMessage.content);
+    return settled;
+  }
+
+  async recoverBackendRun(runId: string): Promise<BackendRunRecord> {
+    const run = await this.requireControlRun(runId);
+    if (isSettled(run)) return run;
+    const startedAt = Date.parse(run.started_at);
+    if (!Number.isFinite(startedAt) || Date.now() - startedAt < 60_000) {
+      throw new WorkspaceServerError("runtime_recovery_run_not_stale", 409);
+    }
+    const admission = await this.admissionForRun(run);
+    const outcomeUnknown = run.status === "running";
+    const evidence: BackendTerminalEvidence = outcomeUnknown
+      ? { kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true }
+      : {
+          kind: "failed",
+          source: "process_exit",
+          error: {
+            code: "runtime_recovery_admission_interrupted",
+            message: "The process stopped before the backend was started.",
+            retryable: true,
+            causeCategory: "runtime"
+          }
+        };
+    const terminal = await this.controlTerminalEvent(run, evidence, evidence.kind === "failed" ? evidence.error : {
+      code: "runtime_recovery_outcome_unknown",
+      message: "The process stopped while an external backend may have been running.",
+      retryable: true,
+      causeCategory: "runtime"
+    }, "recover");
+    const settled = await this.commitTerminal({ admission, terminal, output: "" });
+    await this.notifyControlCompletion(admission, settled, terminal);
+    return settled;
+  }
+
+  async retryBackendRun(runId: string, input: { idempotencyKey: string; confirmUnknown?: boolean }): Promise<RunChatTurnResult> {
+    const original = await this.requireControlRun(runId);
+    if (original.status !== "failed" && original.status !== "outcome_unknown") {
+      throw new WorkspaceServerError("runtime_retry_requires_failed_or_unknown_run", 409);
+    }
+    if (original.status === "outcome_unknown" && input.confirmUnknown !== true) {
+      throw new WorkspaceServerError("runtime_retry_unknown_confirmation_required", 409);
+    }
+    if (!original.session_id) throw new WorkspaceServerError("runtime_retry_session_missing", 409);
+    const admission = await this.admissionForRun(original);
+    const envelope = admission.userMessage.envelope;
+    return this.runChatTurn({
+      sessionId: original.session_id,
+      content: admission.userMessage.content,
+      ...(original.agent_id ? { agentId: original.agent_id } : {}),
+      backendId: original.backend_id,
+      inputLocale: admission.userMessage.input_locale,
+      outputLocale: admission.userMessage.output_locale,
+      metadata: envelope?.metadata ?? {},
+      attachments: envelope?.attachments ?? [],
+      idempotencyKey: requireId(input.idempotencyKey, "runtime_retry_idempotency_key_required"),
+      retryOfRunId: original.id,
+      attemptNo: (original.current_attempt ?? 1) + 1
+    });
+  }
+
+  private async requireControlRun(runId: string): Promise<BackendRunRecord> {
+    const run = await this.getBackendRun(runId);
+    if (!run) throw new WorkspaceServerError(`runtime_backend_run_not_found:${runId}`, 404);
+    if (!run.room_id) throw new WorkspaceServerError(`runtime_backend_run_room_missing:${runId}`, 409);
+    await this.database.withContext(this.context(), async (sql) => this.assertRoomCanExecute(sql, run.room_id!));
+    return run;
+  }
+
+  private async admissionForRun(run: BackendRunRecord): Promise<RuntimeAdmission> {
+    if (!run.session_id || !run.room_id || !run.input_message_id) {
+      throw new WorkspaceServerError(`runtime_run_admission_incomplete:${run.id}`, 409);
+    }
+    return this.database.withContext(this.context(), async (sql) => {
+      await this.assertRoomCanExecute(sql, run.room_id!);
+      const [sessionResult, messageResult, operationResult, activityResult] = await Promise.all([
+        sql.query<RuntimeSessionRow>(
+          `SELECT workspace_id, id, session_key, room_id, title, ui_locale, output_locale, created_at, updated_at
+           FROM workspace_runtime_sessions WHERE workspace_id = $1 AND id = $2`,
+          [this.workspaceId, run.session_id]
+        ),
+        sql.query<RuntimeMessageRow>(
+          "SELECT * FROM workspace_runtime_messages WHERE workspace_id = $1 AND id = $2",
+          [this.workspaceId, run.input_message_id]
+        ),
+        sql.query<RuntimeOperationRow>(
+          `SELECT workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at
+           FROM workspace_runtime_operations WHERE workspace_id = $1 AND id = $2`,
+          [this.workspaceId, runtimeOperationId(run.id)]
+        ),
+        sql.query<RuntimeActivityRow>(
+          `SELECT * FROM workspace_runtime_activities
+           WHERE workspace_id = $1 AND backend_run_id = $2 AND room_id = $3
+           ORDER BY created_at DESC LIMIT 1`,
+          [this.workspaceId, run.id, run.room_id]
+        )
+      ]);
+      const sessionRow = sessionResult.rows[0];
+      const messageRow = messageResult.rows[0];
+      const operationRow = operationResult.rows[0];
+      const activityRow = activityResult.rows[0];
+      if (!sessionRow || !messageRow || !operationRow || !activityRow) {
+        throw new WorkspaceServerError(`runtime_run_admission_incomplete:${run.id}`, 500);
+      }
+      return {
+        session: sessionFromRow(sessionRow),
+        userMessage: messageFromRow(messageRow),
+        run,
+        operation: operationFromRow(operationRow),
+        activity: ActivityRecordSchema.parse(jsonValue(activityRow.record)),
+        replay: true
+      };
+    });
+  }
+
+  private async markCancelling(run: BackendRunRecord): Promise<BackendRunRecord> {
+    return this.database.withContext(this.context(), async (sql) => {
+      await this.assertRoomCanExecute(sql, run.room_id!);
+      const currentResult = await sql.query<RuntimeRunRow>(
+        "SELECT * FROM workspace_runtime_runs WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+        [this.workspaceId, run.id]
+      );
+      const current = currentResult.rows[0] ? runFromRow(currentResult.rows[0]) : undefined;
+      if (!current) throw new WorkspaceServerError(`runtime_backend_run_not_found:${run.id}`, 404);
+      if (isSettled(current)) return current;
+      const currentPhase = current.phase ?? "admitted";
+      const updated = await sql.query<RuntimeRunRow>(
+        `UPDATE workspace_runtime_runs SET phase = 'cancelling'
+         WHERE workspace_id = $1 AND id = $2 AND status = $3 AND phase = $4
+         RETURNING *`,
+        [this.workspaceId, current.id, current.status, currentPhase]
+      );
+      if (!updated.rows[0]) throw new WorkspaceServerError(`runtime_cancel_cas_conflict:${run.id}`, 409);
+      return runFromRow(updated.rows[0]);
+    });
+  }
+
+  private async prepareResumeRun(run: BackendRunRecord, input: Record<string, JsonValue>): Promise<BackendRunRecord> {
+    return this.database.withContext(this.context(), async (sql) => {
+      await this.assertRoomCanExecute(sql, run.room_id!);
+      const currentResult = await sql.query<RuntimeRunRow>(
+        "SELECT * FROM workspace_runtime_runs WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+        [this.workspaceId, run.id]
+      );
+      const current = currentResult.rows[0] ? runFromRow(currentResult.rows[0]) : undefined;
+      if (!current) throw new WorkspaceServerError(`runtime_backend_run_not_found:${run.id}`, 404);
+      if (isSettled(current)) return current;
+      if (current.status !== "waiting_for_backend_input" || current.phase !== "waiting") {
+        throw new WorkspaceServerError(`runtime_run_not_waiting:${run.id}`, 409);
+      }
+      const now = nowIso();
+      const event = BackendEventRecordSchema.parse({
+        id: `event:control-resume:${stableHash({ workspaceId: this.workspaceId, runId: run.id, attemptNo: run.current_attempt ?? 1 }).slice(0, 40)}`,
+        run_id: run.id,
+        session_id: run.session_id,
+        ...(run.backend_session_id ? { backend_session_id: run.backend_session_id } : {}),
+        event_type: "backend_native_input_submitted",
+        sequence: await nextSequence(sql, this.workspaceId, run.id),
+        attempt_no: run.current_attempt ?? 1,
+        source_event_id: `control:resume-input:${run.id}:${run.current_attempt ?? 1}`,
+        payload: { submitted_at: now, has_input: Object.keys(input).length > 0 },
+        resource_refs: [],
+        created_at: now
+      });
+      await insertRuntimeEvent(sql, this.workspaceId, event);
+      const updated = await sql.query<RuntimeRunRow>(
+        `UPDATE workspace_runtime_runs
+         SET status = 'running', phase = 'backend_starting', completed_at = NULL, error_code = NULL
+         WHERE workspace_id = $1 AND id = $2 AND status = 'waiting_for_backend_input' AND phase = 'waiting'
+         RETURNING *`,
+        [this.workspaceId, run.id]
+      );
+      if (!updated.rows[0]) throw new WorkspaceServerError(`runtime_resume_cas_conflict:${run.id}`, 409);
+      await sql.query(
+        `INSERT INTO workspace_runtime_reservations(workspace_id, session_id, run_id, version, status, created_at, updated_at)
+         VALUES ($1, $2, $3, 1, 'held', $4, $4)
+         ON CONFLICT (workspace_id, session_id) DO UPDATE
+         SET run_id = EXCLUDED.run_id, status = 'held', version = workspace_runtime_reservations.version + 1, updated_at = EXCLUDED.updated_at`,
+        [this.workspaceId, run.session_id, run.id, now]
+      );
+      const operation = await this.operationForRun(sql, run.id);
+      if (operation) await this.updateRuntimeOperation(sql, operation, { status: "created" });
+      return runFromRow(updated.rows[0]);
+    });
+  }
+
+  private async controlTerminalEvent(
+    run: BackendRunRecord,
+    evidence: BackendTerminalEvidence,
+    failure: { code: string; message: string; retryable: boolean; causeCategory: string } | undefined,
+    source: string
+  ): Promise<BackendEventRecord> {
+    const error = failure ?? (evidence.kind === "failed" ? evidence.error : undefined);
+    const event = BackendEventRecordSchema.parse({
+      id: `event:control:${stableHash({ workspaceId: this.workspaceId, runId: run.id, source, operationId: this.operationId ?? null }).slice(0, 48)}`,
+      run_id: run.id,
+      ...(run.session_id ? { session_id: run.session_id } : {}),
+      ...(run.backend_session_id ? { backend_session_id: run.backend_session_id } : {}),
+      event_type: evidence.kind === "completed" ? "run_completed" : "run_failed",
+      sequence: await this.nextEventSequence(run.id),
+      attempt_no: run.current_attempt ?? 1,
+      source_event_id: `control:${source}:${run.id}:${run.current_attempt ?? 1}`,
+      payload: {
+        ...(error ? { error_code: error.code, message: summarize(error.message, 240), retryable: error.retryable, cause_category: error.causeCategory } : {}),
+        terminal_evidence: evidence
+      },
+      resource_refs: [],
+      created_at: nowIso()
+    });
+    return event;
+  }
+
+  private async notifyControlCompletion(admission: RuntimeAdmission, run: BackendRunRecord, terminal: BackendEventRecord, requestedCancel = false): Promise<void> {
+    if (run.status === statusForTerminalEvent(terminal, requestedCancel)) {
+      await this.notifyEvent(terminal, admission.session.room_id!);
+    }
+    if (isSettled(run)) await this.notifyCompletionActivity(await this.project(run), admission.userMessage.content);
+  }
+
   async listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]> {
     if (sessionId !== undefined) requireId(sessionId, "session_id_required");
     return this.database.withContext(this.context(), async (sql) => {
@@ -621,9 +978,22 @@ export class PostgresRuntimeChat {
       output_locale: outputLocale,
       metadata: input.metadata ?? {},
       attachments: input.attachments ?? [],
-      temporary_context: (input.temporaryContext ?? []).map(temporaryContextHash)
+      temporary_context: (input.temporaryContext ?? []).map(temporaryContextHash),
+      retry_of_run_id: input.retryOfRunId ?? null,
+      attempt_no: input.attemptNo ?? 1
     });
-    const admission = await this.admit({ session, agent, backend, envelope, content, requestHash, idempotencyKey, outputLocale });
+    const admission = await this.admit({
+      session,
+      agent,
+      backend,
+      envelope,
+      content,
+      requestHash,
+      idempotencyKey,
+      outputLocale,
+      retryOfRunId: input.retryOfRunId,
+      attemptNo: input.attemptNo
+    });
     if (admission.replay) {
       if (isSettled(admission.run)) {
         const replayed = await this.project(admission.run);
@@ -657,55 +1027,123 @@ export class PostgresRuntimeChat {
       throw new WorkspaceServerError(`runtime_backend_not_ready:${notReadyReason}`, 409);
     }
 
-    await this.transitionToExternalRunning(admission.run);
-    await ensureAgentWorktree(this.agentWorktreeRoot, this.coreWorkspaceRoot);
-    const inputForBackend: BackendRunInput = {
-      run_id: admission.run.id,
-      session_id: session.id,
-      room_id: session.room_id,
-      ...(agent ? { agent_context: { id: agent.id, name: agent.name, role: agent.role, instructions: agent.instructions, authority: "supporting_context" as const } } : {}),
-      input_message_id: admission.userMessage.id,
-      workspace_root: this.agentWorktreeRoot,
-      working_directory: this.agentWorktreeRoot,
-      envelope,
-      user_input: content,
-      input_locale: inputLocale,
-      output_locale: outputLocale,
-      active_memory: knowledge.map((page) => memoryCandidate(page)),
-      recent_messages: await this.listMessages(session.id),
-      ...(input.temporaryContext?.length ? { temporary_context: input.temporaryContext } : {}),
-      metadata: input.metadata ?? {},
-      context_intent: "light_chat"
-    };
+    let materializedAttachments: MaterializedWorkspaceAttachment[] = [];
+    try {
+      await ensureAgentWorktree(this.agentWorktreeRoot, this.coreWorkspaceRoot);
+      materializedAttachments = await this.materializeWorkspaceAttachments(session.room_id, input.attachments ?? [], admission.run.id);
+    } catch (error) {
+      await this.rejectAdmittedRun(admission, session, content, error, "runtime_workspace_attachment_unavailable");
+    }
+    try {
+      await this.transitionToExternalRunning(admission.run);
+      const inputForBackend: BackendRunInput = {
+        run_id: admission.run.id,
+        session_id: session.id,
+        room_id: session.room_id,
+        ...(agent ? { agent_context: { id: agent.id, name: agent.name, role: agent.role, instructions: agent.instructions, authority: "supporting_context" as const } } : {}),
+        input_message_id: admission.userMessage.id,
+        workspace_root: this.agentWorktreeRoot,
+        working_directory: this.agentWorktreeRoot,
+        envelope,
+        user_input: content,
+        input_locale: inputLocale,
+        output_locale: outputLocale,
+        active_memory: knowledge.map((page) => memoryCandidate(page)),
+        recent_messages: await this.listMessages(session.id),
+        ...((input.temporaryContext?.length || materializedAttachments.length) ? {
+          temporary_context: [...(input.temporaryContext ?? []), ...materializedAttachments.map((item) => item.context)]
+        } : {}),
+        metadata: input.metadata ?? {},
+        context_intent: "light_chat",
+        ...(input.signal ? { abort_signal: input.signal } : {})
+      };
+      const settled = await this.executeBackendStream({
+        admission,
+        stream: backend.runTurn(inputForBackend)
+      });
+      const result = await this.project(settled);
+      await this.notifyCompletionActivity(result, content);
+      return result;
+    } finally {
+      await Promise.all(materializedAttachments.map((item) => rm(item.absolutePath, { force: true }).catch(() => undefined)));
+    }
+  }
+
+  private async materializeWorkspaceAttachments(
+    roomId: string,
+    refs: ResourceRef[],
+    runId: string
+  ): Promise<MaterializedWorkspaceAttachment[]> {
+    const fileRefs = refs.filter((ref) => ref.kind === "file");
+    if (fileRefs.length === 0) return [];
+    if (!this.readWorkspaceFile) throw new WorkspaceServerError("runtime_workspace_attachment_reader_unavailable", 503);
+    await mkdir(path.join(this.agentWorktreeRoot, "attachments"), { recursive: true, mode: 0o700 });
+    let totalBytes = 0;
+    const materialized: MaterializedWorkspaceAttachment[] = [];
+    try {
+      for (const ref of fileRefs) {
+        const file = await this.readWorkspaceFile(this.context(), roomId, ref);
+        if (ref.id !== file.sha256) throw new WorkspaceServerError("runtime_workspace_attachment_reference_mismatch", 409);
+        if (ref.version !== undefined && ref.version !== String(file.version)) {
+          throw new WorkspaceServerError("runtime_workspace_attachment_version_conflict", 409);
+        }
+        if (file.content.byteLength > runtimeWorkspaceAttachmentMaxBytes
+          || totalBytes + file.content.byteLength > runtimeWorkspaceAttachmentMaxTotalBytes) {
+          throw new WorkspaceServerError("runtime_workspace_attachment_too_large", 413);
+        }
+        totalBytes += file.content.byteLength;
+        const extension = path.extname(file.path).replace(/[^A-Za-z0-9.]/g, "").slice(0, 16);
+        const attachmentHash = stableHash({ runId, path: file.path, version: file.version });
+        const relativePath = path.join("attachments", `workspace-${attachmentHash.slice(0, 48)}${extension}`);
+        const absolutePath = path.join(this.agentWorktreeRoot, relativePath);
+        await writeFile(absolutePath, file.content, { flag: "wx", mode: 0o600 }).catch(async (error: unknown) => {
+          if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error;
+          const existing = await readFile(absolutePath);
+          if (!existing.equals(file.content)) throw new WorkspaceServerError("runtime_workspace_attachment_materialization_conflict", 409);
+        });
+        materialized.push({
+          absolutePath,
+          context: {
+            id: `workspace_attachment_${attachmentHash.slice(0, 48)}`,
+            kind: "workspace_file",
+            label: ref.label ?? file.path,
+            source_name: file.path,
+            mime_type: "application/octet-stream",
+            file_path: relativePath,
+            created_at: nowIso(),
+            expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+            metadata: { resource_kind: ref.kind, resource_id: ref.id, resource_uri: ref.uri, version: file.version }
+          }
+        });
+      }
+      return materialized;
+    } catch (error) {
+      await Promise.all(materialized.map((item) => rm(item.absolutePath, { force: true }).catch(() => undefined)));
+      throw error;
+    }
+  }
+
+  private async rejectAdmittedRun(
+    admission: RuntimeAdmission,
+    session: SessionRecord,
+    instructionSummary: string,
+    error: unknown,
+    fallbackCode: string
+  ): Promise<never> {
+    const reason = error instanceof WorkspaceServerError ? error.code : fallbackCode;
     const eventBridge = new BackendEventBridge({
       runId: admission.run.id,
       sessionId: session.id,
       attemptNo: admission.run.current_attempt ?? 1,
       startSequence: await this.nextEventSequence(admission.run.id)
     });
-    let terminal: BackendEventRecord | undefined;
-    let output = "";
-    try {
-      for await (const backendEvent of backend.runTurn(inputForBackend)) {
-        const projection = eventBridge.project(backendEvent);
-        if (projection.terminal) {
-          terminal = projection.record;
-          if (projection.terminal === "completed") output = this.collectText(output, projection.record);
-          continue;
-        }
-        output = this.collectText(output, projection.record);
-        await this.appendEvent(projection.record);
-        await this.notifyEvent(projection.record, session.room_id);
-      }
-    } catch (error) {
-      terminal = this.failureEvent(admission.run, error, eventBridge);
-    }
-    if (!terminal) terminal = this.failureEvent(admission.run, new Error("backend_terminal_event_missing"), eventBridge);
-    const settled = await this.commitTerminal({ admission, terminal, output });
-    await this.notifyEvent(terminal, session.room_id);
-    const result = await this.project(settled);
-    await this.notifyCompletionActivity(result, content);
-    return result;
+    const terminal = this.failureEvent(admission.run, error, eventBridge);
+    const failed = await this.commitAdmissionFailure({ admission, terminal, reason });
+    await this.notifyEvent(terminal, requireId(session.room_id, "runtime_session_room_missing"));
+    if (!isSettled(failed)) throw new WorkspaceServerError(`runtime_admission_failure_not_settled:${failed.id}`, 500);
+    const result = await this.project(failed);
+    await this.notifyCompletionActivity(result, instructionSummary);
+    throw error instanceof WorkspaceServerError ? error : new WorkspaceServerError(fallbackCode, 503);
   }
 
   private async admit(input: {
@@ -717,6 +1155,8 @@ export class PostgresRuntimeChat {
     requestHash: string;
     idempotencyKey: string;
     outputLocale: SupportedLocale;
+    retryOfRunId?: string;
+    attemptNo?: number;
   }): Promise<RuntimeAdmission> {
     const now = nowIso();
     const runId = createId("run");
@@ -748,12 +1188,12 @@ export class PostgresRuntimeChat {
       backend_kind: input.backend.kind,
       status: "queued",
       phase: "admitted",
-      current_attempt: 1,
+      current_attempt: input.attemptNo && input.attemptNo > 0 ? Math.floor(input.attemptNo) : 1,
       request_idempotency_key: input.idempotencyKey,
       request_hash: input.requestHash,
       started_at: now,
       input_summary: summarize(input.content),
-      metadata: {}
+      metadata: input.retryOfRunId ? { retry_of_run_id: input.retryOfRunId } : {}
     });
     const operation = buildRuntimeOperation({
       session: input.session,
@@ -889,6 +1329,59 @@ export class PostgresRuntimeChat {
       );
       return { session: input.session, ...(input.agent ? { agent: input.agent } : {}), userMessage, run, operation, activity, replay: false };
     });
+  }
+
+  private async executeBackendStream(input: {
+    admission: RuntimeAdmission;
+    stream: AsyncIterable<BackendOutputEvent>;
+    unknownOnError?: boolean;
+  }): Promise<BackendRunRecord> {
+    const { admission } = input;
+    const eventBridge = new BackendEventBridge({
+      runId: admission.run.id,
+      sessionId: admission.session.id,
+      attemptNo: admission.run.current_attempt ?? 1,
+      startSequence: await this.nextEventSequence(admission.run.id)
+    });
+    let terminal: BackendEventRecord | undefined;
+    let output = "";
+    try {
+      for await (const backendEvent of input.stream) {
+        const projection = eventBridge.project(backendEvent);
+        if (projection.terminal) {
+          terminal = projection.record;
+          if (projection.terminal === "completed") output = this.collectText(output, projection.record);
+          continue;
+        }
+        output = this.collectText(output, projection.record);
+        const saved = await this.appendEvent(projection.record);
+        if (saved) await this.notifyEvent(saved, admission.session.room_id!);
+      }
+    } catch (error) {
+      terminal = this.failureEvent(
+        admission.run,
+        error,
+        eventBridge,
+        input.unknownOnError === true
+          ? { kind: "indeterminate", reason: "transport_lost", providerStarted: true, mayHaveSideEffects: true }
+          : undefined
+      );
+    }
+    if (!terminal) {
+      terminal = this.failureEvent(
+        admission.run,
+        new Error("backend_terminal_event_missing"),
+        eventBridge,
+        input.unknownOnError === true
+          ? { kind: "indeterminate", reason: "runtime_state_unavailable", providerStarted: true, mayHaveSideEffects: true }
+          : undefined
+      );
+    }
+    const settled = await this.commitTerminal({ admission, terminal, output });
+    if (settled.status === statusForTerminalEvent(terminal)) {
+      await this.notifyEvent(terminal, admission.session.room_id!);
+    }
+    return settled;
   }
 
   private async ensureRuntimeOperation(
@@ -1116,9 +1609,15 @@ export class PostgresRuntimeChat {
     });
   }
 
-  private async appendEvent(event: BackendEventRecord): Promise<BackendEventRecord> {
+  private async appendEvent(event: BackendEventRecord): Promise<BackendEventRecord | undefined> {
     BackendEventRecordSchema.parse(event);
     return this.database.withContext(this.context(), async (sql) => {
+      const runState = await sql.query<{ status: string; phase: string | null }>(
+        "SELECT status, phase FROM workspace_runtime_runs WHERE workspace_id = $1 AND id = $2",
+        [this.workspaceId, event.run_id]
+      );
+      const state = runState.rows[0];
+      if (!state || isTerminalRunState(state.status, state.phase)) return undefined;
       const existing = await sql.query<RuntimeEventRow>(
         `SELECT * FROM workspace_runtime_events WHERE workspace_id = $1 AND id = $2`,
         [this.workspaceId, event.id]
@@ -1141,16 +1640,23 @@ export class PostgresRuntimeChat {
     });
   }
 
-  private async commitTerminal(input: { admission: RuntimeAdmission; terminal: BackendEventRecord; output: string }): Promise<BackendRunRecord> {
+  private async commitTerminal(input: { admission: RuntimeAdmission; terminal: BackendEventRecord; output: string; requestedCancel?: boolean }): Promise<BackendRunRecord> {
     BackendEventRecordSchema.parse(input.terminal);
     const now = nowIso();
+    const terminalEvidence = input.terminal.event_type === "run_failed" || input.terminal.event_type === "run_completed"
+      ? BackendTerminalEvidenceSchema.safeParse(input.terminal.payload.terminal_evidence)
+      : undefined;
     const finalStatus = input.terminal.event_type === "run_completed"
       ? "completed"
       : input.terminal.event_type === "backend_waiting_for_native_input"
         ? "waiting_for_backend_input"
-        : "failed";
+          : terminalEvidence?.success && (terminalEvidence.data.kind === "cancelled" || (input.requestedCancel === true && terminalEvidence.data.kind === "not_started"))
+            ? "cancelled"
+          : terminalEvidence?.success && terminalEvidence.data.kind === "indeterminate"
+            ? "outcome_unknown"
+            : "failed";
     const finalPhase = finalStatus === "waiting_for_backend_input" ? "waiting" : "settled";
-    const outputMessage = input.output.trim()
+    const outputMessage = finalStatus === "completed" && input.output.trim()
       ? RuntimeMessageRecordSchema.parse({
           id: `message:${input.admission.run.id}:output`,
           session_id: input.admission.session.id,
@@ -1168,8 +1674,10 @@ export class PostgresRuntimeChat {
       );
       const current = currentResult.rows[0] ? runFromRow(currentResult.rows[0]) : undefined;
       if (!current) throw new WorkspaceServerError(`runtime_run_not_found:${input.admission.run.id}`, 500);
-      if (current.status !== "running" || current.phase !== "external_running") {
-        if (isSettled(current)) return current;
+      if (isSettled(current)) return current;
+      const currentPhase = current.phase ?? "admitted";
+      const activeStatuses: BackendRunRecord["status"][] = ["queued", "running", "waiting_for_backend_input"];
+      if (!activeStatuses.includes(current.status) || currentPhase === "settled") {
         throw new WorkspaceServerError(`runtime_settlement_cas_conflict:${current.id}`, 409);
       }
       const maxSequence = await sql.query<{ max_sequence: number | string | null }>(
@@ -1200,9 +1708,9 @@ export class PostgresRuntimeChat {
         `UPDATE workspace_runtime_runs
          SET status = $3, phase = $4, output_message_id = $5, output_summary = $6,
              error_code = $7, completed_at = $8
-         WHERE workspace_id = $1 AND id = $2 AND status = 'running' AND phase = 'external_running'
+         WHERE workspace_id = $1 AND id = $2 AND status = $9 AND phase = $10
          RETURNING *`,
-        [this.workspaceId, current.id, finalStatus, finalPhase, outputMessage?.id ?? null, outputSummary ?? null, errorCode ?? null, finalStatus === "waiting_for_backend_input" ? null : now]
+        [this.workspaceId, current.id, finalStatus, finalPhase, outputMessage?.id ?? null, outputSummary ?? null, errorCode ?? null, finalStatus === "waiting_for_backend_input" ? null : now, current.status, currentPhase]
       );
       if (!updated.rows[0]) throw new WorkspaceServerError(`runtime_settlement_cas_conflict:${current.id}`, 409);
       await sql.query(
@@ -1213,15 +1721,31 @@ export class PostgresRuntimeChat {
       );
       const activity = await this.activityForRun(sql, current.id, current.room_id!);
       if (activity) {
-        const finalActivity = ActivityRecordSchema.parse({
-          ...activity,
-          status: finalStatus === "completed" ? "completed" : finalStatus === "waiting_for_backend_input" ? "failed" : "failed",
-          result_summary: finalStatus === "completed" ? summarize(outputSummary ?? "Backend run completed.", 2_000) : undefined,
-          failure: finalStatus === "completed" ? undefined : { code: errorCode ?? `backend_${finalStatus}`, summary: summarize(outputSummary ?? "Backend run did not complete.", 2_000) },
-          updated_at: now,
-          finalized_at: now,
-          backend_run_id: current.id
-        });
+        const finalActivity = finalStatus === "waiting_for_backend_input"
+          ? ActivityRecordSchema.parse({
+              ...activity,
+              status: "recording",
+              result_summary: undefined,
+              failure: undefined,
+              finalized_at: undefined,
+              updated_at: now,
+              backend_run_id: current.id
+            })
+          : ActivityRecordSchema.parse({
+              ...activity,
+              status: finalStatus === "completed"
+                ? "completed"
+                : finalStatus === "cancelled"
+                  ? "cancelled"
+                  : finalStatus === "outcome_unknown"
+                    ? "outcome_unknown"
+                    : "failed",
+              result_summary: finalStatus === "completed" ? summarize(outputSummary ?? "Backend run completed.", 2_000) : undefined,
+              failure: finalStatus === "completed" ? undefined : { code: errorCode ?? `backend_${finalStatus}`, summary: summarize(outputSummary ?? "Backend run did not complete.", 2_000) },
+              updated_at: now,
+              finalized_at: now,
+              backend_run_id: current.id
+            });
         await sql.query(
           `UPDATE workspace_runtime_activities SET status = $3, record = $4::JSONB, updated_at = $5
            WHERE workspace_id = $1 AND id = $2`,
@@ -1475,10 +1999,24 @@ export class PostgresRuntimeChat {
     };
   }
 
-  private failureEvent(run: BackendRunRecord, error: unknown, bridge: BackendEventBridge): BackendEventRecord {
+  private failureEvent(
+    run: BackendRunRecord,
+    error: unknown,
+    bridge: BackendEventBridge,
+    terminalEvidence: BackendTerminalEvidence = {
+      kind: "failed",
+      source: "owned_loop_return",
+      error: {
+        code: "runtime_backend_failure",
+        message: "Backend execution failed.",
+        retryable: false,
+        causeCategory: "runtime"
+      }
+    }
+  ): BackendEventRecord {
     const message = error instanceof Error ? error.message : String(error);
     const event = bridge.project({
-      event_type: "run_failed",
+      event_type: terminalEvidence.kind === "completed" ? "run_completed" : "run_failed",
       payload: {
         error_code: "runtime_backend_failure",
         message: summarize(message, 240),
@@ -1486,11 +2024,9 @@ export class PostgresRuntimeChat {
         retryable: false,
         cause_category: "runtime"
       },
-      terminal_evidence: {
-        kind: "failed",
-        source: "owned_loop_return",
-        error: { code: "runtime_backend_failure", message: summarize(message, 240), retryable: false, causeCategory: "runtime" }
-      }
+      terminal_evidence: terminalEvidence.kind === "failed"
+        ? { ...terminalEvidence, error: { ...terminalEvidence.error, message: summarize(terminalEvidence.error.message, 240) } }
+        : terminalEvidence
     });
     return event.record;
   }
@@ -1607,6 +2143,26 @@ export class PostgresRuntimeCommandService {
 
   listBackendEvents(runId: string) {
     return this.chat.listBackendEvents(runId);
+  }
+
+  cancelBackendRun(runId: string) {
+    return this.chat.cancelBackendRun(runId);
+  }
+
+  resumeBackendRun(runId: string, input: Record<string, JsonValue>) {
+    return this.chat.resumeBackendRun(runId, input);
+  }
+
+  syncBackendRun(runId: string) {
+    return this.chat.syncBackendRun(runId);
+  }
+
+  recoverBackendRun(runId: string) {
+    return this.chat.recoverBackendRun(runId);
+  }
+
+  retryBackendRun(runId: string, input: { idempotencyKey: string; confirmUnknown?: boolean }) {
+    return this.chat.retryBackendRun(runId, input);
   }
 
   listWorkspaceChanges(sessionId?: string) {
@@ -1810,6 +2366,68 @@ function activityInboxFromRow(row: RuntimeActivityRow): ActivityInboxItem {
 
 function isSettled(run: BackendRunRecord): boolean {
   return run.phase === "settled" || run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "outcome_unknown";
+}
+
+function isTerminalRunState(status: string, phase: string | null): boolean {
+  return phase === "settled" || status === "completed" || status === "failed" || status === "cancelled" || status === "outcome_unknown";
+}
+
+function isPreExternalPhase(phase: string | undefined): boolean {
+  return phase === undefined || phase === "admitted" || phase === "preparing" || phase === "backend_starting";
+}
+
+function statusForTerminalEvent(event: BackendEventRecord, requestedCancel = false): BackendRunRecord["status"] {
+  if (event.event_type === "run_completed") return "completed";
+  if (event.event_type === "backend_waiting_for_native_input") return "waiting_for_backend_input";
+  const evidence = BackendTerminalEvidenceSchema.safeParse(event.payload.terminal_evidence);
+  if (!evidence.success) return "failed";
+  if (evidence.data.kind === "cancelled") return "cancelled";
+  if (evidence.data.kind === "indeterminate") return "outcome_unknown";
+  if (evidence.data.kind === "not_started" && requestedCancel) return "cancelled";
+  return "failed";
+}
+
+function validateResumeInput(input: Record<string, JsonValue>): Record<string, JsonValue> {
+  for (const [key, value] of Object.entries(input)) {
+    if (!key.trim() || !isJsonValue(value)) throw new WorkspaceServerError("runtime_resume_input_invalid", 400);
+  }
+  return { ...input };
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (typeof value !== "object") return false;
+  return Object.entries(value).every(([key, child]) => key.length > 0 && isJsonValue(child));
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("runtime_control_timeout")), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+async function nextSequence(sql: WorkspaceSql, workspaceId: string, runId: string): Promise<number> {
+  const result = await sql.query<{ max_sequence: number | string | null }>(
+    "SELECT MAX(sequence) AS max_sequence FROM workspace_runtime_events WHERE workspace_id = $1 AND run_id = $2",
+    [workspaceId, runId]
+  );
+  return Number(result.rows[0]?.max_sequence ?? 0) + 1;
+}
+
+async function insertRuntimeEvent(sql: WorkspaceSql, workspaceId: string, event: BackendEventRecord): Promise<void> {
+  await sql.query(
+    `INSERT INTO workspace_runtime_events(
+       workspace_id, id, run_id, session_id, backend_session_id, event_type, sequence,
+       attempt_no, source_event_id, source_sequence, payload, resource_refs, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::JSONB, $12::JSONB, $13)
+     ON CONFLICT (workspace_id, id) DO NOTHING`,
+    [workspaceId, event.id, event.run_id, event.session_id ?? null, event.backend_session_id ?? null, event.event_type, event.sequence, event.attempt_no ?? null, event.source_event_id ?? null, event.source_sequence ?? null, jsonText(event.payload), jsonText(event.resource_refs), event.created_at]
+  );
 }
 
 function jsonText(value: unknown): string {

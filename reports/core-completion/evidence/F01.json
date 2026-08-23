@@ -3,10 +3,10 @@
   "test_id": "F01",
   "command": "pnpm core:test:automation-schedule",
   "status": "passed",
-  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
+  "commit_sha": "9b7e672a2fa5deaba0851b413c40c2ac4fcaf835",
   "worktree_clean": false,
-  "source_sha256": "892c4b1fde628ced537d4f5887e9fe961bea988dd6825d51bc2eb5ed9d8341b1",
-  "source_graph_sha256": "8cf8aa3f753bd9335df4737a53e332b4239816a7e9f699378d09453d8920d3e0",
+  "source_sha256": "2b4d9133208886978164077c66cdfae086aff370e23a6785fc7945fa294daa24",
+  "source_graph_sha256": "e434130b84a10e0f6fdd28e662dcc6b751fb175fcbe14ab20efde0a704750755",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/runtime/src/automation/schedule-policy.ts",
@@ -35,8 +35,8 @@
     "scripts/verify-automation-schedule.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-21T22:01:07.780Z",
-  "completed_at": "2026-08-21T22:01:09.232Z",
+  "started_at": "2026-08-23T06:38:30.332Z",
+  "completed_at": "2026-08-23T06:38:31.374Z",
   "assertions": [
     {
       "name": "Timezone and spring/fall DST schedules are deterministic without duplicate fall run",

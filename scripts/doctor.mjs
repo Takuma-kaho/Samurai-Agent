@@ -11,6 +11,7 @@ const dbPath = path.join(workspaceDir, "workspace.sqlite");
 const apiPort = Number(env.PORT || process.env.PORT || 4317);
 const apiUrl = `http://127.0.0.1:${apiPort}`;
 const repairRequested = process.argv.includes("--repair");
+const strictRequested = process.argv.includes("--strict");
 
 const checks = [];
 const initialChecks = [
@@ -62,7 +63,29 @@ const gatewayPolicyCheck = checkGatewayPolicy(env, dbPath);
 checks.push(gatewayPolicyCheck);
 printCheck(gatewayPolicyCheck);
 
-process.exitCode = 0;
+// The regular doctor command is diagnostic and keeps the historical
+// non-zero findings as warnings because an API process may intentionally not
+// be running. Release gates use --strict and must fail on persisted workspace
+// or migration corruption while still ignoring the expected "API not running"
+// probe.
+if (strictRequested) {
+  const persistentChecks = new Set([
+    "workspace",
+    "legacy-workspace",
+    "db",
+    "migration",
+    "workspace-index",
+    "skill-support",
+    "backup",
+    "latest-run",
+    "gateway",
+    "gateway-policy"
+  ]);
+  const hasWorkspaceState = existsSync(workspaceDir) || existsSync(dbPath);
+  process.exitCode = hasWorkspaceState && checks.some((check) => persistentChecks.has(check.name) && !check.ok) ? 1 : 0;
+} else {
+  process.exitCode = 0;
+}
 
 function checkWorkspaceLayout(workspaceDir) {
   const expected = ["artifacts", "memory", "skills", "wiki", "rollback"];
@@ -153,11 +176,15 @@ function checkMigrationJournal(filePath) {
     return { name: "migration", ok: true, message: "DBなし" };
   }
   try {
-    const latest = runSqlite(filePath, "select name || ':' || status || ':' || created_at from migration_journal order by created_at desc limit 1;", 1500);
+    const latest = runSqlite(filePath, "select status || '|' || name || '|' || created_at from migration_journal order by created_at desc limit 1;", 1500);
+    if (!latest) {
+      return { name: "migration", ok: true, message: "migration journal 履歴なし" };
+    }
+    const [status] = latest.split("|");
     return {
       name: "migration",
-      ok: Boolean(latest),
-      message: latest || "migration journal 履歴なし"
+      ok: status === "completed",
+      message: latest.replaceAll("|", ":")
     };
   } catch (error) {
     const message = safeErrorMessage(error);

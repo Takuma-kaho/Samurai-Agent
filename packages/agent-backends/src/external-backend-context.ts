@@ -9,6 +9,16 @@ import { stringValue } from "./provider-decoder-helpers.js";
 
 export function buildExternalBackendPrompt(input: BackendRunInput): string {
   if (input.context_intent === "light_chat") {
+    const attachments = formatResourceRefsForPrompt(input.envelope?.attachments);
+    const temporaryContext = formatTemporaryContextForPrompt(input.temporary_context);
+    const supportingAttachments = attachments || temporaryContext !== "(none)"
+      ? [
+          "Workspace attachments for this turn:",
+          attachments || "(none)",
+          "Temporary attachment context:",
+          temporaryContext
+        ].join("\n")
+      : "";
     const agent = input.agent_context
       ? [
           "Agent context (supporting only; system policy, Workspace owner instructions, and the current user request take priority):",
@@ -17,9 +27,10 @@ export function buildExternalBackendPrompt(input: BackendRunInput): string {
           `instructions: ${input.agent_context.instructions}`,
           "",
           "Current user input:",
-          input.user_input
+          input.user_input,
+          ...(supportingAttachments ? ["", supportingAttachments] : [])
         ].join("\n")
-      : input.user_input;
+      : [input.user_input, ...(supportingAttachments ? ["", supportingAttachments] : [])].join("\n");
     return agent;
   }
   const contextAssembly = formatContextAssemblyForPrompt(input.context_assembly);
@@ -113,6 +124,16 @@ export function buildExternalBackendPrompt(input: BackendRunInput): string {
     "Reference context for this turn:",
     ...referenceSections
   ].join("\n");
+}
+
+function formatResourceRefsForPrompt(refs: BackendRunInput["envelope"] extends { attachments: infer Attachments } ? Attachments : never): string {
+  if (!Array.isArray(refs) || refs.length === 0) return "";
+  return refs.slice(0, 32).map((ref, index) => {
+    const value = ref as { kind?: unknown; id?: unknown; uri?: unknown; label?: unknown };
+    return `${index + 1}. ${typeof value.label === "string" && value.label ? value.label : typeof value.id === "string" ? value.id : "attachment"}
+   kind: ${typeof value.kind === "string" ? value.kind : "unknown"}
+   uri: ${typeof value.uri === "string" ? value.uri : "unknown"}`;
+  }).join("\n");
 }
 
 function formatTemporaryContextForPrompt(items: TemporaryContextAttachment[] | undefined): string {

@@ -136,7 +136,7 @@ async function addConnection(): Promise<void> {
       </label>
       <label v-if="props.browserMode">
         <span>Private key</span>
-        <textarea v-model="draft.privateKey" rows="4" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----" />
+        <textarea v-model="draft.privateKey" rows="4" autocomplete="off" placeholder="Paste private key material" />
       </label>
       <p v-if="props.error || formError" class="workspace-connection-error">{{ formError ?? props.error }}</p>
       <button class="workspace-connection-add" type="submit" :disabled="saving || props.loading"><Plus :size="15" />{{ japanese ? (props.browserMode ? "ブラウザ接続を保存" : "接続先を保存") : (props.browserMode ? "Save browser connection" : "Save connection") }}</button>

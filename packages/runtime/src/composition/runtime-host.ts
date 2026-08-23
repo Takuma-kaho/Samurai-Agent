@@ -76,6 +76,8 @@ export interface RuntimeHostCompositionDependencies {
     observeRecoveredRun(run: BackendRunRecord): Promise<void>;
     workingDirectory(): string;
     workingDirectoryMode(): "workspace" | "repo";
+    backendExecutionRoot(runId: string): Promise<string>;
+    cleanupBackendExecutionRoot(runId: string): Promise<void>;
     resolveDefaultBackendId(): string;
   };
   /** Backend tool bridge state is an execution adapter, not Host business logic. */
@@ -168,8 +170,11 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
       });
       if (activeToolBridge?.token) await deps.execution.registerToolBridgeToken(turn.run.id, activeToolBridge.token);
       const recentMessages = (await deps.core.store.listMessages(turn.session.id)).slice(-10);
-      const workspaceRoot = deps.core.store.rootDir;
-      const workingDirectory = deps.preparation.workingDirectory();
+      const backendExecutionRoot = await deps.preparation.backendExecutionRoot(turn.run.id);
+      const workspaceRoot = backendExecutionRoot;
+      const workingDirectory = deps.preparation.workingDirectoryMode() === "workspace"
+        ? backendExecutionRoot
+        : deps.preparation.workingDirectory();
       const boundaryMetadata = assembly.gatewayBoundary ? gatewayBoundaryRuntimeMetadata(assembly.gatewayBoundary) : {};
       const metadata: Record<string, JsonValue> = {
         ...(turn.request.metadata ?? {}),
@@ -178,6 +183,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         workspace_root: workspaceRoot,
         working_directory: workingDirectory,
         backend_working_directory_mode: deps.preparation.workingDirectoryMode(),
+        backend_workspace_root_role: "isolated_agent_worktree",
         ...(turn.request.temporaryContext && turn.request.temporaryContext.length > 0
           ? {
               temporary_context_count: turn.request.temporaryContext.length,
@@ -298,9 +304,14 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         sessionless: true
       });
       if (activeToolBridge?.token) await deps.execution.registerToolBridgeToken(run.id, activeToolBridge.token);
+      const backendExecutionRoot = await deps.preparation.backendExecutionRoot(run.id);
+      const workingDirectory = deps.preparation.workingDirectoryMode() === "workspace"
+        ? backendExecutionRoot
+        : deps.preparation.workingDirectory();
       const metadata: Record<string, JsonValue> = {
         ...backendInput.metadata,
         context_intent: contextIntent,
+        backend_workspace_root_role: "isolated_agent_worktree",
         ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
         ...(activeToolBridge ? { tool_bridge_status: "enabled", tool_bridge_server: activeToolBridge.server_name } : {})
       };
@@ -309,6 +320,8 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
       return {
         backendInput: {
           ...backendInput,
+          workspace_root: backendExecutionRoot,
+          working_directory: workingDirectory,
           envelope: { ...backendInput.envelope, metadata: { ...backendInput.envelope.metadata, ...metadata } },
           metadata,
           context_intent: contextIntent,
@@ -332,7 +345,15 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         });
       }
     },
-    cleanup: { cleanup: async ({ runId }) => deps.execution.clearRunState(runId) },
+    cleanup: {
+      cleanup: async ({ runId }) => {
+        await deps.execution.clearRunState(runId);
+        const run = await deps.core.store.getBackendRun(runId);
+        if (!run || isSettledRun(run)) {
+          await deps.preparation.cleanupBackendExecutionRoot(runId);
+        }
+      }
+    },
     diagnostics,
     postTurn: {
       presentation: {
@@ -384,4 +405,11 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
     },
     resolveDefaultBackendId: () => deps.preparation.resolveDefaultBackendId()
   });
+}
+
+function isSettledRun(run: BackendRunRecord): boolean {
+  return run.status === "completed"
+    || run.status === "failed"
+    || run.status === "cancelled"
+    || run.status === "outcome_unknown";
 }

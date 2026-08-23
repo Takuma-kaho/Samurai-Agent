@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillOptimizationRollbackValueSchema } from "../../../value-objects/skill.js";
 
 const Input = z.object({
@@ -15,7 +15,7 @@ export type SkillOptimizationRollbackInput = z.infer<typeof Input>;
 export type SkillOptimizationRollbackOutput = z.infer<typeof Output>;
 
 export interface SkillOptimizationRollbackPorts {
-  rollbackSkillOptimization(input: { promotionId?: string; snapshotId?: string }): Promise<SkillOptimizationRollbackOutput> | SkillOptimizationRollbackOutput;
+  rollbackSkillOptimization(input: { promotionId?: string; snapshotId?: string; roomId: string }): Promise<SkillOptimizationRollbackOutput> | SkillOptimizationRollbackOutput;
 }
 
 const skillOptimizationRollback = defineCommand<SkillOptimizationRollbackPorts>()({
@@ -69,7 +69,8 @@ const skillOptimizationRollback = defineCommand<SkillOptimizationRollbackPorts>(
       execute: async function handleSkillOptimizationRollback(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         return { ok: true, value: Output.parse(await ports.rollbackSkillOptimization({
           ...(input.promotion_id ? { promotionId: input.promotion_id } : {}),
-          ...(input.snapshot_id ? { snapshotId: input.snapshot_id } : {})
+          ...(input.snapshot_id ? { snapshotId: input.snapshot_id } : {}),
+          roomId: requireRoomContext(context, "skill.optimization.rollback")
         })) };
       }
     };

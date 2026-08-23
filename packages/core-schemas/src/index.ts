@@ -156,7 +156,7 @@ export const automationAuthorizationStates = ["ready", "rebind_required", "block
 export const automationAuthorityKinds = ["direct_principal", "external_connection"] as const;
 export const automationManagementStates = ["allowed", "manager_stopped"] as const;
 export const automationRunStatuses = ["started", "completed", "failed", "blocked"] as const;
-export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed"] as const;
+export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed", "outcome_unknown"] as const;
 export const externalSendChannels = ["webhook", "email", "slack", "telegram", "line"] as const;
 export const externalSendTransportStatuses = ["ready", "dry_run_only", "not_configured"] as const;
 export const gatewayPairingStatuses = ["pending", "approved", "rejected", "expired", "revoked"] as const;
@@ -629,6 +629,7 @@ export type TrustedWorkspaceSource = z.infer<typeof TrustedWorkspaceSourceSchema
 export const TrustedWorkspaceContextSchema = z.object({
   workspace_id: z.string().trim().min(1),
   room_id: z.string().trim().min(1).optional(),
+  connection_id: z.string().trim().min(1).optional(),
   principal: PrincipalSchema,
   source: TrustedWorkspaceSourceSchema,
   correlation_id: z.string().trim().min(1),
@@ -2786,6 +2787,7 @@ export const ExternalSendDiagnosticsIssueSchema = z.object({
     "external_send_pending_approval",
     "external_send_dry_run_only",
     "external_send_failed",
+    "external_send_outcome_unknown",
     "external_send_stale_draft",
     "external_send_missing_target_url"
   ]),
@@ -3720,6 +3722,7 @@ export type WorkFailureKind = z.infer<typeof WorkFailureKindSchema>;
 export const ObjectiveRecordSchema = z.object({
   id: z.string().min(1),
   session_id: z.string().min(1).optional(),
+  room_id: z.string().min(1).optional(),
   title: z.string().min(1),
   objective: z.string().min(1),
   completion_criteria: z.array(z.string().min(1)).min(1),
@@ -3737,6 +3740,7 @@ export type ObjectiveRecord = z.infer<typeof ObjectiveRecordSchema>;
 export const WorkItemRecordSchema = z.object({
   id: z.string().min(1),
   objective_id: z.string().min(1),
+  room_id: z.string().min(1).optional(),
   parent_work_item_id: z.string().min(1).optional(),
   instruction: z.string().min(1),
   status: WorkItemStatusSchema,
@@ -4154,6 +4158,25 @@ export function stableHash(value: unknown): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Wider deterministic digest for persisted identity and idempotency checks.
+ * stableHash remains the short compatibility fingerprint used by existing
+ * content projections; callers that distinguish different durable commands
+ * must use this 128-bit digest.
+ */
+export function stableDigest(value: unknown): string {
+  const input = stableStringify(value);
+  const states = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35];
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    for (let stateIndex = 0; stateIndex < states.length; stateIndex += 1) {
+      const mixed = code + (index * (stateIndex + 1));
+      states[stateIndex] = Math.imul((states[stateIndex] ?? 0) ^ mixed, 0x01000193 + stateIndex * 2);
+    }
+  }
+  return states.map((state) => (state >>> 0).toString(16).padStart(8, "0")).join("");
 }
 
 export type PrivacyRedactionOptions = {

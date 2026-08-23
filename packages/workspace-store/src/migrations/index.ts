@@ -26,6 +26,9 @@ import { externalConnectorInstallationUniquenessMigration } from "./024-external
 import { externalActivityWorkspaceScopeMigration } from "./025-external-activity-workspace-scope";
 import { externalConnectorDisabledIndexMigration } from "./026-external-connector-disabled-index";
 import { clientEventRoomScopeMigration } from "./027-client-event-room-scope";
+import { objectiveWorkItemRoomScopeMigration } from "./028-objective-work-item-room-scope";
+import { externalSendDispatchSafetyMigration } from "./029-external-send-dispatch-safety";
+import { collectionTriggerFileTransactionMigration } from "./030-collection-trigger-file-transaction";
 
 export const workspaceMigrations: readonly WorkspaceMigration[] = [
   coreBaselineMigration,
@@ -54,7 +57,10 @@ export const workspaceMigrations: readonly WorkspaceMigration[] = [
   externalConnectorInstallationUniquenessMigration,
   externalActivityWorkspaceScopeMigration,
   externalConnectorDisabledIndexMigration,
-  clientEventRoomScopeMigration
+  clientEventRoomScopeMigration,
+  objectiveWorkItemRoomScopeMigration,
+  externalSendDispatchSafetyMigration,
+  collectionTriggerFileTransactionMigration
 ];
 
-export { coreBaselineMigration, gatewayDeliveryMigration, skillOptimizationMigration, toolRunErrorCodeMigration, gatewayPairingPolicyAllowedToolsMigration, preCore04SchemaNormalizationMigration, core05RoomAgentFoundationMigration, core05LearningCompletionMigration, core06RoomParticipantsMigration, core06IntegrityHardeningMigration, core06SessionReferenceBoundaryMigration, core07ActivityHistoryMigration, core07WorkspaceJobsMigration, core08ResourceSessionBoundaryMigration, core09ExternalIngressAutomationBoundaryMigration, core09AutomationManagerLocksMigration, externalIntegrationRecordsMigration, externalIntegrationAuditRecordsMigration, externalIntegrationCaptureQuotaMigration, externalIntegrationResourceVersionsMigration, externalIntegrationManagedResourceVersionsMigration, externalContextSourceMigration, externalIntegrationIdempotencyMigration, externalConnectorInstallationUniquenessMigration, externalActivityWorkspaceScopeMigration, externalConnectorDisabledIndexMigration, clientEventRoomScopeMigration };
+export { coreBaselineMigration, gatewayDeliveryMigration, skillOptimizationMigration, toolRunErrorCodeMigration, gatewayPairingPolicyAllowedToolsMigration, preCore04SchemaNormalizationMigration, core05RoomAgentFoundationMigration, core05LearningCompletionMigration, core06RoomParticipantsMigration, core06IntegrityHardeningMigration, core06SessionReferenceBoundaryMigration, core07ActivityHistoryMigration, core07WorkspaceJobsMigration, core08ResourceSessionBoundaryMigration, core09ExternalIngressAutomationBoundaryMigration, core09AutomationManagerLocksMigration, externalIntegrationRecordsMigration, externalIntegrationAuditRecordsMigration, externalIntegrationCaptureQuotaMigration, externalIntegrationResourceVersionsMigration, externalIntegrationManagedResourceVersionsMigration, externalContextSourceMigration, externalIntegrationIdempotencyMigration, externalConnectorInstallationUniquenessMigration, externalActivityWorkspaceScopeMigration, externalConnectorDisabledIndexMigration, clientEventRoomScopeMigration, objectiveWorkItemRoomScopeMigration, externalSendDispatchSafetyMigration, collectionTriggerFileTransactionMigration };

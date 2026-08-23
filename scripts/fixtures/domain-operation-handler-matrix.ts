@@ -240,6 +240,7 @@ const snapshotOutput = { id: "snapshot_fixture", run_id: "run_fixture", path: "l
 const objectiveOutput = {
   id: "objective_fixture",
   session_id: "session_fixture",
+  room_id: "room_fixture",
   title: "Fixture objective",
   objective: "Complete the fixture objective",
   completion_criteria: ["fixture complete"],
@@ -250,6 +251,7 @@ const objectiveOutput = {
 const workItemOutput = {
   id: "work_item_fixture",
   objective_id: "objective_fixture",
+  room_id: "room_fixture",
   instruction: "Fixture work item",
   status: "ready" as const,
   priority: 0,
@@ -472,12 +474,13 @@ await run("workspace.context.get", () => workspaceContextGet.createHandler({
 }).execute(context, handlerExpectations["workspace.context.get"].input));
 
 await run("objective.transition", () => objectiveTransition.createHandler({
-  transitionObjective(id, action) { return record("objective.transition", "transitionObjective", [id, action], { objective: objectiveOutput, workItems: [workItemOutput], cancelBackendRunIds: ["run_fixture"] }); }
+  transitionObjective(id, action, roomId) { return record("objective.transition", "transitionObjective", [id, action, roomId], { objective: objectiveOutput, workItems: [workItemOutput], cancelBackendRunIds: ["run_fixture"] }); }
 }).execute(context, handlerExpectations["objective.transition"].input));
 
 await run("plugin.status.set", () => pluginStatusSet.createHandler({
   setPluginEnabled(id, enabled) { return record("plugin.status.set", "setPluginEnabled", [id, enabled], true); },
   findPluginStatus(id) { return record("plugin.status.set", "findPluginStatus", [id], pluginOutput.plugin); },
+  getPluginEnabled(id) { return record("plugin.status.set", "getPluginEnabled", [id], false); },
   savePluginState(input) { return record("plugin.status.set", "savePluginState", [input], pluginOutput.state); },
   pluginNotFoundError() { throw new Error("plugin_not_found"); }
 }).execute(context, handlerExpectations["plugin.status.set"].input));

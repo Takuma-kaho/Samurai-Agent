@@ -1,4 +1,5 @@
 import { ref } from "vue";
+import type { ResourceRef } from "@samurai-agent/core-schemas";
 
 export type PromptAttachment = {
   id: string;
@@ -6,6 +7,8 @@ export type PromptAttachment = {
   previewUrl: string;
   size: number;
   type: string;
+  file: File;
+  resourceRef?: ResourceRef;
 };
 
 export function useChatAttachments() {
@@ -25,7 +28,8 @@ export function useChatAttachments() {
       name: file.name,
       previewUrl: URL.createObjectURL(file),
       size: file.size,
-      type: file.type
+      type: file.type,
+      file
     }));
     input.value = "";
   }

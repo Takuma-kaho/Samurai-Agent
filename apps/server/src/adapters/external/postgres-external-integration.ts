@@ -215,7 +215,11 @@ function defaultBrowserSession(config: WorkspaceServerConfig, publicBaseUrl: str
   const configuredToken = token;
   const accountId = config.initialAdminId;
   const manager = token ? new OwnerTokenManager(token) : undefined;
-  if (!manager || !configuredToken || !accountId || !isLoopbackUrl(publicBaseUrl)) {
+  // Self-host has one explicitly configured owner Account and can safely use
+  // the same deployment-local owner token on a public HTTPS origin. Hosted
+  // deployments must inject their real login-session adapter; never infer a
+  // tenant Account from a shared process token there.
+  if (config.mode !== "self_host" || !manager || !configuredToken || !accountId) {
     return unavailableBrowserSession();
   }
   return {
@@ -239,7 +243,7 @@ function defaultBrowserSession(config: WorkspaceServerConfig, publicBaseUrl: str
 
 function defaultBrowserAuthorization(config: WorkspaceServerConfig, publicBaseUrl: string): OAuthAccountAuthorizationPort {
   const accountId = config.initialAdminId;
-  if (!accountId || !isLoopbackUrl(publicBaseUrl)) {
+  if (config.mode !== "self_host" || !accountId) {
     return { async assertBrowserAccount() { throw new ExternalIntegrationError("oauth_browser_session_required"); } };
   }
   return {

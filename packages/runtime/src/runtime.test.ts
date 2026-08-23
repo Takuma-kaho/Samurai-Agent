@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginRuntimeRegistry } from "@samurai-agent/action-catalog";
 import { AgentBackendRegistry, MockBackend, type AgentBackend } from "@samurai-agent/agent-backends";
-import { createId, nowIso, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type OperationRecord, type RollbackPoint, type SkillFrontmatter } from "@samurai-agent/core-schemas";
+import { createId, nowIso, stableDigest, type AutomationJobRecord, type BackendEventRecord, type ExternalSendRecord, type GatewayBoundaryPolicy, type GatewayMcpConfigRecord, type GatewayPairingPolicyRecord, type GatewayRoutingPolicyRecord, type JsonValue, type MemoryFrontmatter, type OperationRecord, type RollbackPoint, type SkillFrontmatter } from "@samurai-agent/core-schemas";
 import { createGatewayEnvelope, webGatewayContext } from "@samurai-agent/gateway";
 import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceStore } from "@samurai-agent/workspace-store";
@@ -73,6 +73,9 @@ async function requestAndApproveExternalSend(
   store: WorkspaceStore,
   sendId: string
 ): Promise<ExternalSendRecord> {
+  const draft = await store.getExternalSend(sendId);
+  expect(draft).toBeDefined();
+  await store.saveExternalSend({ ...draft!, status: "approved", approval_request_id: `approval_${sendId}`, updated_at: nowIso() });
   await dispatchExternalSend(runtime, { sendId, dryRun: false });
   const send = await store.getExternalSend(sendId);
   expect(send).toBeDefined();
@@ -566,7 +569,7 @@ describe("agent runtime", () => {
       kind: "collection.record.delete",
       collection_id: "movies",
       record_id: "movie_1",
-      expected_version: 1,
+      expected_version: 2,
       view_id: "movies_table",
       renderer_capabilities: capabilities
     });
@@ -791,7 +794,7 @@ describe("agent runtime", () => {
     });
     expect(result.render_specs?.some((spec) =>
       spec.kind === "custom_view" && spec.props.renderer === "collection_table"
-    )).toBe(true);
+    )).toBe(false);
   });
 
   it("keeps the movie-log Collection flow reusable across card, records, natural open, edits, and view switch", async () => {
@@ -2685,7 +2688,7 @@ describe("agent runtime", () => {
     });
     expect(result.render_specs?.some((spec) =>
       spec.kind === "custom_view" && spec.props.renderer === "collection_table"
-    )).toBe(true);
+    )).toBe(false);
   });
 
   it("does not create generic Collection apps before backend dispatch", async () => {
@@ -3560,10 +3563,11 @@ describe("agent runtime", () => {
 
     expect(capturedWorkingDirectory).toBe(repoRoot);
     expect(result.backendRun.metadata).toMatchObject({
-      workspace_root: root,
       working_directory: repoRoot,
-      backend_working_directory_mode: "repo"
+      backend_working_directory_mode: "repo",
+      backend_workspace_root_role: "isolated_agent_worktree"
     });
+    expect(result.backendRun.metadata.workspace_root).not.toBe(root);
   });
 
   it("stores a diagnostic message when backend completes without body or artifacts", async () => {
@@ -4031,12 +4035,23 @@ rl.on("line", (line) => {
     const session = await runtime.createSession();
     const boundary: GatewayBoundaryPolicy = {
       ...gatewayBoundaryPolicy(["mcp.call"]),
+      source_channel: "local_cli",
       mcp_config_refs: [{
         id: config.id,
         server_name: config.server_name,
         allowed_tools: ["calendar.read"],
         secret_refs: config.secret_refs
-      }]
+      }],
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        backend: "none",
+        workspace_access: "read_write",
+        network_access: "external",
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
+        denied_paths: [],
+        metadata: {}
+      }
     };
 
     const result = await runtime.runChatTurn({
@@ -4077,7 +4092,7 @@ rl.on("line", (line) => {
         unresolved_secret_ref_ids: []
       }
     });
-    expect(JSON.stringify(outputEvent?.payload)).toContain("[redacted:secret_calendar_runtime]");
+    expect(JSON.stringify(outputEvent?.payload)).toContain("output_withheld_secret_material_injected");
     expect(JSON.stringify(outputEvent?.payload)).not.toContain(secret);
     expect(JSON.stringify(outputEvent?.payload)).not.toContain("CALENDAR_TOKEN");
   });
@@ -4105,6 +4120,7 @@ rl.on("line", (line) => {
     );
     const boundary: GatewayBoundaryPolicy = {
       ...gatewayBoundaryPolicy(["sandbox.exec"]),
+      source_channel: "local_cli",
       secret_refs: [{
         id: "secret_sandbox_runtime",
         source: "env",
@@ -4115,9 +4131,9 @@ rl.on("line", (line) => {
         mode: "all",
         scope: "session",
         backend: "none",
-        workspace_access: "none",
-        network_access: "none",
-        allowed_paths: [],
+        workspace_access: "read_write",
+        network_access: "external",
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {}
@@ -4152,7 +4168,7 @@ rl.on("line", (line) => {
     expect(outputEvent?.payload).toMatchObject({
       status: "completed",
       action_id: "sandbox.exec",
-      stdout: expect.stringContaining("[redacted:secret_sandbox_runtime]")
+      stdout: "output_withheld_secret_material_injected"
     });
     expect(JSON.stringify(outputEvent?.payload)).not.toContain("SANDBOX_RUNTIME_TOKEN");
   });
@@ -4180,6 +4196,7 @@ rl.on("line", (line) => {
     );
     const boundary: GatewayBoundaryPolicy = {
       ...gatewayBoundaryPolicy(["sandbox.exec"]),
+      source_channel: "local_cli",
       sandbox: {
         mode: "all",
         scope: "session",
@@ -4547,8 +4564,9 @@ rl.on("line", (line) => {
         yield { event_type: "backend_waiting_for_native_input", payload: { prompt: "Need input" } };
       },
       async *resumeRun(_runId, input) {
-        expect(input.workspace_root).toBe(root);
-        expect(input.working_directory).toBe(root);
+        expect(input.workspace_root).toBeTruthy();
+        expect(input.workspace_root).not.toBe(root);
+        expect(input.working_directory).not.toBe(root);
         yield { event_type: "text_delta", payload: { text: `Resumed: ${String(input.answer ?? "")}` } };
         yield { event_type: "run_completed", terminal_evidence: { kind: "completed", source: "owned_loop_return" }, payload: { output_summary: "Resume completed." } };
       }
@@ -4667,9 +4685,9 @@ rl.on("line", (line) => {
         mode: "all",
         scope: "session",
         backend: "none",
-        workspace_access: "none",
-        network_access: "none",
-        allowed_paths: [],
+        workspace_access: "read_write",
+        network_access: "external",
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {}
@@ -5827,6 +5845,74 @@ rl.on("line", (line) => {
     }));
   });
 
+  it("fails the Collection operation and leaves no record when durable trigger registration fails", async () => {
+    const { store, runtime } = await createRuntime();
+    await runtime.saveCollectionSchema({
+      ...collectionSchema("trigger_atomicity"),
+      triggers: [{ id: "created", event: "record.created", action_id: "created_action", kind: "patch_record" }],
+      actions: [{ id: "created_action", kind: "patch_record", changes: { name: "unused" } }]
+    });
+    const originalSave = store.saveCollectionRecord.bind(store);
+    let injected = false;
+    store.saveCollectionRecord = async (record, trigger) => {
+      if (trigger && !injected) {
+        injected = true;
+        const id = `automation_collection_trigger_${stableDigest({
+          operationId: trigger.operationId,
+          collectionId: record.collection_id,
+          recordId: record.id,
+          event: trigger.event,
+          triggerIndex: 0,
+          triggerId: "created",
+          actionId: "created_action"
+        })}`;
+        const delivery = trigger.delivery;
+        const now = nowIso();
+        const collision: AutomationJobRecord = {
+          id,
+          title: "pre-existing trigger collision",
+          kind: "custom_instruction",
+          status: "enabled",
+          schedule: "once",
+          target_instruction: "collision",
+          delivery_target: { channel: "test" },
+          workspace_id: delivery.workspaceId,
+          room_id: delivery.roomId,
+          authority: delivery.authority,
+          created_principal_snapshot: delivery.createdPrincipalSnapshot,
+          source_snapshot: delivery.sourceSnapshot,
+          ...(delivery.connectionId ? { connection_id: delivery.connectionId } : {}),
+          ...(delivery.sessionRef ? { session_ref: delivery.sessionRef } : {}),
+          authorization_state: "ready",
+          authorized_at: now,
+          management_state: "allowed",
+          next_run_at: now,
+          failure_count: 0,
+          max_attempts: 3,
+          created_at: now,
+          updated_at: now
+        };
+        await store.saveAutomationJob(collision);
+      }
+      return originalSave(record, trigger);
+    };
+
+    await expect(runtime.createCollectionRecord({
+      id: "record_atomicity_failure",
+      collection_id: "trigger_atomicity",
+      data: { name: "must not persist" },
+      resource_refs: [],
+      created_at: nowIso(),
+      updated_at: nowIso()
+    })).rejects.toThrow();
+
+    const operation = (await store.listOperations()).find((item) => item.operation === "collection.record.create");
+    expect(injected).toBe(true);
+    expect(await store.getCollectionRecord("trigger_atomicity", "record_atomicity_failure")).toBeUndefined();
+    expect(operation?.status).toBe("failed");
+    await store.close();
+  });
+
   it("adds collection notes to context only without relaxing schema validation", async () => {
     const { store, runtime } = await createRuntime();
     const now = new Date().toISOString();
@@ -6872,6 +6958,8 @@ rl.on("line", (line) => {
       title: "確認",
       body: "送信本文"
     });
+    const draft = await store.getExternalSend(prepared.resource.id);
+    await store.saveExternalSend({ ...draft!, status: "approved", approval_request_id: `approval_${prepared.resource.id}`, updated_at: nowIso() });
     const dispatched = await dispatchExternalSend(runtime, { sendId: prepared.resource.id });
     const sends = await store.listExternalSends();
     await store.close();
@@ -6916,11 +7004,12 @@ rl.on("line", (line) => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(3);
     expect(ok).toMatchObject({
-      status: "dispatched",
+      status: "outcome_unknown",
       dispatch_result: {
-        dispatched: true,
+        dispatched: false,
         dry_run: false,
-        status: 200
+        status: 200,
+        outcome_unknown: true
       }
     });
     expect(failed).toMatchObject({
@@ -6933,18 +7022,19 @@ rl.on("line", (line) => {
       }
     });
     expect(rejected).toMatchObject({
-      status: "failed",
+      status: "outcome_unknown",
       dispatch_result: {
         dispatched: false,
         dry_run: false,
+        outcome_unknown: true,
         message: expect.stringContaining("[redacted]")
       }
     });
     expect(JSON.stringify(rejected.dispatch_result)).not.toContain("raw-secret-token");
     expect(sends.map((send) => [send.id, send.status])).toEqual(expect.arrayContaining([
-      [ok.id, "dispatched"],
+      [ok.id, "outcome_unknown"],
       [failed.id, "failed"],
-      [rejected.id, "failed"]
+      [rejected.id, "outcome_unknown"]
     ]));
   });
 
@@ -7001,7 +7091,7 @@ rl.on("line", (line) => {
     }));
     expect(fetchSpy).toHaveBeenNthCalledWith(2, "https://telegram.example.test/bot123456:raw-secret-token/sendMessage", expect.objectContaining({
       method: "POST",
-      headers: { "content-type": "application/json" },
+        headers: expect.objectContaining({ "content-type": "application/json", "idempotency-key": expect.any(String) }),
       body: JSON.stringify({
         chat_id: "-100123",
         text: "Telegram通知\n\nTelegram本文",
@@ -7022,9 +7112,9 @@ rl.on("line", (line) => {
         }]
       })
     }));
-    expect(slack).toMatchObject({ status: "dispatched", dispatch_result: { adapter: "slack", transport: "api", dispatched: true } });
-    expect(telegram).toMatchObject({ status: "dispatched", dispatch_result: { adapter: "telegram", transport: "api", dispatched: true } });
-    expect(line).toMatchObject({ status: "dispatched", dispatch_result: { adapter: "line", transport: "api", dispatched: true } });
+    expect(slack).toMatchObject({ status: "outcome_unknown", dispatch_result: { adapter: "slack", transport: "api", dispatched: false, outcome_unknown: true } });
+    expect(telegram).toMatchObject({ status: "outcome_unknown", dispatch_result: { adapter: "telegram", transport: "api", dispatched: false, outcome_unknown: true } });
+    expect(line).toMatchObject({ status: "outcome_unknown", dispatch_result: { adapter: "line", transport: "api", dispatched: false, outcome_unknown: true } });
     expect(JSON.stringify([slack.dispatch_result, telegram.dispatch_result, line.dispatch_result])).not.toContain("raw-secret-token");
   });
 
@@ -7063,12 +7153,13 @@ rl.on("line", (line) => {
     await store.close();
 
     expect(sent).toMatchObject({
-      status: "dispatched",
+      status: "outcome_unknown",
       dispatch_result: {
         adapter: "email",
         transport: "smtp",
-        dispatched: true,
-        dry_run: false
+        dispatched: false,
+        dry_run: false,
+        outcome_unknown: true
       }
     });
     expect(smtp.commands).toEqual([
@@ -8034,9 +8125,9 @@ function gatewayBoundaryPolicy(allowedTools: string[]): GatewayBoundaryPolicy {
       mode: "non_main",
       scope: "session",
       backend: "none",
-      workspace_access: "none",
-      network_access: "none",
-      allowed_paths: [],
+      workspace_access: "read_write",
+      network_access: "external",
+      allowed_paths: [{ root: "workspace", access: "read_write" }],
       denied_paths: [],
       metadata: {}
     },

@@ -340,13 +340,14 @@ export const handlerExpectations = {
   },
   "objective.transition": {
     input: { objective_id: "objective_fixture", action: "pause" },
-    calls: [{ method: "transitionObjective", args: ["objective_fixture", "pause"] }]
+    calls: [{ method: "transitionObjective", args: ["objective_fixture", "pause", "room_fixture"] }]
   },
   "plugin.status.set": {
     input: { plugin_id: "plugin_fixture", status: "enabled" },
     calls: [
-      { method: "setPluginEnabled", args: ["plugin_fixture", true] },
       { method: "findPluginStatus", args: ["plugin_fixture"] },
+      { method: "getPluginEnabled", args: ["plugin_fixture"] },
+      { method: "setPluginEnabled", args: ["plugin_fixture", true] },
       { method: "savePluginState", args: [{ manifestId: "plugin_fixture", enabled: true, version: "1.0.0" }] }
     ]
   },
@@ -387,11 +388,11 @@ export const handlerExpectations = {
   },
   "work_item.follow_up": {
     input: { work_item_id: "work_item_fixture", instruction: "Continue the fixture task" },
-    calls: [{ method: "createFollowUpWorkItem", args: [{ workItemId: "work_item_fixture", instruction: "Continue the fixture task" }] }]
+    calls: [{ method: "createFollowUpWorkItem", args: [{ workItemId: "work_item_fixture", instruction: "Continue the fixture task", roomId: "room_fixture" }] }]
   },
   "work_item.steer": {
     input: { work_item_id: "work_item_fixture", instruction: "Steer the fixture task" },
-    calls: [{ method: "steerWorkItem", args: [{ workItemId: "work_item_fixture", instruction: "Steer the fixture task" }] }]
+    calls: [{ method: "steerWorkItem", args: [{ workItemId: "work_item_fixture", instruction: "Steer the fixture task", roomId: "room_fixture" }] }]
   }
 } as const satisfies Record<string, HandlerExpectation>;
 

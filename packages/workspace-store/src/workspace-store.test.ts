@@ -73,7 +73,7 @@ describe("workspace store", () => {
       external_provider_role: "assistive"
     });
     expect(sessions[0]?.title).toBe("Store test");
-    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
+    expect(schemaMigrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]);
   });
 
   it("persists human-owned Workspace and Room startup Context", async () => {

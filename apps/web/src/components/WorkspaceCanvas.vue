@@ -25,7 +25,7 @@ import WorkspaceRoomTree from "./WorkspaceRoomTree.vue";
 
 type SurfaceField = { name: string; label: string; type: string; value: unknown };
 type TableColumn = { key: string; label: string };
-type CustomAction = { id: string; label: string };
+type CustomAction = { id: string; label: string; requires_confirmation?: boolean };
 
 const props = defineProps<{
   open: boolean;

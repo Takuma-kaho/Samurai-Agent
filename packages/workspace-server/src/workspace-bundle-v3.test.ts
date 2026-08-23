@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "./auth";
-import { verifyWorkspaceBundleV3 } from "./workspace-bundle-v3";
+import {
+  readWorkspaceBundleV3Transport,
+  verifyWorkspaceBundleV3,
+  WORKSPACE_BUNDLE_MAX_ENTRY_BYTES,
+  writeWorkspaceBundleV3Transport
+} from "./workspace-bundle-v3";
 
 describe("Workspace Bundle v3 credential boundary", () => {
   it("rejects a credential-shaped field inside a portable record", async () => {
@@ -33,7 +38,7 @@ describe("Workspace Bundle v3 credential boundary", () => {
           record_type: "knowledge",
           id: "record_one",
           version: 1,
-          payload: { password: "must-not-export" },
+          payload: { client_secret: "must-not-export", oauth_client_secret: "must-also-not-export" },
           search_text: "",
           content_hash: "0".repeat(64),
           created_by: "account_owner",
@@ -219,6 +224,43 @@ describe("Workspace Bundle v3 credential boundary", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("round-trips a transport entry at exactly 8 MiB", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    const destination = path.join(root, "restored");
+    const content = Buffer.alloc(WORKSPACE_BUNDLE_MAX_ENTRY_BYTES, 0x61);
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        workspaceFiles: [{ path: "payload.bin", content }]
+      });
+
+      const transport = await readWorkspaceBundleV3Transport(root);
+      const restored = await writeWorkspaceBundleV3Transport({ transport, destination });
+
+      expect(restored.manifest.integrity_hash).toBe(transport.manifest.integrity_hash);
+      const restoredContent = await readFile(path.join(restored.directory, "files", "payload.bin"));
+      expect(restoredContent.equals(content)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an exported transport entry over 8 MiB", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        workspaceFiles: [{ path: "payload.bin", content: Buffer.alloc(WORKSPACE_BUNDLE_MAX_ENTRY_BYTES + 1, 0x61) }]
+      });
+
+      await expect(readWorkspaceBundleV3Transport(root)).rejects.toThrow("workspace_bundle_v3_entry_too_large");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 const workspaceId = "workspace_bundle_test";
@@ -258,9 +300,11 @@ async function writeHierarchyBundle(
     schemaVersion?: number;
     rooms: Record<string, unknown>[];
     roomMemberships: Record<string, unknown>[];
+    workspaceFiles?: Array<{ path: string; content: Uint8Array }>;
     learning?: Partial<Record<LearningFile, Record<string, unknown>[]>>;
   }
 ): Promise<void> {
+  const workspaceFiles = input.workspaceFiles ?? [];
   const files = new Map<string, string>([
     ["workspace.json", canonicalJson({
       id: workspaceId,
@@ -292,7 +336,18 @@ async function writeHierarchyBundle(
     ["operations.jsonl", ""],
     ["invitations.jsonl", ""],
     ["audits.jsonl", ""],
-    ["files.jsonl", ""]
+    ["files.jsonl", jsonLines(workspaceFiles.map(({ path: filePath, content }) => ({
+      workspace_id: workspaceId,
+      room_id: "room_root",
+      path: filePath,
+      version: 1,
+      sha256: hash(content),
+      size: content.byteLength,
+      created_by: accountId,
+      updated_by: accountId,
+      created_at: timestamp,
+      updated_at: timestamp
+    })))]
   ]);
   if (input.learning) {
     for (const file of learningFiles) files.set(file, jsonLines(input.learning[file] ?? []));
@@ -307,11 +362,18 @@ async function writeHierarchyBundle(
     operations: 0,
     invitations: 0,
     audits: 0,
-    files: 0,
+    files: workspaceFiles.length,
     ...(input.learning ? Object.fromEntries(learningFiles.map((file) => [learningCountName(file), input.learning?.[file]?.length ?? 0])) : {})
   };
-  const hashes = Object.fromEntries([...files.entries()].map(([name, content]) => [name, hash(content)]).sort(([left], [right]) => left.localeCompare(right)));
+  const hashes = Object.fromEntries([
+    ...[...files.entries()].map(([name, content]) => [name, hash(content)] as const),
+    ...workspaceFiles.map(({ path: filePath, content }) => [`files/${filePath}`, hash(content)] as const)
+  ].sort(([left], [right]) => left.localeCompare(right)));
   for (const [name, content] of files) await writeFile(path.join(root, name), content, "utf8");
+  if (workspaceFiles.length > 0) await mkdir(path.join(root, "files"), { recursive: true });
+  for (const { path: filePath, content } of workspaceFiles) {
+    await writeFile(path.join(root, "files", filePath), content);
+  }
   await writeFile(path.join(root, "manifest.json"), canonicalJson({
     format_version: 3,
     workspace_id: workspaceId,
@@ -346,6 +408,6 @@ function jsonLines(rows: Record<string, unknown>[]): string {
   return rows.map((row) => canonicalJson(row)).join(rows.length ? "\n" : "") + (rows.length ? "\n" : "");
 }
 
-function hash(value: string): string {
+function hash(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }

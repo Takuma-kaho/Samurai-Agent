@@ -49,6 +49,20 @@ import {
 describe("gateway", () => {
   const testCoreWorkspaceRoot = path.join(tmpdir(), "samurai-gateway-test-core-root");
 
+  function unrestrictedHostSandbox() {
+    return {
+      mode: "all" as const,
+      scope: "session" as const,
+      backend: "none" as const,
+      workspace_access: "read_write" as const,
+      network_access: "external" as const,
+      allowed_paths: [{ root: "workspace", access: "read_write" as const }],
+      denied_paths: [],
+      timeout_ms: 2_000,
+      metadata: {}
+    };
+  }
+
   it("creates fixed web, local cli, and cron contexts", () => {
     const web = createWebEnvelope("hello");
     const local = createLocalCliEnvelope("local action", "project/main");
@@ -653,7 +667,7 @@ describe("gateway", () => {
     ]));
   });
 
-  it("executes bounded host sandbox commands and redacts resolved SecretRef material", async () => {
+  it("blocks host sandbox commands when the requested isolation is unavailable", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-host-"));
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
@@ -671,8 +685,8 @@ describe("gateway", () => {
         mode: "all" as const,
         scope: "session" as const,
         backend: "none" as const,
-        workspace_access: "read" as const,
-        network_access: "none" as const,
+        workspace_access: "read_write" as const,
+        network_access: "external" as const,
         allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
@@ -680,6 +694,7 @@ describe("gateway", () => {
       }
     };
 
+    let adapterCalled = false;
     const result = await executeSandboxCommand(
       boundary,
       {
@@ -687,7 +702,12 @@ describe("gateway", () => {
         args: ["-e", "console.log(process.env.SECRET_VALUE)"],
         secret_env: { SECRET_VALUE: "secret_exec" }
       },
-      createSandboxCommandAdapter(),
+      {
+        async execute() {
+          adapterCalled = true;
+          return { exit_code: 0, stdout: "unexpected", stderr: "" };
+        }
+      },
       {
         workspaceRoot,
         env: { EXEC_TOKEN: "sandbox-secret" }
@@ -695,11 +715,11 @@ describe("gateway", () => {
     );
 
     expect(result).toMatchObject({
-      status: "completed",
-      resolved_secret_ref_ids: ["secret_exec"]
+      status: "blocked",
+      reason: "sandbox_isolation_unavailable",
+      error: "sandbox_unisolated_backend_not_allowed"
     });
-    expect(JSON.stringify(result)).not.toContain("sandbox-secret");
-    expect(JSON.stringify(result)).not.toContain("EXEC_TOKEN");
+    expect(adapterCalled).toBe(false);
   });
 
   it("builds docker sandbox command invocations with workspace and secret mounts", async () => {
@@ -767,7 +787,7 @@ describe("gateway", () => {
     );
 
     expect(result.status).toBe("completed");
-    expect(result.stdout).toBe("used [redacted:secret_docker]");
+    expect(result.stdout).toBe("output_withheld_secret_material_injected");
     expect(captured?.command).toBe("docker");
     expect(captured?.args).toEqual(expect.arrayContaining([
       "run",
@@ -865,7 +885,7 @@ describe("gateway", () => {
     );
 
     expect(result.status).toBe("completed");
-    expect(result.stdout).toBe("used [redacted:secret_ssh]");
+    expect(result.stdout).toBe("output_withheld_secret_material_injected");
     expect(captured?.command).toBe("ssh");
     expect(captured?.args).toEqual(["agent@example.test", "sh -s"]);
     expect(JSON.stringify(captured?.args)).not.toContain("ssh-secret");
@@ -1205,9 +1225,9 @@ describe("gateway", () => {
   it("plans MCP tool invocation through boundary and sandbox policy", () => {
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-1",
-        session_key: "webhook:source-1:main"
+        session_key: "local_cli:source-1:main"
       }),
       mcp_config_refs: [{
         id: "mcp_calendar",
@@ -1301,13 +1321,48 @@ describe("gateway", () => {
     });
   });
 
+  it("blocks unisolated host MCP execution for external gateways", async () => {
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-unisolated-mcp",
+        session_key: "webhook:source-unisolated-mcp:main"
+      }),
+      mcp_config_refs: [{
+        id: "mcp_unisolated",
+        server_name: "calendar",
+        allowed_tools: ["calendar.read"],
+        secret_refs: []
+      }],
+      sandbox: unrestrictedHostSandbox()
+    };
+    let adapterCalled = false;
+    const result = await executeMcpToolInvocation(
+      boundary,
+      { server_name: "calendar", tool_name: "calendar.read", input: {} },
+      {
+        async invoke() {
+          adapterCalled = true;
+          return { output: { ok: true } };
+        }
+      }
+    );
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      reason: "sandbox_isolation_unavailable",
+      error: "sandbox_unisolated_backend_not_allowed"
+    });
+    expect(adapterCalled).toBe(false);
+  });
+
   it("executes MCP tools through an adapter without leaking resolved secrets", async () => {
     let adapterSawSecret = false;
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-1",
-        session_key: "webhook:source-1:main"
+        session_key: "local_cli:source-1:main"
       }),
       mcp_config_refs: [{
         id: "mcp_calendar",
@@ -1319,7 +1374,8 @@ describe("gateway", () => {
           provider: "calendar",
           key: "CALENDAR_TOKEN"
         }]
-      }]
+      }],
+      sandbox: unrestrictedHostSandbox()
     };
 
     const result = await executeMcpToolInvocation(
@@ -1349,7 +1405,7 @@ describe("gateway", () => {
         resolved_secret_ref_ids: ["secret_calendar"],
         unresolved_secret_ref_ids: []
       },
-      output: { ok: true, echoed: "used [redacted:secret_calendar] for today" }
+      output: { redacted: true, reason: "output_withheld_secret_material_injected" }
     });
     expect(JSON.stringify(result)).not.toContain("calendar-secret");
     expect(JSON.stringify(result)).not.toContain("CALENDAR_TOKEN");
@@ -1381,11 +1437,12 @@ describe("gateway", () => {
     };
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-http",
-        session_key: "webhook:source-http:main"
+        session_key: "local_cli:source-http:main"
       }),
-      mcp_config_refs: [gatewayMcpConfigToBoundaryRef(config)]
+      mcp_config_refs: [gatewayMcpConfigToBoundaryRef(config)],
+      sandbox: unrestrictedHostSandbox()
     };
     const result = await executeMcpToolInvocation(
       boundary,
@@ -1416,9 +1473,7 @@ describe("gateway", () => {
 
     expect(fetchSawSecretHeader).toBe(true);
     expect(result.status).toBe("completed");
-    expect(result.output).toEqual({
-      content: [{ type: "text", text: "used Bearer [redacted]" }]
-    });
+    expect(result.output).toEqual({ redacted: true, reason: "output_withheld_secret_material_injected" });
     expect(JSON.stringify(result)).not.toContain("calendar-http-secret");
     expect(JSON.stringify(result)).not.toContain("CALENDAR_HTTP_TOKEN");
   });
@@ -1470,9 +1525,9 @@ rl.on("line", (line) => {
 
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-1",
-        session_key: "webhook:source-1:main"
+        session_key: "local_cli:source-1:main"
       }),
       mcp_config_refs: [{
         id: "mcp_calendar",
@@ -1492,7 +1547,8 @@ rl.on("line", (line) => {
             key: "SSH_IDENTITY"
           }
         ]
-      }]
+      }],
+      sandbox: unrestrictedHostSandbox()
     };
 
     const result = await executeMcpToolInvocation(
@@ -1534,7 +1590,7 @@ rl.on("line", (line) => {
         unresolved_secret_ref_ids: []
       }
     });
-    expect(output.content?.[0]?.text).toBe("used [redacted:secret_calendar] and [redacted:secret_ssh]");
+    expect(output).toEqual({ redacted: true, reason: "output_withheld_secret_material_injected" });
     expect(JSON.stringify(result)).not.toContain("calendar-secret");
     expect(JSON.stringify(result)).not.toContain("ssh-secret");
     expect(JSON.stringify(result)).not.toContain("CALENDAR_TOKEN");
@@ -1569,24 +1625,20 @@ rl.on("line", (line) => {
   }
 });
 `);
-    const boundary = {
+      const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-1",
-        session_key: "webhook:source-1:main"
+        session_key: "local_cli:source-1:main"
       }),
       mcp_config_refs: [{
         id: "mcp_calendar",
         server_name: "calendar",
         allowed_tools: ["calendar.read"],
-        secret_refs: [{
-          id: "secret_calendar",
-          source: "env" as const,
-          provider: "calendar",
-          key: "CALENDAR_TOKEN"
-        }]
-      }]
-    };
+        secret_refs: []
+      }],
+      sandbox: unrestrictedHostSandbox()
+      };
     const adapter = createPooledStdioMcpToolAdapter({
       env: { PATH: process.env.PATH },
       maxProcesses: 2,
@@ -1597,7 +1649,7 @@ rl.on("line", (line) => {
               server_name: "calendar",
               command: process.execPath,
               args: [serverPath],
-              secret_env: { CALENDAR_TOKEN: "secret_calendar" },
+              secret_env: {},
               framing: "json_lines",
               timeout_ms: 2000
             }
@@ -1609,17 +1661,17 @@ rl.on("line", (line) => {
       boundary,
       { server_name: "calendar", tool_name: "calendar.read", input: { range: "today" } },
       adapter,
-      { env: { CALENDAR_TOKEN: "calendar-secret" } }
+      {}
     );
     const second = await executeMcpToolInvocation(
       boundary,
       { server_name: "calendar", tool_name: "calendar.read", input: { range: "tomorrow" } },
       adapter,
-      { env: { CALENDAR_TOKEN: "calendar-secret" } }
+      {}
     );
     const [third, fourth] = await Promise.all([
-      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "week" } }, adapter, { env: { CALENDAR_TOKEN: "calendar-secret" } }),
-      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "month" } }, adapter, { env: { CALENDAR_TOKEN: "calendar-secret" } })
+      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "week" } }, adapter, {}),
+      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "month" } }, adapter, {})
     ]);
     const firstOutput = first.output as { pid?: number; calls?: number };
     const secondOutput = second.output as { pid?: number; calls?: number };

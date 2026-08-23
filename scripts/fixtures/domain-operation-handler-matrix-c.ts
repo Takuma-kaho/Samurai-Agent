@@ -67,7 +67,7 @@ const ts: typeof import("typescript") = require("typescript");
 const context: TrustedDomainContext = {
   inputSource: "runtime_api",
   workspaceId: "handler-matrix-c-workspace",
-  actorId: "handler-matrix-c-actor",
+  actorId: "owner",
   correlationId: "handler-matrix-c",
   roomId: "room_fixture",
   sessionId: "session_fixture",

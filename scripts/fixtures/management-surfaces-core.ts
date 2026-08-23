@@ -44,6 +44,22 @@ try {
   await store.createAutomationRun({ id: "management-run", kind: "custom_instruction", source: "automation_job", status: "completed", started_at: now, completed_at: now });
   assert.equal((await store.listAutomationRuns()).length, 1);
 
+  const session = await runtime.createSession({ room_id: (await store.getSettings()).default_room_id, title: "Management Main Chat" });
+  const chat = await runtime.runDomainCommand({
+    command_id: "chat.turn.run",
+    input_source: "surface_operation",
+    idempotency_key: "management-main-chat",
+    payload: {
+      content: "管理画面で選択したSkill、Wiki、Automationの文脈をMain Chatへ戻してください。",
+      output_locale: "ja",
+      metadata: { management_context: { skill_id: skillId, wiki_id: wikiId, automation_id: jobId } }
+    }
+  }, { sessionId: session.id, roomId: session.room_id });
+  const chatResult = chat.result as Record<string, any>;
+  const chatMetadata = chatResult.backendRun?.metadata?.management_context;
+  assert.equal(chatResult.backendRun?.status, "completed");
+  assert.deepEqual(chatMetadata, { skill_id: skillId, wiki_id: wikiId, automation_id: jobId });
+
   const operations = await store.listOperations();
   assert.equal(operations.some((item) => item.operation === "skill.patch"), true);
   assert.equal(operations.some((item) => item.operation === "automation.job.set_status"), true);

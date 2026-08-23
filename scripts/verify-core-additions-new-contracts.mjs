@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { evaluateVerifierAssertions, reportVerifierFailures, verifierEvidenceStatus } from "./lib/verifier-assertions.mjs";
 
 const root = process.cwd();
 const platform = process.platform;
@@ -31,7 +32,8 @@ const sourceFiles = [
   "scripts/fixtures/browser-capability-boundary.ts",
   "scripts/fixtures/image-artifact.ts",
   "scripts/fixtures/graph-artifact.ts",
-  "scripts/fixtures/management-surfaces-core.ts"
+  "scripts/fixtures/management-surfaces-core.ts",
+  "scripts/lib/verifier-assertions.mjs"
 ];
 try {
   execFileSync(esbuild, [path.join(root, "scripts/fixtures/core-additions-new.ts"), "--bundle", "--platform=node", "--format=esm", "--external:better-sqlite3", `--outfile=${output}`, "--log-level=warning"], { cwd: root, stdio: "inherit" });
@@ -42,7 +44,12 @@ try {
   const sourceSha256 = createHash("sha256").update(sourceFiles.map((file) => `${file}\0${readFileSync(path.join(root, file))}`).join("\0")).digest("hex");
   const head = readFileSync(path.join(root, ".git/HEAD"), "utf8").trim();
   const commitSha = head.startsWith("ref: ") ? readFileSync(path.join(root, ".git", head.slice(5)), "utf8").trim() : head;
-  const writeEvidence = (id, assertions, result) => writeFileSync(path.join(evidenceDir, `${id}.json`), `${JSON.stringify({ schema_version: 1, test_id: id, status: "passed", command: "node scripts/verify-core-additions-new-contracts.mjs", commit_sha: commitSha, source_sha256: sourceSha256, source_files: sourceFiles, assertions, result }, null, 2)}\n`);
+  const failures = [];
+  const writeEvidence = (id, assertions, result) => {
+    const assertionFailures = evaluateVerifierAssertions(assertions, result);
+    failures.push(...assertionFailures.map((failure) => `${id}: ${failure}`));
+    writeFileSync(path.join(evidenceDir, `${id}.json`), `${JSON.stringify({ schema_version: 1, test_id: id, status: verifierEvidenceStatus(result, assertionFailures), command: "node scripts/verify-core-additions-new-contracts.mjs", commit_sha: commitSha, source_sha256: sourceSha256, source_files: sourceFiles, assertions, ...(assertionFailures.length ? { failures: assertionFailures } : {}), result }, null, 2)}\n`);
+  };
   writeEvidence("X01", [
     { name: "Codex search mode and sources normalize", actual: backend.codex_search_mode_and_sources, expected: true }
   ], backend);
@@ -93,7 +100,8 @@ try {
   writeEvidence("E06", [{ name: "Automation pauses, resumes, and keeps run history", actual: management.automation_pause_resume_history, expected: true }], management);
   writeEvidence("E10", [{ name: "Management resource context returns to main Chat", actual: management.main_chat_context_contract, expected: true }], management);
   writeEvidence("G01", [{ name: "Surface and agent paths use Domain Commands", actual: management.shared_domain_commands, expected: true }], management);
-  process.stdout.write(`${JSON.stringify({ status: "passed", evidence: ["X01", "X02", "X03", "X04", "X05", "D03", "D06", "D07", "D08", "D09", "E02", "E03", "E04", "E05", "E06", "E10", "G01"] })}\n`);
+  reportVerifierFailures("core-additions-new-contracts", failures);
+  process.stdout.write(`${JSON.stringify({ status: failures.length ? "failed" : "passed", evidence: ["X01", "X02", "X03", "X04", "X05", "D03", "D06", "D07", "D08", "D09", "E02", "E03", "E04", "E05", "E06", "E10", "G01"] })}\n`);
 } finally {
   rmSync(output, { force: true });
 }

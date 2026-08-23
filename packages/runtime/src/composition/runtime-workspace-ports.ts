@@ -116,6 +116,21 @@ export interface CollectionTriggerEffect {
   reason?: string;
   record_ref: import("@samurai-agent/core-schemas").ResourceRef;
 }
+/** Runtime-authorized snapshot persisted with a Collection-trigger job. */
+export interface CollectionTriggerDelivery {
+  workspaceId: string;
+  roomId: string;
+  authority: NonNullable<import("@samurai-agent/core-schemas").AutomationJobRecord["authority"]>;
+  createdPrincipalSnapshot: NonNullable<import("@samurai-agent/core-schemas").AutomationJobRecord["created_principal_snapshot"]>;
+  sourceSnapshot: NonNullable<import("@samurai-agent/core-schemas").AutomationJobRecord["source_snapshot"]>;
+  connectionId?: string;
+  sessionRef?: NonNullable<import("@samurai-agent/core-schemas").AutomationJobRecord["session_ref"]>;
+}
+export interface CollectionTriggerWriteRequest {
+  event: CollectionTriggerEffect["event"];
+  operationId: string;
+  delivery: CollectionTriggerDelivery;
+}
 export interface WikiReindexResult {
   active: number;
   total: number;
@@ -213,14 +228,14 @@ export interface RuntimeWorkspaceOperationsPort {
   ackClientEvent:(eventId: string, ackedAt?: string) => Promise<import("@samurai-agent/core-schemas").ClientEventRecord | undefined>;
   failClientEvent:(eventId: string, errorCode: string, failedAt?: string) => Promise<import("@samurai-agent/core-schemas").ClientEventRecord | undefined>;
   expireClientEvents:(input?: { now?: string; }) => Promise<import("@samurai-agent/core-schemas").ClientEventRecord[]>;
-  saveObjective:(record: import("@samurai-agent/core-schemas").ObjectiveRecord) => Promise<import("@samurai-agent/core-schemas").ObjectiveRecord>;
-  getObjective:(id: string) => Promise<import("@samurai-agent/core-schemas").ObjectiveRecord | undefined>;
-  updateObjective:(record: import("@samurai-agent/core-schemas").ObjectiveRecord) => Promise<import("@samurai-agent/core-schemas").ObjectiveRecord>;
-  saveWorkItem:(record: import("@samurai-agent/core-schemas").WorkItemRecord) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord>;
-  getWorkItem:(id: string) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord | undefined>;
-  claimWorkItem:(input: { workerId: string; leaseMs: number; now?: string; }) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord | undefined>;
-  completeWorkItem:(input: { workItemId: string; workerId: string; now?: string; }) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord | undefined>;
-  failWorkItem:(input: { workItemId: string; workerId: string; failureKind: "retryable" | "non_retryable" | "cancelled"; error: string; now?: string; baseRetryMs?: number; }) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord | undefined>;
+  saveObjective:(record: import("@samurai-agent/core-schemas").ObjectiveRecord, roomId?: string) => Promise<import("@samurai-agent/core-schemas").ObjectiveRecord>;
+  getObjective:(id: string, roomId?: string) => Promise<import("@samurai-agent/core-schemas").ObjectiveRecord | undefined>;
+  updateObjective:(record: import("@samurai-agent/core-schemas").ObjectiveRecord, roomId?: string) => Promise<import("@samurai-agent/core-schemas").ObjectiveRecord>;
+  saveWorkItem:(record: import("@samurai-agent/core-schemas").WorkItemRecord, roomId?: string) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord>;
+  getWorkItem:(id: string, roomId?: string) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord | undefined>;
+  claimWorkItem:(input: { workerId: string; leaseMs: number; roomId?: string; now?: string; }) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord | undefined>;
+  completeWorkItem:(input: { workItemId: string; workerId: string; roomId?: string; now?: string; }) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord | undefined>;
+  failWorkItem:(input: { workItemId: string; workerId: string; roomId?: string; failureKind: "retryable" | "non_retryable" | "cancelled"; error: string; now?: string; baseRetryMs?: number; }) => Promise<import("@samurai-agent/core-schemas").WorkItemRecord | undefined>;
   getArtifact:(id: string) => Promise<import("@samurai-agent/core-schemas").ArtifactRecord | undefined>;
   listArtifacts:(input?: { artifactIds?: readonly string[]; }) => Promise<import("@samurai-agent/core-schemas").ArtifactRecord[]>;
   listArtifactsForSession:(sessionId: string) => Promise<import("@samurai-agent/core-schemas").ArtifactRecord[]>;
@@ -324,13 +339,13 @@ export interface RuntimeWorkspaceOperationsPort {
   getCollectionSchema:(collectionId: string) => Promise<CollectionSchemaWithFilePath | undefined>;
   listCollectionSchemas:(options?: CollectionRoomCandidateOptions) => Promise<CollectionSchemaWithFilePath[]>;
   updateCollectionSchema:(schemaInput: import("@samurai-agent/core-schemas").CollectionSchema, expectedResourceVersion?: number) => Promise<CollectionSchemaWithFilePath>;
-  saveCollectionRecord:(recordInput: import("@samurai-agent/core-schemas").CollectionRecord) => Promise<CollectionRecordWithFilePath>;
-  deleteCollectionRecord:(collectionId: string, recordId: string, expectedVersion?: number) => Promise<CollectionRecordWithFilePath>;
+  saveCollectionRecord:(recordInput: import("@samurai-agent/core-schemas").CollectionRecord, trigger?: CollectionTriggerWriteRequest) => Promise<CollectionRecordWithFilePath>;
+  deleteCollectionRecord:(collectionId: string, recordId: string, expectedVersion: number) => Promise<CollectionRecordWithFilePath>;
   getCollectionRecord:(collectionId: string, recordId: string) => Promise<CollectionRecordWithFilePath | undefined>;
   listCollectionRecords:(collectionId?: string, options?: CollectionRoomCandidateOptions) => Promise<CollectionRecordWithFilePath[]>;
   resolveCollectionRecordRefs:(collectionId: string, recordId: string, options?: CollectionRoomCandidateOptions) => Promise<CollectionRecordResolution>;
   evaluateCollectionTriggers:(input: { collectionId: string; recordId: string; event: CollectionTriggerEffect["event"]; }) => Promise<CollectionTriggerEffect[]>;
-  applyCollectionRecordPatch:(input: { collectionId: string; recordId: string; patch: import("@samurai-agent/core-schemas").CollectionPatch; }) => Promise<{ before: CollectionRecordWithFilePath; after: CollectionRecordWithFilePath; }>;
+  applyCollectionRecordPatch:(input: { collectionId: string; recordId: string; patch: import("@samurai-agent/core-schemas").CollectionPatch; trigger?: CollectionTriggerWriteRequest; }) => Promise<{ before: CollectionRecordWithFilePath; after: CollectionRecordWithFilePath; }>;
   saveAutomationJob:(job: import("@samurai-agent/core-schemas").AutomationJobRecord) => Promise<import("@samurai-agent/core-schemas").AutomationJobRecord>;
   getAutomationJob:(id: string) => Promise<import("@samurai-agent/core-schemas").AutomationJobRecord | undefined>;
   listAutomationJobs:(input?: { dueAt?: string; enabledOnly?: boolean; }) => Promise<import("@samurai-agent/core-schemas").AutomationJobRecord[]>;
@@ -349,6 +364,9 @@ export interface RuntimeWorkspaceOperationsPort {
   revokeExternalAppConnection:(input: { id: string; revokedAt: string; updatedAt?: string; }) => Promise<import("@samurai-agent/core-schemas").ExternalAppConnectionRecord | undefined>;
   saveExternalSend:(send: import("@samurai-agent/core-schemas").ExternalSendRecord) => Promise<import("@samurai-agent/core-schemas").ExternalSendRecord>;
   getExternalSend:(id: string, input?: { operationIds?: string[]; }) => Promise<import("@samurai-agent/core-schemas").ExternalSendRecord | undefined>;
+  claimExternalSendDispatch:(input: { id: string; now: string; lease_until: string; }) => Promise<{ record: import("@samurai-agent/core-schemas").ExternalSendRecord; claim_token: string; } | undefined>;
+  settleExternalSendDispatch:(input: { record: import("@samurai-agent/core-schemas").ExternalSendRecord; claim_token: string; }) => Promise<import("@samurai-agent/core-schemas").ExternalSendRecord>;
+  markExternalSendOutcomeUnknown:(input: { id: string; claim_token: string; now: string; message: string; dispatch_result?: Record<string, import("@samurai-agent/core-schemas").JsonValue>; }) => Promise<import("@samurai-agent/core-schemas").ExternalSendRecord>;
   saveGatewayPairingPolicy:(policy: import("@samurai-agent/core-schemas").GatewayPairingPolicyRecord) => Promise<import("@samurai-agent/core-schemas").GatewayPairingPolicyRecord>;
   getGatewayPairingPolicy:(channel: import("@samurai-agent/core-schemas").GatewayPairingPolicyRecord["channel"]) => Promise<import("@samurai-agent/core-schemas").GatewayPairingPolicyRecord | undefined>;
   listGatewayPairingPolicies:(input?: { status?: import("@samurai-agent/core-schemas").GatewayPairingPolicyRecord["status"]; }) => Promise<import("@samurai-agent/core-schemas").GatewayPairingPolicyRecord[]>;
@@ -458,8 +476,8 @@ export interface RuntimeResourceMutationActivityPort {
 }
 
 export interface RuntimeDurableWorkPort {
-  listWorkItems(input?: { objectiveId?: string; status?: import("@samurai-agent/core-schemas").WorkItemRecord["status"] }): Promise<import("@samurai-agent/core-schemas").WorkItemRecord[]>;
-  saveWorkDependency(record: import("@samurai-agent/core-schemas").WorkDependencyRecord): Promise<import("@samurai-agent/core-schemas").WorkDependencyRecord>;
+  listWorkItems(input?: { objectiveId?: string; status?: import("@samurai-agent/core-schemas").WorkItemRecord["status"]; roomId?: string }): Promise<import("@samurai-agent/core-schemas").WorkItemRecord[]>;
+  saveWorkDependency(record: import("@samurai-agent/core-schemas").WorkDependencyRecord, roomId?: string): Promise<import("@samurai-agent/core-schemas").WorkDependencyRecord>;
 }
 
 export interface RuntimeWorkspaceContextPreviewPort {

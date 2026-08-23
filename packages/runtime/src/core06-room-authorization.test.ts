@@ -493,7 +493,7 @@ describe("Core 06 runtime authorization", () => {
         bundle: {
           title: "Temporary control", html: '<main><button data-action-id="create">Create</button></main>', actions: [{
             id: "create", label: "Create", command_id: "artifact.create", input_schema: { type: "object" },
-            payload_template: { title: "Not allowed", content: "foreign Room cannot run this" }, requires_confirmation: false
+            payload_template: { title: "Not allowed", content: "foreign Room cannot run this" }, requires_confirmation: true
           }]
         }
       }
@@ -501,6 +501,13 @@ describe("Core 06 runtime authorization", () => {
     const surface = (created.result as { definition: { id: string; current_revision_id: string; session_id?: string } }).definition;
     expect(surface.session_id).toBeUndefined();
     expect(await store.getResourceAccessBoundary("generated_surface", surface.id)).toMatchObject({ source_room_id: "room_default" });
+
+    await expect(runtime.runGeneratedSurfaceAction({
+      surfaceId: surface.id,
+      revisionId: surface.current_revision_id,
+      actionId: "create",
+      interactionId: "core08-surface-action-without-confirmation"
+    }, directContext)).rejects.toMatchObject({ code: "conflict", message: "generated_surface_action_confirmation_required" });
 
     const otherOwner = humanParticipantId("core08-surface-other-room-owner");
     await store.addWorkspaceMember({ participantId: otherOwner, role: "member", actorId: localOwnerParticipantId });

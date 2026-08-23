@@ -24,7 +24,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -102,16 +102,16 @@ jobs:
           fi
 
       - name: Run Linux integration and verifier gates
-        # This is the deep integration/release gate. Keep it out of the fast
-        # pull-request contract so a Core change is not blocked by unrelated
-        # full-ledger telemetry work; run it explicitly from workflow_dispatch.
-        if: runner.os == 'Linux' && github.event_name == 'workflow_dispatch'
+        # The Linux job is the single deep Domain Command gate. It is required
+        # for PRs and main pushes; the three-OS matrix above remains focused on
+        # platform differences instead of repeating the same heavy suite.
+        if: runner.os == 'Linux'
         run: pnpm run core:domain-commands:check
 
   release-readiness:
     name: release-readiness
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -151,17 +151,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            # Full non-destructive release verification is an explicit manual
-            # release check. It includes the full Vitest suite and probes.
-            CI=true pnpm run backend:release:verify -- --json | tee release-readiness.json
-          else
-            # Pull requests and main pushes use the fast product-health gates:
-            # typecheck, i18n, web build, doctor, naming, and gateway recovery.
-            # Focused Domain Command tests run in the matrix job above. The
-            # skipped gates remain available through workflow_dispatch.
-            CI=true pnpm run backend:release:verify -- --json --skip-tests --skip-external-probes --skip-sandbox-probes | tee release-readiness.json
-          fi
+          # Every PR and main push must report executable gates. A skipped
+          # gate is unverified and causes the verifier to fail.
+          CI=true pnpm run backend:release:verify -- --json | tee release-readiness.json
 
       - name: Upload release readiness report
         if: always()
@@ -169,4 +161,145 @@ jobs:
         with:
           name: release-readiness
           path: release-readiness.json
+          if-no-files-found: warn
+
+  full-linux:
+    name: full-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format and architecture gates
+        run: |
+          set -euo pipefail
+          git diff --check
+          pnpm run verify:architecture
+
+      - name: Typecheck all packages
+        run: pnpm typecheck
+
+      - name: Run full Linux test suite
+        run: CI=true pnpm test -- --pool=forks --maxWorkers=4
+
+      - name: Build Web and Desktop
+        run: |
+          pnpm run desktop:verify
+          pnpm --filter @samurai-agent/web run build
+          pnpm --filter @samurai-agent/desktop run build
+
+      - name: Dependency security audit
+        run: pnpm audit --audit-level=high
+
+  postgres-deep:
+    name: postgres-deep
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    # This is one disposable PostgreSQL service with two databases. It proves
+    # the migration/RLS/runtime paths in CI, but it is not evidence that two
+    # separately deployed Hosted and Self-host installations behave alike.
+    # That deployment evidence remains a release/environment gate.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: samurai_ci_postgres_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare disposable CI PostgreSQL databases
+        shell: bash
+        env:
+          PGPASSWORD: samurai_ci_postgres_password
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            if pg_isready --host 127.0.0.1 --port 5432 --username postgres --dbname postgres; then
+              break
+            fi
+            sleep 1
+          done
+          pg_isready --host 127.0.0.1 --port 5432 --username postgres --dbname postgres
+          psql --host 127.0.0.1 --port 5432 --username postgres --dbname postgres --set ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE samurai_ci_runtime LOGIN PASSWORD 'samurai_ci_postgres_password' NOSUPERUSER NOBYPASSRLS;
+          CREATE DATABASE samurai_ci_hosted;
+          CREATE DATABASE samurai_ci_self_host;
+          SQL
+
+      - name: Run full CI verifier against disposable PostgreSQL
+        env:
+          SAMURAI_CI_FULL_POSTGRES_MODE: disposable_ci_service
+          SAMURAI_CI_FULL_REPORT_DIRECTORY: /tmp/samurai-ci-full-report
+          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
+          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
+          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
+          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
+          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
+          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
+          SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE: yes
+        run: pnpm run verify:ci-full
+
+      - name: Upload full CI verifier report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-full-report
+          path: /tmp/samurai-ci-full-report/
+          if-no-files-found: warn
+
+      - name: Run disposable PostgreSQL migration, RLS, recovery, bundle and load gates
+        run: CI=true pnpm run server:04:complete:verify
+
+      - name: Upload PostgreSQL deep reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: postgres-deep-reports
+          path: reports/server04-completion/
           if-no-files-found: warn

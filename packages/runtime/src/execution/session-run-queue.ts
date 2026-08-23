@@ -1,5 +1,6 @@
 export interface SessionRunQueueOptions {
   maxConcurrency?: number;
+  controlWaitTimeoutMs?: number;
 }
 
 type Task<T> = { run: () => Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void; signal?: AbortSignal; sessionId: string; started: boolean; abortListener?: () => void };
@@ -18,9 +19,13 @@ export class SessionRunQueue {
   private active = 0;
   private closed = false;
   private readonly maxConcurrency: number;
+  private readonly controlWaitTimeoutMs: number;
 
   constructor(options: SessionRunQueueOptions = {}) {
     this.maxConcurrency = Math.max(1, options.maxConcurrency ?? 4);
+    this.controlWaitTimeoutMs = Number.isFinite(options.controlWaitTimeoutMs)
+      ? Math.max(1, options.controlWaitTimeoutMs ?? 30_000)
+      : 30_000;
   }
 
   enqueue<T>(sessionId: string, run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -108,10 +113,15 @@ export class SessionRunQueue {
    * resume path still needs one before it calls the Backend. This waits only
    * for a global slot; it never joins the normal Session turn queue.
    */
-  async acquireControl(sessionId: string): Promise<SessionControlLease> {
+  async acquireControl(sessionId: string, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<SessionControlLease> {
     if (this.waitingSessions.get(sessionId) !== "suspended") return { acquiredGlobalSlot: false, restoreSuspended: () => undefined };
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(1, options.timeoutMs ?? this.controlWaitTimeoutMs) : this.controlWaitTimeoutMs;
+    const deadline = Date.now() + timeoutMs;
     while (!this.closed && this.waitingSessions.get(sessionId) === "suspended" && this.active >= this.maxConcurrency) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (options.signal?.aborted) throw abortError();
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("session_run_queue_control_timeout");
+      await waitForControlSlot(Math.min(25, remaining), options.signal);
     }
     if (this.closed) throw new Error("session_run_queue_closed");
     if (this.waitingSessions.get(sessionId) !== "suspended") return { acquiredGlobalSlot: false, restoreSuspended: () => undefined };
@@ -164,6 +174,24 @@ export class SessionRunQueue {
 
   get activeCount(): number { return this.active; }
   get pendingCount(): number { return [...this.lanes.values()].reduce((sum, lane) => sum + lane.length, 0); }
+}
+
+function waitForControlSlot(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onAbort = () => finish(abortError());
+    const timer = setTimeout(() => finish(), delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function abortError(): Error {

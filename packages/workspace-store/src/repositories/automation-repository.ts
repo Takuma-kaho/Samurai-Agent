@@ -1,5 +1,5 @@
 import { AutomationJobRecordSchema, AutomationRunRecordSchema, nowIso, type AutomationJobRecord, type AutomationRunRecord } from "@samurai-agent/core-schemas";
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 import type { WorkspaceDb } from "../kernel/workspace-db-schema";
 import type { AutomationQueueSummary } from "../workspace-store-contracts";
 import { automationJobFromRow, automationJobToRow } from "./automation-row-codecs";
@@ -30,12 +30,32 @@ export class AutomationRepository {
   constructor(private readonly db: Kysely<WorkspaceDb>) {}
 
   async saveAutomationJob(job: AutomationJobRecord): Promise<AutomationJobRecord> {
+    const { file_transaction_id: _fileTransactionId, ...row } = automationJobToRow(job);
     await this.db
       .insertInto("automation_jobs")
-      .values(automationJobToRow(job))
-      .onConflict((oc) => oc.column("id").doUpdateSet(automationJobToRow(job)))
+      .values({ ...row, file_transaction_id: null })
+      // A normal management update must never expose a trigger that is still
+      // waiting for its file transaction to settle.
+      .onConflict((oc) => oc.column("id").doUpdateSet(row))
       .execute();
     return job;
+  }
+
+  /**
+   * Collection writes call this from their existing file transaction.  The
+   * job is durable with the record, while `file_transaction_id` prevents the
+   * scheduler from seeing it before the file side has settled.
+   */
+  async saveCollectionTriggerJobs(
+    transaction: Transaction<WorkspaceDb>,
+    jobs: readonly AutomationJobRecord[],
+    fileTransactionId: string
+  ): Promise<void> {
+    for (const job of jobs) {
+      await transaction.insertInto("automation_jobs")
+        .values({ ...automationJobToRow(job), file_transaction_id: fileTransactionId })
+        .execute();
+    }
   }
 
   async getAutomationJob(id: string): Promise<AutomationJobRecord | undefined> {
@@ -44,7 +64,12 @@ export class AutomationRepository {
   }
 
   async listAutomationJobs(input: { dueAt?: string; enabledOnly?: boolean } = {}): Promise<AutomationJobRecord[]> {
-    let query = this.db.selectFrom("automation_jobs").selectAll();
+    let query = this.db.selectFrom("automation_jobs").selectAll()
+      .where((eb) => eb.not(eb.exists(
+        eb.selectFrom("workspace_file_transactions as file_transaction")
+          .select("file_transaction.id")
+          .whereRef("file_transaction.id", "=", "automation_jobs.file_transaction_id")
+      )));
     if (input.enabledOnly) {
       query = query.where("status", "=", "enabled");
     }
@@ -78,6 +103,11 @@ export class AutomationRepository {
       .where("id","=",jobId).where("status","=","enabled")
       .where("authorization_state", "=", "ready")
       .where("management_state", "=", "allowed")
+      .where((eb) => eb.not(eb.exists(
+        eb.selectFrom("workspace_file_transactions as file_transaction")
+          .select("file_transaction.id")
+          .whereRef("file_transaction.id", "=", "automation_jobs.file_transaction_id")
+      )))
       .where((eb)=>eb.or([eb("locked_until","is",null),eb("locked_until","<=",now)]))
       .where((eb)=>eb.or([eb("next_run_at","is",null),eb("next_run_at","<=",now)]))
       .where((eb)=>eb.or([eb("retry_after_at","is",null),eb("retry_after_at","<=",now)]))

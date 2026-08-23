@@ -10,13 +10,13 @@ import { createFollowUpWorkItem, steerWorkItem, transitionObjectiveState, WorkSt
 
 const now = "2026-07-11T00:00:00.000Z";
 const objective: ObjectiveRecord = {
-  id: "objective-model", title: "Model", objective: "Exercise all transitions", completion_criteria: ["model passes"],
+  id: "objective-model", room_id: "room_fixture", title: "Model", objective: "Exercise all transitions", completion_criteria: ["model passes"],
   status: "active", created_at: now, updated_at: now
 };
 const workItems: WorkItemRecord[] = [
-  { id: "running", objective_id: objective.id, instruction: "running", status: "running", priority: 2, attempt: 1, max_attempts: 3, idempotency_key: "running", lease_owner: "worker", lease_expires_at: now, heartbeat_at: now, backend_run_id: "backend-running", created_at: now, updated_at: now },
-  { id: "ready", objective_id: objective.id, instruction: "ready", status: "ready", priority: 1, attempt: 0, max_attempts: 3, idempotency_key: "ready", created_at: now, updated_at: now },
-  { id: "completed", objective_id: objective.id, instruction: "completed", status: "completed", priority: 0, attempt: 1, max_attempts: 3, idempotency_key: "completed", created_at: now, updated_at: now, completed_at: now }
+  { id: "running", objective_id: objective.id, room_id: objective.room_id, instruction: "running", status: "running", priority: 2, attempt: 1, max_attempts: 3, idempotency_key: "running", lease_owner: "worker", lease_expires_at: now, heartbeat_at: now, backend_run_id: "backend-running", created_at: now, updated_at: now },
+  { id: "ready", objective_id: objective.id, room_id: objective.room_id, instruction: "ready", status: "ready", priority: 1, attempt: 0, max_attempts: 3, idempotency_key: "ready", created_at: now, updated_at: now },
+  { id: "completed", objective_id: objective.id, room_id: objective.room_id, instruction: "completed", status: "completed", priority: 0, attempt: 1, max_attempts: 3, idempotency_key: "completed", created_at: now, updated_at: now, completed_at: now }
 ];
 
 const paused = transitionObjectiveState({ objective, workItems, action: "pause", now });
@@ -75,11 +75,11 @@ try {
       return store.updateBackendRun({ ...run, status: "cancelled", completed_at: now });
     }
   });
-  const persistedSteer = await coordinator.steer(workItems[0].id, "Persist this steering instruction", now);
+  const persistedSteer = await coordinator.steer(workItems[0].id, "Persist this steering instruction", objective.room_id!, now);
   assert.match((await store.getWorkItem(persistedSteer.id))!.instruction, /Persist this steering instruction/);
-  const persistedFollowUp = await coordinator.followUp(workItems[0].id, "Persist this follow-up", now);
+  const persistedFollowUp = await coordinator.followUp(workItems[0].id, "Persist this follow-up", objective.room_id!, now);
   assert.equal((await store.listWorkDependencies(objective.id))[0]?.successor_work_item_id, persistedFollowUp.workItem.id);
-  await coordinator.transitionObjective(objective.id, "cancel", now);
+  await coordinator.transitionObjective(objective.id, "cancel", objective.room_id!, now);
   assert.equal(cancelledBackendRun, "backend-running");
   assert.equal((await store.getBackendRun("backend-running"))?.status, "cancelled");
   assert.equal((await store.getWorkItem(workItems[0].id))?.status, "cancelled");

@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   createWorkspaceChatSession: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:session:create", sanitizeWorkspaceChatSessionInput(input)),
   getWorkspaceChatSession: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:session:get", sanitizeWorkspaceChatSessionIdInput(input)),
   sendWorkspaceChatMessage: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:message:send", sanitizeWorkspaceChatTurnInput(input)),
+  writeWorkspaceAttachment: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:files:attachment:write", sanitizeWorkspaceAttachmentInput(input)),
   searchWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:search", sanitizeWorkspaceRuntimeQuery(input)),
   listWorkspaceBackendRuns: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:runs:list", sanitizeWorkspaceRuntimeQuery(input)),
   getWorkspaceBackendRun: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:run:get", sanitizeWorkspaceRuntimeQuery(input)),
@@ -214,6 +215,18 @@ function sanitizeWorkspaceChatTurnInput(input: unknown): Record<string, unknown>
     });
   }
   return output;
+}
+
+function sanitizeWorkspaceAttachmentInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  return {
+    roomId: typeof value.roomId === "string" ? value.roomId.slice(0, 128) : "",
+    path: typeof value.path === "string" ? value.path.slice(0, 240) : "",
+    contentBase64: typeof value.contentBase64 === "string" ? value.contentBase64.slice(0, 11_184_812) : "",
+    expectedVersion: typeof value.expectedVersion === "number" && Number.isSafeInteger(value.expectedVersion) ? value.expectedVersion : -1,
+    operationId: typeof value.operationId === "string" ? value.operationId.slice(0, 128) : ""
+  };
 }
 
 function sanitizeWorkspaceRealtimeNotice(input: unknown): { type: string; workspaceId: string; roomId?: string; kind?: string } | undefined {

@@ -1,4 +1,4 @@
-import { createId, nowIso } from "@samurai-agent/core-schemas";
+import { BackendEventRecordSchema, createId, nowIso } from "@samurai-agent/core-schemas";
 import { PostgresWorkspaceDatabase, type WorkspaceRequestContext, type WorkspaceSql } from "@samurai-agent/workspace-server";
 import type { WorkspaceExecutionJobWorkerPort } from "./workspace-worker-supervisor";
 
@@ -8,6 +8,7 @@ interface InterruptedRunRow {
   room_id: string | null;
   status: "queued" | "running";
   phase: "admitted" | "backend_starting" | "external_running";
+  current_attempt: number | string | null;
 }
 
 interface ActivityRow {
@@ -18,9 +19,10 @@ interface ActivityRow {
 /**
  * Recovers Runtime work that was admitted by the HTTP process and left
  * unfinished by a process crash. It never starts a second backend process:
- * an unstarted run becomes failed, while a run that may have reached an
- * external backend becomes outcome_unknown and needs an explicit retry or
- * human reconciliation.
+ * an unstarted run becomes failed. A run that has reached an external backend
+ * is deliberately excluded from automatic recovery: a provider can be quiet
+ * for longer than the stale interval while still running. It needs an
+ * explicit recovery decision instead of a worker guessing from started_at.
  */
 export class PostgresRuntimeExecutionWorker implements WorkspaceExecutionJobWorkerPort {
   constructor(
@@ -32,12 +34,12 @@ export class PostgresRuntimeExecutionWorker implements WorkspaceExecutionJobWork
     if (input.signal.aborted) return { recovered: 0 };
     return this.database.withContext(context, async (sql) => {
       const runs = await sql.query<InterruptedRunRow>(
-        `SELECT id, session_id, room_id, status, phase
+        `SELECT id, session_id, room_id, status, phase, current_attempt
          FROM workspace_runtime_runs
          WHERE workspace_id = $1
            AND (
              (status = 'queued' AND phase = 'admitted' AND started_at < NOW() - ($2 * INTERVAL '1 millisecond'))
-             OR (status = 'running' AND phase IN ('backend_starting', 'external_running') AND started_at < NOW() - ($2 * INTERVAL '1 millisecond'))
+             OR (status = 'running' AND phase = 'backend_starting' AND started_at < NOW() - ($2 * INTERVAL '1 millisecond'))
            )
          ORDER BY started_at, id
          FOR UPDATE SKIP LOCKED
@@ -51,30 +53,48 @@ export class PostgresRuntimeExecutionWorker implements WorkspaceExecutionJobWork
         const now = nowIso();
         const eventId = createId("event");
         const eventSequence = await nextSequence(sql, context.workspaceId, run.id);
+        const attemptNo = Number(run.current_attempt ?? 1) > 0 ? Number(run.current_attempt) : 1;
+        const errorCode = outcomeUnknown ? "runtime_recovery_outcome_unknown" : "runtime_recovery_admission_interrupted";
+        const message = outcomeUnknown
+          ? "The process stopped while an external backend may have been running."
+          : "The process stopped before the backend was started.";
+        const terminalEvidence = outcomeUnknown
+          ? { kind: "indeterminate" as const, reason: "runtime_state_unavailable" as const, providerStarted: true, mayHaveSideEffects: true }
+          : {
+              kind: "failed" as const,
+              source: "process_exit" as const,
+              error: { code: errorCode, message, retryable: true, causeCategory: "runtime" as const }
+            };
+        const event = BackendEventRecordSchema.parse({
+          id: eventId,
+          run_id: run.id,
+          ...(run.session_id ? { session_id: run.session_id } : {}),
+          event_type: "run_failed",
+          sequence: eventSequence,
+          attempt_no: attemptNo,
+          payload: {
+            error_code: errorCode,
+            message,
+            retryable: true,
+            cause_category: "runtime",
+            terminal_evidence: terminalEvidence
+          },
+          resource_refs: [],
+          created_at: now
+        });
         await sql.query(
           `INSERT INTO workspace_runtime_events(
              workspace_id, id, run_id, session_id, event_type, sequence, attempt_no,
              payload, resource_refs, created_at
-           ) VALUES ($1, $2, $3, $4, 'run_failed', $5, 1, $6::JSONB, '[]'::JSONB, $7)`,
+           ) VALUES ($1, $2, $3, $4, 'run_failed', $5, $6, $7::JSONB, '[]'::JSONB, $8)`,
           [
             context.workspaceId,
             eventId,
             run.id,
             run.session_id,
             eventSequence,
-            JSON.stringify({
-              error_code: outcomeUnknown ? "runtime_recovery_outcome_unknown" : "runtime_recovery_admission_interrupted",
-              message: outcomeUnknown
-                ? "The process stopped while an external backend may have been running."
-                : "The process stopped before the backend was started.",
-              retryable: true,
-              cause_category: "runtime",
-              terminal_evidence: {
-                kind: "indeterminate",
-                source: "recovery",
-                reason: outcomeUnknown ? "external_execution_state_unknown" : "admission_interrupted"
-              }
-            }),
+            attemptNo,
+            JSON.stringify(event.payload),
             now
           ]
         );

@@ -13,10 +13,13 @@ const Input = z.object({
 const Output = collectionRecordWriteValueSchema;
 
 export interface CollectionRecordCreatePorts {
-  saveCollectionRecord(record: CollectionRecord): Promise<z.infer<typeof Output>["resource"]>;
+  saveCollectionRecord(record: CollectionRecord, trigger: {
+    event: "record.created";
+    operation: OperationRecord;
+    trustedContext: TrustedDomainContext;
+  }): Promise<z.infer<typeof Output>["resource"]>;
   collectionRecordRef(record: z.infer<typeof Output>["resource"]): ResourceRef;
   createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, z.infer<typeof domainJsonValueSchema>>, after: Record<string, z.infer<typeof domainJsonValueSchema>>): Promise<RollbackPoint>;
-  queueCollectionTrigger(input: { collectionId: string; recordId: string; event: "record.created" }): Promise<void>;
   runCollectionMutation<T>(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string }> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] }>;
 }
 
@@ -81,15 +84,14 @@ const collectionRecordCreate = defineCommand<CollectionRecordCreatePorts>()({
         };
         const result = await ports.runCollectionMutation({
           trustedContext: context, inputSummary: `Create collection record: ${record.collection_id}/${record.id}`, operationName: "collection.record.create",
-          proposedEffects: ["Create a collection record file and SQLite index row."],
+          proposedEffects: ["Create a Collection record file, SQLite index row, and durable matching trigger job."],
           execute: async (operation) => {
-            const saved = await ports.saveCollectionRecord(record);
+            const saved = await ports.saveCollectionRecord(record, { event: "record.created", operation, trustedContext: context });
             const ref = ports.collectionRecordRef(saved);
             const rollbackPoint = await ports.createCollectionRollback(operation, [ref], {}, { collection_id: saved.collection_id, record_id: saved.id });
             return { resource: saved, ref, rollbackPoint, summary: `Created collection record ${saved.collection_id}/${saved.id}.` };
           }
         });
-        await ports.queueCollectionTrigger({ collectionId: result.resource.collection_id, recordId: result.resource.id, event: "record.created" });
         return { ok: true, value: Output.parse(result) };
       }
     };

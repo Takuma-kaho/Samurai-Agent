@@ -7617,6 +7617,108 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "ALTER TABLE workspace_gateway_pairing_policies ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::JSONB",
       "ALTER TABLE workspace_gateway_routing_policies ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::JSONB"
     ]
+  },
+  {
+    // The original Runtime policies used FOR ALL with a read-only USING
+    // clause. PostgreSQL applies that USING clause to DELETE as well, so a
+    // Room reader could delete runtime evidence. Split the policies by SQL
+    // command and keep deletion disabled except for the existing temporary
+    // user-message cleanup path.
+    version: 55,
+    name: "workspace_server_runtime_command_specific_rls",
+    statements: [
+      ...runtimeCommandSpecificRlsStatements()
+    ]
+  },
+  {
+    // A process can stop after the import transaction commits but before the
+    // read-only Workspace is activated. The owner may resume that exact
+    // manifest, including after the short session TTL, without opening a
+    // generic write capability or accepting a different Bundle.
+    version: 56,
+    name: "workspace_server_import_resume_capability",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_reopen_workspace_import(
+        target_workspace_id TEXT,
+        import_session_id TEXT,
+        target_manifest_hash TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_state TEXT;
+      DECLARE session_account_id TEXT;
+      DECLARE session_state TEXT;
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL
+          OR NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_import_owner_required';
+        END IF;
+        SELECT state INTO current_state
+        FROM workspaces
+        WHERE id = target_workspace_id
+        FOR UPDATE;
+        IF current_state IS DISTINCT FROM 'read_only' THEN
+          RAISE EXCEPTION 'workspace_import_target_not_resumable';
+        END IF;
+        SELECT account_id, state INTO session_account_id, session_state
+        FROM workspace_import_sessions
+        WHERE workspace_id = target_workspace_id AND id = import_session_id
+        FOR UPDATE;
+        IF session_account_id IS DISTINCT FROM samurai_current_account_id()
+          OR session_state IS DISTINCT FROM 'writing' THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM workspace_bundles
+          WHERE workspace_id = target_workspace_id AND sha256 = target_manifest_hash
+        ) THEN
+          RAISE EXCEPTION 'workspace_import_manifest_mismatch';
+        END IF;
+        UPDATE workspace_import_sessions
+        SET expires_at = NOW() + INTERVAL '1 hour', updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = import_session_id AND state = 'writing';
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_reopen_workspace_import(TEXT, TEXT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // v55 split Runtime policies by SQL command but accidentally widened
+    // Client Event access back to the whole Workspace. Re-apply the Room
+    // boundary in a new migration so already-migrated databases are fixed as
+    // well as fresh databases.
+    version: 57,
+    name: "workspace_server_runtime_client_event_room_command_rls",
+    statements: [
+      "DROP POLICY IF EXISTS workspace_runtime_client_events_access ON workspace_runtime_client_events",
+      "DROP POLICY IF EXISTS workspace_runtime_client_events_select ON workspace_runtime_client_events",
+      "DROP POLICY IF EXISTS workspace_runtime_client_events_insert ON workspace_runtime_client_events",
+      "DROP POLICY IF EXISTS workspace_runtime_client_events_update ON workspace_runtime_client_events",
+      "DROP POLICY IF EXISTS workspace_runtime_client_events_delete ON workspace_runtime_client_events",
+      `CREATE POLICY workspace_runtime_client_events_select ON workspace_runtime_client_events FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+          OR (room_id IS NULL AND samurai_can_workspace(workspace_id, 'guest'))
+        )
+      )`,
+      `CREATE POLICY workspace_runtime_client_events_insert ON workspace_runtime_client_events FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND samurai_workspace_is_writable(workspace_id) AND (
+          (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+          OR (room_id IS NULL AND samurai_can_workspace(workspace_id, 'execute'))
+        )
+      )`,
+      `CREATE POLICY workspace_runtime_client_events_update ON workspace_runtime_client_events FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_workspace_is_writable(workspace_id) AND (
+          (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+          OR (room_id IS NULL AND samurai_can_workspace(workspace_id, 'execute'))
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND samurai_workspace_is_writable(workspace_id) AND (
+          (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+          OR (room_id IS NULL AND samurai_can_workspace(workspace_id, 'execute'))
+        )
+      )`
+    ]
   }
 ];
 
@@ -7897,6 +7999,148 @@ function runtimeRlsStatements(): string[] {
   return statements;
 }
 
+function runtimeCommandSpecificRlsStatements(): string[] {
+  const policies: Array<{
+    table: string;
+    read: string;
+    write: string;
+    delete?: string;
+  }> = [
+    {
+      table: "workspace_runtime_sessions",
+      read: "workspace_id = samurai_current_workspace_id() AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read')",
+      write: "workspace_id = samurai_current_workspace_id() AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute')"
+    },
+    {
+      table: "workspace_runtime_messages",
+      read: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_sessions session
+        WHERE session.workspace_id = workspace_runtime_messages.workspace_id
+          AND session.id = workspace_runtime_messages.session_id
+          AND session.room_id IS NOT NULL
+          AND samurai_can_room(session.workspace_id, session.room_id, 'read')
+      )`,
+      write: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_sessions session
+        WHERE session.workspace_id = workspace_runtime_messages.workspace_id
+          AND session.id = workspace_runtime_messages.session_id
+          AND session.room_id IS NOT NULL
+          AND samurai_can_room(session.workspace_id, session.room_id, 'execute')
+      )`,
+      delete: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_sessions session
+        WHERE session.workspace_id = workspace_runtime_messages.workspace_id
+          AND session.id = workspace_runtime_messages.session_id
+          AND session.room_id IS NOT NULL
+          AND samurai_can_room(session.workspace_id, session.room_id, 'execute')
+      ) AND NOT EXISTS (
+        SELECT 1 FROM workspace_runtime_runs run
+        WHERE run.workspace_id = workspace_runtime_messages.workspace_id
+          AND (run.input_message_id = workspace_runtime_messages.id OR run.output_message_id = workspace_runtime_messages.id)
+      )`
+    },
+    {
+      table: "workspace_runtime_operations",
+      read: "workspace_id = samurai_current_workspace_id() AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read')",
+      write: "workspace_id = samurai_current_workspace_id() AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute')"
+    },
+    {
+      table: "workspace_runtime_runs",
+      read: "workspace_id = samurai_current_workspace_id() AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read')",
+      write: "workspace_id = samurai_current_workspace_id() AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute')"
+    },
+    {
+      table: "workspace_runtime_reservations",
+      read: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_runs run
+        WHERE run.workspace_id = workspace_runtime_reservations.workspace_id
+          AND run.id = workspace_runtime_reservations.run_id
+          AND run.room_id IS NOT NULL AND samurai_can_room(run.workspace_id, run.room_id, 'read')
+      )`,
+      write: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_runs run
+        WHERE run.workspace_id = workspace_runtime_reservations.workspace_id
+          AND run.id = workspace_runtime_reservations.run_id
+          AND run.room_id IS NOT NULL AND samurai_can_room(run.workspace_id, run.room_id, 'execute')
+      )`
+    },
+    {
+      table: "workspace_runtime_events",
+      read: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_runs run
+        WHERE run.workspace_id = workspace_runtime_events.workspace_id
+          AND run.id = workspace_runtime_events.run_id
+          AND run.room_id IS NOT NULL AND samurai_can_room(run.workspace_id, run.room_id, 'read')
+      )`,
+      write: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_runs run
+        WHERE run.workspace_id = workspace_runtime_events.workspace_id
+          AND run.id = workspace_runtime_events.run_id
+          AND run.room_id IS NOT NULL AND samurai_can_room(run.workspace_id, run.room_id, 'execute')
+      )`
+    },
+    {
+      table: "workspace_runtime_changes",
+      read: "workspace_id = samurai_current_workspace_id() AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read')",
+      write: "workspace_id = samurai_current_workspace_id() AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute')"
+    },
+    {
+      table: "workspace_runtime_activities",
+      read: "workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'read')",
+      write: "workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute')"
+    },
+    {
+      table: "workspace_runtime_resource_usage",
+      read: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_activities activity
+        WHERE activity.workspace_id = workspace_runtime_resource_usage.workspace_id
+          AND activity.id = workspace_runtime_resource_usage.activity_id
+          AND samurai_can_room(activity.workspace_id, activity.room_id, 'read')
+      )`,
+      write: `workspace_id = samurai_current_workspace_id() AND EXISTS (
+        SELECT 1 FROM workspace_runtime_activities activity
+        WHERE activity.workspace_id = workspace_runtime_resource_usage.workspace_id
+          AND activity.id = workspace_runtime_resource_usage.activity_id
+          AND samurai_can_room(activity.workspace_id, activity.room_id, 'execute')
+      )`
+    },
+    {
+      table: "workspace_runtime_resources",
+      read: `workspace_id = samurai_current_workspace_id() AND (
+        (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+        OR (room_id IS NULL AND samurai_can_workspace(workspace_id, 'guest'))
+      )`,
+      write: `workspace_id = samurai_current_workspace_id() AND (
+        (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'edit'))
+        OR (room_id IS NULL AND samurai_can_workspace(workspace_id, 'admin'))
+      )`
+    },
+    {
+      table: "workspace_runtime_settings",
+      read: "workspace_id = samurai_current_workspace_id() AND samurai_can_workspace(workspace_id, 'guest')",
+      write: "workspace_id = samurai_current_workspace_id() AND samurai_can_workspace(workspace_id, 'admin')"
+    },
+    {
+      table: "workspace_runtime_client_events",
+      read: `workspace_id = samurai_current_workspace_id() AND (
+        (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+        OR (room_id IS NULL AND samurai_can_workspace(workspace_id, 'guest'))
+      )`,
+      write: `workspace_id = samurai_current_workspace_id() AND samurai_workspace_is_writable(workspace_id) AND (
+        (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+        OR (room_id IS NULL AND samurai_can_workspace(workspace_id, 'execute'))
+      )`
+    }
+  ];
+  return policies.flatMap((policy) => [
+    `DROP POLICY IF EXISTS ${policy.table}_access ON ${policy.table}`,
+    `CREATE POLICY ${policy.table}_select ON ${policy.table} FOR SELECT USING (${policy.read})`,
+    `CREATE POLICY ${policy.table}_insert ON ${policy.table} FOR INSERT WITH CHECK (${policy.write})`,
+    `CREATE POLICY ${policy.table}_update ON ${policy.table} FOR UPDATE USING (${policy.write}) WITH CHECK (${policy.write})`,
+    ...(policy.delete ? [`CREATE POLICY ${policy.table}_delete ON ${policy.table} FOR DELETE USING (${policy.delete})`] : [])
+  ]);
+}
+
 function runtimeAutomationRlsStatements(): string[] {
   return [
     "ALTER TABLE workspace_runtime_automation_jobs ENABLE ROW LEVEL SECURITY",
@@ -8077,6 +8321,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_record_workspace_transfer_receipt(TEXT, TEXT, TEXT, JSONB)",
     "samurai_complete_workspace_transfer(TEXT, TEXT)",
     "samurai_record_import_bundle(TEXT, TEXT, TEXT, TEXT, JSONB)",
+    "samurai_reopen_workspace_import(TEXT, TEXT, TEXT)",
     "samurai_redact_completion_resource(TEXT, TEXT, TEXT, TEXT)",
     "samurai_rollback_completion_legacy_migration(TEXT, TEXT)",
     "samurai_completion_migration_write_allowed(TEXT)",

@@ -459,6 +459,16 @@ export interface DesktopWorkspaceRealtimeEvent {
   kind?: string;
 }
 
+export interface WorkspaceAttachmentUploadResult {
+  file: {
+    path: string;
+    version: number;
+    sha256: string;
+    size: number;
+  };
+  replayed?: boolean;
+}
+
 declare global {
   interface Window {
     samuraiDesktop?: {
@@ -495,6 +505,13 @@ declare global {
         metadata?: Record<string, JsonValue>;
         attachments?: ResourceRef[];
       }) => Promise<ChatTurnResult | ChatSurfaceOperationResult>;
+      writeWorkspaceAttachment?: (input: {
+        roomId: string;
+        path: string;
+        contentBase64: string;
+        expectedVersion: number;
+        operationId: string;
+      }) => Promise<WorkspaceAttachmentUploadResult>;
       listWorkspaceCompletionResources?: (input: { scopeKind: "workspace" | "room"; roomId?: string; kind?: "knowledge" | "skill"; includeArchived?: boolean }) => Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
       getWorkspaceCompletionResource?: (input: { resourceId: string }) => Promise<WorkspaceCompletionResourceDetail>;
       getWorkspaceCompletionResourceBody?: (input: { resourceId: string }) => Promise<WorkspaceCompletionResourceBody>;
@@ -560,7 +577,7 @@ declare global {
       runWorkspaceArtifactSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation }) => Promise<SurfaceOperationResultEnvelope>;
       getWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string }) => Promise<GeneratedSurfaceDetail>;
       getWorkspaceGeneratedSurfaceBundle?: (input: { roomId: string; surfaceId: string; revisionId: string }) => Promise<GeneratedSurfaceBundleDetail>;
-      runWorkspaceGeneratedSurfaceAction?: (input: { roomId: string; surfaceId: string; actionId: string; revisionId?: string; interactionId?: string; messageId?: string; actionPayload?: Record<string, JsonValue>; operationId: string }) => Promise<Record<string, unknown>>;
+      runWorkspaceGeneratedSurfaceAction?: (input: { roomId: string; surfaceId: string; actionId: string; revisionId?: string; interactionId?: string; messageId?: string; confirmed?: boolean; actionPayload?: Record<string, JsonValue>; operationId: string }) => Promise<Record<string, unknown>>;
       runWorkspaceGeneratedSurfaceState?: (input: { roomId: string; surfaceId: string; action: "pin" | "unpin" | "archive"; interactionId?: string; messageId?: string; operationId: string }) => Promise<GeneratedSurfaceDefinition>;
       exportWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; revisionId?: string; format: "html" | "zip" }) => Promise<GeneratedSurfaceExportPayload>;
       listWorkspaceAutomationJobs?: (input: { roomId?: string }) => Promise<{ jobs: AutomationJobRecord[] }>;
@@ -765,7 +782,7 @@ export const api = {
     if (bridge?.getWorkspaceGeneratedSurface && activeWorkspaceRoomId) return bridge.getWorkspaceGeneratedSurface({ roomId: activeWorkspaceRoomId, surfaceId });
     return workspaceRequestRequired<GeneratedSurfaceDetail>("generated-surface.get");
   },
-  runGeneratedSurfaceAction(surfaceId: string, actionId: string, payload: { revision_id?: string; interaction_id?: string; message_id?: string; action_payload?: Record<string, JsonValue> }) {
+  runGeneratedSurfaceAction(surfaceId: string, actionId: string, payload: { revision_id?: string; interaction_id?: string; message_id?: string; confirmed?: boolean; action_payload?: Record<string, JsonValue> }) {
     const bridge = activeWorkspaceBridge();
     if (bridge?.runWorkspaceGeneratedSurfaceAction && activeWorkspaceRoomId) {
       return bridge.runWorkspaceGeneratedSurfaceAction({
@@ -775,6 +792,7 @@ export const api = {
         ...(payload.revision_id ? { revisionId: payload.revision_id } : {}),
         ...(payload.interaction_id ? { interactionId: payload.interaction_id } : {}),
         ...(payload.message_id ? { messageId: payload.message_id } : {}),
+        ...(payload.confirmed === true ? { confirmed: true } : {}),
         ...(payload.action_payload ? { actionPayload: payload.action_payload } : {}),
         operationId: createIdempotencyKey()
       });
@@ -872,6 +890,17 @@ export const api = {
       });
     }
     return workspaceRequestRequired<ChatSurfaceOperationResult>("chat.message.submit");
+  },
+  uploadWorkspaceAttachment(input: {
+    roomId: string;
+    path: string;
+    contentBase64: string;
+    expectedVersion: number;
+    operationId: string;
+  }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.writeWorkspaceAttachment) return bridge.writeWorkspaceAttachment(input);
+    return workspaceRequestRequired<WorkspaceAttachmentUploadResult>("workspace.file.attachment.write");
   },
   sendMessage(sessionId: string, content: string, outputLocale: SupportedLocale, idempotencyKey: string, backendId?: string) {
     const bridge = activeWorkspaceBridge();

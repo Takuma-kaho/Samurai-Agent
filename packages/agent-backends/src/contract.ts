@@ -103,7 +103,7 @@ export interface MemoryCandidateLike {
 
 export interface TemporaryContextAttachment {
   id: string;
-  kind: "desktop_screenshot";
+  kind: "desktop_screenshot" | "workspace_file";
   label?: string;
   source_name?: string;
   mime_type: string;

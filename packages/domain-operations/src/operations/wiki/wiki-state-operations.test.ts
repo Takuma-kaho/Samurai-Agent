@@ -7,7 +7,7 @@ import type { WikiStateTransitionPorts } from "./state-transition.js";
 
 const context: TrustedDomainContext = { inputSource: "runtime_api", workspaceId: "workspace_test", actorId: "actor_test", correlationId: "correlation_test" };
 const operation = { id: "operation_1" } as never;
-const page = { id: "wiki_1", slug: "page", title: "Page", state: "proposed" as const, content_locale: "ja" as const, tags: [], source_refs: [], provenance: { kind: "user_authored" as const, summary: "test", verified: true }, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z", file_path: "wiki/page.md" };
+const page = { id: "wiki_1", slug: "page", title: "Page", state: "proposed" as const, content_locale: "ja" as const, tags: [], source_refs: [], provenance: { kind: "user_authored" as const, summary: "test", verified: true }, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z", file_path: "wiki/page.md", resource_version: 1 };
 
 function ports(setWikiPageState = vi.fn(async (_id: string, state: "active" | "archived" | "rejected") => ({ ...page, state }))) {
   return {
@@ -28,12 +28,12 @@ describe("Wiki state operation handlers", () => {
     [wikiArchive, "archived", "wiki.archive"],
     [wikiReject, "rejected", "wiki.reject"]
   ] as const)("owns the state transition for %s", async (definition, expectedState, operationName) => {
-    const setWikiPageState = vi.fn(async (_id: string, state: typeof expectedState) => ({ ...page, state }));
+    const setWikiPageState = vi.fn(async (_id: string, state: typeof expectedState, _expectedResourceVersion?: number) => ({ ...page, state, resource_version: 2 }));
     const handler = definition.createHandler(ports(setWikiPageState));
 
     const result = await handler.execute(context, { wiki_id: page.id });
 
-    expect(setWikiPageState).toHaveBeenCalledWith(page.id, expectedState);
+    expect(setWikiPageState).toHaveBeenCalledWith(page.id, expectedState, 1);
     expect(result.value.resource.state).toBe(expectedState);
     expect(result.value.operation).toEqual(operation);
   });

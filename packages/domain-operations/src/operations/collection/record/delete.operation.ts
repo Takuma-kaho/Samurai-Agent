@@ -7,7 +7,7 @@ import { collectionRecordWriteValueSchema } from "../../../value-objects/collect
 
 const Input = z.object({
   "collection_id": z.string().trim().min(1).max(256),
-  "expected_version": z.number().int().positive().optional(),
+  "expected_version": z.number().int().positive(),
   "record_id": z.string().trim().min(1).max(256),
   "view_id": z.string().trim().min(1).max(256).optional()
 }).strict();
@@ -17,7 +17,7 @@ export interface CollectionRecordDeletePorts {
   getCollectionSchemaForMutation(id: string): Promise<z.infer<typeof storedCollectionSchema> | undefined>;
   collectionDeleteAllowed(schema: CollectionSchema, viewId?: string): boolean;
   getCollectionRecord(collectionId: string, recordId: string): Promise<z.infer<typeof storedCollectionRecordSchema> | undefined>;
-  deleteCollectionRecord(collectionId: string, recordId: string, expectedVersion?: number): Promise<z.infer<typeof Output>["resource"]>;
+  deleteCollectionRecord(collectionId: string, recordId: string, expectedVersion: number): Promise<z.infer<typeof Output>["resource"]>;
   mapCollectionPatchError(error: unknown): Error;
   collectionRecordRef(record: z.infer<typeof Output>["resource"]): ResourceRef;
   collectionMutationError(code: "forbidden" | "not_found", message: string): Error;

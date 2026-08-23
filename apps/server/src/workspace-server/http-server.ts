@@ -18,8 +18,10 @@ import type { RunChatTurnResult } from "@samurai-agent/runtime";
 import { createSurfaceRenderSpec, parseSurfaceOperation, type SurfaceOperation, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   WorkspaceServerError,
+  WorkspaceFileStore,
   WorkspaceServerStore,
   WorkspaceLearningRunner,
+  createInternalWorkspaceMaintenanceCaller,
   assertOpaqueId,
   canonicalJson,
   createVerifiedWorkspaceHumanCaller,
@@ -36,6 +38,9 @@ import {
   type WorkspaceCompletionPolicyOperation,
   type WorkspaceCompletionScope,
   type WorkspaceCompletionSemanticCuratorPort,
+  type WorkspaceCompletionCuratorService,
+  type WorkspaceCompletionJobService,
+  type WorkspaceCompletionService,
   type WorkspaceBundleV3Manifest,
   type WorkspaceBundleV4Manifest,
   type WorkspaceRequestContext,
@@ -53,7 +58,7 @@ import { runPostgresChatTurnThroughDomainOperation } from "../adapters/runtime/p
 import { createPostgresChatSessionThroughDomainOperation } from "../adapters/runtime/postgres-session-domain-operation";
 import { PostgresRuntimeClientEvents } from "../adapters/runtime/postgres-runtime-client-events";
 import { PostgresRuntimeSettings } from "../adapters/runtime/postgres-runtime-settings";
-import { PostgresRuntimeAutomation } from "../adapters/runtime/postgres-runtime-automation";
+import { PostgresRuntimeAutomation, type PostgresRuntimeAutomationExecutionResult } from "../adapters/runtime/postgres-runtime-automation";
 import { PostgresKnowledgeWiki } from "../adapters/runtime/postgres-knowledge-wiki";
 import { PostgresCollection } from "../adapters/runtime/postgres-collection";
 import { PostgresKnowledgeMemory } from "../adapters/runtime/postgres-knowledge-memory";
@@ -151,15 +156,21 @@ export async function createWorkspaceServerHttp(
   const learningReviewPort = options.reviewPorts === undefined
     ? createWorkspaceLearningBackendReviewPort(backendRegistry)
     : undefined;
+  let knowledgeWiki: PostgresKnowledgeWiki;
+  let learningRunner!: WorkspaceLearningRunner;
   const automation = new PostgresRuntimeAutomation({
     database: core.database,
     store,
     backendRegistry,
     agentWorktreeRoot: path.join(config.storageRoot, "agent-worktrees"),
     coreWorkspaceRoot: path.join(config.storageRoot, "workspaces"),
+    reindexWiki: (context, roomId) => knowledgeWiki.reindex(context, roomId),
+    runMemoryReview: (context, input) => learningRunner.runCycle(context, { roomId: input.roomId }, input.signal).then((jobs) => learningExecutionResult("memory_review", jobs)),
+    runLearningEvaluation: (context, input) => runPostgresAutomationEvaluation(completion, completionJobs, context, input),
+    runSkillCurator: (context, input) => runPostgresAutomationCurator(completion, completionJobs, curator, context, input),
     maxRuns: 10
   });
-  const knowledgeWiki = new PostgresKnowledgeWiki(completion, commands);
+  knowledgeWiki = new PostgresKnowledgeWiki(completion, commands);
   const collections = new PostgresCollection(commands, files);
   const knowledgeMemory = new PostgresKnowledgeMemory(completion, commands);
   const runtimeSettings = new PostgresRuntimeSettings(core.database, store);
@@ -287,7 +298,7 @@ export async function createWorkspaceServerHttp(
   });
   const io = new SocketServer(httpServer, { cors: { origin: corsOrigins.length > 0 ? [...corsOrigins] : false, credentials: false } });
   const realtimeGate = new WorkspaceRealtimeGate();
-  const learningRunner = new WorkspaceLearningRunner(learning, options.reviewPorts ?? (learningReviewPort ? [learningReviewPort] : []), {
+  learningRunner = new WorkspaceLearningRunner(learning, options.reviewPorts ?? (learningReviewPort ? [learningReviewPort] : []), {
     onSettled: async ({ context, job }) => {
       await realtimeGate.run(context.workspaceId, async () => {
         await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: job.roomId, kind: "learning.job.updated" });
@@ -355,7 +366,7 @@ export async function createWorkspaceServerHttp(
     errorMessage: (error) => publicError(error).error
   });
 
-  const gatewayContextFor = (req: Request, inputSource: TrustedDomainContext["inputSource"]): TrustedDomainContext => {
+  const gatewayContextFor = (req: Request, inputSource: TrustedDomainContext["inputSource"], roomId?: string): TrustedDomainContext => {
     const context = workspaceContext(req);
     const signed = authenticated(req);
     const operationId = req.header("x-samurai-operation-id")?.trim() || req.header("idempotency-key")?.trim();
@@ -365,7 +376,8 @@ export async function createWorkspaceServerHttp(
       workspaceId: context.workspaceId,
       actorId: context.accountId,
       correlationId: signed.requestId,
-      idempotencyKey: operationId
+      idempotencyKey: operationId,
+      ...(roomId ? { roomId } : {})
     };
   };
 
@@ -670,7 +682,7 @@ export async function createWorkspaceServerHttp(
   app.post("/api/workspaces/:workspaceId/skills/:skillId/optimizations", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const result = await skillOperationsFor(workspaceContext(req), optionalStringField(body, "room_id") || undefined).execute(
-      gatewayContextFor(req, "runtime_api"),
+      gatewayContextFor(req, "runtime_api", optionalStringField(body, "room_id") || undefined),
       "skill.optimization.start",
       {
         skill_id: pathParam(req, "skillId"),
@@ -806,6 +818,49 @@ export async function createWorkspaceServerHttp(
   app.get("/api/workspaces/:workspaceId/chat/runs/:runId/events", authenticateWorkspace, asyncRoute(async (req, res) => {
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
     res.json(await runtimeCommands.listBackendEvents(pathParam(req, "runId")));
+  }));
+
+  app.post("/api/workspaces/:workspaceId/chat/runs/:runId/cancel", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
+      async (event) => recordPostgresChatCompletionActivity(commands, context, event));
+    res.json(await runtimeCommands.cancelBackendRun(pathParam(req, "runId")));
+  }));
+
+  app.post("/api/workspaces/:workspaceId/chat/runs/:runId/resume", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    const body = objectBody(req.body);
+    const input = body.input === undefined ? {} : jsonObjectField(body, "input");
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
+      async (event) => recordPostgresChatCompletionActivity(commands, context, event));
+    res.json(await runtimeCommands.resumeBackendRun(pathParam(req, "runId"), input));
+  }));
+
+  app.post("/api/workspaces/:workspaceId/chat/runs/:runId/sync", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
+      async (event) => recordPostgresChatCompletionActivity(commands, context, event));
+    res.json(await runtimeCommands.syncBackendRun(pathParam(req, "runId")));
+  }));
+
+  app.post("/api/workspaces/:workspaceId/chat/runs/:runId/recover", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
+      async (event) => recordPostgresChatCompletionActivity(commands, context, event));
+    res.json(await runtimeCommands.recoverBackendRun(pathParam(req, "runId")));
+  }));
+
+  app.post("/api/workspaces/:workspaceId/chat/runs/:runId/retry", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const context = operationContext(req);
+    const body = objectBody(req.body);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
+      async (event) => recordPostgresChatCompletionActivity(commands, context, event));
+    const result = await runtimeCommands.retryBackendRun(pathParam(req, "runId"), {
+      idempotencyKey: context.operationId,
+      ...(body.confirm_unknown === true ? { confirmUnknown: true } : {})
+    });
+    const renderSpec = postgresChatRenderSpec(result);
+    res.json({ result, render_spec: renderSpec, render_specs: [renderSpec] });
   }));
 
   app.get("/api/workspaces/:workspaceId/chat/changes", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -1188,6 +1243,7 @@ export async function createWorkspaceServerHttp(
       ...(optionalStringField(body, "revision_id") ? { revision_id: optionalStringField(body, "revision_id") } : {}),
       ...(optionalStringField(body, "interaction_id") ? { interaction_id: optionalStringField(body, "interaction_id") } : {}),
       ...(optionalStringField(body, "message_id") ? { message_id: optionalStringField(body, "message_id") } : {}),
+      confirmed: body.confirmed === true,
       action_payload: actionPayload
     });
     res.status(201).json(result);
@@ -2698,7 +2754,7 @@ function postgresRuntimeCommands(
   database: WorkspaceServerCore["database"],
   config: WorkspaceServerConfig,
   backendRegistry: ReturnType<typeof createDefaultAgentBackendRegistry>,
-  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId"> & Partial<Pick<WorkspaceRequestContext, "operationId">>,
   io: SocketServer,
   store: WorkspaceServerStore,
   knowledgeMemory: PostgresKnowledgeMemory,
@@ -2710,10 +2766,16 @@ function postgresRuntimeCommands(
     database,
     workspaceId: context.workspaceId,
     accountId: context.accountId,
+    ...(context.operationId ? { operationId: context.operationId } : {}),
     backendRegistry,
     knowledgeMemory,
     agentWorktreeRoot: path.join(config.storageRoot, "agent-worktrees", context.workspaceId),
     coreWorkspaceRoot: path.join(config.storageRoot, "workspaces"),
+    readWorkspaceFile: async (fileContext, roomId, ref) => {
+      if (ref.kind !== "file") throw new WorkspaceServerError("runtime_workspace_attachment_kind_invalid", 400);
+      const file = await new WorkspaceFileStore(store).read(fileContext, { roomId, path: ref.uri });
+      return { path: file.file.path, version: file.file.version, sha256: file.file.sha256, content: file.content };
+    },
     ...(onCompletionActivity ? { onCompletionActivity } : {}),
     onEvent: async (event: BackendEventRecord, roomId: string) => {
       await emitAuthorizedRoomWorkspaceEvent(io, store, {
@@ -2745,6 +2807,10 @@ async function recordPostgresChatCompletionActivity(
   if (!roomId) return;
   const outcome = event.run.status === "completed"
     ? "completed"
+    : event.run.status === "cancelled"
+      ? "cancelled"
+      : event.run.status === "outcome_unknown"
+        ? "unknown"
     : event.run.status === "waiting_for_backend_input"
       ? "unknown"
       : "failed";
@@ -3029,6 +3095,75 @@ function supportedLocaleField(body: Record<string, unknown>, key: string): Suppo
   const value = stringField(body, key);
   if (!(supportedLocales as readonly string[]).includes(value)) throw new WorkspaceServerError(`${key}_invalid`, 400);
   return value as SupportedLocale;
+}
+
+function learningExecutionResult(
+  kind: string,
+  jobs: ReadonlyArray<{ status: string; blockedReason?: string }>
+): PostgresRuntimeAutomationExecutionResult {
+  const blocked = jobs.find((job) => job.status === "blocked");
+  if (blocked) return { status: "blocked", summary: `${kind} was blocked.`, errorCode: blocked.blockedReason ?? "automation_learning_job_blocked" };
+  const failed = jobs.find((job) => job.status === "failed");
+  if (failed) return { status: "failed", summary: `${kind} failed.`, errorCode: "automation_learning_job_failed" };
+  const unsettled = jobs.find((job) => job.status === "queued" || job.status === "running");
+  if (unsettled) return { status: "blocked", summary: `${kind} did not reach a terminal state.`, errorCode: "automation_learning_job_not_settled" };
+  return {
+    status: "completed",
+    summary: jobs.length > 0 ? `${kind} settled ${jobs.length} Room-scoped learning job(s).` : `${kind} found no due Room-scoped learning job.`
+  };
+}
+
+function completionExecutionResult(
+  kind: string,
+  result: { status: string; curatorStatus?: string; evaluationCount?: number }
+): PostgresRuntimeAutomationExecutionResult {
+  if (result.status === "blocked") return { status: "blocked", summary: `${kind} was blocked.`, errorCode: "automation_completion_job_blocked" };
+  if (result.status === "failed" || result.status === "repairable_validation") return { status: "failed", summary: `${kind} failed.`, errorCode: "automation_completion_job_failed" };
+  if (result.status === "stale_input") return { status: "failed", summary: `${kind} input changed before settlement.`, errorCode: "automation_completion_job_stale_input" };
+  if (result.status === "idle") return { status: "completed", summary: `${kind} found no due Room-scoped job.` };
+  return {
+    status: "completed",
+    summary: result.evaluationCount === undefined
+      ? `${kind} completed${result.curatorStatus ? ` with status ${result.curatorStatus}` : ""}.`
+      : `${kind} completed ${result.evaluationCount} evaluation(s).`
+  };
+}
+
+function automationMaintenanceContext(context: WorkspaceRequestContext, suffix: string): WorkspaceRequestContext {
+  const operationId = `automation_core_${createHash("sha256").update(`${context.operationId}:${suffix}`).digest("hex").slice(0, 40)}`;
+  return {
+    ...context,
+    operationId,
+    caller: createInternalWorkspaceMaintenanceCaller({ principalAccountId: context.accountId, operationId })
+  };
+}
+
+async function runPostgresAutomationEvaluation(
+  completion: WorkspaceCompletionService,
+  completionJobs: WorkspaceCompletionJobService,
+  context: WorkspaceRequestContext,
+  input: { roomId: string; workerId: string; signal: AbortSignal }
+): Promise<PostgresRuntimeAutomationExecutionResult> {
+  if (input.signal.aborted) return { status: "failed", summary: "learning_evaluation was aborted.", errorCode: "automation_worker_aborted" };
+  const maintenanceContext = automationMaintenanceContext(context, `${input.workerId}:evaluation:${input.roomId}`);
+  await completion.enqueueEvaluationCatchup(maintenanceContext, { roomId: input.roomId, limit: 1 });
+  const result = await completionJobs.runOneEvaluation(maintenanceContext, { workerId: input.workerId, roomId: input.roomId });
+  return completionExecutionResult("learning_evaluation", result);
+}
+
+async function runPostgresAutomationCurator(
+  completion: WorkspaceCompletionService,
+  completionJobs: WorkspaceCompletionJobService,
+  curator: WorkspaceCompletionCuratorService,
+  context: WorkspaceRequestContext,
+  input: { roomId: string; workerId: string; signal: AbortSignal }
+): Promise<PostgresRuntimeAutomationExecutionResult> {
+  if (input.signal.aborted) return { status: "failed", summary: "skill_curator was aborted.", errorCode: "automation_worker_aborted" };
+  const maintenanceContext = automationMaintenanceContext(context, `${input.workerId}:curator:${input.roomId}`);
+  const inputHash = await curator.inputHash(maintenanceContext, { roomId: input.roomId, mode: "light" });
+  await completionJobs.enqueueCurator(maintenanceContext, { roomId: input.roomId, mode: "light", inputHash });
+  const result = await completionJobs.runOneCurator(maintenanceContext, { workerId: input.workerId, curator, roomId: input.roomId });
+  return completionExecutionResult("skill_curator", result);
 }
 
 function automationKindField(body: Record<string, unknown>, key: string): (typeof automationJobKinds)[number] {

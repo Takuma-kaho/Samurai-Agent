@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import process from "node:process";
 import { committedSourceEvidence } from "./lib/core-evidence.mjs";
+import { evaluateVerifierAssertions, reportVerifierFailures, verifierEvidenceStatus } from "./lib/verifier-assertions.mjs";
 
 const root = process.cwd();
 const prefix = process.platform === "darwin"
@@ -25,7 +26,8 @@ const sources = [
   "packages/core-schemas/src/index.ts",
   "scripts/fixtures/curator-resource-graph.ts",
   "scripts/verify-curator-resource-graph.mjs",
-  "scripts/lib/core-evidence.mjs"
+  "scripts/lib/core-evidence.mjs",
+  "scripts/lib/verifier-assertions.mjs"
 ];
 
 try {
@@ -44,17 +46,7 @@ try {
   const completed_at = new Date().toISOString();
   const evidence = path.join(root, "reports/core-completion/evidence");
   mkdirSync(evidence, { recursive: true });
-  writeFileSync(
-    path.join(evidence, "E09.json"),
-    `${JSON.stringify({
-      schema_version: 1,
-      test_id: "E09",
-      command: "pnpm core:test:curator-graph",
-      status: "passed",
-      ...committedSourceEvidence(root, sources),
-      started_at,
-      completed_at,
-      assertions: [
+  const assertions = [
         {
           name: "Duplicate, overlap, conflict, supersede and derivation edges persist",
           actual: result.relations,
@@ -75,11 +67,23 @@ try {
           actual: result.snapshot_rollback_exact,
           expected: true
         }
-      ],
+      ];
+  const failures = evaluateVerifierAssertions(assertions, result);
+  writeFileSync(
+    path.join(evidence, "E09.json"),
+    `${JSON.stringify({
+      schema_version: 1,
+      test_id: "E09",
+      command: "pnpm core:test:curator-graph",
+      status: verifierEvidenceStatus(result, failures),
+      ...committedSourceEvidence(root, sources),
+      started_at,
+      completed_at,
+      assertions, ...(failures.length ? { failures } : {}),
       result
     }, null, 2)}\n`
   );
-  process.stdout.write(`${raw}\n`);
+  reportVerifierFailures("E09", failures); process.stdout.write(`${raw}\n`);
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }

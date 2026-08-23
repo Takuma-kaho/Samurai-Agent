@@ -1156,6 +1156,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           revisionId: typeof payload.revision_id === "string" ? payload.revision_id : undefined,
           interactionId: typeof payload.interaction_id === "string" ? payload.interaction_id : `surface_interaction_${Date.now()}`,
           messageId: typeof payload.message_id === "string" ? payload.message_id : undefined,
+          confirmed: payload.confirmed === true,
           actionPayload
         }, runtimeRequestContext(req));
         res.status(201).json(result);
@@ -2516,7 +2517,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const signature = verifySlackRequestSignature(req);
         if (!signature.ok) {
-          res.status(401).json({
+          res.status(signature.status === "not_configured" ? 503 : 401).json({
             error: "invalid_gateway_slack_signature",
             reason: signature.reason,
             signature_status: signature.status
@@ -2571,7 +2572,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const secret = verifyTelegramWebhookSecret(req);
         if (!secret.ok) {
-          res.status(401).json({
+          res.status(secret.status === "not_configured" ? 503 : 401).json({
             error: "invalid_gateway_telegram_secret",
             reason: secret.reason,
             verification_status: secret.status
@@ -2623,7 +2624,7 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
       try {
         const signature = verifyLineRequestSignature(req);
         if (!signature.ok) {
-          res.status(401).json({
+          res.status(signature.status === "not_configured" ? 503 : 401).json({
             error: "invalid_gateway_line_signature",
             reason: signature.reason,
             signature_status: signature.status
@@ -4024,9 +4025,15 @@ export async function createApiServer(options: CreateApiServerOptions = {}): Pro
           res.status(400).json({ error: "session_id_required" });
           return;
         }
+        const expectedVersion = positiveIntegerOrUndefined(req.body?.expected_version, undefined);
+        if (!expectedVersion) {
+          res.status(400).json({ error: "expected_version_required" });
+          return;
+        }
         const result = await runRuntimeApiWriteCommand(runtime, req, "collection.record.delete", {
           collection_id: req.params.collectionId,
           record_id: req.params.recordId,
+          expected_version: expectedVersion,
           ...(typeof req.query.view_id === "string" ? { view_id: req.query.view_id } : {})
         }, context);
         res.json(result);
@@ -4960,7 +4967,7 @@ function isSlackUrlVerification(input: unknown): input is { type: "url_verificat
 function verifySlackRequestSignature(req: Request): GatewaySlackSignatureVerification {
   const secret = slackSigningSecret();
   if (!secret) {
-    return { ok: true, status: "not_configured" };
+    return { ok: false, status: "not_configured", reason: "slack_signature_secret_not_configured" };
   }
   const signature = req.get("x-slack-signature")?.trim();
   const timestamp = req.get("x-slack-request-timestamp")?.trim();
@@ -5031,7 +5038,7 @@ interface GatewayTelegramSecretVerification {
 function verifyTelegramWebhookSecret(req: Request): GatewayTelegramSecretVerification {
   const secret = telegramWebhookSecret();
   if (!secret) {
-    return { ok: true, status: "not_configured" };
+    return { ok: false, status: "not_configured", reason: "telegram_webhook_secret_not_configured" };
   }
   const token = req.get("x-telegram-bot-api-secret-token")?.trim();
   if (!token) {
@@ -5068,7 +5075,7 @@ interface GatewayLineSignatureVerification {
 function verifyLineRequestSignature(req: Request): GatewayLineSignatureVerification {
   const secret = lineChannelSecret();
   if (!secret) {
-    return { ok: true, status: "not_configured" };
+    return { ok: false, status: "not_configured", reason: "line_channel_secret_not_configured" };
   }
   const signature = req.get("x-line-signature")?.trim();
   if (!signature) {
@@ -7358,6 +7365,18 @@ async function externalSendDiagnosticsPayload(
         resource_ref: ref
       });
     }
+    if (send.status === "outcome_unknown") {
+      issues.push({
+        code: "external_send_outcome_unknown",
+        severity: "critical",
+        send_id: send.id,
+        channel: send.channel,
+        status: send.status,
+        title: send.title,
+        message: "External send outcome cannot be confirmed. Human confirmation is required; automatic redispatch is blocked.",
+        resource_ref: ref
+      });
+    }
     if ((send.status === "draft" || send.status === "pending_approval") && Date.parse(send.updated_at || send.created_at) < staleBeforeMs) {
       issues.push({
         code: "external_send_stale_draft",
@@ -7584,6 +7603,9 @@ function externalSendResourceRef(send: ExternalSendRecord): ResourceRef {
 }
 
 function externalSendDiagnosticsRecommendation(issues: ExternalSendDiagnosticsReport["issues"], dispatchEnabled: boolean): string {
+  if (issues.some((issue) => issue.code === "external_send_outcome_unknown")) {
+    return "Stop automatic retry and confirm the external channel manually before taking any further action.";
+  }
   if (issues.some((issue) => issue.code === "external_send_failed" || issue.code === "external_send_missing_target_url")) {
     return "Review failed or misconfigured external sends before retrying dispatch through the backend API.";
   }

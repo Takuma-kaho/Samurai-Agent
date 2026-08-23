@@ -2,12 +2,19 @@ import { describe, expect, it } from "vitest";
 import { WorkspaceServerError } from "./errors";
 import {
   classifyWorkspaceCompletionActivity,
+  containsWorkspaceCompletionSecret,
   evaluateWorkspaceCompletionPolicies,
   validateWorkspaceCompletionPolicyRules,
   validateWorkspaceCompletionReviewResult
 } from "./workspace-completion-policy";
 
 describe("Workspace completion policy", () => {
+  it("rejects OAuth client secrets in human-readable completion content", () => {
+    expect(containsWorkspaceCompletionSecret('{"client_secret":"must-not-persist"}')).toBe(true);
+    expect(containsWorkspaceCompletionSecret("client-secret: must-not-persist")).toBe(true);
+    expect(containsWorkspaceCompletionSecret('{"oauth_client_secret":"must-not-persist"}')).toBe(true);
+  });
+
   it("does not treat a caller's verified claim as deterministic learning evidence", () => {
     expect(classifyWorkspaceCompletionActivity({
       outcome: "completed", verificationOutcome: "confirmed", failureState: "none", explicitRemember: false, payload: {}

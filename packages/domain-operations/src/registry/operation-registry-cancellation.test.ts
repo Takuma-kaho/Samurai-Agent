@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bindOperationDefinitions, DomainOperationRegistry, TrustedDomainContextError, type DomainOperationPorts, type TrustedDomainContext } from "../index.js";
+import { bindOperationDefinitions, DomainOperationRegistry, TrustedDomainContextError, type DomainOperationPorts, type DomainResult, type TrustedDomainContext } from "../index.js";
 
 let observedSignal: AbortSignal | undefined;
 let observedDeadline: number | undefined;
@@ -38,6 +38,32 @@ function cancellationRegistry() {
   return new DomainOperationRegistry(ports, bindings.map((binding) => binding.definition.id === cancellationOperationId ? hangingBinding : binding));
 }
 
+function deferredCancellationRegistry() {
+  let resolveHandler: ((result: DomainResult<unknown>) => void) | undefined;
+  const ports = {} as DomainOperationPorts;
+  const bindings = bindOperationDefinitions(ports);
+  const target = bindings.find((binding) => binding.definition.id === cancellationOperationId);
+  if (!target) throw new Error(`missing_test_operation:${cancellationOperationId}`);
+  const deferredBinding = {
+    ...target,
+    handlerName: `${target.handlerName}:deferred-cancellation-test`,
+    execute(context: TrustedDomainContext, _rawInput: unknown): Promise<DomainResult<unknown>> {
+      observedSignal = context.signal;
+      observedDeadline = context.deadlineAt;
+      return new Promise((resolve) => {
+        resolveHandler = resolve;
+      });
+    }
+  };
+  return {
+    registry: new DomainOperationRegistry(ports, bindings.map((binding) => binding.definition.id === cancellationOperationId ? deferredBinding : binding)),
+    resolve: (result: DomainResult<unknown> = { ok: true, value: {} }) => {
+      if (!resolveHandler) throw new Error("deferred_handler_not_started");
+      resolveHandler(result);
+    }
+  };
+}
+
 function context(overrides: Partial<TrustedDomainContext> = {}): TrustedDomainContext {
   return {
     inputSource: "runtime_api",
@@ -54,15 +80,40 @@ describe("DomainOperationRegistry cancellation", () => {
     const controller = new AbortController();
     const execution = registry.execute({ ...context({ signal: controller.signal }), inputSource: "provider_tool_call" }, cancellationOperationId, {});
     controller.abort();
-    await expect(execution).rejects.toMatchObject({ code: "unavailable" });
+    await expect(execution).rejects.toMatchObject({
+      code: "outcome_unknown",
+      message: `domain_operation_outcome_unknown:${cancellationOperationId}:cancelled`
+    });
     expect(observedSignal).toBe(controller.signal);
+    expect(registry.listLogEntries()).toMatchObject([{ outcome: "failed", errorCode: "outcome_unknown" }]);
   });
 
   it("rejects an in-flight handler when its deadline expires", async () => {
     const registry = cancellationRegistry();
-    const execution = registry.execute({ ...context({ deadlineAt: Date.now() + 5 }), inputSource: "provider_tool_call" }, cancellationOperationId, {});
-    await expect(execution).rejects.toMatchObject({ code: "unavailable" });
+    const execution = registry.execute({ ...context({ deadlineAt: Date.now() + 50 }), inputSource: "provider_tool_call" }, cancellationOperationId, {});
+    await expect(execution).rejects.toMatchObject({
+      code: "outcome_unknown",
+      message: `domain_operation_outcome_unknown:${cancellationOperationId}:deadline_exceeded`
+    });
     expect(observedDeadline).toBeDefined();
+    expect(registry.listLogEntries()).toMatchObject([{ outcome: "failed", errorCode: "outcome_unknown" }]);
+  });
+
+  it("does not turn a late non-cooperative handler result into success", async () => {
+    const { registry, resolve } = deferredCancellationRegistry();
+    const controller = new AbortController();
+    const execution = registry.execute({ ...context({ signal: controller.signal }), inputSource: "provider_tool_call" }, cancellationOperationId, {});
+    controller.abort();
+
+    await expect(execution).rejects.toMatchObject({
+      code: "outcome_unknown",
+      message: `domain_operation_outcome_unknown:${cancellationOperationId}:cancelled`
+    });
+
+    resolve();
+    await Promise.resolve();
+    expect(registry.listLogEntries()).toMatchObject([{ outcome: "failed", errorCode: "outcome_unknown" }]);
+    expect(registry.listLogEntries().some((entry) => entry.outcome === "succeeded")).toBe(false);
   });
 
   it("rejects before entering a handler when the signal is already aborted", async () => {

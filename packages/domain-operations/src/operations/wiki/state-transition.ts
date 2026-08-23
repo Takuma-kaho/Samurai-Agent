@@ -25,9 +25,12 @@ export async function executeWikiStateTransition(ports: WikiStateTransitionPorts
     proposedEffects: [input.proposedEffect], targetResourceRefs: [currentRef], execute: async (operation) => {
     let saved;
     try {
-      saved = input.expectedResourceVersion === undefined
-        ? await ports.setWikiPageState(input.id, input.state)
-        : await ports.setWikiPageState(input.id, input.state, input.expectedResourceVersion);
+      // Every state transition is a compare-and-set, including callers that
+      // do not provide a client version. The version read above is the
+      // operation's snapshot and prevents a concurrent archive/reject/write
+      // from being silently overwritten.
+      const expectedResourceVersion = input.expectedResourceVersion ?? current.resource_version;
+      saved = await ports.setWikiPageState(input.id, input.state, expectedResourceVersion);
     } catch (error) {
       throw ports.mapWikiWriteError(error);
     }

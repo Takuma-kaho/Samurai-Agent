@@ -1,8 +1,8 @@
 import { mkdir, readdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createId, nowIso, stableHash, type AutomationJobRecord, type CollectionPatch, type CollectionRecord, type CollectionSchema } from "@samurai-agent/core-schemas";
+import { createId, nowIso, stableDigest, stableHash, type AutomationJobRecord, type CollectionPatch, type CollectionRecord, type CollectionSchema } from "@samurai-agent/core-schemas";
 import { collectionRecordResourceId, parseCollectionRecordResourceId } from "@samurai-agent/room-permissions";
-import { sql, type Kysely } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 import type { CollectionRecordsTable, CollectionSchemasTable, WorkspaceDb } from "../kernel/workspace-db-schema";
 import type {
   CollectionNote,
@@ -47,6 +47,28 @@ import { errorMessage, listCollectionRecordFiles, listCollectionSchemaFiles } fr
 
 export interface CollectionAutomationPort {
   listAutomationJobs(input?: { dueAt?: string; enabledOnly?: boolean }): Promise<AutomationJobRecord[]>;
+  saveCollectionTriggerJobs(
+    transaction: Transaction<WorkspaceDb>,
+    jobs: readonly AutomationJobRecord[],
+    fileTransactionId: string
+  ): Promise<void>;
+}
+
+/** Runtime has already validated this authority; Store only persists its immutable snapshot. */
+export interface CollectionTriggerDelivery {
+  workspaceId: string;
+  roomId: string;
+  authority: NonNullable<AutomationJobRecord["authority"]>;
+  createdPrincipalSnapshot: NonNullable<AutomationJobRecord["created_principal_snapshot"]>;
+  sourceSnapshot: NonNullable<AutomationJobRecord["source_snapshot"]>;
+  connectionId?: string;
+  sessionRef?: NonNullable<AutomationJobRecord["session_ref"]>;
+}
+
+export interface CollectionTriggerWriteRequest {
+  event: CollectionTriggerEffect["event"];
+  operationId: string;
+  delivery: CollectionTriggerDelivery;
 }
 
 /** First-stage Room candidates. Final authorization still occurs in Runtime. */
@@ -162,7 +184,10 @@ async updateCollectionSchema(schemaInput: CollectionSchema, expectedResourceVers
   return after;
 }
 
-async saveCollectionRecord(recordInput: CollectionRecord): Promise<CollectionRecordWithFilePath> {
+async saveCollectionRecord(
+  recordInput: CollectionRecord,
+  trigger?: CollectionTriggerWriteRequest
+): Promise<CollectionRecordWithFilePath> {
   const schema = await this.getCollectionSchema(recordInput.collection_id);
   if (!schema) {
     throw new Error("collection_schema_not_found");
@@ -170,28 +195,29 @@ async saveCollectionRecord(recordInput: CollectionRecord): Promise<CollectionRec
   const record = parseCollectionRecordLocal(recordInput, schema);
   await this.validateCollectionRecordLinks(record, schema);
   const relativePath = path.join("collections", recordInput.collection_id, "records", `${recordInput.id}.json`);
-  const absolutePath = path.join(this.rootDir, relativePath);
-  await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" });
-
-  try {
-    await this.db
-      .insertInto("collection_records")
-      .values({
-        id: record.id,
-        collection_id: record.collection_id,
-        file_path: relativePath,
-        record_json: stringify(record),
-        version: record.version,
-        created_at: record.created_at,
-        updated_at: record.updated_at
-      })
-      .execute();
-    return { ...record, file_path: relativePath };
-  } catch (error) {
-    await unlink(absolutePath).catch(() => undefined);
-    throw error;
-  }
+  const after = { ...record, file_path: relativePath };
+  const stagedRelativePath = `${relativePath}.pending-${createId("file_transaction")}`;
+  const triggerJobs = trigger ? collectionTriggerJobs({ schema, record: after, trigger }) : [];
+  await mkdir(path.dirname(path.join(this.rootDir, relativePath)), { recursive: true });
+  await this.fileTransactions.execute({
+    kind: "collection_record_create",
+    targetPath: relativePath,
+    stagedPath: stagedRelativePath,
+    collectionId: record.collection_id,
+    recordId: record.id,
+    beforeJson: stringify({ created: false }),
+    afterJson: stringify(after),
+    stagedContent: `${JSON.stringify(record, null, 2)}\n`,
+    commit: async (transaction, fileTransactionId) => {
+      await this.collectionRecordRecoveryHandler.commitCreate(transaction, { record: after });
+      await this.automation.saveCollectionTriggerJobs(transaction, triggerJobs, fileTransactionId);
+    },
+    rollback: (transaction, fileTransactionId) => this.collectionRecordRecoveryHandler.rollbackCreate(transaction, {
+      record: after,
+      fileTransactionId
+    })
+  });
+  return after;
 }
 
 async upsertCollectionRecord(recordInput: CollectionRecord): Promise<CollectionRecordWithFilePath> {
@@ -619,7 +645,12 @@ private async validateCollectionRecordLinks(record: CollectionRecord, schema: Co
 
 
 
-async applyCollectionRecordPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<{
+async applyCollectionRecordPatch(input: {
+  collectionId: string;
+  recordId: string;
+  patch: CollectionPatch;
+  trigger?: CollectionTriggerWriteRequest;
+}): Promise<{
   before: CollectionRecordWithFilePath;
   after: CollectionRecordWithFilePath;
 }> {
@@ -638,6 +669,8 @@ async applyCollectionRecordPatch(input: { collectionId: string; recordId: string
   }
   const after = applyCollectionPatchLocal(before, input.patch, schema);
   await this.validateCollectionRecordLinks(after, schema);
+  const afterWithPath = { ...after, file_path: before.file_path };
+  const triggerJobs = input.trigger ? collectionTriggerJobs({ schema, record: afterWithPath, trigger: input.trigger }) : [];
   const stagedRelativePath = `${before.file_path}.pending-${input.patch.id}`;
   try {
     await this.fileTransactions.execute({
@@ -650,11 +683,19 @@ async applyCollectionRecordPatch(input: { collectionId: string; recordId: string
       beforeJson: stringify(before),
       afterJson: stringify(after),
       stagedContent: `${JSON.stringify(after, null, 2)}\n`,
-      commit: async (transaction) => {
+      commit: async (transaction, fileTransactionId) => {
         const updated = await this.collectionRecordRecoveryHandler.commitPatch(transaction, { collectionId: input.collectionId, recordId: input.recordId, before, after, patch: input.patch });
         if (!updated) throw new Error("collection_record_patch_version_conflict");
+        await this.automation.saveCollectionTriggerJobs(transaction, triggerJobs, fileTransactionId);
       },
-      rollback: (transaction) => this.collectionRecordRecoveryHandler.rollbackPatch(transaction, { collectionId: input.collectionId, recordId: input.recordId, before, after, patchId: input.patch.id })
+      rollback: (transaction, fileTransactionId) => this.collectionRecordRecoveryHandler.rollbackPatch(transaction, {
+        collectionId: input.collectionId,
+        recordId: input.recordId,
+        before,
+        after,
+        patchId: input.patch.id,
+        fileTransactionId
+      })
     });
   } catch (error) {
     if (error instanceof Error && error.message === "collection_record_patch_version_conflict") {
@@ -663,7 +704,7 @@ async applyCollectionRecordPatch(input: { collectionId: string; recordId: string
     }
     throw error;
   }
-  return { before, after: { ...after, file_path: before.file_path } };
+  return { before, after: afterWithPath };
 }
 
   async listCollectionNotes(collectionId: string): Promise<CollectionNote[]> {
@@ -978,4 +1019,65 @@ function requiredSchemaResourceVersion(schema: CollectionSchemaWithFilePath): nu
     throw new Error(`collection_schema_resource_version_missing:${schema.id}`);
   }
   return schema.resource_version as number;
+}
+
+/**
+ * Snapshot the matching trigger definition while the record mutation is being
+ * prepared.  The resulting queue rows are written in the same SQLite
+ * transaction as the record index and are held behind the file journal.
+ */
+function collectionTriggerJobs(input: {
+  schema: CollectionSchema;
+  record: CollectionRecordWithFilePath;
+  trigger: CollectionTriggerWriteRequest;
+}): AutomationJobRecord[] {
+  const now = nowIso();
+  const recordRef = collectionRecordRefLocal(input.record);
+  return input.schema.triggers.flatMap((definition, triggerIndex) => {
+    const effect = collectionTriggerEffect(definition, triggerIndex, input.trigger.event, recordRef);
+    if (effect.status !== "queued") return [];
+    const id = `automation_collection_trigger_${stableDigest({
+      operationId: input.trigger.operationId,
+      collectionId: input.record.collection_id,
+      recordId: input.record.id,
+      event: input.trigger.event,
+      triggerIndex,
+      triggerId: effect.id,
+      actionId: effect.action_id
+    })}`;
+    return [{
+      id,
+      title: `Collection trigger ${input.record.collection_id}/${effect.id}`,
+      kind: "custom_instruction",
+      status: "enabled",
+      schedule: "once",
+      target_instruction: `Run collection trigger ${effect.action_id} (${effect.action_kind}) for ${input.record.collection_id}/${input.record.id}.`,
+      delivery_target: {
+        channel: "collection_trigger",
+        collection_id: input.record.collection_id,
+        record_id: input.record.id,
+        event: input.trigger.event,
+        trigger_id: effect.id,
+        action_id: effect.action_id,
+        action_kind: effect.action_kind,
+        record_ref: effect.record_ref as unknown as import("@samurai-agent/core-schemas").JsonValue
+      },
+      workspace_id: input.trigger.delivery.workspaceId,
+      room_id: input.trigger.delivery.roomId,
+      authority: input.trigger.delivery.authority,
+      created_principal_snapshot: input.trigger.delivery.createdPrincipalSnapshot,
+      source_snapshot: input.trigger.delivery.sourceSnapshot,
+      ...(input.trigger.delivery.connectionId ? { connection_id: input.trigger.delivery.connectionId } : {}),
+      ...(input.trigger.delivery.sessionRef ? { session_ref: input.trigger.delivery.sessionRef } : {}),
+      authorization_state: "ready",
+      authorized_at: now,
+      management_state: "allowed",
+      created_operation_id: input.trigger.operationId,
+      next_run_at: now,
+      failure_count: 0,
+      max_attempts: 3,
+      created_at: now,
+      updated_at: now
+    } satisfies AutomationJobRecord];
+  });
 }

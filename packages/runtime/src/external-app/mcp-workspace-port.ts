@@ -34,7 +34,8 @@ export function createRuntimeContextSnapshotSource(input: { runtime: Pick<AgentR
     const ingress = input.runtime.createExternalAppIngress(target.workspaceId);
     const ingressTarget = {
       requested_room_id: target.roomId,
-      correlation_id: `context:${target.connectorId}:${target.externalSessionId}`
+      connection_id: target.connectionId,
+      correlation_id: ["context", target.connectionId, target.connectorId, target.externalSessionId].join(":")
     };
     const evidence = { connector_id: target.connectorId, app_id: target.appId };
     const query = (queryId: string, payload: Record<string, unknown>) => ingress.query({
@@ -701,7 +702,8 @@ function isExternalSessionEndEvent(eventKind: string): boolean {
 function ingressTarget(target: ExternalWorkspaceTarget, idempotencyKey?: string) {
   return {
     requested_room_id: target.roomId,
-    correlation_id: `mcp:${target.connectorId}:${target.externalSessionId}`,
+    connection_id: target.connectionId,
+    correlation_id: ["mcp", target.connectionId, target.connectorId, target.externalSessionId].join(":"),
     ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
     ...(target.sessionRef ? { session_ref: { session_id: target.sessionRef.session_id, ...(target.sessionRef.turn_id ? { turn_id: target.sessionRef.turn_id } : {}), ...(target.sessionRef.message_id ? { message_id: target.sessionRef.message_id } : {}) } } : {})
   };

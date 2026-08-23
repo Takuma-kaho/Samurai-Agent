@@ -2699,13 +2699,15 @@ describe("backend run API", () => {
   });
 
   it("routes Slack event payloads through Gateway inbound", async () => {
+    const signingSecret = "test-slack-route-secret";
+    setManagedEnv("SAMURAI_SLACK_SIGNING_SECRET", signingSecret);
     const { baseUrl } = await startTestServer();
     const slackUrl = `${baseUrl}/api/gateway/slack/events`;
-    const challenge = await postJson<{ challenge: string }>(slackUrl, {
+    const challenge = await postSignedSlackJson<{ challenge: string }>(slackUrl, {
       type: "url_verification",
       challenge: "slack-challenge-code"
-    });
-    const invalid = await postJson<{ error: string }>(slackUrl, {
+    }, signingSecret);
+    const invalid = await postSignedSlackJson<{ error: string }>(slackUrl, {
       type: "event_callback",
       team_id: "T123",
       event: {
@@ -2713,8 +2715,8 @@ describe("backend run API", () => {
         channel: "C123",
         user: "U456"
       }
-    }, 400);
-    const blocked = await postJson<{
+    }, signingSecret, 400);
+    const blocked = await postSignedSlackJson<{
       adapter: { channel: string; source_identity: string; body_field: string; team_id?: string; channel_id?: string; user_id?: string };
       inbound: { id: string; status: string; trusted: boolean; metadata: Record<string, unknown> };
       pairing: { id: string; status: string; pairing_code?: string; session_key: string };
@@ -2733,12 +2735,12 @@ describe("backend run API", () => {
         request_id: "slack_req_1",
         authorization: "Bearer raw-secret-token"
       }
-    }, 202);
+    }, signingSecret, 202);
     await postJson<{ id: string; status: string }>(
       `${baseUrl}/api/gateway/pairings/${blocked.pairing.id}/approve`,
       {}
     );
-    const routed = await postJson<{
+    const routed = await postSignedSlackJson<{
       adapter: { channel: string; source_identity: string; body_field: string; team_id?: string; channel_id?: string; user_id?: string };
       inbound: { id: string; status: string; trusted: boolean; body: string; metadata: Record<string, unknown>; session_key?: string };
       session: { session_key: string };
@@ -2763,7 +2765,7 @@ describe("backend run API", () => {
         cookie: "raw-secret-token"
       },
       output_locale: "ja"
-    }, 202);
+    }, signingSecret, 202);
 
     expect(challenge).toEqual({ challenge: "slack-challenge-code" });
     expect(invalid).toEqual({ error: "invalid_gateway_slack_event" });

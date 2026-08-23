@@ -189,10 +189,19 @@ export class PostgresRuntimeClientEvents {
     if (![
       "completed",
       "failed",
+      "cancelled",
       "waiting_for_backend_input",
       "outcome_unknown"
     ].includes(run.status)) return undefined;
-    const statusLabel = run.status === "completed" ? "完了" : run.status === "failed" ? "失敗" : run.status === "outcome_unknown" ? "結果未確認" : "確認待ち";
+    const statusLabel = run.status === "completed"
+      ? "完了"
+      : run.status === "failed"
+        ? "失敗"
+        : run.status === "cancelled"
+          ? "取消"
+          : run.status === "outcome_unknown"
+            ? "結果未確認"
+            : "確認待ち";
     const createdAt = run.completed_at ?? run.started_at;
     const id = `client_event_${stableHash({ kind: "backend_run_status_notification", run_id: run.id, status: run.status }).slice(0, 24)}`;
     return ClientEventRecordSchema.parse({

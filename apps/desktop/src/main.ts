@@ -73,6 +73,7 @@ import {
   workspaceChatSessionRequest,
   workspaceChatTurnRequest
 } from "./workspace-chat-requests.js";
+import { workspaceAttachmentRequest } from "./workspace-attachment-requests.js";
 import {
   workspaceMemoryArchiveRequest,
   workspaceMemoryIdRequest,
@@ -586,6 +587,16 @@ function registerIpcHandlers(): void {
       path: `${activeWorkspaceChatPath()}/sessions/${encodeURIComponent(request.sessionId)}/messages`,
       workspaceScoped: true,
       idempotencyKey: request.idempotencyKey,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:files:attachment:write", async (_event, input: unknown) => {
+    const request = workspaceAttachmentRequest(input);
+    return activeWorkspaceServerRequest({
+      method: "PUT",
+      path: `${activeWorkspaceFilesPath()}/${request.filePath.split("/").map((part) => encodeURIComponent(part)).join("/")}`,
+      workspaceScoped: true,
+      operationId: request.operationId,
       body: request.body
     });
   });
@@ -1421,6 +1432,10 @@ function activeWorkspaceChatPath(): string {
   return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/chat`;
 }
 
+function activeWorkspaceFilesPath(): string {
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/files`;
+}
+
 async function activeWorkspaceExecutableRoomId(): Promise<string> {
   const body = await activeWorkspaceServerRequest({
     method: "GET",
@@ -1694,16 +1709,19 @@ async function submitAppShot(input: AppShotInput): Promise<AppShotResult> {
     throw new Error("スクショの一時Contextが期限切れです。もう一度AppShotを開いてください。");
   }
   const roomId = await activeWorkspaceExecutableRoomId();
+  const sessionRequest = workspaceChatSessionRequest({
+    roomId,
+    operationId: `desktop_app_shot_session_${randomUUID()}`,
+    title: draftSessionTitle(input.content),
+    uiLocale: "ja",
+    outputLocale: "ja"
+  });
   const session = await activeWorkspaceServerRequest({
     method: "POST",
     path: `${activeWorkspaceChatPath()}/sessions`,
     workspaceScoped: true,
-    body: {
-      room_id: roomId,
-      title: draftSessionTitle(input.content),
-      ui_locale: "ja",
-      output_locale: "ja"
-    }
+    operationId: sessionRequest.operationId,
+    body: sessionRequest.body
   });
   const sessionId = workspaceChatSessionResponseId(session);
   const result = await activeWorkspaceServerRequest({
@@ -2063,16 +2081,19 @@ async function checkDeepLinkTargetAvailability(
 
 async function submitQuickAsk(input: QuickAskInput): Promise<QuickAskResult> {
   const roomId = await activeWorkspaceExecutableRoomId();
+  const sessionRequest = workspaceChatSessionRequest({
+    roomId,
+    operationId: `desktop_quick_ask_session_${randomUUID()}`,
+    title: draftSessionTitle(input.content),
+    uiLocale: "ja",
+    outputLocale: "ja"
+  });
   const session = await activeWorkspaceServerRequest({
     method: "POST",
     path: `${activeWorkspaceChatPath()}/sessions`,
     workspaceScoped: true,
-    body: {
-      room_id: roomId,
-      title: draftSessionTitle(input.content),
-      ui_locale: "ja",
-      output_locale: "ja"
-    }
+    operationId: sessionRequest.operationId,
+    body: sessionRequest.body
   });
   const sessionId = workspaceChatSessionResponseId(session);
   const result = await activeWorkspaceServerRequest({

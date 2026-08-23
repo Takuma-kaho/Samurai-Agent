@@ -72,7 +72,7 @@ function createDisposableProbeEnvironment() {
     "run", "--detach", "--rm", "--name", containerName,
     "--publish", "127.0.0.1::5432",
     "--env", "POSTGRES_PASSWORD=" + password,
-    "postgres:16-alpine"
+    "postgres:17-alpine"
   ]);
   if (started.status !== 0) {
     const reason = String(started.stderr || started.error?.message || "docker_postgres_start_failed").trim();

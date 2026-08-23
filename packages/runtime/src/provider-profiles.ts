@@ -49,8 +49,8 @@ export const providerProfiles: Record<ProviderId, ProviderProfile> = {
     defaultModel: "gemini-3.5-flash",
     resolveCredential: (env) => (env.GEMINI_API_KEY || env.GOOGLE_API_KEY ? { apiKey: env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY! } : undefined),
     buildRequest: (model, credential, input) => ({
-      url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(credential.apiKey)}`,
-      headers: { "Content-Type": "application/json" },
+      url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": credential.apiKey },
       body: {
         systemInstruction: { parts: [{ text: stablePrompt(input.envelope.output_locale) }] },
         contents: [{ role: "user", parts: geminiUserParts(input, contextPrompt(input)) }],

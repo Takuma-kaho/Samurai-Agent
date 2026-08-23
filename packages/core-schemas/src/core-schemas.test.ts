@@ -40,10 +40,15 @@ import {
   ToolRunDiagnosticsReportSchema,
   createId,
   nowIso,
+  stableDigest,
   stableHash
 } from "./index";
 
 describe("core schemas", () => {
+  it("provides a wider digest for durable identity checks", () => {
+    expect(stableDigest({ value: 1 })).toMatch(/^[a-f0-9]{32}$/);
+    expect(stableDigest({ value: 1 })).not.toBe(stableDigest({ value: 2 }));
+  });
   it("parses locale-aware message envelopes", () => {
     const envelope = MessageEnvelopeSchema.parse({
       id: createId("envelope"),

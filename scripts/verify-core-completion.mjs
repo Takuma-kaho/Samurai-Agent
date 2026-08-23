@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { evaluateVerifierAssertions } from "./lib/verifier-assertions.mjs";
 
 const root = process.cwd();
 const scorecardPath = path.join(root, "plans/core-completion-scorecard.json");
@@ -37,6 +38,7 @@ async function inspectEvidence(test) {
     if (evidence.status !== "passed") failures.push("status is not passed");
     if (!evidence.started_at || !evidence.completed_at) failures.push("timestamps missing");
     if (!Array.isArray(evidence.assertions) || evidence.assertions.length === 0) failures.push("assertions missing");
+    failures.push(...evaluateVerifierAssertions(evidence.assertions, evidence.status).filter((failure) => !failures.includes(failure)));
     if (!Array.isArray(evidence.source_files) || evidence.source_files.length === 0 || !evidence.source_sha256) {
       failures.push("source evidence missing");
     } else {

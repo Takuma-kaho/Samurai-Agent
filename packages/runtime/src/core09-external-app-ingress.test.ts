@@ -41,6 +41,7 @@ describe("Core09 formal External App ingress", () => {
       requested_room_id: roomId,
       correlation_id: "core09-external-flow",
       idempotency_key: "core09:artifact:1",
+      connection_id: connection.resource.id,
       session_ref: { session_id: "external-session-1" }
     };
 

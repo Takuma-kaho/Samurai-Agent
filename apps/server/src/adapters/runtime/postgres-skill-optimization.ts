@@ -108,7 +108,8 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
       title: document.resource.title,
       state: document.frontmatter.state,
       file_path: document.version.filePath,
-      frontmatter: document.frontmatter
+      frontmatter: document.frontmatter,
+      ...(document.resource.scope.kind === "room" && document.resource.scope.roomId ? { room_id: document.resource.scope.roomId } : {})
     };
     return this.skillType ? this.skillType(skill) : skill as TSkill;
   }
@@ -199,17 +200,17 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
     });
   }
 
-  async getSession(id: string): Promise<{ id: string; ui_locale: string; output_locale: string } | undefined> {
+  async getSession(id: string): Promise<{ id: string; ui_locale: string; output_locale: string; room_id?: string } | undefined> {
     assertId(id, "session_id_invalid");
     return this.withSql(async (sql) => {
       const result = await sql.query<SessionRow>(
-        `SELECT workspace_id, id, ui_locale, output_locale
+        `SELECT workspace_id, id, room_id, ui_locale, output_locale
          FROM workspace_runtime_sessions
          WHERE workspace_id = $1 AND id = $2`,
         [this.workspaceId, id]
       );
       const row = result.rows[0];
-      return row ? { id: row.id, ui_locale: row.ui_locale, output_locale: row.output_locale } : undefined;
+      return row ? { id: row.id, ui_locale: row.ui_locale, output_locale: row.output_locale, ...(row.room_id ? { room_id: row.room_id } : {}) } : undefined;
     });
   }
 
@@ -268,33 +269,41 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
     return normalized;
   }
 
-  async saveObjective(record: ObjectiveRecord): Promise<ObjectiveRecord> {
+  async saveObjective(record: ObjectiveRecord, roomId: string): Promise<ObjectiveRecord> {
     const normalized = ObjectiveRecordSchema.parse(record);
-    const roomId = await this.roomForSession(normalized.session_id);
+    const storedRoomId = normalized.room_id ?? await this.roomForSession(normalized.session_id);
+    if (!storedRoomId || storedRoomId !== roomId) throw new WorkspaceServerError("skill_optimization_room_mismatch", 409);
     await this.upsertRecord("workspace_skill_optimization_objectives", normalized.id, {
       columns: ["room_id", "status", "record", "created_at", "updated_at"],
-      values: [roomId, normalized.status, jsonText(normalized), normalized.created_at, normalized.updated_at],
+      values: [storedRoomId, normalized.status, jsonText(normalized), normalized.created_at, normalized.updated_at],
       updates: ["room_id = EXCLUDED.room_id", "status = EXCLUDED.status", "record = EXCLUDED.record", "updated_at = EXCLUDED.updated_at"]
     });
     return normalized;
   }
 
-  async getObjective(id: string): Promise<ObjectiveRecord | undefined> {
-    return this.getRecord("workspace_skill_optimization_objectives", id, ObjectiveRecordSchema, "skill_optimization_objective_record_invalid");
+  async getObjective(id: string, roomId: string): Promise<ObjectiveRecord | undefined> {
+    return this.getRecord("workspace_skill_optimization_objectives", id, ObjectiveRecordSchema, "skill_optimization_objective_record_invalid", roomId);
   }
 
-  async updateObjective(record: ObjectiveRecord): Promise<ObjectiveRecord> {
+  async updateObjective(record: ObjectiveRecord, roomId: string): Promise<ObjectiveRecord> {
     const normalized = ObjectiveRecordSchema.parse(record);
-    await this.updateStoredRecord("workspace_skill_optimization_objectives", normalized.id, {
-      columns: ["status", "record", "updated_at"],
-      values: [normalized.status, jsonText(normalized), normalized.updated_at]
+    if (normalized.room_id !== roomId) throw new WorkspaceServerError("skill_optimization_room_mismatch", 409);
+    await this.withSql(async (sql) => {
+      const result = await sql.query(
+        "UPDATE workspace_skill_optimization_objectives SET status = $4, record = $5::JSONB, updated_at = $6 WHERE workspace_id = $1 AND id = $2 AND room_id = $3",
+        [this.workspaceId, normalized.id, roomId, normalized.status, jsonText(normalized), normalized.updated_at]
+      );
+      if (Number(result.rowCount ?? 0) === 0) throw new WorkspaceServerError("workspace_skill_optimization_objectives_not_found", 404);
     });
     return normalized;
   }
 
-  async saveWorkItem(record: WorkItemRecord): Promise<WorkItemRecord> {
+  async saveWorkItem(record: WorkItemRecord, roomId: string): Promise<WorkItemRecord> {
     const normalized = WorkItemRecordSchema.parse(record);
-    const roomId = await this.roomForObjective(normalized.objective_id);
+    const objectiveRoomId = await this.roomForObjective(normalized.objective_id);
+    if (normalized.room_id !== roomId || (objectiveRoomId && roomId !== objectiveRoomId)) {
+      throw new WorkspaceServerError("skill_optimization_room_mismatch", 409);
+    }
     await this.upsertRecord("workspace_skill_optimization_work_items", normalized.id, {
       columns: ["objective_id", "room_id", "status", "worker_id", "lease_until", "attempt", "record", "created_at", "updated_at"],
       values: [normalized.objective_id, roomId, normalized.status, normalized.lease_owner ?? null, normalized.lease_expires_at ?? null, normalized.attempt, jsonText(normalized), normalized.created_at, normalized.updated_at],
@@ -303,11 +312,11 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
     return normalized;
   }
 
-  async getWorkItem(id: string): Promise<WorkItemRecord | undefined> {
-    return this.getRecord("workspace_skill_optimization_work_items", id, WorkItemRecordSchema, "skill_optimization_work_item_record_invalid");
+  async getWorkItem(id: string, roomId: string): Promise<WorkItemRecord | undefined> {
+    return this.getRecord("workspace_skill_optimization_work_items", id, WorkItemRecordSchema, "skill_optimization_work_item_record_invalid", roomId);
   }
 
-  async claimWorkItem(input: { workerId: string; leaseMs: number; now: string }): Promise<WorkItemRecord | undefined> {
+  async claimWorkItem(input: { workerId: string; leaseMs: number; now: string; roomId?: string }): Promise<WorkItemRecord | undefined> {
     assertId(input.workerId, "skill_optimization_worker_id_invalid");
     if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs <= 0) throw new WorkspaceServerError("skill_optimization_lease_invalid", 400);
     assertIso(input.now, "skill_optimization_time_invalid");
@@ -315,16 +324,19 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
       const candidates = await sql.query<WorkItemRow>(
         `SELECT workspace_id, id, objective_id, status, worker_id, lease_until, attempt, record, created_at, updated_at
          FROM workspace_skill_optimization_work_items
-         WHERE workspace_id = $1 AND status IN ('queued', 'ready')
+         WHERE workspace_id = $1 AND (status IN ('queued', 'ready')
+           OR (status = 'running' AND lease_until IS NOT NULL AND lease_until <= $2))
+           AND room_id IS NOT NULL
+           AND ($3::TEXT IS NULL OR room_id = $3)
            AND (lease_until IS NULL OR lease_until <= $2)
          ORDER BY COALESCE((record->>'priority')::INTEGER, 0) DESC, created_at ASC, id ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 50`,
-        [this.workspaceId, input.now]
+        [this.workspaceId, input.now, input.roomId ?? null]
       );
       for (const row of candidates.rows) {
         const current = parseRecord(row.record, WorkItemRecordSchema, "skill_optimization_work_item_record_invalid");
-        if (current.status !== "queued" && current.status !== "ready") continue;
+        if (current.status !== "queued" && current.status !== "ready" && current.status !== "running") continue;
         if (current.attempt >= current.max_attempts) continue;
         if (current.retry_after_at && Date.parse(current.retry_after_at) > Date.parse(input.now)) continue;
         const leaseUntil = new Date(Date.parse(input.now) + input.leaseMs).toISOString();
@@ -344,7 +356,8 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
         await sql.query(
           `UPDATE workspace_skill_optimization_work_items
            SET status = $3, worker_id = $4, lease_until = $5, attempt = $6, record = $7::JSONB, updated_at = $8
-           WHERE workspace_id = $1 AND id = $2 AND status IN ('queued', 'ready')
+           WHERE workspace_id = $1 AND id = $2
+             AND (status IN ('queued', 'ready') OR (status = 'running' AND lease_until <= $8))
            RETURNING id`,
           [this.workspaceId, current.id, next.status, input.workerId, leaseUntil, next.attempt, jsonText(next), input.now]
         );
@@ -354,13 +367,35 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
     });
   }
 
-  async completeWorkItem(input: { workItemId: string; workerId: string }): Promise<WorkItemRecord | undefined> {
-    return this.transitionWorkItem(input.workItemId, input.workerId, "completed");
+  async heartbeatWorkItem(input: { workItemId: string; workerId: string; roomId: string; leaseMs: number; now: string }): Promise<WorkItemRecord | undefined> {
+    assertId(input.workItemId, "skill_optimization_work_item_id_invalid");
+    assertId(input.workerId, "skill_optimization_worker_id_invalid");
+    if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs <= 0) throw new WorkspaceServerError("skill_optimization_lease_invalid", 400);
+    assertIso(input.now, "skill_optimization_time_invalid");
+    const leaseUntil = new Date(Date.parse(input.now) + input.leaseMs).toISOString();
+    return this.withSql(async (sql) => {
+      const result = await sql.query<WorkItemRow>(
+        `UPDATE workspace_skill_optimization_work_items
+         SET lease_until = $4,
+             record = jsonb_set(record, '{heartbeat_at}', to_jsonb($2::TEXT), true),
+             updated_at = $2
+         WHERE workspace_id = $1 AND id = $3 AND room_id = $6 AND status = 'running' AND worker_id = $5
+           AND lease_until IS NOT NULL AND lease_until > $2
+         RETURNING workspace_id, id, objective_id, status, worker_id, lease_until, attempt, record, created_at, updated_at`,
+        [this.workspaceId, input.now, input.workItemId, leaseUntil, input.workerId, input.roomId]
+      );
+      const row = result.rows[0];
+      return row ? parseRecord(row.record, WorkItemRecordSchema, "skill_optimization_work_item_record_invalid") : undefined;
+    });
   }
 
-  async failWorkItem(input: { workItemId: string; workerId: string; failureKind: "cancelled" | "non_retryable"; error: string }): Promise<WorkItemRecord | undefined> {
+  async completeWorkItem(input: { workItemId: string; workerId: string; roomId: string }): Promise<WorkItemRecord | undefined> {
+    return this.transitionWorkItem(input.workItemId, input.workerId, input.roomId, "completed");
+  }
+
+  async failWorkItem(input: { workItemId: string; workerId: string; roomId: string; failureKind: "cancelled" | "non_retryable"; error: string }): Promise<WorkItemRecord | undefined> {
     if (!input.error.trim()) throw new WorkspaceServerError("skill_optimization_work_item_error_required", 400);
-    return this.transitionWorkItem(input.workItemId, input.workerId, input.failureKind === "cancelled" ? "cancelled" : "failed", input.failureKind, input.error);
+    return this.transitionWorkItem(input.workItemId, input.workerId, input.roomId, input.failureKind === "cancelled" ? "cancelled" : "failed", input.failureKind, input.error);
   }
 
   async getRun(id: string): Promise<SkillOptimizationRun | undefined> {
@@ -615,21 +650,22 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
     return room;
   }
 
-  private async transitionWorkItem(workItemId: string, workerId: string, status: "completed" | "failed" | "cancelled", failureKind?: "cancelled" | "non_retryable", error?: string): Promise<WorkItemRecord | undefined> {
+  private async transitionWorkItem(workItemId: string, workerId: string, roomId: string, status: "completed" | "failed" | "cancelled", failureKind?: "cancelled" | "non_retryable", error?: string): Promise<WorkItemRecord | undefined> {
     assertId(workItemId, "skill_optimization_work_item_id_invalid");
     assertId(workerId, "skill_optimization_worker_id_invalid");
+    const now = new Date().toISOString();
     return this.withSql(async (sql) => {
       const result = await sql.query<WorkItemRow>(
         `SELECT workspace_id, id, objective_id, status, worker_id, lease_until, attempt, record, created_at, updated_at
          FROM workspace_skill_optimization_work_items
-         WHERE workspace_id = $1 AND id = $2 AND status = 'running' AND worker_id = $3
+         WHERE workspace_id = $1 AND id = $2 AND room_id = $3 AND status = 'running' AND worker_id = $4
+           AND lease_until IS NOT NULL AND lease_until > $5
          FOR UPDATE`,
-        [this.workspaceId, workItemId, workerId]
+        [this.workspaceId, workItemId, roomId, workerId, now]
       );
       const row = result.rows[0];
       if (!row) return undefined;
       const current = parseRecord(row.record, WorkItemRecordSchema, "skill_optimization_work_item_record_invalid");
-      const now = new Date().toISOString();
       const next = WorkItemRecordSchema.parse({
         ...current,
         status,
@@ -645,19 +681,21 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
       await sql.query(
         `UPDATE workspace_skill_optimization_work_items
          SET status = $3, worker_id = NULL, lease_until = NULL, record = $4::JSONB, updated_at = $5
-         WHERE workspace_id = $1 AND id = $2 AND status = 'running' AND worker_id = $6`,
-        [this.workspaceId, workItemId, status, jsonText(next), now, workerId]
+         WHERE workspace_id = $1 AND id = $2 AND room_id = $7 AND status = 'running' AND worker_id = $6
+           AND lease_until IS NOT NULL AND lease_until > $5`,
+        [this.workspaceId, workItemId, status, jsonText(next), now, workerId, roomId]
       );
       return next;
     });
   }
 
-  private async getRecord<T>(table: string, id: string, schema: { parse(value: unknown): T }, errorCode: string): Promise<T | undefined> {
+  private async getRecord<T>(table: string, id: string, schema: { parse(value: unknown): T }, errorCode: string, roomId?: string): Promise<T | undefined> {
     assertId(id, "skill_optimization_record_id_invalid");
     return this.withSql(async (sql) => {
+      const roomClause = roomId === undefined ? "" : " AND room_id = $3";
       const result = await sql.query<StoredRow>(
-        `SELECT workspace_id, id, record FROM ${table} WHERE workspace_id = $1 AND id = $2`,
-        [this.workspaceId, id]
+        `SELECT workspace_id, id, record FROM ${table} WHERE workspace_id = $1 AND id = $2${roomClause}`,
+        roomId === undefined ? [this.workspaceId, id] : [this.workspaceId, id, roomId]
       );
       const row = result.rows[0];
       return row ? parseRecord(row.record, schema, errorCode) : undefined;
@@ -770,7 +808,7 @@ interface RuntimeRunRow {
   metadata: unknown;
 }
 
-interface SessionRow { id: string; workspace_id: string; ui_locale: string; output_locale: string; }
+interface SessionRow { id: string; workspace_id: string; room_id: string | null; ui_locale: string; output_locale: string; }
 interface WorkItemRow extends StoredRow { id: string; objective_id: string; created_at: string | Date; updated_at: string | Date; }
 
 function skillFrontmatter(resource: WorkspaceCompletionResource, version: WorkspaceCompletionResourceVersion, content: string): SkillFrontmatter {

@@ -24,6 +24,7 @@ import {
   PostgresWorkspaceDatabase,
   WorkspaceServerError,
   type WorkspaceRequestContext,
+  type WorkspaceExternalRoomPrincipal,
   type WorkspaceServerStore,
   type WorkspaceSql
 } from "@samurai-agent/workspace-server";
@@ -53,7 +54,20 @@ export interface PostgresRuntimeAutomationOptions {
   backendRegistry: AgentBackendRegistry;
   agentWorktreeRoot: string;
   coreWorkspaceRoot?: string;
+  reindexWiki?: (context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string) => Promise<{ active: number; total: number }>;
+  /** Core-owned maintenance lanes for the non-chat Automation kinds. The
+   * adapter owns the durable Automation lease; these ports own their own
+   * Room-scoped persistence and policy checks. */
+  runMemoryReview?: (context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; signal: AbortSignal }) => Promise<PostgresRuntimeAutomationExecutionResult>;
+  runLearningEvaluation?: (context: WorkspaceRequestContext, input: { roomId: string; workerId: string; signal: AbortSignal }) => Promise<PostgresRuntimeAutomationExecutionResult>;
+  runSkillCurator?: (context: WorkspaceRequestContext, input: { roomId: string; workerId: string; signal: AbortSignal }) => Promise<PostgresRuntimeAutomationExecutionResult>;
   maxRuns?: number;
+}
+
+export interface PostgresRuntimeAutomationExecutionResult {
+  status: "completed" | "failed" | "blocked";
+  summary: string;
+  errorCode?: string;
 }
 
 export type PostgresRuntimeAutomationRun = AutomationRunRecord & { scheduled_at: string; attempt_no: number };
@@ -130,6 +144,9 @@ interface ClaimedAutomation {
   activity: ActivityRecord;
 }
 
+const AUTOMATION_LEASE_MS = 15 * 60_000;
+const AUTOMATION_LEASE_REFRESH_MS = 60_000;
+
 /**
  * PostgreSQLのAutomation入口とWorker lane。
  *
@@ -144,6 +161,10 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
   private readonly backendRegistry: AgentBackendRegistry;
   private readonly agentWorktreeRoot: string;
   private readonly coreWorkspaceRoot?: string;
+  private readonly reindexWiki?: PostgresRuntimeAutomationOptions["reindexWiki"];
+  private readonly runMemoryReview?: PostgresRuntimeAutomationOptions["runMemoryReview"];
+  private readonly runLearningEvaluation?: PostgresRuntimeAutomationOptions["runLearningEvaluation"];
+  private readonly runSkillCurator?: PostgresRuntimeAutomationOptions["runSkillCurator"];
   private readonly maxRuns: number;
 
   constructor(options: PostgresRuntimeAutomationOptions) {
@@ -152,6 +173,10 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
     this.backendRegistry = options.backendRegistry;
     this.agentWorktreeRoot = assertAgentWorktreeSeparated(options.agentWorktreeRoot, options.coreWorkspaceRoot);
     this.coreWorkspaceRoot = options.coreWorkspaceRoot;
+    this.reindexWiki = options.reindexWiki;
+    this.runMemoryReview = options.runMemoryReview;
+    this.runLearningEvaluation = options.runLearningEvaluation;
+    this.runSkillCurator = options.runSkillCurator;
     this.maxRuns = boundedInteger(options.maxRuns ?? 10, 1, 100);
   }
 
@@ -366,7 +391,7 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
       const claim = await this.claimNext(context, input.workerId);
       if (!claim) break;
       claimed += 1;
-      const result = await this.executeClaim(context, claim, input.signal);
+      const result = await this.executeClaimWithLease(context, claim, input.signal);
       if (result === "completed") completed += 1;
       if (result === "failed") failed += 1;
       if (result === "blocked") blocked += 1;
@@ -448,7 +473,7 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
       if (!row) return undefined;
       const job = jobFromRow(row);
       const scheduledAt = job.next_run_at ?? now;
-      const lockedUntil = new Date(Date.parse(now) + 15 * 60_000).toISOString();
+      const lockedUntil = new Date(Date.parse(now) + AUTOMATION_LEASE_MS).toISOString();
       const locked = await sql.query<AutomationJobRow>(
         `UPDATE workspace_runtime_automation_jobs
          SET locked_until = $3, lock_owner_token = $4, updated_at = $2
@@ -519,12 +544,118 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
     });
   }
 
+  private async executeClaimWithLease(
+    context: WorkspaceRequestContext,
+    claim: ClaimedAutomation,
+    inputSignal: AbortSignal
+  ): Promise<"completed" | "failed" | "blocked"> {
+    const leaseController = new AbortController();
+    const signal = AbortSignal.any([inputSignal, leaseController.signal]);
+    const refresh = async (): Promise<void> => {
+      if (signal.aborted) return;
+      try {
+        await this.refreshClaimLease(context, claim);
+      } catch {
+        leaseController.abort();
+      }
+    };
+    const timer = setInterval(() => { void refresh(); }, AUTOMATION_LEASE_REFRESH_MS);
+    timer.unref?.();
+    try {
+      // A heartbeat failure aborts the external work. The final settlement
+      // remains the source of truth: if the lease was actually lost, its
+      // owner-token guarded update fails closed. A transient heartbeat error
+      // after a successful settlement must not turn durable success into a
+      // scheduler-level failure.
+      return await this.executeClaim(context, claim, signal);
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  private async refreshClaimLease(context: WorkspaceRequestContext, claim: ClaimedAutomation): Promise<void> {
+    const now = nowIso();
+    const lockedUntil = new Date(Date.parse(now) + AUTOMATION_LEASE_MS).toISOString();
+    const updated = await this.database.withContext(context, async (sql) => sql.query<{ id: string }>(
+      `UPDATE workspace_runtime_automation_jobs
+       SET locked_until = $3, updated_at = $2
+       WHERE workspace_id = $1 AND id = $4 AND lock_owner_token = $5
+       RETURNING id`,
+      [context.workspaceId, now, lockedUntil, claim.job.id, claim.lockOwnerToken]
+    ));
+    if (!updated.rows[0]) throw new WorkspaceServerError("automation_claim_lease_lost", 409);
+  }
+
   private async executeClaim(context: WorkspaceRequestContext, claim: ClaimedAutomation, signal: AbortSignal): Promise<"completed" | "failed" | "blocked"> {
     const roomId = requiredId(claim.job.room_id, "automation_room_id_required");
-    const unsupported = new Set<AutomationJobRecord["kind"]>(["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex"]);
-    if (unsupported.has(claim.job.kind)) {
-      await this.settleBlocked(context, claim, "automation_executor_not_connected_for_kind");
+    let currentAuthority: Awaited<ReturnType<PostgresRuntimeAutomation["resolveAuthority"]>> | undefined;
+    try {
+      currentAuthority = await this.revalidateExecutionAuthority(context, claim.job, roomId);
+    } catch (error) {
+      const code = safeErrorCode(error) === "room_permission_denied" ? "automation_room_permission_denied" : safeErrorCode(error);
+      await this.settleBlocked(context, claim, code);
       return "blocked";
+    }
+    if (claim.job.kind === "wiki_reindex") {
+      if (!this.reindexWiki) {
+        await this.settleBlocked(context, claim, "automation_executor_not_connected_for_kind");
+        return "blocked";
+      }
+      if (signal.aborted) {
+        await this.settleFailed(context, claim, "automation_worker_aborted");
+        return "failed";
+      }
+      try {
+        const result = await this.reindexWiki(context, roomId);
+        await this.settle(context, claim, {
+          status: "completed",
+          resultSummary: `Reindexed Knowledge Wiki pages: ${result.active}/${result.total} active.`,
+          nextRunAt: nextRunAt(claim.job.schedule, claim.run.scheduled_at)
+        });
+        return "completed";
+      } catch (error) {
+        await this.settleFailed(context, claim, safeErrorCode(error));
+        return "failed";
+      }
+    }
+    if (claim.job.kind === "memory_review") {
+      if (!this.runMemoryReview) {
+        await this.settleBlocked(context, claim, "automation_executor_not_connected_for_kind");
+        return "blocked";
+      }
+      if (signal.aborted) {
+        await this.settleFailed(context, claim, "automation_worker_aborted");
+        return "failed";
+      }
+      try {
+        const result = await this.runMemoryReview(context, { roomId, signal });
+        await this.settleExecutionResult(context, claim, result);
+        return result.status;
+      } catch (error) {
+        const code = safeErrorCode(error);
+        await this.settleFailed(context, claim, code);
+        return "failed";
+      }
+    }
+    if (claim.job.kind === "learning_evaluation" || claim.job.kind === "skill_curator") {
+      const execute = claim.job.kind === "learning_evaluation" ? this.runLearningEvaluation : this.runSkillCurator;
+      if (!execute) {
+        await this.settleBlocked(context, claim, "automation_executor_not_connected_for_kind");
+        return "blocked";
+      }
+      if (signal.aborted) {
+        await this.settleFailed(context, claim, "automation_worker_aborted");
+        return "failed";
+      }
+      try {
+        const result = await execute(context, { roomId, workerId: `automation:${claim.run.id}`, signal });
+        await this.settleExecutionResult(context, claim, result);
+        return result.status;
+      } catch (error) {
+        const code = safeErrorCode(error);
+        await this.settleFailed(context, claim, code);
+        return "failed";
+      }
     }
     if (signal.aborted) {
       await this.settleFailed(context, claim, "automation_worker_aborted");
@@ -532,11 +663,7 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
     }
     let sessionRef = claim.job.session_ref;
     try {
-      let currentAuthority: Awaited<ReturnType<PostgresRuntimeAutomation["resolveAuthority"]>> | undefined;
-      if (claim.job.authority?.kind === "external_connection") {
-        currentAuthority = await this.resolveAuthority(context, roomId, requiredId(claim.job.connection_id, "automation_connection_id_required"));
-      }
-      const chat = this.chat(context, claim.job, currentAuthority);
+      let chat = this.chat(context, claim.job, currentAuthority);
       let sessionId = runtimeSessionId(sessionRef);
       if (!sessionId || !(await chat.getSession(sessionId))) {
         const session = await chat.createSession({
@@ -548,6 +675,11 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
         sessionRef = { app_id: "samurai-workspace", session_id: session.id };
         await this.attachSessionRef(context, claim, sessionRef);
       }
+      // The session lookup/creation may take time. Revalidate once more at the
+      // actual external execution boundary so a revoked Connection cannot be
+      // used merely because it was valid when the Job was claimed.
+      currentAuthority = await this.revalidateExecutionAuthority(context, claim.job, roomId);
+      chat = this.chat(context, claim.job, currentAuthority);
       const result = await chat.runChatTurn({
         sessionId,
         content: claim.job.target_instruction,
@@ -557,7 +689,8 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
           scheduled_at: claim.run.scheduled_at,
           attempt_no: claim.run.attempt_no
         },
-        idempotencyKey: `automation_${stableHash({ job_id: claim.job.id, scheduled_at: claim.run.scheduled_at })}`
+        idempotencyKey: `automation_${stableHash({ job_id: claim.job.id, scheduled_at: claim.run.scheduled_at })}`,
+        signal
       });
       if (result.backendRun.status !== "completed") {
         await this.settleFailed(context, claim, result.backendRun.error_code ?? "automation_backend_not_completed");
@@ -574,6 +707,45 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
       await this.settleFailed(context, claim, code);
       return "failed";
     }
+  }
+
+  private async revalidateExecutionAuthority(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    job: AutomationJobRecord,
+    roomId: string
+  ): Promise<Awaited<ReturnType<PostgresRuntimeAutomation["resolveAuthority"]>> | undefined> {
+    if (!job.authority) throw new WorkspaceServerError("automation_job_authority_missing", 409);
+    const currentAuthority = job.authority.kind === "external_connection"
+      ? await this.resolveAuthority(context, roomId, requiredId(job.connection_id, "automation_connection_id_required"))
+      : undefined;
+    const allowed = await this.store.canExternalRoomAccess({
+      workspaceId: context.workspaceId,
+      roomId,
+      principal: roomAuthorizationPrincipal(job.authority),
+      action: "execute"
+    });
+    if (!allowed) throw new WorkspaceServerError("automation_room_permission_denied", 403);
+    return currentAuthority;
+  }
+
+  private async settleExecutionResult(
+    context: WorkspaceRequestContext,
+    claim: ClaimedAutomation,
+    result: PostgresRuntimeAutomationExecutionResult
+  ): Promise<void> {
+    if (result.status === "completed") {
+      await this.settle(context, claim, {
+        status: "completed",
+        resultSummary: result.summary,
+        nextRunAt: nextRunAt(claim.job.schedule, claim.run.scheduled_at)
+      });
+      return;
+    }
+    if (result.status === "blocked") {
+      await this.settleBlocked(context, claim, result.errorCode ?? "automation_execution_blocked");
+      return;
+    }
+    await this.settleFailed(context, claim, result.errorCode ?? "automation_execution_failed");
   }
 
   private chat(
@@ -598,12 +770,13 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
 
   private async attachSessionRef(context: WorkspaceRequestContext, claim: ClaimedAutomation, sessionRef: SessionRef): Promise<void> {
     await this.database.withContext(context, async (sql) => {
-      await sql.query(
+      const updated = await sql.query(
         `UPDATE workspace_runtime_automation_jobs
          SET session_ref = $4::JSONB, updated_at = $3
          WHERE workspace_id = $1 AND id = $2 AND lock_owner_token = $5`,
         [context.workspaceId, claim.job.id, nowIso(), jsonText(sessionRef), claim.lockOwnerToken]
       );
+      if (!updated.rowCount) throw new WorkspaceServerError("automation_claim_lease_lost", 409);
     });
   }
 
@@ -692,7 +865,7 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
           claim.lockOwnerToken
         ]
       );
-      if (!updatedJob.rows[0]) return;
+      if (!updatedJob.rows[0]) throw new WorkspaceServerError("automation_claim_lease_lost", 409);
       await sql.query(
         `UPDATE workspace_runtime_automation_runs
          SET status = $3, backend_run_id = COALESCE($4, backend_run_id),
@@ -886,6 +1059,13 @@ function automationSource(job: AutomationJobRecord) {
   return TrustedWorkspaceSourceSchema.parse(job.authority.kind === "external_connection"
     ? { kind: "external_app", app_id: job.authority.app_id, connector_id: job.authority.connector_id }
     : { kind: "host" });
+}
+
+function roomAuthorizationPrincipal(authority: NonNullable<AutomationJobRecord["authority"]>): WorkspaceExternalRoomPrincipal {
+  const delegated = authority.kind === "direct_principal" ? authority.principal : authority.delegated_principal;
+  return delegated.kind === "human"
+    ? { kind: "human", participantId: delegated.participant_id }
+    : { kind: "agent", agentId: delegated.agent_id, requestedByParticipantId: delegated.requested_by_participant_id };
 }
 
 function runtimeSessionId(sessionRef: SessionRef | undefined): string | undefined {

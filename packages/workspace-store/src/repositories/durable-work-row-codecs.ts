@@ -42,6 +42,7 @@ export function objectiveToRow(record: ObjectiveRecord): ObjectivesTable {
   return {
     id: record.id,
     session_id: record.session_id ?? null,
+    room_id: requiredRoomId(record.room_id, "objective"),
     title: record.title,
     objective: record.objective,
     completion_criteria_json: stringify(record.completion_criteria),
@@ -60,6 +61,7 @@ export function objectiveFromRow(row: ObjectivesTable): ObjectiveRecord {
   return {
     id: row.id,
     session_id: row.session_id ?? undefined,
+    room_id: requiredRoomId(row.room_id, "objective"),
     title: row.title,
     objective: row.objective,
     completion_criteria: parse(row.completion_criteria_json),
@@ -78,6 +80,7 @@ export function workItemToRow(record: WorkItemRecord): WorkItemsTable {
   return {
     id: record.id,
     objective_id: record.objective_id,
+    room_id: requiredRoomId(record.room_id, "work_item"),
     parent_work_item_id: record.parent_work_item_id ?? null,
     instruction: record.instruction,
     status: record.status,
@@ -104,6 +107,7 @@ export function workItemFromRow(row: WorkItemsTable): WorkItemRecord {
   return {
     id: row.id,
     objective_id: row.objective_id,
+    room_id: requiredRoomId(row.room_id, "work_item"),
     parent_work_item_id: row.parent_work_item_id ?? undefined,
     instruction: row.instruction,
     status: row.status as WorkItemRecord["status"],
@@ -124,6 +128,12 @@ export function workItemFromRow(row: WorkItemsTable): WorkItemRecord {
     started_at: row.started_at ?? undefined,
     completed_at: row.completed_at ?? undefined
   };
+}
+
+function requiredRoomId(roomId: string | null | undefined, resourceKind: "objective" | "work_item"): string {
+  const normalized = roomId?.trim();
+  if (!normalized) throw new Error(`${resourceKind}_room_scope_required`);
+  return normalized;
 }
 
 export function workDependencyToRow(record: WorkDependencyRecord): WorkDependenciesTable {

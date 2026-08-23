@@ -44,6 +44,7 @@ describe("System operation handlers", () => {
     }));
     const handler = pluginStatusSet.createHandler({
       setPluginEnabled,
+      getPluginEnabled: () => false,
       findPluginStatus,
       savePluginState,
       pluginNotFoundError: () => new Error("plugin_not_found")
@@ -54,6 +55,25 @@ describe("System operation handlers", () => {
     expect(setPluginEnabled).toHaveBeenCalledWith("plugin-1", true);
     expect(findPluginStatus).toHaveBeenCalledWith("plugin-1");
     expect(savePluginState).toHaveBeenCalledWith({ manifestId: "plugin-1", enabled: true, version: "1.0.0" });
+  });
+
+  it("restores the previous runtime status when persistence fails", async () => {
+    const runtimeStates: boolean[] = [];
+    const handler = pluginStatusSet.createHandler({
+      setPluginEnabled: (_id, enabled) => {
+        runtimeStates.push(enabled);
+        return true;
+      },
+      getPluginEnabled: () => false,
+      findPluginStatus: () => ({ manifest_id: "plugin-1", version: "1.0.0" }),
+      savePluginState: async () => {
+        throw new Error("db_save_failed");
+      },
+      pluginNotFoundError: () => new Error("plugin_not_found")
+    });
+
+    await expect(handler.execute(context, { plugin_id: "plugin-1", status: "enabled" })).rejects.toThrow("db_save_failed");
+    expect(runtimeStates).toEqual([true, false]);
   });
 
   it("plans presentation without a runtime service", async () => {

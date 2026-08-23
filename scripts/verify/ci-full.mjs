@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const startedAt = new Date().toISOString();
-const resultDirectory = mkdtempSync(path.join(os.tmpdir(), "samurai-verify-ci-full-"));
+const configuredResultDirectory = process.env.SAMURAI_CI_FULL_REPORT_DIRECTORY?.trim();
+const resultDirectory = configuredResultDirectory
+  ? path.resolve(configuredResultDirectory)
+  : mkdtempSync(path.join(os.tmpdir(), "samurai-verify-ci-full-"));
+mkdirSync(resultDirectory, { recursive: true });
 const commandDirectory = path.join(resultDirectory, "commands");
 mkdirSync(commandDirectory, { recursive: true });
 const checks = [];
@@ -136,6 +140,7 @@ const report = {
   started_at: startedAt,
   completed_at: new Date().toISOString(),
   repository_root: root,
+  postgres_environment_mode: process.env.SAMURAI_CI_FULL_POSTGRES_MODE?.trim() || "external_or_unavailable",
   scope: ["postgresql", "migration", "server", "worker", "bundle", "web", "full-test"],
   checks,
   unverified: checks.filter((check) => check.status === "unverified"),

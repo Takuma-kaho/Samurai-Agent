@@ -20,7 +20,8 @@ import {
   type WorkspaceCompletionTuning
 } from "./workspace-completion-types";
 
-const secretPattern = /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----|(?:^|[\n{,])\s*["']?(?:password|passphrase|secret|private[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|credential|api[_-]?key)["']?\s*[:=]|(?:^|[^A-Za-z0-9])(?:sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})(?:$|[^A-Za-z0-9])/i;
+const secretPattern = /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----|(?:^|[\n{,])\s*["']?(?:password|passphrase|secret|client[_-]?secret|private[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|credential|api[_-]?key)["']?\s*[:=]|(?:^|[^A-Za-z0-9])(?:sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})(?:$|[^A-Za-z0-9])/i;
+const secretFieldPattern = /(?:^|[_-])(?:password|passphrase|secret|client[_-]?secret|oauth[_-]?client[_-]?secret|private[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|oauth[_-]?(?:access|refresh)[_-]?token|authorization|cookie|credential|api[_-]?key|api[_-]?token|bearer[_-]?token)(?:$|[_-])/i;
 const opaqueId = /^[a-z][a-z0-9_:-]{0,127}$/;
 
 export interface WorkspaceCompletionValidationIssue {
@@ -362,7 +363,7 @@ export function assertCompletionResourceAxes(input: {
 }
 
 export function containsWorkspaceCompletionSecret(value: string): boolean {
-  return secretPattern.test(value);
+  return secretPattern.test(value) || secretFieldPattern.test(value);
 }
 
 function safeText(value: string, path: string, issues: WorkspaceCompletionValidationIssue[]): void {

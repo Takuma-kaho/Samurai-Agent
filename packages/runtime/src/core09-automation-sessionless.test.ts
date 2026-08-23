@@ -76,10 +76,28 @@ describe("Core09 Session-free Automation", () => {
         allowed_room_ids: [roomId], ingress_classes: ["domain_operation"]
       }
     });
+    const fallbackConnection = await runtime.runDomainCommand({
+      command_id: "external_app.connection.create",
+      idempotency_key: "core09:automation:connection-b",
+      payload: {
+        connector_id: "connector-automation-fallback", app_id: "app-automation-fallback",
+        delegated_principal: { kind: "human", participant_id: localOwnerParticipantId },
+        allowed_room_ids: [roomId], ingress_classes: ["domain_operation"]
+      }
+    });
+    const connectionId = (connection.result as { resource: { id: string } }).resource.id;
+    const fallbackConnectionId = (fallbackConnection.result as { resource: { id: string } }).resource.id;
+    const fallbackRecord = await store.getExternalAppConnection(fallbackConnectionId);
+    if (!fallbackRecord) throw new Error("fallback_connection_missing");
+    vi.spyOn(store, "getExternalAppConnectionByConnector").mockResolvedValue({
+      ...fallbackRecord,
+      connector_id: "connector-automation",
+      app_id: "app-automation"
+    });
     const adapter = runtime.createReferenceExternalAppAdapter();
     const saved = await adapter.domainOperation({
       evidence: { connector_id: "connector-automation", app_id: "app-automation" },
-      target: { requested_room_id: roomId, correlation_id: "core09-automation-external", idempotency_key: "core09:automation:job" },
+      target: { requested_room_id: roomId, correlation_id: "core09-automation-external", idempotency_key: "core09:automation:job", connection_id: connectionId },
       command_id: "automation.job.save",
       payload: {
         title: "External reindex", kind: "wiki_reindex", schedule: "daily", target_instruction: "Reindex",
@@ -87,6 +105,7 @@ describe("Core09 Session-free Automation", () => {
       }
     });
     const job = (saved.result as { resource: { id: string } }).resource;
+    expect(await store.getAutomationJob(job.id)).toMatchObject({ connection_id: connectionId });
     await runtime.runDomainCommand({
       command_id: "external_app.connection.revoke",
       idempotency_key: "core09:automation:revoke",

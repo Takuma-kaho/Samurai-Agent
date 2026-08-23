@@ -27,6 +27,9 @@ describe("backend release readiness verification script", () => {
       "full-tests",
       "i18n-check",
       "web-build",
+      "desktop-verify",
+      "desktop-build",
+      "architecture-static",
       "doctor",
       "doctor-syntax",
       "public-naming-scan",
@@ -36,6 +39,9 @@ describe("backend release readiness verification script", () => {
       "sandbox-capabilities",
       "sandbox-host-run"
     ]);
+    expect(result.gates.find((gate: { id: string }) => gate.id === "doctor")).toMatchObject({
+      command: "node scripts/doctor.mjs --strict"
+    });
     expect(result.gates.every((gate: { status: string }) => gate.status === "planned")).toBe(true);
     expect(result.manual_gates.map((gate: { id: string }) => gate.id)).toEqual([
       "external-backend-run-resume",

@@ -52,15 +52,20 @@ type ExternalRoomPrincipal = {
 export class PostgresExternalConnectionLookup {
   constructor(private readonly commands: WorkspaceServerCommandService) {}
 
-  async getExternalAppConnection(id: string): Promise<ExternalAppConnectionRecord | undefined> {
-    const descriptor = await this.commands.getExternalConnectionDescriptor({ id });
-    return descriptor ? connectionFromDescriptor(descriptor) : undefined;
+  async getExternalAppConnection(id: string): Promise<ExternalAppConnectionRecord | undefined>;
+  async getExternalAppConnection(input: { workspaceId: string; connectionId: string }): Promise<ExternalAppConnectionRecord | undefined>;
+  async getExternalAppConnection(value: string | { workspaceId: string; connectionId: string }): Promise<ExternalAppConnectionRecord | undefined> {
+    const connectionId = typeof value === "string" ? value : value.connectionId;
+    const descriptor = await this.commands.getExternalConnectionDescriptor({ id: connectionId });
+    if (!descriptor || (typeof value !== "string" && descriptor.workspaceId !== value.workspaceId)) return undefined;
+    return connectionFromDescriptor(descriptor);
   }
 
   async getExternalAppConnectionByConnector(input: { workspaceId: string; connectorId: string }): Promise<ExternalAppConnectionRecord | undefined> {
     const descriptor = await this.commands.getExternalConnectionDescriptor(input);
     return descriptor ? connectionFromDescriptor(descriptor) : undefined;
   }
+
 }
 
 /** Room permission adapter for the formal ingress. Human delegation uses the
@@ -821,7 +826,7 @@ function requestContext(trusted: TrustedDomainRuntimeContext, workspaceId: strin
 }
 
 function requestContextFromWorkspaceContext(context: TrustedWorkspaceContext, accountId: string): WorkspaceRequestContext {
-  const connectionId = context.principal.kind === "external_app" ? `external_${hash(`${context.workspace_id}|${context.source.connector_id ?? ""}`)}` : undefined;
+  const connectionId = context.connection_id;
   const operationId = `external_${hash(`${context.workspace_id}|${context.correlation_id}`)}`;
   const caller = connectionId ? createInternalWorkspaceConnectionCaller({
     principalAccountId: accountId,

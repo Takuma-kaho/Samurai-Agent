@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { evaluateVerifierAssertions, reportVerifierFailures, verifierEvidenceStatus } from "./lib/verifier-assertions.mjs";
 
 const root = process.cwd();
 const evidenceDir = path.join(root, "reports/core-additional-scope/evidence");
@@ -27,7 +28,8 @@ const sourceFiles = [
   "packages/runtime/src/agent-runtime.ts",
   "apps/server/src/api-server.ts",
   "apps/web/src/components/ManagementSurfaces.vue",
-  "apps/web/src/AppWorkspace.vue"
+  "apps/web/src/AppWorkspace.vue",
+  "scripts/lib/verifier-assertions.mjs"
 ];
 const runFixture = (source, name) => {
   const output = path.join(tempDir, `${name}.mjs`);
@@ -38,10 +40,22 @@ const learning = runFixture(fixtureFiles[0], "learning-gateway");
 const workspace = runFixture(fixtureFiles[1], "workspace-plugin");
 const [task, curator, race, schedule, guardrails, privacy, restart, signed, payload, backend] = learning;
 const [presentation, surface, attachment, plugin, correlation, doctor, parity, artifact] = workspace;
+const fixtureStatusFailures = [...learning, ...workspace]
+  .filter((item) => item?.status !== "passed")
+  .map((item) => `fixture status is ${item?.status ?? "missing"}`);
 const head = readFileSync(path.join(root, ".git/HEAD"), "utf8").trim();
 const commitSha = head.startsWith("ref: ") ? readFileSync(path.join(root, ".git", head.slice(5)), "utf8").trim() : head;
 const sourceSha256 = createHash("sha256").update(sourceFiles.map((file) => `${file}\0${readFileSync(path.join(root, file))}`).join("\0")).digest("hex");
-const writeEvidence = (id, assertions, result) => writeFileSync(path.join(evidenceDir, `${id}.json`), `${JSON.stringify({ schema_version: 1, test_id: id, status: "passed", command: "node scripts/verify-core-additions-regression.mjs", commit_sha: commitSha, source_sha256: sourceSha256, source_files: sourceFiles, assertions, result }, null, 2)}\n`);
+const failures = [];
+const writtenStatuses = new Map();
+const writeEvidence = (id, assertions, result) => {
+  const assertionFailures = evaluateVerifierAssertions(assertions);
+  const allFailures = [...fixtureStatusFailures, ...assertionFailures];
+  failures.push(...allFailures.map((failure) => `${id}: ${failure}`));
+  const status = verifierEvidenceStatus(fixtureStatusFailures.length ? "failed" : "passed", assertionFailures);
+  writtenStatuses.set(id, status);
+  writeFileSync(path.join(evidenceDir, `${id}.json`), `${JSON.stringify({ schema_version: 1, test_id: id, status, command: "node scripts/verify-core-additions-regression.mjs", commit_sha: commitSha, source_sha256: sourceSha256, source_files: sourceFiles, assertions, ...(allFailures.length ? { failures: allFailures } : {}), result }, null, 2)}\n`);
+};
 
 writeEvidence("B01", [{ name: "Backend selection is consistent", actual: backend.consistent, expected: true }], backend);
 writeEvidence("B02", [{ name: "Skill outcome is evaluated", actual: task.comparable_assessment, expected: "helpful" }, { name: "Safe revision is promoted", actual: guardrails.decision, expected: "promote" }], { task, guardrails });
@@ -123,5 +137,6 @@ const catalog = readFileSync(path.join(root, "packages/action-catalog/src/index.
 writeEvidence("G03", [{ name: "Product-later and excluded engines are absent from Core commands", actual: forbiddenActions.filter((prefix) => catalog.includes(`id: \"${prefix}`)), expected: [] }], { forbidden_actions: forbiddenActions });
 const uiContextWired = readFileSync(path.join(root, "apps/web/src/AppWorkspace.vue"), "utf8").includes("selectedManagementContext");
 writeEvidence("E10", [{ name: "Selected management resource is wired to Chat context", actual: uiContextWired, expected: true }], { ui_context_wired: uiContextWired });
-writeEvidence("G05", [{ name: "Current HEAD fixtures regenerate evidence", actual: learning.every((item) => item.status === "passed") && workspace.every((item) => item.status === "passed"), expected: true }], { learning: learning.length, workspace: workspace.length, correlation, doctor, parity, surface });
-process.stdout.write(`${JSON.stringify({ status: "passed", learning: learning.length, workspace: workspace.length, evidence_written: 28 })}\n`);
+writeEvidence("G05", [{ name: "Current HEAD fixtures regenerate evidence", actual: learning.every((item) => item.status === "passed") && workspace.every((item) => item.status === "passed") && [...writtenStatuses.values()].every((status) => status === "passed"), expected: true }], { learning: learning.length, workspace: workspace.length, correlation, doctor, parity, surface });
+reportVerifierFailures("core-additions-regression", failures);
+process.stdout.write(`${JSON.stringify({ status: failures.length ? "failed" : "passed", learning: learning.length, workspace: workspace.length, evidence_written: 28 })}\n`);

@@ -3,17 +3,17 @@
   "test_id": "G05",
   "command": "pnpm core:test:release-hygiene",
   "status": "passed",
-  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
+  "commit_sha": "9b7e672a2fa5deaba0851b413c40c2ac4fcaf835",
   "worktree_clean": false,
-  "source_sha256": "668c80e71920b6a0c102e0a92143de099c2607fca06a1911eff44745eba9a930",
+  "source_sha256": "4dbc227a6b425537c3e3813bc6987e5acdb632997f68e9e3a6322798a8c36bf7",
   "source_files": [
     "package.json",
     "plans/core-completion-scorecard.json",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-release-hygiene.mjs"
   ],
-  "started_at": "2026-08-21T22:06:51.111Z",
-  "completed_at": "2026-08-21T22:07:17.298Z",
+  "started_at": "2026-08-23T01:08:07.925Z",
+  "completed_at": "2026-08-23T01:08:46.460Z",
   "assertions": [
     {
       "name": "inspection_ok",
@@ -64,7 +64,7 @@
     "duplicate_sources": [],
     "duplicate_candidates": [],
     "untracked_generated": [],
-    "inspected_source_files": 1165,
-    "dirty_entries": 25
+    "inspected_source_files": 1196,
+    "dirty_entries": 1
   }
 }

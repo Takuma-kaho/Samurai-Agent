@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertOpaqueId, assertSafeRelativePath } from "./config";
 import { canonicalJson } from "./auth";
@@ -61,6 +61,7 @@ export class WorkspaceFileStore {
     const stagedPath = `.staging/${transactionId}`;
     const root = this.workspaceRoot(context.workspaceId);
     const stagedAbsolutePath = this.resolveWithinWorkspace(root, stagedPath);
+    await assertNoSymlinkPath(root, stagedPath);
     await mkdir(path.dirname(stagedAbsolutePath), { recursive: true, mode: 0o700 });
     let databaseCommitted = false;
     try {
@@ -152,7 +153,9 @@ export class WorkspaceFileStore {
       if (!row) throw new WorkspaceServerError("workspace_file_not_found", 404);
       return fileFromRow(row);
     });
-    const content = await readFile(this.resolveWithinWorkspace(this.workspaceRoot(context.workspaceId), `files/${safePath}`));
+    const root = this.workspaceRoot(context.workspaceId);
+    await assertNoSymlinkPath(root, `files/${safePath}`);
+    const content = await readFile(this.resolveWithinWorkspace(root, `files/${safePath}`));
     if (hashBytes(content) !== file.sha256) throw new WorkspaceServerError("workspace_file_hash_mismatch", 500);
     return { file, content };
   }
@@ -267,6 +270,8 @@ export class WorkspaceFileStore {
       const root = this.workspaceRoot(context.workspaceId);
       const source = this.resolveWithinWorkspace(root, transaction.staged_path);
       const destination = this.resolveWithinWorkspace(root, `files/${transaction.target_path}`);
+      await assertNoSymlinkPath(root, transaction.staged_path);
+      await assertNoSymlinkPath(root, `files/${transaction.target_path}`);
       if (transaction.staged_path.endsWith(".delete")) {
         const currentFile = await sql.query<FileRow>(
           `SELECT workspace_id, room_id, path, version, sha256, size, created_at, updated_at
@@ -395,6 +400,29 @@ function fileToJson(file: WorkspaceFile): Record<string, unknown> {
 
 function fileLockKey(workspaceId: string, relativePath: string): string {
   return `${workspaceId}\u001f${relativePath}`;
+}
+
+/** A normalized path is not sufficient protection for a file-backed
+ * Workspace: an already-created directory symlink can redirect read/write
+ * operations after normalization. Reject every existing symlink component
+ * before touching the path. The database transaction remains authoritative;
+ * this is an additional filesystem boundary check. */
+async function assertNoSymlinkPath(root: string, relativePath: string): Promise<void> {
+  let current = path.resolve(root);
+  const rootStat = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (rootStat?.isSymbolicLink()) throw new WorkspaceServerError("workspace_file_symlink_path_rejected", 409);
+  for (const segment of relativePath.split("/").filter(Boolean)) {
+    current = path.join(current, segment);
+    const stat = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!stat) break;
+    if (stat.isSymbolicLink()) throw new WorkspaceServerError("workspace_file_symlink_path_rejected", 409, { path: relativePath });
+  }
 }
 
 async function assertWorkspaceWritable(sql: WorkspaceSql, workspaceId: string): Promise<void> {

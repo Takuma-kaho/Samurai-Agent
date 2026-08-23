@@ -11,16 +11,16 @@ export type WorkspaceRestoreResult = DomainOperationOutput<"workspace.backup.res
 export type WorkspaceRepairResult = DomainOperationOutput<"workspace.repair">;
 
 export interface ExecutionStorePort {
-  getObjective(id: string): Promise<ObjectiveRecord | undefined>;
-  saveWorkItem(record: WorkItemRecord): Promise<WorkItemRecord>;
+  getObjective(id: string, roomId: string): Promise<ObjectiveRecord | undefined>;
+  saveWorkItem(record: WorkItemRecord, roomId: string): Promise<WorkItemRecord>;
   createWorkspaceBackup(): Promise<WorkspaceBackupRecord>;
   restoreWorkspaceBackup(backupId: string): Promise<WorkspaceRestoreResult>;
   repairWorkspace(options?: { dryRun?: boolean }): Promise<WorkspaceRepairResult>;
 }
 
 export interface WorkCoordinatorPort {
-  followUp(workItemId: string, instruction: string): Promise<{ workItem: WorkItemRecord; dependency: WorkDependencyRecord }>;
-  steer(workItemId: string, instruction: string): Promise<WorkItemRecord>;
+  followUp(workItemId: string, instruction: string, roomId: string): Promise<{ workItem: WorkItemRecord; dependency: WorkDependencyRecord }>;
+  steer(workItemId: string, instruction: string, roomId: string): Promise<WorkItemRecord>;
 }
 
 export interface ExecutionDomainServiceDependencies {
@@ -32,11 +32,13 @@ export interface ExecutionDomainServiceDependencies {
 export interface FollowUpWorkItemInput {
   workItemId: string;
   instruction?: string;
+  roomId: string;
 }
 
 export interface SteerWorkItemInput {
   workItemId: string;
   instruction?: string;
+  roomId: string;
 }
 
 export interface RestoreWorkspaceBackupInput {
@@ -50,16 +52,16 @@ export interface RepairWorkspaceInput {
 export class ExecutionDomainService {
   constructor(private readonly dependencies: ExecutionDomainServiceDependencies) {}
 
-  getObjective(id: string) { return this.dependencies.store.getObjective(id); }
-  saveWorkItemRecord(record: WorkItemRecord) { return this.dependencies.store.saveWorkItem(record); }
+  getObjective(id: string, roomId: string) { return this.dependencies.store.getObjective(id, roomId); }
+  saveWorkItemRecord(record: WorkItemRecord) { return this.dependencies.store.saveWorkItem(record, record.room_id ?? ""); }
   objectiveNotFoundError() { return this.dependencies.requestError("not_found", "objective_not_found"); }
 
   followUpWorkItem(input: FollowUpWorkItemInput) {
-    return this.dependencies.coordinator.followUp(input.workItemId, input.instruction ?? "");
+    return this.dependencies.coordinator.followUp(input.workItemId, input.instruction ?? "", input.roomId);
   }
 
   steerWorkItem(input: SteerWorkItemInput) {
-    return this.dependencies.coordinator.steer(input.workItemId, input.instruction ?? "");
+    return this.dependencies.coordinator.steer(input.workItemId, input.instruction ?? "", input.roomId);
   }
 
   createWorkspaceBackup() {

@@ -81,7 +81,10 @@ export function projectBackendEventForUi(record: BackendEventRecord): BackendEve
 }
 
 export function normalizeBackendOutputEvent(event: BackendOutputEvent | BackendOutputEventCandidate): BackendOutputEvent {
-  const payload = jsonRecord(event.payload);
+  // Persisted Backend events are durable evidence and may outlive the
+  // short-lived UI projection. Redact sensitive fields before the record is
+  // returned to the Store boundary; UI-only redaction is too late.
+  const payload = redactPersistedPayload(jsonRecord(event.payload)) as Record<string, JsonValue>;
   const payloadToolCallId = typeof payload.tool_call_id === "string" && payload.tool_call_id.trim() ? payload.tool_call_id : undefined;
   const toolCallId = event.tool_call_id ?? payloadToolCallId;
   const payloadSessionId = typeof payload.backend_session_id === "string" && payload.backend_session_id.trim()
@@ -297,8 +300,14 @@ function truncateText(value: string): string {
   return value.length > 4000 ? `${value.slice(0, 4000)}...[truncated]` : value;
 }
 
+const sensitivePayloadKeys = new Set([
+  "apikey", "accesstoken", "token", "clientsecret", "oauthclientsecret", "refreshtoken",
+  "privatekey", "password", "cookie", "credential", "authorization", "secret", "secretvalue", "secretmaterial", "rawvalue"
+]);
+
 function isSensitivePayloadKey(key: string): boolean {
-  return /secret|token|api[_-]?key|password|authorization|credential/i.test(key);
+  const normalized = key.replaceAll("_", "").replaceAll("-", "").toLowerCase();
+  return sensitivePayloadKeys.has(normalized);
 }
 
 function stringPayload(value: JsonValue | undefined): string | undefined {
@@ -322,6 +331,24 @@ function normalizeResourceRefs(value: ResourceRef[] | undefined): ResourceRef[] 
 function jsonRecord(value: unknown): Record<string, JsonValue> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, jsonSafe(entry)]));
+}
+
+function redactPersistedPayload(value: JsonValue, key = ""): JsonValue {
+  // `secret_env` carries SecretRef IDs, not resolved credentials. Keep those
+  // references available to the Host after event normalization; raw values in
+  // ordinary environment fields still follow the sensitive-key policy.
+  if (key === "secret_env" && value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.fromEntries(Object.entries(value).map(([envName, refId]) => [
+      envName,
+      typeof refId === "string" ? refId : "[redacted]"
+    ]));
+  }
+  if (isSensitivePayloadKey(key)) return "[redacted]";
+  if (Array.isArray(value)) return value.map((entry) => redactPersistedPayload(entry));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([entryKey, entry]) => [entryKey, redactPersistedPayload(entry, entryKey)]));
+  }
+  return value;
 }
 
 function jsonSafe(value: unknown): JsonValue {

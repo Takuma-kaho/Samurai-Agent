@@ -6,7 +6,18 @@ import { assertOpaqueId, assertSafeRelativePath } from "./config";
 import { WorkspaceServerError } from "./errors";
 import type { WorkspaceSql } from "./postgres";
 import type { WorkspaceRequestContext, WorkspaceTransferReceipt } from "./types";
-import { readWorkspaceTransfer, runExclusiveWorkspaceTransferExport, verifyWorkspaceBundleV3, WorkspaceBundleV3Service } from "./workspace-bundle-v3";
+import {
+  readWorkspaceTransfer,
+  runExclusiveWorkspaceBundleStaging,
+  runExclusiveWorkspaceTransferExport,
+  verifyWorkspaceBundleV3,
+  WORKSPACE_BUNDLE_INCOMING_TTL_MS,
+  WORKSPACE_BUNDLE_MAX_BYTES,
+  WORKSPACE_BUNDLE_MAX_ENTRIES,
+  WORKSPACE_BUNDLE_MAX_ENTRY_BYTES,
+  WORKSPACE_BUNDLE_MAX_RECORDS_PER_FILE,
+  WorkspaceBundleV3Service
+} from "./workspace-bundle-v3";
 import { WorkspaceCompletionFileService, type StagedWorkspaceCompletionFileBatch } from "./workspace-completion-files";
 import { containsWorkspaceCompletionSecret } from "./workspace-completion-policy";
 import { WorkspaceServerStore } from "./workspace-server-store";
@@ -105,6 +116,10 @@ interface IncomingV4BundleMetadata {
   target_workspace_id: string;
   target_workspace_name?: string;
   manifest: WorkspaceBundleV4Manifest;
+  created_at: string;
+  expires_at: string;
+  received_bytes: number;
+  received_entries: number;
   completed?: {
     workspace_id: string;
     manifest: WorkspaceBundleV4Manifest;
@@ -405,6 +420,9 @@ export class WorkspaceBundleV4Service {
     assertOpaqueId(context.operationId, "workspace_operation_id_invalid");
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
     assertWorkspaceBundleV4ManifestCandidate(input.manifest);
+    const createdAt = new Date();
+    const manifestText = canonicalJson(input.manifest);
+    if (Buffer.byteLength(manifestText, "utf8") > WORKSPACE_BUNDLE_MAX_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
     const root = this.incomingRoot(context);
     const metadata: IncomingV4BundleMetadata = {
       format_version: 1,
@@ -413,7 +431,11 @@ export class WorkspaceBundleV4Service {
       operation_id: context.operationId,
       target_workspace_id: input.targetWorkspaceId,
       ...(input.targetWorkspaceName?.trim() ? { target_workspace_name: input.targetWorkspaceName.trim().slice(0, 500) } : {}),
-      manifest: input.manifest
+      manifest: input.manifest,
+      created_at: createdAt.toISOString(),
+      expires_at: new Date(createdAt.getTime() + WORKSPACE_BUNDLE_INCOMING_TTL_MS).toISOString(),
+      received_bytes: Buffer.byteLength(manifestText, "utf8"),
+      received_entries: 0
     };
     const metadataPath = this.incomingMetadataPath(context);
     if (await pathExists(metadataPath)) {
@@ -452,22 +474,41 @@ export class WorkspaceBundleV4Service {
     entryPath: string,
     content: Uint8Array
   ): Promise<void> {
-    const metadata = await this.readIncomingMetadata(context);
-    if (metadata.completed) throw new WorkspaceServerError("workspace_import_staging_completed", 409);
-    assertSafeRelativePath(entryPath);
-    const expectedHash = metadata.manifest.files[entryPath];
-    if (!expectedHash) throw new WorkspaceServerError("workspace_bundle_v4_entry_not_found", 404);
-    if (content.byteLength > 8 * 1024 * 1024) throw new WorkspaceServerError("workspace_bundle_v4_entry_too_large", 413);
-    if (hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
-    const destination = resolveBundlePath(this.incomingRoot(context), entryPath);
-    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-    try {
-      await writeFile(destination, content, { flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const existing = await readFile(destination);
-      if (hashBytes(existing) !== expectedHash) throw new WorkspaceServerError("workspace_import_staging_conflict", 409);
-    }
+    return runExclusiveWorkspaceBundleStaging(canonicalJson([context.accountId, context.operationId]), async () => {
+      const metadata = await this.readIncomingMetadata(context);
+      if (metadata.completed) throw new WorkspaceServerError("workspace_import_staging_completed", 409);
+      assertSafeRelativePath(entryPath);
+      const expectedHash = metadata.manifest.files[entryPath];
+      if (!expectedHash) throw new WorkspaceServerError("workspace_bundle_v4_entry_not_found", 404);
+      if (content.byteLength > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_entry_too_large", 413);
+      if (hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
+      const destination = resolveBundlePath(this.incomingRoot(context), entryPath);
+      if (await pathExists(destination)) {
+        const existing = await readFile(destination);
+        if (hashBytes(existing) !== expectedHash) throw new WorkspaceServerError("workspace_import_staging_conflict", 409);
+        return;
+      }
+      const usage = await measureBundleUsage(this.incomingRoot(context));
+      if (usage.entries >= WORKSPACE_BUNDLE_MAX_ENTRIES || usage.bytes + content.byteLength > WORKSPACE_BUNDLE_MAX_BYTES) {
+        throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
+      }
+      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      let wrote = false;
+      try {
+        await writeFile(destination, content, { flag: "wx", mode: 0o600 });
+        wrote = true;
+        const nextUsage = await measureBundleUsage(this.incomingRoot(context));
+        assertBundleUsage(nextUsage, "workspace_bundle_v4_transport_too_large");
+        await this.writeIncomingMetadata(context, {
+          ...metadata,
+          received_bytes: nextUsage.bytes,
+          received_entries: nextUsage.entries
+        }, true);
+      } catch (error) {
+        if (wrote) await rm(destination, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    });
   }
 
   async completeIncomingBundle(context: Pick<WorkspaceRequestContext, "accountId" | "operationId">): Promise<{
@@ -528,6 +569,21 @@ export class WorkspaceBundleV4Service {
     }
     assertOpaqueId(metadata.target_workspace_id, "workspace_id_invalid");
     assertWorkspaceBundleV4ManifestCandidate(metadata.manifest);
+    if (metadata.created_at !== undefined && !isValidTimestamp(metadata.created_at)) throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
+    if (metadata.expires_at !== undefined && !isValidTimestamp(metadata.expires_at)) throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
+    if (metadata.received_bytes !== undefined && (!Number.isSafeInteger(metadata.received_bytes) || metadata.received_bytes < 0 || metadata.received_bytes > WORKSPACE_BUNDLE_MAX_BYTES)) {
+      throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
+    }
+    if (metadata.received_entries !== undefined && (!Number.isSafeInteger(metadata.received_entries) || metadata.received_entries < 0 || metadata.received_entries > WORKSPACE_BUNDLE_MAX_ENTRIES)) {
+      throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
+    }
+    if (!metadata.completed && await incomingV4BundleExpired(this.incomingMetadataPath(context), metadata)) {
+      await Promise.all([
+        rm(this.incomingRoot(context), { recursive: true, force: true }),
+        rm(this.incomingMetadataPath(context), { force: true })
+      ]);
+      throw new WorkspaceServerError("workspace_import_staging_expired", 410);
+    }
     return metadata as IncomingV4BundleMetadata;
   }
 
@@ -694,6 +750,15 @@ export class WorkspaceBundleV4Service {
 
   private async importCompletionExtension(context: WorkspaceRequestContext, source: { directory: string; manifest: WorkspaceBundleV4Manifest }): Promise<void> {
     const rows = await readCompletionBundleRows(source.directory);
+    const receiptId = completionId("completion_receipt", context.workspaceId, source.manifest.integrity_hash);
+    const existingReceipt = await this.store.database.withContext(context, async (sql) => sql.query<{ id: string }>(
+      "SELECT id FROM workspace_completion_migration_receipts WHERE workspace_id = $1 AND id = $2 AND integrity_hash = $3 AND status = 'switched'",
+      [context.workspaceId, receiptId, source.manifest.integrity_hash]
+    ));
+    if (existingReceipt.rows[0]) {
+      await this.recoverImportedCommittedBatches(context, source.directory, rows);
+      return;
+    }
     const batches = await this.stageImportedBatches(context, source.directory, rows);
     try {
       await this.store.database.withContext(context, async (sql) => {
@@ -738,6 +803,45 @@ export class WorkspaceBundleV4Service {
     } catch (error) {
       await Promise.all(batches.map((batch) => this.files.rollback(batch).catch(() => undefined)));
       throw error;
+    }
+  }
+
+  private async recoverImportedCommittedBatches(
+    context: WorkspaceRequestContext,
+    root: string,
+    rows: Record<string, Record<string, unknown>[]>
+  ): Promise<void> {
+    const pending = await this.store.database.withContext(context, async (sql) => sql.query<{ id: string; scope_kind: string; room_id: string | null }>(
+      "SELECT id, scope_kind, room_id FROM workspace_completion_file_batches WHERE workspace_id = $1 AND status = 'db_committed' ORDER BY id",
+      [context.workspaceId]
+    ));
+    const entriesByBatch = new Map<string, Record<string, unknown>[]>();
+    for (const row of rows.workspace_completion_file_batch_entries ?? []) {
+      const batchId = stringValue(row.batch_id, "workspace_bundle_v4_batch_invalid");
+      entriesByBatch.set(batchId, [...(entriesByBatch.get(batchId) ?? []), row]);
+    }
+    for (const batch of pending.rows) {
+      const scope = batch.scope_kind === "workspace" && batch.room_id === null
+        ? { kind: "workspace" as const }
+        : batch.scope_kind === "room" && batch.room_id
+          ? { kind: "room" as const, roomId: batch.room_id }
+          : (() => { throw new WorkspaceServerError("workspace_bundle_v4_batch_scope_invalid", 400); })();
+      const entries = (entriesByBatch.get(batch.id) ?? []).map((row) => {
+        const relative = assertSafeRelativePath(stringValue(row.path, "workspace_bundle_v4_file_path_invalid"));
+        const expectedHash = stringValue(row.sha256, "workspace_bundle_v4_file_hash_invalid");
+        return { path: relative, expectedHash };
+      });
+      const resolved = await Promise.all(entries.map(async (entry) => ({
+        path: entry.path,
+        content: await readFile(resolveBundlePath(root, `${completionDirectory}/files/${entry.path}`)),
+        sha256: entry.expectedHash
+      })));
+      if (resolved.length === 0) throw new WorkspaceServerError("workspace_bundle_v4_batch_entries_missing", 400);
+      if (resolved.some((entry) => hashBytes(entry.content) !== entry.sha256)) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
+      await this.files.recover({ workspaceId: context.workspaceId, id: batch.id, scope, entries: resolved });
+      await this.store.database.withContext(context, async (sql) => {
+        await sql.query("UPDATE workspace_completion_file_batches SET status = 'renamed', updated_at = NOW() WHERE workspace_id = $1 AND id = $2 AND status = 'db_committed'", [context.workspaceId, batch.id]);
+      });
     }
   }
 
@@ -972,6 +1076,7 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
   const v3 = await verifyWorkspaceBundleV3(resolveBundlePath(root, baseV3Directory));
   if (v3.manifest.integrity_hash !== manifest.base_v3_integrity_hash) throw new WorkspaceServerError("workspace_bundle_v4_base_mismatch", 400);
   if (v3.manifest.transfer_id !== manifest.transfer_id) throw new WorkspaceServerError("workspace_transfer_bundle_mismatch", 409);
+  assertBundleUsage(await measureBundleUsage(root), "workspace_bundle_v4_transport_too_large");
   const actual = await hashBundleFiles(root);
   if (canonicalJson(actual) !== canonicalJson(manifest.files)) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
   for (const accountId of manifest.excluded_maintenance_account_ids) assertOpaqueId(accountId, "workspace_bundle_v4_maintenance_account_invalid");
@@ -1019,8 +1124,9 @@ export async function readWorkspaceBundleV4Transport(directory: string): Promise
   let total = 0;
   for (const relativePath of Object.keys(verified.manifest.files).sort()) {
     const content = await readFile(resolveBundlePath(verified.directory, relativePath));
+    if (content.byteLength > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_entry_too_large", 413);
     total += content.byteLength;
-    if (total > 24 * 1024 * 1024) throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
+    if (entries.length >= WORKSPACE_BUNDLE_MAX_ENTRIES || total > WORKSPACE_BUNDLE_MAX_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
     entries.push({ path: relativePath, content_base64: content.toString("base64") });
   }
   return { format: transportFormat, manifest: verified.manifest, entries };
@@ -1035,12 +1141,14 @@ export async function writeWorkspaceBundleV4Transport(input: { transport: unknow
   try {
     const expected = new Set(Object.keys(transport.manifest.files));
     let total = 0;
+    let receivedEntries = 0;
     for (const entry of transport.entries) {
       assertSafeRelativePath(entry.path);
       if (!expected.delete(entry.path)) throw new WorkspaceServerError("workspace_bundle_v4_transport_entry_invalid", 400);
+      receivedEntries += 1;
       const content = decodeV4TransportContent(entry.content_base64);
       total += content.byteLength;
-      if (total > 24 * 1024 * 1024) throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
+      if (receivedEntries > WORKSPACE_BUNDLE_MAX_ENTRIES || total > WORKSPACE_BUNDLE_MAX_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
       if (hashBytes(content) !== transport.manifest.files[entry.path]) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
       const target = resolveBundlePath(destination, entry.path);
       await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -1149,7 +1257,10 @@ async function writeJsonl(destination: string, rows: readonly Record<string, unk
 async function readJsonl(source: string): Promise<Record<string, unknown>[]> {
   const raw = await readFile(source, "utf8");
   if (!raw) return [];
-  return raw.trimEnd().split("\n").map((line) => {
+  if (Buffer.byteLength(raw, "utf8") > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_entry_too_large", 413);
+  const lines = raw.trimEnd().split("\n");
+  if (lines.length > WORKSPACE_BUNDLE_MAX_RECORDS_PER_FILE) throw new WorkspaceServerError("workspace_bundle_v4_record_count_too_large", 413);
+  return lines.map((line) => {
     try {
       const value = JSON.parse(line) as unknown;
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("row");
@@ -1357,13 +1468,72 @@ function assertWorkspaceBundleV4ManifestCandidate(value: unknown): asserts value
     throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
   }
   if (manifest.transfer_id !== undefined) assertOpaqueId(manifest.transfer_id, "workspace_transfer_id_invalid");
+  if (Object.keys(manifest.files).length > WORKSPACE_BUNDLE_MAX_ENTRIES || Object.keys(manifest.record_counts).length > WORKSPACE_BUNDLE_MAX_ENTRIES) {
+    throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 413);
+  }
   for (const [relativePath, hash] of Object.entries(manifest.files)) {
     assertSafeRelativePath(relativePath);
     if (!/^[a-f0-9]{64}$/.test(hash)) throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
   }
   for (const count of Object.values(manifest.record_counts)) {
-    if (!Number.isSafeInteger(count) || count < 0) throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
+    if (!Number.isSafeInteger(count) || count < 0 || count > WORKSPACE_BUNDLE_MAX_RECORDS_PER_FILE) throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
   }
+}
+
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+async function incomingV4BundleExpired(metadataPath: string, metadata: Partial<IncomingV4BundleMetadata>): Promise<boolean> {
+  const expiresAt = typeof metadata.expires_at === "string"
+    ? Date.parse(metadata.expires_at)
+    : typeof metadata.created_at === "string"
+      ? Date.parse(metadata.created_at) + WORKSPACE_BUNDLE_INCOMING_TTL_MS
+      : Number.NaN;
+  if (Number.isFinite(expiresAt)) return expiresAt <= Date.now();
+  try {
+    const stats = await lstat(metadataPath);
+    return stats.mtimeMs + WORKSPACE_BUNDLE_INCOMING_TTL_MS <= Date.now();
+  } catch {
+    return true;
+  }
+}
+
+interface BundleUsage {
+  bytes: number;
+  entries: number;
+}
+
+async function measureBundleUsage(root: string): Promise<BundleUsage> {
+  let bytes = 0;
+  let entries = 0;
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const relative = path.relative(root, path.join(directory, entry.name)).split(path.sep).join("/");
+      const absolute = resolveBundlePath(root, relative);
+      const stats = await lstat(absolute);
+      if (stats.isSymbolicLink()) throw new WorkspaceServerError("workspace_bundle_v4_symlink_forbidden", 400);
+      if (stats.isDirectory()) {
+        await visit(absolute);
+      } else if (stats.isFile()) {
+        // The manifest is transport metadata, not one of the uploaded
+        // Workspace entries. Counting it would make a manifest with exactly
+        // MAX_ENTRIES legitimate files impossible to stage.
+        if (relative === manifestName) continue;
+        entries += 1;
+        bytes += stats.size;
+        if (entries > WORKSPACE_BUNDLE_MAX_ENTRIES || bytes > WORKSPACE_BUNDLE_MAX_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
+      } else {
+        throw new WorkspaceServerError("workspace_bundle_v4_file_invalid", 400);
+      }
+    }
+  };
+  await visit(root);
+  return { bytes, entries };
+}
+
+function assertBundleUsage(usage: BundleUsage, code: string): void {
+  if (usage.entries > WORKSPACE_BUNDLE_MAX_ENTRIES || usage.bytes > WORKSPACE_BUNDLE_MAX_BYTES) throw new WorkspaceServerError(code, 413);
 }
 
 function incomingV4Request(metadata: IncomingV4BundleMetadata): Record<string, unknown> {
@@ -1392,7 +1562,7 @@ function parseV4Transport(value: unknown): WorkspaceBundleV4Transport {
   if (candidate.format !== transportFormat || !candidate.manifest || !Array.isArray(candidate.entries)) {
     throw new WorkspaceServerError("workspace_bundle_v4_transport_invalid", 400);
   }
-  if (candidate.entries.length > 100_000) throw new WorkspaceServerError("workspace_bundle_v4_transport_invalid", 400);
+  if (candidate.entries.length > WORKSPACE_BUNDLE_MAX_ENTRIES) throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
   if (typeof candidate.manifest !== "object" || Array.isArray(candidate.manifest)) {
     throw new WorkspaceServerError("workspace_bundle_v4_transport_invalid", 400);
   }
@@ -1415,8 +1585,11 @@ function decodeV4TransportContent(value: string): Buffer {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
     throw new WorkspaceServerError("workspace_bundle_v4_transport_entry_invalid", 400);
   }
+  const maxEncodedLength = Math.ceil(WORKSPACE_BUNDLE_MAX_ENTRY_BYTES / 3) * 4;
+  if (value.length > maxEncodedLength) throw new WorkspaceServerError("workspace_bundle_v4_entry_too_large", 413);
   const content = Buffer.from(value, "base64");
   if (content.toString("base64") !== value) throw new WorkspaceServerError("workspace_bundle_v4_transport_entry_invalid", 400);
+  if (content.byteLength > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_entry_too_large", 413);
   return content;
 }
 

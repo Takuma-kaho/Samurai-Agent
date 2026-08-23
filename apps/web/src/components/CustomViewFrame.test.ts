@@ -24,6 +24,13 @@ describe("CustomViewFrame", () => {
     expect(html).toContain("surface-json");
     expect(html).toContain("payload_only");
   });
+
+  it("ignores a server-requested same-origin permission", async () => {
+    const html = await renderCustomView(customViewSpec({ html: "<main>remote</main>" }, true));
+
+    expect(html).toContain("allow-scripts");
+    expect(html).not.toContain("allow-same-origin");
+  });
 });
 
 async function renderCustomView(spec: SurfaceRenderSpec): Promise<string> {
@@ -39,7 +46,7 @@ async function renderCustomView(spec: SurfaceRenderSpec): Promise<string> {
   return renderToString(app);
 }
 
-function customViewSpec(data: Record<string, JsonValue>): SurfaceRenderSpec {
+function customViewSpec(data: Record<string, JsonValue>, allowSameOrigin = false): SurfaceRenderSpec {
   return {
     id: "render_custom_board",
     kind: "custom_view",
@@ -55,7 +62,7 @@ function customViewSpec(data: Record<string, JsonValue>): SurfaceRenderSpec {
         mode: "iframe",
         allow_scripts: true,
         allow_forms: false,
-        allow_same_origin: false,
+        allow_same_origin: allowSameOrigin,
         network_access: "none",
         workspace_access: "none"
       },

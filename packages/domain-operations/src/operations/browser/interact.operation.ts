@@ -17,6 +17,12 @@ const Input = z.object({
   if (input.action === "input" && input.value === undefined) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["value"], message: "value is required for input actions" });
   }
+  if (input.action === "navigate" && (input.selector !== undefined || input.value !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["action"], message: "navigate actions cannot include selector or value" });
+  }
+  if (input.action === "click" && input.value !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["value"], message: "click actions cannot include value" });
+  }
 });
 const Output = runtimeWriteValueSchema(browserInteractionSchema);
 
@@ -49,7 +55,7 @@ const browserInteract = defineCommand<BrowserInteractPorts>()({
   "availability": "active",
   "runtimeRequirements": ["browser_adapter"],
   "title": "Interact with browser",
-  "description": "Navigate, click, or input through a configured real browser adapter.",
+  "description": "Navigate or perform a potentially externally visible click or input through a configured real browser adapter.",
   "sources": [
     "provider_tool_call",
     "runtime_api"
@@ -64,7 +70,7 @@ const browserInteract = defineCommand<BrowserInteractPorts>()({
     "browser_page"
   ],
   "proposedEffects": [
-    "Interact with a real browser page through the configured adapter."
+    "Navigate or perform a potentially externally visible browser interaction through the configured adapter."
   ],
   "outputResourceKind": "browser_page",
   "uiDisplayCategory": "browser",
@@ -88,11 +94,15 @@ const browserInteract = defineCommand<BrowserInteractPorts>()({
       execute: async function handleBrowserInteract(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const session = await ports.ensureBrowserSession();
         const envelope = ports.createBrowserEnvelope(session, `browser.interact: ${input.url}`);
+        const operationName = input.action === "navigate" ? "browser.navigate" : "browser.interact";
+        const proposedEffects = input.action === "navigate"
+          ? [`browser.navigate ${input.url} without mutating external state.`]
+          : [`browser.interact ${input.action} ${input.url} may mutate external state and requires approval.`];
         const value = await ports.runBrowserMutation({
           session,
           envelope,
-          operationName: "browser.interact",
-          proposedEffects: [`browser.interact ${input.url} without mutating external state.`],
+          operationName,
+          proposedEffects,
           execute: async () => {
             const resource = await ports.interactWithBrowser({
               url: input.url,

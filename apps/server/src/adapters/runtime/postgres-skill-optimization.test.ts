@@ -137,8 +137,25 @@ describe("PostgresSkillOptimization", () => {
     const claimed = await adapter.claimWorkItem({ workerId: "worker-1", leaseMs: 30_000, now: "2026-08-22T00:01:00.000Z" });
     expect(claimed?.status).toBe("running");
     expect(claimed?.lease_owner).toBe("worker-1");
-    expect(calls.some((call) => call.text.includes("lease_until <= $2") && call.text.includes("FOR UPDATE SKIP LOCKED"))).toBe(true);
+    expect(calls.some((call) => call.text.includes("status = 'running'") && call.text.includes("lease_until <= $2") && call.text.includes("FOR UPDATE SKIP LOCKED"))).toBe(true);
     expect(calls.every((call) => call.text.includes("workspace_id") && call.values[0] === "workspace-a")).toBe(true);
+  });
+
+  it("期限前のHeartbeatだけが同じWorkerのWorkItem leaseを延長する", async () => {
+    const running = WorkItemRecordSchema.parse({
+      ...workItem(), status: "running", lease_owner: "worker-1",
+      lease_expires_at: "2026-08-22T01:00:00.000Z", heartbeat_at: "2026-08-22T00:30:00.000Z", attempt: 1
+    });
+    const { adapter, calls } = adapterFor(async (text) => text.includes("jsonb_set")
+      ? { rows: [{ workspace_id: "workspace-a", id: running.id, objective_id: running.objective_id, status: running.status,
+          worker_id: running.lease_owner, lease_until: running.lease_expires_at, attempt: running.attempt, record: running,
+          created_at: running.created_at, updated_at: running.updated_at }], rowCount: 1 }
+      : { rows: [], rowCount: 0 });
+
+    const renewed = await adapter.heartbeatWorkItem({ workItemId: running.id, workerId: "worker-1", leaseMs: 60_000, now: "2026-08-22T00:30:00.000Z" });
+    expect(renewed).toMatchObject({ status: "running", lease_owner: "worker-1" });
+    expect(calls[0]?.text).toContain("lease_until > $2");
+    expect(calls[0]?.text).toContain("worker_id = $5");
   });
 
   it("保存前にSkillOptimizationの状態スキーマを検証する", async () => {

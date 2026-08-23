@@ -148,7 +148,7 @@ export class PostgresGeneratedSurface {
     return { ...value, replayed };
   }
 
-  async runAction(context: WorkspaceRequestContext, input: GeneratedSurfaceActionRunInput & { room_id: string; action_payload?: Record<string, JsonValue>; interaction_id?: string; message_id?: string }): Promise<Record<string, unknown>> {
+  async runAction(context: WorkspaceRequestContext, input: GeneratedSurfaceActionRunInput & { room_id: string; action_payload?: Record<string, JsonValue>; interaction_id?: string; message_id?: string; confirmed?: boolean }): Promise<Record<string, unknown>> {
     const surface = await this.get(context, input.room_id, input.surface_id);
     await this.commands.assertRoomExecutable(context, input.room_id);
     const trusted = trustedContext(context, input.room_id, surface.session_id);
@@ -169,6 +169,9 @@ export class PostgresGeneratedSurface {
       ...(input.revision_id ? { revision_id: input.revision_id } : {}),
       surface_id: input.surface_id
     }));
+    if (resolved.action.requires_confirmation && input.confirmed !== true) {
+      throw new WorkspaceServerError("generated_surface_action_confirmation_required", 409);
+    }
     const payload = {
       ...resolved.action.payload_template,
       ...(input.action_payload ?? {})

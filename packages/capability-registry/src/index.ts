@@ -2,7 +2,7 @@ import type { CapabilityManifest } from "@samurai-agent/core-schemas";
 
 export const proposalCapabilityManifest: CapabilityManifest = {
   id: "proposal_workspace",
-  version: "1.0.0",
+  version: "1.1.0",
   title: "Workspace proposal capability",
   description: "Creates local drafts, provisional memory, and approval-gated outbound actions.",
   operations: [
@@ -125,16 +125,16 @@ export const proposalCapabilityManifest: CapabilityManifest = {
     },
     {
       operation: "browser.interact",
-      description: "Interact with a real browser page through a configured adapter.",
+      description: "Perform a browser interaction that may submit data or trigger an external side effect through a configured adapter.",
       input_schema_ref: "browser.interact.input",
       output_schema_ref: "browser.interact.output",
-      risk: "medium",
+      risk: "high",
       scope: "external_channel",
-      reversibility: true,
-      external_impact: false,
+      reversibility: false,
+      external_impact: true,
       secret_requirement: "none",
       allowed_instruction_sources: ["owner_instruction", "owner_approved_policy"],
-      default_decision: "allow_with_audit"
+      default_decision: "requires_approval"
     },
     {
       operation: "browser.download_to_workspace",

@@ -3,10 +3,10 @@
   "test_id": "D05",
   "command": "pnpm core:test:collection-safety",
   "status": "passed",
-  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
+  "commit_sha": "9b7e672a2fa5deaba0851b413c40c2ac4fcaf835",
   "worktree_clean": false,
-  "source_sha256": "356693de4bdd5e7d310275fb948fda5d177734f9b68799e9a00b3aa5a01e90f1",
-  "source_graph_sha256": "0226fa6f75c9ba6d2c182e6f5e6165ac3bcafc930df610e5d7c5c01413ab7aac",
+  "source_sha256": "aba5127f9a7025f2c775e3f90a10be7ab6ae22c1fe4b16b1142fcec9a70c7f0f",
+  "source_graph_sha256": "6faec93709b1e8137e2ae17d65227943db0201ed2e98bad9919c51ecadb94ee8",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/core-schemas/src/index.ts",
@@ -16,8 +16,8 @@
     "scripts/verify-collection-safety.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-22T04:51:02.682Z",
-  "completed_at": "2026-08-22T04:51:02.964Z",
+  "started_at": "2026-08-23T06:28:59.309Z",
+  "completed_at": "2026-08-23T06:29:00.574Z",
   "assertions": [
     {
       "name": "Schema migration has parity across Human, Agent, and Generated Surface",

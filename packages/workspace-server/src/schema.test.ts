@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -27,6 +27,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_gateway_runtime_state");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_skill_optimization_state");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_gateway_policy_metadata_columns");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_import_resume_capability");
     for (const table of [
       "workspace_gateway_pairings", "workspace_gateway_pairing_policies", "workspace_gateway_routing_policies",
       "workspace_gateway_inbound_messages", "workspace_gateway_deliveries", "workspace_gateway_boundary_policies",
@@ -125,6 +126,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_settings_respect_workspace_freeze");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_agent_connection_import_guards");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_client_event_room_authorization");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_client_event_room_command_rls");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_transfer_ledger");
     expect(schema).toContain("ALTER POLICY workspace_runtime_settings_access ON workspace_runtime_settings");
     for (const table of [
@@ -184,6 +186,9 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("workspace_runtime_runs_idempotency_index");
     expect(schema).toContain("workspace_runtime_reservations");
     expect(schema).toContain("workspace_runtime_client_events_room_fkey");
+    const clientEventRlsMigration = migrations.find((migration) => migration.version === 57);
+    expect(clientEventRlsMigration?.statements.join("\n")).toContain("room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read')");
+    expect(clientEventRlsMigration?.statements.join("\n")).toContain("room_id IS NULL AND samurai_can_workspace(workspace_id, 'guest')");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_jobs_and_runs");
     for (const table of ["workspace_runtime_automation_jobs", "workspace_runtime_automation_runs"]) {
       expect(schema).toContain(`CREATE TABLE ${table}`);

@@ -194,6 +194,7 @@ export class PostgresCollection {
         throw new WorkspaceServerError(existingPayload.state === "blocked" ? "collection_recovery_required" : "collection_record_exists", existingPayload.state === "blocked" ? 503 : 409);
       }
     }
+    assertPostgresCollectionTriggerDeliverySupported(schema, "record.created");
     const pending = existing
       ? { record: existing, replayed: true }
       : await this.commands.putRecord(indexContext(context, "record-prepare"), {
@@ -226,6 +227,7 @@ export class PostgresCollection {
       }
       return { ...(await this.getRecord(context, roomId, collectionId, recordId)), replayed: true };
     }
+    assertPostgresCollectionTriggerDeliverySupported(schema, "record.patched");
     const before = await this.getRecord(context, roomId, collectionId, recordId);
     const patch: CollectionPatch = {
       id: patchId, record_id: recordId, changes: patchInput.changes,
@@ -565,6 +567,28 @@ function parseCollectionSchemaSafe(value: unknown): CollectionSchema {
 
 function parseRecordSafe(value: unknown, schema: CollectionSchema): CollectionRecord {
   try { return parseCollectionRecord(value, schema); } catch (error) { throw new WorkspaceServerError(`collection_record_invalid:${errorCode(error)}`, 422); }
+}
+
+/**
+ * PostgreSQL does not yet have the SQLite file-transaction + durable job
+ * commit. Reject before any record/file write instead of silently persisting
+ * a Collection mutation whose enabled trigger cannot be delivered.
+ */
+export function assertPostgresCollectionTriggerDeliverySupported(
+  schema: CollectionSchema,
+  event: "record.created" | "record.patched"
+): void {
+  const matching = schema.triggers.some((trigger) => {
+    if (trigger.enabled === false) return false;
+    const triggerEvent = jsonString(trigger, "event") ?? jsonString(trigger, "on");
+    return !triggerEvent || triggerEvent === event;
+  });
+  if (matching) {
+    throw new WorkspaceServerError("collection_trigger_delivery_not_supported", 503, {
+      collection_id: schema.id,
+      event
+    });
+  }
 }
 
 function indexPayload(row: WorkspaceRecord, kind: CollectionIndexPayload["kind"]): CollectionIndexPayload {

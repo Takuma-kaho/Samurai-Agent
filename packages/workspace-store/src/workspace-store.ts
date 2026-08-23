@@ -14,7 +14,7 @@ export type {
   WorkspaceMemberRecord
 } from "./repositories/room-permission-repository";
 
-import { defaultSettings, type BackendRunRecord, type RoomRecord, type WorkspaceFilePort } from "@samurai-agent/core-schemas";
+import { defaultSettings, nowIso, type BackendRunRecord, type RoomRecord, type WorkspaceFilePort } from "@samurai-agent/core-schemas";
 import { localOwnerParticipantId } from "@samurai-agent/room-permissions";
 import { WorkspaceBundleService } from "./backup/workspace-bundle-service";
 import { WorkspaceKernelService } from "./kernel/workspace-kernel-service";
@@ -174,6 +174,7 @@ export class WorkspaceStore {
   private async initializeOpenWorkspace(): Promise<void> {
     await this.kernel.migrate();
     await this.kernel.recoverWorkspaceFileTransactions();
+    await this.composition.gateway.reconcileExpiredExternalSendDispatches(nowIso(), true);
     await this.ensureDefaultRoomAccess();
     await this.composition.managedResources.synchronizeAll();
     await this.composition.queries.initializeSessionSearch();
@@ -235,7 +236,11 @@ export class WorkspaceStore {
       this.kernel.fileTransactions,
       this.kernel.collectionRecordRecoveryHandler,
       this.kernel.collectionSchemaRecoveryHandler,
-      { listAutomationJobs: (input) => automation.listAutomationJobs(input) }
+      {
+        listAutomationJobs: (input) => automation.listAutomationJobs(input),
+        saveCollectionTriggerJobs: (transaction, jobs, fileTransactionId) =>
+          automation.saveCollectionTriggerJobs(transaction, jobs, fileTransactionId)
+      }
     );
     const managedResources = new ManagedResourceSynchronizer(memory, wiki, skills, collections);
     const learning = new LearningRepository(
@@ -657,6 +662,10 @@ export class WorkspaceStore {
     facade.saveExternalSend = gateway.saveExternalSend.bind(gateway);
     facade.getExternalSend = gateway.getExternalSend.bind(gateway);
     facade.listExternalSends = gateway.listExternalSends.bind(gateway);
+    facade.claimExternalSendDispatch = gateway.claimExternalSendDispatch.bind(gateway);
+    facade.settleExternalSendDispatch = gateway.settleExternalSendDispatch.bind(gateway);
+    facade.markExternalSendOutcomeUnknown = gateway.markExternalSendOutcomeUnknown.bind(gateway);
+    facade.reconcileExpiredExternalSendDispatches = gateway.reconcileExpiredExternalSendDispatches.bind(gateway);
     facade.saveGatewayPairingPolicy = gateway.saveGatewayPairingPolicy.bind(gateway);
     facade.getGatewayPairingPolicy = gateway.getGatewayPairingPolicy.bind(gateway);
     facade.listGatewayPairingPolicies = gateway.listGatewayPairingPolicies.bind(gateway);
@@ -1077,6 +1086,10 @@ export interface WorkspaceStore {
   saveExternalSend: GatewayRepository["saveExternalSend"];
   getExternalSend: GatewayRepository["getExternalSend"];
   listExternalSends: GatewayRepository["listExternalSends"];
+  claimExternalSendDispatch: GatewayRepository["claimExternalSendDispatch"];
+  settleExternalSendDispatch: GatewayRepository["settleExternalSendDispatch"];
+  markExternalSendOutcomeUnknown: GatewayRepository["markExternalSendOutcomeUnknown"];
+  reconcileExpiredExternalSendDispatches: GatewayRepository["reconcileExpiredExternalSendDispatches"];
   saveGatewayPairingPolicy: GatewayRepository["saveGatewayPairingPolicy"];
   getGatewayPairingPolicy: GatewayRepository["getGatewayPairingPolicy"];
   listGatewayPairingPolicies: GatewayRepository["listGatewayPairingPolicies"];

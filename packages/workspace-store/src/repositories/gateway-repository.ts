@@ -49,15 +49,22 @@ import {
 } from "./gateway-row-codecs";
 import { stringify } from "./serialization";
 
+export interface ExternalSendDispatchClaim {
+  record: ExternalSendRecord;
+  claim_token: string;
+}
+
 /** Gateway pairing, routing, delivery, sandbox, and concurrency state. */
 export class GatewayRepository {
   constructor(private readonly db: Kysely<WorkspaceDb>) {}
 
 async saveExternalSend(send: ExternalSendRecord): Promise<ExternalSendRecord> {
+  const row = externalSendToRow(send);
+  const { dispatch_claim_token: _claimToken, dispatch_claimed_at: _claimedAt, dispatch_lease_until: _leaseUntil, ...mutableRow } = row;
   await this.db
     .insertInto("external_sends")
-    .values(externalSendToRow(send))
-    .onConflict((oc) => oc.column("id").doUpdateSet(externalSendToRow(send)))
+    .values(row)
+    .onConflict((oc) => oc.column("id").doUpdateSet(mutableRow))
     .execute();
   return send;
 }
@@ -78,6 +85,121 @@ async listExternalSends(input: { operationIds?: string[] } = {}): Promise<Extern
   if (operationIds) query = query.where("operation_id", "in", operationIds);
   const rows = await query.execute();
   return rows.map(externalSendFromRow);
+}
+
+async claimExternalSendDispatch(input: { id: string; now: string; lease_until: string }): Promise<ExternalSendDispatchClaim | undefined> {
+  await this.reconcileExpiredExternalSendDispatches(input.now);
+  const claimToken = createId("external_send_claim");
+  const updated = await this.db
+    .updateTable("external_sends")
+    .set({
+      dispatch_claim_token: claimToken,
+      dispatch_claimed_at: input.now,
+      dispatch_lease_until: input.lease_until
+    })
+    .where("id", "=", input.id)
+    .where("status", "=", "approved")
+    .where("dispatch_claim_token", "is", null)
+    .executeTakeFirst();
+  if (Number(updated.numUpdatedRows) !== 1) return undefined;
+  const record = await this.getExternalSend(input.id);
+  return record ? { record, claim_token: claimToken } : undefined;
+}
+
+async settleExternalSendDispatch(input: { record: ExternalSendRecord; claim_token: string }): Promise<ExternalSendRecord> {
+  const row = externalSendToRow(input.record);
+  const updated = await this.db
+    .updateTable("external_sends")
+    .set({
+      channel: row.channel,
+      status: row.status,
+      target_json: row.target_json,
+      title: row.title,
+      body: row.body,
+      operation_id: row.operation_id,
+      approval_request_id: row.approval_request_id,
+      dispatch_result_json: row.dispatch_result_json,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      dispatched_at: row.dispatched_at,
+      dispatch_claim_token: null,
+      dispatch_claimed_at: null,
+      dispatch_lease_until: null
+    })
+    .where("id", "=", input.record.id)
+    .where("status", "=", "approved")
+    .where("dispatch_claim_token", "=", input.claim_token)
+    .executeTakeFirst();
+  if (Number(updated.numUpdatedRows) !== 1) throw new Error("external_send_claim_not_owned");
+  return input.record;
+}
+
+async markExternalSendOutcomeUnknown(input: { id: string; claim_token: string; now: string; message: string; dispatch_result?: Record<string, JsonValue> }): Promise<ExternalSendRecord> {
+  const dispatchResult = {
+    ...(input.dispatch_result ?? {}),
+    dispatched: false,
+    dry_run: false,
+    adapter: input.dispatch_result?.adapter ?? "unknown",
+    outcome_unknown: true,
+    message: redactPrivateData(input.message, { redactPii: true })
+  } satisfies Record<string, JsonValue>;
+  const updated = await this.db
+    .updateTable("external_sends")
+    .set({
+      status: "outcome_unknown",
+      dispatch_result_json: stringify(dispatchResult),
+      updated_at: input.now,
+      dispatch_claim_token: null,
+      dispatch_claimed_at: null,
+      dispatch_lease_until: null
+    })
+    .where("id", "=", input.id)
+    .where("status", "=", "approved")
+    .where("dispatch_claim_token", "=", input.claim_token)
+    .executeTakeFirst();
+  if (Number(updated.numUpdatedRows) !== 1) throw new Error("external_send_claim_not_owned");
+  const record = await this.getExternalSend(input.id);
+  if (!record) throw new Error("external_send_not_found");
+  return record;
+}
+
+async reconcileExpiredExternalSendDispatches(now = nowIso(), recoverActiveClaims = false): Promise<ExternalSendRecord[]> {
+  let query = this.db
+    .selectFrom("external_sends")
+    .select(["id", "dispatch_claim_token"])
+    .where("status", "=", "approved")
+    .where("dispatch_claim_token", "is not", null);
+  if (!recoverActiveClaims) query = query.where("dispatch_lease_until", "<=", now);
+  const rows = await query.execute();
+  const reconciled: ExternalSendRecord[] = [];
+  for (const row of rows) {
+    let update = this.db
+      .updateTable("external_sends")
+      .set({
+        status: "outcome_unknown",
+        dispatch_result_json: stringify({
+          dispatched: false,
+          dry_run: false,
+          adapter: "unknown",
+          outcome_unknown: true,
+          message: "External send dispatch claim expired; human confirmation is required before any further action."
+        }),
+        updated_at: now,
+        dispatch_claim_token: null,
+        dispatch_claimed_at: null,
+        dispatch_lease_until: null
+      })
+      .where("id", "=", row.id)
+      .where("status", "=", "approved")
+      .where("dispatch_claim_token", "=", row.dispatch_claim_token!);
+    if (!recoverActiveClaims) update = update.where("dispatch_lease_until", "<=", now);
+    const updated = await update.executeTakeFirst();
+    if (Number(updated.numUpdatedRows) === 1) {
+      const record = await this.getExternalSend(row.id);
+      if (record) reconciled.push(record);
+    }
+  }
+  return reconciled;
 }
 
 async saveGatewayPairingPolicy(policy: GatewayPairingPolicyRecord): Promise<GatewayPairingPolicyRecord> {

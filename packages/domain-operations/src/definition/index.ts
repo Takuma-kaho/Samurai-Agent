@@ -101,6 +101,8 @@ export interface TrustedDomainContext {
   /** Optional app-owned reference; never an authorization input. */
   sessionRef?: import("@samurai-agent/core-schemas").SessionRef;
   source?: import("@samurai-agent/core-schemas").TrustedWorkspaceSource;
+  /** Server-loaded External App Connection identity; never inferred from a connector. */
+  connectionId?: string;
   runId?: string;
   /** Server-selected input envelope; never populated from a command payload. */
   envelopeId?: string;

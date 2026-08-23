@@ -53,5 +53,7 @@ describe("Skill improvement contracts", () => {
   it("rejects secret-like candidate content", () => {
     expect(evaluateSkillOptimizationSafety("Use the workflow.").passed).toBe(true);
     expect(evaluateSkillOptimizationSafety("api_key=sk-1234567890123456").passed).toBe(false);
+    expect(evaluateSkillOptimizationSafety("client_secret=abcdefghijklmnop").passed).toBe(false);
+    expect(evaluateSkillOptimizationSafety("oauth_client_secret: 'abcdefghijklmnop'").passed).toBe(false);
   });
 });

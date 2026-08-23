@@ -37,6 +37,8 @@ interface TimedSample {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const reportDirectory = path.join(root, "reports", "server04-completion");
+const p95BudgetMilliseconds = numberEnvironment("SAMURAI_SERVER_VERIFY_COMPLETION_LOAD_P95_MS", 2_000);
+const rssBudgetBytes = numberEnvironment("SAMURAI_SERVER_VERIFY_COMPLETION_LOAD_MAX_RSS_BYTES", 512 * 1024 * 1024);
 const targets: ProbeTarget[] = [
   targetFromEnvironment("HOSTED", "hosted"),
   targetFromEnvironment("SELF_HOST", "self_host")
@@ -163,6 +165,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const fullWorkspaceScan = planText.includes("Seq Scan") && !hasWorkspacePredicate;
     const indexObserved = indexUsage.some((row) => row.index_scans > 0);
     const boundedRuntimeReads = pageBounded && !fullWorkspaceScan;
+    const performanceBudgetRespected = p95 <= p95BudgetMilliseconds && maxRssGrowth <= rssBudgetBytes;
     report = {
       schema_version: 1,
       generated_at: new Date().toISOString(),
@@ -191,9 +194,12 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         no_unintended_full_workspace_scan: !fullWorkspaceScan,
         bounded_runtime_reads: boundedRuntimeReads,
         index_observed: indexObserved,
+        performance_budget_respected: performanceBudgetRespected,
+        p95_budget_milliseconds: p95BudgetMilliseconds,
+        max_rss_budget_bytes: rssBudgetBytes,
         unlimited_memory_expansion_observed: false
       },
-      status: boundedRuntimeReads && claimedJobs === 8 ? "passed" : "failed"
+      status: boundedRuntimeReads && indexObserved && performanceBudgetRespected && claimedJobs === 8 ? "passed" : "failed"
     };
     await writeLoadReport(target.label, report);
     if (report.status !== "passed") throw new Error("server04_completion_load_guard_failed");
@@ -442,10 +448,18 @@ async function cleanup(database: PostgresWorkspaceAdminDatabase, workspaceId: st
       "workspace_file_transactions", "workspace_files", "workspace_records", "room_members", "rooms", "workspace_members",
       "workspace_import_sessions", "workspaces"
     ];
-    for (const table of tables) await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]).catch(() => undefined);
-    await sql.query("DELETE FROM account_operations WHERE account_id = $1", [accountId]).catch(() => undefined);
-    await sql.query("DELETE FROM accounts WHERE id = $1", [accountId]).catch(() => undefined);
-  }).catch(() => undefined);
+    for (const table of tables) await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]);
+    await sql.query("DELETE FROM account_operations WHERE account_id = $1", [accountId]);
+    await sql.query("DELETE FROM accounts WHERE id = $1", [accountId]);
+  });
+}
+
+function numberEnvironment(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${name}_invalid`);
+  return value;
 }
 
 function accountIdentity(): ProbeAccount {

@@ -87,7 +87,7 @@ function disposableEnvironment() {
   const role = "samurai_server04_runtime";
   const started = captured("docker", [
     "run", "--detach", "--rm", "--name", container, "--publish", "127.0.0.1::5432",
-    "--env", "POSTGRES_PASSWORD=" + password, "postgres:16-alpine"
+    "--env", "POSTGRES_PASSWORD=" + password, "postgres:17-alpine"
   ]);
   if (started.status !== 0) throw new Error("server04_postgresql_unavailable:" + String(started.stderr || started.error?.message || "docker_postgres_start_failed").trim());
   try {

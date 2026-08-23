@@ -90,7 +90,9 @@ import {
 } from "@samurai-agent/domain-operations";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { mkdir, rm } from "node:fs/promises";
 import { connect as netConnect, type Socket } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import {
@@ -254,7 +256,6 @@ import type {
   ArchiveMemoryResult,
   AutomationRunRecord,
   CollectionRecordResolution,
-  CollectionTriggerEffect,
   CollectionReindexResult,
   CollectionRecordWithFilePath,
   CollectionSchemaWithFilePath,
@@ -309,7 +310,7 @@ import { Core09AutomationDomainService } from "./commands/services/core09-automa
 import { DomainOperationTelemetryService } from "./commands/services/domain-operation-telemetry-service";
 import { GeneratedSurfaceDomainService } from "./commands/services/generated-surface-domain-service";
 import { SkillDomainService } from "./commands/services/skill-domain-service";
-import { CollectionDomainService } from "./commands/services/collection-domain-service";
+import { CollectionDomainService, type CollectionTriggerMutationRequest } from "./commands/services/collection-domain-service";
 import { ConversationDomainService } from "./commands/services/conversation-domain-service";
 import { FileDomainService } from "./commands/services/file-domain-service";
 import { BrowserDomainService } from "./commands/services/browser-domain-service";
@@ -1104,15 +1105,15 @@ export class AgentRuntime {
     });
     this.executionDomainService = new ExecutionDomainService({
       store: {
-        getObjective: (id) => this.store.getObjective(id),
-        saveWorkItem: (record) => this.store.saveWorkItem(record),
+        getObjective: (id, roomId) => this.store.getObjective(id, roomId),
+        saveWorkItem: (record, roomId) => this.store.saveWorkItem(record, roomId),
         createWorkspaceBackup: () => this.store.createWorkspaceBackup(),
         restoreWorkspaceBackup: (backupId) => this.store.restoreWorkspaceBackup(backupId),
         repairWorkspace: (options) => this.store.repairWorkspace(options)
       },
       coordinator: {
-        followUp: (workItemId, instruction) => this.durableWorkCoordinator.followUp(workItemId, instruction),
-        steer: (workItemId, instruction) => this.durableWorkCoordinator.steer(workItemId, instruction)
+        followUp: (workItemId, instruction, roomId) => this.durableWorkCoordinator.followUp(workItemId, instruction, roomId),
+        steer: (workItemId, instruction, roomId) => this.durableWorkCoordinator.steer(workItemId, instruction, roomId)
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
@@ -1181,8 +1182,8 @@ export class AgentRuntime {
     );
     this.objectiveDomainService = new ObjectiveDomainService({
       objectives: {
-        save: (record) => this.store.saveObjective(record),
-        transition: (objectiveId, action) => this.durableWorkCoordinator.transitionObjective(objectiveId, action)
+        save: (record) => this.store.saveObjective(record, record.room_id),
+        transition: (objectiveId, action, roomId) => this.durableWorkCoordinator.transitionObjective(objectiveId, action, roomId)
       }
     });
     this.translationDomainService = new TranslationDomainService({
@@ -1763,11 +1764,11 @@ export class AgentRuntime {
         getLock: (skillId) => this.store.getSkillOptimizationLock(skillId),
         releaseLock: (input) => this.store.releaseSkillOptimizationLock(input),
         saveDataset: (record) => this.store.saveSkillOptimizationDataset(record),
-        saveObjective: (record) => this.store.saveObjective(record),
-        getObjective: (id) => this.store.getObjective(id),
-        updateObjective: (record) => this.store.updateObjective(record),
-        saveWorkItem: (record) => this.store.saveWorkItem(record),
-        getWorkItem: (id) => this.store.getWorkItem(id),
+        saveObjective: (record, roomId) => this.store.saveObjective(record, roomId),
+        getObjective: (id, roomId) => this.store.getObjective(id, roomId),
+        updateObjective: (record, roomId) => this.store.updateObjective(record, roomId),
+        saveWorkItem: (record, roomId) => this.store.saveWorkItem(record, roomId),
+        getWorkItem: (id, roomId) => this.store.getWorkItem(id, roomId),
         claimWorkItem: (input) => this.store.claimWorkItem(input),
         completeWorkItem: (input) => this.store.completeWorkItem(input),
         failWorkItem: (input) => this.store.failWorkItem(input),
@@ -1918,7 +1919,10 @@ export class AgentRuntime {
     this.externalSendDomainService = new ExternalSendDomainService({
       get: (id) => this.store.getExternalSend(id),
       save: (record) => this.store.saveExternalSend(record),
-      dispatch: (record, dryRun) => dispatchExternalSendAdapter(record, dryRun)
+      dispatch: (record, dryRun) => dispatchExternalSendAdapter(record, dryRun),
+      claimDispatch: (input) => this.store.claimExternalSendDispatch(input),
+      settleDispatch: (input) => this.store.settleExternalSendDispatch(input),
+      markOutcomeUnknown: (input) => this.store.markExternalSendOutcomeUnknown(input)
     }, {
       ensureSession: () => this.ensureSessionForContext(webGatewayContext, "Workspace operations"),
       createEnvelope: (_session, content) => createGatewayEnvelope(webGatewayContext, content),
@@ -1946,10 +1950,19 @@ export class AgentRuntime {
         getSchema: (id) => this.store.getCollectionSchema(id),
         saveSchema: (schema) => this.store.saveCollectionSchema(schema),
         updateSchema: (schema, expectedResourceVersion) => this.store.updateCollectionSchema(schema, expectedResourceVersion),
-        saveRecord: (record) => this.store.saveCollectionRecord(record),
+        saveRecord: async (record, trigger) => this.store.saveCollectionRecord(
+          record,
+          trigger ? await this.collectionTriggerWriteRequest(trigger) : undefined
+        ),
         getRecord: (collectionId, recordId) => this.store.getCollectionRecord(collectionId, recordId),
         deleteRecord: (collectionId, recordId, expectedVersion) => this.store.deleteCollectionRecord(collectionId, recordId, expectedVersion),
-        applyRecordPatch: (input) => this.store.applyCollectionRecordPatch(input),
+        applyRecordPatch: async (input) => {
+          const { trigger, ...patchInput } = input;
+          return this.store.applyCollectionRecordPatch({
+            ...patchInput,
+            ...(trigger ? { trigger: await this.collectionTriggerWriteRequest(trigger) } : {})
+          });
+        },
         mapPatchError: (error) => isCollectionRecordVersionConflictError(error)
           ? new RuntimeRequestError("conflict", error.message, resourceVersionConflictPayload(error))
           : error instanceof Error ? error : new Error(String(error)),
@@ -1961,8 +1974,7 @@ export class AgentRuntime {
           ...(input.evidenceKind === "derived_repair" ? {} : { core08Evidence: { changeType: "collection_changed" } })
         }),
         createRollback: (operation, refs, before, after) => this.createRollbackPoint(operation, refs, before, after),
-        contract: (id) => requireDomainCommandEntry(id),
-        queueTrigger: async (input) => { await this.queueCollectionTriggerAutomations(input); }
+        contract: (id) => requireDomainCommandEntry(id)
       },
       requestError: (code, message) => new RuntimeRequestError(code, message)
     });
@@ -2128,6 +2140,8 @@ export class AgentRuntime {
         observeRecoveredRun: (run) => this.captureActivityForStoredRun(run),
         workingDirectory: () => this.backendWorkingDirectory(),
         workingDirectoryMode: () => this.backendWorkingDirectoryMode(),
+        backendExecutionRoot: (runId) => this.backendExecutionRoot(runId),
+        cleanupBackendExecutionRoot: (runId) => this.cleanupBackendExecutionRoot(runId),
         resolveDefaultBackendId: () => this.defaultBackendIdForRun()
       },
       execution: {
@@ -2692,6 +2706,32 @@ export class AgentRuntime {
     return this.backendWorkingDirectoryMode() === "repo"
       ? path.resolve(this.workspaceOptions.repoRoot ?? process.cwd())
       : this.store.rootDir;
+  }
+
+  private backendExecutionRootPath(runId: string): string {
+    const root = path.resolve(this.store.rootDir);
+    const backendRoot = path.join(
+      tmpdir(),
+      "samurai-agent-backend-workspaces",
+      createHash("sha256").update(`${root}\0${runId}`).digest("hex").slice(0, 32)
+    );
+    const resolvedBackendRoot = path.resolve(backendRoot);
+    if (resolvedBackendRoot === root
+      || resolvedBackendRoot.startsWith(`${root}${path.sep}`)
+      || root.startsWith(`${resolvedBackendRoot}${path.sep}`)) {
+      throw new RuntimeRequestError("conflict", "backend_execution_root_not_separated");
+    }
+    return resolvedBackendRoot;
+  }
+
+  private async backendExecutionRoot(runId: string): Promise<string> {
+    const backendRoot = this.backendExecutionRootPath(runId);
+    await mkdir(backendRoot, { recursive: true, mode: 0o700 });
+    return backendRoot;
+  }
+
+  private async cleanupBackendExecutionRoot(runId: string): Promise<void> {
+    await rm(this.backendExecutionRootPath(runId), { recursive: true, force: true });
   }
 
   async previewContext(input: { sessionId: string; query?: string }): Promise<ContextPreview> {
@@ -3786,6 +3826,7 @@ export class AgentRuntime {
       const result = await this.runSurfaceDomainCommand<CollectionDeleteRuntimeResult>(commandIdForSurfaceOperation(input.kind), input, {
         collection_id: input.collection_id,
         record_id: input.record_id,
+        expected_version: input.expected_version,
         view_id: input.view_id
       });
       const view = await this.presentCollectionView({
@@ -4159,6 +4200,7 @@ export class AgentRuntime {
     actionId: string;
     interactionId: string;
     messageId?: string;
+    confirmed?: boolean;
     actionPayload?: Record<string, JsonValue>;
   }, trusted: TrustedDomainRuntimeContext = {}): Promise<{ surface: GeneratedSurfaceDefinition; action: GeneratedSurfaceActionDeclaration; command: unknown; interaction: unknown }> {
     const persistedSurface = await this.store.getGeneratedSurface(input.surfaceId);
@@ -4223,6 +4265,9 @@ export class AgentRuntime {
       : {};
     if (!surface || !targetCommandId || typeof action.id !== "string") {
       throw new RuntimeRequestError("internal", "generated_surface_action_resolution_invalid");
+    }
+    if (action.requires_confirmation && input.confirmed !== true) {
+      throw new RuntimeRequestError("conflict", "generated_surface_action_confirmation_required");
     }
     const revisionId = input.revisionId ?? surface.current_revision_id;
     const ingressResult = await executeGeneratedSurfaceAction({
@@ -4412,6 +4457,8 @@ export class AgentRuntime {
     const resolver = new ExternalAppContextResolver({
       workspaceId,
       connections: {
+        getExternalAppConnection: ({ workspaceId: targetWorkspaceId, connectionId }) =>
+          targetWorkspaceId === workspaceId ? this.store.getExternalAppConnection(connectionId) : Promise.resolve(undefined),
         getExternalAppConnectionByConnector: (input) => this.store.getExternalAppConnectionByConnector(input)
       },
       roomAuthorization: this.roomAuthorizationService
@@ -5083,7 +5130,7 @@ export class AgentRuntime {
         ? ["room_id"]
         : trustedContextPayloadFieldsForOperation(operationId ?? "")
     );
-    const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey, roomId: trustedRoomId, sessionRef, source, externalAllowedRoomIds, requireExplicitRoom } = trusted;
+    const { runId, envelopeId, surfaceOperation, signal, deadlineAt, idempotencyKey, roomId: trustedRoomId, sessionRef, source, connectionId, externalAllowedRoomIds, requireExplicitRoom } = trusted;
     assertTrustedRuntimeContextActive({ signal, deadlineAt });
     const actorIdentity = trustedActorIdentityForSource(inputSource);
     if (trusted.actorIdentity !== undefined && trusted.actorIdentity !== actorIdentity) {
@@ -5156,6 +5203,7 @@ export class AgentRuntime {
       ...(sessionId ? { sessionId } : {}),
       ...(sessionRef ? { sessionRef } : {}),
       ...(source ? { source } : {}),
+      ...(connectionId ? { connectionId } : {}),
       ...(runId ? { runId } : {}),
       ...(envelopeId ? { envelopeId } : {}),
       ...(inputSource === "external_app" && externalAllowedRoomIds ? { externalAllowedRoomIds: [...new Set(externalAllowedRoomIds)] } : {}),
@@ -5172,6 +5220,7 @@ export class AgentRuntime {
         surface_operation_kind: surfaceOperation?.kind ?? null,
         actor_id: actorIdentity,
         participant_id: principalParticipantId(participant),
+        connection_id: connectionId ?? null,
         room_id: roomId ?? null,
         payload
       })
@@ -6367,8 +6416,13 @@ export class AgentRuntime {
     return await this.runLocalCollectionCommand(runtimeOperationIds.collectionPatchApply, payload, `collection_patch_apply:${stableHash(payload)}`);
   }
 
-  async deleteCollectionRecord(input: { collectionId: string; recordId: string; viewId?: string }): Promise<CollectionDeleteRuntimeResult> {
-    const payload = { collection_id: input.collectionId, record_id: input.recordId, ...(input.viewId ? { view_id: input.viewId } : {}) };
+  async deleteCollectionRecord(input: { collectionId: string; recordId: string; expectedVersion: number; viewId?: string }): Promise<CollectionDeleteRuntimeResult> {
+    const payload = {
+      collection_id: input.collectionId,
+      record_id: input.recordId,
+      expected_version: input.expectedVersion,
+      ...(input.viewId ? { view_id: input.viewId } : {})
+    };
     return await this.runLocalCollectionCommand(requireDomainCommandEntry("collection.record.delete").id, payload, `collection_record_delete:${stableHash(payload)}`);
   }
 
@@ -6429,6 +6483,18 @@ export class AgentRuntime {
       roomId,
       source: { kind: "native_app", app_id: "samurai-native" },
       ...(session ? { sessionId: session.id, sessionRef: { app_id: "samurai-native", session_id: session.id } } : {})
+    };
+  }
+
+  /**
+   * Authorization is checked before Store starts its file transaction.  Store
+   * receives only the immutable snapshot it must persist with the job.
+   */
+  private async collectionTriggerWriteRequest(input: CollectionTriggerMutationRequest) {
+    return {
+      event: input.event,
+      operationId: input.operation.id,
+      delivery: await this.core09AutomationDomainService.prepareCollectionTriggerDelivery(input.trustedContext)
     };
   }
 
@@ -6639,40 +6705,6 @@ export class AgentRuntime {
     }
   }
 
-  private async queueCollectionTriggerAutomations(input: {
-    collectionId: string;
-    recordId: string;
-    event: CollectionTriggerEffect["event"];
-  }): Promise<AutomationJobRuntimeResult[]> {
-    const effects = await this.store.evaluateCollectionTriggers({
-      collectionId: input.collectionId,
-      recordId: input.recordId,
-      event: input.event
-    });
-    const queued = effects.filter((effect) => effect.status === "queued");
-    const results: AutomationJobRuntimeResult[] = [];
-    for (const effect of queued) {
-      results.push(await this.saveAutomationJob({
-        title: `Collection trigger ${input.collectionId}/${effect.id}`,
-        kind: "custom_instruction",
-        schedule: "once",
-        target_instruction: `Run collection trigger ${effect.action_id} (${effect.action_kind}) for ${input.collectionId}/${input.recordId}.`,
-        delivery_target: {
-          channel: "collection_trigger",
-          collection_id: input.collectionId,
-          record_id: input.recordId,
-          event: input.event,
-          trigger_id: effect.id,
-          action_id: effect.action_id,
-          action_kind: effect.action_kind,
-          record_ref: effect.record_ref as unknown as JsonValue
-        },
-        next_run_at: nowIso()
-      }));
-    }
-    return results;
-  }
-
   private async saveMessage(message: MessageRecord): Promise<MessageRecord> {
     const saved = await this.store.saveMessage(message);
     await this.emit("message.created", saved);
@@ -6691,8 +6723,14 @@ export class AgentRuntime {
   ): Promise<BackendRunInput> {
     if (!run.session_id) {
       const content = typeof resumeInput.content === "string" ? resumeInput.content : JSON.stringify(resumeInput);
+      const backendRoot = await this.backendExecutionRoot(run.id);
+      const workingDirectory = this.backendWorkingDirectoryMode() === "workspace"
+        ? backendRoot
+        : this.backendWorkingDirectory();
       return {
         ...workspaceBackendInput(run, nowIso, content || run.input_summary, resumeInput),
+        workspace_root: backendRoot,
+        working_directory: workingDirectory,
         ...(gatewayBoundaryPolicy ? { gateway_boundary: gatewayBoundaryRuntimeSnapshot(gatewayBoundaryPolicy, nowIso()) } : {})
       };
     }
@@ -6712,8 +6750,10 @@ export class AgentRuntime {
     const outputLocale = inputMessage?.output_locale ?? session.output_locale ?? settings.output_locale;
     const userInput = inputMessage?.content || run.input_summary || "Resume backend run";
     const envelope = inputMessage?.envelope ?? createGatewayEnvelope(webGatewayContext, userInput, inputLocale, outputLocale, run.metadata);
-    const workspaceRoot = stringPayload(run.metadata.workspace_root) || this.store.rootDir;
-    const workingDirectory = stringPayload(run.metadata.working_directory) || workspaceRoot;
+    const workspaceRoot = await this.backendExecutionRoot(run.id);
+    const workingDirectory = this.backendWorkingDirectoryMode() === "workspace"
+      ? workspaceRoot
+      : this.backendWorkingDirectory();
     return {
       run_id: run.id,
       session_id: run.session_id,
@@ -12933,7 +12973,7 @@ function nextRetryAt(failureCount: number): string {
   return new Date(Date.now() + learningRetryDelayMs(failureCount)).toISOString();
 }
 
-type ExternalSendDispatchAdapterResult = { dispatched: boolean; adapter: string; transport?: string; status?: number; dry_run: boolean; message: string };
+type ExternalSendDispatchAdapterResult = { dispatched: boolean; adapter: string; transport?: string; status?: number; dry_run: boolean; message: string; idempotency_guaranteed?: boolean; outcome_unknown?: boolean };
 
 interface SmtpResponse {
   code: number;
@@ -13007,13 +13047,15 @@ async function dispatchEmailSmtpExternalSend(send: ExternalSendRecord, dryRun: b
       from: config.from,
       to: recipients,
       subject: send.title,
-      body: send.body
+      body: send.body,
+      idempotencyKey: send.id
     });
     return {
       dispatched: true,
       adapter: "email",
       transport: "smtp",
       dry_run: false,
+      idempotency_guaranteed: false,
       message: "email smtp dispatched."
     };
   } catch (error) {
@@ -13021,7 +13063,7 @@ async function dispatchEmailSmtpExternalSend(send: ExternalSendRecord, dryRun: b
   }
 }
 
-async function sendSmtpMessage(config: SmtpTransportConfig, message: { from: string; to: string[]; subject: string; body: string }): Promise<void> {
+async function sendSmtpMessage(config: SmtpTransportConfig, message: { from: string; to: string[]; subject: string; body: string; idempotencyKey: string }): Promise<void> {
   const connection = await smtpClientConnectionFactory(config);
   try {
     await expectSmtpResponse(connection, [220], "greeting");
@@ -13061,11 +13103,12 @@ async function expectSmtpResponse(connection: SmtpClientConnection, expected: nu
   return response;
 }
 
-function formatSmtpMessage(message: { from: string; to: string[]; subject: string; body: string }): string {
+function formatSmtpMessage(message: { from: string; to: string[]; subject: string; body: string; idempotencyKey: string }): string {
   const headers = [
     `From: ${message.from}`,
     `To: ${message.to.join(", ")}`,
     `Subject: ${smtpHeaderValue(message.subject)}`,
+    `X-Samurai-Idempotency-Key: ${smtpHeaderValue(message.idempotencyKey)}`,
     "Content-Type: text/plain; charset=utf-8",
     "Content-Transfer-Encoding: 8bit"
   ];
@@ -13139,7 +13182,7 @@ async function dispatchHttpExternalSend(send: ExternalSendRecord, dryRun: boolea
   try {
     const response = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "idempotency-key": send.id },
       body: JSON.stringify(send.channel === "slack" ? { text: `*${send.title}*\n${send.body}` } : { title: send.title, body: send.body })
     });
     return {
@@ -13148,6 +13191,7 @@ async function dispatchHttpExternalSend(send: ExternalSendRecord, dryRun: boolea
       transport: "http",
       status: response.status,
       dry_run: false,
+      idempotency_guaranteed: false,
       message: response.ok ? `${send.channel} dispatched.` : `${send.channel} dispatch failed.`
     };
   } catch (error) {
@@ -13156,6 +13200,7 @@ async function dispatchHttpExternalSend(send: ExternalSendRecord, dryRun: boolea
       adapter: send.channel,
       transport: "http",
       dry_run: false,
+      outcome_unknown: true,
       message: safeExternalSendDispatchError(error, `${send.channel} dispatch failed.`)
     };
   }
@@ -13178,7 +13223,8 @@ async function dispatchSlackApiExternalSend(send: ExternalSendRecord, dryRun: bo
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "idempotency-key": send.id
       },
       body: JSON.stringify({
         channel,
@@ -13194,6 +13240,7 @@ async function dispatchSlackApiExternalSend(send: ExternalSendRecord, dryRun: bo
       transport: "api",
       status: response.status,
       dry_run: false,
+      idempotency_guaranteed: false,
       message: dispatched ? "slack api dispatched." : "slack api dispatch failed."
     };
   } catch (error) {
@@ -13216,7 +13263,7 @@ async function dispatchTelegramExternalSend(send: ExternalSendRecord, dryRun: bo
   try {
     const response = await fetch(`${telegramApiBaseUrl()}/bot${token}/sendMessage`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "idempotency-key": send.id },
       body: JSON.stringify({
         chat_id: chatId,
         text: `${send.title}\n\n${send.body}`,
@@ -13232,6 +13279,7 @@ async function dispatchTelegramExternalSend(send: ExternalSendRecord, dryRun: bo
       transport: "api",
       status: response.status,
       dry_run: false,
+      idempotency_guaranteed: false,
       message: dispatched ? "telegram api dispatched." : "telegram api dispatch failed."
     };
   } catch (error) {
@@ -13258,7 +13306,8 @@ async function dispatchLineExternalSend(send: ExternalSendRecord, dryRun: boolea
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "idempotency-key": send.id
       },
       body: JSON.stringify(replyToken
         ? { replyToken, messages: [lineTextMessage(send)] }
@@ -13270,6 +13319,7 @@ async function dispatchLineExternalSend(send: ExternalSendRecord, dryRun: boolea
       transport: "api",
       status: response.status,
       dry_run: false,
+      idempotency_guaranteed: false,
       message: response.ok ? "line api dispatched." : "line api dispatch failed."
     };
   } catch (error) {
@@ -13283,6 +13333,7 @@ function externalSendDryRunResult(adapter: string, transport: string): ExternalS
     adapter,
     transport,
     dry_run: true,
+    idempotency_guaranteed: true,
     message: "Dry run recorded. Set SAMURAI_EXTERNAL_SEND_DISPATCH=true to enable dispatch."
   };
 }
@@ -13293,6 +13344,7 @@ function externalSendFailureResult(adapter: string, transport: string, error: un
     adapter,
     transport,
     dry_run: false,
+    outcome_unknown: true,
     message: safeExternalSendDispatchError(error, `${adapter} dispatch failed.`)
   };
 }

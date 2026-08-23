@@ -1,7 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { SkillOptimizationRunSchema } from "@samurai-agent/core-schemas";
 import { z } from "zod";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 
 const Input = z.object({
   "optimization_run_id": z.string().trim().min(1).max(256)
@@ -12,7 +12,7 @@ export type SkillOptimizationCancelInput = z.infer<typeof Input>;
 export type SkillOptimizationCancelOutput = z.infer<typeof Output>;
 
 export interface SkillOptimizationCancelPorts {
-  cancelSkillOptimization(input: { optimizationRunId: string }): Promise<SkillOptimizationCancelOutput> | SkillOptimizationCancelOutput;
+  cancelSkillOptimization(input: { optimizationRunId: string; roomId: string }): Promise<SkillOptimizationCancelOutput> | SkillOptimizationCancelOutput;
 }
 
 const skillOptimizationCancel = defineCommand<SkillOptimizationCancelPorts>()({
@@ -63,7 +63,7 @@ const skillOptimizationCancel = defineCommand<SkillOptimizationCancelPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleSkillOptimizationCancel(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await ports.cancelSkillOptimization({ optimizationRunId: input.optimization_run_id })) };
+        return { ok: true, value: Output.parse(await ports.cancelSkillOptimization({ optimizationRunId: input.optimization_run_id, roomId: requireRoomContext(context, "skill.optimization.cancel") })) };
       }
     };
   }
