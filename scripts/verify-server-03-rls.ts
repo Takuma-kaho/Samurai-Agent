@@ -756,7 +756,7 @@ async function runRealtimeSubscriptionProbe(input: {
     );
 
     const revokedRoomIds = new Set<string>();
-    const leakedRoomEvents: unknown[] = [];
+    const postRevocationRoomEvents: unknown[] = [];
     const ownerRoomEvents: Array<{ roomId?: string; kind?: string }> = [];
     const parentOnlyRoomEvents: Array<{ roomId?: string; kind?: string }> = [];
     const invitationRoomEvents: Array<{ roomId?: string; kind?: string }> = [];
@@ -768,7 +768,6 @@ async function runRealtimeSubscriptionProbe(input: {
         if (typeof roomId === "string") revokedRoomIds.add(roomId);
       }
     });
-    memberSocket.on("workspace:event", (event: unknown) => leakedRoomEvents.push(event));
     ownerSocket.on("workspace:event", (event: unknown) => ownerRoomEvents.push(roomEventSummary(event)));
     parentOnlySocket.on("workspace:event", (event: unknown) => parentOnlyRoomEvents.push(roomEventSummary(event)));
     parentOnlySocket.on("workspace:room-access-revoked", (event: unknown) => {
@@ -825,6 +824,11 @@ async function runRealtimeSubscriptionProbe(input: {
     await delay(75);
     assert(invitationRoomEvents.length === invitationEventCount, "server03_realtime_child_invitation_retry_duplicated_event");
 
+    // Events before this point are valid: the member still had access when the
+    // child invitation was accepted. Observe only the period after revocation
+    // begins, otherwise a delayed legitimate event becomes a false leak.
+    memberSocket.on("workspace:event", (event: unknown) => postRevocationRoomEvents.push(event));
+
     const body = { role: "member", state: "revoked", expected_version: input.rootMembershipVersion };
     const revokeOperationId = operationId("realtime-revoke");
     const result = await signedJsonRequest({
@@ -851,7 +855,7 @@ async function runRealtimeSubscriptionProbe(input: {
       "server03_realtime_owner_event_missing"
     );
     await delay(75);
-    assert(leakedRoomEvents.length === 0, "server03_realtime_event_leaked_after_revocation");
+    assert(postRevocationRoomEvents.length === 0, "server03_realtime_event_leaked_after_revocation");
     assert(!parentOnlyRoomEvents.some((event) => event.roomId === input.childRoomId), "server03_realtime_hidden_child_event_leaked");
     assert(!parentOnlyRevocations.has(input.childRoomId), "server03_realtime_hidden_child_revocation_leaked");
     assert(

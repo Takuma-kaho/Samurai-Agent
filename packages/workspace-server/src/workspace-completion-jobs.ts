@@ -176,8 +176,11 @@ export class WorkspaceCompletionJobService {
         highWatermarkActivityId: candidate.highWatermark
       });
     } catch (error) {
-      if (error instanceof WorkspaceServerError && error.code === "workspace_completion_review_snapshot_limit_exceeded") {
-        await this.blockReviewSnapshotLimit(context, candidate, error);
+      if (error instanceof WorkspaceServerError && (
+        error.code === "workspace_completion_review_snapshot_limit_exceeded"
+        || error.code === "workspace_completion_review_stale_input"
+      )) {
+        await this.blockReviewSnapshot(context, candidate, error);
         return { blocked: true, jobId: candidate.id };
       }
       throw error;
@@ -476,11 +479,10 @@ export class WorkspaceCompletionJobService {
     });
   }
 
-  /** An oversized snapshot is not a retryable worker failure: handing an
-   * incomplete episode to the Review cassette would make its decision
-   * unsound. Keep the reason as structured data so a human can deliberately
-   * raise the configured bound or split the Episode. */
-  private async blockReviewSnapshotLimit(
+  /** A Review with an oversized or stale snapshot must not reach the cassette.
+   * Keep the reason on the queued Job so it is visible for repair instead of
+   * escaping from claimReview and crashing the worker loop. */
+  private async blockReviewSnapshot(
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
     job: WorkspaceCompletionJob,
     error: WorkspaceServerError

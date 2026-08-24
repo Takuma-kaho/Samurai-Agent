@@ -1011,9 +1011,30 @@ function isTransientBundleSnapshotError(error: unknown): boolean {
 }
 
 function snapshotFingerprint(snapshot: WorkspaceSnapshot): string {
-  // JSON serialization normalizes PostgreSQL Date values before canonical
-  // sorting, so a timestamp change cannot be hidden as an empty object.
-  return hashText(canonicalJson(JSON.parse(JSON.stringify(snapshot))));
+  return hashText(canonicalBundleJson(snapshot));
+}
+
+/** PostgreSQL returns TIMESTAMPTZ columns as Date instances. Bundle JSON must
+ * preserve them as ISO strings; canonicalJson alone would see a Date as an
+ * object with no enumerable fields and serialize it as {}. */
+function canonicalBundleJson(value: unknown): string {
+  return canonicalJson(normalizeBundleJson(value));
+}
+
+function normalizeBundleJson(value: unknown): unknown {
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) throw new WorkspaceServerError("workspace_bundle_v3_snapshot_value_invalid", 500);
+    return value.toISOString();
+  }
+  if (Array.isArray(value)) return value.map(normalizeBundleJson);
+  if (value && typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      normalized[key] = normalizeBundleJson(nested);
+    }
+    return normalized;
+  }
+  return value;
 }
 
 export async function readWorkspaceTransfer(
@@ -1089,7 +1110,7 @@ async function writeBundleDirectory(input: {
     ["learning-resource-uses.jsonl", input.snapshot.learningResourceUses]
   ];
   for (const [file, payload] of dataFiles) {
-    const contents = Array.isArray(payload) ? payload.map((row) => canonicalJson(row)).join("\n") + (payload.length > 0 ? "\n" : "") : canonicalJson(payload);
+    const contents = Array.isArray(payload) ? payload.map((row) => canonicalBundleJson(row)).join("\n") + (payload.length > 0 ? "\n" : "") : canonicalBundleJson(payload);
     await writeFile(path.join(input.directory, file), contents, { flag: "wx", mode: 0o600 });
   }
   for (const row of input.snapshot.files) {

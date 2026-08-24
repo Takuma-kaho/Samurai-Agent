@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { Server as HttpServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -78,6 +78,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const accounts = [owner, otherRoomMember, maintenanceAccount];
   const database = new PostgresWorkspaceDatabase({ databaseUrl: target.databaseUrl, runtimeRole: target.runtimeRole });
   const adminDatabase = new PostgresWorkspaceAdminDatabase({ databaseAdminUrl: target.adminDatabaseUrl, runtimeRole: target.runtimeRole });
+  let stage = "setup";
   try {
     await adminDatabase.migrate();
     await database.assertReady();
@@ -279,9 +280,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       verificationOutcome: "confirmed",
       failureState: "none",
       outcome: "completed",
-      explicitRemember: true
+      explicitRemember: false
     });
-    assert(activity.eligible && activity.job?.status === "queued", "server04_completion_activity_review_missing");
+    assert(!activity.eligible && !activity.job, "server04_completion_activity_unexpected_review_job");
     const snapshot = await completion.createReviewSnapshot({ workspaceId, accountId: owner.id }, activity.episode.id);
     const reviewed = await completion.applyReviewResult(ownerContext("review"), {
       snapshot,
@@ -307,9 +308,10 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     });
     assert(reviewed.resources.length === 1 && reviewed.resources[0]?.evidenceState === "provisional", "server04_completion_review_not_provisional");
 
+    stage = "review_snapshot";
     // A Review must retain every Activity through the advertised high
-    // watermark, rather than silently keeping the first 100.  Updating a
-    // snapshot Resource after that read must reject the whole application.
+    // watermark, rather than silently keeping the first 100. Only the final
+    // Activity requests a Review, so the Worker has one deterministic Job.
     const longReviewKey = `review_101_${suffix.slice(0, 20)}`;
     let longReviewEpisodeId: string | undefined;
     let longReviewFinalJobId: string | undefined;
@@ -324,12 +326,15 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         verificationOutcome: "not_run",
         failureState: "none",
         outcome: "completed",
-        // Each record intentionally qualifies for a Review Job so the final
-        // high-watermark Job can prove the cap blocks rather than truncates.
-        explicitRemember: true
+        explicitRemember: index === 100
       });
       longReviewEpisodeId = item.episode.id;
-      longReviewFinalJobId = item.job?.id;
+      if (index === 100) {
+        assert(item.eligible && item.job?.status === "queued", "server04_completion_review_final_job_missing");
+        longReviewFinalJobId = item.job.id;
+      } else {
+        assert(!item.eligible && !item.job, "server04_completion_review_unexpected_queued_job");
+      }
     }
     if (!longReviewEpisodeId || !longReviewFinalJobId) throw new Error("server04_completion_review_101_episode_missing");
     const longReviewSnapshot = await completion.createReviewSnapshot({ workspaceId, accountId: owner.id }, longReviewEpisodeId);
@@ -359,20 +364,12 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     assert(workspaceKnowledgeAfterStaleReview.resource.version === workspaceKnowledgeBeforeStaleReview.resource.version + 1, "server04_completion_review_stale_human_edit_lost");
 
     // An explicit snapshot cap must block the selected Job rather than give
-    // an incomplete Episode to a Review Port. Mark unrelated queued jobs
-    // complete only to make this public worker claim deterministic.
-    await completion.updateConfiguration(ownerContext("review-snapshot-cap"), {
+    // an incomplete Episode to a Review Port.
+    stage = "review_snapshot_cap";
+    const reviewSnapshotCap = await completion.updateConfiguration(ownerContext("review-snapshot-cap"), {
       scope: { kind: "room", roomId: rootRoom.id },
       expectedVersion: 0,
       values: { reviewSnapshotMaxItems: 100 }
-    });
-    await adminDatabase.withAdmin(async (sql) => {
-      await sql.query(
-        `UPDATE workspace_completion_jobs
-         SET status = 'completed', completed_at = NOW(), updated_at = NOW()
-         WHERE workspace_id = $1 AND kind = 'review' AND status = 'queued' AND id <> $2`,
-        [workspaceId, longReviewFinalJobId]
-      );
     });
     const cappedReview = await jobs.runOneReview(ownerContext("review-snapshot-cap-run"), {
       workerId: `completion_review_cap_${suffix.slice(0, 18)}`,
@@ -382,6 +379,51 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const blockedReview = (await jobs.listJobs({ workspaceId, accountId: owner.id }, { roomId: rootRoom.id, status: "blocked" }))
       .find((job) => job.id === longReviewFinalJobId);
     assert(Boolean(blockedReview?.blockedReason?.includes("workspace_completion_review_snapshot_limit_exceeded")), "server04_completion_review_snapshot_cap_reason_missing");
+
+    // A restored or legacy Job can name an Activity that is no longer linked
+    // to its Episode. It must become a visible blocked Job, never crash the
+    // Worker before it has an Attempt to settle.
+    stage = "review_stale_job";
+    const staleEpisode = await completion.createEpisode(ownerContext("review-stale-job-episode"), {
+      roomId: rootRoom.id,
+      goal: "A deliberately stale Review Job.",
+      sourceApp: "probe",
+      externalEpisodeKey: `review_stale_${suffix.slice(0, 20)}`
+    });
+    const staleReviewJobId = `completion_job_stale_${suffix.slice(0, 24)}`;
+    await adminDatabase.withAdmin(async (sql) => {
+      await sql.query(
+        `INSERT INTO workspace_completion_jobs(
+           workspace_id, room_id, id, kind, status, idempotency_key, group_key, high_watermark,
+           input_hash, configuration_version, max_attempts, created_by, updated_by
+         ) VALUES ($1, $2, $3, 'review', 'queued', $4, $5, $6, $7, $8, $9, $10, $10)`,
+        [
+          workspaceId,
+          rootRoom.id,
+          staleReviewJobId,
+          `review:stale:${suffix}`,
+          staleEpisode.episode.id,
+          longReviewSnapshot.highWatermarkActivityId,
+          "0".repeat(64),
+          reviewSnapshotCap.configuration.version,
+          reviewSnapshotCap.configuration.values.reviewMaxAttempts,
+          owner.id
+        ]
+      );
+    });
+    const staleReview = await jobs.runOneReview(ownerContext("review-stale-job-run"), {
+      workerId: `completion_review_stale_${suffix.slice(0, 16)}`,
+      port: { review: async () => { throw new Error("server04_completion_review_port_must_not_receive_stale_snapshot"); } }
+    });
+    assert(staleReview.status === "blocked" && staleReview.jobId === staleReviewJobId, "server04_completion_review_stale_job_not_blocked");
+    const staleBlockedReview = (await jobs.listJobs({ workspaceId, accountId: owner.id }, { roomId: rootRoom.id, status: "blocked" }))
+      .find((job) => job.id === staleReviewJobId);
+    assert(
+      Boolean(staleBlockedReview?.blockedReason?.includes("workspace_completion_review_stale_input")
+        && staleBlockedReview.blockedReason.includes(staleEpisode.episode.id)
+        && staleBlockedReview.blockedReason.includes(longReviewSnapshot.highWatermarkActivityId)),
+      "server04_completion_review_stale_job_reason_missing"
+    );
 
     const attestedFact = await completion.proposeResourceVersion(ownerContext("attestation-fact"), {
       id: `completion_attestation_fact_${suffix.slice(0, 20)}`,
@@ -734,8 +776,20 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     // legacy portable Workspace is first restored through its old path, then
     // migrated to the file-backed Completion model, exported as v4, and
     // restored again without losing the old body.
+    stage = "bundle_v3";
     const v3Directory = path.join(root, "legacy.bundle.v3");
     await new WorkspaceBundleV3Service(store).export(ownerContext("v3-export"), { destination: v3Directory });
+    const v3MembershipRows = (await readFile(path.join(v3Directory, "memberships.jsonl"), "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { created_at?: unknown; updated_at?: unknown });
+    assert(
+      v3MembershipRows.length > 0 && v3MembershipRows.every((row) => typeof row.created_at === "string"
+        && Number.isFinite(new Date(row.created_at).getTime())
+        && typeof row.updated_at === "string"
+        && Number.isFinite(new Date(row.updated_at).getTime())),
+      "server04_completion_v3_membership_timestamp_not_serialized"
+    );
     const v3Store = target.label === "self_host"
       ? new WorkspaceServerStore({
         database,
@@ -783,6 +837,8 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     }, legacyResource.resource.id);
     assert(v3RestoredLegacy.content === "This old row must become a file-backed Completion Resource.", "server04_completion_v3_to_v4_roundtrip_failed");
     console.log(`[Server04 completion] ${target.label}: file body, RLS, review, scheduler, migration, v3-to-v4, and Bundle v4 probes passed`);
+  } catch (error) {
+    throw new Error(`server04_completion_probe_${target.label}_${stage}:${error instanceof Error ? error.message : String(error)}`);
   } finally {
     await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId, v3ImportedWorkspaceId, v3RestoredWorkspaceId], accounts.map((account) => account.id));
     await database.close();

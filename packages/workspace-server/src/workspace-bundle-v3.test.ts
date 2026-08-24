@@ -4,14 +4,83 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "./auth";
+import type { WorkspaceServerStore } from "./workspace-server-store";
 import {
   readWorkspaceBundleV3Transport,
   verifyWorkspaceBundleV3,
   WORKSPACE_BUNDLE_MAX_ENTRY_BYTES,
+  WorkspaceBundleV3Service,
   writeWorkspaceBundleV3Transport
 } from "./workspace-bundle-v3";
 
 describe("Workspace Bundle v3 credential boundary", () => {
+  it("serializes PostgreSQL Date values as ISO timestamps in an exported Bundle", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-date-"));
+    try {
+      const workspaceId = "workspace_bundle_date_test";
+      const timestamp = new Date("2026-08-24T00:00:00.000Z");
+      const sql = {
+        query: async <T extends Record<string, unknown>>(query: string): Promise<{ rows: T[] }> => {
+          if (query.includes("samurai_can_workspace")) return { rows: [{ allowed: true } as T] };
+          if (query.includes("FROM workspaces")) {
+            return {
+              rows: [{
+                id: workspaceId,
+                name: "Date bundle test",
+                hosting_mode: "self_host",
+                database_placement: "dedicated",
+                storage_namespace: `workspaces/${workspaceId}`,
+                created_by: "account_owner",
+                version: 1,
+                created_at: timestamp,
+                updated_at: timestamp
+              } as T]
+            };
+          }
+          if (query.includes("FROM workspace_members")) {
+            return {
+              rows: [{
+                workspace_id: workspaceId,
+                account_id: "account_owner",
+                role: "owner",
+                state: "active",
+                version: 1,
+                created_at: timestamp,
+                updated_at: timestamp,
+                revoked_at: null
+              } as T]
+            };
+          }
+          return { rows: [] };
+        }
+      };
+      const store = {
+        mode: "self_host",
+        storageRoot: root,
+        database: {
+          withContext: async <T>(_context: unknown, action: (value: typeof sql) => Promise<T>): Promise<T> => action(sql),
+          withReadSnapshot: async <T>(_context: unknown, action: (value: typeof sql) => Promise<T>): Promise<T> => action(sql)
+        }
+      } as unknown as WorkspaceServerStore;
+
+      const exported = await new WorkspaceBundleV3Service(store).writePortableSnapshot({
+        workspaceId,
+        accountId: "account_owner",
+        operationId: "operation_bundle_date_test"
+      }, { destination: path.join(root, "bundle") });
+      expect(exported.manifest.workspace_id).toBe(workspaceId);
+
+      const membership = JSON.parse((await readFile(path.join(root, "bundle", "memberships.jsonl"), "utf8")).trim()) as {
+        created_at: unknown;
+        updated_at: unknown;
+      };
+      expect(membership.created_at).toBe(timestamp.toISOString());
+      expect(membership.updated_at).toBe(timestamp.toISOString());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a credential-shaped field inside a portable record", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
     try {

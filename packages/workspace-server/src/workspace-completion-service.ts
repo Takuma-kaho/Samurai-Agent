@@ -2326,7 +2326,12 @@ export class WorkspaceCompletionService {
          WHERE link.workspace_id = $1 AND link.episode_id = $2 AND activity.id = $3`,
         [context.workspaceId, episode.id, options.highWatermarkActivityId]
       );
-      if (!watermark.rows[0]) throw new WorkspaceServerError("workspace_completion_review_stale_input", 409);
+      if (!watermark.rows[0]) {
+        throw new WorkspaceServerError("workspace_completion_review_stale_input", 409, {
+          episode_id: episode.id,
+          high_watermark_activity_id: options.highWatermarkActivityId
+        });
+      }
       watermarkFinalizedAt = iso(watermark.rows[0].finalized_at);
     }
     const activities: WorkspaceCompletionActivity[] = [];
