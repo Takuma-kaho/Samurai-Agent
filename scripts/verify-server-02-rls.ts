@@ -142,11 +142,12 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     await adminDatabase.withAdmin(async (sql) => {
       for (const workspaceId of [workspaceA, workspaceB]) {
         for (const table of ["workspace_audit_entries", "workspace_jobs", "workspace_events", "workspace_files", "workspace_records", "room_members", "rooms", "workspace_members", "workspaces"]) {
-          await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]);
+          const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+          await sql.query(`DELETE FROM ${table} WHERE ${workspaceColumn} = $1`, [workspaceId]);
         }
       }
       await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [[accountA.id, accountB.id]]);
-    }).catch(() => undefined);
+    });
     await database.close();
     await adminDatabase.close();
   }

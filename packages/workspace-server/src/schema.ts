@@ -7719,6 +7719,108 @@ const migrations: readonly WorkspaceServerMigration[] = [
         )
       )`
     ]
+  },
+  {
+    // Keep the migration ledger immutable. PostgreSQL exposes RETURNS TABLE
+    // fields as PL/pgSQL variables, so the existing invitation function's
+    // unqualified room_id reference becomes ambiguous on already-migrated
+    // databases. Replacing it in a new migration preserves the public
+    // function contract while making the parent-membership check explicit.
+    version: 58,
+    name: "workspace_server_room_invitation_output_column_ambiguity_fix",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_accept_invitation(
+        target_workspace_id TEXT,
+        supplied_token_hash TEXT,
+        target_operation_id TEXT
+      ) RETURNS TABLE(workspace_role TEXT, room_id TEXT, room_role TEXT, invitation_version BIGINT)
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE invitation workspace_invitations%ROWTYPE;
+      DECLARE existing_workspace_member workspace_members%ROWTYPE;
+      DECLARE has_existing_workspace_member BOOLEAN;
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || target_workspace_id, 0));
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL
+          OR target_operation_id IS NULL OR btrim(target_operation_id) = ''
+          OR NOT EXISTS (
+            SELECT 1 FROM accounts
+            WHERE id = samurai_current_account_id() AND status = 'active'
+          ) THEN
+          RAISE EXCEPTION 'workspace_invitation_invalid';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        SELECT * INTO invitation
+        FROM workspace_invitations
+        WHERE workspace_id = target_workspace_id
+          AND token_hash = supplied_token_hash
+          AND revoked_at IS NULL
+          AND accepted_at IS NULL
+          AND expires_at > NOW()
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_invitation_invalid'; END IF;
+        SELECT * INTO existing_workspace_member
+        FROM workspace_members
+        WHERE workspace_id = target_workspace_id
+          AND account_id = samurai_current_account_id()
+        FOR UPDATE;
+        has_existing_workspace_member := FOUND;
+        IF NOT has_existing_workspace_member OR existing_workspace_member.state <> 'active' THEN
+          PERFORM samurai_clear_stale_room_memberships_on_workspace_activation(
+            target_workspace_id, samurai_current_account_id()
+          );
+        END IF;
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version, updated_at)
+        VALUES (target_workspace_id, samurai_current_account_id(), invitation.workspace_role, 'active', 1, NOW())
+        ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+          role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(workspace_members.role) THEN EXCLUDED.role ELSE workspace_members.role END,
+          state = 'active', revoked_at = NULL, version = workspace_members.version + 1, updated_at = NOW();
+        IF invitation.room_id IS NOT NULL THEN
+          IF NOT EXISTS (
+            SELECT 1 FROM rooms WHERE workspace_id = target_workspace_id AND id = invitation.room_id
+          ) THEN RAISE EXCEPTION 'room_not_available'; END IF;
+          IF EXISTS (
+            WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+              SELECT parent.id, parent.parent_room_id
+              FROM rooms AS room
+              JOIN rooms AS parent
+                ON parent.workspace_id = room.workspace_id AND parent.id = room.parent_room_id
+              WHERE room.workspace_id = target_workspace_id AND room.id = invitation.room_id
+              UNION ALL
+              SELECT parent.id, parent.parent_room_id
+              FROM rooms AS parent
+              JOIN ancestors ON ancestors.parent_room_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1 FROM ancestors
+            WHERE NOT EXISTS (
+              SELECT 1 FROM room_members AS ancestor_member
+              WHERE ancestor_member.workspace_id = target_workspace_id
+                AND ancestor_member.room_id = ancestors.room_id
+                AND ancestor_member.account_id = samurai_current_account_id()
+                AND ancestor_member.state = 'active'
+            )
+          ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+          INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, updated_at)
+          VALUES (target_workspace_id, invitation.room_id, samurai_current_account_id(), COALESCE(invitation.room_role, invitation.workspace_role), 'active', 1, NOW())
+          ON CONFLICT (workspace_id, room_id, account_id) DO UPDATE SET
+            role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(room_members.role) THEN EXCLUDED.role ELSE room_members.role END,
+            state = 'active', revoked_at = NULL, version = room_members.version + 1, updated_at = NOW();
+          INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
+          VALUES (
+            target_workspace_id, invitation.room_id, 'room.member.changed', target_operation_id,
+            jsonb_build_object('changed_room_id', invitation.room_id)
+          );
+        END IF;
+        UPDATE workspace_invitations
+        SET accepted_by = samurai_current_account_id(), accepted_at = NOW(), version = version + 1
+        WHERE workspace_id = target_workspace_id AND id = invitation.id
+        RETURNING version INTO invitation_version;
+        UPDATE workspaces SET version = version + 1, updated_at = NOW() WHERE id = target_workspace_id;
+        RETURN QUERY SELECT invitation.workspace_role, invitation.room_id, invitation.room_role, invitation_version;
+      END
+      $$`
+    ]
   }
 ];
 

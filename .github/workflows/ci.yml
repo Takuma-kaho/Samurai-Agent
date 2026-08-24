@@ -246,9 +246,11 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        id: install_dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Prepare disposable CI PostgreSQL databases
+        id: prepare_postgres
         shell: bash
         env:
           PGPASSWORD: samurai_ci_postgres_password
@@ -289,6 +291,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Run disposable PostgreSQL migration, RLS, recovery, bundle and load gates
+        if: ${{ always() && steps.install_dependencies.outcome == 'success' && steps.prepare_postgres.outcome == 'success' }}
         env:
           SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
           SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted

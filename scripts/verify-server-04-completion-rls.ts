@@ -1032,11 +1032,32 @@ async function cleanup(adminDatabase: PostgresWorkspaceAdminDatabase, workspaceI
       "workspace_operations", "workspace_file_transactions", "workspace_files", "workspace_records", "room_members", "rooms",
       "workspace_members", "workspace_import_sessions", "workspaces"
     ];
-    for (const workspaceId of workspaceIds) {
-      for (const table of tables) await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]);
+    await sql.query("BEGIN");
+    try {
+      for (const workspaceId of workspaceIds) {
+        // A Completion Resource points to its current immutable Versions.
+        // Clear those pointers before deleting version rows, otherwise the
+        // resource-to-version foreign keys prevent deterministic cleanup.
+        await sql.query(
+          `UPDATE workspace_completion_resources
+           SET current_confirmed_version = NULL,
+               current_provisional_version = NULL,
+               candidate_version = NULL
+           WHERE workspace_id = $1`,
+          [workspaceId]
+        );
+        for (const table of tables) {
+          const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+          await sql.query(`DELETE FROM ${table} WHERE ${workspaceColumn} = $1`, [workspaceId]);
+        }
+      }
+      await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
+      await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK").catch(() => undefined);
+      throw error;
     }
-    await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
-    await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);
   });
 }
 

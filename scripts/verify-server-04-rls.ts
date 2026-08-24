@@ -315,7 +315,10 @@ async function cleanup(adminDatabase: PostgresWorkspaceAdminDatabase, workspaceI
       "workspace_audit_entries", "workspace_bundles", "workspace_transfers", "workspace_invitations", "workspace_jobs", "workspace_events", "workspace_operations", "workspace_file_transactions", "workspace_files", "workspace_records", "room_members", "rooms", "workspace_members", "workspace_import_sessions", "workspaces"
     ];
     for (const workspaceId of workspaceIds) {
-      for (const table of tables) await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]);
+      for (const table of tables) {
+        const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+        await sql.query(`DELETE FROM ${table} WHERE ${workspaceColumn} = $1`, [workspaceId]);
+      }
     }
     await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
     await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);

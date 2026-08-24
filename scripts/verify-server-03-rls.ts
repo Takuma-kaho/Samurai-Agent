@@ -1134,11 +1134,14 @@ async function cleanup(
       "workspaces"
     ];
     for (const workspaceId of workspaceIds) {
-      for (const table of tables) await sql.query("DELETE FROM " + table + " WHERE workspace_id = $1", [workspaceId]).catch(() => undefined);
+      for (const table of tables) {
+        const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+        await sql.query("DELETE FROM " + table + " WHERE " + workspaceColumn + " = $1", [workspaceId]);
+      }
     }
-    await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]).catch(() => undefined);
-    await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]).catch(() => undefined);
-  }).catch(() => undefined);
+    await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
+    await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);
+  });
 }
 
 function accountIdentity(): ProbeAccount {

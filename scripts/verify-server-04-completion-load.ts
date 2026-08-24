@@ -448,9 +448,27 @@ async function cleanup(database: PostgresWorkspaceAdminDatabase, workspaceId: st
       "workspace_file_transactions", "workspace_files", "workspace_records", "room_members", "rooms", "workspace_members",
       "workspace_import_sessions", "workspaces"
     ];
-    for (const table of tables) await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]);
-    await sql.query("DELETE FROM account_operations WHERE account_id = $1", [accountId]);
-    await sql.query("DELETE FROM accounts WHERE id = $1", [accountId]);
+    await sql.query("BEGIN");
+    try {
+      await sql.query(
+        `UPDATE workspace_completion_resources
+         SET current_confirmed_version = NULL,
+             current_provisional_version = NULL,
+             candidate_version = NULL
+         WHERE workspace_id = $1`,
+        [workspaceId]
+      );
+      for (const table of tables) {
+        const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+        await sql.query(`DELETE FROM ${table} WHERE ${workspaceColumn} = $1`, [workspaceId]);
+      }
+      await sql.query("DELETE FROM account_operations WHERE account_id = $1", [accountId]);
+      await sql.query("DELETE FROM accounts WHERE id = $1", [accountId]);
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    }
   });
 }
 

@@ -108,10 +108,11 @@ async function runTarget(target: Target): Promise<void> {
   } finally {
     await adminDatabase.withAdmin(async (sql) => {
       for (const table of ["workspace_runtime_activities", "workspace_runtime_events", "workspace_runtime_reservations", "workspace_runtime_runs", "workspace_runtime_sessions", "room_members", "rooms", "workspace_members", "workspaces"]) {
-        await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]);
+        const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+        await sql.query(`DELETE FROM ${table} WHERE ${workspaceColumn} = $1`, [workspaceId]);
       }
       await sql.query("DELETE FROM accounts WHERE id = $1", [owner.id]);
-    }).catch(() => undefined);
+    });
     await database.close();
     await adminDatabase.close();
   }
