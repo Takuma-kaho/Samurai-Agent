@@ -3661,9 +3661,9 @@ const migrations: readonly WorkspaceServerMigration[] = [
           ) THEN
           RAISE EXCEPTION 'workspace_membership_invalid';
         END IF;
-        // A legacy stale owner cannot be silently discarded if it would leave
-        // a Room without any effective direct Owner. An existing Workspace
-        // Owner/Admin can first appoint another direct Room Owner, then retry.
+        -- A legacy stale owner cannot be silently discarded if it would leave
+        -- a Room without any effective direct Owner. An existing Workspace
+        -- Owner/Admin can first appoint another direct Room Owner, then retry.
         IF EXISTS (
           SELECT 1
           FROM room_members AS member

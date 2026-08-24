@@ -1696,8 +1696,11 @@ rl.on("line", (line) => {
   it("rejects pending MCP requests and refuses invocation after pool shutdown", async () => {
     const tmpRoot = await mkdtemp(path.join(tmpdir(), "samurai-mcp-pool-close-"));
     const serverPath = path.join(tmpRoot, "mcp-server.cjs");
+    const pendingCallMarker = path.join(tmpRoot, "tools-call-started");
     await writeFile(serverPath, `
+const fs = require("node:fs");
 const readline = require("node:readline");
+const pendingCallMarker = process.argv[2];
 const rl = readline.createInterface({ input: process.stdin });
 function send(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
 process.on("SIGTERM", () => {});
@@ -1705,6 +1708,9 @@ rl.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2024-11-05", capabilities: {} } });
+  }
+  if (message.method === "tools/call") {
+    fs.writeFileSync(pendingCallMarker, "started");
   }
 });
 `);
@@ -1714,7 +1720,7 @@ rl.on("line", (line) => {
         return {
           server_name: "calendar",
           command: process.execPath,
-          args: [serverPath],
+          args: [serverPath, pendingCallMarker],
           framing: "json_lines",
           timeout_ms: 60_000
         };
@@ -1731,7 +1737,7 @@ rl.on("line", (line) => {
       }).sandbox),
       secrets: []
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForFile(pendingCallMarker);
     const pendingRejection = expect(pending).rejects.toThrow("mcp_process_closed");
     const closing = adapter.closeAll();
     await pendingRejection;
@@ -1747,6 +1753,52 @@ rl.on("line", (line) => {
       }).sandbox),
       secrets: []
     })).rejects.toThrow("mcp_process_pool_closed");
+  });
+
+  it("does not report an intentionally aborted MCP startup as a pool-close failure", async () => {
+    const tmpRoot = await mkdtemp(path.join(tmpdir(), "samurai-mcp-pool-startup-close-"));
+    const serverPath = path.join(tmpRoot, "mcp-server.cjs");
+    const initializeMarker = path.join(tmpRoot, "initialize-started");
+    await writeFile(serverPath, `
+const fs = require("node:fs");
+const readline = require("node:readline");
+const initializeMarker = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    fs.writeFileSync(initializeMarker, "started");
+  }
+});
+`);
+    const adapter = createPooledStdioMcpToolAdapter({
+      env: { PATH: process.env.PATH },
+      resolveConfig() {
+        return {
+          server_name: "calendar",
+          command: process.execPath,
+          args: [serverPath, initializeMarker],
+          framing: "json_lines",
+          timeout_ms: 60_000
+        };
+      }
+    });
+    const pending = adapter.invoke({
+      server_name: "calendar",
+      tool_name: "calendar.read",
+      input: {},
+      sandbox: createSandboxExecutionPlan(createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-1",
+        session_key: "webhook:source-1:main"
+      }).sandbox),
+      secrets: []
+    });
+    await waitForFile(initializeMarker);
+    const pendingRejection = expect(pending).rejects.toThrow("mcp_process_closed");
+    await expect(adapter.closeAll()).resolves.toBeUndefined();
+    await pendingRejection;
+    expect(adapter.stats().process_count).toBe(0);
   });
 
   it("reports SecretRef ids without marking them unresolved when an MCP tool is blocked before resolution", async () => {
@@ -1796,3 +1848,12 @@ rl.on("line", (line) => {
     expect(JSON.stringify(result)).not.toContain("CALENDAR_TOKEN");
   });
 });
+
+async function waitForFile(filePath: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (await access(filePath).then(() => true, () => false)) return;
+    if (Date.now() >= deadline) throw new Error("test_file_wait_timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

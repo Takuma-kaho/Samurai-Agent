@@ -782,7 +782,9 @@ describe("agent backend registry", () => {
     expect(backend.getStatus().active_run_count).toBe(1);
     await iterator.return?.();
     await waitFor(() => fileExists(marker));
-    await waitFor(() => backend.getStatus().active_run_count === 0);
+    // The runner may need its SIGTERM grace window before the child close
+    // event releases the active-run record on a contended CI worker.
+    await waitFor(() => backend.getStatus().active_run_count === 0, 3_500);
     expect(backend.getStatus().active_run_count).toBe(0);
   });
 

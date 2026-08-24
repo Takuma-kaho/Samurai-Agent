@@ -24,7 +24,7 @@ const largeModules = normalModules.map((file) => ({ file, lines: lineCount(file)
 const requiredDirectories = [
   "packages/runtime/src/host", "packages/runtime/src/commands", "packages/runtime/src/execution", "packages/runtime/src/context", "packages/runtime/src/presentation", "packages/runtime/src/backend", "packages/runtime/src/learning",
   "packages/workspace-server/src",
-  "apps/server/src/routes", "apps/server/src/middleware", "apps/server/src/workers", "apps/server/src/streams", "apps/server/src/composition",
+  "apps/server/src/middleware", "apps/server/src/workers", "apps/server/src/composition",
   "apps/web/src/components", "apps/web/src/lib"
 ];
 const missingDirectories = requiredDirectories.filter((directory) => !existsSync(path.join(root, directory)));

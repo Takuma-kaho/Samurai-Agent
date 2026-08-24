@@ -2897,7 +2897,7 @@ class StdioMcpProcessPool {
       }
       const results = await Promise.allSettled([
         ...entries.map((entry) => this.closeEntry(entry)),
-        ...starting.map((handle) => settleMcpStartup(handle.promise))
+        ...starting.map((handle) => settleMcpStartup(handle))
       ]);
       const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (errors.length > 0) {
@@ -3044,7 +3044,7 @@ class StdioMcpProcessPool {
   }
 }
 
-async function settleMcpStartup(task: Promise<unknown>): Promise<void> {
+async function settleMcpStartup(handle: StdioMcpStartupHandle): Promise<void> {
   const timeoutMs = mcpProcessCloseGraceMs + mcpProcessCloseKillWaitMs + 500;
   await new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -3053,7 +3053,7 @@ async function settleMcpStartup(task: Promise<unknown>): Promise<void> {
       settled = true;
       reject(new Error("mcp_process_startup_shutdown_timeout"));
     }, timeoutMs);
-    task.then(() => {
+    handle.promise.then(() => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -3062,9 +3062,20 @@ async function settleMcpStartup(task: Promise<unknown>): Promise<void> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (handle.controller.signal.aborted && isExpectedMcpStartupAbort(error)) {
+        resolve();
+        return;
+      }
       reject(error);
     });
   });
+}
+
+function isExpectedMcpStartupAbort(error: unknown): boolean {
+  if (!(error instanceof Error) || error instanceof AggregateError) return false;
+  return error.message === "mcp_process_closed"
+    || error.message === "mcp_process_startup_aborted"
+    || error.message.startsWith("mcp_process_exited:");
 }
 
 function pooledStdioProcessKey(config: StdioMcpServerConfig, secrets: SecretResolutionMaterial[]): string {
