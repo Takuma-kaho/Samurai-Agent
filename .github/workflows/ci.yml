@@ -246,11 +246,9 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        id: install_dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Prepare disposable CI PostgreSQL databases
-        id: prepare_postgres
         shell: bash
         env:
           PGPASSWORD: samurai_ci_postgres_password
@@ -269,11 +267,10 @@ jobs:
           CREATE DATABASE samurai_ci_self_host;
           SQL
 
-      - name: Run full CI verifier against disposable PostgreSQL
-        id: full_ci
+      - name: Run PostgreSQL deep verifier against disposable PostgreSQL
         env:
           SAMURAI_CI_FULL_POSTGRES_MODE: disposable_ci_service
-          SAMURAI_CI_FULL_REPORT_DIRECTORY: /tmp/samurai-ci-full-report
+          SAMURAI_VERIFY_REPORT_DIRECTORY: /tmp/samurai-postgres-deep-report
           SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
           SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
           SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
@@ -281,32 +278,91 @@ jobs:
           SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
           SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
           SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE: "yes"
-        run: pnpm run verify:ci-full
+        run: pnpm run verify:postgres-deep
 
-      - name: Upload full CI verifier report
+      - name: Upload PostgreSQL deep verifier report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ci-full-report
-          path: /tmp/samurai-ci-full-report/
+          name: postgres-deep-report
+          path: /tmp/samurai-postgres-deep-report/
           if-no-files-found: warn
 
-      - name: Run disposable PostgreSQL Completion load gate
-        if: ${{ steps.full_ci.outcome == 'success' && steps.install_dependencies.outcome == 'success' && steps.prepare_postgres.outcome == 'success' }}
+  postgres-completion-load:
+    name: postgres-completion-load
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # This load gate has its own PostgreSQL service and databases so another
+    # deep verifier cannot skip it or leave state that changes its result.
+    services:
+      postgres:
+        image: postgres:17
         env:
-          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
-          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
+          POSTGRES_PASSWORD: samurai_ci_postgres_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare disposable CI PostgreSQL load databases
+        shell: bash
+        env:
+          PGPASSWORD: samurai_ci_postgres_password
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            if pg_isready --host 127.0.0.1 --port 5432 --username postgres --dbname postgres; then
+              break
+            fi
+            sleep 1
+          done
+          pg_isready --host 127.0.0.1 --port 5432 --username postgres --dbname postgres
+          psql --host 127.0.0.1 --port 5432 --username postgres --dbname postgres --set ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE samurai_ci_runtime LOGIN PASSWORD 'samurai_ci_postgres_password' NOSUPERUSER NOBYPASSRLS;
+          CREATE DATABASE samurai_ci_load_hosted;
+          CREATE DATABASE samurai_ci_load_self_host;
+          SQL
+
+      - name: Run disposable PostgreSQL Completion load gate
+        env:
+          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_load_hosted
+          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_load_hosted
           SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
-          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
-          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
+          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_load_self_host
+          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_load_self_host
           SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
           SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE: "yes"
         run: CI=true timeout --signal=TERM --kill-after=30s 30m node --import tsx scripts/verify-server-04-completion-load.ts
 
-      - name: Upload PostgreSQL deep reports
+      - name: Upload PostgreSQL Completion load reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: postgres-deep-reports
+          name: postgres-completion-load-reports
           path: reports/server04-completion/
           if-no-files-found: warn

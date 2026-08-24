@@ -7,10 +7,13 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const startedAt = new Date().toISOString();
-const configuredResultDirectory = process.env.SAMURAI_CI_FULL_REPORT_DIRECTORY?.trim();
+const postgresOnly = process.argv.includes("--postgres-only");
+const verifierName = postgresOnly ? "postgres-deep" : "ci-full";
+const configuredResultDirectory = process.env.SAMURAI_VERIFY_REPORT_DIRECTORY?.trim()
+  || process.env.SAMURAI_CI_FULL_REPORT_DIRECTORY?.trim();
 const resultDirectory = configuredResultDirectory
   ? path.resolve(configuredResultDirectory)
-  : mkdtempSync(path.join(os.tmpdir(), "samurai-verify-ci-full-"));
+  : mkdtempSync(path.join(os.tmpdir(), `samurai-verify-${verifierName}-`));
 mkdirSync(resultDirectory, { recursive: true });
 const commandDirectory = path.join(resultDirectory, "commands");
 mkdirSync(commandDirectory, { recursive: true });
@@ -123,15 +126,62 @@ function writeReport(report) {
   return reportPath;
 }
 
+function problemCheckSummary(check) {
+  return {
+    id: check.id,
+    kind: check.kind,
+    status: check.status,
+    exit_code: check.exit_code ?? null,
+    signal: check.signal ?? null,
+    duration_ms: check.duration_ms ?? null,
+    ...(check.command ? { command: check.command } : {}),
+    ...(check.reason ? { reason: check.reason } : {}),
+    ...(check.error ? { error: check.error } : {}),
+    ...(check.missing_environment ? { missing_environment: check.missing_environment } : {}),
+    ...(check.output_tail ? { output_tail: check.output_tail } : {})
+  };
+}
+
+function escapeMarkdownCodeFence(value) {
+  return String(value).replaceAll("```", "` ` `");
+}
+
+function writeGitHubStepSummary(report, reportPath) {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY?.trim();
+  if (!summaryPath) return;
+  const problemChecks = report.checks.filter((check) => check.status !== "passed");
+  const lines = [
+    `## ${report.verifier}`,
+    "",
+    `- Status: **${report.status}**`,
+    `- Failed: **${report.checks.filter((check) => check.status === "failed").length}**`,
+    `- Unverified: **${report.checks.filter((check) => check.status === "unverified").length}**`,
+    `- Report: \`${reportPath}\``
+  ];
+  for (const check of problemChecks) {
+    lines.push("", `### ${check.id}: ${check.status}`);
+    if (check.reason) lines.push("", `Reason: \`${escapeMarkdownCodeFence(check.reason)}\``);
+    if (check.error) lines.push("", `Error: \`${escapeMarkdownCodeFence(check.error)}\``);
+    if (check.output_tail) {
+      lines.push("", "<details><summary>Sanitized output tail</summary>", "", "```text", escapeMarkdownCodeFence(check.output_tail), "```", "", "</details>");
+    }
+  }
+  writeFileSync(summaryPath, `${lines.join("\n")}\n`, { flag: "a" });
+}
+
 try {
-  runCheck("architecture-static", "static", process.execPath, ["scripts/verify/architecture-invariants.mjs", "--strict"]);
+  if (!postgresOnly) {
+    runCheck("architecture-static", "static", process.execPath, ["scripts/verify/architecture-invariants.mjs", "--strict"]);
+  }
   runCheck("postgres-migration-readiness", "migration", "pnpm", ["run", "verify:postgres-migration"], { timeoutMs: 5 * 60 * 1000 });
-  runCheck("full-typecheck", "typecheck", "pnpm", ["run", "typecheck"], { timeoutMs: 30 * 60 * 1000 });
-  runCheck("web-build", "build", "pnpm", ["--filter", "@samurai-agent/web", "run", "build"], { timeoutMs: 20 * 60 * 1000 });
-  runCheck("full-test", "test", "pnpm", ["run", "test"], { timeoutMs: 45 * 60 * 1000 });
+  if (!postgresOnly) {
+    runCheck("full-typecheck", "typecheck", "pnpm", ["run", "typecheck"], { timeoutMs: 30 * 60 * 1000 });
+    runCheck("web-build", "build", "pnpm", ["--filter", "@samurai-agent/web", "run", "build"], { timeoutMs: 20 * 60 * 1000 });
+    runCheck("full-test", "test", "pnpm", ["run", "test"], { timeoutMs: 45 * 60 * 1000 });
+  }
   runPostgresChecks();
 } catch (error) {
-  checks.push({ id: "ci-full-runner", kind: "runner", status: "failed", reason: sanitize(error instanceof Error ? error.message : error) });
+  checks.push({ id: `${verifierName}-runner`, kind: "runner", status: "failed", reason: sanitize(error instanceof Error ? error.message : error) });
 }
 
 const failed = checks.some((check) => check.status === "failed");
@@ -140,18 +190,29 @@ const status = failed ? "failed" : hasUnverified ? "unverified" : "passed";
 const exitCode = failed ? 1 : hasUnverified ? 2 : 0;
 const report = {
   schema_version: 1,
-  verifier: "ci-full",
+  verifier: verifierName,
   status,
   exit_code: exitCode,
   started_at: startedAt,
   completed_at: new Date().toISOString(),
   repository_root: root,
   postgres_environment_mode: process.env.SAMURAI_CI_FULL_POSTGRES_MODE?.trim() || "external_or_unavailable",
-  scope: ["postgresql", "migration", "server", "worker", "runtime-recovery", "bundle", "web", "full-test"],
+  scope: postgresOnly
+    ? ["postgresql", "migration", "rls", "realtime", "server", "worker", "runtime-recovery", "bundle"]
+    : ["postgresql", "migration", "server", "worker", "runtime-recovery", "bundle", "web", "full-test"],
   checks,
   unverified: checks.filter((check) => check.status === "unverified"),
   result_directory: resultDirectory
 };
 const reportPath = writeReport(report);
-process.stdout.write(`${JSON.stringify({ verifier: report.verifier, status: report.status, exit_code: report.exit_code, result_directory: resultDirectory, result_file: reportPath })}\n`);
+writeGitHubStepSummary(report, reportPath);
+process.stdout.write(`${JSON.stringify({
+  verifier: report.verifier,
+  status: report.status,
+  exit_code: report.exit_code,
+  result_directory: resultDirectory,
+  result_file: reportPath,
+  failed_checks: checks.filter((check) => check.status === "failed").map(problemCheckSummary),
+  unverified_checks: checks.filter((check) => check.status === "unverified").map(problemCheckSummary)
+}, null, 2)}\n`);
 process.exitCode = exitCode;

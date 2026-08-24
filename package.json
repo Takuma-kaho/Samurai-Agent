@@ -48,6 +48,7 @@
     "verify:postgres-runtime-scope": "node scripts/verify-postgres-runtime-scope.mjs",
     "verify:postgres-migration": "node scripts/verify-postgres-migration-readiness.mjs",
     "verify:postgres-migration:static": "node scripts/verify-postgres-migration-readiness.mjs --static-only",
+    "verify:postgres-deep": "node scripts/verify/ci-full.mjs --postgres-only",
     "verify:source-quality": "node scripts/verify-source-quality.mjs",
     "format:check": "node scripts/verify-source-quality.mjs",
     "lint": "node scripts/verify-source-quality.mjs",
