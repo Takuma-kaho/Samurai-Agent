@@ -294,7 +294,12 @@ async function runProbe(target: ProbeTarget): Promise<void> {
           knowledgeKind: "experience_rule",
           title: "Verified probe procedure",
           content: "Use the file-backed procedure after a confirmed Activity.",
-          metadata: { source: "review" },
+          metadata: {
+            source: "review",
+            conditions: "A confirmed Activity records a reusable procedure.",
+            action: "Use the file-backed procedure for the same Room.",
+            likely_result: "The procedure can be reused with its evidence."
+          },
           evidenceActivityIds: [activity.activity.id],
           reason: "Confirmed result"
         }]

@@ -1186,7 +1186,9 @@ export class WorkspaceServerStore {
     assertOpaqueId(roomId, "room_id_invalid");
     await this.database.withContext(context, async (sql) => {
       const result = await sql.query<{ id: string }>("SELECT id FROM rooms WHERE workspace_id = $1 AND id = $2", [context.workspaceId, roomId]);
-      if (!result.rows[0]) throw new WorkspaceServerError("room_not_found_or_access_denied", 404);
+      // This method is used by the public Socket boundary. Missing and
+      // unreadable Rooms must have the same externally visible response.
+      if (!result.rows[0]) throw new WorkspaceServerError("room_not_available", 404);
     });
   }
 

@@ -70,6 +70,31 @@ describe("Workspace learning worker", () => {
     expect(result?.status).toBe("queued");
   });
 
+  it("settles a rejected review through failJob instead of leaking the rejection", async () => {
+    let failedCode: string | undefined;
+    const service = {
+      claimNextJob: async () => ({ job, attempt, snapshot, settings: {} }),
+      heartbeat: async () => job,
+      applyReview: async () => { throw new WorkspaceServerError("workspace_learning_resource_ai_update_locked", 409); },
+      failJob: async (_context: unknown, input: { errorCode: string; retryable: boolean }) => {
+        failedCode = input.errorCode;
+        expect(input.retryable).toBe(false);
+        return { ...job, status: "failed" as const };
+      }
+    };
+    const port: WorkspaceKnowledgeReviewPort = {
+      id: "engine_one", model: "model_one",
+      async review() { return { reviewer: "test", summary: "Rejected mutation", mutations: [] }; }
+    };
+
+    const result = await new WorkspaceLearningWorker(service as never, port).runOne(
+      { workspaceId: "workspace_one", accountId: "account_one" }, { workerId: "worker_one" }
+    );
+
+    expect(failedCode).toBe("workspace_learning_resource_ai_update_locked");
+    expect(result?.status).toBe("failed");
+  });
+
   it("returns a retryable job promptly when the runner is closed during a review", async () => {
     let failedCode: string | undefined;
     const service = {

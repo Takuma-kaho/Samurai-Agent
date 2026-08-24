@@ -1491,7 +1491,7 @@ export class WorkspaceLearningWorker {
       const result = await Promise.race([review, timeoutPromise, executionAbort]);
       if (heartbeatFailure) throw heartbeatFailure;
       if (input.signal?.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new WorkspaceServerError("workspace_learning_review_aborted", 499);
-      return this.learning.applyReview(context, {
+      return await this.learning.applyReview(context, {
         jobId: claimed.job.id,
         attemptId: attempt.id,
         workerId: attempt.workerId,
