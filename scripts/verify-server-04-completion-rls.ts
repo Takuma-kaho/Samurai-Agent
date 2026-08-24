@@ -209,7 +209,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       metadata: {},
       reason: "Failure recovery probe."
     });
-    await expectCode("workspace_completion_version_conflict", async () => {
+    await expectCode("workspace_completion_resource_version_conflict", async () => {
       await completion.moveResource(ownerContext("skill-move-collision"), {
         resourceId: skill.resource.id,
         targetRoomId: privateRoom.id,

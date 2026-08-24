@@ -235,7 +235,7 @@ async function bulkFixture(
       await sql.query(
         `WITH input AS (SELECT $1::TEXT AS workspace_id, $2::TEXT AS owner_id, $3::TEXT[] AS room_ids),
           generated AS (
-            SELECT item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
+            SELECT input.workspace_id, input.owner_id, item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
             FROM input CROSS JOIN generate_series(1, 100000) AS item
           )
          INSERT INTO workspace_completion_activities(
@@ -252,7 +252,7 @@ async function bulkFixture(
       await sql.query(
         `WITH input AS (SELECT $1::TEXT AS workspace_id, $2::TEXT AS owner_id, $3::TEXT[] AS room_ids),
           generated AS (
-            SELECT item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
+            SELECT input.workspace_id, input.owner_id, item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
             FROM input CROSS JOIN generate_series(1, 10000) AS item
           )
          INSERT INTO workspace_completion_resources(
@@ -295,7 +295,7 @@ async function bulkFixture(
       await sql.query(
         `WITH input AS (SELECT $1::TEXT AS workspace_id, $2::TEXT AS owner_id, $3::TEXT[] AS room_ids),
           generated AS (
-            SELECT item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
+            SELECT input.workspace_id, input.owner_id, item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
             FROM input CROSS JOIN generate_series(1, 1000) AS item
           )
          INSERT INTO workspace_completion_resources(
@@ -338,7 +338,7 @@ async function bulkFixture(
       await sql.query(
         `WITH input AS (SELECT $1::TEXT AS workspace_id, $2::TEXT AS owner_id, $3::TEXT[] AS room_ids),
           generated AS (
-            SELECT item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
+            SELECT input.workspace_id, input.owner_id, item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
             FROM input CROSS JOIN generate_series(1, 16) AS item
           )
          INSERT INTO workspace_completion_jobs(

@@ -765,9 +765,9 @@ describe("agent backend registry", () => {
       "#!/usr/bin/env node",
       "const fs = require('node:fs');",
       "const marker = process.argv[2];",
+      "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'stopped'); process.exit(143); });",
       "process.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');",
       "process.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');",
-      "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'stopped'); process.exit(143); });",
       "setInterval(() => {}, 1000);"
     ].join("\n"), "utf8");
     await chmod(executable, 0o755);

@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -192,6 +192,11 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(clientEventRlsMigration?.statements.join("\n")).toContain("room_id IS NULL AND samurai_can_workspace(workspace_id, 'guest')");
     const invitationAmbiguityFixMigration = migrations.find((migration) => migration.version === 58);
     expect(invitationAmbiguityFixMigration?.statements.join("\n")).toContain("ancestor_member.room_id = ancestors.room_id");
+    const invitationConflictTargetFixMigration = migrations.find((migration) => migration.version === 59);
+    expect(invitationConflictTargetFixMigration?.statements.join("\n")).toContain("ON CONFLICT ON CONSTRAINT room_members_pkey");
+    const learningResourceUseUniquenessRepairMigration = migrations.find((migration) => migration.version === 60);
+    expect(learningResourceUseUniquenessRepairMigration?.statements.join("\n")).toContain("constraint_row.conkey = ARRAY[");
+    expect(learningResourceUseUniquenessRepairMigration?.statements.join("\n")).toContain("workspace_learning_resource_use_initial_unique");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_jobs_and_runs");
     for (const table of ["workspace_runtime_automation_jobs", "workspace_runtime_automation_runs"]) {
       expect(schema).toContain(`CREATE TABLE ${table}`);
