@@ -312,11 +312,11 @@ export class WorkspaceLearningService {
       input: { ...input, id: useId }
     }, async (sql) => {
       await assertWorkspaceWritable(sql, context.workspaceId);
-      const [resourceResult, activityResult, versionResult] = await Promise.all([
-        sql.query<ResourceRow>("SELECT * FROM workspace_learning_resources WHERE workspace_id = $1 AND id = $2", [context.workspaceId, input.resourceId]),
-        sql.query<ActivityRow>("SELECT * FROM workspace_learning_activities WHERE workspace_id = $1 AND id = $2", [context.workspaceId, input.activityId]),
-        sql.query<{ id: string }>("SELECT id FROM workspace_learning_resource_versions WHERE workspace_id = $1 AND resource_id = $2 AND version = $3", [context.workspaceId, input.resourceId, input.resourceVersion])
-      ]);
+      // Queries on one transaction client must stay ordered. PostgreSQL's
+      // client does not permit concurrent query dispatch on that connection.
+      const resourceResult = await sql.query<ResourceRow>("SELECT * FROM workspace_learning_resources WHERE workspace_id = $1 AND id = $2", [context.workspaceId, input.resourceId]);
+      const activityResult = await sql.query<ActivityRow>("SELECT * FROM workspace_learning_activities WHERE workspace_id = $1 AND id = $2", [context.workspaceId, input.activityId]);
+      const versionResult = await sql.query<{ id: string }>("SELECT id FROM workspace_learning_resource_versions WHERE workspace_id = $1 AND resource_id = $2 AND version = $3", [context.workspaceId, input.resourceId, input.resourceVersion]);
       const resourceRow = resourceResult.rows[0];
       const activityRow = activityResult.rows[0];
       if (!resourceRow || !activityRow || !versionResult.rows[0]) throw new WorkspaceServerError("workspace_learning_resource_use_target_not_found", 404);
@@ -325,10 +325,16 @@ export class WorkspaceLearningService {
       if (resource.scope.kind === "room" && resource.scope.roomId !== activity.roomId) {
         throw new WorkspaceServerError("workspace_learning_resource_use_cross_room_denied", 403);
       }
+      // Resource uses are append-only, so SELECT ... FOR UPDATE is neither
+      // permitted by the RLS policy nor appropriate. Serialize this one use
+      // key without granting UPDATE access to immutable history.
+      await sql.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        `workspace_learning_resource_use:${context.workspaceId}:${resource.id}:${input.resourceVersion}:${activity.id}`
+      ]);
       const prior = await sql.query<ResourceUseRow>(
         `SELECT * FROM workspace_learning_resource_uses
          WHERE workspace_id = $1 AND resource_id = $2 AND resource_version = $3 AND activity_id = $4
-         ORDER BY created_at, id FOR UPDATE`,
+         ORDER BY created_at, id`,
         [context.workspaceId, resource.id, input.resourceVersion, activity.id]
       );
       const priorUses = prior.rows.map(resourceUseFromRow);
@@ -340,12 +346,10 @@ export class WorkspaceLearningService {
         `INSERT INTO workspace_learning_resource_uses(
            workspace_id, id, resource_id, resource_version, activity_id, outcome, supersedes_use_id, summary
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT DO NOTHING
          RETURNING *`,
         [context.workspaceId, useId, resource.id, input.resourceVersion, activity.id, input.outcome, unknown?.id ?? null, input.summary.trim()]
       );
-      if (!inserted.rows[0]) throw new WorkspaceServerError("workspace_learning_resource_use_already_recorded", 409);
-      const resourceUse = resourceUseFromRow(inserted.rows[0]);
+      const resourceUse = resourceUseFromRow(inserted.rows[0]!);
       const feedbackEligibility = classifyLearningActivity({
         outcome: activity.outcome,
         verificationState: activity.verificationState,

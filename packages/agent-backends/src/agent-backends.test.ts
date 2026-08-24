@@ -857,7 +857,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-race-"));
     roots.push(root);
     const executable = path.join(root, "completed-then-close");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'run_completed', payload: { output_summary: 'done' } }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'run_failed', payload: { error_code: 'late_error', message: 'late provider failure', reason: 'late_provider_failure', retryable: false } }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.on('SIGTERM', () => process.exit(143));\nprocess.stdout.write([JSON.stringify({ event_type: 'run_started', payload: {} }), JSON.stringify({ event_type: 'run_completed', payload: { output_summary: 'done' } }), JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }), JSON.stringify({ event_type: 'run_failed', payload: { error_code: 'late_error', message: 'late provider failure', reason: 'late_provider_failure', retryable: false } })].join('\\n') + '\\n');\nsetInterval(() => {}, 1000);\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "cancel-race-cli", kind: "external", label: "Cancel Race CLI", command: executable });
     const iterator = backend.runTurn(backendInput("run-cancel-race"))[Symbol.asyncIterator]();

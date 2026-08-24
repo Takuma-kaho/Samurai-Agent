@@ -16,7 +16,8 @@ function run(label, command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
     stdio: "inherit",
-    env: { ...process.env, ...(options.env ?? {}) }
+    env: { ...process.env, ...(options.env ?? {}) },
+    timeout: options.timeoutMs ?? 15 * 60 * 1000
   });
   const passed = result.status === 0 && !result.error;
   checks.push({
@@ -279,12 +280,31 @@ try {
         disposable = disposableEnvironment();
         environment = disposable.env;
       }
-      run("Hosted and Self-host PostgreSQL Server02 probes", "node", ["--import", "tsx", "scripts/verify-server-02-rls.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL Server03 probes", "node", ["--import", "tsx", "scripts/verify-server-03-rls.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL legacy Server04 learning probes", "node", ["--import", "tsx", "scripts/verify-server-04-rls.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL Completion Server04 probes", "node", ["--import", "tsx", "scripts/verify-server-04-completion-rls.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL Completion Server04 load probes", "node", ["--import", "tsx", "scripts/verify-server-04-completion-load.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL Runtime recovery probes", "node", ["--import", "tsx", "scripts/verify-runtime-recovery-rls.ts"], { env: environment });
+      const postgresqlChecks = [
+        ["Hosted and Self-host PostgreSQL Server02 probes", ["--import", "tsx", "scripts/verify-server-02-rls.ts"]],
+        ["Hosted and Self-host PostgreSQL Server03 probes", ["--import", "tsx", "scripts/verify-server-03-rls.ts"]],
+        ["Hosted and Self-host PostgreSQL legacy Server04 learning probes", ["--import", "tsx", "scripts/verify-server-04-rls.ts"]],
+        ["Hosted and Self-host PostgreSQL Completion Server04 probes", ["--import", "tsx", "scripts/verify-server-04-completion-rls.ts"]],
+        ["Hosted and Self-host PostgreSQL Completion Server04 load probes", ["--import", "tsx", "scripts/verify-server-04-completion-load.ts"]],
+        ["Hosted and Self-host PostgreSQL Runtime recovery probes", ["--import", "tsx", "scripts/verify-runtime-recovery-rls.ts"]]
+      ];
+      let postgresqlPassed = true;
+      for (const [label, args] of postgresqlChecks) {
+        if (!postgresqlPassed) {
+          checks.push({
+            label,
+            started_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+            status: "failed",
+            error: "postgresql_prerequisite_failed"
+          });
+          continue;
+        }
+        postgresqlPassed = run(label, "node", args, {
+          env: environment,
+          ...(label.includes("load probes") ? { timeoutMs: 30 * 60 * 1000 } : {})
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       checks.push({

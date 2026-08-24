@@ -75,6 +75,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const adminDatabase = new PostgresWorkspaceAdminDatabase({ databaseAdminUrl: target.adminDatabaseUrl, runtimeRole: target.runtimeRole });
   let report: Record<string, unknown> | undefined;
   try {
+    console.log(`[Server04 completion load] ${target.label}: migrate and prepare`);
     await adminDatabase.migrate();
     await database.assertReady();
     const store = new WorkspaceServerStore({
@@ -103,7 +104,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       roomIds.push(room.room.id);
     }
 
+    console.log(`[Server04 completion load] ${target.label}: write bulk fixture`);
     await bulkFixture(adminDatabase, { workspaceId, ownerId: owner.id, roomIds });
+    console.log(`[Server04 completion load] ${target.label}: measure runtime paths`);
     const completion = new WorkspaceCompletionService(store);
     const jobs = new WorkspaceCompletionJobService(completion);
     const samples: TimedSample[] = [];
@@ -216,7 +219,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     await writeLoadReport(target.label, failed);
     throw error;
   } finally {
+    console.log(`[Server04 completion load] ${target.label}: cleanup`);
     await cleanup(adminDatabase, workspaceId, owner.id);
+    console.log(`[Server04 completion load] ${target.label}: cleanup complete`);
     await database.close();
     await adminDatabase.close();
     await rm(filesystemRoot, { recursive: true, force: true }).catch(() => undefined);

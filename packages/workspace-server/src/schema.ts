@@ -7952,6 +7952,15 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "CREATE UNIQUE INDEX IF NOT EXISTS workspace_learning_resource_use_initial_unique ON workspace_learning_resource_uses(workspace_id, resource_id, resource_version, activity_id) WHERE supersedes_use_id IS NULL",
       "CREATE UNIQUE INDEX IF NOT EXISTS workspace_learning_resource_use_correction_unique ON workspace_learning_resource_uses(workspace_id, supersedes_use_id) WHERE supersedes_use_id IS NOT NULL"
     ]
+  },
+  {
+    // PostgreSQL does not create an index for a referencing foreign key.
+    // Cleanup and correction lookups must not scan every Activity row.
+    version: 61,
+    name: "workspace_server_completion_activity_correction_index",
+    statements: [
+      "CREATE INDEX IF NOT EXISTS workspace_completion_activities_correction_index ON workspace_completion_activities(workspace_id, correction_of_activity_id)"
+    ]
   }
 ];
 

@@ -270,6 +270,7 @@ jobs:
           SQL
 
       - name: Run full CI verifier against disposable PostgreSQL
+        id: full_ci
         env:
           SAMURAI_CI_FULL_POSTGRES_MODE: disposable_ci_service
           SAMURAI_CI_FULL_REPORT_DIRECTORY: /tmp/samurai-ci-full-report
@@ -290,8 +291,8 @@ jobs:
           path: /tmp/samurai-ci-full-report/
           if-no-files-found: warn
 
-      - name: Run disposable PostgreSQL migration, RLS, recovery, bundle and load gates
-        if: ${{ always() && steps.install_dependencies.outcome == 'success' && steps.prepare_postgres.outcome == 'success' }}
+      - name: Run disposable PostgreSQL Completion load gate
+        if: ${{ steps.full_ci.outcome == 'success' && steps.install_dependencies.outcome == 'success' && steps.prepare_postgres.outcome == 'success' }}
         env:
           SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
           SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
@@ -300,7 +301,7 @@ jobs:
           SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
           SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
           SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE: "yes"
-        run: CI=true pnpm run server:04:complete:verify
+        run: CI=true timeout --signal=TERM --kill-after=30s 30m node --import tsx scripts/verify-server-04-completion-load.ts
 
       - name: Upload PostgreSQL deep reports
         if: always()

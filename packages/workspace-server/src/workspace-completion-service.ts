@@ -143,6 +143,7 @@ interface TrustedHumanPolicyApproval {
   requestId: string;
   operationId: string;
   timestamp: string;
+  requestTimestamp: string;
   canonicalPayloadHash: string;
   signature: string;
 }
@@ -3428,7 +3429,7 @@ export class WorkspaceCompletionService {
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::TIMESTAMPTZ, $9, $10, $11::JSONB, $12)`,
       [
         context.workspaceId, approvalId, resource.id, version, approval.principalAccountId,
-        approval.operationId, approval.requestId, approval.timestamp, approval.canonicalPayloadHash,
+        approval.operationId, approval.requestId, approval.requestTimestamp, approval.canonicalPayloadHash,
         approval.signature, canonicalJson(change), context.operationId
       ]
     );
@@ -4366,12 +4367,16 @@ function trustedHumanPolicyApproval(context: WorkspaceRequestContext): TrustedHu
   }
   assertOpaqueId(caller.requestId, "request_id_invalid");
   const timestamp = Number(caller.timestamp);
-  if (!Number.isFinite(timestamp)) throw new WorkspaceServerError("workspace_completion_policy_verified_human_required", 403);
+  const requestTimestamp = new Date(timestamp);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(requestTimestamp.getTime())) {
+    throw new WorkspaceServerError("workspace_completion_policy_verified_human_required", 403);
+  }
   return {
     principalAccountId: caller.principalAccountId,
     requestId: caller.requestId,
     operationId: caller.operationId,
     timestamp: caller.timestamp,
+    requestTimestamp: requestTimestamp.toISOString(),
     canonicalPayloadHash: caller.canonicalPayloadHash,
     signature: caller.signature
   };

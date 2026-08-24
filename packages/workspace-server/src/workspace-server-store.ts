@@ -673,33 +673,20 @@ export class WorkspaceServerStore {
         "SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
         [context.workspaceId, input.roomId]
       );
+      await sql.query("SAVEPOINT samurai_room_move");
+      let moveResult: WorkspaceRecordPayload | string | undefined;
       try {
         const moved = await sql.query<{ result: WorkspaceRecordPayload | string }>(
           "SELECT samurai_move_room($1, $2, $3, $4, $5, $6) AS result",
           [context.workspaceId, input.roomId, input.parentRoomId ?? null, input.expectedRoomVersion, input.expectedWorkspaceVersion, context.operationId]
         );
-        const result = roomMoveResultPayload(moved.rows[0]?.result);
-        const selected = await sql.query<RoomRow>(
-          "SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
-          [context.workspaceId, input.roomId]
-        );
-        const room = selected.rows[0];
-        if (!room) throw new WorkspaceServerError("room_move_failed", 500);
-        const mapped = roomFromRow(room);
-        await this.insertAudit(sql, context, {
-          action: "room.move",
-          roomId: input.roomId,
-          subjectKind: "room",
-          subjectId: input.roomId,
-          beforeVersion: before.rows[0] ? Number(before.rows[0].version) : undefined,
-          afterVersion: mapped.version,
-          details: {
-            previous_parent_room_id: before.rows[0]?.parent_room_id ?? null,
-            parent_room_id: input.parentRoomId ?? null
-          }
-        });
-        return { room: mapped, affectedRoomIds: result.affectedRoomIds };
+        moveResult = moved.rows[0]?.result;
       } catch (error) {
+        // The guarded SQL function can reject an old Version. PostgreSQL then
+        // marks the current transaction failed, so restore this local
+        // savepoint before reading the latest Version for the caller.
+        await sql.query("ROLLBACK TO SAVEPOINT samurai_room_move");
+        await sql.query("RELEASE SAVEPOINT samurai_room_move");
         const message = postgresMessage(error);
         if (message.includes("workspace_version_conflict")) throw await this.workspaceVersionConflict(sql, context.workspaceId);
         if (message.includes("room_version_conflict")) {
@@ -711,6 +698,28 @@ export class WorkspaceServerStore {
         }
         throw error;
       }
+      await sql.query("RELEASE SAVEPOINT samurai_room_move");
+      const result = roomMoveResultPayload(moveResult);
+      const selected = await sql.query<RoomRow>(
+        "SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
+        [context.workspaceId, input.roomId]
+      );
+      const room = selected.rows[0];
+      if (!room) throw new WorkspaceServerError("room_move_failed", 500);
+      const mapped = roomFromRow(room);
+      await this.insertAudit(sql, context, {
+        action: "room.move",
+        roomId: input.roomId,
+        subjectKind: "room",
+        subjectId: input.roomId,
+        beforeVersion: before.rows[0] ? Number(before.rows[0].version) : undefined,
+        afterVersion: mapped.version,
+        details: {
+          previous_parent_room_id: before.rows[0]?.parent_room_id ?? null,
+          parent_room_id: input.parentRoomId ?? null
+        }
+      });
+      return { room: mapped, affectedRoomIds: result.affectedRoomIds };
     });
     const visibleAffectedRoomIds = await this.visibleRoomIds(
       { workspaceId: context.workspaceId, accountId: context.accountId },
